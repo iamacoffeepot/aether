@@ -90,6 +90,25 @@ echo "[ensure-tunnel] pre-building tunnel + forked binaries (no-op when warm)...
         -p aether-substrate-bundle --bin aether-substrate-headless
 ) || true
 
+# Bootstrap the hub's content-addressed binary store (ADR-0115) with the
+# chassis bins just built, so a bare `spawn_substrate` (selector `default`)
+# resolves to the headless binary even in a fresh or `restart-hub`'d hub —
+# the spawn surface no longer takes a host path, so the host-path knowledge
+# lives here in the build flow. The forked hub's `EngineServer::init` reads
+# this OS-path-list and ingests each (idempotent via content dedup). Exported
+# so the detached tunnel — and the hub it forks — inherit it; only bins that
+# actually built are listed.
+BOOTSTRAP_BINS=()
+for bin in aether-substrate-headless aether-substrate; do
+    candidate="${PROJECT_DIR}/target/release/${bin}"
+    [[ -x "$candidate" ]] && BOOTSTRAP_BINS+=("$candidate")
+done
+if (( ${#BOOTSTRAP_BINS[@]} > 0 )); then
+    AETHER_BINARY_BOOTSTRAP="$(IFS=:; printf '%s' "${BOOTSTRAP_BINS[*]}")"
+    export AETHER_BINARY_BOOTSTRAP
+    echo "[ensure-tunnel] binary-store bootstrap: ${AETHER_BINARY_BOOTSTRAP}"
+fi
+
 # Pick a launch command: prefer a pre-built binary (fast, clean reap), else
 # fall back to `cargo run` (rebuild-friendly).
 RELEASE_BIN="${PROJECT_DIR}/target/release/aether-tunnel"

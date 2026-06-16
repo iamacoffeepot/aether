@@ -50,11 +50,12 @@ use aether_kinds::MailEnvelope as TracedEnvelope;
 use aether_kinds::descriptors;
 use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME};
 use aether_kinds::{
-    BinaryEntry, Cancel, CancelResult, ComponentCapabilities, DagDescriptor, DeadEngineDescriptor,
-    EngineDescriptor, HandleDescribe, HandleDescribeResult, ListBinaries, ListBinariesResult,
-    ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail, LogTailResult,
-    ReplaceComponent, ReplaceResult, SpawnEngine, SpawnEngineResult, Status, StatusResult, Submit,
-    SubmitResult, TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult,
+    BinaryEntry, BinarySelector, Cancel, CancelResult, ComponentCapabilities, DagDescriptor,
+    DeadEngineDescriptor, EngineDescriptor, HandleDescribe, HandleDescribeResult, ListBinaries,
+    ListBinariesResult, ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail,
+    LogTailResult, ReplaceComponent, ReplaceResult, SpawnEngine, SpawnEngineResult, Status,
+    StatusResult, Submit, SubmitResult, TerminateEngine, TerminateEngineResult, UploadBinary,
+    UploadBinaryResult,
 };
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
@@ -175,13 +176,27 @@ impl FleetBench {
 
     /// Fork a real `aether-substrate-headless` through the hub's engines
     /// cap and return its `EngineId`. Records the engine for teardown.
+    ///
+    /// Pins the binary by content hash (ADR-0115, #1954): upload the
+    /// headless bin into the hub's content-addressed store, then spawn
+    /// exactly that hash — so every run forks the same binary regardless of
+    /// local build state, instead of handing the cap a host path.
     pub fn spawn_headless(&mut self) -> EngineId {
         let headless = env!("CARGO_BIN_EXE_aether-substrate-headless");
+        let hash = match self.upload_binary(headless, Some("headless")) {
+            UploadBinaryResult::Ok { hash, .. } => hash,
+            UploadBinaryResult::Err { error } => panic!("spawn_headless upload failed: {error}"),
+        };
         let replies = self.call(
             None,
             "aether.engine",
             &SpawnEngine {
-                binary_path: headless.to_owned(),
+                selector: BinarySelector {
+                    query: Some(hash),
+                    chassis: None,
+                    caps: vec![],
+                    target: None,
+                },
                 args: vec![],
                 boot_manifest: None,
             },

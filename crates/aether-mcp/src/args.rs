@@ -9,10 +9,26 @@ use serde::{Deserialize, Serialize};
 /// `spawn_substrate` arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SpawnSubstrateArgs {
-    /// Absolute path to the substrate binary the hub should fork+exec.
-    /// The hub doesn't resolve or locate binaries — pass a path that
-    /// exists.
-    pub binary_path: String,
+    /// Registry selector for the binary to fork, resolved against the
+    /// hub's content-addressed store (ADR-0115) — `upload_binary` first if
+    /// it isn't stored yet. An exact token: a `hash`, a `name@version`
+    /// (version = the binary's self-reported build id), or a `name`. Omit
+    /// (or `null`) for `default` — the headless chassis, so a bare
+    /// `spawn_substrate` with no arguments returns a working engine.
+    #[serde(default)]
+    pub selector: Option<String>,
+    /// Attribute query over the stored manifests, used when `selector` is
+    /// omitted: the binary's chassis (`"headless"` / `"desktop"` /
+    /// `"hub"`).
+    #[serde(default)]
+    pub chassis: Option<String>,
+    /// Attribute query: keep only binaries whose linked caps are a
+    /// superset of every cap listed here (e.g. `["aether.render"]`).
+    #[serde(default)]
+    pub caps: Vec<String>,
+    /// Attribute query: the build target triple to match.
+    #[serde(default)]
+    pub target: Option<String>,
     /// Extra command-line arguments forwarded to the substrate
     /// verbatim. `AETHER_RPC_PORT` is injected by the hub regardless.
     #[serde(default)]

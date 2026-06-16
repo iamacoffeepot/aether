@@ -59,13 +59,13 @@ mod server_native {
         TerminateEngine, UploadBinary,
     };
     use crate::engine::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams};
-    use crate::store::{ArtifactKind, ArtifactStore};
+    use crate::store::{ArtifactKind, ArtifactStore, Selector, StoredArtifact};
     use aether_actor::actor;
     use aether_data::{EngineId, Kind, MailboxId, Uuid};
     use aether_kinds::{
-        BinaryManifest, CallSettled, DeadEngineDescriptor, DeathReason, EngineDescriptor,
-        ForwardEnvelope, ListBinariesResult, ListEnginesResult, SpawnEngineResult,
-        TerminateEngineResult, UploadBinaryResult,
+        BinaryManifest, BinarySelector, CallSettled, DeadEngineDescriptor, DeathReason,
+        EngineDescriptor, ForwardEnvelope, ListBinariesResult, ListEnginesResult,
+        SpawnEngineResult, TerminateEngineResult, UploadBinaryResult,
     };
     use aether_substrate::Mail;
     use aether_substrate::Subname;
@@ -80,7 +80,7 @@ mod server_native {
     use std::fs;
     use std::io;
     use std::net::TcpListener;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -91,6 +91,21 @@ mod server_native {
     /// to `std::env::temp_dir().join("aether-engines")` if no data dir
     /// is resolvable.
     const ENV_ENGINE_STORE_ROOT: &str = "AETHER_ENGINE_STORE_ROOT";
+
+    /// Env var the hub reads at [`EngineServer::init`] to bootstrap its
+    /// content-addressed binary store (ADR-0115, issue 1954): an
+    /// OS-path-list (`std::env::split_paths`) of chassis binaries to ingest
+    /// at boot, so a `default` / `name` selector resolves in a fresh or
+    /// `restart-hub`'d hub without a manual `upload_binary`.
+    /// `ensure-tunnel.sh` exports it to the freshly-built chassis bins.
+    /// Idempotent — content dedup means a re-ingest of identical bytes is a
+    /// no-op.
+    const ENV_BINARY_BOOTSTRAP: &str = "AETHER_BINARY_BOOTSTRAP";
+
+    /// The chassis a `default` selector (an empty [`BinarySelector::query`]
+    /// with no attribute filters) resolves to (ADR-0115): `headless` has no
+    /// window and runs on any host, so a bare spawn is self-sufficient.
+    const DEFAULT_CHASSIS: &str = "headless";
 
     /// Default heartbeat ping cadence (issue 1339). 5 s × the miss
     /// limit is the detection-latency vs. flap-tolerance tradeoff.
@@ -240,13 +255,18 @@ mod server_native {
         const NAMESPACE: &'static str = "aether.engine";
 
         fn init(config: EngineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            // Build the hub-scoped store, then bootstrap-ingest the chassis
+            // bins named in `AETHER_BINARY_BOOTSTRAP` so `default` / `name`
+            // resolve in a fresh or `restart-hub`'d hub (ADR-0115, #1954).
+            let mut store = ArtifactStore::from_env();
+            bootstrap_ingest(&mut store);
             Ok(Self {
                 engines: HashMap::new(),
                 next_engine_seq: 1,
                 mailer: ctx.mailer(),
                 heartbeat: config.heartbeat_params(),
                 recently_died: VecDeque::new(),
-                store: ArtifactStore::from_env(),
+                store,
             })
         }
 
@@ -307,15 +327,29 @@ mod server_native {
         /// Fork+exec a substrate binary and connect a proxy to it.
         ///
         /// # Agent
-        /// Send `SpawnEngine { binary_path, args, boot_manifest }`. The cap assigns a
-        /// free localhost port for the substrate's RPC server, injects
-        /// it as `AETHER_RPC_PORT`, forks the binary, then boots an
-        /// `aether.engine.proxy:<id>` actor that dials it. Reply:
-        /// `SpawnEngineResult::Ok { engine_id, rpc_port }` on success,
-        /// or `Err { error }` if the fork fails or the substrate never
-        /// comes up.
+        /// Send `SpawnEngine { selector, args, boot_manifest }`. The cap
+        /// resolves `selector` against its content-addressed binary store
+        /// (ADR-0115), materializes the resolved bytes to an executable
+        /// temp file, assigns a free localhost port for the substrate's
+        /// RPC server, injects it as `AETHER_RPC_PORT`, forks the realized
+        /// binary, then boots an `aether.engine.proxy:<id>` actor that
+        /// dials it. Reply: `SpawnEngineResult::Ok { engine_id, rpc_port }`
+        /// on success, or `Err { error }` if the selector resolves to no
+        /// stored binary, the fork fails, or the substrate never comes up.
         #[handler]
         fn on_spawn(&mut self, ctx: &mut NativeCtx<'_>, mail: SpawnEngine) -> SpawnEngineResult {
+            // Resolve the registry selector to stored content bytes before
+            // any side effect, so a miss returns without reserving a port
+            // or burning an engine id (ADR-0115, #1954).
+            let Some(artifact) = resolve_selector(&mut self.store, &mail.selector) else {
+                return SpawnEngineResult::Err {
+                    error: format!(
+                        "no binary in the registry matched selector {:?}",
+                        mail.selector
+                    ),
+                };
+            };
+
             let rpc_port = match free_local_port() {
                 Ok(port) => port,
                 Err(e) => {
@@ -335,7 +369,22 @@ mod server_native {
             self.next_engine_seq += 1;
             let engine_store_dir = engine_store_root().join(engine_id.0.simple().to_string());
 
-            let mut command = Command::new(&mail.binary_path);
+            // Stored bytes are content-addressed and not directly
+            // fork-exec'able, so materialize the resolved entry to an
+            // executable temp file under this engine's store dir and fork
+            // that (ADR-0115 §Execution); the caller never sees the path.
+            let exec_path = engine_store_dir.join("substrate");
+            if let Err(e) = realize_executable(&artifact.path, &exec_path) {
+                return SpawnEngineResult::Err {
+                    error: format!(
+                        "materializing binary {} to {}: {e}",
+                        artifact.hash,
+                        exec_path.display()
+                    ),
+                };
+            }
+
+            let mut command = Command::new(&exec_path);
             command
                 .args(&mail.args)
                 .env("AETHER_RPC_PORT", rpc_port.to_string())
@@ -352,7 +401,7 @@ mod server_native {
                 Ok(child) => child,
                 Err(e) => {
                     return SpawnEngineResult::Err {
-                        error: format!("failed to spawn {}: {e}", mail.binary_path),
+                        error: format!("failed to spawn {}: {e}", exec_path.display()),
                     };
                 }
             };
@@ -594,24 +643,12 @@ mod server_native {
             _ctx: &mut NativeCtx<'_>,
             mail: UploadBinary,
         ) -> UploadBinaryResult {
-            let bytes = match fs::read(&mail.staged_path) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    return UploadBinaryResult::Err {
-                        error: format!("reading staged path {:?}: {e}", mail.staged_path),
-                    };
-                }
-            };
-            let manifest = match describe_binary(&mail.staged_path) {
-                Ok(manifest) => manifest,
-                Err(error) => return UploadBinaryResult::Err { error },
-            };
-            let hash = self
-                .store
-                .upload(&bytes, ArtifactKind::Binary, manifest, mail.name.clone());
-            UploadBinaryResult::Ok {
-                hash,
-                name: mail.name,
+            match ingest_binary(&mut self.store, &mail.staged_path, mail.name.clone()) {
+                Ok(hash) => UploadBinaryResult::Ok {
+                    hash,
+                    name: mail.name,
+                },
+                Err(error) => UploadBinaryResult::Err { error },
             }
         }
 
@@ -654,6 +691,145 @@ mod server_native {
         }
         serde_json::from_slice(&output.stdout)
             .map_err(|e| format!("parsing {binary_path:?} --describe manifest JSON: {e}"))
+    }
+
+    /// Ingest the binary at `path` into `store` content-addressed,
+    /// capturing its manifest via a one-time `<path> --describe` fork
+    /// (ADR-0115, issue 1953). Shared by the `on_upload_binary` handler and
+    /// the [`bootstrap_ingest`] boot path. Returns the stored content hash,
+    /// or a human-readable error for an unreadable path or a `--describe`
+    /// that failed / yielded no parseable manifest. Idempotent — identical
+    /// bytes dedup to the same hash.
+    fn ingest_binary(
+        store: &mut ArtifactStore,
+        path: &str,
+        name: Option<String>,
+    ) -> Result<String, String> {
+        let bytes = fs::read(path).map_err(|e| format!("reading binary path {path:?}: {e}"))?;
+        let manifest = describe_binary(path)?;
+        Ok(store.upload(&bytes, ArtifactKind::Binary, manifest, name))
+    }
+
+    /// Bootstrap-ingest the chassis bins named in `AETHER_BINARY_BOOTSTRAP`
+    /// (an OS path list) into `store`, naming each by its file stem so a
+    /// `default` / `name` selector resolves in a fresh or `restart-hub`'d
+    /// hub (ADR-0115, issue 1954). A path that can't be read or
+    /// `--describe`d is logged and skipped — a bad bootstrap entry must not
+    /// fail hub boot. Idempotent via content dedup.
+    pub(super) fn bootstrap_ingest(store: &mut ArtifactStore) {
+        let Ok(raw) = env::var(ENV_BINARY_BOOTSTRAP) else {
+            return;
+        };
+        for path in env::split_paths(&raw) {
+            let Some(path_str) = path.to_str() else {
+                continue;
+            };
+            let name = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_owned);
+            match ingest_binary(store, path_str, name) {
+                Ok(hash) => tracing::info!(
+                    target: "aether_substrate::engine_server",
+                    path = path_str,
+                    hash = %hash,
+                    "binary bootstrap: ingested a chassis bin",
+                ),
+                Err(error) => tracing::warn!(
+                    target: "aether_substrate::engine_server",
+                    path = path_str,
+                    error = %error,
+                    "binary bootstrap: skipping a bin that failed to ingest",
+                ),
+            }
+        }
+    }
+
+    /// Resolve a [`BinarySelector`] against `store` to the stored content
+    /// bytes the spawn forks (ADR-0115). Resolution order: an exact `query`
+    /// token wins first (`hash` > `name@version` > `name`); absent a token,
+    /// the `chassis` / `caps` / `target` attribute query resolves, and with
+    /// no attribute filters either, `default` = the [`DEFAULT_CHASSIS`]
+    /// binary. `None` when nothing matched.
+    pub(super) fn resolve_selector(
+        store: &mut ArtifactStore,
+        selector: &BinarySelector,
+    ) -> Option<StoredArtifact> {
+        if let Some(token) = selector
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            // Exact hash wins outright.
+            if let Some(found) = store.get(&Selector::Hash(token.to_owned())) {
+                return Some(found);
+            }
+            // `name@version`: the binary's self-reported build id (the
+            // manifest `git_sha`) pins a specific entry of a name.
+            if let Some((name, version)) = token.split_once('@') {
+                let hash = pick_versioned(store, name, version)?;
+                return store.get(&Selector::Hash(hash));
+            }
+            // A bare name points at the latest hash uploaded under it.
+            return store.get(&Selector::Name(token.to_owned()));
+        }
+        // No exact token: an attribute query, else `default` = headless.
+        let hash = store
+            .list(&attribute_filter(selector))
+            .into_iter()
+            .map(|entry| entry.hash)
+            .min()?;
+        store.get(&Selector::Hash(hash))
+    }
+
+    /// The store filter for a tokenless [`BinarySelector`]: the explicit
+    /// `chassis` / `caps` / `target` attribute query, or — when none is
+    /// set — the `default` filter selecting the [`DEFAULT_CHASSIS`]
+    /// chassis.
+    fn attribute_filter(selector: &BinarySelector) -> ListBinaries {
+        if selector.chassis.is_none() && selector.caps.is_empty() && selector.target.is_none() {
+            ListBinaries {
+                chassis: Some(DEFAULT_CHASSIS.to_owned()),
+                caps: Vec::new(),
+                target: None,
+            }
+        } else {
+            ListBinaries {
+                chassis: selector.chassis.clone(),
+                caps: selector.caps.clone(),
+                target: selector.target.clone(),
+            }
+        }
+    }
+
+    /// The content hash of the entry named `name` whose manifest build id
+    /// (`git_sha`) is `version` — the `name@version` selector (ADR-0115).
+    /// `None` when no current entry matches both.
+    fn pick_versioned(store: &ArtifactStore, name: &str, version: &str) -> Option<String> {
+        store
+            .list(&ListBinaries::default())
+            .into_iter()
+            .find(|entry| entry.name.as_deref() == Some(name) && entry.manifest.git_sha == version)
+            .map(|entry| entry.hash)
+    }
+
+    /// Copy the content bytes at `src` to `dest` and mark `dest`
+    /// executable (`0o755` on Unix; the `from_mode` precedent in
+    /// `anthropic/cli.rs`), creating `dest`'s parent dir. The
+    /// realize-to-exec step for spawn: stored bytes aren't directly
+    /// fork-exec'able (ADR-0115 §Execution).
+    fn realize_executable(src: &Path, dest: &Path) -> io::Result<()> {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(src, dest)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dest, fs::Permissions::from_mode(0o755))?;
+        }
+        Ok(())
     }
 
     /// Push a `CallSettled::Err` back to `target` (correlation
@@ -790,8 +966,8 @@ mod tests {
     use aether_data::{Kind, mailbox_id_from_name};
     use aether_kinds::descriptors;
     use aether_kinds::{
-        DeathReason, EngineAlive, EngineDied, ListEngines, SpawnEngine, SpawnEngineResult,
-        TerminateEngine, TerminateEngineResult,
+        BinarySelector, DeathReason, EngineAlive, EngineDied, ListEngines, SpawnEngine,
+        SpawnEngineResult, TerminateEngine, TerminateEngineResult,
     };
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::handle_store::HandleStore;
@@ -903,15 +1079,22 @@ mod tests {
             assert!(result.engines.is_empty(), "fresh cap supervises no engines");
         }
 
-        /// `on_spawn` with a binary path that doesn't exist fails fast at
-        /// the fork — no proxy is spawned, no retry window is entered.
+        /// `on_spawn` with a selector that resolves to no stored binary
+        /// fails fast at resolution — the store is empty (each cap test
+        /// isolates a fresh binary store), so no proxy is spawned and no
+        /// fork is attempted (ADR-0115, #1954).
         #[test]
         fn spawn_with_missing_binary_replies_err() {
             let (_chassis, mailer, cells) = boot();
             let result = drive(
                 &mailer,
                 &SpawnEngine {
-                    binary_path: "/nonexistent/aether-substrate-does-not-exist".to_owned(),
+                    selector: BinarySelector {
+                        query: Some("nonexistent-hash-or-name".to_owned()),
+                        chassis: None,
+                        caps: vec![],
+                        target: None,
+                    },
                     args: vec![],
                     boot_manifest: None,
                 },
@@ -926,12 +1109,82 @@ mod tests {
             match result {
                 SpawnEngineResult::Err { error } => {
                     assert!(
-                        error.contains("failed to spawn"),
+                        error.contains("no binary in the registry matched selector"),
                         "unexpected error: {error}"
                     );
                 }
-                SpawnEngineResult::Ok { .. } => panic!("a missing binary must not spawn"),
+                SpawnEngineResult::Ok { .. } => {
+                    panic!("an unresolvable selector must not spawn")
+                }
             }
+        }
+
+        /// Bootstrap-ingest a stand-in headless binary through
+        /// `AETHER_BINARY_BOOTSTRAP`, then resolve the `default` selector
+        /// (empty `query`, no attribute filters) to it — the bare-spawn
+        /// path a fresh hub serves (ADR-0115, #1954). Heavy: it sets a
+        /// process-global env var and forks `<stand-in> --describe`.
+        #[cfg(unix)]
+        #[test]
+        fn bootstrap_populates_and_default_resolves_to_headless() {
+            use super::super::server_native::{bootstrap_ingest, resolve_selector};
+            use crate::store::{ArtifactStore, DEFAULT_DISK_BUDGET_BYTES};
+            use std::fs;
+            use std::os::unix::fs::PermissionsExt;
+
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let dir = env::temp_dir().join(format!(
+                "aether-binstore-bootstrap-{}-{nanos}",
+                process::id()
+            ));
+            fs::create_dir_all(&dir).expect("test setup: bootstrap temp dir");
+
+            // A stand-in chassis bin: on `--describe` it prints a headless
+            // manifest; its own bytes are what the store content-addresses.
+            let stand_in = dir.join("aether-substrate-headless");
+            fs::write(
+                &stand_in,
+                "#!/bin/sh\nif [ \"$1\" = \"--describe\" ]; then printf \
+                 '{\"chassis\":\"headless\",\"caps\":[\"aether.fs\"],\"git_sha\":\"deadbee\",\
+                 \"profile\":\"debug\",\"target\":\"x86_64-unknown-linux-gnu\"}'; fi\n",
+            )
+            .expect("test setup: write stand-in");
+            fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755))
+                .expect("test setup: chmod stand-in");
+
+            // SAFETY: serialized as a heavy test; no sibling reads
+            // AETHER_BINARY_BOOTSTRAP concurrently, and only the bootstrap
+            // path consumes it. Key mirrors `ENV_BINARY_BOOTSTRAP`.
+            unsafe {
+                env::set_var("AETHER_BINARY_BOOTSTRAP", &stand_in);
+            }
+
+            let mut store = ArtifactStore::open(&dir.join("store"), DEFAULT_DISK_BUDGET_BYTES);
+            bootstrap_ingest(&mut store);
+
+            let resolved = resolve_selector(
+                &mut store,
+                &BinarySelector {
+                    query: None,
+                    chassis: None,
+                    caps: vec![],
+                    target: None,
+                },
+            )
+            .expect("the default selector resolves to the bootstrapped headless bin");
+            assert_eq!(
+                resolved.manifest.chassis, "headless",
+                "default resolves to the headless chassis",
+            );
+
+            // SAFETY: same heavy-test serialization; restore the global so
+            // a sibling heavy test's `boot()` bootstrap sees it unset.
+            unsafe {
+                env::remove_var("AETHER_BINARY_BOOTSTRAP");
+            }
+            let _ = fs::remove_dir_all(&dir);
         }
 
         /// `on_terminate` with an `engine_id` that isn't a UUID, and one

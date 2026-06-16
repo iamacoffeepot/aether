@@ -34,10 +34,10 @@ use aether_data::{
 use aether_data::{EnumVariant, Primitive, SchemaType};
 use aether_kinds::dag::{DagDescriptor, Edge, Node, NodeId};
 use aether_kinds::{
-    Cancel, CancelResult, CaptureFrame, CaptureFrameResult, ComponentCapabilities, CostTail,
-    CostTailResult, DeathReason, FrameCheck, FrameReduction, ListBinaries, ListBinariesResult,
-    ListEngines, ListEnginesResult, ListKinds, ListKindsResult, LoadComponent, LoadResult,
-    MailEnvelope as KindMailEnvelope, ReplaceComponent, ReplaceResult, SimilarityCheck,
+    BinarySelector, Cancel, CancelResult, CaptureFrame, CaptureFrameResult, ComponentCapabilities,
+    CostTail, CostTailResult, DeathReason, FrameCheck, FrameReduction, ListBinaries,
+    ListBinariesResult, ListEngines, ListEnginesResult, ListKinds, ListKindsResult, LoadComponent,
+    LoadResult, MailEnvelope as KindMailEnvelope, ReplaceComponent, ReplaceResult, SimilarityCheck,
     SpawnEngine, SpawnEngineResult, Status, StatusResult, Submit, SubmitResult, TerminateEngine,
     TerminateEngineResult, UploadBinary, UploadBinaryResult,
     trace::{
@@ -234,7 +234,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Fork+exec a substrate binary as a child of the hub. The hub assigns the substrate a free localhost RPC port, injects it as AETHER_RPC_PORT, forks the binary, and connects a proxy. Returns the engine_id and rpc_port on success. Pass `components` (each {binary_path, name?, config_path?, export?}) to bring the engine up with those components already loaded in one call — aether-mcp stages a temp boot-manifest the hub injects as AETHER_BOOT_MANIFEST, and the spawned substrate reads the listed wasm itself (single-host), so no follow-up load_component is needed."
+        description = "Fork+exec a substrate binary as a child of the hub, resolved from the hub's content-addressed binary store (ADR-0115) — not a host path. Pass `selector` to pick the binary: a content `hash`, a `name@version`, or a `name` (upload_binary first if it isn't stored). Omit `selector` for `default` — the headless chassis — so a bare spawn_substrate with no arguments returns a working engine. When `selector` is omitted you may instead attribute-query with `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (linked-cap superset), and `target` (build triple). The hub resolves the selector to the stored bytes, materializes them to an executable temp file, assigns a free localhost RPC port (injected as AETHER_RPC_PORT), forks it, and connects a proxy. Returns the engine_id and rpc_port on success; errors if the selector resolves to no stored binary. Pass `components` (each {binary_path, name?, config_path?, export?}) to bring the engine up with those components already loaded in one call — aether-mcp stages a temp boot-manifest the hub injects as AETHER_BOOT_MANIFEST, and the spawned substrate reads the listed wasm itself (single-host), so no follow-up load_component is needed."
     )]
     pub async fn spawn_substrate(
         &self,
@@ -259,7 +259,12 @@ impl Mcp {
             .call_one(local_envelope(
                 ENGINE_CAP,
                 &SpawnEngine {
-                    binary_path: args.binary_path,
+                    selector: BinarySelector {
+                        query: args.selector,
+                        chassis: args.chassis,
+                        caps: args.caps,
+                        target: args.target,
+                    },
                     args: args.args,
                     boot_manifest: manifest.as_ref().map(|p| p.to_string_lossy().into_owned()),
                 },
@@ -2868,20 +2873,27 @@ mod tests {
         );
     }
 
-    /// `spawn_substrate` with a binary path that doesn't exist surfaces
-    /// the hub's `SpawnEngineResult::Err` as a tool error.
+    /// `spawn_substrate` with a selector that resolves to no stored binary
+    /// surfaces the hub's `SpawnEngineResult::Err` as a tool error (the
+    /// store is empty on a fresh hub).
     #[tokio::test]
     async fn spawn_substrate_missing_binary_is_tool_error() {
         let (_chassis, port) = boot_hub();
         let mcp = connect_mcp(port);
         let result = mcp
             .spawn_substrate(Parameters(SpawnSubstrateArgs {
-                binary_path: "/nonexistent/aether-substrate-does-not-exist".to_owned(),
+                selector: Some("nonexistent-hash-or-name".to_owned()),
+                chassis: None,
+                caps: vec![],
+                target: None,
                 args: vec![],
                 components: vec![],
             }))
             .await;
-        assert!(result.is_err(), "a missing binary should be a tool error");
+        assert!(
+            result.is_err(),
+            "an unresolvable selector should be a tool error"
+        );
     }
 
     /// The temp boot-manifest `spawn_substrate` stages from its
