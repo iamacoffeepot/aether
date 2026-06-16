@@ -1,146 +1,200 @@
-# ADR-0118: Own the Aether Wire Format and Drop the Postcard Dependency
+# ADR-0118: Own the Aether Wire Format
 
 - **Status:** Proposed
 - **Date:** 2026-06-16
 
 ## Context
 
-Aether's non-cast wire encoding is postcard's format (ADR-0019: a kind is
-either cast-shaped `#[repr(C)]` bytes or postcard-shaped). Two separate pieces
-of code produce and consume those bytes today, and only one of them is the
-postcard crate:
+A kind's payload is one of two shapes (ADR-0019): cast-shaped (`#[repr(C)]`
+bytes, read directly as memory for zero-copy slabs), or the structured shape
+used by everything else — every control-plane kind, every `Result`, anything
+with a string, vector, option, enum, or map field.
 
-- **The typed path** (`aether-data`): `#[derive(Kind)]` postcard-shaped kinds
-  encode through `serde` + the postcard crate (`postcard::to_allocvec` /
-  `postcard::from_bytes`, via the derive runtime's `encode_postcard` /
-  `decode_postcard`). This is real postcard library code.
-- **The schema-walker** (`aether-codec`): `encode_schema` / `decode_schema`
-  translate agent JSON ↔ wire bytes at the MCP boundary, where no Rust types are
-  available — only a `SchemaType`. This path is **hand-rolled**:
-  `write_varint_u64`, `zigzag_i64`, hand-written enum discriminants and
-  length prefixes. It calls no postcard library code in production. Its only
-  relationship to the postcard crate is a `#[cfg(test)]` conformance oracle that
-  asserts its hand-rolled bytes match `postcard::to_allocvec` for equivalent
-  values.
+The structured shape is what this ADR is about. Today it is produced and
+consumed two different ways: the typed path (`aether-data`) encodes Rust values
+through the external `postcard` crate, while the schema-walker (`aether-codec`)
+encodes agent JSON at the MCP boundary by hand-writing the same byte layout from
+a `SchemaType`, with no Rust types in hand. Two implementations of one format,
+one of them an external dependency, kept in agreement by a test. That split is
+the thing we are removing.
 
-The length-prefix stream framing (ADR-0072) and `aether-data` additionally
-surface `postcard::Error` in their public error types, and `take_from_bytes`
-(decode-and-return-remainder) is used by the kind-manifest parser and the
-canonical decoders.
+The single fact the design turns on: **the schema is present on both ends, for
+every consumer that touches the bytes.** The typed path has the `SchemaType` at
+compile time; the schema-walker is handed it at the boundary; the manifest and
+`KindId`-hashing paths walk its name-stripped twin `SchemaShape`. Nothing
+decodes these bytes without the schema.
 
-This split is the problem. Half the codec already reimplements the format by
-hand; that half draws no benefit from the postcard crate's tested code — it is
-our code, with our bugs, checked against postcard only in tests. Meanwhile the
-postcard crate's types and traits (`postcard::Error`, the `Serializer` it
-implements) sit in scope across the workspace next to that hand-rolled half,
-which is a standing source of confusion: a reader cannot tell from a call site
-whether "the format" means the library or the hand-rolled twin. Depending on a
-crate to gain "ecosystem" and "fuzzing" benefits does not hold when half the
-codec never runs that crate's code. The format is effectively already ours; the
-dependency mostly buys confusion.
-
-`aether-data` is `#![no_std]` + `alloc`, and the hand-rolled walker already
-proves the byte primitives are trivial `no_std` code — so owning the encoder is
-not gated on `std`.
+That collapses what the bytes must carry. Everything structural — field names,
+field order, field types, scalar widths, fixed-array lengths, the variant list —
+is in the schema and costs zero wire bytes. The payload carries only what the
+schema cannot pin down: scalar leaf values, collection and string lengths,
+option presence, enum variant selectors, map entries, and ref selectors. A
+format that carries exactly that, designed from aether's data rather than
+inherited from any existing serializer, is the goal.
 
 ## Decision
 
-Own the wire format end to end and remove the postcard crate from the workspace.
+Own the structured wire format end to end, designed from first principles, and
+remove the external serialization dependency.
 
-1. **The aether wire format is ours.** We keep postcard's byte layout (varint /
-   zigzag / length-prefix / enum-discriminant) — copying the format spec is
-   fine and keeps the wire bytes unchanged — and publish it as the aether wire
-   format, with a single reference implementation we own.
+### Shape of the implementation
 
-2. **`aether_data::wire` is that reference implementation** — the byte
-   primitives plus `to_vec` / `from_bytes` / `take_from_bytes` and a
-   `wire::Error`. It lives in `aether-data` because the typed derive runtime
-   calls into it and `aether-codec` depends on `aether-data` (never the
-   reverse), so this is the only placement that avoids a dependency cycle and
-   keeps the format reachable from the `no_std` foundation.
+- **`aether_data::wire` is the single reference implementation** — the byte
+  primitives plus `to_vec` / `from_bytes` / `take_from_bytes` and a
+  `wire::Error`. It lives in `aether-data` because the typed derive runtime calls
+  into it and `aether-codec` depends on `aether-data` (never the reverse), so
+  this is the only placement reachable from the `no_std` foundation without a
+  dependency cycle.
+- **Two consumers over the one module.** A `serde` adapter (`Serializer` /
+  `Deserializer` implemented over the `wire` primitives) lets any
+  `#[derive(Serialize)]` kind encode with no per-type hand-coding; `serde` is
+  plumbing that *utilizes* the format and does not define it. The schema-walker
+  (`aether-codec`) drives the same `wire` primitives from `SchemaType` + JSON.
+  Both must emit identical bytes for the same logical value.
 
-3. **The format has two consumers, both ours, over the one `wire` module:**
-   - A **serde adapter** (`Serializer` / `Deserializer` implemented over the
-     `wire` primitives) so any `#[derive(Serialize)]` kind encodes in our format
-     with no per-type hand-coding. serde is plumbing that *utilizes* our format;
-     it is not the format's identity, and the format owes nothing to serde.
-   - The **schema-walker** (`aether-codec`), unchanged in role, now calling the
-     shared `aether_data::wire` primitives instead of hand-maintaining its own
-     copy.
+### The format
 
-4. **The postcard crate is removed from every `Cargo.toml`.** Every
-   `postcard::{to_allocvec, from_bytes, take_from_bytes, Error}` call site moves
-   to `aether_data::wire` (or, for kinds, to the `Kind` trait methods
-   `encode_into_bytes` / `decode_from_bytes` that wrap it). Once the dependency
-   is gone, `postcard::` is a compile error workspace-wide — no lint needed.
+Schema-driven, little-endian, fixed-width. The schema declares every type, so
+integers need not be self-delimiting; fixed-width is then simpler, branchless to
+decode, deterministic, and byte-identical to the cast image. A scalar leaf has
+**one** representation — fixed little-endian of its declared width — shared by
+the cast path and the structured path; the two differ only in struct padding
+(the cast path is `#[repr(C)]`) and in the variable-length arms the cast path
+cannot hold.
 
-The wire bytes do not change, so this is an internal-implementation decision,
-not a wire-format break.
+| Schema type | Encoding |
+|---|---|
+| `Unit` | zero bytes |
+| `Bool` | 1 byte, `0` or `1`; any other value is a decode error |
+| `Scalar(U8..U64)` | fixed little-endian, declared width (1/2/4/8 bytes) |
+| `Scalar(I8..I64)` | fixed little-endian two's-complement, declared width |
+| `Scalar(F32/F64)` | IEEE-754 little-endian (4/8 bytes), bit-faithful |
+| `String` | `u32` little-endian byte length, then UTF-8 bytes |
+| `Bytes` | `u32` little-endian byte length, then raw bytes |
+| `Option(T)` | 1 byte presence (`0` None / `1` Some); if Some, the `T` encoding |
+| `Vec(T)` | `u32` little-endian element count, then each element in order |
+| `Array { T, len }` | the `len` elements in order — no count (the schema has `len`) |
+| `Struct { fields }` | each field in schema order — no names, no count |
+| `Enum { variants }` | the variant index as a fixed `u32` little-endian (serde's `variant_index`; the schema-walker matches by declaration position), then the selected variant's fields in order |
+| `Ref(T)` | a two-variant sum encoded like any `Enum`: a `u32` selector — `0` inline → `u32` length-prefix + the inline kind's own encoded image (`K::encode_into_bytes`); `1` handle → `id` (8 LE) + `kind_id` (8 LE) |
+| `Map { K, V }` | `u32` little-endian entry count, then `(K, V)` pairs in ascending encoded-key byte order |
+| `TypeId` (`KindId` / `MailboxId` / `HandleId`) | fixed 8 bytes little-endian |
+
+Three choices in that table carry the most weight:
+
+- **Collection lengths are the one quantity the schema does not bound**, so they
+  are a fixed `u32` (a 4 GB ceiling). Payloads that could approach it stage
+  out-of-band through a handle or path, never inline mail.
+- **Identifiers are high-entropy 64-bit hashes** (`KindId`, `MailboxId`,
+  `HandleId`), so they are fixed 8 bytes. A variable-length integer would be
+  strictly larger for full-range values — the opposite of compaction.
+- **Sum-type selectors (`Enum`, `Ref`) are a fixed `u32`, not a schema-derived
+  width.** The serde consumer is schema-less — it receives serde's
+  `variant_index` but never the variant count — so a width that depends on the
+  schema is not derivable on that side. A fixed `u32` is what both consumers can
+  produce identically, which is the property the whole format rests on.
+
+The inline `Ref` body is length-prefixed: `Ref`'s serde impl (ADR-0100) emits the
+inline kind's own `encode_into_bytes` image through `serialize_bytes`, which both
+consumers render as `u32` length + raw bytes. The prefix lets the handle store
+skip or splice a resolved value in place without walking the subtree (ADR-0049),
+and the body is the kind's codec image rather than a recursive re-encoding — so a
+cast kind's inline value stays a cast image.
+
+### Envelope
+
+One **format-version byte** prefixes each top-level encoded payload. It is
+distinct from kind identity (`KindId` already versions the *schema*); the version
+byte versions the *encoding*, so the format can evolve without ambiguity, and
+"is this aether wire or garbage" stays decidable. It is per-message, not
+per-value.
+
+### Determinism
+
+Encoding is deterministic by construction — the same value always produces the
+same bytes — from fixed-width leaves, positional fields, count-prefixed
+collections, and ascending-key-ordered maps. This is a formal invariant of the
+format, and it buys reproducible golden-byte fixtures, stable hashing, and
+byte-equality as value-equality.
+
+Floats are encoded bit-faithfully. A normal float has one bit pattern and is
+already deterministic; signed zero and NaN payloads are preserved rather than
+normalized, so two floats that are IEEE-equal but bit-distinct encode
+distinctly. Normalizing floats to a single representation per IEEE-equality
+class is **deferred** — it is the only lossy operation the format would carry,
+and the need it serves (content-addressing float-bearing values by IEEE
+equality) does not exist today. `KindId` hashing is unaffected: `SchemaShape`
+contains no floats.
 
 ## Consequences
 
 **Positive**
 
-- One source of truth for the byte format. The byte primitives are written
-  once in `aether_data::wire` and shared by both consumers, instead of a
-  library copy and a hand-rolled copy kept in sync by an oracle.
-- The postcard crate's types and traits leave the workspace, so a call site can
-  no longer be ambiguous about which "format" it means.
-- Full ownership of evolution: changing the format (e.g. a future version tag)
-  is a change to one module we control, not a negotiation with an external
-  crate's spec.
-- `postcard::` becoming an unresolved path makes the boundary self-enforcing —
-  the clippy `disallowed-methods` ban that was otherwise needed is moot.
+- One owned implementation. The byte primitives are written once and shared by
+  both consumers, replacing a library copy plus a hand-rolled copy kept in sync
+  by a test.
+- Scalars are consistent across the cast and structured paths; decode is
+  branchless and faster than a variable-length scheme.
+- Deterministic by construction, on aether's own terms, evolvable through one
+  module.
+- Removing the external crate makes its path unresolvable workspace-wide, so the
+  boundary is self-enforcing — no lint needed.
 
 **Negative**
 
-- We own correctness. The serde adapter and the schema-walker are two
-  traversals that must emit byte-identical output for the same logical value,
-  so a conformance suite cross-checking the two consumers (plus golden
-  byte-vector fixtures) replaces the former postcard oracle. Serialization bugs
-  are the silent-corruption kind, so this suite is load-bearing.
-- The serde adapter is real work — a clean-room `Serializer` / `Deserializer`
-  over the wire primitives. postcard's published format is the reference for the
-  byte layout; the implementation is ours.
-- Migration touches every crate that names postcard (~75 files) and every
-  `Cargo.toml` that depends on it. It lands as a sequenced arc, not one change.
+- We own correctness. The `serde` adapter and the schema-walker are two
+  traversals that must agree byte-for-byte, so a conformance suite — golden
+  byte-vector fixtures plus a cross-check that both consumers emit identical
+  bytes for the same value — is load-bearing. Serialization bugs are the
+  silent-corruption kind.
+- The `serde` adapter is real implementation work: a clean-room `Serializer` /
+  `Deserializer` over the `wire` primitives.
+
+**Identity and wire break**
+
+- `KindId` is `hash(KIND_DOMAIN ++ canonical SchemaShape bytes)`. The canonical
+  `SchemaShape` bytes change under this format, so **every `KindId` is
+  regenerated**. Components rebuild, routing ids shift, and persisted
+  handle-store snapshots and saved state written under the old encoding are
+  invalidated — wiped or migrated. This is a deliberate clean break, taken
+  while pre-1.0 makes it cheap.
 
 **Neutral**
 
-- No wire-format break: the bytes are unchanged, so engines, handle-store
-  snapshots, and stored mail stay readable across the switch.
-- serde stays a workspace dependency — it already backs the JSON side of
-  `aether-codec`, and kinds keep `#[derive(Serialize, Deserialize)]`. This
-  decision changes who implements the *wire* format under serde, not whether
-  serde is used.
-- Cross-language interop is unaffected in practice: the bytes remain
-  postcard-compatible, so a non-Rust participant can still use any postcard
-  library against them (parked per ADR-0005 / ADR-0007 regardless).
+- `serde` stays a workspace dependency: it backs JSON at the MCP boundary and
+  the typed-path adapter, and kinds keep their derives. This decision changes
+  who implements the wire format under `serde`, not whether `serde` is used.
+- The bytes are no longer compatible with any external serializer. Cross-language
+  interop, if it is ever wanted, ships an aether-wire implementation in the other
+  language (parked per ADR-0005 / ADR-0007).
 
 ### Migration arc
 
-1. Build `aether_data::wire`: primitives, `to_vec` / `from_bytes` /
-   `take_from_bytes`, `wire::Error`, the serde adapter, and the conformance
-   suite (golden fixtures + serde-adapter-vs-schema-walker cross-check).
-2. Switch the `aether-data` derive runtime and `aether-codec` schema-walker onto
-   `aether_data::wire`; drop their postcard dependency.
-3. Migrate the remaining call sites per crate to the `wire` API or the `Kind`
-   trait methods (kinds first — the bulk are roundtrip tests already moving to
-   the trait methods).
-4. Remove postcard from every `Cargo.toml`.
+1. Build `aether_data::wire`: byte primitives, `to_vec` / `from_bytes` /
+   `take_from_bytes`, `wire::Error`, the `serde` adapter, and the conformance
+   suite (golden fixtures + adapter-vs-walker cross-check).
+2. Switch the `aether-data` derive runtime and the `aether-codec` schema-walker
+   onto `aether_data::wire`; regenerate `KindId`s; drop their external-crate
+   dependency.
+3. Migrate remaining call sites per crate to the `wire` API or the `Kind` trait
+   methods (`encode_into_bytes` / `decode_from_bytes`).
+4. Remove the `postcard` crate from every `Cargo.toml`; wipe or migrate
+   persisted data.
 
 ## Alternatives considered
 
-- **Keep the postcard dependency, enforce the boundary with a clippy
-  `disallowed-methods` ban.** Rejected: it leaves the confusing dual
-  implementation in place (library copy + hand-rolled copy) and keeps postcard's
-  types in scope — it polices the smell instead of removing it.
-- **Drop serde on the wire path too; have the derive emit field-by-field encode
-  /decode directly.** Rejected: larger macro work (enums, `Option`, `Vec`,
-  `String`, nesting all hand-emitted) for no gain on the stated problem — serde
-  is not the source of the confusion, the postcard crate is. serde as an adapter
-  keeps the derive ergonomics.
-- **Define a genuinely different wire layout (deliberately break
-  postcard-compatibility).** Rejected: it buys nothing the ownership decision
-  doesn't already give us, and it forces a wire-format break with no
-  corresponding benefit.
+- **Keep the external dependency, enforce the boundary with a clippy
+  `disallowed-methods` ban** (the first form of this ADR). Rejected: it preserves
+  the two-implementation split and keeps the external crate's types in scope —
+  it polices the smell instead of removing it.
+- **Variable-length integers for compactness.** Rejected: it sacrifices
+  determinism simplicity and cast-consistency, is strictly worse for
+  high-entropy ids, and saves size only on the structured path — which is not
+  where bulk lives, because cast-shaped slabs carry it.
+- **Normalize floats to one representation per IEEE-equality class now.**
+  Rejected (deferred): it is the only lossy operation the format would carry
+  (dropping signed zero and NaN payloads) and serves a need aether does not have
+  today; bit-faithful floats are already deterministic.
+- **Preserve byte-compatibility with the prior external format.** Rejected: it
+  would constrain a first-principles design to an inherited byte layout for no
+  benefit, and the `KindId` regeneration already makes this a clean break.
