@@ -40,6 +40,7 @@
 extern crate self as aether_substrate;
 
 pub mod actor;
+pub mod atomic_write;
 // iamacoffeepot/aether#1275: `boot` builds a wasmtime `Engine` + `Linker`,
 // so it rides the `wasm` feature. Default-on; only `aether-derive`'s
 // trybuild fixtures opt out (they don't reach the boot path).
@@ -51,6 +52,7 @@ pub mod config;
 pub mod dag;
 pub mod handle_store;
 pub mod mail;
+pub mod pid_lock;
 #[cfg(feature = "render")]
 pub mod render;
 pub mod runtime;
