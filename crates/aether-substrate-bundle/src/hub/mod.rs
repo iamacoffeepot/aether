@@ -32,6 +32,10 @@ pub const DEFAULT_RPC_PORT: u16 = 8901;
 /// desktop and headless chassis treat `None` as "don't boot the RPC
 /// server" instead.
 #[must_use]
+// Chassis boot config: the AETHER_RPC_PORT fallback for an absent --rpc-port flag
+// (the hub injects this into forked engines), read at the process boundary — not
+// a cap config knob.
+#[allow(clippy::disallowed_methods)]
 pub fn rpc_port_from_env() -> Option<u16> {
     env::var("AETHER_RPC_PORT")
         .ok()

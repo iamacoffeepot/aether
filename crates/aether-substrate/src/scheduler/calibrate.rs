@@ -164,6 +164,9 @@ static PINNED: AtomicBool = AtomicBool::new(false);
 
 /// Seed [`HANDOFF`] exactly once: from `AETHER_HANDOFF_COST_NS` if set
 /// (and freeze live refinement), else from the boot probe.
+// Process-level scheduler tuning knob (the handoff-cost pin), read once at boot
+// at the substrate level — not cap config.
+#[allow(clippy::disallowed_methods)]
 fn ensure_seeded() {
     SEEDED.get_or_init(
         || match parse_cost_override(env::var("AETHER_HANDOFF_COST_NS").ok()) {

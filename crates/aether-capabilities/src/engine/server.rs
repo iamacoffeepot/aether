@@ -946,6 +946,13 @@ mod server_native {
     ///    macOS, `$XDG_DATA_HOME/aether/engines` on Linux, etc.).
     /// 3. `std::env::temp_dir().join("aether-engines")` if no data
     ///    dir is resolvable.
+    // External ops escape hatch (AETHER_ENGINE_STORE_ROOT) for the per-engine
+    // spawn-dir parent — the directory forked substrates and their handle
+    // stores live under, resolved in a static spawn helper. #1968 deliberately
+    // kept this knob inline (separate from the binary-artifact store, which it
+    // moved onto EngineConfig); it is a process-level deployment override, not
+    // a cap config field.
+    #[allow(clippy::disallowed_methods)]
     fn engine_store_root() -> PathBuf {
         if let Ok(raw) = env::var(ENV_ENGINE_STORE_ROOT)
             && !raw.is_empty()

@@ -251,6 +251,9 @@ pub const SPIN_KNOBS: &[KnobRecord] = &[KnobRecord {
 /// route-to-spinner coordinator, falling back to the default. The
 /// experiment's latency sweep retunes this without a recompile; a
 /// malformed value falls back rather than aborting boot.
+// Process-level scheduler tuning knob (hand-registered in the ADR-0090 config
+// dump above), read at the substrate level — not cap config.
+#[allow(clippy::disallowed_methods)]
 fn spin_window_from_env() -> Duration {
     let usec = env::var("AETHER_SPIN_WINDOW_USEC")
         .ok()

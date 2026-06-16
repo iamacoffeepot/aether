@@ -33,6 +33,13 @@ pub const GEN_PREFIX: &str = "gen";
 /// default the `aether.fs` cap uses (`AETHER_SAVE_DIR` →
 /// `dirs::data_dir()/aether/save` → `temp_dir()/aether/save`).
 #[must_use]
+// External filesystem-root resolution mirroring the aether.fs cap's namespace
+// roots (ADR-0041) — AETHER_GEN_DIR overrides, else the same AETHER_SAVE_DIR
+// the `save` namespace resolves — not a cap config knob. The staging helpers
+// are free functions called from static reply builders with no config in scope,
+// so this is the fs-cap namespace-resolution case the disallowed-methods reason
+// names as legitimate, not a hand-rolled config bypass.
+#[allow(clippy::disallowed_methods)]
 pub fn gen_root() -> PathBuf {
     if let Ok(dir) = env::var("AETHER_GEN_DIR")
         && !dir.is_empty()

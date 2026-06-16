@@ -17,6 +17,12 @@
 //! Release matters: the numbers are dominated by enqueue + worker wake,
 //! which a debug build inflates several-fold.
 
+// Test-only (`#[cfg(test)]`): the on-demand `#[ignore]` profiling tests in this
+// module read their tuning knobs (WORKERS / TOKENS / PROFILE_SECS /
+// SETTLE_SAMPLES) from env so a run can be parameterised from the shell. No cap,
+// no config layer — the whole module opts out of the env-read ban.
+#![allow(clippy::disallowed_methods)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::sync::Arc;

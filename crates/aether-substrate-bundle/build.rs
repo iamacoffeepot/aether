@@ -28,6 +28,9 @@ mod bundle_pack;
 
 use bundle_pack::{Pack, encode_pack, pack_from_manifest, read_manifest};
 
+// Build script: cargo communicates with build scripts exclusively through env
+// (OUT_DIR + the manifest path) — there is no config layer at build time.
+#[allow(clippy::disallowed_methods)]
 fn main() {
     emit_provenance();
     println!("cargo:rerun-if-env-changed=AETHER_BUNDLE_MANIFEST");
@@ -52,6 +55,9 @@ fn main() {
 /// - `AETHER_BUILD_PROFILE` — cargo's `PROFILE` (`debug` / `release`).
 /// - `AETHER_TARGET_TRIPLE` — cargo's `TARGET` (e.g.
 ///   `aarch64-apple-darwin`).
+// Build script: PROFILE / TARGET are cargo-provided build-time env vars, the
+// only channel cargo uses to pass them — no config layer exists at build time.
+#[allow(clippy::disallowed_methods)]
 fn emit_provenance() {
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     let git_sha = Command::new("git")

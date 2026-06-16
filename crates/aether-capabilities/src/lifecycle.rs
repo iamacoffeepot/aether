@@ -499,7 +499,6 @@ fn finalize(inner: GraphInner) -> Result<LifecycleGraphData, BuildError> {
 #[aether_actor::bridge(singleton)]
 mod native {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::env;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -570,6 +569,18 @@ mod native {
         /// verifies this and returns `BootError` otherwise, so
         /// misconfiguration fails fast at chassis-build.
         pub initial_subscribers: Vec<(KindId, DataMailboxId)>,
+        /// Force-complete deadline for a pending advance's `Settled`
+        /// (iamacoffeepot/aether#1048), in milliseconds. Resolved
+        /// chassis-side (env override over [`Self::ADVANCE_TIMEOUT_MS_DEFAULT`])
+        /// rather than read from the environment in `init`, so the cap
+        /// configures through this struct rather than a naked env read.
+        pub advance_timeout_millis: u64,
+    }
+
+    impl LifecycleConfig {
+        /// Default force-complete deadline (ms) for a pending advance.
+        /// Chassis builders that don't override use this.
+        pub const ADVANCE_TIMEOUT_MS_DEFAULT: u64 = ADVANCE_TIMEOUT_MS_DEFAULT;
     }
 
     /// The `aether.lifecycle` capability (ADR-0082). Non-generic and
@@ -639,12 +650,9 @@ mod native {
             let LifecycleConfig {
                 graph,
                 initial_subscribers,
+                advance_timeout_millis,
             } = config;
             let current_state = graph.start();
-            let advance_timeout_millis = env::var("AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS")
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(ADVANCE_TIMEOUT_MS_DEFAULT);
             let mailer = ctx.mailer();
             let mut subscribers: BTreeMap<KindId, BTreeSet<DataMailboxId>> = BTreeMap::new();
             for (stage, mailbox) in initial_subscribers {

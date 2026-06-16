@@ -205,6 +205,9 @@ fn write_crash_dump(
     }
 }
 
+// Process-level crash-dump infra (the AETHER_CRASH_LOG_DISABLE kill switch),
+// read in the panic hook below the actor/config layer — not cap config.
+#[allow(clippy::disallowed_methods)]
 fn crash_log_disabled() -> bool {
     env::var(ENV_CRASH_LOG_DISABLE).is_ok_and(|v| {
         let v = v.trim();
@@ -217,6 +220,10 @@ fn crash_log_disabled() -> bool {
 /// `$HOME/.local/share/aether/crash/<unix_ms>/`. `None` only when
 /// neither override nor `$HOME` is available (rare — typically
 /// containerised env with neither set).
+// Crash-dump directory resolution in the panic hook: an internal override
+// (AETHER_CRASH_LOG_DIR) plus the standard external XDG_DATA_HOME / HOME
+// path vars — process-level infra below the actor/config layer, not cap config.
+#[allow(clippy::disallowed_methods)]
 fn resolve_crash_dir(timestamp_unix_ms: u64) -> Option<PathBuf> {
     let base = if let Ok(dir) = env::var(ENV_CRASH_LOG_DIR) {
         PathBuf::from(dir)
@@ -305,6 +312,9 @@ fn payload_string(payload: &(dyn Any + Send)) -> String {
     }
 }
 
+// Process-level backtrace gate (RUST_BACKTRACE-style), read in the panic hook
+// below the actor/config layer — not cap config.
+#[allow(clippy::disallowed_methods)]
 fn capture_backtrace() -> Option<Backtrace> {
     capture_backtrace_with(env::var_os(ENV_BACKTRACE).is_some())
 }

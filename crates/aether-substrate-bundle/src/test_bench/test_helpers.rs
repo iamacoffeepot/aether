@@ -139,6 +139,10 @@ pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
 // through `tracing` because the test harness already captures stderr
 // and surfaces it on failure (issue 891).
 #[allow(clippy::print_stderr)]
+// Test-only: AETHER_REQUIRE_RUNTIME is the CI strict-mode toggle that turns a
+// missing wgpu adapter / wasm pre-build from a skip into a hard failure — a test
+// harness knob, not cap config.
+#[allow(clippy::disallowed_methods)]
 pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
     let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
     if !has_wgpu_adapter() {

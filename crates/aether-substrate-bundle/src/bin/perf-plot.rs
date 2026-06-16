@@ -47,6 +47,9 @@ const FONT: &[u8] = include_bytes!("../../assets/fonts/RobotoMono.ttf");
 /// clearly distinct from the queued/drain/handler `BLUE`/`RED`/`GREEN`.
 const CONSTRUCT: RGBColor = RGBColor(255, 140, 0);
 
+// Dev/bench tooling: this perf-plot binary takes its run parameters from env in
+// main — not a capability, no config layer in scope.
+#[allow(clippy::disallowed_methods)]
 fn main() -> ExitCode {
     let frames: u32 = env::var("AETHER_PERF_FRAMES")
         .ok()

@@ -215,7 +215,21 @@ pub fn tick_only_lifecycle_config() -> LifecycleConfig {
     LifecycleConfig {
         graph,
         initial_subscribers: vec![],
+        advance_timeout_millis: lifecycle_advance_timeout_millis(),
     }
+}
+
+/// Resolve the lifecycle force-complete deadline (ms) chassis-side
+/// (iamacoffeepot/aether#1048): the `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS`
+/// override over the cap's default. Read here, in the chassis builder, so
+/// `LifecycleCapability::init` configures through `LifecycleConfig`
+/// rather than a naked env read.
+#[allow(clippy::disallowed_methods)] // chassis-level process tuning knob: the lifecycle force-complete deadline (#1048) is a per-process override resolved here into LifecycleConfig, not a cap-internal env read
+fn lifecycle_advance_timeout_millis() -> u64 {
+    env::var("AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT)
 }
 
 /// Build the three-stage frame lifecycle config the display-driving
@@ -265,6 +279,7 @@ pub fn frame_lifecycle_config() -> LifecycleConfig {
     LifecycleConfig {
         graph,
         initial_subscribers: vec![],
+        advance_timeout_millis: lifecycle_advance_timeout_millis(),
     }
 }
 
@@ -399,6 +414,9 @@ pub fn maybe_with_http_server<C: Chassis>(
 /// read is the fallback for an absent `--boot-manifest` CLI flag.
 /// Shared by the desktop + headless chassis.
 #[must_use]
+// Chassis-level boot config: the env fallback for an absent --boot-manifest CLI
+// flag (argv > env > default at the process boundary), read in a chassis builder.
+#[allow(clippy::disallowed_methods)]
 pub fn boot_manifest_from_env() -> Option<String> {
     env::var("AETHER_BOOT_MANIFEST")
         .ok()
@@ -411,6 +429,9 @@ pub fn boot_manifest_from_env() -> Option<String> {
 /// one worker); unparseable → `None` with a warn. Issue 745. Shared by
 /// the desktop + headless chassis, which both fall back to it when the
 /// CLI `--workers` flag is absent.
+// Chassis-level boot config: the env fallback for an absent --workers CLI flag
+// (argv > env > default at the process boundary), read in a chassis builder.
+#[allow(clippy::disallowed_methods)]
 pub fn parse_workers_env() -> Option<usize> {
     let raw = env::var("AETHER_WORKERS").ok()?;
     match raw.trim().parse::<usize>() {

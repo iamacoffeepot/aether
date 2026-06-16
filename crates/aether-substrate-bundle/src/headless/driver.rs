@@ -42,6 +42,9 @@ pub const DEFAULT_TICK_HZ: u32 = 60;
 /// or unparseable → log + fall back to default. Tests bypass this by
 /// constructing `HeadlessEnv` with a chosen `tick_period` directly.
 #[must_use]
+// Headless chassis boot config: the AETHER_TICK_HZ tick-cadence override read at
+// the process boundary — not a cap config knob.
+#[allow(clippy::disallowed_methods)]
 pub fn parse_tick_hz_env() -> u32 {
     // Match arms read cleaner than `map_or` here because the Ok arm
     // is a chained iterator/closure that warn-logs on parse failure.

@@ -310,6 +310,11 @@ fn leaf_row(env_key: &str, leaf: &LeafKind, doc: &[&'static str]) -> DumpRow {
         } => render_expr(expr),
         LeafKind::Required { default: None } | LeafKind::Optional => String::new(),
     };
+    // The sanctioned ADR-0090 config machinery: this is the central env-read
+    // the whole derive-`Config` system funnels through (the `#[config(env =
+    // ...)]` discovery dump), the one place capabilities *should* configure
+    // through rather than reading env themselves.
+    #[allow(clippy::disallowed_methods)]
     let (value, source) =
         env::var(env_key).map_or_else(|_| (default.clone(), "default"), |v| (v, "env"));
     DumpRow {
@@ -358,6 +363,10 @@ pub fn dump_config(metas: &[&'static Meta], records: &[KnobRecord]) -> String {
     }
     for record in records {
         let default = record.default.unwrap_or("").to_owned();
+        // The sanctioned ADR-0090 config machinery: resolving a hand-registered
+        // knob's live source for the `--config` discovery dump, the central
+        // config-read path, not a cap reading its own env.
+        #[allow(clippy::disallowed_methods)]
         let (value, source) =
             env::var(record.env_key).map_or_else(|_| (default.clone(), "default"), |v| (v, "env"));
         rows.push(DumpRow {

@@ -54,8 +54,12 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
+    // Top-level process config for the MCP binary (the hub address it dials and
+    // its own bind port) — process wiring in main, not a capability reading config.
+    #[allow(clippy::disallowed_methods)]
     let hub_addr =
         env::var("AETHER_HUB_RPC_ADDR").unwrap_or_else(|_| DEFAULT_HUB_RPC_ADDR.to_owned());
+    #[allow(clippy::disallowed_methods)]
     let mcp_port: u16 = env::var("AETHER_MCP_PORT")
         .ok()
         .and_then(|s| s.parse().ok())

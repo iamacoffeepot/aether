@@ -26,6 +26,9 @@
 // `cargo test` surfaces "skipping: ..." alongside `test ... ok` (issue
 // 891), matching `headless_autoload.rs`.
 #![allow(clippy::print_stderr)]
+// The same guard reads the AETHER_REQUIRE_RUNTIME CI skip toggle — a test-harness
+// knob, not cap config.
+#![allow(clippy::disallowed_methods)]
 
 use std::collections::BTreeMap;
 use std::env;
