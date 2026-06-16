@@ -9,8 +9,10 @@
 //!
 //! Artifact-generic from the start — an entry is a content blob plus a
 //! type-tagged ([`ArtifactKind`]) manifest — so the registry extraction
-//! (#1955) lifts it whole. Today the only artifact is a chassis binary and
-//! the manifest is a [`BinaryManifest`].
+//! (#1955) lifts it whole. Two artifact types share the store: a chassis
+//! binary (a [`BinaryManifest`], ADR-0115) and a wasm component (a
+//! [`ComponentManifest`] read straight from the wasm, ADR-0116 / #1956),
+//! carried in the [`StoredManifest`] enum.
 //!
 //! ## Layout
 //!
@@ -48,7 +50,10 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aether_kinds::{BinaryEntry, BinaryManifest, ListBinaries};
+use aether_kinds::{
+    BinaryEntry, BinaryManifest, ComponentActor, ComponentEntry, ComponentManifest, ListBinaries,
+    ListComponents,
+};
 use aether_substrate::atomic_write::atomic_write;
 use aether_substrate::pid_lock::{LockAcquisition, LockGuard, acquire_lock_pid};
 use serde::{Deserialize, Serialize};
@@ -67,13 +72,46 @@ pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 const TARGET: &str = "aether_capabilities::store";
 
-/// The type tag on a stored artifact (ADR-0115). One variant today — the
-/// store is artifact-generic so #1955 can add more (component packs, asset
-/// bundles) without reshaping the entry.
+/// The type tag on a stored artifact (ADR-0115 / ADR-0116). The store is
+/// artifact-generic: an entry's `kind` selects which [`StoredManifest`]
+/// variant describes it, so binaries and component wasm share one store
+/// (#1955 can add more — asset bundles — without reshaping the entry).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArtifactKind {
     /// A chassis substrate binary, described by a [`BinaryManifest`].
     Binary,
+    /// A wasm component, described by a [`ComponentManifest`] (ADR-0116).
+    Component,
+}
+
+/// The type-tagged manifest a stored artifact carries (ADR-0115 /
+/// ADR-0116). The store sidecars one of these next to each entry's bytes;
+/// the variant matches the entry's [`ArtifactKind`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StoredManifest {
+    Binary(BinaryManifest),
+    Component(ComponentManifest),
+}
+
+impl StoredManifest {
+    /// The [`BinaryManifest`] when this artifact is a binary, else `None`.
+    #[must_use]
+    pub fn as_binary(&self) -> Option<&BinaryManifest> {
+        match self {
+            Self::Binary(m) => Some(m),
+            Self::Component(_) => None,
+        }
+    }
+
+    /// The [`ComponentManifest`] when this artifact is a component, else
+    /// `None`.
+    #[must_use]
+    pub fn as_component(&self) -> Option<&ComponentManifest> {
+        match self {
+            Self::Component(m) => Some(m),
+            Self::Binary(_) => None,
+        }
+    }
 }
 
 /// How a caller addresses a stored artifact in [`ArtifactStore::get`] —
@@ -88,31 +126,35 @@ pub enum Selector {
 }
 
 /// One resolved artifact returned by [`ArtifactStore::get`]: its content
-/// hash, the on-disk path of its raw bytes (the fork target for #1954),
-/// the type tag, the manifest, and the name pointing at it (if any).
+/// hash, the on-disk path of its raw bytes (the fork target for #1954, the
+/// resolve-and-forward byte source for #1956), the type tag, the
+/// type-tagged manifest, and the name pointing at it (if any).
 #[derive(Debug, Clone)]
 pub struct StoredArtifact {
     pub hash: String,
     pub path: PathBuf,
     pub kind: ArtifactKind,
-    pub manifest: BinaryManifest,
+    pub manifest: StoredManifest,
     pub name: Option<String>,
 }
 
 /// The JSON sidecar written next to each entry's bytes — the type tag
-/// plus the manifest, so a fresh store rebuilds its index from disk.
+/// plus the type-tagged manifest, so a fresh store rebuilds its index
+/// from disk. `kind` is redundant with the `manifest` variant but kept
+/// for a forward-compatible read of an entry whose manifest variant a
+/// future build doesn't recognize.
 #[derive(Serialize, Deserialize, Clone)]
 struct StoredEntry {
     kind: ArtifactKind,
-    manifest: BinaryManifest,
+    manifest: StoredManifest,
 }
 
 /// In-memory record of one entry. The bytes live on disk at
-/// `entries/<hash>`; only the metadata is held in memory (binaries are
+/// `entries/<hash>`; only the metadata is held in memory (artifacts are
 /// large), read back lazily on [`ArtifactStore::get`].
 struct Entry {
     kind: ArtifactKind,
-    manifest: BinaryManifest,
+    manifest: StoredManifest,
     bytes_len: u64,
     /// Eviction protection independent of naming (an explicit
     /// [`ArtifactStore::pin`]). A named entry is also eviction-protected.
@@ -211,7 +253,7 @@ impl ArtifactStore {
         &mut self,
         bytes: &[u8],
         kind: ArtifactKind,
-        manifest: BinaryManifest,
+        manifest: StoredManifest,
         name: Option<String>,
     ) -> String {
         let hash = hash_hex(bytes);
@@ -282,16 +324,40 @@ impl ArtifactStore {
     /// [`BinaryEntry`]s. The filter fields are AND-combined: `chassis` /
     /// `target` are exact matches, `caps` requires the entry's caps to be
     /// a superset of every listed cap. Each absent field is "no
-    /// constraint".
+    /// constraint". Component entries are excluded — only `Binary`-kind
+    /// artifacts are listed here.
     #[must_use]
-    pub fn list(&self, filter: &ListBinaries) -> Vec<BinaryEntry> {
+    pub fn list_binaries(&self, filter: &ListBinaries) -> Vec<BinaryEntry> {
         self.entries
             .iter()
-            .filter(|(_, entry)| matches_filter(&entry.manifest, filter))
-            .map(|(hash, entry)| BinaryEntry {
-                hash: hash.clone(),
-                name: self.name_for(hash),
-                manifest: entry.manifest.clone(),
+            .filter_map(|(hash, entry)| {
+                let manifest = entry.manifest.as_binary()?;
+                matches_binary_filter(manifest, filter).then(|| BinaryEntry {
+                    hash: hash.clone(),
+                    name: self.name_for(hash),
+                    manifest: manifest.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Enumerate the stored components matching `filter` as
+    /// [`ComponentEntry`]s (ADR-0116, issue 1956). The filter fields are
+    /// AND-combined: `namespace` keeps entries exporting that actor
+    /// namespace, `handled_kind` keeps entries handling that `KindId`.
+    /// Each absent field is "no constraint". Binary entries are excluded —
+    /// only `Component`-kind artifacts are listed here.
+    #[must_use]
+    pub fn list_components(&self, filter: &ListComponents) -> Vec<ComponentEntry> {
+        self.entries
+            .iter()
+            .filter_map(|(hash, entry)| {
+                let manifest = entry.manifest.as_component()?;
+                matches_component_filter(manifest, filter).then(|| ComponentEntry {
+                    hash: hash.clone(),
+                    name: self.name_for(hash),
+                    manifest: manifest.clone(),
+                })
             })
             .collect()
     }
@@ -406,8 +472,8 @@ impl ArtifactStore {
     }
 }
 
-/// Whether a manifest passes a [`ListBinaries`] filter.
-fn matches_filter(manifest: &BinaryManifest, filter: &ListBinaries) -> bool {
+/// Whether a binary manifest passes a [`ListBinaries`] filter.
+fn matches_binary_filter(manifest: &BinaryManifest, filter: &ListBinaries) -> bool {
     if let Some(chassis) = &filter.chassis
         && &manifest.chassis != chassis
     {
@@ -419,6 +485,93 @@ fn matches_filter(manifest: &BinaryManifest, filter: &ListBinaries) -> bool {
         return false;
     }
     filter.caps.iter().all(|c| manifest.caps.contains(c))
+}
+
+/// Whether a component manifest passes a [`ListComponents`] filter
+/// (ADR-0116): the optional `namespace` must be one of the exported actor
+/// namespaces, and the optional `handled_kind` must be in the manifest's
+/// handled-kind union. Each absent field is "no constraint".
+fn matches_component_filter(manifest: &ComponentManifest, filter: &ListComponents) -> bool {
+    if let Some(namespace) = &filter.namespace
+        && !manifest.namespaces.iter().any(|n| n == namespace)
+    {
+        return false;
+    }
+    if let Some(handled_kind) = &filter.handled_kind
+        && !manifest.handled_kinds.contains(handled_kind)
+    {
+        return false;
+    }
+    true
+}
+
+/// Read a component's [`ComponentManifest`] straight from its wasm bytes
+/// (ADR-0116, issue 1956) — no execution step. Reuses the substrate's
+/// `wasmparser`-based section readers (the same ones the substrate uses at
+/// load): `read_actor_inputs_from_bytes` for the exported actor groups and
+/// their handled kind ids + `#[fallback]` presence (`aether.kinds.inputs`,
+/// ADR-0033 / ADR-0096), `read_namespace_from_bytes` for a single-actor
+/// module's `aether.namespace`, and `read_producers_from_bytes` for build
+/// provenance. The hub indexes a component by what it self-reports.
+///
+/// Each [`ComponentActor`]'s `namespace` is the group's `Actor::NAMESPACE`
+/// from its `ActorBoundary` record; a single-actor module's implicit group
+/// (`namespace: None`) takes the module's `aether.namespace` section value.
+/// The top-level `handled_kinds` / `fallback` are the union across every
+/// exported actor.
+///
+/// # Errors
+///
+/// Returns the section reader's error string when the wasm can't be parsed
+/// (a malformed `aether.kinds.inputs` section). A component with no inputs
+/// section yields an empty manifest with whatever namespace / provenance is
+/// present.
+pub fn component_manifest(wasm: &[u8]) -> Result<ComponentManifest, String> {
+    use aether_substrate::actor::wasm::kind_manifest;
+
+    let groups = kind_manifest::read_actor_inputs_from_bytes(wasm)?;
+    let module_namespace = kind_manifest::read_namespace_from_bytes(wasm)?;
+    let provenance = kind_manifest::read_producers_from_bytes(wasm);
+
+    let mut actors: Vec<ComponentActor> = Vec::with_capacity(groups.len());
+    for group in groups {
+        // A boundary-named group carries its own `Actor::NAMESPACE`; a
+        // single-actor module's implicit group (`None`) resolves its name
+        // from the `aether.namespace` section, falling back to empty.
+        let namespace = group
+            .namespace
+            .or_else(|| module_namespace.clone())
+            .unwrap_or_default();
+        let handled_kinds: Vec<aether_data::KindId> =
+            group.capabilities.handlers.iter().map(|h| h.id).collect();
+        actors.push(ComponentActor {
+            namespace,
+            handled_kinds,
+            fallback: group.capabilities.fallback.is_some(),
+        });
+    }
+
+    let namespaces: Vec<String> = actors.iter().map(|a| a.namespace.clone()).collect();
+    // The handled-kind union across every exported actor, deduped (the
+    // selector axis "a component that handles K"). A `Vec` is right here —
+    // a component handles a handful of kinds.
+    let mut handled_kinds: Vec<aether_data::KindId> = Vec::new();
+    for actor in &actors {
+        for id in &actor.handled_kinds {
+            if !handled_kinds.contains(id) {
+                handled_kinds.push(*id);
+            }
+        }
+    }
+    let fallback = actors.iter().any(|a| a.fallback);
+
+    Ok(ComponentManifest {
+        namespaces,
+        actors,
+        handled_kinds,
+        fallback,
+        provenance,
+    })
 }
 
 /// sha256 hex over `bytes` — the content address.
@@ -570,7 +723,12 @@ fn now_nanos() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArtifactKind, ArtifactStore, DEFAULT_DISK_BUDGET_BYTES, ListBinaries, Selector};
+    use super::{
+        ArtifactKind, ArtifactStore, DEFAULT_DISK_BUDGET_BYTES, ListBinaries, ListComponents,
+        Selector, StoredManifest,
+    };
+    use aether_data::Kind;
+    use aether_kinds::{ComponentActor, ComponentManifest, Key, Tick};
     use std::path::PathBuf;
     use std::{env, fs, process};
 
@@ -582,14 +740,30 @@ mod tests {
         ))
     }
 
-    fn manifest(chassis: &str) -> aether_kinds::BinaryManifest {
-        aether_kinds::BinaryManifest {
+    fn manifest(chassis: &str) -> StoredManifest {
+        StoredManifest::Binary(aether_kinds::BinaryManifest {
             chassis: chassis.to_owned(),
             caps: vec!["aether.fs".to_owned()],
             git_sha: "deadbee".to_owned(),
             profile: "debug".to_owned(),
             target: "x86_64-unknown-linux-gnu".to_owned(),
-        }
+        })
+    }
+
+    /// A component manifest exporting `namespace`, handling `Tick` + `Key`,
+    /// for the ADR-0116 component-store resolve/list unit tests.
+    fn component_manifest(namespace: &str) -> StoredManifest {
+        StoredManifest::Component(ComponentManifest {
+            namespaces: vec![namespace.to_owned()],
+            actors: vec![ComponentActor {
+                namespace: namespace.to_owned(),
+                handled_kinds: vec![Tick::ID, Key::ID],
+                fallback: false,
+            }],
+            handled_kinds: vec![Tick::ID, Key::ID],
+            fallback: false,
+            provenance: String::new(),
+        })
     }
 
     #[test]
@@ -610,6 +784,85 @@ mod tests {
         );
         assert_eq!(h1, h2, "identical bytes dedup to the same content hash");
         assert_eq!(store.entry_count(), 1, "dedup stores one entry");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn component_store_uploads_dedups_and_resolves_by_attribute() {
+        // ADR-0116, issue 1956: the artifact-generic store holds component
+        // wasm as a second type-tagged artifact. Upload + dedup, name
+        // repoint, resolve by hash / name, list by namespace / handled-kind.
+        let root = temp_root("component");
+        let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+
+        let h1 = store.upload(
+            b"probe-wasm-bytes",
+            ArtifactKind::Component,
+            component_manifest("test_fixture_probe"),
+            Some("probe".to_owned()),
+        );
+        // An identical re-upload dedups to the same hash.
+        let h2 = store.upload(
+            b"probe-wasm-bytes",
+            ArtifactKind::Component,
+            component_manifest("test_fixture_probe"),
+            None,
+        );
+        assert_eq!(h1, h2, "identical component bytes dedup to one hash");
+        assert_eq!(store.entry_count(), 1, "dedup stores one component entry");
+
+        // Resolve by hash and by name; the manifest is the component one.
+        let by_hash = store
+            .get(&Selector::Hash(h1.clone()))
+            .expect("the component resolves by hash");
+        assert_eq!(by_hash.kind, ArtifactKind::Component);
+        assert!(
+            by_hash.manifest.as_component().is_some(),
+            "a component entry carries a component manifest",
+        );
+        let by_name = store
+            .get(&Selector::Name("probe".to_owned()))
+            .expect("the component resolves by name");
+        assert_eq!(by_name.hash, h1, "the name points at the component hash");
+
+        // A component is not listed as a binary, and vice versa.
+        store.upload(
+            b"a-binary",
+            ArtifactKind::Binary,
+            manifest("headless"),
+            None,
+        );
+        assert_eq!(
+            store.list_binaries(&ListBinaries::default()).len(),
+            1,
+            "only the binary lists as a binary",
+        );
+        let components = store.list_components(&ListComponents::default());
+        assert_eq!(
+            components.len(),
+            1,
+            "only the component lists as a component"
+        );
+        assert_eq!(components[0].hash, h1);
+
+        // Attribute filters: namespace + handled-kind keep the entry; a
+        // miss drops it.
+        let by_namespace = store.list_components(&ListComponents {
+            namespace: Some("test_fixture_probe".to_owned()),
+            handled_kind: None,
+        });
+        assert_eq!(by_namespace.len(), 1, "a matching namespace keeps it");
+        let by_kind = store.list_components(&ListComponents {
+            namespace: None,
+            handled_kind: Some(Tick::ID),
+        });
+        assert_eq!(by_kind.len(), 1, "a matching handled-kind keeps it");
+        let miss = store.list_components(&ListComponents {
+            namespace: Some("nope".to_owned()),
+            handled_kind: None,
+        });
+        assert!(miss.is_empty(), "a non-matching namespace drops it");
+
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -717,11 +970,16 @@ mod tests {
             manifest("headless"),
             None,
         );
-        let mut desktop = manifest("desktop");
-        desktop.caps = vec!["aether.fs".to_owned(), "aether.render".to_owned()];
+        let desktop = match manifest("desktop") {
+            StoredManifest::Binary(mut m) => {
+                m.caps = vec!["aether.fs".to_owned(), "aether.render".to_owned()];
+                StoredManifest::Binary(m)
+            }
+            StoredManifest::Component(_) => unreachable!("manifest() returns a binary manifest"),
+        };
         store.upload(b"desktop-bin", ArtifactKind::Binary, desktop, None);
 
-        let headless_only = store.list(&ListBinaries {
+        let headless_only = store.list_binaries(&ListBinaries {
             chassis: Some("headless".to_owned()),
             caps: vec![],
             target: None,
@@ -729,7 +987,7 @@ mod tests {
         assert_eq!(headless_only.len(), 1);
         assert_eq!(headless_only[0].manifest.chassis, "headless");
 
-        let render_capable = store.list(&ListBinaries {
+        let render_capable = store.list_binaries(&ListBinaries {
             chassis: None,
             caps: vec!["aether.render".to_owned()],
             target: None,
@@ -741,7 +999,7 @@ mod tests {
         );
         assert_eq!(render_capable[0].manifest.chassis, "desktop");
 
-        let all = store.list(&ListBinaries::default());
+        let all = store.list_binaries(&ListBinaries::default());
         assert_eq!(all.len(), 2);
         let _ = fs::remove_dir_all(&root);
     }

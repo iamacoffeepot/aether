@@ -50,12 +50,14 @@ use aether_kinds::MailEnvelope as TracedEnvelope;
 use aether_kinds::descriptors;
 use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME};
 use aether_kinds::{
-    BinaryEntry, BinarySelector, Cancel, CancelResult, ComponentCapabilities, DagDescriptor,
-    DeadEngineDescriptor, EngineDescriptor, HandleDescribe, HandleDescribeResult, ListBinaries,
-    ListBinariesResult, ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail,
-    LogTailResult, ReplaceComponent, ReplaceResult, SpawnEngine, SpawnEngineResult, Status,
-    StatusResult, Submit, SubmitResult, TerminateEngine, TerminateEngineResult, UploadBinary,
-    UploadBinaryResult,
+    BinaryEntry, BinarySelector, Cancel, CancelResult, ComponentCapabilities, ComponentEntry,
+    ComponentSelector, DagDescriptor, DeadEngineDescriptor, EngineDescriptor, HandleDescribe,
+    HandleDescribeResult, ListBinaries, ListBinariesResult, ListComponents, ListComponentsResult,
+    ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail, LogTailResult,
+    ReplaceComponent, ReplaceResult, ResolveComponent, ResolveComponentResult, SpawnEngine,
+    SpawnEngineResult, Status, StatusResult, Submit, SubmitResult, TerminateEngine,
+    TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent,
+    UploadComponentResult,
 };
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
@@ -182,6 +184,21 @@ impl FleetBench {
     /// exactly that hash — so every run forks the same binary regardless of
     /// local build state, instead of handing the cap a host path.
     pub fn spawn_headless(&mut self) -> EngineId {
+        self.spawn_headless_inner(None)
+    }
+
+    /// Fork a real `aether-substrate-headless` with an `AETHER_BOOT_MANIFEST`
+    /// pointing at `boot_manifest_path` (ADR-0116, issue 1956), so the
+    /// engine comes up with the manifest's components already loading — the
+    /// path a `spawn_substrate` carrying a component list drives. Records
+    /// the engine for teardown.
+    pub fn spawn_headless_with_boot_manifest(&mut self, boot_manifest_path: &Path) -> EngineId {
+        self.spawn_headless_inner(Some(boot_manifest_path.to_string_lossy().into_owned()))
+    }
+
+    /// Shared spawn body: pin the headless bin by content hash, fork it
+    /// through the engines cap, optionally injecting a boot manifest path.
+    fn spawn_headless_inner(&mut self, boot_manifest: Option<String>) -> EngineId {
         let headless = env!("CARGO_BIN_EXE_aether-substrate-headless");
         let hash = match self.upload_binary(headless, Some("headless")) {
             UploadBinaryResult::Ok { hash, .. } => hash,
@@ -198,7 +215,7 @@ impl FleetBench {
                     target: None,
                 },
                 args: vec![],
-                boot_manifest: None,
+                boot_manifest,
             },
         );
         let payload = single_reply(&replies, "SpawnEngine");
@@ -264,6 +281,140 @@ impl FleetBench {
         match ListBinariesResult::decode_from_bytes(&payload) {
             Some(result) => result.binaries,
             None => panic!("undecodable ListBinariesResult"),
+        }
+    }
+
+    /// Upload a component wasm into the hub's content-addressed store
+    /// (ADR-0116, issue 1956) by absolute host path, optionally naming it.
+    /// Hub-local — addressed at `aether.engine` with no engine route. The
+    /// hub reads the path, sha256s it, parses its manifest from the wasm,
+    /// and stores both; returns the decoded [`UploadComponentResult`].
+    pub fn upload_component(
+        &mut self,
+        staged_path: &str,
+        name: Option<&str>,
+    ) -> UploadComponentResult {
+        let replies = self.call(
+            None,
+            "aether.engine",
+            &UploadComponent {
+                staged_path: staged_path.to_owned(),
+                name: name.map(str::to_owned),
+            },
+        );
+        let payload = single_reply(&replies, "UploadComponent");
+        UploadComponentResult::decode_from_bytes(&payload)
+            .expect("undecodable UploadComponentResult")
+    }
+
+    /// Enumerate the hub's stored components (ADR-0116, issue 1956) under
+    /// the given filter. Hub-local — addressed at `aether.engine` with no
+    /// engine route.
+    pub fn list_components(&mut self, filter: &ListComponents) -> Vec<ComponentEntry> {
+        let replies = self.call(None, "aether.engine", filter);
+        let payload = single_reply(&replies, "ListComponents");
+        match ListComponentsResult::decode_from_bytes(&payload) {
+            Some(result) => result.components,
+            None => panic!("undecodable ListComponentsResult"),
+        }
+    }
+
+    /// Resolve a component selector hub-local against the registry
+    /// (ADR-0116, issue 1956) — the `ResolveComponent` hop aether-mcp does
+    /// before forwarding a `LoadComponent` to a substrate. Hub-local —
+    /// addressed at `aether.engine` with no engine route. Returns the
+    /// decoded [`ResolveComponentResult`].
+    pub fn resolve_component(&mut self, selector: ComponentSelector) -> ResolveComponentResult {
+        let replies = self.call(None, "aether.engine", &ResolveComponent { selector });
+        let payload = single_reply(&replies, "ResolveComponent");
+        ResolveComponentResult::decode_from_bytes(&payload)
+            .expect("undecodable ResolveComponentResult")
+    }
+
+    /// Load a component into `engine` by registry selector (ADR-0116, issue
+    /// 1956), mirroring aether-mcp's resolve-then-forward: resolve the
+    /// selector hub-local to the wasm bytes + `@actor` export, then forward
+    /// `LoadComponent { wasm, export }` to the engine's `aether.component`
+    /// mailbox. Returns the loaded component's [`Loaded`] (mailbox id,
+    /// lineage address, capabilities). Panics on a resolve / load error.
+    pub fn load_by_selector(&mut self, engine: EngineId, selector: &str) -> Loaded {
+        let resolved = self.resolve_component(ComponentSelector {
+            query: Some(selector.to_owned()),
+            namespace: None,
+            handled_kind: None,
+        });
+        let (wasm, export) = match resolved {
+            ResolveComponentResult::Ok { wasm, export, .. } => (wasm, export),
+            ResolveComponentResult::Err { error } => {
+                panic!("resolve of selector {selector:?} failed: {error}")
+            }
+        };
+        let replies = self.call(
+            Some(engine),
+            "aether.component",
+            &LoadComponent {
+                wasm,
+                name: None,
+                config: Vec::new(),
+                export,
+            },
+        );
+        let payload = single_reply(&replies, "LoadComponent");
+        match LoadResult::decode_from_bytes(&payload) {
+            Some(LoadResult::Ok {
+                mailbox_id,
+                name,
+                capabilities,
+            }) => Loaded {
+                mailbox_id,
+                addr: name,
+                capabilities,
+            },
+            Some(LoadResult::Err { error }) => {
+                panic!("load by selector {selector:?} failed: {error}")
+            }
+            None => panic!("undecodable LoadResult"),
+        }
+    }
+
+    /// Replace the component bound to `mailbox_id` on `engine` with a build
+    /// resolved from a registry selector (ADR-0116, issue 1956) — the
+    /// resolve-then-forward twin of [`replace`](Self::replace), which loads
+    /// by dist stem. Returns the swapped binary's advertised capabilities.
+    pub fn replace_by_selector(
+        &mut self,
+        engine: EngineId,
+        mailbox_id: MailboxId,
+        selector: &str,
+    ) -> ComponentCapabilities {
+        let resolved = self.resolve_component(ComponentSelector {
+            query: Some(selector.to_owned()),
+            namespace: None,
+            handled_kind: None,
+        });
+        let wasm = match resolved {
+            ResolveComponentResult::Ok { wasm, .. } => wasm,
+            ResolveComponentResult::Err { error } => {
+                panic!("resolve of selector {selector:?} failed: {error}")
+            }
+        };
+        let replies = self.call(
+            Some(engine),
+            "aether.component",
+            &ReplaceComponent {
+                mailbox_id,
+                wasm,
+                drain_timeout_ms: None,
+                config: Vec::new(),
+            },
+        );
+        let payload = single_reply(&replies, "ReplaceComponent");
+        match ReplaceResult::decode_from_bytes(&payload) {
+            Some(ReplaceResult::Ok { capabilities }) => capabilities,
+            Some(ReplaceResult::Err { error }) => {
+                panic!("replace by selector {selector:?} failed: {error}")
+            }
+            None => panic!("undecodable ReplaceResult"),
         }
     }
 
@@ -818,6 +969,18 @@ pub fn dist_manifest_present() -> bool {
 /// it. Tests guard their load path with [`dist_manifest_present`] so a
 /// missing manifest skips rather than reaching this panic.
 pub fn read_component_wasm(stem: &str) -> Vec<u8> {
+    let wasm_path = component_wasm_path(stem);
+    fs::read(&wasm_path)
+        .unwrap_or_else(|e| panic!("reading component wasm {} ({e})", wasm_path.display()))
+}
+
+/// The absolute on-disk path of a component wasm by stem, resolved through
+/// `dist/manifest.json` (the #1445 dist tree) — the staged path the
+/// ADR-0116 `upload_component` reads. Tests guard with
+/// [`dist_manifest_present`] before reaching this. Panics with a
+/// `cargo xtask dist` hint if the manifest is absent or the stem is
+/// missing.
+pub fn component_wasm_path(stem: &str) -> PathBuf {
     let dist = dist_dir();
     let manifest_path = dist.join("manifest.json");
     let raw = fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
@@ -831,7 +994,5 @@ pub fn read_component_wasm(stem: &str) -> Vec<u8> {
     let rel = manifest.components.get(stem).unwrap_or_else(|| {
         panic!("component stem {stem:?} is not in dist/manifest.json; run `cargo xtask dist`")
     });
-    let wasm_path = dist.join(rel);
-    fs::read(&wasm_path)
-        .unwrap_or_else(|e| panic!("reading component wasm {} ({e})", wasm_path.display()))
+    dist.join(rel)
 }

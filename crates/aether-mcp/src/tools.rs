@@ -35,11 +35,13 @@ use aether_data::{EnumVariant, Primitive, SchemaType};
 use aether_kinds::dag::{DagDescriptor, Edge, Node, NodeId};
 use aether_kinds::{
     BinarySelector, Cancel, CancelResult, CaptureFrame, CaptureFrameResult, ComponentCapabilities,
-    CostTail, CostTailResult, DeathReason, FrameCheck, FrameReduction, ListBinaries,
-    ListBinariesResult, ListEngines, ListEnginesResult, ListKinds, ListKindsResult, LoadComponent,
-    LoadResult, MailEnvelope as KindMailEnvelope, ReplaceComponent, ReplaceResult, SimilarityCheck,
-    SpawnEngine, SpawnEngineResult, Status, StatusResult, Submit, SubmitResult, TerminateEngine,
-    TerminateEngineResult, UploadBinary, UploadBinaryResult,
+    ComponentSelector, CostTail, CostTailResult, DeathReason, FrameCheck, FrameReduction,
+    ListBinaries, ListBinariesResult, ListComponents, ListComponentsResult, ListEngines,
+    ListEnginesResult, ListKinds, ListKindsResult, LoadComponent, LoadResult,
+    MailEnvelope as KindMailEnvelope, ReplaceComponent, ReplaceResult, ResolveComponent,
+    ResolveComponentResult, SimilarityCheck, SpawnEngine, SpawnEngineResult, Status, StatusResult,
+    Submit, SubmitResult, TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult,
+    UploadComponent, UploadComponentResult,
     trace::{
         DescribeTreeResult, DispatchTraced, DispatchTracedAck, MailNodeWire, TRACE_MAILBOX_NAME,
         TraceTail, TraceTailResult,
@@ -61,11 +63,12 @@ use crate::args::{
     CaptureCheckSpec, CaptureFrameArgs, CaptureMailSpec, ComponentSpec, DagCancelArgs,
     DagDescriptorArg, DagStatusArgs, DeadEngineInfo, DescribeComponentArgs, DescribeHandlersArgs,
     DescribeHandlersResponse, DescribeHandlesArgs, DescribeHandlesResponse, DescribeKindsArgs,
-    EngineInfo, HandleSummaryJson, KindSummary, ListBinariesArgs, ListEnginesResponse,
-    LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, MailStatus, NativeCapHandlers,
-    NativeHandlerJson, NodeArg, ReplaceComponentArgs, ReplyEventJson, SendMailArgs,
-    SendMailTracedArgs, SendMailTracedResponse, SpawnSubstrateArgs, SubmitDagArgs,
+    EngineInfo, HandleSummaryJson, KindSummary, ListBinariesArgs, ListComponentsArgs,
+    ListEnginesResponse, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, MailStatus,
+    NativeCapHandlers, NativeHandlerJson, NodeArg, ReplaceComponentArgs, ReplyEventJson,
+    SendMailArgs, SendMailTracedArgs, SendMailTracedResponse, SpawnSubstrateArgs, SubmitDagArgs,
     TerminateSubstrateArgs, TracedMailSpec, TransformListing, UploadBinaryArgs,
+    UploadComponentArgs,
 };
 use crate::reverse::EngineNames;
 use crate::rpc::RpcSession;
@@ -234,25 +237,25 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Fork+exec a substrate binary as a child of the hub, resolved from the hub's content-addressed binary store (ADR-0115) — not a host path. Pass `selector` to pick the binary: a content `hash`, a `name@version`, or a `name` (upload_binary first if it isn't stored). Omit `selector` for `default` — the headless chassis — so a bare spawn_substrate with no arguments returns a working engine. When `selector` is omitted you may instead attribute-query with `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (linked-cap superset), and `target` (build triple). The hub resolves the selector to the stored bytes, materializes them to an executable temp file, assigns a free localhost RPC port (injected as AETHER_RPC_PORT), forks it, and connects a proxy. Returns the engine_id and rpc_port on success; errors if the selector resolves to no stored binary. Pass `components` (each {binary_path, name?, config_path?, export?}) to bring the engine up with those components already loaded in one call — aether-mcp stages a temp boot-manifest the hub injects as AETHER_BOOT_MANIFEST, and the spawned substrate reads the listed wasm itself (single-host), so no follow-up load_component is needed."
+        description = "Fork+exec a substrate binary as a child of the hub, resolved from the hub's content-addressed binary store (ADR-0115) — not a host path. Pass `selector` to pick the binary: a content `hash`, a `name@version`, or a `name` (upload_binary first if it isn't stored). Omit `selector` for `default` — the headless chassis — so a bare spawn_substrate with no arguments returns a working engine. When `selector` is omitted you may instead attribute-query with `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (linked-cap superset), and `target` (build triple). The hub resolves the selector to the stored bytes, materializes them to an executable temp file, assigns a free localhost RPC port (injected as AETHER_RPC_PORT), forks it, and connects a proxy. Returns the engine_id and rpc_port on success; errors if the selector resolves to no stored binary. Pass `components` (each {selector, name?, config_path?, export?}) to bring the engine up with those components already loaded in one call — each selector is a content hash, name, or module@actor resolved against the hub's component registry (ADR-0116; upload_component first). aether-mcp pre-resolves each selector to its wasm bytes, stages a temp boot-manifest the hub injects as AETHER_BOOT_MANIFEST, and the spawned substrate reads the staged wasm itself (single-host), so no follow-up load_component is needed."
     )]
     pub async fn spawn_substrate(
         &self,
         Parameters(args): Parameters<SpawnSubstrateArgs>,
     ) -> Result<String, McpError> {
-        // A boot list rides in as a temp boot-manifest JSON of file
-        // paths; the hub injects its path as AETHER_BOOT_MANIFEST and the
-        // single-host substrate reads the wasm itself (issue 1776). Hold
-        // the temp file across the spawn call — the substrate reads it at
-        // boot, before the spawn reply returns — then clean it up.
-        let manifest = if args.components.is_empty() {
+        // A boot list rides in as a temp boot-manifest JSON of file paths;
+        // the hub injects its path as AETHER_BOOT_MANIFEST and the
+        // single-host substrate reads the staged wasm itself (issue 1776).
+        // ADR-0116: each component is a registry selector, so aether-mcp
+        // pre-resolves it to bytes and stages those bytes to a temp wasm
+        // file the manifest points at — the substrate boot path stays
+        // path-based, now fed by the registry. Hold the temp files across
+        // the spawn call — the substrate reads them at boot, before the
+        // spawn reply returns — then clean them up.
+        let staged = if args.components.is_empty() {
             None
         } else {
-            Some(
-                stage_boot_manifest(&args.components)
-                    .await
-                    .map_err(internal)?,
-            )
+            Some(self.stage_boot_manifest(&args.components).await?)
         };
         let reply = self
             .session
@@ -266,13 +269,15 @@ impl Mcp {
                         target: args.target,
                     },
                     args: args.args,
-                    boot_manifest: manifest.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                    boot_manifest: staged
+                        .as_ref()
+                        .map(|s| s.manifest_path.to_string_lossy().into_owned()),
                 },
             ))
             .await;
-        if let Some(path) = &manifest {
-            // Best-effort cleanup; the substrate has already read it.
-            let _ = fs::remove_file(path).await;
+        if let Some(staged) = &staged {
+            // Best-effort cleanup; the substrate has already read them.
+            staged.cleanup().await;
         }
         let reply = reply.map_err(internal)?;
         match SpawnEngineResult::decode_from_bytes(&reply.payload) {
@@ -365,6 +370,64 @@ impl Mcp {
         match ListBinariesResult::decode_from_bytes(&reply.payload) {
             Some(result) => json(&result.binaries),
             None => Err(internal_msg("undecodable ListBinariesResult")),
+        }
+    }
+
+    #[tool(
+        description = "Upload a WASM component into the hub's content-addressed store (ADR-0116). Pass `staged_path` — an absolute path to the component .wasm on the fleet host — and an optional `name` (the component's Actor::NAMESPACE is the natural one). The hub reads the path itself (aether-mcp never reads the bytes — too large for the tool channel), sha256-hashes it, dedups against the store (a re-upload of identical bytes returns the same hash), reads its manifest straight from the wasm (no execution step — exported actor namespaces, handled kind ids, #[fallback] presence, build provenance), stores both, and points `name` (when given) at the hash. The store persists across a restart-hub. Then load it by selector with load_component — the host wasm path is gone from load_component / replace_component / boot manifests, surviving only here as the upload input. Returns {hash, name}."
+    )]
+    pub async fn upload_component(
+        &self,
+        Parameters(args): Parameters<UploadComponentArgs>,
+    ) -> Result<String, McpError> {
+        // The hub reads the staged path; aether-mcp forwards it, never
+        // reading the bytes (unlike the load_component resolve hop, which
+        // pulls the bytes back from the store).
+        let reply = self
+            .session
+            .call_one(local_envelope(
+                ENGINE_CAP,
+                &UploadComponent {
+                    staged_path: args.staged_path,
+                    name: args.name,
+                },
+            ))
+            .await
+            .map_err(internal)?;
+        match UploadComponentResult::decode_from_bytes(&reply.payload) {
+            Some(UploadComponentResult::Ok { hash, name }) => {
+                json(&serde_json::json!({ "hash": hash, "name": name }))
+            }
+            Some(UploadComponentResult::Err { error }) => Err(internal_msg(&error)),
+            None => Err(internal_msg("undecodable UploadComponentResult")),
+        }
+    }
+
+    #[tool(
+        description = "Enumerate the hub's stored components (ADR-0116). Optional AND-combined filters: `namespace` (keep only components exporting an actor with that Actor::NAMESPACE) and `handled_kind` (keep only components handling that kind, by tagged knd-… id or kind name). Omit both to list every stored component. Returns an array of {hash, name, manifest} — the manifest read straight from each wasm at upload: {namespaces, actors: [{namespace, handled_kinds, fallback}], handled_kinds, fallback, provenance}."
+    )]
+    pub async fn list_components(
+        &self,
+        Parameters(args): Parameters<ListComponentsArgs>,
+    ) -> Result<String, McpError> {
+        let handled_kind = match args.handled_kind.as_deref() {
+            Some(s) => Some(resolve_handled_kind(s)?),
+            None => None,
+        };
+        let reply = self
+            .session
+            .call_one(local_envelope(
+                ENGINE_CAP,
+                &ListComponents {
+                    namespace: args.namespace,
+                    handled_kind,
+                },
+            ))
+            .await
+            .map_err(internal)?;
+        match ListComponentsResult::decode_from_bytes(&reply.payload) {
+            Some(result) => json(&result.components),
+            None => Err(internal_msg("undecodable ListComponentsResult")),
         }
     }
 
@@ -588,20 +651,17 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Load a WASM component into a substrate by filesystem path. aether-mcp reads the binary, forwards it as aether.component.load to the engine's aether.component mailbox, and awaits the LoadResult — returning {mailbox_id, name, capabilities} or an error. The path must exist as given (no ~ expansion, no relative resolution). The component's kind vocabulary rides in the wasm's aether.kinds custom section. Pass config_path to deliver init-config bytes to a typed-config component (ADR-0090): the file must already hold the component's Config kind wire bytes — describe_component reports the expected config kind. Pass export to pick which exported actor type to instantiate from a multi-actor module (ADR-0096), named by its Actor::NAMESPACE; omit it to load the module's entry type (the first in its export! list, and the only type a single-actor module has). The returned name + capabilities describe the selected type. Very large wasm payloads (typically target/wasm32-unknown-unknown/debug/*.wasm, which can run 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
+        description = "Load a WASM component into a substrate by registry selector (ADR-0116) — upload_component first if it isn't stored. Pass `selector`: a content hash, a name (latest upload under it), or a module@actor (the @actor half picks an exported actor type from a multi-actor module). The host wasm path is gone — the only path anywhere is the upload_component input. aether-mcp resolves the selector hub-local to the wasm bytes, forwards aether.component.load to the engine's aether.component mailbox, and awaits the LoadResult — returning {mailbox_id, name, capabilities} or an error. The component's kind vocabulary rides in the wasm's aether.kinds custom section. Pass config_path to deliver init-config bytes to a typed-config component (ADR-0090): the file must already hold the component's Config kind wire bytes — describe_component reports the expected config kind. Pass export to pick which exported actor type to instantiate from a multi-actor module (ADR-0096), named by its Actor::NAMESPACE; a module@actor selector populates it from its @actor half; omit both to load the module's entry type (the first in its export! list, and the only type a single-actor module has). The returned name + capabilities describe the selected type. Very large wasm payloads (debug builds at 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
     )]
     pub async fn load_component(
         &self,
         Parameters(args): Parameters<LoadComponentArgs>,
     ) -> Result<String, McpError> {
         let engine = parse_engine_id(&args.engine_id)?;
-        let wasm = fs::read(&args.binary_path).await.map_err(|e| {
-            McpError::invalid_params(
-                format!("reading binary_path {:?}: {e}", args.binary_path),
-                None,
-            )
-        })?;
-        let binary_path = args.binary_path.clone();
+        let selector = args.selector.clone();
+        // ADR-0116: resolve the selector hub-local to the wasm bytes; a
+        // `module@actor` selector's `@actor` half rides back as `export`.
+        let resolved = self.resolve_component(&selector).await?;
         // ADR-0090 (issue 1257): read optional init-config bytes from a
         // file path (already encoded to the component's `Config` kind
         // wire shape). Absent → empty vec → the substrate hands `&[]` to
@@ -612,20 +672,22 @@ impl Mcp {
             })?,
             None => Vec::new(),
         };
+        // An explicit `export` arg wins over the selector's `@actor` half.
+        let export = args.export.or(resolved.export);
         let reply = self
             .session
             .call_one(engine_envelope(
                 engine,
                 COMPONENT_CAP,
                 &LoadComponent {
-                    wasm,
+                    wasm: resolved.wasm,
                     name: args.name,
                     config,
-                    export: args.export,
+                    export,
                 },
             ))
             .await
-            .map_err(|e| frame_size_aware_error(&format!("load_component {binary_path:?}"), e))?;
+            .map_err(|e| frame_size_aware_error(&format!("load_component {selector:?}"), e))?;
         match LoadResult::decode_from_bytes(&reply.payload) {
             Some(LoadResult::Ok {
                 mailbox_id,
@@ -648,7 +710,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Atomically replace a live component's WASM with a new binary loaded from a filesystem path (ADR-0022 structural splice). aether-mcp reads the binary and forwards aether.component.replace to the engine's aether.component mailbox. drain_timeout_ms is accepted for wire compatibility but currently ignored. Returns the replaced component's advertised capabilities. Very large wasm payloads (typically debug builds at 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
+        description = "Atomically replace a live component's WASM with a build resolved from a registry selector (ADR-0022 structural splice; ADR-0116 selector). Pass `selector` (hash-primary — a hash pins or rolls the component to an exact build; a name or module@actor resolves too); the host wasm path is gone, surviving only as the upload_component input. aether-mcp resolves the selector hub-local to the wasm bytes and forwards aether.component.replace to the engine's aether.component mailbox. drain_timeout_ms is accepted for wire compatibility but currently ignored. Returns the replaced component's advertised capabilities. Very large wasm payloads (debug builds at 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
     )]
     pub async fn replace_component(
         &self,
@@ -656,13 +718,10 @@ impl Mcp {
     ) -> Result<String, McpError> {
         let engine = parse_engine_id(&args.engine_id)?;
         let mailbox_id = parse_mailbox_id(&args.mailbox_id)?;
-        let wasm = fs::read(&args.binary_path).await.map_err(|e| {
-            McpError::invalid_params(
-                format!("reading binary_path {:?}: {e}", args.binary_path),
-                None,
-            )
-        })?;
-        let binary_path = args.binary_path.clone();
+        let selector = args.selector.clone();
+        // ADR-0116: resolve the selector hub-local to the replacement wasm
+        // bytes (hash-primary, so a hash pins/rolls to an exact build).
+        let resolved = self.resolve_component(&selector).await?;
         // ADR-0090 (issue 1257): optional init-config bytes for the
         // replacement instance, read from a file path like the load path.
         let config = match args.config_path {
@@ -678,15 +737,13 @@ impl Mcp {
                 COMPONENT_CAP,
                 &ReplaceComponent {
                     mailbox_id,
-                    wasm,
+                    wasm: resolved.wasm,
                     drain_timeout_ms: args.drain_timeout_ms,
                     config,
                 },
             ))
             .await
-            .map_err(|e| {
-                frame_size_aware_error(&format!("replace_component {binary_path:?}"), e)
-            })?;
+            .map_err(|e| frame_size_aware_error(&format!("replace_component {selector:?}"), e))?;
         match ReplaceResult::decode_from_bytes(&reply.payload) {
             Some(ReplaceResult::Ok { capabilities }) => {
                 self.components
@@ -1247,6 +1304,102 @@ impl Mcp {
         self.session.fire(envelope).await
     }
 
+    /// Resolve a component registry selector hub-local to its wasm bytes +
+    /// `@actor` export (ADR-0116). aether-mcp issues a `ResolveComponent` to
+    /// the `aether.engine` cap (no engine route — the store is hub-level),
+    /// which matches the selector to a single component and replies with the
+    /// wasm bytes from its store; aether-mcp then forwards those bytes to
+    /// the target substrate's `aether.component` mailbox. Shared by
+    /// `load_component`, `replace_component`, and the boot-manifest
+    /// pre-resolution, so the load seam stays path-free. An `Err` reply (no
+    /// match, or an attribute query matching more than one component) is a
+    /// clean tool error.
+    async fn resolve_component(&self, selector: &str) -> Result<ResolvedComponent, McpError> {
+        let reply = self
+            .session
+            .call_one(local_envelope(
+                ENGINE_CAP,
+                &ResolveComponent {
+                    selector: ComponentSelector {
+                        query: Some(selector.to_owned()),
+                        namespace: None,
+                        handled_kind: None,
+                    },
+                },
+            ))
+            .await
+            .map_err(|e| frame_size_aware_error(&format!("resolve_component {selector:?}"), e))?;
+        match ResolveComponentResult::decode_from_bytes(&reply.payload) {
+            Some(ResolveComponentResult::Ok { wasm, export, .. }) => {
+                Ok(ResolvedComponent { wasm, export })
+            }
+            Some(ResolveComponentResult::Err { error }) => Err(internal_msg(&error)),
+            None => Err(internal_msg("undecodable ResolveComponentResult")),
+        }
+    }
+
+    /// Pre-resolve a `spawn_substrate` boot list against the component
+    /// registry (ADR-0116) and stage it as a temp boot-manifest JSON the
+    /// hub injects as `AETHER_BOOT_MANIFEST` (issue 1776). For each spec
+    /// aether-mcp resolves the selector hub-local to its wasm bytes, writes
+    /// the bytes to a per-process-unique temp `.wasm`, and points the
+    /// manifest entry's `wasm` at that staged path — so the substrate boot
+    /// autoload path stays path-based, now fed by the registry rather than
+    /// host build paths. A `module@actor` selector's `@actor` half
+    /// populates the entry's `export` unless the spec set one explicitly.
+    /// Returns the staged paths so the caller cleans them all up once the
+    /// substrate has read them at boot.
+    async fn stage_boot_manifest(
+        &self,
+        components: &[ComponentSpec],
+    ) -> Result<StagedBootManifest, McpError> {
+        use std::env;
+        use std::process;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+
+        let mut wasm_paths: Vec<PathBuf> = Vec::with_capacity(components.len());
+        let mut entries: Vec<serde_json::Value> = Vec::with_capacity(components.len());
+        for spec in components {
+            let resolved = self.resolve_component(&spec.selector).await?;
+            let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+            let wasm_path =
+                env::temp_dir().join(format!("aether-boot-wasm-{}-{seq}.wasm", process::id()));
+            fs::write(&wasm_path, &resolved.wasm).await.map_err(|e| {
+                internal_msg(&format!(
+                    "staging boot wasm for selector {:?}: {e}",
+                    spec.selector
+                ))
+            })?;
+            let mut entry = serde_json::json!({ "wasm": wasm_path.to_string_lossy() });
+            if let Some(name) = &spec.name {
+                entry["name"] = serde_json::json!(name);
+            }
+            if let Some(config) = &spec.config_path {
+                entry["config"] = serde_json::json!(config);
+            }
+            // An explicit `export` wins over the selector's `@actor` half.
+            if let Some(export) = spec.export.clone().or(resolved.export) {
+                entry["export"] = serde_json::json!(export);
+            }
+            entries.push(entry);
+            wasm_paths.push(wasm_path);
+        }
+
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let manifest_path =
+            env::temp_dir().join(format!("aether-boot-manifest-{}-{seq}.json", process::id()));
+        let bytes = serde_json::to_vec(&serde_json::json!({ "components": entries }))
+            .map_err(|e| internal_msg(&format!("encoding boot manifest: {e}")))?;
+        fs::write(&manifest_path, bytes)
+            .await
+            .map_err(|e| internal_msg(&format!("staging boot manifest: {e}")))?;
+        Ok(StagedBootManifest {
+            manifest_path,
+            wasm_paths,
+        })
+    }
+
     /// Resolve a `MailSpec` against the per-engine merged kind view
     /// (static prefill + cached `ListKinds` reply, ADR-0091) and build
     /// the `engine = Some` wire envelope — the shared front half of
@@ -1705,48 +1858,35 @@ fn validate_recipient_scope(recipient_name: &str) -> anyhow::Result<()> {
     })
 }
 
-/// Build the boot-manifest JSON for a `spawn_substrate` component list
-/// (issue 1776). Mirrors the bundle crate's `BundleManifest` schema,
-/// serialized with `serde_json::json!` so `aether-mcp` needn't depend on
-/// the bundle crate — the same approach `cargo xtask bundle` takes on the
-/// write side. Factored from [`stage_boot_manifest`] so the shape is
-/// unit-testable without staging a file. Optional spec fields are only
-/// emitted when set, matching the manifest's `#[serde(default)]` fields.
-fn component_manifest_json(components: &[ComponentSpec]) -> serde_json::Value {
-    let entries: Vec<serde_json::Value> = components
-        .iter()
-        .map(|spec| {
-            let mut entry = serde_json::json!({ "wasm": spec.binary_path });
-            if let Some(name) = &spec.name {
-                entry["name"] = serde_json::json!(name);
-            }
-            if let Some(config) = &spec.config_path {
-                entry["config"] = serde_json::json!(config);
-            }
-            if let Some(export) = &spec.export {
-                entry["export"] = serde_json::json!(export);
-            }
-            entry
-        })
-        .collect();
-    serde_json::json!({ "components": entries })
+/// A component registry selector resolved to its bytes + `@actor` export
+/// (ADR-0116) — the front half of `load_component` / `replace_component` /
+/// the boot-manifest pre-resolution. `export` is the `module@actor`
+/// selector's actor half, threaded into the forwarded `LoadComponent.export`.
+struct ResolvedComponent {
+    wasm: Vec<u8>,
+    export: Option<String>,
 }
 
-/// Stage the `spawn_substrate` boot list as a temporary boot-manifest
-/// JSON file and return its path (issue 1776). The hub injects the path
-/// as `AETHER_BOOT_MANIFEST` at the fork; the caller removes the file
-/// once the spawn settles. The filename is per-process-unique so
-/// concurrent spawns never collide.
-async fn stage_boot_manifest(components: &[ComponentSpec]) -> anyhow::Result<PathBuf> {
-    use std::env;
-    use std::process;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let path = env::temp_dir().join(format!("aether-boot-manifest-{}-{seq}.json", process::id()));
-    let bytes = serde_json::to_vec(&component_manifest_json(components))?;
-    fs::write(&path, bytes).await?;
-    Ok(path)
+/// The temp files a `stage_boot_manifest` wrote (ADR-0116): the
+/// boot-manifest JSON the hub injects as `AETHER_BOOT_MANIFEST` plus the
+/// staged component `.wasm` files it points at. The substrate reads them
+/// at boot, before the spawn reply returns; the spawn caller
+/// [`cleanup`](StagedBootManifest::cleanup)s them once it has.
+struct StagedBootManifest {
+    manifest_path: PathBuf,
+    wasm_paths: Vec<PathBuf>,
+}
+
+impl StagedBootManifest {
+    /// Best-effort remove the staged manifest + every staged wasm file.
+    /// The substrate has already read them at boot by the time the spawn
+    /// reply returns, so a removal failure is harmless.
+    async fn cleanup(&self) {
+        let _ = fs::remove_file(&self.manifest_path).await;
+        for path in &self.wasm_paths {
+            let _ = fs::remove_file(path).await;
+        }
+    }
 }
 
 /// Build a `MailEnvelope` addressed at a hub-local mailbox
@@ -1852,6 +1992,30 @@ fn parse_kind_id(s: &str) -> Result<KindId, McpError> {
             None,
         )
     })
+}
+
+/// Resolve a `handled_kind` filter token (ADR-0116 `list_components`) to a
+/// [`KindId`]: a tagged `knd-…` id or a decimal `u64` resolves directly;
+/// otherwise the token is a kind name resolved against the static substrate
+/// vocabulary (`describe_kinds`'s source). An unknown name is an
+/// invalid-params error.
+fn resolve_handled_kind(s: &str) -> Result<KindId, McpError> {
+    if let Ok(id) = tagged_id::decode_with_tag(s, Tag::Kind) {
+        return Ok(KindId(id));
+    }
+    if let Ok(id) = s.parse::<u64>() {
+        return Ok(KindId(id));
+    }
+    descriptors::all()
+        .into_iter()
+        .find(|d| d.name == s)
+        .map(|d| KindId(kind_id_from_parts(&d.name, &d.schema)))
+        .ok_or_else(|| {
+            McpError::invalid_params(
+                format!("handled_kind: not a tagged `knd-…` id, a decimal u64, or a known kind name: {s:?}"),
+                None,
+            )
+        })
 }
 
 /// Best-effort resolve a [`KindId`] to its name from the static kind
@@ -2896,48 +3060,34 @@ mod tests {
         );
     }
 
-    /// The temp boot-manifest `spawn_substrate` stages from its
-    /// `components` list is a well-formed `BundleManifest` JSON: list
-    /// order is preserved, `binary_path` maps to `wasm`, and the optional
-    /// `config_path` / `name` / `export` ride only when set (issue 1776).
-    #[test]
-    fn component_manifest_json_is_well_formed() {
-        let specs = vec![
-            ComponentSpec {
-                binary_path: "/abs/camera.wasm".to_owned(),
-                name: Some("camera".to_owned()),
-                config_path: Some("/abs/camera.cfg".to_owned()),
-                export: None,
-            },
-            ComponentSpec {
-                binary_path: "/abs/ui.wasm".to_owned(),
-                name: None,
-                config_path: None,
-                export: Some("ui.panel".to_owned()),
-            },
-        ];
-        let manifest = component_manifest_json(&specs);
-        let components = manifest["components"]
-            .as_array()
-            .expect("components is an array");
-        assert_eq!(components.len(), 2);
-
-        assert_eq!(components[0]["wasm"], "/abs/camera.wasm");
-        assert_eq!(components[0]["name"], "camera");
-        assert_eq!(components[0]["config"], "/abs/camera.cfg");
-        assert!(components[0].get("export").is_none());
-
-        assert_eq!(components[1]["wasm"], "/abs/ui.wasm");
-        assert_eq!(components[1]["export"], "ui.panel");
-        assert!(components[1].get("name").is_none());
-        assert!(components[1].get("config").is_none());
-
-        // The staged JSON parses back through the chassis manifest schema
-        // shape (components array of {wasm, ...}).
-        let serialized = serde_json::to_string(&manifest).expect("serialize manifest");
-        let reparsed: serde_json::Value =
-            serde_json::from_str(&serialized).expect("reparse manifest");
-        assert_eq!(reparsed["components"].as_array().unwrap().len(), 2);
+    /// A `spawn_substrate` boot list whose component selector resolves to
+    /// no stored component fails the spawn as a tool error before any fork
+    /// (ADR-0116): aether-mcp pre-resolves each selector via
+    /// `ResolveComponent`, and a miss aborts the staging. The store is
+    /// empty on a fresh hub, so any selector is a miss.
+    #[tokio::test]
+    async fn spawn_substrate_unresolvable_component_selector_is_tool_error() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let result = mcp
+            .spawn_substrate(Parameters(SpawnSubstrateArgs {
+                selector: None,
+                chassis: None,
+                caps: vec![],
+                target: None,
+                args: vec![],
+                components: vec![ComponentSpec {
+                    selector: "no-such-component".to_owned(),
+                    name: None,
+                    config_path: None,
+                    export: None,
+                }],
+            }))
+            .await;
+        assert!(
+            result.is_err(),
+            "an unresolvable component selector should abort the spawn as a tool error",
+        );
     }
 
     /// `terminate_substrate` with a malformed `engine_id` surfaces the
@@ -3113,22 +3263,26 @@ mod tests {
         );
     }
 
-    /// `load_component` with a binary path that doesn't exist fails at
-    /// the file read, before any RPC.
+    /// `load_component` with a selector that resolves to no stored
+    /// component is a tool error: the hub-local `ResolveComponent` misses
+    /// on the empty store (ADR-0116).
     #[tokio::test]
-    async fn load_component_missing_binary_is_tool_error() {
+    async fn load_component_unresolvable_selector_is_tool_error() {
         let (_chassis, port) = boot_hub();
         let mcp = connect_mcp(port);
         let result = mcp
             .load_component(Parameters(LoadComponentArgs {
                 engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
-                binary_path: "/nonexistent/does-not-exist.wasm".to_owned(),
+                selector: "no-such-component".to_owned(),
                 name: None,
                 config_path: None,
                 export: None,
             }))
             .await;
-        assert!(result.is_err(), "a missing binary should be a tool error");
+        assert!(
+            result.is_err(),
+            "an unresolvable selector should be a tool error",
+        );
     }
 
     /// `replace_component` with a malformed tagged mailbox id is
@@ -3141,7 +3295,7 @@ mod tests {
             .replace_component(Parameters(ReplaceComponentArgs {
                 engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
                 mailbox_id: "not-a-tagged-id".to_owned(),
-                binary_path: "/tmp/whatever.wasm".to_owned(),
+                selector: "any-selector".to_owned(),
                 drain_timeout_ms: None,
                 config_path: None,
             }))

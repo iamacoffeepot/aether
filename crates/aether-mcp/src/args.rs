@@ -47,13 +47,20 @@ pub struct SpawnSubstrateArgs {
 }
 
 /// One component in a `spawn_substrate` boot list. Mirrors the
-/// `load_component` arguments (path-addressed, ADR-0096 export
-/// selector), but the substrate reads the files itself at boot rather
-/// than `aether-mcp` forwarding the bytes.
+/// `load_component` arguments (registry selector, ADR-0096 export
+/// selector). aether-mcp pre-resolves each selector against the hub's
+/// component registry (ADR-0116) and stages the resolved bytes for the
+/// substrate to read at boot — the substrate boot path stays path-based,
+/// now fed by the registry rather than host build paths.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ComponentSpec {
-    /// Absolute path to the component's `.wasm` on the fleet host.
-    pub binary_path: String,
+    /// Registry selector for the component, resolved against the hub's
+    /// content-addressed store (ADR-0116) — `upload_component` first if it
+    /// isn't stored. An exact token: a content `hash`, a `name`, or a
+    /// `module@actor` (the `@actor` half picks an exported actor type from
+    /// a multi-actor module). The host wasm path is gone — the path
+    /// survives only as the `upload_component` input.
+    pub selector: String,
     /// Optional human-readable load name. The substrate defaults one
     /// from the wasm if omitted.
     #[serde(default)]
@@ -65,7 +72,8 @@ pub struct ComponentSpec {
     pub config_path: Option<String>,
     /// ADR-0096: which exported actor type to instantiate from a
     /// multi-actor module, named by its `Actor::NAMESPACE`. Omit to load
-    /// the module's entry type.
+    /// the module's entry type. A `module@actor` selector populates this
+    /// from its `@actor` half — set it explicitly to override.
     #[serde(default)]
     pub export: Option<String>,
 }
@@ -91,6 +99,36 @@ pub struct UploadBinaryArgs {
     /// protected from LRU eviction.
     #[serde(default)]
     pub name: Option<String>,
+}
+
+/// `upload_component` arguments (ADR-0116, issue 1956).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UploadComponentArgs {
+    /// Absolute path to the component `.wasm` on the fleet host. The hub
+    /// reads this path itself, content-addresses it (sha256), and reads its
+    /// manifest straight from the wasm — aether-mcp never reads the bytes
+    /// (a component is too large for the tool channel).
+    pub staged_path: String,
+    /// Optional human-readable name to point at the resulting hash (the
+    /// component's `Actor::NAMESPACE` is the natural one). A later upload
+    /// with the same name repoints it; the named entry is protected from
+    /// LRU eviction.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// `list_components` arguments (ADR-0116, issue 1956). Every field is an
+/// optional AND-combined filter; omit all to list every stored component.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListComponentsArgs {
+    /// Keep only components exporting an actor with this `Actor::NAMESPACE`.
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// Keep only components handling this kind, by its tagged kind id
+    /// (`knd-…`) or kind name (e.g. `"aether.lifecycle.tick"`). Resolved
+    /// against the substrate kind vocabulary baked into aether-mcp.
+    #[serde(default)]
+    pub handled_kind: Option<String>,
 }
 
 /// `list_binaries` arguments (ADR-0115, issue 1953). Every field is an
@@ -247,10 +285,15 @@ pub struct ReplyEventJson {
 pub struct LoadComponentArgs {
     /// Engine UUID the component loads into (from `list_engines`).
     pub engine_id: String,
-    /// Absolute path to the component's `.wasm`. `aether-mcp` reads
-    /// the bytes and forwards them to the substrate — agents never
-    /// inline wasm through the tool call.
-    pub binary_path: String,
+    /// Registry selector for the component, resolved against the hub's
+    /// content-addressed store (ADR-0116) — `upload_component` first if it
+    /// isn't stored. An exact token: a content `hash`, a `name` (latest
+    /// upload under it), or a `module@actor` (the `@actor` half picks an
+    /// exported actor type from a multi-actor module). The host wasm path
+    /// is retired — the only path anywhere is the `upload_component` input.
+    /// aether-mcp resolves the selector hub-local to the wasm bytes, then
+    /// forwards them to the substrate's `aether.component` mailbox.
+    pub selector: String,
     /// Optional human-readable name. The substrate defaults one from
     /// the wasm if omitted; the reply echoes the resolved name.
     #[serde(default)]
@@ -267,7 +310,8 @@ pub struct LoadComponentArgs {
     /// multi-actor module, named by its `Actor::NAMESPACE` (e.g.
     /// `"ui.panel"`). Omit to load the module's entry type — the first
     /// in its `export!` list, and the only type a single-actor module
-    /// has. An export the module doesn't declare comes back as a
+    /// has. A `module@actor` selector populates this from its `@actor`
+    /// half. An export the module doesn't declare comes back as a
     /// `LoadResult::Err`.
     #[serde(default)]
     pub export: Option<String>,
@@ -281,8 +325,12 @@ pub struct ReplaceComponentArgs {
     /// Tagged mailbox id (`mbx-…`) of the component to replace, as
     /// returned by `load_component`.
     pub mailbox_id: String,
-    /// Absolute path to the replacement `.wasm`.
-    pub binary_path: String,
+    /// Registry selector for the replacement component, resolved against
+    /// the hub's content-addressed store (ADR-0116) — hash-primary, so a
+    /// `hash` pins or rolls a component to an exact build. A `name` or
+    /// `module@actor` resolves too. The host wasm path is retired; the
+    /// only path anywhere is the `upload_component` input.
+    pub selector: String,
     /// Accepted for wire compatibility; currently ignored by the
     /// substrate (post-ADR-0038 the splice is structural).
     #[serde(default)]
