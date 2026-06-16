@@ -114,6 +114,7 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-data",
  "aether-kinds",
+ "base64",
  "bytemuck",
  "postcard",
  "proptest",
