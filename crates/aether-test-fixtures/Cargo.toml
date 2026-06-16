@@ -159,5 +159,15 @@ crate-type = ["cdylib"]
 name = "inline_child_despawn"
 crate-type = ["cdylib"]
 
+# Issue 1958: `source_mailbox()` end-to-end fixture. A `SourceObserver`
+# actor with two handlers: `on_send_source_query` forwards a `SourceQuery`
+# to a runtime-supplied `MailboxId` (proving component-origin attribution),
+# and `on_source_query` (manual) reads `ctx.source_mailbox()` and broadcasts
+# `SourceReport { mailbox_id }` to the test-bench observer.
+# Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/source_observer.wasm
+[[example]]
+name = "source_observer"
+crate-type = ["cdylib"]
+
 [lints]
 workspace = true

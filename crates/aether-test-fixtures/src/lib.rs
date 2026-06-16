@@ -299,6 +299,60 @@ pub const INLINE_WHO_CHILD: u32 = 2;
 #[kind(name = "aether.test_fixtures.despawn_child")]
 pub struct DespawnChild;
 
+/// Issue 1958: trigger sent to a `source_observer` fixture to request that
+/// it forward a `SourceQuery` to the named target mailbox. The fixture then
+/// sends `SourceQuery` to `MailboxId(to)`, making itself the component
+/// origin so the reader's `ctx.source_mailbox()` sees the sender's mailbox.
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+)]
+#[kind(name = "aether.test_fixtures.send_source_query")]
+pub struct SendSourceQuery {
+    /// Raw `MailboxId` of the component to forward `SourceQuery` to.
+    pub to: u64,
+}
+
+/// Issue 1958: unit query sent to a `source_observer` fixture. Its
+/// `Manual`-class handler reads `ctx.source_mailbox()` and broadcasts a
+/// `SourceReport` to the test-bench observer mailbox.
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Clone,
+    Default,
+)]
+#[kind(name = "aether.test_fixtures.source_query")]
+pub struct SourceQuery;
+
+/// Issue 1958: broadcast emitted by the `source_observer` fixture after
+/// reading `ctx.source_mailbox()`. `mailbox_id` is the raw `MailboxId`
+/// of the sender (`0` when the source was a Session / `EngineMailbox` /
+/// `None`, i.e. when `source_mailbox()` returned `None`).
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+)]
+#[kind(name = "aether.test_fixtures.source_report")]
+pub struct SourceReport {
+    pub mailbox_id: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use aether_data::{Kind, Ref};
