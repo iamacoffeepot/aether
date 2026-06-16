@@ -1242,6 +1242,97 @@ mod engine {
     pub struct EngineAlive {
         pub engine_id: String,
     }
+
+    /// What a stored binary *is*, captured once at upload time by forking
+    /// the binary with `--describe` (ADR-0115, issue 1953). The
+    /// content-addressed store sidecars one of these next to each entry's
+    /// bytes, and [`ListBinariesResult`] returns it per entry so an
+    /// observer (and the spawn cutover, #1954) can tell a `headless` from
+    /// a `desktop` binary, see which capabilities it links, and read its
+    /// build provenance — all without re-running the binary.
+    ///
+    /// - `chassis` — the chassis profile (`Chassis::PROFILE`):
+    ///   `"headless"` / `"desktop"` / `"hub"`.
+    /// - `caps` — the mailbox namespaces the chassis registers (its
+    ///   linked capabilities, e.g. `aether.fs`, `aether.render`).
+    /// - `git_sha` / `profile` / `target` — build provenance from the
+    ///   bundle's `build.rs` (`git rev-parse --short HEAD`, the cargo
+    ///   build profile, the target triple); `git_sha` is `"unknown"` when
+    ///   the binary was built outside a git checkout.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct BinaryManifest {
+        pub chassis: String,
+        pub caps: Vec<String>,
+        pub git_sha: String,
+        pub profile: String,
+        pub target: String,
+    }
+
+    /// One stored binary in a [`ListBinariesResult`] (ADR-0115, issue
+    /// 1953). `hash` is the sha256 hex over the binary's raw bytes — the
+    /// content-address key. `name` is the optional human-readable name an
+    /// upload pointed at this hash (the latest upload that named it wins).
+    /// `manifest` is what the binary reported via `--describe`.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct BinaryEntry {
+        pub hash: String,
+        pub name: Option<String>,
+        pub manifest: BinaryManifest,
+    }
+
+    /// `aether.engine.upload_binary` — ingest a binary into the hub's
+    /// content-addressed store (ADR-0115, issue 1953). `staged_path` is an
+    /// absolute host path the hub reads itself (aether-mcp never reads the
+    /// bytes — a binary is too large to ride the tool channel); the cap
+    /// sha256-hashes the bytes, dedups against the existing store, forks
+    /// `staged_path --describe` to capture its [`BinaryManifest`], and
+    /// stores both. `name`, when set, points that human-readable name at
+    /// the resulting hash. Reply: [`UploadBinaryResult`].
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.upload_binary")]
+    pub struct UploadBinary {
+        pub staged_path: String,
+        pub name: Option<String>,
+    }
+
+    /// Reply to [`UploadBinary`] (ADR-0115, issue 1953). `Ok` carries the
+    /// content-address `hash` the bytes stored under (a re-upload of
+    /// identical bytes returns the same hash) and the `name` now pointing
+    /// at it, if any. `Err` carries a free-form reason — an unreadable
+    /// `staged_path`, or a `--describe` that failed or didn't yield a
+    /// parseable manifest.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.upload_binary_result")]
+    pub enum UploadBinaryResult {
+        Ok { hash: String, name: Option<String> },
+        Err { error: String },
+    }
+
+    /// `aether.engine.list_binaries` — enumerate the hub's stored binaries
+    /// (ADR-0115, issue 1953). The filter fields are AND-combined and each
+    /// defaults to "no constraint": `chassis` keeps only entries whose
+    /// `manifest.chassis` matches, `caps` keeps only entries whose
+    /// `manifest.caps` is a superset of every listed cap, `target` keeps
+    /// only entries whose `manifest.target` matches. Reply:
+    /// [`ListBinariesResult`].
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
+    )]
+    #[kind(name = "aether.engine.list_binaries")]
+    pub struct ListBinaries {
+        pub chassis: Option<String>,
+        pub caps: Vec<String>,
+        pub target: Option<String>,
+    }
+
+    /// Reply to [`ListBinaries`] (ADR-0115, issue 1953): every stored
+    /// binary matching the filter, each as a [`BinaryEntry`] carrying its
+    /// hash, optional name, and `--describe` manifest.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.list_binaries_result")]
+    pub struct ListBinariesResult {
+        pub binaries: Vec<BinaryEntry>,
+    }
 }
 
 mod control_plane {
@@ -4070,6 +4161,72 @@ mod tests {
         let back = SpawnEngine::decode_from_bytes(&bare.encode_into_bytes())
             .expect("test setup: bare SpawnEngine decodes");
         assert_eq!(back.boot_manifest, None);
+    }
+
+    #[test]
+    fn binary_store_kinds_roundtrip() {
+        // The hub binary-store registry kinds (ADR-0115, issue 1953) ride
+        // the postcard path — `Option<String>` + `Vec<String>` + a nested
+        // `Schema` manifest struct. The request, the tagged result, and the
+        // list reply with its embedded `BinaryEntry`/`BinaryManifest` must
+        // all survive the engines-cap encode/decode.
+        use alloc::string::ToString;
+        use alloc::vec;
+
+        let upload = UploadBinary {
+            staged_path: "/tmp/staged/aether-substrate-headless".to_string(),
+            name: Some("headless".to_string()),
+        };
+        let back = UploadBinary::decode_from_bytes(&upload.encode_into_bytes())
+            .expect("test setup: UploadBinary decodes");
+        assert_eq!(back.staged_path, upload.staged_path);
+        assert_eq!(back.name.as_deref(), Some("headless"));
+
+        let ok = UploadBinaryResult::Ok {
+            hash: "abc123".to_string(),
+            name: Some("headless".to_string()),
+        };
+        match UploadBinaryResult::decode_from_bytes(&ok.encode_into_bytes())
+            .expect("test setup: UploadBinaryResult decodes")
+        {
+            UploadBinaryResult::Ok { hash, name } => {
+                assert_eq!(hash, "abc123");
+                assert_eq!(name.as_deref(), Some("headless"));
+            }
+            UploadBinaryResult::Err { error } => panic!("expected Ok, got Err {error}"),
+        }
+
+        let manifest = BinaryManifest {
+            chassis: "headless".to_string(),
+            caps: vec!["aether.fs".to_string(), "aether.render".to_string()],
+            git_sha: "deadbee".to_string(),
+            profile: "debug".to_string(),
+            target: "aarch64-apple-darwin".to_string(),
+        };
+        let listed = ListBinariesResult {
+            binaries: vec![BinaryEntry {
+                hash: "abc123".to_string(),
+                name: Some("headless".to_string()),
+                manifest: manifest.clone(),
+            }],
+        };
+        let back = ListBinariesResult::decode_from_bytes(&listed.encode_into_bytes())
+            .expect("test setup: ListBinariesResult decodes");
+        assert_eq!(back.binaries.len(), 1);
+        assert_eq!(back.binaries[0].hash, "abc123");
+        assert_eq!(back.binaries[0].name.as_deref(), Some("headless"));
+        assert_eq!(back.binaries[0].manifest, manifest);
+
+        let filter = ListBinaries {
+            chassis: Some("headless".to_string()),
+            caps: vec!["aether.fs".to_string()],
+            target: None,
+        };
+        let back = ListBinaries::decode_from_bytes(&filter.encode_into_bytes())
+            .expect("test setup: ListBinaries decodes");
+        assert_eq!(back.chassis.as_deref(), Some("headless"));
+        assert_eq!(back.caps, vec!["aether.fs".to_string()]);
+        assert_eq!(back.target, None);
     }
 
     #[test]

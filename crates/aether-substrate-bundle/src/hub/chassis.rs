@@ -14,8 +14,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use aether_actor::Actor;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{EngineConfig, EngineServer, trace::TraceDispatchCapability};
+use aether_kinds::BinaryManifest;
 use aether_substrate::chassis::builder::{
     Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError,
 };
@@ -38,6 +40,25 @@ impl Chassis for HubChassis {
 
     fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
         Self::build_inner(env)
+    }
+}
+
+impl HubChassis {
+    /// The `--describe` manifest (ADR-0115, issue 1953): the chassis
+    /// profile, the mailbox namespaces this binary links, and the
+    /// `build.rs` provenance. The hub is the minimal coordinator chassis —
+    /// it links the trace dispatcher, the engines cap, and the RPC server,
+    /// not the full-stack cap set — so it lists those three directly
+    /// rather than through the full-stack
+    /// [`common_cap_namespaces`](crate::common_cap_namespaces) base.
+    #[must_use]
+    pub fn describe_manifest() -> BinaryManifest {
+        let caps = vec![
+            <TraceDispatchCapability as Actor>::NAMESPACE,
+            <EngineServer as Actor>::NAMESPACE,
+            <RpcServerCapability as Actor>::NAMESPACE,
+        ];
+        crate::binary_manifest(Self::PROFILE, caps)
     }
 }
 

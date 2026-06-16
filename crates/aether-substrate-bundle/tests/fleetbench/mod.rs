@@ -50,11 +50,11 @@ use aether_kinds::MailEnvelope as TracedEnvelope;
 use aether_kinds::descriptors;
 use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME};
 use aether_kinds::{
-    Cancel, CancelResult, ComponentCapabilities, DagDescriptor, DeadEngineDescriptor,
-    EngineDescriptor, HandleDescribe, HandleDescribeResult, ListEngines, ListEnginesResult,
-    LoadComponent, LoadResult, LogTail, LogTailResult, ReplaceComponent, ReplaceResult,
-    SpawnEngine, SpawnEngineResult, Status, StatusResult, Submit, SubmitResult, TerminateEngine,
-    TerminateEngineResult,
+    BinaryEntry, Cancel, CancelResult, ComponentCapabilities, DagDescriptor, DeadEngineDescriptor,
+    EngineDescriptor, HandleDescribe, HandleDescribeResult, ListBinaries, ListBinariesResult,
+    ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail, LogTailResult,
+    ReplaceComponent, ReplaceResult, SpawnEngine, SpawnEngineResult, Status, StatusResult, Submit,
+    SubmitResult, TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult,
 };
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
@@ -219,6 +219,36 @@ impl FleetBench {
         match ListEnginesResult::decode_from_bytes(&payload) {
             Some(result) => result.recently_died,
             None => panic!("undecodable ListEnginesResult"),
+        }
+    }
+
+    /// Upload a binary into the hub's content-addressed store (ADR-0115,
+    /// issue 1953) by absolute host path, optionally naming it. Hub-local —
+    /// addressed at `aether.engine` with no engine route. The hub reads the
+    /// path, sha256s it, forks `<path> --describe`, and stores both; this
+    /// returns the decoded [`UploadBinaryResult`].
+    pub fn upload_binary(&mut self, staged_path: &str, name: Option<&str>) -> UploadBinaryResult {
+        let replies = self.call(
+            None,
+            "aether.engine",
+            &UploadBinary {
+                staged_path: staged_path.to_owned(),
+                name: name.map(str::to_owned),
+            },
+        );
+        let payload = single_reply(&replies, "UploadBinary");
+        UploadBinaryResult::decode_from_bytes(&payload).expect("undecodable UploadBinaryResult")
+    }
+
+    /// Enumerate the hub's stored binaries (ADR-0115, issue 1953) under the
+    /// given filter. Hub-local — addressed at `aether.engine` with no
+    /// engine route.
+    pub fn list_binaries(&mut self, filter: &ListBinaries) -> Vec<BinaryEntry> {
+        let replies = self.call(None, "aether.engine", filter);
+        let payload = single_reply(&replies, "ListBinaries");
+        match ListBinariesResult::decode_from_bytes(&payload) {
+            Some(result) => result.binaries,
+            None => panic!("undecodable ListBinariesResult"),
         }
     }
 
@@ -668,6 +698,11 @@ fn isolate_store_root() -> PathBuf {
     unsafe {
         env::set_var("AETHER_ENGINE_STORE_ROOT", &root);
         env::remove_var("AETHER_HANDLE_STORE_DIR");
+        // Isolate the hub's binary store (ADR-0115) under the same per-bench
+        // root so the EngineServer's `ArtifactStore::from_env` doesn't touch
+        // the real data dir and a binary-store scenario can't see another
+        // bench's entries. Removed on `Drop` with the rest of the root.
+        env::set_var("AETHER_BINARY_STORE_DIR", root.join("binaries"));
     }
     root
 }

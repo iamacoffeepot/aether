@@ -38,7 +38,8 @@
 // `#[bridge]` macro emits `impl HandlesKind<K>` markers as siblings of
 // the mod.
 use aether_kinds::{
-    EngineAlive, EngineDied, ListEngines, RouteEnvelope, SpawnEngine, TerminateEngine,
+    EngineAlive, EngineDied, ListBinaries, ListEngines, RouteEnvelope, SpawnEngine,
+    TerminateEngine, UploadBinary,
 };
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
@@ -54,14 +55,17 @@ pub use server_native::{EngineConfig, EngineOverlay};
 #[aether_actor::bridge(singleton)]
 mod server_native {
     use super::{
-        EngineAlive, EngineDied, ListEngines, RouteEnvelope, SpawnEngine, TerminateEngine,
+        EngineAlive, EngineDied, ListBinaries, ListEngines, RouteEnvelope, SpawnEngine,
+        TerminateEngine, UploadBinary,
     };
     use crate::engine::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams};
+    use crate::store::{ArtifactKind, ArtifactStore};
     use aether_actor::actor;
     use aether_data::{EngineId, Kind, MailboxId, Uuid};
     use aether_kinds::{
-        CallSettled, DeadEngineDescriptor, DeathReason, EngineDescriptor, ForwardEnvelope,
-        ListEnginesResult, SpawnEngineResult, TerminateEngineResult,
+        BinaryManifest, CallSettled, DeadEngineDescriptor, DeathReason, EngineDescriptor,
+        ForwardEnvelope, ListBinariesResult, ListEnginesResult, SpawnEngineResult,
+        TerminateEngineResult, UploadBinaryResult,
     };
     use aether_substrate::Mail;
     use aether_substrate::Subname;
@@ -73,6 +77,7 @@ mod server_native {
     use std::collections::VecDeque;
     use std::convert::Infallible;
     use std::env;
+    use std::fs;
     use std::io;
     use std::net::TcpListener;
     use std::path::PathBuf;
@@ -219,6 +224,14 @@ mod server_native {
         /// so an observer can tell a clean terminate from a crash or a
         /// heartbeat eviction.
         recently_died: VecDeque<DeadRecord>,
+        /// Hub-scoped content-addressed binary store (ADR-0115, issue
+        /// 1953) — the storage half of the artifact registry.
+        /// `on_upload_binary` ingests a staged binary content-addressed;
+        /// `on_list_binaries` enumerates the stored entries. Built
+        /// `from_env` at init so it persists across a `restart-hub` (the
+        /// layout root outlives the hub child); the spawn cutover (#1954)
+        /// reads it back through the store's `get` seam.
+        store: ArtifactStore,
     }
 
     #[actor]
@@ -233,6 +246,7 @@ mod server_native {
                 mailer: ctx.mailer(),
                 heartbeat: config.heartbeat_params(),
                 recently_died: VecDeque::new(),
+                store: ArtifactStore::from_env(),
             })
         }
 
@@ -562,6 +576,84 @@ mod server_native {
                 entry.last_alive = Instant::now();
             }
         }
+
+        /// Ingest a binary into the hub's content-addressed store.
+        ///
+        /// # Agent
+        /// Send `UploadBinary { staged_path, name }`. The hub reads the
+        /// staged path itself (aether-mcp never reads the bytes — too
+        /// large for the tool channel), sha256-hashes it, dedups against
+        /// the store, forks `staged_path --describe` to capture its
+        /// `BinaryManifest`, stores both, and points `name` (when set) at
+        /// the hash. Reply: `UploadBinaryResult::Ok { hash, name }`, or
+        /// `Err { error }` for an unreadable path or a `--describe` that
+        /// failed or didn't yield a parseable manifest.
+        #[handler]
+        fn on_upload_binary(
+            &mut self,
+            _ctx: &mut NativeCtx<'_>,
+            mail: UploadBinary,
+        ) -> UploadBinaryResult {
+            let bytes = match fs::read(&mail.staged_path) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    return UploadBinaryResult::Err {
+                        error: format!("reading staged path {:?}: {e}", mail.staged_path),
+                    };
+                }
+            };
+            let manifest = match describe_binary(&mail.staged_path) {
+                Ok(manifest) => manifest,
+                Err(error) => return UploadBinaryResult::Err { error },
+            };
+            let hash = self
+                .store
+                .upload(&bytes, ArtifactKind::Binary, manifest, mail.name.clone());
+            UploadBinaryResult::Ok {
+                hash,
+                name: mail.name,
+            }
+        }
+
+        /// Enumerate the hub's stored binaries.
+        ///
+        /// # Agent
+        /// Send `ListBinaries { chassis?, caps, target? }` (each filter
+        /// field AND-combined; an absent / empty field is no constraint).
+        /// Reply: `ListBinariesResult { binaries: [{ hash, name,
+        /// manifest: { chassis, caps, git_sha, profile, target } }] }`.
+        #[handler]
+        fn on_list_binaries(
+            &mut self,
+            _ctx: &mut NativeCtx<'_>,
+            mail: ListBinaries,
+        ) -> ListBinariesResult {
+            ListBinariesResult {
+                binaries: self.store.list(&mail),
+            }
+        }
+    }
+
+    /// Fork `binary_path --describe` and parse the JSON manifest it prints
+    /// (ADR-0115, issue 1953). The one-time capture of what a binary *is* —
+    /// its chassis kind, linked caps, and build provenance — without the
+    /// hub linking the chassis crate. `stdin` is nulled so a describe can't
+    /// block on input.
+    fn describe_binary(binary_path: &str) -> Result<BinaryManifest, String> {
+        let output = Command::new(binary_path)
+            .arg("--describe")
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("forking {binary_path:?} --describe: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "{binary_path:?} --describe exited {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim(),
+            ));
+        }
+        serde_json::from_slice(&output.stdout)
+            .map_err(|e| format!("parsing {binary_path:?} --describe manifest JSON: {e}"))
     }
 
     /// Push a `CallSettled::Err` back to `target` (correlation
@@ -692,6 +784,7 @@ mod tests {
     // for fixture wiring — reference id derivation, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
     use super::{EngineConfig, EngineServer, ReplyCells, ReplySink};
+    use crate::store::ENV_BINARY_STORE_DIR;
     use crate::test_chassis::TestChassis;
     use aether_actor::Actor;
     use aether_data::{Kind, mailbox_id_from_name};
@@ -707,13 +800,14 @@ mod tests {
     use aether_substrate::mail::registry::Registry;
     use aether_substrate::mail::{Mail, Source, SourceAddr};
     use std::sync::Arc;
-    use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::{env, process, thread};
 
     /// Boot a passive chassis hosting `EngineServer` + the reply sink.
     /// Returns the chassis (kept alive for its dispatcher threads), the
     /// mailer to push requests through, and the sink's cells.
     fn boot() -> (PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
+        isolate_binary_store();
         let registry = Arc::new(Registry::new());
         for d in descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
@@ -728,6 +822,23 @@ mod tests {
             .build_passive()
             .expect("caps boot");
         (chassis, mailer, cells)
+    }
+
+    /// Point `EngineServer::init`'s `ArtifactStore::from_env` (ADR-0115) at
+    /// a per-call temp dir so the engines-cap unit tests never touch the
+    /// real `dirs::data_dir()` binary store. These tests live in
+    /// `mod heavy`, which nextest serializes (`serial-heavy`), so the
+    /// process-global env set can't race a sibling.
+    fn isolate_binary_store() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = env::temp_dir().join(format!("aether-binstore-engcap-{}-{nanos}", process::id()));
+        // SAFETY: serialized as a heavy test; no sibling reads this var
+        // concurrently, and only `EngineServer` consumes it.
+        unsafe {
+            env::set_var(ENV_BINARY_STORE_DIR, &dir);
+        }
     }
 
     /// Drive one request kind at `aether.engine`, reply-to the sink,

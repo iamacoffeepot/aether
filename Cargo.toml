@@ -79,6 +79,11 @@ proc-macro2 = "1"
 quote = "1"
 serde = { version = "1", default-features = false }
 serde_json = "1"
+# Content-addressed hashing for the hub binary store (ADR-0115, issue
+# 1953): sha256 over a binary's raw bytes keys each entry. Native-only
+# consumer (`aether-capabilities` under `native`); pinned here so any
+# future hashing surface shares the major.
+sha2 = "0.10"
 syn = { version = "2", features = ["full"] }
 tracing = { version = "0.1", default-features = false }
 wasmtime = "44"

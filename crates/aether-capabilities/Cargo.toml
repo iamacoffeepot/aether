@@ -43,6 +43,7 @@ native = [
     "dep:httparse",
     "dep:postcard",
     "dep:serde_json",
+    "dep:sha2",
     "dep:tracing",
     "dep:ureq",
     "dep:url",
@@ -130,6 +131,10 @@ postcard = { workspace = true, optional = true, features = ["alloc", "heapless-c
 # JSON request/response bodies for the content-gen provider APIs
 # (ADR-0050) — the Anthropic Messages API and the Gemini media APIs.
 serde_json = { workspace = true, optional = true }
+# ADR-0115 (issue 1953): sha256 content addressing for the hub binary
+# store. Rides the `native` feature — the store is native-only (it forks
+# `--describe` and reads staged paths), so wasm / marker builds skip it.
+sha2 = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
 ureq = { version = "3", optional = true, features = ["rustls"] }
 url = { version = "2", optional = true }

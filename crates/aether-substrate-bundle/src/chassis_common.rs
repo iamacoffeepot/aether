@@ -15,6 +15,7 @@ use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use aether_actor::Actor;
 use aether_capabilities::anthropic::AnthropicConfigLayer;
 use aether_capabilities::audio::AudioConfigLayer;
 use aether_capabilities::fs::NamespaceRootsLayer;
@@ -30,7 +31,7 @@ use aether_capabilities::{
     LifecycleConfig, TcpCapability, TextCapability, UiCapability, fs::NamespaceRoots,
     http::HttpConfig, trace::TraceDispatchCapability,
 };
-use aether_kinds::{Present, Render, Shutdown, Tick};
+use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
 // The `aether.trajectory` recorder cap moved to `aether-labyrinth` (issue
 // 1908); the mailbox NAMESPACE (and so its hash-derived id) is unchanged.
 use aether_labyrinth::TrajectoryRecorderCapability;
@@ -306,6 +307,54 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_actor::<TcpCapability>(())
         .with_actor::<AnthropicCapability>(boot.anthropic)
         .with_actor::<GeminiCapability>(boot.gemini)
+}
+
+/// The mailbox namespaces `with_common_caps` registers — the linked
+/// capabilities every full-stack chassis carries, for the `--describe`
+/// manifest (ADR-0115, issue 1953). Read straight off each cap type's
+/// `Actor::NAMESPACE` const, so the values can't drift from what
+/// `with_common_caps` actually claims; the *membership* of this list must
+/// be kept in lockstep with the `.with_actor::<_>()` chain above (a cap
+/// added there must be added here). The renderer / window / lifecycle
+/// extras each chassis layers on top are appended by its own
+/// `cap_namespaces` helper.
+#[must_use]
+pub fn common_cap_namespaces() -> Vec<&'static str> {
+    vec![
+        <HandleCapability as Actor>::NAMESPACE,
+        <TraceDispatchCapability as Actor>::NAMESPACE,
+        <DagCapability as Actor>::NAMESPACE,
+        <TrajectoryRecorderCapability as Actor>::NAMESPACE,
+        <InputCapability as Actor>::NAMESPACE,
+        <ComponentHostCapability as Actor>::NAMESPACE,
+        <FsCapability as Actor>::NAMESPACE,
+        <TextCapability as Actor>::NAMESPACE,
+        <UiCapability as Actor>::NAMESPACE,
+        <InventoryCapability as Actor>::NAMESPACE,
+        <HttpCapability as Actor>::NAMESPACE,
+        <TcpCapability as Actor>::NAMESPACE,
+        <AnthropicCapability as Actor>::NAMESPACE,
+        <GeminiCapability as Actor>::NAMESPACE,
+    ]
+}
+
+/// Assemble a chassis bin's `--describe` [`BinaryManifest`] (ADR-0115,
+/// issue 1953): the chassis profile, the mailbox namespaces it links, and
+/// the build provenance `build.rs` baked into the bundle crate
+/// (`AETHER_GIT_SHA` / `AETHER_BUILD_PROFILE` / `AETHER_TARGET_TRIPLE`).
+/// The `env!`s resolve in this crate, where `build.rs` set them. Each
+/// chassis bin calls this on `--describe`, prints the JSON, and exits
+/// before boot — the hub's binary store forks `<binary> --describe` once
+/// at upload time to capture exactly this.
+#[must_use]
+pub fn binary_manifest(chassis: &str, caps: Vec<&'static str>) -> BinaryManifest {
+    BinaryManifest {
+        chassis: chassis.to_owned(),
+        caps: caps.into_iter().map(str::to_owned).collect(),
+        git_sha: env!("AETHER_GIT_SHA").to_owned(),
+        profile: env!("AETHER_BUILD_PROFILE").to_owned(),
+        target: env!("AETHER_TARGET_TRIPLE").to_owned(),
+    }
 }
 
 /// Issue 763 P2: boot the RPC server only when `rpc_addr` is set,

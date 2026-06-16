@@ -31,6 +31,17 @@ fn main() -> anyhow::Result<()> {
         print!("{}", chassis_config_dump());
         return Ok(());
     }
+    // `--describe` (ADR-0115, issue 1953): print this binary's manifest —
+    // chassis kind, linked caps, build provenance — as JSON, then exit
+    // before boot. The hub's binary store forks `<binary> --describe`
+    // once at upload time to capture exactly this.
+    if cli.describe {
+        println!(
+            "{}",
+            serde_json::to_string(&HeadlessChassis::describe_manifest())?
+        );
+        return Ok(());
+    }
     let env = HeadlessEnv::from_env_with_argv(cli)?;
     let chassis = HeadlessChassis::build(env)?;
     tracing::info!(

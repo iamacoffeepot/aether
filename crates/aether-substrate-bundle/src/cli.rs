@@ -170,6 +170,13 @@ pub struct DesktopCli {
     /// and exit before boot (ADR-0090 §4 discovery dump).
     #[arg(long = "config")]
     pub config: bool,
+
+    /// Print this binary's `BinaryManifest` (chassis kind, linked caps,
+    /// build provenance) as JSON and exit before boot (ADR-0115, issue
+    /// 1953). The hub's binary store forks `<binary> --describe` once at
+    /// upload time to capture what a stored binary is.
+    #[arg(long = "describe")]
+    pub describe: bool,
 }
 
 /// Headless chassis CLI root.
@@ -190,6 +197,13 @@ pub struct HeadlessCli {
     /// and exit before boot (ADR-0090 §4 discovery dump).
     #[arg(long = "config")]
     pub config: bool,
+
+    /// Print this binary's `BinaryManifest` (chassis kind, linked caps,
+    /// build provenance) as JSON and exit before boot (ADR-0115, issue
+    /// 1953). The hub's binary store forks `<binary> --describe` once at
+    /// upload time to capture what a stored binary is.
+    #[arg(long = "describe")]
+    pub describe: bool,
 }
 
 /// Hub chassis CLI root — coordinator-only, no full-stack caps.
@@ -214,4 +228,11 @@ pub struct HubCli {
     /// and exit before boot (ADR-0090 §4 discovery dump).
     #[arg(long = "config")]
     pub config: bool,
+
+    /// Print this binary's `BinaryManifest` (chassis kind, linked caps,
+    /// build provenance) as JSON and exit before boot (ADR-0115, issue
+    /// 1953). The hub's binary store forks `<binary> --describe` once at
+    /// upload time to capture what a stored binary is.
+    #[arg(long = "describe")]
+    pub describe: bool,
 }

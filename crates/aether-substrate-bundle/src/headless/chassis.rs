@@ -17,13 +17,16 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use aether_actor::Actor;
 use aether_capabilities::LifecycleCapability;
+use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
     AnthropicConfig, ComponentHostConfig, GeminiConfig, HeadlessRenderCapability,
     HeadlessWindowCapability, HttpServerConfig, InputConfig, UnsupportedTestBenchCapability,
     fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
 use aether_data::Kind;
+use aether_kinds::BinaryManifest;
 use aether_kinds::{SetMasterGain, SetMasterGainResult, Tick};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
@@ -57,6 +60,28 @@ impl Chassis for HeadlessChassis {
 
     fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
         Self::build_inner(env)
+    }
+}
+
+impl HeadlessChassis {
+    /// The `--describe` manifest (ADR-0115, issue 1953): the chassis
+    /// profile, the mailbox namespaces this binary links, and the
+    /// `build.rs` provenance. The headless chassis layers the renderer /
+    /// window / test-bench / lifecycle caps plus the RPC server onto the
+    /// shared [`common_cap_namespaces`](crate::common_cap_namespaces)
+    /// base — a hub-forked fleet engine always boots its RPC server, so it
+    /// is part of the headless capability surface.
+    #[must_use]
+    pub fn describe_manifest() -> BinaryManifest {
+        let mut caps = crate::common_cap_namespaces();
+        caps.extend([
+            <HeadlessRenderCapability as Actor>::NAMESPACE,
+            <HeadlessWindowCapability as Actor>::NAMESPACE,
+            <UnsupportedTestBenchCapability as Actor>::NAMESPACE,
+            <LifecycleCapability as Actor>::NAMESPACE,
+            <RpcServerCapability as Actor>::NAMESPACE,
+        ]);
+        crate::binary_manifest(Self::PROFILE, caps)
     }
 }
 
@@ -135,9 +160,10 @@ impl HeadlessEnv {
         let HeadlessCli {
             common,
             tick_hz: cli_tick_hz,
-            // The bin handles `--config` (print + exit) before this
-            // resolver runs; ignore it here.
+            // The bin handles `--config` / `--describe` (print + exit)
+            // before this resolver runs; ignore them here.
             config: _,
+            describe: _,
         } = cli;
         let CommonOverlay {
             http,
