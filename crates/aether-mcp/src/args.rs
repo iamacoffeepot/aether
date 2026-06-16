@@ -381,6 +381,37 @@ pub struct ActorCostResponse {
     pub rows: Vec<ActorCostRow>,
 }
 
+/// `describe_kinds` arguments. Both fields are optional and orthogonal —
+/// omit both for the compact default listing of every kind.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DescribeKindsArgs {
+    /// Case-sensitive prefix filter: when set, only kinds whose name starts
+    /// with this string are included in the output (e.g. `"aether.fs"` to
+    /// get just the file-system kinds). Omit to list every kind.
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// When `true`, return the full authoritative `SchemaType` for each
+    /// matching kind (the existing schema-exact form, enough for codec
+    /// work). When `false` (default), return a compact `[{name, shape}]`
+    /// array where `shape` is a one-line human-readable rendering of the
+    /// kind's field structure — enough to build `send_mail` params for
+    /// simple kinds without a second fetch.
+    #[serde(default)]
+    pub full: bool,
+}
+
+/// One entry in the compact `describe_kinds` listing (`full: false`).
+/// `shape` is a one-line rendering of the kind's schema, e.g.
+/// `{ namespace: String, path: String, bytes: Bytes }`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct KindSummary {
+    /// Fully-qualified kind name (e.g. `"aether.fs.write"`).
+    pub name: String,
+    /// One-line human-readable rendering of the kind's field structure.
+    /// Enough to build `send_mail` params without fetching the full schema.
+    pub shape: String,
+}
+
 /// `describe_handles` arguments (ADR-0049 §10). Summarizes a
 /// substrate's persistent handle store.
 #[derive(Debug, Deserialize, JsonSchema)]

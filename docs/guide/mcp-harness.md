@@ -101,11 +101,15 @@ need exact whole-chain settlement — proof that everything a mail set off has f
 moves. For independent items where you just want each reply, plain `send_mail` is the
 simpler tool.
 
-**Introspection.** `describe_kinds` is how you learn what to put in `params` — it
-returns the static kind vocabulary with full schemas. `describe_component` reports a
-loaded component's handler kinds, their docs, whether it has a fallback, and its
-boot-config kind. `describe_transforms` lists the native transforms a DAG can wire;
-`describe_handles` inspects the persistent handle store.
+**Introspection.** `describe_kinds` is how you learn what to put in `params`. The
+default call returns a compact `[{name, shape}]` listing of every kind — a one-line
+field rendering per kind, small enough to read in one shot. Pass `prefix: "aether.fs"`
+to narrow the listing to a kind family. Pass `full: true` to get the full nested
+`SchemaType` (useful for codec-exact work); combine with `prefix` to keep the payload
+bounded. `describe_component` reports a loaded component's handler kinds, their docs,
+whether it has a fallback, and its boot-config kind. `describe_transforms` lists the
+native transforms a DAG can wire; `describe_handles` inspects the persistent handle
+store.
 
 **Components.** `load_component` and `replace_component` take a filesystem **path** to
 the `.wasm` — the tool reads the bytes; you never inline a wasm buffer through a tool
