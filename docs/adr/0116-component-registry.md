@@ -1,6 +1,6 @@
 # ADR-0116: Component Registry
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
 
 ## Context
