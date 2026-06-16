@@ -53,6 +53,7 @@ pub mod schema;
 pub mod tag_bits;
 pub mod tagged_id;
 pub mod transform;
+pub mod wire;
 pub mod wire_id;
 pub use hash::{
     HANDLE_DOMAIN, KIND_DOMAIN, MAILBOX_DOMAIN, MAX_SCOPE_PATH_BYTES, MAX_SCOPE_PATH_DEPTH,
