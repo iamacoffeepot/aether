@@ -8,10 +8,9 @@
 //! own divergent live-holder policy.
 
 use std::fs;
-use std::io::{Error as IoError, Write as _};
+use std::io::Error as IoError;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Whether `pid` names a live process. Unix: `kill(pid, 0)` returns 0
 /// for a live process, `ESRCH` for a dead one, `EPERM` for a live one
@@ -85,7 +84,7 @@ pub fn acquire_lock_pid(path: &Path) -> LockAcquisition {
             }
         }
     }
-    match atomic_write_pid(path, process::id().to_string().as_bytes()) {
+    match crate::atomic_write::atomic_write(path, process::id().to_string().as_bytes()) {
         Ok(()) => LockAcquisition::Acquired(LockGuard {
             path: path.to_path_buf(),
         }),
@@ -93,37 +92,10 @@ pub fn acquire_lock_pid(path: &Path) -> LockAcquisition {
     }
 }
 
-/// Atomic write via tmp+rename. Creates the parent dir lazily.
-fn atomic_write_pid(target: &Path, bytes: &[u8]) -> Result<(), IoError> {
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let pid = process::id();
-    let file_name = target
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("lock");
-    let tmp = target.with_file_name(format!("{file_name}.tmp-{pid}-{nonce}"));
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    match fs::rename(&tmp, target) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, process};
 
     fn temp_dir(tag: &str) -> PathBuf {

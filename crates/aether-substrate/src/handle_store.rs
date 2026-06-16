@@ -46,15 +46,17 @@ use std::convert::Infallible;
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
-use std::io::{Error as IoError, ErrorKind, Write as _};
+use std::io::{Error as IoError, ErrorKind};
 use std::mem;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::atomic_write::atomic_write;
 use crate::config::ConfigError;
 use crate::mail::Mail;
 use crate::mail::registry::Registry;
@@ -456,38 +458,6 @@ fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-}
-
-/// Atomic write via tmp+rename (ADR-0041's `LocalFileAdapter` pattern):
-/// stage to a sibling `.tmp-<pid>-<nonce>`, fsync it, rename over the
-/// target. Creates the parent dir lazily. Returns the io error on
-/// failure so the caller can log + continue (persistence is best-effort
-/// per ADR-0049 §3).
-fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), IoError> {
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let nonce = now_millis();
-    let pid = process::id();
-    let file_name = target
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("entry");
-    let tmp = target.with_file_name(format!("{file_name}.tmp-{pid}-{nonce}"));
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        // fsync the tmp file so its bytes hit disk before the rename
-        // publishes it (preserves ordering across a crash).
-        f.sync_all()?;
-    }
-    match fs::rename(&tmp, target) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
 }
 
 /// Per-entry store record. Bytes are the postcard-encoded `K` body
@@ -1510,7 +1480,7 @@ impl HandleStore {
     }
 
     /// Acquire the on-disk store lock (ADR-0049 §7). Delegates to
-    /// [`crate::pid_lock::acquire_lock_pid`] for the shared read →
+    /// [`acquire_lock_pid`] for the shared read →
     /// classify → reclaim → write protocol; maps the result to
     /// [`LockError`]. A live conflicting lock returns [`LockError::Held`]
     /// so the caller can abort boot with a clear error. No-op (returns

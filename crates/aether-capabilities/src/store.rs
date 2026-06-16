@@ -42,11 +42,12 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
-use std::io::{self, ErrorKind, Write as _};
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use aether_substrate::atomic_write::atomic_write;
 use aether_kinds::{BinaryEntry, BinaryManifest, ListBinaries};
 use aether_substrate::pid_lock::{LockAcquisition, LockGuard, acquire_lock_pid};
 use serde::{Deserialize, Serialize};
@@ -578,32 +579,6 @@ fn now_nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos())
-}
-
-/// Atomic write via tmp + rename (the handle store's pattern): stage to a
-/// sibling `.tmp-<pid>-<nonce>`, fsync, rename over the target. Creates
-/// the parent dir lazily.
-fn atomic_write(target: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let file_name = target
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("entry");
-    let tmp = target.with_file_name(format!("{file_name}.tmp-{}-{}", process::id(), now_nanos()));
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    match fs::rename(&tmp, target) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
 }
 
 #[cfg(test)]
