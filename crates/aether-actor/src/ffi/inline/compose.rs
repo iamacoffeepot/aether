@@ -218,11 +218,17 @@ where
         child.erased_on_rehydrate(&mut ctx, prior);
     }
 
+    // The flat-alias model folds every inline child on the instance carry,
+    // so a reconstructed child's logical parent is the cluster root (the
+    // instance's real `self_id`). The dehydrate bundle does not persist the
+    // parent link; it is re-derived here from the live registry. Per-parent
+    // nesting (the address-tree = slot-tree fold) is a follow-up.
     registry.insert_child(
         to_reconstruct.alias,
         to_reconstruct.type_tag,
         String::from(to_reconstruct.full_subname),
         to_reconstruct.is_counter,
+        registry.self_id(),
         Box::new(child),
     );
     true
@@ -287,6 +293,7 @@ mod tests {
             0xAAAA,
             String::from("a"),
             false,
+            0,
             Box::new(SavingChild { tag: 0x1111_2222 }),
         );
         registry.insert_child(
@@ -294,6 +301,7 @@ mod tests {
             0xBBBB,
             String::from("b"),
             true,
+            0,
             Box::new(SavingChild { tag: 0x3333_4444 }),
         );
 

@@ -23,18 +23,33 @@
 //! substrate serializes delivery under the run token, so an `UnsafeCell`
 //! with a blanket `Sync` impl is sound — the same argument that licenses
 //! [`crate::Slot`].
+//!
+//! Beyond child demux the registry is also the cluster's runtime structure
+//! and router (ADR-0114 addressing amendment). It holds the instance's real
+//! folded [`MailboxId`] — `self_id`, captured from the `init` / `wire`
+//! argument so the instance is addressable at any lineage depth rather than
+//! only at the ADR-0099 depth-1 `hash(NAMESPACE)` fixed point — and each
+//! child's logical `parent`, so relative addressing (parent / sibling /
+//! child) resolves by registry lookup, never by folding (a `MailboxId` is a
+//! one-way hash chain, so the guest cannot reproduce a relative's id). A
+//! send to a cluster member (own id or a resident child alias) is pushed to
+//! the per-component queue and [`drain_cluster_queue`] dispatches it in
+//! place through the membrane after the top-level dispatch returns, so the
+//! whole intra-cluster cascade settles inside one `receive_p32` call under
+//! one run-token — only cross-cluster mail hands off to the scheduler.
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::UnsafeCell;
+use core::cell::{Cell, UnsafeCell};
 
 use aether_data::MailboxId;
 
 use crate::ffi::ErasedFfiActor;
+use crate::ffi::bridge::mail;
 use crate::ffi::ctx::FfiCtx;
-use crate::mail::Mail;
+use crate::mail::{Mail, NO_REPLY_HANDLE};
 
 mod bundle;
 pub mod compose;
@@ -64,6 +79,15 @@ struct InlineSlot {
     /// re-fold; always `false` after resolution, but carried so the
     /// rehydrate call mirrors the original `spawn_inline_child` shape.
     is_counter: bool,
+    /// The real folded [`MailboxId`] of the actor that spawned this child
+    /// (the spawning ctx's own id at `spawn_inline_child` time). The
+    /// logical-tree link the relative-addressing lookups
+    /// ([`InlineRegistry::parent_of`] / [`InlineRegistry::child_of`] /
+    /// [`InlineRegistry::sibling_of`]) walk — resolution is pure registry
+    /// lookup, never a fold (a `MailboxId` is a one-way hash chain, so the
+    /// guest cannot reproduce a relative's id by folding; it looks the
+    /// recorded id up instead).
+    parent: u64,
     actor: Option<Box<dyn ErasedFfiActor>>,
 }
 
@@ -83,21 +107,75 @@ pub(crate) struct InlineChildMeta {
     pub(crate) is_counter: bool,
 }
 
+/// One intra-cluster send buffered on the per-component queue
+/// ([`InlineRegistry`]). A send whose recipient is a member of this cluster
+/// — the instance itself or one of its inline children — is pushed here
+/// rather than handed to the host; [`drain_cluster_queue`] dispatches each
+/// one through the membrane after the top-level dispatch returns, so the
+/// whole local cascade settles inside one `receive_p32` call under one
+/// run-token (no scheduler hop). The `bytes` are owned so they outlive the
+/// drain's `Mail` borrow.
+struct QueuedMail {
+    recipient: u64,
+    kind: u64,
+    bytes: Vec<u8>,
+    count: u32,
+}
+
+/// Whether a resolved recipient is in this cluster (dispatch in place
+/// through the queue) or outside it (hand to the host). The membership
+/// decision is factored out of [`InlineRegistry::route_or_enqueue`] as this
+/// pure value so it is unit-testable without a live `MAIL_BRIDGE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouteDecision {
+    /// The recipient is a cluster member; enqueue for in-place dispatch.
+    Local,
+    /// The recipient is outside the cluster; send through the host.
+    Remote,
+}
+
 /// The per-component inline-child registry (ADR-0114 decision #3), keyed
 /// by each child's alias [`MailboxId`]. The [`crate::export!`] macro emits
 /// one as a `static __AETHER_INLINE` per component (mirroring the parent's
 /// `static __AETHER_COMPONENT` slot) and threads it to the membrane; the
-/// membrane demuxes the inbound recipient against it. Every operation is
-/// O(log n) in the resident child count (`BTreeMap` lookup).
+/// membrane demuxes the inbound recipient against it. Every keyed
+/// operation is O(log n) in the resident child count (`BTreeMap` lookup).
+///
+/// Beyond the child slot map the registry also holds the cluster's runtime
+/// structure and router (ADR-0114 addressing amendment): `self_id` is the
+/// instance's real folded [`MailboxId`] (captured from the `init` / `wire`
+/// argument, not recomputed from `hash(NAMESPACE)`), so the instance is
+/// addressable at any lineage depth; `queue` is the cluster-local mail
+/// queue an intra-cluster send is pushed to and [`drain_cluster_queue`]
+/// drains in place.
 pub struct InlineRegistry {
     inner: UnsafeCell<BTreeMap<MailboxId, InlineSlot>>,
+    /// The instance's real folded [`MailboxId`] (`Tag::Mailbox`-tagged),
+    /// set once from the `init` / `wire` shim's `mailbox_id` argument — the
+    /// id the substrate registered for this trampoline (`store.data()
+    /// .sender.0`). `0` until set; the receive shim falls back to
+    /// `hash(NAMESPACE)` only while it is still `0` (a receive before
+    /// `wire`, which should not happen). The instance's runtime identity at
+    /// any depth, not the ADR-0099 depth-1 fixed point.
+    self_id: Cell<u64>,
+    /// The cluster-local mail queue. A send to a cluster member is pushed
+    /// here ([`Self::route_or_enqueue`]) instead of going to the host;
+    /// [`drain_cluster_queue`] dispatches each item through the membrane
+    /// after the top-level dispatch returns, so a child → parent → sibling
+    /// cascade settles in one `receive_p32` call. Reentrancy and cycles are
+    /// handled by the queue — a busy target is just a later queue item —
+    /// not by nested dispatch.
+    queue: UnsafeCell<VecDeque<QueuedMail>>,
 }
 
 // SAFETY: identical argument to [`crate::Slot`] — the WASM guest is
 // single-threaded (ADR-0010 §5) and the substrate serializes delivery
 // under the run token, so a `static __AETHER_INLINE` is only ever touched
 // from one thread at a time. On the host unit-test build each test owns a
-// local registry, reached from one test thread.
+// local registry, reached from one test thread. The same argument covers
+// the added interior-mutable fields (`self_id`, `queue`): each is touched
+// only from the single run-token thread, and every borrow of `queue` is
+// taken fresh and released before return (never spanning a dispatch).
 unsafe impl Sync for InlineRegistry {}
 
 impl InlineRegistry {
@@ -106,19 +184,43 @@ impl InlineRegistry {
     pub const fn new() -> Self {
         Self {
             inner: UnsafeCell::new(BTreeMap::new()),
+            self_id: Cell::new(0),
+            queue: UnsafeCell::new(VecDeque::new()),
         }
     }
 
+    /// Record the instance's real folded [`MailboxId`] — the `mailbox_id`
+    /// argument the substrate passes the `init` / `wire` shims, which is the
+    /// id it registered for this trampoline (`store.data().sender.0`). Set
+    /// once from the first shim that runs; the receive path then uses it as
+    /// the cluster's self-identity for the membrane and the ctx, so the
+    /// instance is addressable at any lineage depth rather than only at the
+    /// ADR-0099 depth-1 fixed point. Idempotent re-sets (each `init` /
+    /// `wire` shim sets it) write the same value.
+    pub fn set_self_id(&self, id: u64) {
+        self.self_id.set(id);
+    }
+
+    /// The instance's real folded [`MailboxId`] raw value, or `0` if no
+    /// `init` / `wire` shim has run yet (the receive path falls back to
+    /// `hash(NAMESPACE)` only in that should-not-happen window).
+    #[must_use]
+    pub fn self_id(&self) -> u64 {
+        self.self_id.get()
+    }
+
     /// Register a freshly-spawned (or reconstructed) inline child under
-    /// `id`, recording the reconstruct metadata alongside the actor box.
-    /// Replaces the actor + metadata if `id` is already present (a
-    /// re-spawn / rehydrate re-register of the same alias). O(log n).
+    /// `id`, recording the reconstruct metadata + the spawner's `parent` id
+    /// alongside the actor box. Replaces the actor + metadata if `id` is
+    /// already present (a re-spawn / rehydrate re-register of the same
+    /// alias). O(log n).
     pub(crate) fn insert_child(
         &self,
         id: MailboxId,
         type_tag: u64,
         full_subname: String,
         is_counter: bool,
+        parent: u64,
         actor: Box<dyn ErasedFfiActor>,
     ) {
         // SAFETY: single-threaded guest + serialized delivery — no other
@@ -129,6 +231,7 @@ impl InlineRegistry {
             slot.type_tag = type_tag;
             slot.full_subname = full_subname;
             slot.is_counter = is_counter;
+            slot.parent = parent;
             slot.actor = Some(actor);
         } else {
             map.insert(
@@ -137,6 +240,7 @@ impl InlineRegistry {
                     type_tag,
                     full_subname,
                     is_counter,
+                    parent,
                     actor: Some(actor),
                 },
             );
@@ -230,6 +334,118 @@ impl InlineRegistry {
         let map = unsafe { &mut *self.inner.get() };
         map.get_mut(&id).and_then(|s| s.actor.as_deref_mut()).map(f)
     }
+
+    /// The recorded parent of the inline child registered under `id`, or
+    /// `None` if `id` names no resident child (`id` is the cluster root —
+    /// the instance itself, whose parent is cross-cluster — or a stray
+    /// address). Pure registry lookup, never a fold. O(log n).
+    #[must_use]
+    pub(crate) fn parent_of(&self, id: MailboxId) -> Option<MailboxId> {
+        // SAFETY: see [`Self::insert_child`].
+        let map = unsafe { &*self.inner.get() };
+        map.get(&id).map(|slot| MailboxId(slot.parent))
+    }
+
+    /// The inline child of `parent` whose resolved subname is `subname`, or
+    /// `None` if no resident child matches. A child's id is recorded at
+    /// spawn time, so this is a scan over resident children for one whose
+    /// `(parent, full_subname)` matches — pure lookup, never a fold. The
+    /// resident child count is small (a cluster's widget set), so the linear
+    /// scan is cheap.
+    #[must_use]
+    pub(crate) fn child_of(&self, parent: MailboxId, subname: &str) -> Option<MailboxId> {
+        // SAFETY: see [`Self::insert_child`].
+        let map = unsafe { &*self.inner.get() };
+        map.iter()
+            .find(|(_, slot)| slot.parent == parent.0 && slot.full_subname == subname)
+            .map(|(key, _)| *key)
+    }
+
+    /// The sibling of the inline child registered under `id` whose resolved
+    /// subname is `subname` — the child of `id`'s parent named `subname`.
+    /// `None` if `id` has no recorded parent or no such sibling resides.
+    /// Pure registry lookup, never a fold.
+    #[must_use]
+    pub(crate) fn sibling_of(&self, id: MailboxId, subname: &str) -> Option<MailboxId> {
+        let parent = self.parent_of(id)?;
+        self.child_of(parent, subname)
+    }
+
+    /// Whether `recipient` is a member of this cluster (the instance's real
+    /// `self_id`, or a resident inline-child alias). The pure membership
+    /// decision behind [`Self::route_or_enqueue`], split out so the
+    /// local-vs-host routing is unit-testable without a live `MAIL_BRIDGE`.
+    #[must_use]
+    pub(crate) fn route_decision(&self, recipient: u64) -> RouteDecision {
+        if recipient == self.self_id.get() {
+            return RouteDecision::Local;
+        }
+        // SAFETY: see [`Self::insert_child`].
+        let map = unsafe { &*self.inner.get() };
+        if map.contains_key(&MailboxId(recipient)) {
+            RouteDecision::Local
+        } else {
+            RouteDecision::Remote
+        }
+    }
+
+    /// Route an outbound send. If `recipient` is a cluster member (the
+    /// instance itself or a resident inline child) the send is pushed to
+    /// the cluster-local queue for in-place dispatch by
+    /// [`drain_cluster_queue`]; otherwise it goes to the host
+    /// (`MAIL_BRIDGE.send_mail`) like any cross-cluster send. `detached`
+    /// rides through to the host on the remote path (the lineage signal,
+    /// ADR-0080 §7); an in-place dispatch carries no host trace ids, so the
+    /// flag is irrelevant on the local path.
+    pub(crate) fn route_or_enqueue(
+        &self,
+        recipient: u64,
+        kind: u64,
+        bytes: &[u8],
+        count: u32,
+        detached: bool,
+    ) {
+        match self.route_decision(recipient) {
+            RouteDecision::Local => {
+                // SAFETY: see [`Self::insert_child`] — the queue borrow is
+                // taken fresh and released before return, never spanning a
+                // dispatch (the drain re-borrows per item).
+                let queue = unsafe { &mut *self.queue.get() };
+                queue.push_back(QueuedMail {
+                    recipient,
+                    kind,
+                    bytes: bytes.to_vec(),
+                    count,
+                });
+            }
+            RouteDecision::Remote => {
+                mail::send_mail(recipient, kind, bytes, count, detached);
+            }
+        }
+    }
+
+    /// Pop the next buffered intra-cluster send, or `None` when the queue is
+    /// drained. Backs [`drain_cluster_queue`]; each popped item is
+    /// dispatched through the membrane before the next pop, so an item whose
+    /// dispatch enqueues more work drains in the same loop.
+    fn pop_queued(&self) -> Option<QueuedMail> {
+        // SAFETY: see [`Self::insert_child`] — borrow taken fresh, released
+        // before return.
+        let queue = unsafe { &mut *self.queue.get() };
+        queue.pop_front()
+    }
+
+    /// The number of buffered intra-cluster sends currently on the queue.
+    /// Crate-internal test observability for the local-routing path (the
+    /// `queue` field itself is private).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn queued_len(&self) -> usize {
+        // SAFETY: see [`Self::insert_child`] — borrow taken fresh, released
+        // before return.
+        let queue = unsafe { &*self.queue.get() };
+        queue.len()
+    }
 }
 
 impl Default for InlineRegistry {
@@ -281,9 +497,56 @@ where
     }
 }
 
+/// Drain the cluster-local queue (ADR-0114 addressing amendment): dispatch
+/// every buffered intra-cluster send in place through the membrane until the
+/// queue empties, so a child → parent → sibling cascade settles inside one
+/// `receive_p32` call under one run-token — zero scheduler hops.
+///
+/// `self_id` is the cluster's real folded id (the membrane's own-recipient
+/// discriminator). `dispatch_own` is re-evaluated per item by the caller —
+/// the `receive_p32` shim acquires `__AETHER_COMPONENT.get_mut()` fresh
+/// inside the closure for each item, so no two `&mut` instance borrows ever
+/// overlap (the borrow-aliasing the #1945 bounce proved). `mk_own` is that
+/// per-item factory: it is called once per drained item to build a fresh
+/// `dispatch_own` closure, and the resulting closure is handed straight to
+/// [`membrane_dispatch`] and dropped before the next iteration.
+///
+/// Reentrancy and cycles are handled by the queue, not by nested dispatch:
+/// a drained item's handler that sends to a busy cluster member just pushes
+/// a later queue item, which this same loop picks up.
+pub fn drain_cluster_queue<MakeOwn, Own>(registry: &InlineRegistry, mut mk_own: MakeOwn)
+where
+    MakeOwn: FnMut() -> Own,
+    Own: FnOnce(Mail<'_>) -> u32,
+{
+    let self_id = registry.self_id();
+    while let Some(item) = registry.pop_queued() {
+        // Keep the owned bytes alive for the duration of this item's
+        // dispatch; the `Mail` borrows them by raw pointer + length.
+        let bytes = item.bytes;
+        // SAFETY: `bytes` lives for the rest of this loop iteration, longer
+        // than the `Mail` built from its pointer; `Mail::__from_ptr` bounds
+        // the slice to `bytes.len()`. A queued intra-cluster send carries no
+        // reply handle (the local fast path is fire-and-forget), so
+        // `NO_REPLY_HANDLE` is the correct sender.
+        let mail = unsafe {
+            Mail::__from_ptr(
+                item.kind,
+                bytes.as_ptr() as usize,
+                bytes.len().try_into().unwrap_or(u32::MAX),
+                item.count,
+                NO_REPLY_HANDLE,
+                item.recipient,
+            )
+        };
+        let dispatch_own = mk_own();
+        membrane_dispatch(self_id, mail, registry, dispatch_own);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{InlineRegistry, membrane_dispatch};
+    use super::{InlineRegistry, RouteDecision, drain_cluster_queue, membrane_dispatch};
     use crate::FfiCtx;
     use crate::ffi::ErasedFfiActor;
     use crate::mail::{Mail, PriorState};
@@ -291,7 +554,8 @@ mod tests {
     use alloc::boxed::Box;
     use alloc::rc::Rc;
     use alloc::string::String;
-    use core::cell::Cell;
+    use alloc::vec::Vec;
+    use core::cell::{Cell, RefCell};
 
     /// Distinct return codes so an assertion can tell which dispatch path
     /// the membrane took.
@@ -406,6 +670,7 @@ mod tests {
             0,
             String::from("widget"),
             false,
+            0,
             Box::new(RecordingChild::new().0),
         );
         let taken = registry
@@ -435,6 +700,7 @@ mod tests {
             tag,
             String::from("widget"),
             false,
+            0,
             Box::new(RecordingChild::new().0),
         );
 
@@ -473,6 +739,7 @@ mod tests {
             0,
             String::from("widget"),
             false,
+            0,
             Box::new(recording),
         );
 
@@ -520,6 +787,7 @@ mod tests {
             0,
             String::from("widget"),
             false,
+            0,
             Box::new(RecordingChild::new().0),
         );
         assert!(
@@ -555,6 +823,7 @@ mod tests {
             0,
             String::from("widget"),
             false,
+            0,
             Box::new(SelfDespawningChild {
                 id: MailboxId(child),
                 drops: Rc::clone(&drops),
@@ -578,6 +847,260 @@ mod tests {
         assert_eq!(
             rc2, OWN_CODE,
             "the torn-down alias falls through to the parent",
+        );
+    }
+
+    /// Install a recording child under `id` with `parent`, returning the
+    /// shared dispatch counter. Shared helper for the addressing /
+    /// route / drain tests below.
+    fn install_recording(registry: &InlineRegistry, id: u64, parent: u64) -> Rc<Cell<u32>> {
+        let (recording, dispatches) = RecordingChild::new();
+        registry.insert_child(
+            MailboxId(id),
+            0,
+            String::from("recording"),
+            false,
+            parent,
+            Box::new(recording),
+        );
+        dispatches
+    }
+
+    /// Addressing amendment: parent / child / sibling resolve by registry
+    /// lookup over the recorded logical tree, and a missing relative is a
+    /// clean `None` — never a fold.
+    #[test]
+    fn relative_resolution_walks_recorded_parent_links() {
+        let registry = InlineRegistry::new();
+        let root = 0x1000_u64;
+        registry.set_self_id(root);
+
+        // Two children of the root with distinct subnames, plus a grandchild
+        // of the first child.
+        let bar = MailboxId(0x1001);
+        let baz = MailboxId(0x1002);
+        let button = MailboxId(0x1003);
+        registry.insert_child(
+            bar,
+            0,
+            String::from("bar"),
+            false,
+            root,
+            Box::new(RecordingChild::new().0),
+        );
+        registry.insert_child(
+            baz,
+            0,
+            String::from("baz"),
+            false,
+            root,
+            Box::new(RecordingChild::new().0),
+        );
+        registry.insert_child(
+            button,
+            0,
+            String::from("button"),
+            false,
+            bar.0,
+            Box::new(RecordingChild::new().0),
+        );
+
+        // parent_of: bar's parent is the root; the root itself has no slot,
+        // so parent_of(root) is None (its parent is cross-cluster).
+        assert_eq!(registry.parent_of(bar), Some(MailboxId(root)));
+        assert_eq!(registry.parent_of(button), Some(bar));
+        assert_eq!(
+            registry.parent_of(MailboxId(root)),
+            None,
+            "the cluster root has no registry parent (its parent is cross-cluster)",
+        );
+        assert_eq!(
+            registry.parent_of(MailboxId(0xDEAD)),
+            None,
+            "a stray id resolves to no parent",
+        );
+
+        // child_of: the root's child named "bar"/"baz"; bar's child "button".
+        assert_eq!(registry.child_of(MailboxId(root), "bar"), Some(bar));
+        assert_eq!(registry.child_of(MailboxId(root), "baz"), Some(baz));
+        assert_eq!(registry.child_of(bar, "button"), Some(button));
+        assert_eq!(
+            registry.child_of(MailboxId(root), "missing"),
+            None,
+            "no child named 'missing' resides",
+        );
+        assert_eq!(
+            registry.child_of(MailboxId(root), "button"),
+            None,
+            "'button' is bar's child, not the root's — scoping is by parent",
+        );
+
+        // sibling_of: bar and baz are siblings under the root.
+        assert_eq!(registry.sibling_of(bar, "baz"), Some(baz));
+        assert_eq!(registry.sibling_of(baz, "bar"), Some(bar));
+        assert_eq!(
+            registry.sibling_of(button, "bar"),
+            None,
+            "button's parent (bar) has no child named 'bar'",
+        );
+    }
+
+    /// Addressing amendment: `route_decision` classifies the cluster's own
+    /// id and any resident inline-child alias as `Local` (in-place dispatch)
+    /// and any other recipient as `Remote` (host hand-off) — the pure
+    /// membership decision behind `route_or_enqueue`, testable without a
+    /// live `MAIL_BRIDGE`.
+    #[test]
+    fn route_decision_classifies_cluster_membership() {
+        let registry = InlineRegistry::new();
+        let root = 0x2000_u64;
+        let child = 0x2001_u64;
+        registry.set_self_id(root);
+        install_recording(&registry, child, root);
+
+        assert_eq!(
+            registry.route_decision(root),
+            RouteDecision::Local,
+            "the cluster's own id is local",
+        );
+        assert_eq!(
+            registry.route_decision(child),
+            RouteDecision::Local,
+            "a resident inline-child alias is local",
+        );
+        assert_eq!(
+            registry.route_decision(0x9999),
+            RouteDecision::Remote,
+            "a non-member recipient is remote (host hand-off)",
+        );
+    }
+
+    /// Addressing amendment: `route_or_enqueue` to a cluster member pushes to
+    /// the local queue and makes no host call (the host stub would panic).
+    /// The queue grows by one per local send.
+    #[test]
+    fn route_or_enqueue_buffers_local_sends() {
+        let registry = InlineRegistry::new();
+        let root = 0x3000_u64;
+        let child = 0x3001_u64;
+        registry.set_self_id(root);
+        install_recording(&registry, child, root);
+
+        assert_eq!(registry.queued_len(), 0, "the queue starts empty");
+        registry.route_or_enqueue(root, 7, &[1, 2, 3], 1, false);
+        assert_eq!(
+            registry.queued_len(),
+            1,
+            "an own-id send enqueues locally, no host call",
+        );
+        registry.route_or_enqueue(child, 8, &[4], 1, false);
+        assert_eq!(
+            registry.queued_len(),
+            2,
+            "a child-alias send enqueues locally too",
+        );
+    }
+
+    /// Addressing amendment: a seeded local item drains through the membrane
+    /// (dispatched once) and the queue empties in one `drain_cluster_queue`
+    /// call.
+    #[test]
+    fn drain_dispatches_a_seeded_local_item() {
+        let registry = InlineRegistry::new();
+        let root = 0x4000_u64;
+        let child = 0x4001_u64;
+        registry.set_self_id(root);
+        let dispatches = install_recording(&registry, child, root);
+
+        // Seed one local send addressed to the child.
+        registry.route_or_enqueue(child, 1, &[0xAB], 1, false);
+
+        let own_dispatches = Rc::new(Cell::new(0));
+        let own_counter = Rc::clone(&own_dispatches);
+        drain_cluster_queue(&registry, || {
+            let own_counter = Rc::clone(&own_counter);
+            move |_mail| {
+                own_counter.set(own_counter.get() + 1);
+                OWN_CODE
+            }
+        });
+
+        assert_eq!(
+            dispatches.get(),
+            1,
+            "the child-addressed item dispatched the child once",
+        );
+        assert_eq!(
+            own_dispatches.get(),
+            0,
+            "a child-addressed item never ran the parent dispatch",
+        );
+        assert_eq!(
+            registry.queued_len(),
+            0,
+            "the queue is empty after the drain",
+        );
+    }
+
+    /// Addressing amendment: a cascade — a drained item whose dispatch
+    /// enqueues another local item — drains fully in one
+    /// `drain_cluster_queue` call (the queue, not nested dispatch, carries
+    /// the cascade). Here the parent dispatch enqueues a follow-up to the
+    /// child the first time it runs.
+    #[test]
+    fn drain_runs_a_cascade_in_one_call() {
+        let registry = InlineRegistry::new();
+        let root = 0x5000_u64;
+        let child = 0x5001_u64;
+        registry.set_self_id(root);
+        let child_dispatches = install_recording(&registry, child, root);
+
+        // Seed one own-addressed item; the parent dispatch, on its first
+        // run, enqueues a follow-up addressed to the child.
+        registry.route_or_enqueue(root, 1, &[0x01], 1, false);
+
+        // Record the order dispatches happened in, to prove a single drain
+        // loop carried both the seed and the cascaded follow-up.
+        let order: Rc<RefCell<Vec<&'static str>>> = Rc::new(RefCell::new(Vec::new()));
+        let own_ran = Rc::new(Cell::new(false));
+
+        let order_for_own = Rc::clone(&order);
+        let own_ran_inner = Rc::clone(&own_ran);
+        let registry_ref = &registry;
+        drain_cluster_queue(&registry, || {
+            let order_for_own = Rc::clone(&order_for_own);
+            let own_ran_inner = Rc::clone(&own_ran_inner);
+            move |mail| {
+                // Only the own-addressed seed lands in `dispatch_own`; a
+                // child-addressed item is demuxed to the child by the
+                // membrane before this closure runs.
+                if mail.recipient().0 == root {
+                    order_for_own.borrow_mut().push("own");
+                    if !own_ran_inner.get() {
+                        own_ran_inner.set(true);
+                        // Cascade: enqueue a follow-up to the child mid-drain.
+                        registry_ref.route_or_enqueue(child, 2, &[0x02], 1, false);
+                    }
+                }
+                OWN_CODE
+            }
+        });
+
+        assert!(own_ran.get(), "the seeded own item dispatched");
+        assert_eq!(
+            child_dispatches.get(),
+            1,
+            "the cascaded follow-up reached the child in the same drain call",
+        );
+        assert_eq!(
+            order.borrow().as_slice(),
+            ["own"],
+            "exactly one own dispatch ran (the seed); the cascade went to the child",
+        );
+        assert_eq!(
+            registry.queued_len(),
+            0,
+            "the cascade drained fully — queue empty",
         );
     }
 }
