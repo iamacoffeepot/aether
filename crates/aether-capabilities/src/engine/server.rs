@@ -59,7 +59,10 @@ mod server_native {
         TerminateEngine, UploadBinary,
     };
     use crate::engine::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams};
-    use crate::store::{ArtifactKind, ArtifactStore, Selector, StoredArtifact};
+    use crate::store::{
+        ArtifactKind, ArtifactStore, DEFAULT_DISK_BUDGET_BYTES, LAYOUT_VERSION_DIR, Selector,
+        StoredArtifact,
+    };
     use aether_actor::actor;
     use aether_data::{EngineId, Kind, MailboxId, Uuid};
     use aether_kinds::{
@@ -74,6 +77,7 @@ mod server_native {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::{Source, SourceAddr};
     use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::collections::VecDeque;
     use std::convert::Infallible;
     use std::env;
@@ -92,16 +96,6 @@ mod server_native {
     /// is resolvable.
     const ENV_ENGINE_STORE_ROOT: &str = "AETHER_ENGINE_STORE_ROOT";
 
-    /// Env var the hub reads at [`EngineServer::init`] to bootstrap its
-    /// content-addressed binary store (ADR-0115, issue 1954): an
-    /// OS-path-list (`std::env::split_paths`) of chassis binaries to ingest
-    /// at boot, so a `default` / `name` selector resolves in a fresh or
-    /// `restart-hub`'d hub without a manual `upload_binary`.
-    /// `ensure-tunnel.sh` exports it to the freshly-built chassis bins.
-    /// Idempotent — content dedup means a re-ingest of identical bytes is a
-    /// no-op.
-    const ENV_BINARY_BOOTSTRAP: &str = "AETHER_BINARY_BOOTSTRAP";
-
     /// The chassis a `default` selector (an empty [`BinarySelector::query`]
     /// with no attribute filters) resolves to (ADR-0115): `headless` has no
     /// window and runs on any host, so a bare spawn is self-sufficient.
@@ -114,10 +108,12 @@ mod server_native {
     /// dead. Small N tolerates a transient hiccup / GC pause.
     const DEFAULT_HEARTBEAT_MISS_LIMIT: u32 = 3;
 
-    /// Resolved engines-cap configuration (ADR-0090, issue 1339).
-    /// Today this is just the liveness-heartbeat tuning; the inline
-    /// `AETHER_ENGINE_STORE_ROOT` reader (`engine_store_root`) is a
-    /// pre-ADR-0090 holdover left to a separate migration.
+    /// Resolved engines-cap configuration (ADR-0090, issue 1339): the
+    /// liveness-heartbeat tuning plus the hub binary store's layout dir,
+    /// disk budget, and bootstrap list (ADR-0115, #1954 — these last three
+    /// moved onto the config off their pre-ADR-0090 naked `env::var`
+    /// readers). The inline `AETHER_ENGINE_STORE_ROOT` reader
+    /// (`engine_store_root`) is a separate, still-inline knob.
     ///
     /// `#[derive(aether_substrate::Config)]` emits the env-shaped
     /// `EngineConfigLayer`, the clap-shaped `EngineOverlay`, and the
@@ -125,12 +121,16 @@ mod server_native {
     /// beats the literal default). The hub chassis resolves it with
     /// `EngineConfig::from_argv_then_env(cli.engine.into_layer())` and
     /// hands it to `with_actor::<EngineServer>(cfg)`; tests build it
-    /// directly. `env_prefix = "AETHER_HUB"` + the `heartbeat_*` field
-    /// names compose the `AETHER_HUB_HEARTBEAT_*` env keys and
-    /// `--hub-heartbeat-*` flags. `Default` (the test constructor)
-    /// resolves to `0/0` = heartbeat-disabled; production picks up the
-    /// `default = 5/3` literals through the layer.
-    #[derive(Clone, Debug, Default, aether_substrate::Config)]
+    /// directly. `env_prefix = "AETHER_HUB"` + the `heartbeat_*` /
+    /// `binary_disk_budget_bytes` field names compose the
+    /// `AETHER_HUB_HEARTBEAT_*` / `AETHER_HUB_BINARY_DISK_BUDGET_BYTES`
+    /// env keys and `--hub-*` flags; `binary_store_dir` / `binary_bootstrap`
+    /// pin the unprefixed `AETHER_BINARY_STORE_DIR` / `AETHER_BINARY_BOOTSTRAP`
+    /// keys via per-field `env` overrides. `Default` (the test constructor)
+    /// resolves the heartbeat to `0/0` (disabled) and the store fields to
+    /// unset / `16 GiB`; production picks up the `default = 5/3` / `16 GiB`
+    /// literals and the env layers through `from_argv_then_env`.
+    #[derive(Clone, Debug, aether_substrate::Config)]
     #[config(env_prefix = "AETHER_HUB", cli_prefix = "hub")]
     pub struct EngineConfig {
         /// Heartbeat ping cadence in seconds
@@ -147,6 +147,56 @@ mod server_native {
         /// `miss_limit × interval_secs`.
         #[config(default = 3, parse = parse_heartbeat_miss_limit)]
         pub heartbeat_miss_limit: u32,
+        /// Layout-root override for the hub's content-addressed binary
+        /// store (`AETHER_BINARY_STORE_DIR`, unprefixed — the ops escape
+        /// hatch and the fleet tests' per-process isolation knob). Unset
+        /// (`None`) → the computed default `data_dir/aether/binaries/v1`
+        /// (`ArtifactStore::default_root`). A bare `Option<String>` (not a
+        /// `PathBuf`) keeps that runtime-computed default in `init`, so
+        /// `EngineConfig` needs no `skip_from_layer`; `EngineServer::init`
+        /// joins the store's layout-version dir to a set override.
+        #[config(env = "AETHER_BINARY_STORE_DIR")]
+        pub binary_store_dir: Option<String>,
+        /// On-disk byte budget for the binary store
+        /// (`AETHER_HUB_BINARY_DISK_BUDGET_BYTES`, derived from the
+        /// `AETHER_HUB` prefix / `--hub-binary-disk-budget-bytes`). Default
+        /// 16 GiB (`DEFAULT_DISK_BUDGET_BYTES`); LRU eviction over unpinned,
+        /// unnamed entries holds it.
+        #[config(default = 17_179_869_184u64, parse = parse_binary_disk_budget)]
+        pub binary_disk_budget_bytes: u64,
+        /// Chassis bins to bootstrap-ingest at init so a `default` / `name`
+        /// selector resolves in a fresh or `restart-hub`'d hub
+        /// (`AETHER_BINARY_BOOTSTRAP`, unprefixed, comma-separated). Each is
+        /// ingested content-addressed and named by its file stem;
+        /// idempotent via content dedup. `ensure-tunnel.sh` exports the
+        /// freshly-built chassis bins here.
+        #[config(
+            env = "AETHER_BINARY_BOOTSTRAP",
+            default = [],
+            parse = parse_binary_bootstrap,
+            csv_set
+        )]
+        pub binary_bootstrap: HashSet<String>,
+    }
+
+    impl Default for EngineConfig {
+        /// The test constructor: heartbeat disabled (`0/0`) but a real
+        /// `DEFAULT_DISK_BUDGET_BYTES` budget — `0` is inert for the
+        /// heartbeat (no pinging) yet destructive for the store (it would
+        /// evict every unnamed upload), so the budget can't share the
+        /// heartbeat's zero. Store dir unset (the computed default) and an
+        /// empty bootstrap. Production resolves all five through the layer
+        /// (`from_argv_then_env`); this matches the prior `from_env()`
+        /// store budget every `EngineConfig::default()` consumer saw.
+        fn default() -> Self {
+            Self {
+                heartbeat_interval_secs: 0,
+                heartbeat_miss_limit: 0,
+                binary_store_dir: None,
+                binary_disk_budget_bytes: DEFAULT_DISK_BUDGET_BYTES,
+                binary_bootstrap: HashSet::new(),
+            }
+        }
     }
 
     impl EngineConfig {
@@ -180,6 +230,25 @@ mod server_native {
     #[allow(clippy::unnecessary_wraps)]
     fn parse_heartbeat_miss_limit(s: &str) -> Result<u32, Infallible> {
         Ok(s.trim().parse().unwrap_or(DEFAULT_HEARTBEAT_MISS_LIMIT))
+    }
+
+    /// Parse the binary-store disk budget; unparseable → the default
+    /// `DEFAULT_DISK_BUDGET_BYTES` (mirrors the heartbeat parsers).
+    #[allow(clippy::unnecessary_wraps)]
+    fn parse_binary_disk_budget(s: &str) -> Result<u64, Infallible> {
+        Ok(s.trim().parse().unwrap_or(DEFAULT_DISK_BUDGET_BYTES))
+    }
+
+    /// Split a comma-separated bootstrap path list, trimming and dropping
+    /// empties (mirrors the http allowlist's `parse_allowlist`). Total —
+    /// never errors.
+    #[allow(clippy::unnecessary_wraps)]
+    fn parse_binary_bootstrap(s: &str) -> Result<HashSet<String>, Infallible> {
+        Ok(s.split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect())
     }
 
     /// How many recently-died engines [`EngineServer`] retains for
@@ -242,10 +311,11 @@ mod server_native {
         /// Hub-scoped content-addressed binary store (ADR-0115, issue
         /// 1953) — the storage half of the artifact registry.
         /// `on_upload_binary` ingests a staged binary content-addressed;
-        /// `on_list_binaries` enumerates the stored entries. Built
-        /// `from_env` at init so it persists across a `restart-hub` (the
-        /// layout root outlives the hub child); the spawn cutover (#1954)
-        /// reads it back through the store's `get` seam.
+        /// `on_list_binaries` enumerates the stored entries. Built from
+        /// `EngineConfig` (the layout dir + disk budget) at init so it
+        /// persists across a `restart-hub` (the layout root outlives the
+        /// hub child); the spawn cutover (#1954) reads it back through the
+        /// store's `get` seam.
         store: ArtifactStore,
     }
 
@@ -255,11 +325,23 @@ mod server_native {
         const NAMESPACE: &'static str = "aether.engine";
 
         fn init(config: EngineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            // Build the hub-scoped store, then bootstrap-ingest the chassis
-            // bins named in `AETHER_BINARY_BOOTSTRAP` so `default` / `name`
-            // resolve in a fresh or `restart-hub`'d hub (ADR-0115, #1954).
-            let mut store = ArtifactStore::from_env();
-            bootstrap_ingest(&mut store);
+            // Build the hub-scoped store from `EngineConfig` (ADR-0090): the
+            // layout-dir override + disk budget ride config fields (their
+            // `AETHER_BINARY_*` env keys are the config env layer), then
+            // bootstrap-ingest the chassis bins in `binary_bootstrap` so
+            // `default` / `name` resolve in a fresh or `restart-hub`'d hub
+            // (ADR-0115, #1954). An unset store dir falls back to the
+            // computed default; a set one gets the layout-version dir joined
+            // (matching the prior `AETHER_BINARY_STORE_DIR` reader).
+            let store_dir = config
+                .binary_store_dir
+                .as_deref()
+                .filter(|d| !d.is_empty())
+                .map_or_else(ArtifactStore::default_root, |dir| {
+                    PathBuf::from(dir).join(LAYOUT_VERSION_DIR)
+                });
+            let mut store = ArtifactStore::open(&store_dir, config.binary_disk_budget_bytes);
+            bootstrap_ingest(&mut store, &config.binary_bootstrap);
             Ok(Self {
                 engines: HashMap::new(),
                 next_engine_seq: 1,
@@ -710,34 +792,29 @@ mod server_native {
         Ok(store.upload(&bytes, ArtifactKind::Binary, manifest, name))
     }
 
-    /// Bootstrap-ingest the chassis bins named in `AETHER_BINARY_BOOTSTRAP`
-    /// (an OS path list) into `store`, naming each by its file stem so a
-    /// `default` / `name` selector resolves in a fresh or `restart-hub`'d
-    /// hub (ADR-0115, issue 1954). A path that can't be read or
-    /// `--describe`d is logged and skipped — a bad bootstrap entry must not
-    /// fail hub boot. Idempotent via content dedup.
-    pub(super) fn bootstrap_ingest(store: &mut ArtifactStore) {
-        let Ok(raw) = env::var(ENV_BINARY_BOOTSTRAP) else {
-            return;
-        };
-        for path in env::split_paths(&raw) {
-            let Some(path_str) = path.to_str() else {
-                continue;
-            };
-            let name = path
+    /// Bootstrap-ingest each chassis bin in `paths` into `store`, naming
+    /// each by its file stem so a `default` / `name` selector resolves in a
+    /// fresh or `restart-hub`'d hub (ADR-0115, issue 1954). The list rides
+    /// `EngineConfig`'s `binary_bootstrap` field (its `AETHER_BINARY_BOOTSTRAP`
+    /// env layer, ADR-0090). A path that can't be read or `--describe`d is
+    /// logged and skipped — a bad bootstrap entry must not fail hub boot.
+    /// Idempotent via content dedup.
+    pub(super) fn bootstrap_ingest(store: &mut ArtifactStore, paths: &HashSet<String>) {
+        for path_str in paths {
+            let name = Path::new(path_str)
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .map(str::to_owned);
             match ingest_binary(store, path_str, name) {
                 Ok(hash) => tracing::info!(
                     target: "aether_substrate::engine_server",
-                    path = path_str,
+                    path = path_str.as_str(),
                     hash = %hash,
                     "binary bootstrap: ingested a chassis bin",
                 ),
                 Err(error) => tracing::warn!(
                     target: "aether_substrate::engine_server",
-                    path = path_str,
+                    path = path_str.as_str(),
                     error = %error,
                     "binary bootstrap: skipping a bin that failed to ingest",
                 ),
@@ -960,7 +1037,6 @@ mod tests {
     // for fixture wiring — reference id derivation, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
     use super::{EngineConfig, EngineServer, ReplyCells, ReplySink};
-    use crate::store::ENV_BINARY_STORE_DIR;
     use crate::test_chassis::TestChassis;
     use aether_actor::Actor;
     use aether_data::{Kind, mailbox_id_from_name};
@@ -983,7 +1059,6 @@ mod tests {
     /// Returns the chassis (kept alive for its dispatcher threads), the
     /// mailer to push requests through, and the sink's cells.
     fn boot() -> (PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
-        isolate_binary_store();
         let registry = Arc::new(Registry::new());
         for d in descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
@@ -992,29 +1067,34 @@ mod tests {
         let store = Arc::new(HandleStore::new(1024 * 1024));
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
         let cells = ReplyCells::default();
+        // Point the cap's binary store (ADR-0115) at a per-call temp dir via
+        // the ADR-0090 config field so these unit tests never touch the real
+        // `dirs::data_dir()` store. Heartbeat stays disabled (the `Default`);
+        // only the store dir is overridden.
+        let config = EngineConfig {
+            binary_store_dir: Some(isolated_store_dir()),
+            ..EngineConfig::default()
+        };
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<EngineServer>(EngineConfig::default())
+            .with_actor::<EngineServer>(config)
             .with_actor::<ReplySink>(cells.clone())
             .build_passive()
             .expect("caps boot");
         (chassis, mailer, cells)
     }
 
-    /// Point `EngineServer::init`'s `ArtifactStore::from_env` (ADR-0115) at
-    /// a per-call temp dir so the engines-cap unit tests never touch the
-    /// real `dirs::data_dir()` binary store. These tests live in
-    /// `mod heavy`, which nextest serializes (`serial-heavy`), so the
-    /// process-global env set can't race a sibling.
-    fn isolate_binary_store() {
+    /// A unique per-call temp dir for the engines-cap unit tests' binary
+    /// store (ADR-0115), threaded onto `EngineConfig`'s `binary_store_dir`
+    /// by [`boot`] so they never touch the real `dirs::data_dir()` store. No
+    /// env side-channel — the store dir now rides the config (ADR-0090).
+    fn isolated_store_dir() -> String {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
-        let dir = env::temp_dir().join(format!("aether-binstore-engcap-{}-{nanos}", process::id()));
-        // SAFETY: serialized as a heavy test; no sibling reads this var
-        // concurrently, and only `EngineServer` consumes it.
-        unsafe {
-            env::set_var(ENV_BINARY_STORE_DIR, &dir);
-        }
+        env::temp_dir()
+            .join(format!("aether-binstore-engcap-{}-{nanos}", process::id()))
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// Drive one request kind at `aether.engine`, reply-to the sink,
@@ -1119,16 +1199,17 @@ mod tests {
             }
         }
 
-        /// Bootstrap-ingest a stand-in headless binary through
-        /// `AETHER_BINARY_BOOTSTRAP`, then resolve the `default` selector
-        /// (empty `query`, no attribute filters) to it — the bare-spawn
-        /// path a fresh hub serves (ADR-0115, #1954). Heavy: it sets a
-        /// process-global env var and forks `<stand-in> --describe`.
+        /// Bootstrap-ingest a stand-in headless binary (passed directly as
+        /// the bootstrap list), then resolve the `default` selector (empty
+        /// `query`, no attribute filters) to it — the bare-spawn path a
+        /// fresh hub serves (ADR-0115, #1954). Heavy: it forks
+        /// `<stand-in> --describe`.
         #[cfg(unix)]
         #[test]
         fn bootstrap_populates_and_default_resolves_to_headless() {
             use super::super::server_native::{bootstrap_ingest, resolve_selector};
             use crate::store::{ArtifactStore, DEFAULT_DISK_BUDGET_BYTES};
+            use std::collections::HashSet;
             use std::fs;
             use std::os::unix::fs::PermissionsExt;
 
@@ -1154,15 +1235,9 @@ mod tests {
             fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755))
                 .expect("test setup: chmod stand-in");
 
-            // SAFETY: serialized as a heavy test; no sibling reads
-            // AETHER_BINARY_BOOTSTRAP concurrently, and only the bootstrap
-            // path consumes it. Key mirrors `ENV_BINARY_BOOTSTRAP`.
-            unsafe {
-                env::set_var("AETHER_BINARY_BOOTSTRAP", &stand_in);
-            }
-
             let mut store = ArtifactStore::open(&dir.join("store"), DEFAULT_DISK_BUDGET_BYTES);
-            bootstrap_ingest(&mut store);
+            let bootstrap = HashSet::from([stand_in.to_string_lossy().into_owned()]);
+            bootstrap_ingest(&mut store, &bootstrap);
 
             let resolved = resolve_selector(
                 &mut store,
@@ -1179,11 +1254,6 @@ mod tests {
                 "default resolves to the headless chassis",
             );
 
-            // SAFETY: same heavy-test serialization; restore the global so
-            // a sibling heavy test's `boot()` bootstrap sees it unset.
-            unsafe {
-                env::remove_var("AETHER_BINARY_BOOTSTRAP");
-            }
             let _ = fs::remove_dir_all(&dir);
         }
 

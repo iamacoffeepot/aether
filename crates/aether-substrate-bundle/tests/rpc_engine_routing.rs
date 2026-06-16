@@ -40,6 +40,7 @@ use aether_substrate::handle_store::HandleStore;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
+use std::collections::HashSet;
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -59,7 +60,7 @@ impl Chassis for TestChassis {
 /// (engine-addressed Calls route through `aether.engine`), the engines
 /// cap, and `TraceDispatchCapability` so the `RpcServer`'s local Calls
 /// (`spawn`, `terminate`) settle and close.
-fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
+fn boot_hub(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
         let _ = registry.register_kind_with_descriptor(d);
@@ -69,7 +70,7 @@ fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<EngineServer>(EngineConfig::default())
+        .with_actor::<EngineServer>(engine_config)
         .with_actor::<RpcServerCapability>(RpcServerConfig {
             bind_addr: "127.0.0.1:0".into(),
             peer_kind: PeerKind::Substrate {
@@ -157,8 +158,8 @@ mod tests {
         fn hub_routes_engine_addressed_calls_to_a_real_substrate() {
             let headless = env!("CARGO_BIN_EXE_aether-substrate-headless");
             // Bootstrap an isolated binary store so the hub resolves a
-            // `default` selector to the headless bin (ADR-0115, #1954). Set
-            // before boot_hub() — `EngineServer::init` reads the bootstrap env.
+            // `default` selector to the headless bin (ADR-0115, #1954) —
+            // threaded onto the engines-cap config below.
             let nanos = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos());
@@ -166,14 +167,16 @@ mod tests {
                 "aether-rpcroute-binstore-{}-{nanos}",
                 process::id()
             ));
-            // SAFETY: nextest runs each test in its own process, so this env
-            // set can't race a sibling.
-            unsafe {
-                env::set_var("AETHER_BINARY_STORE_DIR", &bin_store);
-                env::set_var("AETHER_BINARY_BOOTSTRAP", headless);
-            }
+            // The store dir / bootstrap list ride `EngineConfig` (ADR-0090)
+            // instead of the env side-channel; the heartbeat stays disabled
+            // (the `Default`).
+            let engine_config = EngineConfig {
+                binary_store_dir: Some(bin_store.to_string_lossy().into_owned()),
+                binary_bootstrap: HashSet::from([headless.to_owned()]),
+                ..EngineConfig::default()
+            };
 
-            let (_chassis, hub_port) = boot_hub();
+            let (_chassis, hub_port) = boot_hub(engine_config);
 
             let mut stream =
                 TcpStream::connect(format!("127.0.0.1:{hub_port}")).expect("connect to hub");

@@ -29,6 +29,7 @@ use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
 use aether_substrate::mail::{Mail, Source, SourceAddr};
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -109,7 +110,7 @@ mod sink {
 // `ReplySink` is re-exported to this module root by the `#[bridge]`
 // macro — no explicit `use sink::ReplySink` needed.
 
-fn boot() -> (PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
+fn boot(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
         let _ = registry.register_kind_with_descriptor(d);
@@ -119,23 +120,24 @@ fn boot() -> (PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
     let cells = ReplyCells::default();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EngineServer>(EngineConfig::default())
+        .with_actor::<EngineServer>(engine_config)
         .with_actor::<ReplySink>(cells.clone())
         .build_passive()
         .expect("caps boot");
     (chassis, mailer, cells)
 }
 
-/// Isolate the hub binary store (ADR-0115) under `store_dir` and bootstrap
-/// it with the `headless` bin, so the cap resolves a `default` selector to
-/// that binary (issue 1954). Must run before [`boot`] — `EngineServer::init`
-/// reads `AETHER_BINARY_BOOTSTRAP` and forks `<headless> --describe`. nextest
-/// runs each test in its own process, so the env set can't race a sibling.
-fn isolate_and_bootstrap_store(store_dir: &Path, headless: &str) {
-    // SAFETY: per-test process; no sibling reads these vars concurrently.
-    unsafe {
-        env::set_var("AETHER_BINARY_STORE_DIR", store_dir);
-        env::set_var("AETHER_BINARY_BOOTSTRAP", headless);
+/// Build the engines-cap config that isolates the hub binary store
+/// (ADR-0115) under `store_dir` and bootstraps it with the `headless` bin,
+/// so the cap resolves a `default` selector to that binary (issue 1954).
+/// The store dir / bootstrap list ride `EngineConfig` (ADR-0090) instead of
+/// the env side-channel; the heartbeat stays disabled (the `Default`).
+/// `EngineServer::init` forks `<headless> --describe` to ingest it.
+fn bootstrap_store_config(store_dir: &Path, headless: &str) -> EngineConfig {
+    EngineConfig {
+        binary_store_dir: Some(store_dir.to_string_lossy().into_owned()),
+        binary_bootstrap: HashSet::from([headless.to_owned()]),
+        ..EngineConfig::default()
     }
 }
 
@@ -198,9 +200,8 @@ mod tests {
                 .map_or(0, |d| d.as_nanos());
             let store_dir =
                 env::temp_dir().join(format!("aether-engcap-binstore-{}-{nanos}", process::id()));
-            isolate_and_bootstrap_store(&store_dir, headless);
 
-            let (_chassis, mailer, cells) = boot();
+            let (_chassis, mailer, cells) = boot(bootstrap_store_config(&store_dir, headless));
 
             // Spawn: the cap assigns a port, forks the substrate, and the
             // proxy retries the dial until the fresh process binds. Generous
@@ -313,19 +314,18 @@ mod tests {
             // `engine_store_root()` to resolve to `root` (read in the test
             // process when `on_spawn` runs), (b) the spawned substrates to
             // NOT inherit a parent `AETHER_HANDLE_STORE_DIR` (which would win
-            // over the cap's per-engine injection), (c) persistence not
+            // over the cap's per-engine injection), and (c) persistence not
             // to be globally disabled — the lock-collision case the issue
-            // pins only fires when each substrate writes a `lock.pid` — and
-            // (d) the cap to resolve a `default` selector to the bootstrapped
-            // headless bin (ADR-0115, #1954).
+            // pins only fires when each substrate writes a `lock.pid`. The
+            // `default`-selector resolution to the bootstrapped headless bin
+            // (ADR-0115, #1954) now rides `bootstrap_store_config`, not env.
             unsafe {
                 env::set_var("AETHER_ENGINE_STORE_ROOT", &root);
                 env::remove_var("AETHER_HANDLE_STORE_DIR");
                 env::remove_var("AETHER_HANDLE_STORE_PERSIST_DISABLE");
             }
-            isolate_and_bootstrap_store(&bin_store, headless);
 
-            let (_chassis, mailer, cells) = boot();
+            let (_chassis, mailer, cells) = boot(bootstrap_store_config(&bin_store, headless));
 
             // Spawn engine A.
             let a = drive(

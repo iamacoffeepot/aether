@@ -14,8 +14,9 @@
 //!
 //! ## Layout
 //!
-//! Under a hub-scoped, layout-versioned root
-//! (`AETHER_BINARY_STORE_DIR`, default `data_dir/aether/binaries/v1`):
+//! Under a hub-scoped, layout-versioned root — the dir resolved from
+//! `EngineConfig`'s `binary_store_dir` field (the `AETHER_BINARY_STORE_DIR`
+//! env layer, ADR-0090) or the computed default `data_dir/aether/binaries/v1`:
 //!
 //! ```text
 //! <root>/
@@ -51,18 +52,15 @@ use aether_substrate::handle_store::is_pid_alive;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Env override for the store's layout root (the ops escape hatch and the
-/// per-process isolation knob the fleet tests set). Absent → the platform
-/// data dir, then a temp fallback.
-pub const ENV_BINARY_STORE_DIR: &str = "AETHER_BINARY_STORE_DIR";
-
 /// Layout-version subdirectory under the resolved root, so a future
 /// on-disk format change can land beside `v1` without a migration.
 pub const LAYOUT_VERSION_DIR: &str = "v1";
 
 /// Default on-disk byte budget. 16 GiB — matches the handle store's disk
 /// budget; binaries are tens of megabytes, so this holds a deep history
-/// before LRU eviction kicks in.
+/// before LRU eviction kicks in. `EngineConfig`'s `binary_disk_budget_bytes`
+/// carries this as its literal default (`17_179_869_184`) and folds an
+/// unparseable env value back to it.
 pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 const TARGET: &str = "aether_capabilities::store";
@@ -148,16 +146,24 @@ pub struct ArtifactStore {
 }
 
 impl ArtifactStore {
-    /// Resolve the layout root from the environment, then [`open`] it.
-    ///
-    /// Priority: `AETHER_BINARY_STORE_DIR` env override, then
-    /// `data_dir/aether/binaries`, then `temp_dir/aether-binaries`. The
-    /// [`LAYOUT_VERSION_DIR`] is always appended.
-    ///
-    /// [`open`]: Self::open
+    /// The computed default layout root for the store — `data_dir`'s
+    /// `aether/binaries/<LAYOUT_VERSION_DIR>`, or a `temp_dir` fallback
+    /// when no platform data dir resolves. No env read: the
+    /// `AETHER_BINARY_STORE_DIR` override now rides `EngineConfig`'s
+    /// `binary_store_dir` field (ADR-0090), and `EngineServer::init` joins
+    /// [`LAYOUT_VERSION_DIR`] to a configured override or falls back here
+    /// when it's unset.
     #[must_use]
-    pub fn from_env() -> Self {
-        Self::open(&root_from_env(), DEFAULT_DISK_BUDGET_BYTES)
+    pub fn default_root() -> PathBuf {
+        if let Some(data) = dirs::data_dir() {
+            return data
+                .join("aether")
+                .join("binaries")
+                .join(LAYOUT_VERSION_DIR);
+        }
+        env::temp_dir()
+            .join("aether-binaries")
+            .join(LAYOUT_VERSION_DIR)
     }
 
     /// Open (or create) the store at `root` with the given disk budget.
@@ -422,25 +428,6 @@ fn hash_hex(bytes: &[u8]) -> String {
         let _ = write!(out, "{byte:02x}");
     }
     out
-}
-
-/// Resolve the layout root from the environment (see
-/// [`ArtifactStore::from_env`]).
-fn root_from_env() -> PathBuf {
-    if let Ok(raw) = env::var(ENV_BINARY_STORE_DIR)
-        && !raw.is_empty()
-    {
-        return PathBuf::from(raw).join(LAYOUT_VERSION_DIR);
-    }
-    if let Some(data) = dirs::data_dir() {
-        return data
-            .join("aether")
-            .join("binaries")
-            .join(LAYOUT_VERSION_DIR);
-    }
-    env::temp_dir()
-        .join("aether-binaries")
-        .join(LAYOUT_VERSION_DIR)
 }
 
 /// Ensure `root/entries` exists, falling back to a unique temp dir when
