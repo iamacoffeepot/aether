@@ -10,6 +10,7 @@
 use std::fs;
 use std::io::{Error as IoError, Write as _};
 use std::path::Path;
+use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Write `bytes` to `target` atomically via a sibling temp file.
@@ -25,7 +26,7 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), IoError> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let pid = std::process::id();
+    let pid = process::id();
     let file_name = target.file_name().and_then(|n| n.to_str()).unwrap_or("tmp");
     let tmp = target.with_file_name(format!("{file_name}.tmp-{pid}-{nonce}"));
     {

@@ -12,6 +12,8 @@ use std::io::Error as IoError;
 use std::path::{Path, PathBuf};
 use std::process;
 
+use crate::atomic_write::atomic_write;
+
 /// Whether `pid` names a live process. Unix: `kill(pid, 0)` returns 0
 /// for a live process, `ESRCH` for a dead one, `EPERM` for a live one
 /// we can't signal (still counts as alive). Non-Unix: conservatively
@@ -84,7 +86,7 @@ pub fn acquire_lock_pid(path: &Path) -> LockAcquisition {
             }
         }
     }
-    match crate::atomic_write::atomic_write(path, process::id().to_string().as_bytes()) {
+    match atomic_write(path, process::id().to_string().as_bytes()) {
         Ok(()) => LockAcquisition::Acquired(LockGuard {
             path: path.to_path_buf(),
         }),
