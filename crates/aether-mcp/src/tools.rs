@@ -13,7 +13,10 @@
 //! cache populated by `load_component` / `replace_component`.
 
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
+use std::mem;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 // `tokio::sync::Mutex` (the async one used by the per-engine refresh-
@@ -21,6 +24,7 @@ use std::sync::{Arc, Mutex};
 // stays short — `std::sync::Mutex` is the bare `Mutex`.
 use tokio::sync::Mutex as AsyncMutex;
 
+use aether_codec::frame::max_frame_size;
 use aether_data::MailId;
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::{
@@ -1201,6 +1205,9 @@ impl Mcp {
         );
         let desc = self.lookup_descriptor(engine, &spec.kind_name).await?;
         let params = spec.params.unwrap_or(serde_json::Value::Null);
+        let params = resolve_bytes_params(params, &desc.schema, max_frame_size())
+            .await
+            .map_err(|e| anyhow::anyhow!("resolving blob params: {e}"))?;
         let payload = aether_codec::encode_schema(&params, &desc.schema)
             .map_err(|e| anyhow::anyhow!("param encode failed: {e}"))?;
         Ok(MailEnvelope {
@@ -1850,7 +1857,14 @@ fn decode_reply_events(
             let kind_name = descriptor.as_ref().map(|d| d.name.clone());
             let (params, payload_bytes) = descriptor
                 .as_ref()
-                .and_then(|d| aether_codec::decode_schema(&env.payload, &d.schema).ok())
+                .and_then(|d| {
+                    // Render reply `Bytes` fields back to readable text /
+                    // base64 (issue 1944): the strict decoder emits a byte
+                    // array, the MCP front projects it for the caller.
+                    aether_codec::decode_schema(&env.payload, &d.schema)
+                        .ok()
+                        .map(|v| render_bytes_reply(v, &d.schema))
+                })
                 .map_or_else(
                     // Decode miss: base64 the raw payload as the fallback
                     // (the only signal when `params` is `null`).
@@ -1994,6 +2008,11 @@ impl Mcp {
         for spec in specs {
             let desc = self.lookup_descriptor(engine, &spec.kind_name).await?;
             let params = spec.params.clone().unwrap_or(serde_json::Value::Null);
+            let params = resolve_bytes_params(params, &desc.schema, max_frame_size())
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("resolving blob params for {}: {e}", spec.kind_name)
+                })?;
             let payload = aether_codec::encode_schema(&params, &desc.schema)
                 .map_err(|e| anyhow::anyhow!("param encode failed for {}: {e}", spec.kind_name))?;
             out.push(KindMailEnvelope {
@@ -2086,6 +2105,11 @@ impl Mcp {
         for spec in specs {
             let desc = self.lookup_descriptor(engine, &spec.kind_name).await?;
             let params = spec.params.clone().unwrap_or(serde_json::Value::Null);
+            let params = resolve_bytes_params(params, &desc.schema, max_frame_size())
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("resolving blob params for {}: {e}", spec.kind_name)
+                })?;
             let payload = aether_codec::encode_schema(&params, &desc.schema)
                 .map_err(|e| anyhow::anyhow!("param encode failed for {}: {e}", spec.kind_name))?;
             out.push(aether_kinds::MailEnvelope {
@@ -2162,6 +2186,251 @@ fn frame_size_aware_error(context: &str, e: anyhow::Error) -> McpError {
         );
     }
     McpError::internal_error(text, None)
+}
+
+/// Blob-embed preprocessor (issue 1944). The wire codec is strict and
+/// canonical — a `SchemaType::Bytes` param encodes only from a JSON byte
+/// array — so the consumer-facing ergonomics live here, in the MCP front
+/// that already owns the JSON params before schema-encoding them. Walk
+/// `value` alongside `schema` and, at every `Bytes` node, resolve a
+/// `$`-sigil embed object into the canonical byte array `encode_schema`
+/// accepts. A literal `[…]` array passes straight through (back-compat);
+/// a one-key embed object expands — `{"$file": path}` reads the file on
+/// the harness host and inlines its bytes, `{"$base64": s}` decodes,
+/// `{"$text": s}` UTF-8-encodes. Any other shape at a `Bytes` node, or an
+/// unknown `$`-tag, errors. Recursion depth is bounded by the
+/// compile-time kind schema, not by user-controlled runtime data, so it
+/// mirrors `encode_schema`'s own recursive walk; only the arms that can
+/// carry a `Bytes` leaf (`Struct` / `Option` / `Vec` / `Array` / `Map`)
+/// descend, every other value passes through untouched. `max_file_bytes`
+/// is the RPC frame cap a `{"$file"}` read is guarded against; the
+/// production call sites pass `max_frame_size()`.
+fn resolve_bytes_params<'a>(
+    value: serde_json::Value,
+    schema: &'a SchemaType,
+    max_file_bytes: usize,
+) -> Pin<Box<dyn Future<Output = anyhow::Result<serde_json::Value>> + Send + 'a>> {
+    use serde_json::Value;
+    Box::pin(async move {
+        match schema {
+            SchemaType::Bytes => resolve_bytes_embed(value, max_file_bytes).await,
+            SchemaType::Option(inner) => {
+                if value.is_null() {
+                    Ok(value)
+                } else {
+                    resolve_bytes_params(value, inner, max_file_bytes).await
+                }
+            }
+            SchemaType::Vec(inner) => match value {
+                Value::Array(items) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for item in items {
+                        out.push(resolve_bytes_params(item, inner, max_file_bytes).await?);
+                    }
+                    Ok(Value::Array(out))
+                }
+                other => Ok(other),
+            },
+            SchemaType::Array { element, .. } => match value {
+                Value::Array(items) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for item in items {
+                        out.push(resolve_bytes_params(item, element, max_file_bytes).await?);
+                    }
+                    Ok(Value::Array(out))
+                }
+                other => Ok(other),
+            },
+            SchemaType::Struct { fields, .. } => match value {
+                Value::Object(mut map) => {
+                    for field in fields.iter() {
+                        if let Some(slot) = map.remove(&*field.name) {
+                            let resolved =
+                                resolve_bytes_params(slot, &field.ty, max_file_bytes).await?;
+                            map.insert(field.name.to_string(), resolved);
+                        }
+                    }
+                    Ok(Value::Object(map))
+                }
+                other => Ok(other),
+            },
+            SchemaType::Map {
+                value: value_schema,
+                ..
+            } => match value {
+                Value::Object(mut map) => {
+                    let keys: Vec<String> = map.keys().cloned().collect();
+                    for key in keys {
+                        if let Some(slot) = map.remove(&key) {
+                            let resolved =
+                                resolve_bytes_params(slot, value_schema, max_file_bytes).await?;
+                            map.insert(key, resolved);
+                        }
+                    }
+                    Ok(Value::Object(map))
+                }
+                other => Ok(other),
+            },
+            // Scalars, String, Enum, Ref, TypeId, Unit, Bool: no `Bytes`
+            // leaf is reachable through the embed grammar, so pass through.
+            _ => Ok(value),
+        }
+    })
+}
+
+/// Resolve a single `Bytes`-node value into the canonical JSON byte
+/// array (issue 1944). A literal `[…]` array passes through; a one-key
+/// `$`-sigil object expands into bytes; anything else errors. `{"$file"}`
+/// is guarded above `max_file_bytes` (the RPC frame cap) so a blob too
+/// large to ride in mail errors with a pointer to the staged-path
+/// mechanism rather than being silently inlined.
+async fn resolve_bytes_embed(
+    value: serde_json::Value,
+    max_file_bytes: usize,
+) -> anyhow::Result<serde_json::Value> {
+    use serde_json::Value;
+    let obj = match value {
+        // Canonical form — already a byte array. Back-compat passthrough.
+        Value::Array(_) => return Ok(value),
+        Value::Object(map) => map,
+        _ => anyhow::bail!(
+            "a Bytes field accepts a byte array or a single $-sigil embed \
+             ($file / $base64 / $text)"
+        ),
+    };
+    if obj.len() != 1 {
+        anyhow::bail!(
+            "a Bytes embed object must have exactly one $-sigil key \
+             ($file / $base64 / $text)"
+        );
+    }
+    let (key, body) = obj.into_iter().next().expect("len == 1");
+    let bytes: Vec<u8> = match key.as_str() {
+        "$file" => {
+            let path = body
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("$file value must be a string path"))?;
+            let bytes = fs::read(path)
+                .await
+                .map_err(|e| anyhow::anyhow!("$file: reading {path:?}: {e}"))?;
+            if bytes.len() > max_file_bytes {
+                anyhow::bail!(
+                    "$file {path:?} is {} bytes, over the {max_file_bytes}-byte RPC frame cap; a \
+                     blob this large must stage as a hub-read path (ADR-0115/0116), not inline \
+                     into mail",
+                    bytes.len()
+                );
+            }
+            bytes
+        }
+        "$base64" => {
+            let s = body
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("$base64 value must be a string"))?;
+            STANDARD
+                .decode(s)
+                .map_err(|e| anyhow::anyhow!("$base64: invalid base64: {e}"))?
+        }
+        "$text" => {
+            let s = body
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("$text value must be a string"))?;
+            s.as_bytes().to_vec()
+        }
+        other => anyhow::bail!(
+            "a Bytes field accepts a byte array or a single $-sigil embed; got {other:?} \
+             (expected $file / $base64 / $text)"
+        ),
+    };
+    Ok(Value::Array(bytes.into_iter().map(Value::from).collect()))
+}
+
+/// Reply-side mirror of [`resolve_bytes_params`] (issue 1944). The strict
+/// decoder emits a `Bytes` field as a JSON byte array; render it back to
+/// a bare string when the bytes are valid UTF-8 (the read-back-as-text
+/// ergonomic), else to `{"base64": …}`. Walks `schema` to reach a `Bytes`
+/// leaf nested in a composite, every other value untouched.
+fn render_bytes_reply(value: serde_json::Value, schema: &SchemaType) -> serde_json::Value {
+    use serde_json::Value;
+    match schema {
+        SchemaType::Bytes => render_bytes_leaf(value),
+        SchemaType::Option(inner) => {
+            if value.is_null() {
+                value
+            } else {
+                render_bytes_reply(value, inner)
+            }
+        }
+        SchemaType::Vec(inner) => match value {
+            Value::Array(items) => Value::Array(
+                items
+                    .into_iter()
+                    .map(|v| render_bytes_reply(v, inner))
+                    .collect(),
+            ),
+            other => other,
+        },
+        SchemaType::Array { element, .. } => match value {
+            Value::Array(items) => Value::Array(
+                items
+                    .into_iter()
+                    .map(|v| render_bytes_reply(v, element))
+                    .collect(),
+            ),
+            other => other,
+        },
+        SchemaType::Struct { fields, .. } => match value {
+            Value::Object(mut map) => {
+                for field in fields.iter() {
+                    if let Some(slot) = map.get_mut(&*field.name) {
+                        let taken = mem::take(slot);
+                        *slot = render_bytes_reply(taken, &field.ty);
+                    }
+                }
+                Value::Object(map)
+            }
+            other => other,
+        },
+        SchemaType::Map {
+            value: value_schema,
+            ..
+        } => match value {
+            Value::Object(mut map) => {
+                for slot in map.values_mut() {
+                    let taken = mem::take(slot);
+                    *slot = render_bytes_reply(taken, value_schema);
+                }
+                Value::Object(map)
+            }
+            other => other,
+        },
+        _ => value,
+    }
+}
+
+/// Render one decoded `Bytes` value — a JSON array of byte numbers — to a
+/// bare string (valid UTF-8) or a `{"base64": …}` object (binary). A
+/// value that isn't the array-of-bytes shape is returned untouched.
+fn render_bytes_leaf(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    let Value::Array(items) = &value else {
+        return value;
+    };
+    let mut bytes = Vec::with_capacity(items.len());
+    for item in items {
+        match item.as_u64().and_then(|n| u8::try_from(n).ok()) {
+            Some(b) => bytes.push(b),
+            None => return value,
+        }
+    }
+    str::from_utf8(&bytes).map_or_else(
+        |_| {
+            let mut obj = serde_json::Map::new();
+            obj.insert("base64".to_owned(), Value::String(STANDARD.encode(&bytes)));
+            Value::Object(obj)
+        },
+        |s| Value::String(s.to_owned()),
+    )
 }
 
 /// Issue 963: render an `actor_logs` `LogTailResult::Err` into a
@@ -2259,6 +2528,160 @@ mod tests {
         // A single segment longer than the byte cap (depth stays 1).
         let name = "a".repeat(aether_data::MAX_SCOPE_PATH_BYTES + 1);
         assert!(validate_recipient_scope(&name).is_err());
+    }
+
+    /// A single huge cap so the embed tests aren't tripping the oversize
+    /// guard — the oversize test passes a deliberately tiny cap instead.
+    const NO_CAP: usize = usize::MAX;
+
+    /// One-field `{ blob: Bytes }` struct schema for the nested-Bytes
+    /// embed / render tests.
+    fn blob_struct_schema() -> SchemaType {
+        use aether_data::NamedField;
+        SchemaType::Struct {
+            fields: vec![NamedField {
+                name: "blob".into(),
+                ty: SchemaType::Bytes,
+            }]
+            .into(),
+            repr_c: false,
+        }
+    }
+
+    /// Write `bytes` to a unique temp file for the `$file` embed tests.
+    /// The `std_env` / `std_fs` aliases avoid shadowing the module's
+    /// `tokio::fs`; same pattern as `stage_temp_file`.
+    fn stage_blob_file(tag: &str, bytes: &[u8]) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let path = std_env::temp_dir().join(format!(
+            "aether-mcp-blob-{tag}-{}-{nanos}.bin",
+            process::id()
+        ));
+        std_fs::write(&path, bytes).expect("stage blob temp file");
+        path
+    }
+
+    #[tokio::test]
+    async fn resolve_bytes_text_embed() {
+        let out = resolve_bytes_params(
+            serde_json::json!({"$text": "hi"}),
+            &SchemaType::Bytes,
+            NO_CAP,
+        )
+        .await
+        .expect("$text resolves");
+        assert_eq!(out, serde_json::json!([104, 105]));
+    }
+
+    #[tokio::test]
+    async fn resolve_bytes_base64_embed() {
+        // "aGk=" is base64 for "hi".
+        let out = resolve_bytes_params(
+            serde_json::json!({"$base64": "aGk="}),
+            &SchemaType::Bytes,
+            NO_CAP,
+        )
+        .await
+        .expect("$base64 resolves");
+        assert_eq!(out, serde_json::json!([104, 105]));
+    }
+
+    #[tokio::test]
+    async fn resolve_bytes_array_passthrough() {
+        // A literal byte array is the canonical form and passes straight
+        // through untouched.
+        let out = resolve_bytes_params(serde_json::json!([1, 2, 3]), &SchemaType::Bytes, NO_CAP)
+            .await
+            .expect("array passthrough");
+        assert_eq!(out, serde_json::json!([1, 2, 3]));
+    }
+
+    #[tokio::test]
+    async fn resolve_bytes_file_embed() {
+        let path = stage_blob_file("read", b"hi");
+        let out = resolve_bytes_params(
+            serde_json::json!({"$file": path.to_str().expect("utf-8 temp path")}),
+            &SchemaType::Bytes,
+            NO_CAP,
+        )
+        .await
+        .expect("$file resolves");
+        assert_eq!(out, serde_json::json!([104, 105]));
+        std_fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn resolve_bytes_file_oversize_errors() {
+        // A 32-byte file against a 16-byte cap trips the oversize guard.
+        let path = stage_blob_file("oversize", &[0u8; 32]);
+        let err = resolve_bytes_params(
+            serde_json::json!({"$file": path.to_str().expect("utf-8 temp path")}),
+            &SchemaType::Bytes,
+            16,
+        )
+        .await
+        .expect_err("oversize $file must error");
+        assert!(err.to_string().contains("over the"), "got: {err}");
+        std_fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn resolve_bytes_unknown_sigil_tag_errors() {
+        let err = resolve_bytes_params(
+            serde_json::json!({"$weird": "x"}),
+            &SchemaType::Bytes,
+            NO_CAP,
+        )
+        .await
+        .expect_err("unknown $-tag must error");
+        let _ = err;
+    }
+
+    #[tokio::test]
+    async fn resolve_bytes_non_sigil_object_errors() {
+        // A single-key object whose key carries no `$` sigil is data, not a
+        // directive — it errors at the Bytes node.
+        let err =
+            resolve_bytes_params(serde_json::json!({"file": "x"}), &SchemaType::Bytes, NO_CAP)
+                .await
+                .expect_err("non-$ object must error");
+        let _ = err;
+    }
+
+    #[tokio::test]
+    async fn resolve_bytes_nested_in_struct() {
+        let out = resolve_bytes_params(
+            serde_json::json!({"blob": {"$text": "hi"}}),
+            &blob_struct_schema(),
+            NO_CAP,
+        )
+        .await
+        .expect("nested Bytes resolves");
+        assert_eq!(out, serde_json::json!({"blob": [104, 105]}));
+    }
+
+    #[test]
+    fn render_bytes_reply_utf8_to_string() {
+        let out = render_bytes_reply(serde_json::json!([104, 105]), &SchemaType::Bytes);
+        assert_eq!(out, serde_json::json!("hi"));
+    }
+
+    #[test]
+    fn render_bytes_reply_binary_to_base64() {
+        // 0xff 0xfe is not valid UTF-8 → base64 object.
+        let out = render_bytes_reply(serde_json::json!([255, 254]), &SchemaType::Bytes);
+        assert_eq!(out, serde_json::json!({"base64": "//4="}));
+    }
+
+    #[test]
+    fn render_bytes_reply_nested_in_struct() {
+        let out = render_bytes_reply(
+            serde_json::json!({"blob": [104, 105]}),
+            &blob_struct_schema(),
+        );
+        assert_eq!(out, serde_json::json!({"blob": "hi"}));
     }
 
     #[test]
