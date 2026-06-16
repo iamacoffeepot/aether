@@ -7,7 +7,7 @@
 
 `load_component` (and the `spawn_substrate` boot manifest's component entries) take a host path to a `.wasm`, with the same path-and-build coupling ADR-0115 removed for substrate binaries: the caller has to know where the component was built and that it exists. Components feel this harder than chassis binaries do. There are four chassis; components are open-ended — they are the unit you actually author, load, hot-reload, and compose, and you do it constantly. The path friction and the absence of reproducible pinning bite on the daily path, not the occasional one.
 
-This ADR builds directly on ADR-0115, which gives the hub a content-addressed store kept deliberately **artifact-generic** and notes that a second consumer is what extracts the store into a standalone actor. Component wasm is that second artifact type and second consumer.
+This ADR builds directly on ADR-0115, which gives the hub a content-addressed store kept deliberately **artifact-generic** in the `aether.engine` cap. Component wasm is the second artifact type that store holds.
 
 Two facts make components a stronger fit for a registry than binaries:
 
@@ -31,7 +31,7 @@ Extend the ADR-0115 content-addressed store to hold component wasm, and give `lo
 
 **Identity.** As in ADR-0115, a name is a mutable tag pointing at an immutable content hash. Pinning by hash drives the hot-reload workflow: `replace_component` to a specific hash pins or rolls a component to an exact build, and a boot manifest written in selectors makes a demo's or test's whole component set reproducible.
 
-**Placement.** Because the store now has two consumers — substrate spawn via ADR-0115 and `load_component` here — it extracts from the `aether.engine` cap into a **standalone shared store actor**. This is the extraction condition ADR-0115 named; this ADR is what triggers it.
+**Placement.** The store stays in the `aether.engine` cap — the cap that already manages engines also owns the registry. Both consumers are handlers on that one cap: spawn resolves a binary selector in `on_spawn`, and `load_component` resolution is a hub-local `ResolveComponent` handler aether-mcp calls to get the wasm bytes before forwarding `LoadComponent` to the target substrate. There is a single owner and nothing to extract. A separate store actor would force a shared `Arc` across two actors, because `on_spawn` resolves-then-forks synchronously while native mail is fire-and-forget; the store stays the cap's own single-threaded field.
 
 **Open, deferred to scope/implementation:**
 
@@ -45,13 +45,13 @@ Extend the ADR-0115 content-addressed store to hold component wasm, and give `lo
 
 - `load_component` and the boot manifest reference a component by what it *is* — namespace, exported actor, handled kinds — and pin by hash. The wasm path papercut goes away, and a component set becomes reproducible.
 - Self-description is free: the manifest is read straight from the wasm, so the catalog and query surface are richer and cheaper than the binary side, which needs `--describe`.
-- The store earns its standalone-actor extraction honestly, on a real second consumer rather than a forecast one.
+- The one cap that manages engines manages the whole registry: a second artifact type adds handlers, not a second owner, so no store extraction or cross-actor sharing is needed.
 
 **Negative / cost.**
 
 - Far more entries and far more churn than binaries — components are iterated constantly — so the disk budget, eviction, and pin-protection are load-bearing rather than nominal.
 - A second selector surface (`load_component`, boot-manifest entries) plus the query index built from each component's manifest.
-- Extracting the store out of the `aether.engine` cap into a standalone actor is a real refactor, mitigated by ADR-0115 having kept the store artifact-generic from the start.
+- Component upload / resolve / list add a second artifact type and its handlers to the `aether.engine` cap; keeping the store artifact-generic from ADR-0115 means the type tag and manifest variant are the main additions, not a new store.
 
 **Neutral / follow-on.**
 
