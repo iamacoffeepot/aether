@@ -9,6 +9,12 @@
 //! routed recipient is the parent's own id and otherwise demuxes to the
 //! co-located child the producer addressed.
 //!
+//! The registry is a `BTreeMap<MailboxId, InlineSlot>` — every keyed
+//! operation (`take`, `reinsert`, `with_child_mut`, `remove`,
+//! `insert_child`) is O(log n) in the resident child count. `MailboxId`
+//! derives `Ord` and `BTreeMap::new()` is `const`, so the map still backs
+//! the `static INLINE_CHILDREN` with no init-time cost.
+//!
 //! The registry is slot-shaped (take-out / dispatch / reinsert) so a
 //! running child can spawn or mutate siblings through `ctx` while it is
 //! itself dispatched — the registry borrow is never held across a child's
@@ -18,6 +24,7 @@
 //! [`crate::Slot`].
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
@@ -30,6 +37,8 @@ use crate::mail::Mail;
 
 /// One inline child's slot. `actor` is `None` while the child is taken
 /// out for dispatch (the slot-shaped take / reinsert) and `Some` at rest.
+/// The child's alias [`MailboxId`] is carried as the map key in
+/// [`InlineRegistry`]; there is no redundant `id` field here.
 ///
 /// ADR-0114 §5: the slot also records the metadata a `replace_component`
 /// swap needs to reconstruct the child in the fresh instance — the
@@ -39,7 +48,6 @@ use crate::mail::Mail;
 /// rehydrate path re-folds the identical alias and re-`init`s the child
 /// by type.
 struct InlineSlot {
-    id: MailboxId,
     /// `mailbox_id_from_name(A::NAMESPACE)` — the actor-type tag the
     /// rehydrate reconstruct matches against the module's exported types.
     type_tag: u64,
@@ -73,9 +81,10 @@ pub struct InlineChildMeta {
 
 /// The process-global inline-child registry (ADR-0114 decision #3), keyed
 /// by each child's alias [`MailboxId`]. The membrane demuxes the inbound
-/// recipient against it.
+/// recipient against it. Every operation is O(log n) in the resident child
+/// count (`BTreeMap` lookup).
 pub struct InlineRegistry {
-    inner: UnsafeCell<Vec<InlineSlot>>,
+    inner: UnsafeCell<BTreeMap<MailboxId, InlineSlot>>,
 }
 
 // SAFETY: identical argument to [`crate::Slot`] — the WASM guest is
@@ -90,14 +99,14 @@ impl InlineRegistry {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            inner: UnsafeCell::new(Vec::new()),
+            inner: UnsafeCell::new(BTreeMap::new()),
         }
     }
 
     /// Register a freshly-spawned (or reconstructed) inline child under
     /// `id`, recording the reconstruct metadata alongside the actor box.
     /// Replaces the actor + metadata if `id` is already present (a
-    /// re-spawn / rehydrate re-register of the same alias).
+    /// re-spawn / rehydrate re-register of the same alias). O(log n).
     pub fn insert_child(
         &self,
         id: MailboxId,
@@ -109,20 +118,22 @@ impl InlineRegistry {
         // SAFETY: single-threaded guest + serialized delivery — no other
         // live borrow of the cell (the `Sync` argument). The borrow is
         // released before this returns, so it never spans a dispatch.
-        let slots = unsafe { &mut *self.inner.get() };
-        if let Some(slot) = slots.iter_mut().find(|s| s.id == id) {
+        let map = unsafe { &mut *self.inner.get() };
+        if let Some(slot) = map.get_mut(&id) {
             slot.type_tag = type_tag;
             slot.full_subname = full_subname;
             slot.is_counter = is_counter;
             slot.actor = Some(actor);
         } else {
-            slots.push(InlineSlot {
+            map.insert(
                 id,
-                type_tag,
-                full_subname,
-                is_counter,
-                actor: Some(actor),
-            });
+                InlineSlot {
+                    type_tag,
+                    full_subname,
+                    is_counter,
+                    actor: Some(actor),
+                },
+            );
         }
     }
 
@@ -131,29 +142,27 @@ impl InlineRegistry {
     /// `None` if `id` names no resident inline child (already taken out,
     /// or never registered). The borrow drops before the returned box is
     /// dispatched, so a child may re-enter the registry mid-dispatch.
+    /// O(log n).
     pub fn take(&self, id: MailboxId) -> Option<Box<dyn ErasedFfiActor>> {
         // SAFETY: see [`Self::insert_child`].
-        let slots = unsafe { &mut *self.inner.get() };
-        slots
-            .iter_mut()
-            .find(|s| s.id == id)
-            .and_then(|s| s.actor.take())
+        let map = unsafe { &mut *self.inner.get() };
+        map.get_mut(&id).and_then(|s| s.actor.take())
     }
 
     /// Put a child back after dispatch, into its existing slot (metadata
     /// preserved). Pairs with [`Self::take`]; the slot is guaranteed to
     /// exist because `take` left it in place with an empty actor box.
     ///
-    /// The find-then-set is deliberately a no-op when no slot matches `id`:
+    /// The lookup-then-set is deliberately a no-op when no slot matches `id`:
     /// a child despawned mid-dispatch (its slot already
     /// [`removed`](Self::remove) while it was taken out) has nowhere to go
     /// back to, so the live box drops at end of scope rather than
     /// re-entering the registry. This no-op is what makes self-despawn
-    /// fall out for free (ADR-0114) — no pending-removal flag.
+    /// fall out for free (ADR-0114) — no pending-removal flag. O(log n).
     pub fn reinsert(&self, id: MailboxId, actor: Box<dyn ErasedFfiActor>) {
         // SAFETY: see [`Self::insert_child`].
-        let slots = unsafe { &mut *self.inner.get() };
-        if let Some(slot) = slots.iter_mut().find(|s| s.id == id) {
+        let map = unsafe { &mut *self.inner.get() };
+        if let Some(slot) = map.get_mut(&id) {
             slot.actor = Some(actor);
         }
     }
@@ -164,6 +173,7 @@ impl InlineRegistry {
     /// `true` if a slot was present, `false` if `id` named no inline child
     /// (idempotent — a re-despawn of an already-gone alias is a clean
     /// `false`, not an error). Backs [`FfiCtx::despawn_inline_child`].
+    /// O(log n).
     ///
     /// If the child is currently taken out for dispatch (a self-despawn:
     /// its slot's actor box is `None`, the live box held on the stack by
@@ -174,26 +184,24 @@ impl InlineRegistry {
     pub fn remove(&self, id: MailboxId) -> bool {
         // SAFETY: see [`Self::insert_child`] — the borrow is taken fresh
         // and released before return, never spanning a dispatch.
-        let slots = unsafe { &mut *self.inner.get() };
-        let Some(pos) = slots.iter().position(|s| s.id == id) else {
-            return false;
-        };
-        slots.remove(pos);
-        true
+        let map = unsafe { &mut *self.inner.get() };
+        map.remove(&id).is_some()
     }
 
     /// Snapshot the reconstruct metadata of every resident inline child
     /// (ADR-0114 §5 dehydrate walk). The actor boxes stay in the
     /// registry; the compose path reads each child's state through
-    /// [`Self::with_child_mut`] keyed by the returned `id`.
+    /// [`Self::with_child_mut`] keyed by the returned `id`. Children are
+    /// returned in [`MailboxId`] key order; the dehydrate/rehydrate walk
+    /// reconstructs each child independently by its own `alias_id` /
+    /// `type_tag` / `full_subname`, so order is irrelevant.
     #[must_use]
     pub fn child_metas(&self) -> Vec<InlineChildMeta> {
         // SAFETY: see [`Self::insert_child`].
-        let slots = unsafe { &*self.inner.get() };
-        slots
-            .iter()
-            .map(|slot| InlineChildMeta {
-                id: slot.id,
+        let map = unsafe { &*self.inner.get() };
+        map.iter()
+            .map(|(key, slot)| InlineChildMeta {
+                id: *key,
                 type_tag: slot.type_tag,
                 full_subname: slot.full_subname.clone(),
                 is_counter: slot.is_counter,
@@ -206,18 +214,15 @@ impl InlineRegistry {
     /// `None` if `id` names no resident child). Used by the dehydrate
     /// compose to drive each child's `erased_on_dehydrate` in place. The
     /// borrow drops before this returns, so it never spans a dispatch.
+    /// O(log n).
     pub fn with_child_mut<R>(
         &self,
         id: MailboxId,
         f: impl FnOnce(&mut dyn ErasedFfiActor) -> R,
     ) -> Option<R> {
         // SAFETY: see [`Self::insert_child`].
-        let slots = unsafe { &mut *self.inner.get() };
-        slots
-            .iter_mut()
-            .find(|s| s.id == id)
-            .and_then(|s| s.actor.as_deref_mut())
-            .map(f)
+        let map = unsafe { &mut *self.inner.get() };
+        map.get_mut(&id).and_then(|s| s.actor.as_deref_mut()).map(f)
     }
 }
 
