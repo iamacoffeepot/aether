@@ -130,8 +130,7 @@ mod tests {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
-        let dir =
-            env::temp_dir().join(format!("aether-pid-lock-{tag}-{}-{nonce}", process::id()));
+        let dir = env::temp_dir().join(format!("aether-pid-lock-{tag}-{}-{nonce}", process::id()));
         fs::create_dir_all(&dir).expect("temp dir creates");
         dir
     }
@@ -142,11 +141,14 @@ mod tests {
         let path = dir.join("lock.pid");
         let guard = match acquire_lock_pid(&path) {
             LockAcquisition::Acquired(g) => g,
-            other => panic!("expected Acquired, got {}", match other {
-                LockAcquisition::Held(p) => format!("Held({p})"),
-                LockAcquisition::WriteFailed(e) => format!("WriteFailed({e})"),
-                LockAcquisition::Acquired(_) => unreachable!(),
-            }),
+            other => panic!(
+                "expected Acquired, got {}",
+                match other {
+                    LockAcquisition::Held(p) => format!("Held({p})"),
+                    LockAcquisition::WriteFailed(e) => format!("WriteFailed({e})"),
+                    LockAcquisition::Acquired(_) => unreachable!(),
+                }
+            ),
         };
         assert!(path.exists(), "lock.pid written");
         let contents = fs::read_to_string(&path).expect("lock.pid is readable");
