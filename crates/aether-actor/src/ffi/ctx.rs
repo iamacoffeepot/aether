@@ -518,7 +518,9 @@ impl OutboundReply for FfiCtx<'_, Manual> {
     }
 
     fn source_mailbox(&self) -> Option<MailboxId> {
-        None
+        let handle = self.sender?;
+        let id = MAIL_BRIDGE.source_of(handle);
+        (id != MailboxId::NONE.0).then_some(MailboxId(id))
     }
 
     fn reply<K: Kind>(&mut self, payload: &K) {

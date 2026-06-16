@@ -477,6 +477,31 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // now a deterministic hash of the mailbox name, computed on the
     // guest side. The corresponding host fn is gone.
 
+    // HOST_FN_OK: read-only scalar lookup into the per-instance ReplyTable
+    // the substrate already maintains. The guest holds the reply handle
+    // (`FfiCtx.sender`) and this merely resolves it to the sender's
+    // mailbox id — no new substrate resource, no side effect, same
+    // shape as `prev_correlation_p32` (scalar in, scalar out). A
+    // mail-sink approach would require an extra dispatch just to read a
+    // value already in the current call's local state.
+    //
+    // Resolve the source mailbox of the mail currently being handled.
+    // Returns `SourceAddr::Component(m) => m.0` when the inbound mail
+    // originated from a peer component; returns `MailboxId::NONE.0` (0)
+    // for every other `SourceAddr` variant, for `NO_REPLY_HANDLE`, and
+    // for any handle not in the table. Mirrors `NativeCtx::source_mailbox`
+    // semantics on the FFI side (issue 1958).
+    linker.func_wrap(
+        "aether",
+        "source_of_p32",
+        |caller: Caller<'_, ComponentCtx>, handle: u32| -> u64 {
+            match caller.data().reply_table.resolve(handle).map(|e| e.addr) {
+                Some(SourceAddr::Component(m)) => m.0,
+                _ => MailboxId::NONE.0,
+            }
+        },
+    )?;
+
     // ADR-0042: read back the correlation id the substrate minted
     // for this component's most recent `send_mail`. A guest handler
     // captures the id right after a send, then matches it against the
