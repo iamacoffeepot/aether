@@ -359,8 +359,8 @@ fn value_for_schema(schema: &SchemaType) -> BoxedStrategy<Value> {
         SchemaType::String => prop::collection::vec(any::<char>(), 0..=12)
             .prop_map(|cs| Value::String(cs.into_iter().collect()))
             .boxed(),
-        SchemaType::Bytes => prop::collection::vec(any::<char>(), 0..=12)
-            .prop_map(|cs| Value::String(cs.into_iter().collect()))
+        SchemaType::Bytes => prop::collection::vec(any::<u8>(), 0..=12)
+            .prop_map(|bytes| Value::Array(bytes.into_iter().map(Value::from).collect()))
             .boxed(),
         SchemaType::Option(inner) => {
             let inner = value_for_schema(inner);

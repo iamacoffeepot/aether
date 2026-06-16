@@ -346,16 +346,9 @@ fn decode_postcard(
         SchemaType::Bytes => {
             let len = read_varint_u64(cur, path)? as usize;
             let bytes = cur.take_slice(len, path)?;
-            // Emit a bare JSON string when the bytes are valid UTF-8 —
-            // the common case (text files, JSON payloads) — so the
-            // caller can read the content directly without an out-of-band
-            // decode. Non-UTF-8 bytes fall back to the original array of
-            // u8 values, which the encoder's array arm accepts on the
-            // return trip.
-            Ok(str::from_utf8(bytes).map_or_else(
-                |_| Value::Array(bytes.iter().map(|b| Value::from(*b)).collect()),
-                |s| Value::String(s.to_owned()),
-            ))
+            // Mirror encoder input shape: array of byte values.
+            let arr = bytes.iter().map(|b| Value::from(*b)).collect();
+            Ok(Value::Array(arr))
         }
         SchemaType::Option(inner) => {
             let [tag] = cur.take::<1>(path)?;
@@ -906,15 +899,13 @@ mod tests {
 
     #[test]
     fn postcard_bytes_field() {
-        let schema = pc_struct(vec![NamedField {
-            name: "blob".into(),
-            ty: SchemaType::Bytes,
-        }]);
-        // Valid UTF-8 — encode as string, decode back as the same string.
-        roundtrip(json!({"blob": "hello aether"}), &schema);
-        // Non-UTF-8 bytes — decode falls back to an array of byte values
-        // which the encoder's array arm accepts on the return trip.
-        roundtrip(json!({"blob": [0xffu8, 0xfe, 0x00]}), &schema);
+        roundtrip(
+            json!({"blob": [1u8, 2, 3, 4, 5]}),
+            &pc_struct(vec![NamedField {
+                name: "blob".into(),
+                ty: SchemaType::Bytes,
+            }]),
+        );
     }
 
     #[test]

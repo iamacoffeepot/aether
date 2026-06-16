@@ -13,25 +13,6 @@
 //!   2. Postcard (everything else): postcard 1.x wire format, written
 //!      and read directly to match the format byte-for-byte.
 //!
-//!   **`Bytes` JSON projection.** The postcard `&[u8]` wire format
-//!   (`varint(len)` + raw bytes) maps to three accepted encode shapes
-//!   and two canonical decode shapes:
-//!
-//!   Encode accepts:
-//!   - `[u8, ...]` — array of integer byte values (original form).
-//!   - `"…"` — bare JSON string, stored as its UTF-8 bytes.
-//!   - `{ "base64": "…" }` — standard-alphabet base64 for binary that
-//!     isn't valid UTF-8. A bare string is never auto-decoded as base64;
-//!     only the explicit object triggers base64 decoding.
-//!
-//!   Decode emits:
-//!   - `"…"` — when the bytes are valid UTF-8 (the common case).
-//!   - `[u8, ...]` — when the bytes are not valid UTF-8.
-//!
-//!   The postcard wire bytes are identical across all encode shapes; the
-//!   decode output is a fixed point under encode (string → UTF-8 round-
-//!   trips as string; non-UTF-8 array round-trips as array).
-//!
 //! - **Stream framing** ([`frame`]): length-prefixed postcard for
 //!   serde-derived enum types. The hub channel (`aether_hub::wire`)
 //!   is the first consumer; ADR-0072 placed framing here because the
