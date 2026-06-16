@@ -7,8 +7,8 @@
 //!
 //!   - [`raw`] — `extern "C"` host-fn imports + host-target panic
 //!     stubs (the only place the `_p32` symbols are named).
-//!   - [`bridge`] — per-concern free-function modules ([`bridge::mail`],
-//!     [`bridge::persist`]). Each module owns one FFI op family and
+//!   - [`bridge`] — per-concern free-function modules (`bridge::mail`,
+//!     `bridge::persist`). Each module owns one FFI op family and
 //!     forwards calls to the matching `raw::*` host fn. Issue 665 split
 //!     the prior monolithic `MailTransport`-impl ZST into these per-concern
 //!     modules so persistence isn't mixed with mail; issue 1967 collapsed

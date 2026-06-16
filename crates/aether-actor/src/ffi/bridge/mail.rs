@@ -46,13 +46,7 @@ use crate::ffi::raw;
     clippy::must_use_candidate,
     reason = "fire-and-forget by contract — see doc-comment above; #[must_use] retired in issue 892"
 )]
-pub fn send_mail(
-    recipient: u64,
-    kind: u64,
-    bytes: &[u8],
-    count: u32,
-    detached: bool,
-) -> u32 {
+pub fn send_mail(recipient: u64, kind: u64, bytes: &[u8], count: u32, detached: bool) -> u32 {
     // SAFETY: forwards to `raw::send_mail`, whose ABI is documented
     // at the import site in `ffi/raw.rs`. The `(ptr, len)` pair is
     // derived from the `&[u8]` slice we just received, which the
@@ -140,7 +134,7 @@ pub fn source_of(handle: u32) -> u64 {
 /// returning; the guest's borrows are released as soon as the
 /// FFI call completes.
 ///
-/// Only callable from wasm32 — the only caller ([`crate::log::WasmSubscriber`])
+/// Only callable from wasm32 — the only caller (`crate::log::WasmSubscriber`)
 /// is gated behind `#[cfg(target_arch = "wasm32")]`.
 #[cfg(target_arch = "wasm32")]
 pub fn emit_log_event(level: u8, target: &str, message: &str) {
