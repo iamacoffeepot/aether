@@ -143,12 +143,43 @@ impl InlineRegistry {
     /// Put a child back after dispatch, into its existing slot (metadata
     /// preserved). Pairs with [`Self::take`]; the slot is guaranteed to
     /// exist because `take` left it in place with an empty actor box.
+    ///
+    /// The find-then-set is deliberately a no-op when no slot matches `id`:
+    /// a child despawned mid-dispatch (its slot already
+    /// [`removed`](Self::remove) while it was taken out) has nowhere to go
+    /// back to, so the live box drops at end of scope rather than
+    /// re-entering the registry. This no-op is what makes self-despawn
+    /// fall out for free (ADR-0114) — no pending-removal flag.
     pub fn reinsert(&self, id: MailboxId, actor: Box<dyn ErasedFfiActor>) {
         // SAFETY: see [`Self::insert_child`].
         let slots = unsafe { &mut *self.inner.get() };
         if let Some(slot) = slots.iter_mut().find(|s| s.id == id) {
             slot.actor = Some(actor);
         }
+    }
+
+    /// Tear down the inline child registered under `id` (ADR-0114
+    /// teardown): remove its slot, dropping the resident
+    /// `Box<dyn ErasedFfiActor>` so the child's `Drop` runs. Returns
+    /// `true` if a slot was present, `false` if `id` named no inline child
+    /// (idempotent — a re-despawn of an already-gone alias is a clean
+    /// `false`, not an error). Backs [`FfiCtx::despawn_inline_child`].
+    ///
+    /// If the child is currently taken out for dispatch (a self-despawn:
+    /// its slot's actor box is `None`, the live box held on the stack by
+    /// [`membrane_dispatch`]), removing the empty slot makes the matching
+    /// [`Self::reinsert`] find nothing and no-op, so the box drops at end
+    /// of dispatch instead of re-entering — the reentrant case the
+    /// slot-shaped take/reinsert design handles with no extra state.
+    pub fn remove(&self, id: MailboxId) -> bool {
+        // SAFETY: see [`Self::insert_child`] — the borrow is taken fresh
+        // and released before return, never spanning a dispatch.
+        let slots = unsafe { &mut *self.inner.get() };
+        let Some(pos) = slots.iter().position(|s| s.id == id) else {
+            return false;
+        };
+        slots.remove(pos);
+        true
     }
 
     /// Snapshot the reconstruct metadata of every resident inline child
@@ -258,6 +289,11 @@ mod tests {
     /// second dispatch lands again).
     static CHILD_DISPATCHES: AtomicU32 = AtomicU32::new(0);
 
+    /// Process-global drop counter the self-despawning child bumps from its
+    /// `Drop`, so the reentrancy test can prove the box dropped (rather than
+    /// being reinserted) after it removed its own slot mid-dispatch.
+    static SELF_DESPAWN_DROPS: AtomicU32 = AtomicU32::new(0);
+
     /// Minimal `ErasedFfiActor` for the membrane tests: records each
     /// dispatch and returns [`CHILD_CODE`]. The lifecycle hooks are
     /// unreachable in these tests.
@@ -273,6 +309,47 @@ mod tests {
             _mail: Mail<'_>,
         ) -> u32 {
             CHILD_DISPATCHES.fetch_add(1, Ordering::Relaxed);
+            CHILD_CODE
+        }
+        fn erased_wire(&mut self, _ctx: &mut FfiCtx<'_, crate::Manual>) {}
+        fn erased_unwire(&mut self, _ctx: &mut FfiCtx<'_, crate::Manual>) {}
+        fn erased_on_dehydrate(&mut self, _ctx: &mut crate::FfiDropCtx<'_>) {}
+        fn erased_on_rehydrate(
+            &mut self,
+            _ctx: &mut FfiCtx<'_, crate::Manual>,
+            _prior: PriorState<'_>,
+        ) {
+        }
+    }
+
+    /// A child that despawns *itself* from [`INLINE_CHILDREN`] during its
+    /// own dispatch and bumps [`SELF_DESPAWN_DROPS`] when dropped — used to
+    /// prove the reentrant self-despawn drops the live box rather than
+    /// reinserting it. Carries its own alias id so `erased_dispatch` can
+    /// remove the matching slot.
+    struct SelfDespawningChild {
+        id: MailboxId,
+    }
+
+    impl Drop for SelfDespawningChild {
+        fn drop(&mut self) {
+            SELF_DESPAWN_DROPS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl ErasedFfiActor for SelfDespawningChild {
+        fn erased_namespace(&self) -> &'static str {
+            "test.inline.self_despawning_child"
+        }
+        fn erased_dispatch(
+            &mut self,
+            _ctx: &mut FfiCtx<'_, crate::Manual>,
+            _mail: Mail<'_>,
+        ) -> u32 {
+            // Self-despawn mid-dispatch: this box is currently taken out
+            // (held on the membrane's stack), so `remove` clears the empty
+            // slot and the membrane's `reinsert` will find nothing.
+            INLINE_CHILDREN.remove(self.id);
             CHILD_CODE
         }
         fn erased_wire(&mut self, _ctx: &mut FfiCtx<'_, crate::Manual>) {}
@@ -404,6 +481,81 @@ mod tests {
         assert_eq!(
             rc, OWN_CODE,
             "an unknown recipient falls back to the parent's unmatched path",
+        );
+    }
+
+    /// Step 1 coverage: `remove` drops a resident child (the alias goes
+    /// absent) and is idempotent — a second `remove` of the same id is a
+    /// clean `false`.
+    #[test]
+    fn registry_remove_drops_child_and_is_idempotent() {
+        let registry = InlineRegistry::new();
+        let id = MailboxId(0x8888);
+
+        assert!(
+            !registry.remove(id),
+            "removing an absent id returns false (idempotent)",
+        );
+        registry.insert_child(
+            id,
+            0,
+            String::from("widget"),
+            false,
+            Box::new(RecordingChild),
+        );
+        assert!(
+            registry.remove(id),
+            "removing a resident child returns true",
+        );
+        assert!(
+            registry.take(id).is_none(),
+            "a removed child is absent from the registry",
+        );
+        assert!(
+            !registry.remove(id),
+            "a second remove of the same id is a clean false",
+        );
+    }
+
+    /// Step 3 coverage: a child that despawns itself mid-dispatch drops
+    /// correctly. `membrane_dispatch` takes it out, the dispatch removes the
+    /// now-empty slot via `INLINE_CHILDREN.remove`, the membrane's
+    /// `reinsert` finds nothing and no-ops, and the live box drops at end of
+    /// scope — proving the slot-shaped take/reinsert handles the reentrant
+    /// drop with no pending-removal flag. A subsequent send to the same
+    /// alias then falls through to the parent's unmatched path.
+    #[test]
+    fn membrane_self_despawn_drops_box_and_falls_through() {
+        let own = 0x5000_u64;
+        let child = 0x5001_u64;
+        let before_drops = SELF_DESPAWN_DROPS.load(Ordering::Relaxed);
+        INLINE_CHILDREN.insert_child(
+            MailboxId(child),
+            0,
+            String::from("widget"),
+            false,
+            Box::new(SelfDespawningChild {
+                id: MailboxId(child),
+            }),
+        );
+
+        // Dispatch the child; it removes its own slot mid-dispatch.
+        let rc = membrane_dispatch(own, mail_to(child), |_mail| {
+            panic!("own dispatch must not run while the child is resident")
+        });
+        assert_eq!(rc, CHILD_CODE, "the child handled the despawning dispatch");
+        assert_eq!(
+            SELF_DESPAWN_DROPS.load(Ordering::Relaxed) - before_drops,
+            1,
+            "the self-despawned box dropped at end of dispatch, not reinserted",
+        );
+
+        // The alias is gone: a second send falls through to the parent's
+        // unmatched path rather than re-dispatching a dropped child.
+        let rc2 = membrane_dispatch(own, mail_to(child), |_mail| OWN_CODE);
+        assert_eq!(
+            rc2, OWN_CODE,
+            "the torn-down alias falls through to the parent",
         );
     }
 }
