@@ -67,6 +67,7 @@ proptest = "1"
 # re-add the default features they rely on (`heapless-cas`, `std`,
 # `attributes`) on their own declaration, keeping Cargo.lock byte-stable.
 anyhow = "1"
+base64 = "0.22"
 bytemuck = { version = "1.19", default-features = false }
 confique = { version = "0.4", default-features = false }
 cpal = "0.17"

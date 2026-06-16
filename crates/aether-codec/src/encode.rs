@@ -40,6 +40,8 @@ use std::fmt;
 
 use aether_data::tagged_id;
 use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde_json::Value;
 
 use crate::cast::{align_of_primitive, non_cast_variant_error};
@@ -62,6 +64,12 @@ pub enum EncodeError {
         field: String,
         expected: u32,
         got: usize,
+    },
+    /// A `{ "base64": "..." }` object whose value isn't valid standard
+    /// base64. Distinct from `TypeMismatch` so the caller can surface
+    /// "invalid base64 in field X" rather than a generic type error.
+    InvalidBase64 {
+        field: String,
     },
     /// A schema arm the hub encoder can't handle in this position.
     /// PR 5's postcard path covers every top-level `SchemaType`, so
@@ -91,6 +99,9 @@ impl fmt::Display for EncodeError {
                 f,
                 "field {field:?}: array length {got} != expected {expected}"
             ),
+            Self::InvalidBase64 { field } => {
+                write!(f, "field {field:?} contains invalid base64")
+            }
             Self::UnsupportedSchema(shape) => {
                 write!(f, "schema arm not supported by hub encoder: {shape}")
             }
@@ -184,17 +195,59 @@ fn encode_postcard(
             Ok(())
         }
         SchemaType::Bytes => {
-            let arr = value.as_array().ok_or_else(|| EncodeError::TypeMismatch {
-                field: path.to_owned(),
-                expected: "byte array",
-            })?;
-            write_varint_u64(out, arr.len() as u64);
-            for (i, v) in arr.iter().enumerate() {
-                let n = as_unsigned(v, path, "u8")?;
-                let b: u8 = n
-                    .try_into()
-                    .map_err(|_| oor(&format!("{path}[{i}]"), "u8"))?;
-                out.push(b);
+            // Three accepted JSON shapes (wire bytes are identical):
+            //
+            // 1. Array of u8 integers — the original form; kept for
+            //    back-compat with callers that serialize byte arrays as
+            //    JSON arrays.
+            // 2. Bare JSON string — interpreted as its UTF-8 bytes; the
+            //    common case for writing text files.
+            // 3. `{ "base64": "<standard-b64>" }` — for binary that
+            //    isn't valid UTF-8. A bare string is never auto-detected
+            //    as base64; only the explicit object triggers decoding.
+            match value {
+                Value::Array(arr) => {
+                    write_varint_u64(out, arr.len() as u64);
+                    for (i, v) in arr.iter().enumerate() {
+                        let n = as_unsigned(v, path, "u8")?;
+                        let b: u8 = n
+                            .try_into()
+                            .map_err(|_| oor(&format!("{path}[{i}]"), "u8"))?;
+                        out.push(b);
+                    }
+                }
+                Value::String(s) => {
+                    let raw = s.as_bytes();
+                    write_varint_u64(out, raw.len() as u64);
+                    out.extend_from_slice(raw);
+                }
+                Value::Object(obj) if obj.len() == 1 => {
+                    let (key, body) = obj.iter().next().expect("len == 1");
+                    if key != "base64" {
+                        return Err(EncodeError::TypeMismatch {
+                            field: path.to_owned(),
+                            expected: "byte array, string, or {\"base64\": \"...\"}",
+                        });
+                    }
+                    let b64 = body.as_str().ok_or_else(|| EncodeError::TypeMismatch {
+                        field: path.to_owned(),
+                        expected: "base64 value must be a string",
+                    })?;
+                    let decoded =
+                        BASE64_STANDARD
+                            .decode(b64)
+                            .map_err(|_| EncodeError::InvalidBase64 {
+                                field: path.to_owned(),
+                            })?;
+                    write_varint_u64(out, decoded.len() as u64);
+                    out.extend_from_slice(&decoded);
+                }
+                _ => {
+                    return Err(EncodeError::TypeMismatch {
+                        field: path.to_owned(),
+                        expected: "byte array, string, or {\"base64\": \"...\"}",
+                    });
+                }
             }
             Ok(())
         }
@@ -1180,8 +1233,68 @@ mod tests {
             ty: SchemaType::Bytes,
         }]);
         let bytes = encode_schema(&json!({"blob": [1, 2, 3, 4, 5]}), &schema)
-            .expect("test setup: encode bytes field");
+            .expect("test setup: encode bytes field as array");
         assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn postcard_bytes_string_encodes_as_utf8() {
+        // A bare JSON string for a Bytes field is written as its raw UTF-8
+        // bytes — wire-identical to the array form of the same bytes.
+        let schema = postcard_struct(vec![NamedField {
+            name: "blob".into(),
+            ty: SchemaType::Bytes,
+        }]);
+        let via_string = encode_schema(&json!({"blob": "hello"}), &schema)
+            .expect("test setup: encode bytes as string");
+        let via_array = encode_schema(&json!({"blob": [104u8, 101, 108, 108, 111]}), &schema)
+            .expect("test setup: encode bytes as array");
+        assert_eq!(via_string, via_array);
+    }
+
+    #[test]
+    fn postcard_bytes_base64_object_encodes_correctly() {
+        // `{ "base64": "aGVsbG8=" }` decodes to b"hello" and produces
+        // the same wire bytes as the string / array forms.
+        let schema = postcard_struct(vec![NamedField {
+            name: "blob".into(),
+            ty: SchemaType::Bytes,
+        }]);
+        let via_b64 = encode_schema(&json!({"blob": {"base64": "aGVsbG8="}}), &schema)
+            .expect("test setup: encode bytes as base64 object");
+        let via_string = encode_schema(&json!({"blob": "hello"}), &schema)
+            .expect("test setup: encode bytes as string reference");
+        assert_eq!(via_b64, via_string);
+    }
+
+    #[test]
+    fn postcard_bytes_invalid_base64_errors() {
+        let schema = postcard_struct(vec![NamedField {
+            name: "blob".into(),
+            ty: SchemaType::Bytes,
+        }]);
+        let err = encode_schema(&json!({"blob": {"base64": "not!valid"}}), &schema)
+            .expect_err("invalid base64 must error");
+        assert!(matches!(err, EncodeError::InvalidBase64 { .. }));
+    }
+
+    #[test]
+    fn postcard_bytes_malformed_object_errors() {
+        let schema = postcard_struct(vec![NamedField {
+            name: "blob".into(),
+            ty: SchemaType::Bytes,
+        }]);
+        // Wrong key name.
+        let err = encode_schema(&json!({"blob": {"data": "aGVsbG8="}}), &schema)
+            .expect_err("object with wrong key must error");
+        assert!(matches!(err, EncodeError::TypeMismatch { .. }));
+        // Multiple keys.
+        let err = encode_schema(
+            &json!({"blob": {"base64": "aGVsbG8=", "extra": 1}}),
+            &schema,
+        )
+        .expect_err("multi-key object must error");
+        assert!(matches!(err, EncodeError::TypeMismatch { .. }));
     }
 
     #[test]
