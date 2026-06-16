@@ -3,10 +3,10 @@
 //!
 //! Issue 665 split the prior monolithic `MailTransport` trait + its
 //! `FfiTransport` ZST impl into one module per FFI op family. Issue 1967
-//! then collapsed the per-module ZST + static packaging into `pub(crate)`
-//! free functions, keeping the safe-wrapper boundary (one `unsafe` block
-//! per FFI op, one audited ptr/len marshalling) while closing the
-//! over-exposure the `pub static` forms created.
+//! then collapsed the per-module ZST + static packaging into free functions,
+//! keeping the safe-wrapper boundary (one `unsafe` block per FFI op, one
+//! audited ptr/len marshalling) while closing the over-exposure the
+//! `pub static` forms created.
 //!
 //! - [`mail`] — outbound mail (`send_mail`, `reply_mail`,
 //!   `prev_correlation`, `source_of`, `emit_log_event`, `spawn_sibling`,

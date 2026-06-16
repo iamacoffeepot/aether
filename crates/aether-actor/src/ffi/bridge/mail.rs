@@ -3,7 +3,7 @@
 // `_p32`-suffixed FFI per ADR-0024 documents the convention.
 #![allow(clippy::cast_possible_truncation)]
 
-//! Outbound-mail FFI bridge — `pub(crate)` free functions.
+//! Outbound-mail FFI bridge — free functions in a `pub(crate)` module.
 //!
 //! Each function forwards to the matching `extern "C"` host fn in [`raw`]
 //! and localizes `unsafe` to one audited site per FFI op. `send_mail`
@@ -46,7 +46,7 @@ use crate::ffi::raw;
     clippy::must_use_candidate,
     reason = "fire-and-forget by contract — see doc-comment above; #[must_use] retired in issue 892"
 )]
-pub(crate) fn send_mail(
+pub fn send_mail(
     recipient: u64,
     kind: u64,
     bytes: &[u8],
@@ -83,7 +83,7 @@ pub(crate) fn send_mail(
     clippy::must_use_candidate,
     reason = "fire-and-forget by contract — see doc-comment above; #[must_use] retired in issue 892"
 )]
-pub(crate) fn reply_mail(sender: u32, kind: u64, bytes: &[u8], count: u32) -> u32 {
+pub fn reply_mail(sender: u32, kind: u64, bytes: &[u8], count: u32) -> u32 {
     // SAFETY: forwards to `raw::reply_mail`, whose ABI is documented
     // at the import site in `ffi/raw.rs`. The `(ptr, len)` pair is
     // derived from the `&[u8]` slice we just received, which the
@@ -106,7 +106,7 @@ pub(crate) fn reply_mail(sender: u32, kind: u64, bytes: &[u8], count: u32) -> u3
 /// matches it against the inbound reply's correlation to pair a
 /// reply with the request it sent.
 #[must_use]
-pub(crate) fn prev_correlation() -> u64 {
+pub fn prev_correlation() -> u64 {
     // SAFETY: `raw::prev_correlation` takes no arguments and reads
     // a host-side scalar set on the most recent `send_mail`; no
     // ABI invariants to uphold beyond "we are the FFI guest", which
@@ -121,7 +121,7 @@ pub(crate) fn prev_correlation() -> u64 {
 /// for every other source kind, for `NO_REPLY_HANDLE`, and for unknown
 /// handles. Callers map `0 → None` to mirror `NativeCtx::source_mailbox`.
 #[must_use]
-pub(crate) fn source_of(handle: u32) -> u64 {
+pub fn source_of(handle: u32) -> u64 {
     // SAFETY: `raw::source_of` takes a scalar handle and reads a
     // host-side ReplyTable entry — no guest memory access, no ABI
     // invariants beyond "we are the FFI guest", enforced by the
@@ -143,7 +143,7 @@ pub(crate) fn source_of(handle: u32) -> u64 {
 /// Only callable from wasm32 — the only caller ([`crate::log::WasmSubscriber`])
 /// is gated behind `#[cfg(target_arch = "wasm32")]`.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn emit_log_event(level: u8, target: &str, message: &str) {
+pub fn emit_log_event(level: u8, target: &str, message: &str) {
     let target_bytes = target.as_bytes();
     let message_bytes = message.as_bytes();
     // SAFETY: forwards to `raw::log_event`, whose ABI is documented
@@ -174,7 +174,7 @@ pub(crate) fn emit_log_event(level: u8, target: &str, message: &str) {
 /// after this call (ADR-0097 §4), so a spawn-time failure surfaces
 /// asynchronously rather than here.
 #[must_use]
-pub(crate) fn spawn_sibling(tag: u64, is_counter: bool, subname: &str, config: &[u8]) -> u64 {
+pub fn spawn_sibling(tag: u64, is_counter: bool, subname: &str, config: &[u8]) -> u64 {
     let subname_bytes = subname.as_bytes();
     // SAFETY: forwards to `raw::spawn_sibling`, whose ABI is
     // documented at the import site in `ffi/raw.rs`. Both `(ptr,
@@ -205,7 +205,7 @@ pub(crate) fn spawn_sibling(tag: u64, is_counter: bool, subname: &str, config: &
 /// ADR-0099 §3 lineage fold, known synchronously; `0` on a host-side
 /// error.
 #[must_use]
-pub(crate) fn spawn_inline_child(is_counter: bool, subname: &str) -> u64 {
+pub fn spawn_inline_child(is_counter: bool, subname: &str) -> u64 {
     let subname_bytes = subname.as_bytes();
     // SAFETY: forwards to `raw::spawn_inline_child`, whose ABI is
     // documented at the import site in `ffi/raw.rs`. The `(ptr, len)`

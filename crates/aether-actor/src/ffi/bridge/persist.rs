@@ -2,7 +2,7 @@
 // to the wasm32 host-fn ABI (`_p32` convention, ADR-0024).
 #![allow(clippy::cast_possible_truncation)]
 
-//! Migration-bundle FFI bridge — `pub(crate)` free function.
+//! Migration-bundle FFI bridge — free function in a `pub(crate)` module.
 //!
 //! `save_state` is the ADR-0016 deposit hook called inside `on_dehydrate`
 //! to hand a typed bundle to the replacement instance. Persistence is
@@ -26,7 +26,7 @@ use crate::ffi::raw;
 /// bugs). Meaningful inside `on_dehydrate`, where the substrate
 /// hands the bundle to the replacement instance via `on_rehydrate`.
 #[must_use]
-pub(crate) fn save_state(version: u32, bytes: &[u8]) -> u32 {
+pub fn save_state(version: u32, bytes: &[u8]) -> u32 {
     // SAFETY: forwards to `raw::save_state`, whose ABI is documented
     // at the import site in `ffi/raw.rs`. The `(ptr, len)` pair is
     // derived from the `&[u8]` slice we just received, which the

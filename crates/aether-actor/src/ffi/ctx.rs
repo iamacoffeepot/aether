@@ -8,8 +8,8 @@
 //! `DropCtx<'a, T>` aliases. The ctx interface is now spelled by the
 //! per-stage capability traits in [`crate::actor::ctx`]; these structs
 //! are concrete impls that route outbound calls through the
-//! per-concern bridge functions in [`crate::ffi::bridge::mail`] and
-//! [`crate::ffi::bridge::persist`].
+//! per-concern bridge functions in `crate::ffi::bridge::mail` and
+//! `crate::ffi::bridge::persist`.
 //!
 //! Issue 665 retired the `transport: &'a FfiTransport` field along
 //! with the `FfiTransport` ZST and `MailTransport` trait — ctxs hold
