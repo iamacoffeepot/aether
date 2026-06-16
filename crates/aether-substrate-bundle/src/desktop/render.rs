@@ -108,6 +108,9 @@ enum WireframeMode {
 }
 
 impl WireframeMode {
+    // Process-level render debug toggle (AETHER_WIREFRAME), read at the desktop
+    // GPU layer — not cap config.
+    #[allow(clippy::disallowed_methods)]
     fn from_env() -> Self {
         match env::var("AETHER_WIREFRAME").ok().as_deref() {
             None | Some("" | "0" | "off") => Self::Off,

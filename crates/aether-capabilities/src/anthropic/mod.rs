@@ -935,6 +935,9 @@ mod native {
             use super::super::UreqAnthropicAdapter;
             use crate::contentgen::adapter::AnthropicRequest;
             use std::env;
+            // Test-only: the live-API smoke reads an external credential
+            // (ANTHROPIC_API_KEY), not cap config; gated `#[ignore]`.
+            #[allow(clippy::disallowed_methods)]
             let key = env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY set for smoke");
             let adapter = UreqAnthropicAdapter::new(key, Duration::from_secs(30));
             let resp = adapter

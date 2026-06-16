@@ -51,6 +51,9 @@ use aether_substrate_bundle::perf::harness::{
 };
 use aether_substrate_bundle::perf::report::TrialReport;
 
+// Dev/bench tooling: optional CI-provided git-sha override for the perf-trial
+// binary — not a capability, no config layer in scope.
+#[allow(clippy::disallowed_methods)]
 fn git_sha() -> Option<String> {
     if let Ok(s) = env::var("AETHER_PERF_GIT_SHA")
         && !s.is_empty()
@@ -67,6 +70,9 @@ fn git_sha() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+// Dev/bench tooling: this perf-trial binary takes its run parameters from env in
+// main — not a capability, no config layer in scope.
+#[allow(clippy::disallowed_methods)]
 fn main() -> ExitCode {
     let frames: u32 = env::var("AETHER_PERF_FRAMES")
         .ok()

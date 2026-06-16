@@ -194,6 +194,8 @@ const GROUP_CAP_MIN: usize = 4;
 /// iamacoffeepot/aether#1116 narrow-local win) and recruits only wider
 /// fan-outs. See the module doc on the width-vs-cost proxy limitation
 /// (iamacoffeepot/aether#1127).
+// Process-level scheduler tuning knob, read once at the substrate level — not cap config.
+#[allow(clippy::disallowed_methods)]
 fn recruit_min() -> usize {
     static MIN: OnceLock<usize> = OnceLock::new();
     *MIN.get_or_init(|| {
@@ -210,6 +212,8 @@ fn recruit_min() -> usize {
 /// injector churn for a very wide fan-out (over-recruiting past the worker
 /// count just re-parks the extra workers — harmless but wasteful). Default
 /// 32.
+// Process-level scheduler tuning knob, read once at the substrate level — not cap config.
+#[allow(clippy::disallowed_methods)]
 fn recruit_cap() -> usize {
     static CAP: OnceLock<usize> = OnceLock::new();
     *CAP.get_or_init(|| {
@@ -242,6 +246,9 @@ const MAD_CONFIDENCE_DEN: u64 = 1;
 /// source ([`crate::scheduler::time_budget`]), so both consumers of the
 /// shared handoff-cost seam scale with the box. The conversion's saturating
 /// floor now lives in `handoff_cost_nanos`.
+// Process-level scheduler tuning knob (wake break-even override), read once at the
+// substrate level — not cap config.
+#[allow(clippy::disallowed_methods)]
 fn wake_cost_nanos() -> u64 {
     static OVERRIDE: OnceLock<Option<u64>> = OnceLock::new();
     if let Some(ns) = *OVERRIDE.get_or_init(|| {

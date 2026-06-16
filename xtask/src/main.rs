@@ -587,6 +587,9 @@ fn run(mut cmd: Command, what: &str) -> Result<()> {
 
 /// Cargo binary to re-invoke — honours the `CARGO` env var cargo sets for
 /// subprocesses, falling back to `cargo` on `PATH`.
+// Build tooling: CARGO is the cargo-provided binary path for subprocess
+// re-invocation, an external var — xtask is not a capability.
+#[allow(clippy::disallowed_methods)]
 fn cargo() -> String {
     env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
 }

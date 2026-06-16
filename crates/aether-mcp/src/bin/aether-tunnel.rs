@@ -264,6 +264,9 @@ impl Drop for Tunnel {
 /// the pre-built binary paths next to this one, for a clean single-pid
 /// reap). Set them to `cargo run -p … --bin …` for a rebuild-friendly
 /// fork — the process-group reap handles the extra `cargo` parent.
+// Process-orchestration config for the tunnel supervisor binary (the fork
+// command lines) — top-level process wiring, not a capability reading its config.
+#[allow(clippy::disallowed_methods)]
 fn resolve_specs(ports: Ports) -> anyhow::Result<(ChildSpec, ChildSpec)> {
     let exe_dir = env::current_exe()
         .ok()
@@ -313,6 +316,9 @@ fn split_cmd(cmd: &str) -> anyhow::Result<(String, Vec<String>)> {
     Ok((program, parts.collect()))
 }
 
+// Process-orchestration config for the tunnel supervisor binary (the bind
+// ports) — top-level process wiring, not a capability reading its config.
+#[allow(clippy::disallowed_methods)]
 fn read_port(var: &str, default: u16) -> u16 {
     env::var(var)
         .ok()

@@ -59,6 +59,10 @@
 // On-demand measurement: the table is the deliverable, printed to stderr
 // where the test harness surfaces it under `--nocapture`.
 #![allow(clippy::print_stderr)]
+// On-demand perf test: its iteration / count-sweep parameters are read from env
+// (env_or / env_counts) so a run can be tuned from the shell — test-harness
+// knobs, not cap config.
+#![allow(clippy::disallowed_methods)]
 
 use std::env;
 use std::fs;

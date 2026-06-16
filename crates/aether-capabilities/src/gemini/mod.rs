@@ -1071,6 +1071,9 @@ mod native {
         fn gemini_nanobanana_smoke() {
             use super::super::UreqGeminiAdapter;
             use crate::contentgen::adapter::{GeminiAdapter, GeminiImageRequest};
+            // Test-only: the live-API smoke reads an external credential
+            // (GEMINI_API_KEY), not cap config; gated `#[ignore]`.
+            #[allow(clippy::disallowed_methods)]
             let key = env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY set for smoke");
             let adapter = UreqGeminiAdapter::new(key, Duration::from_mins(1));
             let resp = adapter
@@ -1091,6 +1094,9 @@ mod native {
         fn gemini_lyria_smoke() {
             use super::super::UreqGeminiAdapter;
             use crate::contentgen::adapter::{GeminiAdapter, GeminiMusicRequest};
+            // Test-only: the live-API smoke reads an external credential
+            // (GEMINI_API_KEY), not cap config; gated `#[ignore]`.
+            #[allow(clippy::disallowed_methods)]
             let key = env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY set for smoke");
             let adapter = UreqGeminiAdapter::new(key, Duration::from_mins(2));
             let resp = adapter

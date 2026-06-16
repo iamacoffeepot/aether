@@ -16,6 +16,12 @@
 //! pool size; a fan-out either parallelises across workers or queues on
 //! a small pool. So the sweep takes the worker set as an axis.
 
+// Dev/bench tooling: every `*_from_env` knob in this latency-sweep harness reads
+// its run parameters from env (workers / topology / pacing / tiers / fan-out).
+// This is a bench driver, not a capability — there is no config layer in scope,
+// so the whole module opts out of the env-read ban.
+#![allow(clippy::disallowed_methods)]
+
 use std::env;
 use std::hint::black_box;
 use std::sync::Arc;

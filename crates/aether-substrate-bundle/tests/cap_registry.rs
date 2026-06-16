@@ -18,7 +18,9 @@
 // surfaces "skipping: ..." alongside `test ... ok` (issue 891).
 #![allow(clippy::print_stderr)]
 // Integration test derives the fs cap's own id by name to probe the registry —
-// reference id derivation, not sibling-cap addressing.
+// reference id derivation, not sibling-cap addressing — and reads the
+// AETHER_REQUIRE_RUNTIME CI skip toggle, a test-harness knob rather than cap
+// config.
 #![allow(clippy::disallowed_methods)]
 
 use std::path::Path;

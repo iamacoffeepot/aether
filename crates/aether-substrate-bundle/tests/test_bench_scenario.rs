@@ -26,6 +26,9 @@
 // Integration-test skip diagnostic: emit via stderr so `cargo test`
 // surfaces "skipping: ..." alongside `test ... ok` (issue 891).
 #![allow(clippy::print_stderr)]
+// Test reads the AETHER_REQUIRE_RUNTIME CI skip toggle — a test-harness knob,
+// not cap config.
+#![allow(clippy::disallowed_methods)]
 
 use std::path::Path;
 

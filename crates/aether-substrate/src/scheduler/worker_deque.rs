@@ -187,6 +187,9 @@ pub fn pending_depth() -> u32 {
 /// for any realistic cascade (well under 256 blobs queued at once) `hard_cap`
 /// never trips.
 #[must_use]
+// Process-level scheduler tuning knob (deque-growth backstop), read once at the
+// substrate level — not cap config.
+#[allow(clippy::disallowed_methods)]
 pub fn hard_cap() -> usize {
     static CAP: OnceLock<usize> = OnceLock::new();
     *CAP.get_or_init(|| {
@@ -243,6 +246,9 @@ const MAX_ADAPTIVE_BUDGET: Duration = Duration::from_micros(60);
 /// atomic loads, negligible against the dispatch it gates. The wall clock
 /// is still sampled at decision time, not per mail (#1163).
 #[must_use]
+// Process-level scheduler tuning knob (keep-local time-budget override), read once
+// at the substrate level — not cap config.
+#[allow(clippy::disallowed_methods)]
 pub fn time_budget() -> Duration {
     // An explicit env budget wins and is fixed within a run — pin or
     // disable (0) the valve regardless of the measured handoff cost. Cached
@@ -288,6 +294,9 @@ fn derive_budget(handoff: Duration) -> Duration {
 /// raising the stakes on the iamacoffeepot/aether#1128 cost classification;
 /// `AETHER_PEER_STEAL=1` restores the rescue.
 #[must_use]
+// Process-level scheduler tuning knob (peer-deque-steal opt-in), read once at the
+// substrate level — not cap config.
+#[allow(clippy::disallowed_methods)]
 pub fn peer_steal_enabled() -> bool {
     static E: OnceLock<bool> = OnceLock::new();
     *E.get_or_init(|| {
@@ -307,6 +316,9 @@ pub fn peer_steal_enabled() -> bool {
 /// K−1 of K cycles. Read once from `AETHER_LOCAL_CHAIN_BACKSTOP`; values
 /// `< 1` and unparseable input fall back to `64`.
 #[must_use]
+// Process-level scheduler tuning knob (every-K chain backstop), read once at the
+// substrate level — not cap config.
+#[allow(clippy::disallowed_methods)]
 pub fn chain_backstop() -> u32 {
     static K: OnceLock<u32> = OnceLock::new();
     *K.get_or_init(|| {

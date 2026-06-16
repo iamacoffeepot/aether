@@ -144,6 +144,14 @@ The full walkthrough is the [*Adding a config knob*](../recipes/adding-a-config-
 recipe; the rule to carry is
 that a knob is declared once and resolved by the layer, never read ad-hoc.
 
+A `clippy.toml` `disallowed-methods` entry bans `std::env::var` / `std::env::var_os`
+workspace-wide to keep that rule mechanical: a capability that reads the
+environment directly fails `cargo clippy -- -D warnings` (the same gate CI and
+`scripts/preflight.sh` run). A legitimately external read — the config machinery
+itself, a process-level tuning knob, a standard `HOME` / `XDG` lookup, a build
+script, or test code — carries an `#[allow(clippy::disallowed_methods)]` with a
+one-line reason stating why it is not cap config.
+
 `HttpConfig` above is the live example: each field is a knob the deployer sets at
 boot, and what those knobs gate — the deny-by-default egress allowlist, the body
 cap, the per-request timeout — is the subject of [HTTP egress](http.md).

@@ -240,6 +240,11 @@ impl DesktopEnv {
     /// # Errors
     ///
     /// See [`Self::from_env`].
+    // Desktop chassis boot resolver (argv > env): AETHER_WINDOW_MODE /
+    // AETHER_WINDOW_TITLE are hand-parsed boot overrides read by design here at
+    // the process boundary (see chassis_common's cap-flag-convention guard) — not
+    // a cap config knob.
+    #[allow(clippy::disallowed_methods)]
     pub fn from_env_with_argv(cli: DesktopCli) -> Result<Self, DesktopBootError> {
         // ADR-0090 §4 (e1): warn on any unknown AETHER_ env var.
         validate_env(&chassis_known_keys())?;

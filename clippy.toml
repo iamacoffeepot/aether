@@ -12,4 +12,6 @@ disallowed-methods = [
     { path = "std::thread::Builder::spawn", reason = "raw thread spawn bypasses the settlement/trace umbrella; use NativeCtx::spawn_inherit/spawn_detached or the ADR-0093 task system, or #[allow] with a reason for infra threads" },
     { path = "aether_data::mailbox_id_from_name", reason = "hardcodes an actor namespace into a MailboxId; address siblings via ctx.actor::<Cap>() (resolves through the ADR-0099 lineage carry). Only the core id-constant defs and runtime-name routing may #[allow] with a reason." },
     { path = "aether_data::mailbox_id_from_name_pair", reason = "scoped-name variant of the above; use the typed resolver, or #[allow] with a reason in the core id/routing API." },
+    { path = "std::env::var", reason = "capabilities configure through the ADR-0090 derive-Config path (argv > env > default, resolved into init), not a naked env read; route config through #[derive(aether_substrate::Config)]. Only the sanctioned config machinery, process-level tuning knobs, genuinely external vars (HOME/XDG), and tests may #[allow] with a reason." },
+    { path = "std::env::var_os", reason = "OS-string variant of the above; capabilities configure through the ADR-0090 derive-Config path, not a naked env read. #[allow] with a reason for the sanctioned config machinery, process-level tuning, external vars, or tests." },
 ]

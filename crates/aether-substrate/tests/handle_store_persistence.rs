@@ -200,6 +200,8 @@ fn persist_config_from_env_disable_flag() {
     // The disable flag wins even when the chassis votes enabled. This
     // test mutates a process-global env var; nextest runs each test in
     // its own process so the mutation is isolated.
+    // Test-only: save the prior env value to restore after the test mutates it.
+    #[allow(clippy::disallowed_methods)]
     let prev = env::var(ENV_PERSIST_DISABLE).ok();
     // SAFETY: single-threaded test body; nextest isolates the process.
     unsafe {

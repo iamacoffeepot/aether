@@ -43,6 +43,9 @@ use aether_substrate_bundle::test_bench::{
 /// Parse `AETHER_TEST_BENCH_SIZE=WxH`. Falls back to defaults on
 /// missing/unparseable input with a warn log so scenario scripts can
 /// see what dimensions they actually got.
+// Dev/test tooling: the test-bench binary takes its render size from env — not a
+// capability, no config layer in scope.
+#[allow(clippy::disallowed_methods)]
 fn parse_size_env() -> (u32, u32) {
     use aether_substrate_bundle::test_bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
     let Ok(raw) = env::var("AETHER_TEST_BENCH_SIZE") else {

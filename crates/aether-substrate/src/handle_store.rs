@@ -181,6 +181,10 @@ impl PersistConfig {
     /// Shared resolution path. Argv overrides (when `Some`) win against
     /// the env variable; absent argv falls through to env, then to the
     /// platform default.
+    // ADR-0049 handle-store config resolution: the argv > env > default path for
+    // the persistence enable / directory knobs — the sanctioned config shape, not
+    // a cap reading its own env behind one.
+    #[allow(clippy::disallowed_methods)]
     fn resolve(
         enabled: bool,
         dir_argv: Option<PathBuf>,
@@ -679,6 +683,7 @@ impl HandleStore {
     /// Returns [`ConfigError::UnparseableKnown`] when
     /// `AETHER_HANDLE_STORE_MAX_BYTES` is set to a non-empty value
     /// that doesn't parse as `usize`.
+    #[allow(clippy::disallowed_methods)] // ADR-0049 handle-store disk-budget config knob (AETHER_HANDLE_STORE_MAX_BYTES), the sanctioned env-resolution path, not a cap reading its own env
     pub fn from_env() -> Result<Self, ConfigError> {
         let max_bytes = match env::var(ENV_MAX_BYTES) {
             Ok(raw) if raw.trim().is_empty() => DEFAULT_MAX_BYTES,

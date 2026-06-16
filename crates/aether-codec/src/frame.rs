@@ -56,6 +56,9 @@ pub const MAX_FRAME_SIZE_CEILING: usize = 1024 * 1024 * 1024;
 /// `AETHER_MAX_FRAME_SIZE` at process start lifts the cap symmetrically
 /// for both sides.
 #[must_use]
+// Process-level wire-framing tuning knob (AETHER_MAX_FRAME_SIZE), read once at the
+// codec layer below the actor/config system — not cap config.
+#[allow(clippy::disallowed_methods)]
 pub fn max_frame_size() -> usize {
     static CACHED: OnceLock<usize> = OnceLock::new();
     *CACHED.get_or_init(|| resolve_max_frame_size(env::var("AETHER_MAX_FRAME_SIZE").ok()))
