@@ -30,7 +30,7 @@ use crate::actor::{
     Actor, HandlesKind, Instanced, NamespaceError, Singleton, Subname, validate_namespace_segment,
 };
 use crate::ffi::bridge::{MAIL_BRIDGE, PERSIST_BRIDGE};
-use crate::ffi::inline::INLINE_CHILDREN;
+use crate::ffi::inline::InlineRegistry;
 use crate::ffi::mailbox::FfiActorMailbox;
 use crate::ffi::{BootError, ErasedFfiActor, FfiActor};
 use crate::mail::ReplyHandle;
@@ -141,6 +141,14 @@ pub enum SpawnError {
 pub struct FfiCtx<'a, M: ReplyMode = Single> {
     mailbox: u64,
     sender: Option<u32>,
+    /// ADR-0114: the per-component inline-child registry the
+    /// [`Self::spawn_inline_child`] / [`Self::despawn_inline_child`] verbs
+    /// drive. The `export!` membrane threads in the component's emitted
+    /// `static __AETHER_INLINE` (a `&'static` that coerces to `&'a`); a
+    /// host unit test threads in a local registry. Held by reference
+    /// rather than reached as a global — the same discipline the parent
+    /// slot (`__AETHER_COMPONENT`) already follows.
+    inline: &'a InlineRegistry,
     _borrow: PhantomData<&'a ()>,
     /// ADR-0112: phantom reply-mode marker (a ZST, layout-neutral) that
     /// selects which reply surface this ctx exposes. Defaults to
@@ -155,10 +163,11 @@ impl<'a> FfiCtx<'a, Manual> {
     /// class with [`Self::as_single`].
     #[doc(hidden)]
     #[must_use]
-    pub fn __new(mailbox: u64) -> Self {
+    pub fn __new(mailbox: u64, inline: &'a InlineRegistry) -> Self {
         Self {
             mailbox,
             sender: None,
+            inline,
             _borrow: PhantomData,
             _mode: PhantomData,
         }
@@ -305,7 +314,7 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
     /// this trampoline's own slot; the SDK then runs `A::init`
     /// **synchronously** (unlike the detached `spawn_child`, whose `init`
     /// runs later on a fresh trampoline) and inserts the boxed child into
-    /// the ctx-side [`INLINE_CHILDREN`] registry keyed by the alias. Mail
+    /// this ctx's per-component [`InlineRegistry`] keyed by the alias. Mail
     /// addressed to the alias lands in this slot and the `export!`
     /// membrane demuxes it to the child; the child's own sends stamp the
     /// child's address as origin and its replies route back.
@@ -343,12 +352,19 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
         // child type, so the disallowed-method allow mirrors `spawn_child`.
         #[allow(clippy::disallowed_methods)]
         let type_tag = mailbox_id_from_name(<A as Actor>::NAMESPACE).0;
-        install_inline_child::<A>(alias, type_tag, full_subname, is_counter, owned)
+        install_inline_child::<A>(
+            self.inline,
+            alias,
+            type_tag,
+            full_subname,
+            is_counter,
+            owned,
+        )
     }
 
     /// ADR-0114: tear down an **inline child** spawned by
-    /// [`Self::spawn_inline_child`]. Drops the child from the ctx-side
-    /// [`INLINE_CHILDREN`] registry (running the child's `Drop`), so it
+    /// [`Self::spawn_inline_child`]. Drops the child from this ctx's
+    /// per-component [`InlineRegistry`] (running the child's `Drop`), so it
     /// stops handling mail. `child` is the alias [`MailboxId`] that
     /// `spawn_inline_child` returned (the registry key, the natural
     /// handle). Returns `true` if a resident child was removed, `false` if
@@ -376,8 +392,14 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
     /// today, so an `unwire` here would be asymmetric. The inline-child
     /// `wire` / `unwire` / subscription lifecycle lands separately, and
     /// teardown grows its `unwire` call then.
+    // Despawn is a command; its `bool` ("was a resident child removed")
+    // is informational and may be ignored, the same contract as
+    // `BTreeMap::remove` / `HashSet::remove` (neither is `#[must_use]`).
+    // The pedantic candidate lint only fires now that the body reads a
+    // borrowed registry rather than mutating a crate-global static.
+    #[allow(clippy::must_use_candidate)]
     pub fn despawn_inline_child(&self, child: MailboxId) -> bool {
-        INLINE_CHILDREN.remove(child)
+        self.inline.remove(child)
     }
 }
 
@@ -398,16 +420,18 @@ fn resolve_subname(subname: Subname<'_>) -> Result<(bool, String), SpawnError> {
     }
 }
 
-/// Build an inline child's actor value and register it under its alias
-/// (ADR-0114). Split out of [`FfiCtx::spawn_inline_child`] so the in-guest
-/// `init` + registry insert is exercisable on the host build (where the
-/// `spawn_inline_child` host fn is a panicking stub): the unit test calls
-/// this with a synthetic alias and an owned config.
+/// Build an inline child's actor value and register it under its alias in
+/// `registry` (ADR-0114). Split out of [`FfiCtx::spawn_inline_child`] so
+/// the in-guest `init` + registry insert is exercisable on the host build
+/// (where the `spawn_inline_child` host fn is a panicking stub): the unit
+/// test calls this with a local registry, a synthetic alias, and an owned
+/// config.
 ///
 /// ADR-0114 §5: `type_tag` / `full_subname` / `is_counter` are recorded in
 /// the slot so a `replace_component` swap can reconstruct the child by
 /// type and re-fold its metadata.
 fn install_inline_child<A>(
+    registry: &InlineRegistry,
     alias: MailboxId,
     type_tag: u64,
     full_subname: String,
@@ -420,13 +444,7 @@ where
     let mut ctx = FfiInitCtx::__new(alias.0);
     match A::init(config, &mut ctx) {
         Ok(child) => {
-            INLINE_CHILDREN.insert_child(
-                alias,
-                type_tag,
-                full_subname,
-                is_counter,
-                Box::new(child),
-            );
+            registry.insert_child(alias, type_tag, full_subname, is_counter, Box::new(child));
             Ok(alias)
         }
         Err(err) => Err(SpawnError::InitFailed(err)),
@@ -587,7 +605,7 @@ impl<'a> FfiDropCtx<'a> {
     }
 
     /// Not part of the public API; called only by the dehydrate compose
-    /// (`crate::ffi::inline_compose`). `save_state` records into `capture`
+    /// (`crate::ffi::inline::compose`). `save_state` records into `capture`
     /// rather than the host import, so the composite can be assembled
     /// before a single real host `save_state`.
     #[doc(hidden)]
@@ -702,7 +720,7 @@ impl Persistence for FfiDropCtx<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FfiCtx, Manual, Single, SpawnError, install_inline_child};
+    use super::{FfiCtx, InlineRegistry, Manual, Single, SpawnError, install_inline_child};
     use crate::Actor;
     use crate::actor::ctx::{OutboundReply, Resolver};
     use crate::actor::{Instanced, Subname};
@@ -764,7 +782,9 @@ mod tests {
     /// it without the panicking `spawn_inline_child` host-fn stub.
     #[test]
     fn install_inline_child_reports_init_failure() {
+        let registry = InlineRegistry::new();
         let result = install_inline_child::<FailingChild>(
+            &registry,
             MailboxId(0x5555),
             0,
             String::from("child"),
@@ -783,7 +803,8 @@ mod tests {
     /// host build's panicking host-fn stub is never reached).
     #[test]
     fn spawn_inline_child_rejects_invalid_subname() {
-        let ctx = FfiCtx::__new(0);
+        let registry = InlineRegistry::new();
+        let ctx = FfiCtx::__new(0, &registry);
         let result = ctx.spawn_inline_child::<FailingChild>(Subname::Named("bad:name"), &());
         assert!(
             matches!(result, Err(SpawnError::SubnameInvalid(_))),
@@ -792,8 +813,9 @@ mod tests {
     }
 
     /// Test inline child whose `init` succeeds, so `install_inline_child`
-    /// registers it in `INLINE_CHILDREN` for the despawn test. Its dispatch
-    /// hooks are unreachable here — the test only installs then despawns.
+    /// registers it in the test-local registry for the despawn test. Its
+    /// dispatch hooks are unreachable here — the test only installs then
+    /// despawns.
     struct SucceedingChild;
 
     impl Actor for SucceedingChild {
@@ -833,11 +855,19 @@ mod tests {
     /// (the host build's `spawn_inline_child` host fn is a panicking stub).
     #[test]
     fn despawn_inline_child_removes_then_idempotent() {
+        let registry = InlineRegistry::new();
         let alias = MailboxId(0x6161);
-        install_inline_child::<SucceedingChild>(alias, 0, String::from("widget"), false, ())
-            .expect("a succeeding init installs the inline child");
+        install_inline_child::<SucceedingChild>(
+            &registry,
+            alias,
+            0,
+            String::from("widget"),
+            false,
+            (),
+        )
+        .expect("a succeeding init installs the inline child");
 
-        let ctx = FfiCtx::__new(alias.0);
+        let ctx = FfiCtx::__new(alias.0, &registry);
         assert!(
             ctx.despawn_inline_child(alias),
             "despawning a resident child returns true",
