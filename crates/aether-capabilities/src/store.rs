@@ -47,8 +47,8 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aether_substrate::atomic_write::atomic_write;
 use aether_kinds::{BinaryEntry, BinaryManifest, ListBinaries};
+use aether_substrate::atomic_write::atomic_write;
 use aether_substrate::pid_lock::{LockAcquisition, LockGuard, acquire_lock_pid};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

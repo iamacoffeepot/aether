@@ -8,7 +8,7 @@
 //! and continue (persistence is best-effort per ADR-0049 §3).
 
 use std::fs;
-use std::io::{Write as _, Error as IoError};
+use std::io::{Error as IoError, Write as _};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,10 +26,7 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), IoError> {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     let pid = std::process::id();
-    let file_name = target
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("tmp");
+    let file_name = target.file_name().and_then(|n| n.to_str()).unwrap_or("tmp");
     let tmp = target.with_file_name(format!("{file_name}.tmp-{pid}-{nonce}"));
     {
         let mut f = fs::File::create(&tmp)?;
