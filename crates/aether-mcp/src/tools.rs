@@ -22,12 +22,12 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
 
 use aether_data::MailId;
-use aether_data::SchemaType;
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::{
-    DagId, EngineId, Kind, KindDescriptor, KindId, MailboxId, ScopePathError, Tag, Uuid,
+    DagId, EngineId, HandleId, Kind, KindDescriptor, KindId, MailboxId, ScopePathError, Tag, Uuid,
     mailbox_id_from_name, mailbox_id_from_path, tagged_id, validate_scope_path,
 };
+use aether_data::{EnumVariant, Primitive, SchemaType};
 use aether_kinds::dag::{DagDescriptor, Edge, Node, NodeId};
 use aether_kinds::{
     Cancel, CancelResult, CaptureFrame, CaptureFrameResult, ComponentCapabilities, CostTail,
@@ -55,11 +55,11 @@ use crate::args::{ActorCostArgs, ActorCostResponse, ActorCostRow};
 use crate::args::{
     CaptureCheckSpec, CaptureFrameArgs, CaptureMailSpec, ComponentSpec, DagCancelArgs,
     DagDescriptorArg, DagStatusArgs, DeadEngineInfo, DescribeComponentArgs, DescribeHandlersArgs,
-    DescribeHandlersResponse, DescribeHandlesArgs, DescribeHandlesResponse, EngineInfo,
-    HandleSummaryJson, ListEnginesResponse, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec,
-    MailStatus, NativeCapHandlers, NativeHandlerJson, NodeArg, ReplaceComponentArgs,
-    ReplyEventJson, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse, SpawnSubstrateArgs,
-    SubmitDagArgs, TerminateSubstrateArgs, TracedMailSpec, TransformListing,
+    DescribeHandlersResponse, DescribeHandlesArgs, DescribeHandlesResponse, DescribeKindsArgs,
+    EngineInfo, HandleSummaryJson, KindSummary, ListEnginesResponse, LoadComponentArgs, MailIdJson,
+    MailNodeJson, MailSpec, MailStatus, NativeCapHandlers, NativeHandlerJson, NodeArg,
+    ReplaceComponentArgs, ReplyEventJson, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse,
+    SpawnSubstrateArgs, SubmitDagArgs, TerminateSubstrateArgs, TracedMailSpec, TransformListing,
 };
 use crate::reverse::EngineNames;
 use crate::rpc::RpcSession;
@@ -726,10 +726,32 @@ impl Mcp {
     }
 
     #[tool(
-        description = "List the substrate kind vocabulary — every aether.* kind with its full schema, enough to build send_mail params. This is the static vocabulary aether-mcp ships with, not a per-engine query; component-defined kinds aren't included (use describe_component for a loaded component's handlers)."
+        description = "List the substrate kind vocabulary — the static aether.* kinds aether-mcp ships with (not a per-engine query; component-defined kinds use describe_component). Default (no args) returns a compact [{name, shape}] JSON array where shape is a one-line field rendering — small enough to never trip the context cap and chunk-readable. prefix (case-sensitive starts_with) filters the listing to a kind family (e.g. \"aether.fs\" for just the fs kinds). full:true returns the full [{name, schema}] with the authoritative nested SchemaType; combine with prefix to bound the payload to the kinds a task needs."
     )]
-    pub async fn describe_kinds(&self) -> Result<String, McpError> {
-        json(&descriptors::all())
+    pub async fn describe_kinds(
+        &self,
+        Parameters(args): Parameters<DescribeKindsArgs>,
+    ) -> Result<String, McpError> {
+        let all = descriptors::all();
+        let filtered: Vec<_> = if let Some(prefix) = &args.prefix {
+            all.into_iter()
+                .filter(|d| d.name.starts_with(prefix.as_str()))
+                .collect()
+        } else {
+            all
+        };
+        if args.full {
+            json(&filtered)
+        } else {
+            let summary: Vec<KindSummary> = filtered
+                .iter()
+                .map(|d| KindSummary {
+                    name: d.name.clone(),
+                    shape: render_shape(&d.schema),
+                })
+                .collect();
+            json(&summary)
+        }
     }
 
     #[tool(
@@ -1510,6 +1532,93 @@ impl ServerHandler for Mcp {
     }
 }
 
+/// Render a [`SchemaType`] as a one-line human-readable shape string —
+/// the compact form `describe_kinds` returns by default. The rendering is
+/// intentionally lossy (names only, not discriminants or `repr_c`) and is
+/// enough to build `send_mail` params for simple kinds without fetching
+/// the full schema. Depth is capped at 6 (`…` past that) per CLAUDE.md's
+/// recursion rule; schema depth is structurally bounded by the vocabulary
+/// but the cap is cheap insurance against pathological nesting.
+fn render_shape(ty: &SchemaType) -> String {
+    fn render(ty: &SchemaType, depth: u8) -> String {
+        if depth > 6 {
+            return "\u{2026}".to_owned();
+        }
+        match ty {
+            SchemaType::Unit => "{}".to_owned(),
+            SchemaType::Bool => "bool".to_owned(),
+            SchemaType::Scalar(p) => match p {
+                Primitive::U8 => "u8",
+                Primitive::U16 => "u16",
+                Primitive::U32 => "u32",
+                Primitive::U64 => "u64",
+                Primitive::I8 => "i8",
+                Primitive::I16 => "i16",
+                Primitive::I32 => "i32",
+                Primitive::I64 => "i64",
+                Primitive::F32 => "f32",
+                Primitive::F64 => "f64",
+            }
+            .to_owned(),
+            SchemaType::String => "String".to_owned(),
+            SchemaType::Bytes => "Bytes".to_owned(),
+            SchemaType::Option(inner) => format!("Option<{}>", render(inner, depth + 1)),
+            SchemaType::Vec(inner) => format!("Vec<{}>", render(inner, depth + 1)),
+            SchemaType::Ref(inner) => format!("Ref<{}>", render(inner, depth + 1)),
+            SchemaType::Array { element, len } => {
+                format!("[{}; {}]", render(element, depth + 1), len)
+            }
+            SchemaType::Struct { fields, .. } => {
+                let parts: Vec<String> = fields
+                    .iter()
+                    .map(|f| format!("{}: {}", f.name, render(&f.ty, depth + 1)))
+                    .collect();
+                format!("{{ {} }}", parts.join(", "))
+            }
+            SchemaType::Enum { variants } => {
+                let parts: Vec<String> = variants
+                    .iter()
+                    .map(|v| match v {
+                        EnumVariant::Unit { name, .. } => name.to_string(),
+                        EnumVariant::Tuple { name, fields, .. } => {
+                            let inner: Vec<String> =
+                                fields.iter().map(|f| render(f, depth + 1)).collect();
+                            format!("{}({})", name, inner.join(", "))
+                        }
+                        EnumVariant::Struct { name, fields, .. } => {
+                            let inner: Vec<String> = fields
+                                .iter()
+                                .map(|f| format!("{}: {}", f.name, render(&f.ty, depth + 1)))
+                                .collect();
+                            format!("{} {{ {} }}", name, inner.join(", "))
+                        }
+                    })
+                    .collect();
+                parts.join(" | ")
+            }
+            SchemaType::Map { key, value } => {
+                format!(
+                    "Map<{}, {}>",
+                    render(key, depth + 1),
+                    render(value, depth + 1)
+                )
+            }
+            SchemaType::TypeId(id) => {
+                if *id == MailboxId::TYPE_ID {
+                    "MailboxId".to_owned()
+                } else if *id == KindId::TYPE_ID {
+                    "KindId".to_owned()
+                } else if *id == HandleId::TYPE_ID {
+                    "HandleId".to_owned()
+                } else {
+                    format!("TypeId({id:#x})")
+                }
+            }
+        }
+    }
+    render(ty, 0)
+}
+
 /// ADR-0098/0099 input hygiene: reject a `recipient_name` whose
 /// `/`-rendered scope path exceeds the depth or byte caps before it
 /// folds to a `MailboxId`. The MCP `send_mail` surface is the wire
@@ -2108,9 +2217,9 @@ fn level_to_str(level: u8) -> &'static str {
 mod tests {
     use super::*;
     use crate::args::{
-        CaptureFrameArgs, CaptureMailSpec, ComponentSpec, DescribeComponentArgs, LoadComponentArgs,
-        MailSpec, ReplaceComponentArgs, SendMailArgs, SendMailTracedArgs, SpawnSubstrateArgs,
-        TerminateSubstrateArgs, TracedMailSpec,
+        CaptureFrameArgs, CaptureMailSpec, ComponentSpec, DescribeComponentArgs, DescribeKindsArgs,
+        LoadComponentArgs, MailSpec, ReplaceComponentArgs, SendMailArgs, SendMailTracedArgs,
+        SpawnSubstrateArgs, TerminateSubstrateArgs, TracedMailSpec,
     };
     use aether_capabilities::rpc::{
         PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle,
@@ -2406,16 +2515,110 @@ mod tests {
 
     /// `describe_kinds` is fully local — it renders the substrate kind
     /// inventory baked into `aether-kinds`, no hub round-trip. The
-    /// result is a non-empty JSON array.
+    /// default (compact) result is a non-empty JSON array of `{name,shape}`
+    /// objects.
     #[tokio::test]
     async fn describe_kinds_returns_the_substrate_inventory() {
         let (_chassis, port) = boot_hub();
         let mcp = connect_mcp(port);
-        let out = mcp.describe_kinds().await.expect("describe_kinds ok");
+        let out = mcp
+            .describe_kinds(Parameters(DescribeKindsArgs {
+                prefix: None,
+                full: false,
+            }))
+            .await
+            .expect("describe_kinds ok");
         let kinds: serde_json::Value = serde_json::from_str(&out).expect("json array");
+        let arr = kinds.as_array().expect("result is a JSON array");
         assert!(
-            kinds.as_array().is_some_and(|a| !a.is_empty()),
-            "describe_kinds should list the substrate vocabulary",
+            !arr.is_empty(),
+            "describe_kinds should list the substrate vocabulary"
+        );
+        let first = &arr[0];
+        assert!(
+            first.get("name").is_some() && first.get("shape").is_some(),
+            "compact entry must carry name and shape, got: {first}",
+        );
+        assert!(
+            first.get("schema").is_none(),
+            "compact entry must not carry schema, got: {first}",
+        );
+    }
+
+    /// `describe_kinds(prefix="aether.fs")` narrows the array to only the
+    /// fs kinds — every returned name starts with the prefix.
+    #[tokio::test]
+    async fn describe_kinds_prefix_narrows_results() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let out = mcp
+            .describe_kinds(Parameters(DescribeKindsArgs {
+                prefix: Some("aether.fs".to_owned()),
+                full: false,
+            }))
+            .await
+            .expect("describe_kinds ok");
+        let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+        assert!(
+            !arr.is_empty(),
+            "aether.fs prefix should match at least one kind"
+        );
+        for entry in &arr {
+            let name = entry["name"].as_str().expect("name is a string");
+            assert!(
+                name.starts_with("aether.fs"),
+                "entry name {name:?} should start with \"aether.fs\"",
+            );
+        }
+    }
+
+    /// `describe_kinds(full=true)` returns objects with a `schema` key
+    /// (the full nested `SchemaType`) and no `shape` key.
+    #[tokio::test]
+    async fn describe_kinds_full_returns_schema_key() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let out = mcp
+            .describe_kinds(Parameters(DescribeKindsArgs {
+                prefix: Some("aether.fs".to_owned()),
+                full: true,
+            }))
+            .await
+            .expect("describe_kinds ok");
+        let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+        assert!(
+            !arr.is_empty(),
+            "aether.fs prefix should match at least one kind"
+        );
+        for entry in &arr {
+            assert!(
+                entry.get("schema").is_some(),
+                "full entry must carry schema, got: {entry}",
+            );
+            assert!(
+                entry.get("shape").is_none(),
+                "full entry must not carry shape, got: {entry}",
+            );
+        }
+    }
+
+    /// `describe_kinds(prefix="zzz.does.not.exist")` returns an empty
+    /// array — not an error.
+    #[tokio::test]
+    async fn describe_kinds_nonmatching_prefix_returns_empty() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let out = mcp
+            .describe_kinds(Parameters(DescribeKindsArgs {
+                prefix: Some("zzz.does.not.exist".to_owned()),
+                full: false,
+            }))
+            .await
+            .expect("describe_kinds returns ok even with no matches");
+        let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+        assert!(
+            arr.is_empty(),
+            "non-matching prefix should return empty array, got {arr:?}"
         );
     }
 
@@ -3355,5 +3558,59 @@ mod tests {
             "fire-and-forget carries no replies",
         );
         assert!(!statuses[0].timed_out, "dispatch is not a timeout");
+    }
+
+    /// `render_shape` on a struct kind produces a `{ field: type, … }`
+    /// one-liner. Using `aether.fs.write` as a representative struct kind —
+    /// it has named fields with known types.
+    #[test]
+    fn render_shape_struct_kind() {
+        use aether_kinds::descriptors;
+        let write = descriptors::all()
+            .into_iter()
+            .find(|d| d.name == "aether.fs.write")
+            .expect("aether.fs.write in the substrate vocabulary");
+        let shape = render_shape(&write.schema);
+        assert!(
+            shape.starts_with("{ ") && shape.ends_with(" }"),
+            "struct shape should be {{ field: type, … }}, got: {shape:?}",
+        );
+        assert!(
+            shape.contains("namespace") && shape.contains("path"),
+            "aether.fs.write shape should mention namespace and path, got: {shape:?}",
+        );
+    }
+
+    /// `render_shape` on a unit/fieldless kind produces `{}`.
+    #[test]
+    fn render_shape_unit_kind() {
+        let shape = render_shape(&SchemaType::Unit);
+        assert_eq!(shape, "{}", "unit schema should render as {{}}");
+    }
+
+    /// `render_shape` on an enum kind produces `Var1 | Var2(…) | …`
+    /// with variants separated by ` | `.
+    #[test]
+    fn render_shape_enum_kind() {
+        use aether_data::{EnumVariant, SchemaType as ST};
+        use std::borrow::Cow;
+        let schema = ST::Enum {
+            variants: Cow::Borrowed(&[
+                EnumVariant::Unit {
+                    name: Cow::Borrowed("Off"),
+                    discriminant: 0,
+                },
+                EnumVariant::Tuple {
+                    name: Cow::Borrowed("On"),
+                    discriminant: 1,
+                    fields: Cow::Borrowed(&[ST::Bool]),
+                },
+            ]),
+        };
+        let shape = render_shape(&schema);
+        assert_eq!(
+            shape, "Off | On(bool)",
+            "enum shape should be Var1 | Var2(inner)"
+        );
     }
 }
