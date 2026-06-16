@@ -345,6 +345,40 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
         let type_tag = mailbox_id_from_name(<A as Actor>::NAMESPACE).0;
         install_inline_child::<A>(alias, type_tag, full_subname, is_counter, owned)
     }
+
+    /// ADR-0114: tear down an **inline child** spawned by
+    /// [`Self::spawn_inline_child`]. Drops the child from the ctx-side
+    /// [`INLINE_CHILDREN`] registry (running the child's `Drop`), so it
+    /// stops handling mail. `child` is the alias [`MailboxId`] that
+    /// `spawn_inline_child` returned (the registry key, the natural
+    /// handle). Returns `true` if a resident child was removed, `false` if
+    /// the alias named no inline child — idempotent, so despawning an
+    /// absent or already-gone alias is a clean `false`, not an error.
+    ///
+    /// **The substrate alias route is kept** — teardown is guest-only, with
+    /// no substrate change and no alias deregistration. The alias stays a
+    /// route to this component's slot, so any in-flight or later mail to the
+    /// torn-down alias — fresh mail or an orphaned downstream reply — lands
+    /// in this inbox, the `export!` membrane finds no resident child and
+    /// falls through to the parent's standard dispatch tail, and the chain
+    /// settles (ADR-0080 / ADR-0094) rather than leaking. Discarding the
+    /// alias would short-circuit-drop that orphan mail; routing it to the
+    /// parent is the deliberate teardown discipline.
+    ///
+    /// Callable from any depth: a parent on a child, a sibling on a
+    /// sibling, or a child on itself. A self-despawn mid-dispatch drops
+    /// correctly — the child is taken out of its slot while it runs, so
+    /// `remove` clears the empty slot and the matching `reinsert` on the
+    /// inline registry finds nothing and no-ops, dropping the live box at
+    /// end of dispatch.
+    ///
+    /// No `unwire` runs on teardown in v1: inline children get only `init`
+    /// today, so an `unwire` here would be asymmetric. The inline-child
+    /// `wire` / `unwire` / subscription lifecycle lands separately, and
+    /// teardown grows its `unwire` call then.
+    pub fn despawn_inline_child(&self, child: MailboxId) -> bool {
+        INLINE_CHILDREN.remove(child)
+    }
 }
 
 /// Resolve a [`Subname`] into the `(is_counter, discriminator)` pair the
@@ -752,6 +786,63 @@ mod tests {
         assert!(
             matches!(result, Err(SpawnError::SubnameInvalid(_))),
             "a separator-bearing subname must return SubnameInvalid, got {result:?}",
+        );
+    }
+
+    /// Test inline child whose `init` succeeds, so `install_inline_child`
+    /// registers it in `INLINE_CHILDREN` for the despawn test. Its dispatch
+    /// hooks are unreachable here — the test only installs then despawns.
+    struct SucceedingChild;
+
+    impl Actor for SucceedingChild {
+        const NAMESPACE: &'static str = "test.inline.succeeding_child";
+    }
+
+    impl Instanced for SucceedingChild {}
+
+    impl FfiActor for SucceedingChild {
+        type Config = ();
+        type State = ();
+
+        fn init<C>(_config: (), _ctx: &mut C) -> Result<Self, BootError>
+        where
+            C: Resolver,
+        {
+            Ok(Self)
+        }
+    }
+
+    impl ErasedFfiActor for SucceedingChild {
+        fn erased_namespace(&self) -> &'static str {
+            Self::NAMESPACE
+        }
+        fn erased_dispatch(&mut self, _ctx: &mut FfiCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+            unreachable!("the despawn test never dispatches this child")
+        }
+        fn erased_wire(&mut self, _ctx: &mut FfiCtx<'_, Manual>) {}
+        fn erased_unwire(&mut self, _ctx: &mut FfiCtx<'_, Manual>) {}
+        fn erased_on_dehydrate(&mut self, _ctx: &mut FfiDropCtx<'_>) {}
+        fn erased_on_rehydrate(&mut self, _ctx: &mut FfiCtx<'_, Manual>, _prior: PriorState<'_>) {}
+    }
+
+    /// Step 2: `despawn_inline_child` removes a resident inline child
+    /// (returns `true`) and is idempotent — a second despawn of the same
+    /// alias returns `false`, not an error. Installs the child directly
+    /// (the host build's `spawn_inline_child` host fn is a panicking stub).
+    #[test]
+    fn despawn_inline_child_removes_then_idempotent() {
+        let alias = MailboxId(0x6161);
+        install_inline_child::<SucceedingChild>(alias, 0, String::from("widget"), false, ())
+            .expect("a succeeding init installs the inline child");
+
+        let ctx = FfiCtx::__new(alias.0);
+        assert!(
+            ctx.despawn_inline_child(alias),
+            "despawning a resident child returns true",
+        );
+        assert!(
+            !ctx.despawn_inline_child(alias),
+            "a second despawn of the same alias returns false (idempotent)",
         );
     }
 

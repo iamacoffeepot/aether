@@ -282,6 +282,23 @@ pub const INLINE_WHO_PARENT: u32 = 1;
 /// child-alias path).
 pub const INLINE_WHO_CHILD: u32 = 2;
 
+/// ADR-0114 inline-child teardown trigger. Sent to the despawn fixture's
+/// parent (which tears down its stored child via `ctx.despawn_inline_child`)
+/// or to the child's alias (which despawns itself mid-dispatch). Carries no
+/// payload — the recipient address selects which actor tears the child
+/// down. Postcard-shaped unit struct.
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Clone,
+    Default,
+)]
+#[kind(name = "aether.test_fixtures.despawn_child")]
+pub struct DespawnChild;
+
 #[cfg(test)]
 mod tests {
     use aether_data::{Kind, Ref};

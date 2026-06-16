@@ -147,5 +147,17 @@ crate-type = ["cdylib"]
 name = "inline_child_stateful"
 crate-type = ["cdylib"]
 
+# ADR-0114 inline-child teardown fixture (#1939): the entry
+# `InlineDespawnParent` spawns a co-located `InlineDespawnChild` in `wire`,
+# stores its alias, and tears it down on a `DespawnChild` trigger via
+# `ctx.despawn_inline_child`. A TestBench scenario probes the live child,
+# despawns it, then probes the same alias and asserts the parent answered
+# (membrane fallthrough) and the chain still settled — the post-teardown
+# settlement guarantee (the kept alias routes orphan mail to the parent).
+# Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/inline_child_despawn.wasm
+[[example]]
+name = "inline_child_despawn"
+crate-type = ["cdylib"]
+
 [lints]
 workspace = true

@@ -46,7 +46,10 @@ use aether_substrate_bundle::test_bench::{
 use aether_substrate_bundle::visual::{
     background_top_left, bounding_box, centroid, coverage, decode_png,
 };
-use aether_test_fixtures::{Bump, CountQuery, CountReport, SetRender};
+use aether_test_fixtures::{
+    Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
+    InlineProbe, SetRender,
+};
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary. Without the reference, the
@@ -2387,6 +2390,104 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
         CountReport { count: 2 },
         "the inline child's state must survive replace_component via the composite bundle + \
          rehydrate reconstruct; got {post_count:?} (0 means the child was not reconstructed)",
+    );
+}
+
+/// ADR-0114 teardown (#1939): an inline child torn down mid-life still
+/// settles mail to its now-dead alias through the parent. Loads
+/// `inline_child_despawn` (the entry `InlineDespawnParent` spawns an
+/// `InlineDespawnChild` in `wire`), probes the child's first-class alias and
+/// asserts the *child* answers + the chain settles, sends a `DespawnChild`
+/// trigger to the parent (which calls `ctx.despawn_inline_child` on the
+/// stored alias), then probes the **same** alias again. The substrate alias
+/// route is kept on teardown, so the orphaned probe lands in the parent's
+/// inbox, the membrane finds no resident child and falls through to the
+/// parent's dispatch tail — the *parent* answers and the chain **settles**.
+/// A `SettlementTimeout` on the post-teardown probe would be the leak this
+/// verb exists to prevent. Teardown settlement is engine-internal (membrane
+/// fallthrough → parent dispatch tail → `record_finished`), `TestBench`'s
+/// lane; #1916's `FleetBench` already proved over-the-wire inline addressing.
+#[test]
+fn despawn_inline_child_settles_orphan_mail_via_parent() {
+    use aether_actor::Actor;
+
+    const FIXTURE_NAME: &str = "inline_child_despawn";
+
+    let Some(wasm_path) = require_runtime(FIXTURE_NAME) else {
+        return;
+    };
+    let parent_addr = format!(
+        "aether.component/{}:{FIXTURE_NAME}",
+        aether_capabilities::WasmTrampoline::NAMESPACE,
+    );
+    // The child's first-class lineage address: the parent's rendered name
+    // plus the inline-child node (ADR-0114). The parent spawns it under the
+    // `Named("widget")` subname in `wire`.
+    let child_addr = format!("{parent_addr}/aether.embedded:widget");
+
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+
+    // Load the entry export, then probe the *live* child's alias: the
+    // membrane demuxes to the child, which answers with the child marker,
+    // and the chain settles.
+    let live = bench
+        .execute(vec![
+            (
+                "load",
+                BenchOp::send_and_await(
+                    "aether.component",
+                    &LoadComponent {
+                        wasm,
+                        name: Some(FIXTURE_NAME.to_owned()),
+                        config: Vec::new(),
+                        export: None,
+                    },
+                ),
+            ),
+            (
+                "probe",
+                BenchOp::send_and_await(child_addr.as_str(), &InlineProbe),
+            ),
+        ])
+        .expect("load + live-probe sequence");
+    match live.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { .. } => {}
+        LoadResult::Err { error } => panic!("inline_child_despawn load failed: {error}"),
+    }
+    assert_eq!(
+        live.reply::<InlineEcho>("probe")
+            .expect("decode live-probe InlineEcho"),
+        InlineEcho {
+            who: INLINE_WHO_CHILD,
+        },
+        "a probe to the live child's alias is demuxed to and answered by the child",
+    );
+
+    // Tear the child down via the parent (`ctx.despawn_inline_child(self.child)`),
+    // then probe the *same* alias again. The kept alias routes the orphaned
+    // probe to the parent's dispatch tail, so it settles (a SettlementTimeout
+    // here would be the leak this verb prevents) and the *parent* answers.
+    let post = bench
+        .execute(vec![
+            (
+                "despawn",
+                BenchOp::send_mail::<DespawnChild>(parent_addr.as_str(), &DespawnChild),
+            ),
+            (
+                "probe",
+                BenchOp::send_and_await(child_addr.as_str(), &InlineProbe),
+            ),
+        ])
+        .expect("despawn + post-teardown probe must settle, not SettlementTimeout");
+    assert_eq!(
+        post.reply::<InlineEcho>("probe")
+            .expect("decode post-teardown InlineEcho"),
+        InlineEcho {
+            who: INLINE_WHO_PARENT,
+        },
+        "after teardown, a probe to the same alias falls through to the parent \
+         (kept alias → membrane no resident child → parent dispatch tail)",
     );
 }
 
