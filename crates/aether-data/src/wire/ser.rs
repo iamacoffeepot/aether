@@ -52,10 +52,6 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     type SerializeStruct = &'a mut Serializer;
     type SerializeStructVariant = &'a mut Serializer;
 
-    fn is_human_readable(&self) -> bool {
-        false
-    }
-
     fn serialize_bool(self, v: bool) -> Result<(), Error> {
         self.output.push(u8::from(v));
         Ok(())
@@ -233,6 +229,10 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         self.output.extend_from_slice(&variant_index.to_le_bytes());
         Ok(self)
     }
+
+    fn is_human_readable(&self) -> bool {
+        false
+    }
 }
 
 /// Buffered sequence serializer: elements accumulate in `buf` so the `u32` count
@@ -260,78 +260,36 @@ impl ser::SerializeSeq for SeqSerializer<'_> {
     }
 }
 
-impl ser::SerializeTuple for &mut Serializer {
-    type Ok = ();
-    type Error = Error;
+// Tuples, tuple structs/variants, structs, and struct variants all append
+// their elements positionally to the same buffer and write nothing at `end`.
+// One macro emits the five identical pass-through impls (the struct forms take
+// an ignored field-name argument; the tuple forms do not).
+macro_rules! passthrough_serialize {
+    ($trait:ident, $method:ident $(, $key:ident: $key_ty:ty)?) => {
+        impl ser::$trait for &mut Serializer {
+            type Ok = ();
+            type Error = Error;
 
-    fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
-        value.serialize(&mut **self)
-    }
+            fn $method<T: ?Sized + Serialize>(
+                &mut self,
+                $($key: $key_ty,)?
+                value: &T,
+            ) -> Result<(), Error> {
+                value.serialize(&mut **self)
+            }
 
-    fn end(self) -> Result<(), Error> {
-        Ok(())
-    }
+            fn end(self) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+    };
 }
 
-impl ser::SerializeTupleStruct for &mut Serializer {
-    type Ok = ();
-    type Error = Error;
-
-    fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
-        value.serialize(&mut **self)
-    }
-
-    fn end(self) -> Result<(), Error> {
-        Ok(())
-    }
-}
-
-impl ser::SerializeTupleVariant for &mut Serializer {
-    type Ok = ();
-    type Error = Error;
-
-    fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
-        value.serialize(&mut **self)
-    }
-
-    fn end(self) -> Result<(), Error> {
-        Ok(())
-    }
-}
-
-impl ser::SerializeStruct for &mut Serializer {
-    type Ok = ();
-    type Error = Error;
-
-    fn serialize_field<T: ?Sized + Serialize>(
-        &mut self,
-        _key: &'static str,
-        value: &T,
-    ) -> Result<(), Error> {
-        value.serialize(&mut **self)
-    }
-
-    fn end(self) -> Result<(), Error> {
-        Ok(())
-    }
-}
-
-impl ser::SerializeStructVariant for &mut Serializer {
-    type Ok = ();
-    type Error = Error;
-
-    fn serialize_field<T: ?Sized + Serialize>(
-        &mut self,
-        _key: &'static str,
-        value: &T,
-    ) -> Result<(), Error> {
-        value.serialize(&mut **self)
-    }
-
-    fn end(self) -> Result<(), Error> {
-        Ok(())
-    }
-}
+passthrough_serialize!(SerializeTuple, serialize_element);
+passthrough_serialize!(SerializeTupleStruct, serialize_field);
+passthrough_serialize!(SerializeTupleVariant, serialize_field);
+passthrough_serialize!(SerializeStruct, serialize_field, _key: &'static str);
+passthrough_serialize!(SerializeStructVariant, serialize_field, _key: &'static str);
 
 /// Buffered map serializer: collects encoded `(key, value)` pairs and emits them
 /// in ascending key-byte order at `end`, so equal maps encode identically.

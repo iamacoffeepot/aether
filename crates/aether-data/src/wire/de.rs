@@ -75,15 +75,7 @@ impl<'de> Deserializer<'de> {
 impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     type Error = Error;
 
-    fn is_human_readable(&self) -> bool {
-        false
-    }
-
     fn deserialize_any<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value, Error> {
-        Err(Error::NotSelfDescribing)
-    }
-
-    fn deserialize_ignored_any<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value, Error> {
         Err(Error::NotSelfDescribing)
     }
 
@@ -240,6 +232,14 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
 
     fn deserialize_identifier<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
         visitor.visit_u32(u32::from_le_bytes(self.take_array::<4>()?))
+    }
+
+    fn deserialize_ignored_any<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value, Error> {
+        Err(Error::NotSelfDescribing)
+    }
+
+    fn is_human_readable(&self) -> bool {
+        false
     }
 }
 

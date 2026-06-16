@@ -154,13 +154,13 @@ impl Kind for Tiny {
     const NAME: &'static str = "test.tiny";
     const ID: KindId = KindId(0xDEAD_BEEF);
 
-    fn encode_into_bytes(&self) -> Vec<u8> {
-        self.0.to_le_bytes().to_vec()
-    }
-
     fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
         let arr: [u8; 4] = bytes.try_into().ok()?;
         Some(Self(u32::from_le_bytes(arr)))
+    }
+
+    fn encode_into_bytes(&self) -> Vec<u8> {
+        self.0.to_le_bytes().to_vec()
     }
 }
 
