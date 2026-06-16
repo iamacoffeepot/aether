@@ -51,6 +51,7 @@ pub mod config;
 pub mod dag;
 pub mod handle_store;
 pub mod mail;
+pub mod pid_lock;
 #[cfg(feature = "render")]
 pub mod render;
 pub mod runtime;

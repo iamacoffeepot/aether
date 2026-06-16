@@ -33,10 +33,11 @@
 //!
 //! Modeled on the ADR-0049 handle store's lock / reclaim / budget shape
 //! (`aether_substrate::handle_store`), not its instance: the handle store
-//! is keyed on `HandleId` and lives per-engine. The shared `is_pid_alive`
-//! liveness check is the one piece literally reused. The `aether.engine`
-//! cap is single-threaded (one dispatcher run-token), so the store holds
-//! its index in plain fields behind `&mut self` rather than an inner lock.
+//! is keyed on `HandleId` and lives per-engine. The shared `lock.pid`
+//! acquisition protocol lives in `aether_substrate::pid_lock` and is
+//! consumed by both stores. The `aether.engine` cap is single-threaded
+//! (one dispatcher run-token), so the store holds its index in plain
+//! fields behind `&mut self` rather than an inner lock.
 
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -47,7 +48,7 @@ use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_kinds::{BinaryEntry, BinaryManifest, ListBinaries};
-use aether_substrate::handle_store::is_pid_alive;
+use aether_substrate::pid_lock::{LockAcquisition, LockGuard, acquire_lock_pid};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -464,37 +465,35 @@ fn ensure_root(root: &Path) -> PathBuf {
     fallback
 }
 
-/// Best-effort `lock.pid` acquisition (ADR-0115; reuses the handle
-/// store's reclaim shape). A stale (dead-pid) or garbage lock is
-/// reclaimed and rewritten with our pid; a live holder leaves the store
-/// unlocked (returns `None`) but still operating, since a content-
-/// addressed store tolerates a shared dir.
+/// Best-effort `lock.pid` acquisition (ADR-0115). Delegates to
+/// [`aether_substrate::pid_lock::acquire_lock_pid`] for the shared
+/// read → classify → reclaim → write protocol. A stale (dead-pid) or
+/// garbage lock is reclaimed; a live holder or a write failure leaves
+/// the store unlocked (returns `None`) but still operating, since a
+/// content-addressed store tolerates a shared dir.
 fn acquire_lock(root: &Path) -> Option<LockGuard> {
     let path = root.join("lock.pid");
-    if let Ok(raw) = fs::read_to_string(&path) {
-        match raw.trim().parse::<i32>() {
-            Ok(pid) if pid > 0 && is_pid_alive(pid) => {
-                // A live holder (possibly this same process re-opening the
-                // dir) leaves us unlocked but still operating.
-                tracing::warn!(
-                    target: TARGET,
-                    path = %path.display(),
-                    holder_pid = pid,
-                    "binary store: lock held by a live process; operating unlocked",
-                );
-                return None;
-            }
-            Ok(_) => {}
-            Err(_) => {
-                tracing::warn!(target: TARGET, path = %path.display(), "binary store: lock.pid holds garbage; reclaiming");
-            }
+    match acquire_lock_pid(&path) {
+        LockAcquisition::Acquired(guard) => Some(guard),
+        LockAcquisition::Held(pid) => {
+            tracing::warn!(
+                target: TARGET,
+                path = %path.display(),
+                holder_pid = pid,
+                "binary store: lock held by a live process; operating unlocked",
+            );
+            None
+        }
+        LockAcquisition::WriteFailed(e) => {
+            tracing::warn!(
+                target: TARGET,
+                path = %path.display(),
+                error = %e,
+                "binary store: writing lock.pid failed; operating unlocked",
+            );
+            None
         }
     }
-    if let Err(e) = atomic_write(&path, process::id().to_string().as_bytes()) {
-        tracing::warn!(target: TARGET, path = %path.display(), error = %e, "binary store: writing lock.pid failed; operating unlocked");
-        return None;
-    }
-    Some(LockGuard { path })
 }
 
 /// The in-memory index [`restore`] rebuilds from disk.
@@ -604,18 +603,6 @@ fn atomic_write(target: &Path, bytes: &[u8]) -> io::Result<()> {
             let _ = fs::remove_file(&tmp);
             Err(e)
         }
-    }
-}
-
-/// RAII guard that deletes `lock.pid` on graceful shutdown. SIGKILL
-/// bypasses `Drop`; the stale-lock reclaim on the next open handles that.
-struct LockGuard {
-    path: PathBuf,
-}
-
-impl Drop for LockGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
     }
 }
 

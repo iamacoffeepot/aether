@@ -58,6 +58,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::config::ConfigError;
 use crate::mail::Mail;
 use crate::mail::registry::Registry;
+use crate::pid_lock::{LockAcquisition, LockGuard, acquire_lock_pid};
 use aether_data::{EnumVariant, Primitive, SchemaType};
 use aether_data::{HandleId, KindId};
 use std::env;
@@ -287,49 +288,6 @@ impl fmt::Display for LockError {
 }
 
 impl StdError for LockError {}
-
-/// RAII guard that deletes `lock.pid` on graceful shutdown. SIGKILL
-/// bypasses `Drop`; the stale-lock reclamation path handles that case
-/// on the next boot.
-#[derive(Debug)]
-struct LockGuard {
-    path: PathBuf,
-}
-
-impl Drop for LockGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-/// Whether `pid` names a live process. Unix: `kill(pid, 0)` returns 0
-/// for a live process, `ESRCH` for a dead one, `EPERM` for a live one
-/// we can't signal (still counts as alive). Non-Unix: conservatively
-/// reports `false` so the lock is always reclaimable (substrate on
-/// Windows is deferred per ADR-0049 §7).
-///
-/// Public so the hub binary store's `lock.pid` reclaim (ADR-0115, issue
-/// 1953) reuses the same liveness check rather than duplicating the
-/// `kill(pid, 0)` unsafe — the two stores share the lock/reclaim shape,
-/// not the instance.
-#[cfg(unix)]
-#[must_use]
-pub fn is_pid_alive(pid: i32) -> bool {
-    // SAFETY: `kill` with signal 0 performs the error checks without
-    // sending a signal. No memory is touched.
-    let ret = unsafe { libc::kill(pid, 0) };
-    if ret == 0 {
-        return true;
-    }
-    // errno == EPERM means the process exists but we lack permission.
-    IoError::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-#[cfg(not(unix))]
-#[must_use]
-pub fn is_pid_alive(_pid: i32) -> bool {
-    false
-}
 
 /// A handle known to be on disk but not (necessarily) materialized in
 /// memory. Populated by the boot scan (issue #985) from the `.meta`
@@ -1551,11 +1509,12 @@ impl HandleStore {
         }
     }
 
-    /// Acquire the on-disk store lock (ADR-0049 §7). Writes `lock.pid`
-    /// with this process's PID after checking that any existing lock is
-    /// stale. A live conflicting lock returns [`LockError::Held`] so the
-    /// caller can abort boot with a clear error. No-op (returns `Ok`)
-    /// when persistence is disabled.
+    /// Acquire the on-disk store lock (ADR-0049 §7). Delegates to
+    /// [`crate::pid_lock::acquire_lock_pid`] for the shared read →
+    /// classify → reclaim → write protocol; maps the result to
+    /// [`LockError`]. A live conflicting lock returns [`LockError::Held`]
+    /// so the caller can abort boot with a clear error. No-op (returns
+    /// `Ok`) when persistence is disabled.
     ///
     /// On success the store holds a lock guard whose `Drop` deletes the
     /// lockfile on graceful shutdown.
@@ -1567,41 +1526,18 @@ impl HandleStore {
             return Ok(());
         };
         let path = cfg.lock_path();
-        // Inspect any existing lock.
-        if let Ok(raw) = fs::read_to_string(&path) {
-            match raw.trim().parse::<i32>() {
-                Ok(pid) if pid > 0 && is_pid_alive(pid) => {
-                    return Err(LockError::Held { path, pid });
-                }
-                Ok(pid) => {
-                    tracing::warn!(
-                        target: TARGET,
-                        path = %path.display(),
-                        stale_pid = pid,
-                        "reclaiming stale handle store lock from a dead process",
-                    );
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        target: TARGET,
-                        path = %path.display(),
-                        "lock.pid holds garbage; reclaiming as stale",
-                    );
-                }
+        match acquire_lock_pid(&path) {
+            LockAcquisition::Acquired(guard) => {
+                *self
+                    .lock
+                    .lock()
+                    .expect("handle store lock mutex poisoned; fail-fast per ADR-0063") =
+                    Some(guard);
+                Ok(())
             }
+            LockAcquisition::Held(pid) => Err(LockError::Held { path, pid }),
+            LockAcquisition::WriteFailed(error) => Err(LockError::Io { path, error }),
         }
-        // Write our PID atomically.
-        let pid = process::id();
-        atomic_write(&path, pid.to_string().as_bytes()).map_err(|error| LockError::Io {
-            path: path.clone(),
-            error,
-        })?;
-        *self
-            .lock
-            .lock()
-            .expect("handle store lock mutex poisoned; fail-fast per ADR-0063") =
-            Some(LockGuard { path });
-        Ok(())
     }
 
     /// Snapshot the store state for `describe_handles` (ADR-0049 §10).
