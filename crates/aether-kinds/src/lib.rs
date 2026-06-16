@@ -1365,6 +1365,174 @@ mod engine {
     pub struct ListBinariesResult {
         pub binaries: Vec<BinaryEntry>,
     }
+
+    /// What a stored component *is*, read straight from the wasm at upload
+    /// time — no `--describe` execution step (ADR-0116, issue 1956). A
+    /// component embeds its manifest in the `aether.kinds.inputs` /
+    /// `aether.namespace` custom sections (ADR-0028 / ADR-0033 / ADR-0096),
+    /// so the hub reads it with `wasmparser`, the same reader the substrate
+    /// uses at load. The store sidecars one of these next to each
+    /// component entry's bytes, and [`ListComponentsResult`] returns it per
+    /// entry so an observer (and the resolve query) can select a component
+    /// by what it is.
+    ///
+    /// - `namespaces` — every exported actor's `Actor::NAMESPACE`. A
+    ///   single-actor module yields one; a multi-actor module
+    ///   (`export!(A, B, …)`) yields one per type, the entry type first.
+    /// - `actors` — one [`ComponentActor`] per exported actor type, the
+    ///   `module@actor` selector axis (ADR-0096 export selector).
+    /// - `handled_kinds` — the union of every actor's handled `KindId`s
+    ///   (ADR-0030), the handled-kind selector axis.
+    /// - `fallback` — whether any exported actor declares a `#[fallback]`.
+    /// - `provenance` — the wasm `producers` custom section rendered as a
+    ///   short string (`"<tool> <version>; …"`), or empty when absent.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct ComponentManifest {
+        pub namespaces: Vec<String>,
+        pub actors: Vec<ComponentActor>,
+        pub handled_kinds: Vec<aether_data::KindId>,
+        pub fallback: bool,
+        pub provenance: String,
+    }
+
+    /// One exported actor type within a (possibly multi-actor) component
+    /// module (ADR-0096, issue 1956). `namespace` is the type's
+    /// `Actor::NAMESPACE` — the `@actor` half of a `module@actor` selector;
+    /// `handled_kinds` is the kind ids this actor handles; `fallback` is
+    /// whether it declares a `#[fallback]`. A single-actor module's
+    /// implicit group reports `namespace` as the module's `aether.namespace`
+    /// section value.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct ComponentActor {
+        pub namespace: String,
+        pub handled_kinds: Vec<aether_data::KindId>,
+        pub fallback: bool,
+    }
+
+    /// One stored component in a [`ListComponentsResult`] (ADR-0116, issue
+    /// 1956). `hash` is the sha256 hex over the wasm's raw bytes — the
+    /// content-address key. `name` is the optional human-readable name the
+    /// latest upload pointed at this hash (`Actor::NAMESPACE` is the
+    /// natural one). `manifest` is what the wasm self-reported.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct ComponentEntry {
+        pub hash: String,
+        pub name: Option<String>,
+        pub manifest: ComponentManifest,
+    }
+
+    /// How a [`ResolveComponent`] names the component wasm to load — a
+    /// registry selector resolved against the hub's content-addressed store
+    /// (ADR-0116), never a host filesystem path (the path is retired from
+    /// `load_component` entirely). The engines cap resolves it in this
+    /// order:
+    ///
+    /// - `query` is the exact selector token: a sha256 content `hash`, a
+    ///   `name@version` (treated as `name` latest in v1 — no per-name
+    ///   version index yet, ADR-0116), or a `name` an upload pointed at a
+    ///   hash. `module@actor` resolves the `module` part as the
+    ///   `name`/`hash` and the `@actor` part as the [`ResolveComponentResult`]
+    ///   `export` (the actor `Actor::NAMESPACE` to instantiate, ADR-0096).
+    /// - `namespace` / `handled_kind` are an attribute query over the
+    ///   type-tagged component manifests, consulted when `query` is `None`:
+    ///   keep only components exporting that `namespace`, or handling that
+    ///   `KindId`. An attribute query that matches more than one component
+    ///   is a clean ambiguity error, not a silent pick.
+    ///
+    /// An exact `query` wins first; absent one, the attribute query
+    /// resolves. A selector that resolves to no stored component fails.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+    pub struct ComponentSelector {
+        pub query: Option<String>,
+        pub namespace: Option<String>,
+        pub handled_kind: Option<aether_data::KindId>,
+    }
+
+    /// `aether.engine.upload_component` — ingest a component wasm into the
+    /// hub's content-addressed store (ADR-0116, issue 1956). `staged_path`
+    /// is an absolute host path the hub reads itself (aether-mcp never reads
+    /// the bytes — too large for the tool channel); the cap sha256-hashes
+    /// the bytes, dedups against the existing store, reads the manifest
+    /// straight from the wasm (no execution step — `aether.kinds.inputs` +
+    /// `aether.namespace` + the `producers` section), and stores both.
+    /// `name`, when set, points that human-readable name at the resulting
+    /// hash. Reply: [`UploadComponentResult`].
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.upload_component")]
+    pub struct UploadComponent {
+        pub staged_path: String,
+        pub name: Option<String>,
+    }
+
+    /// Reply to [`UploadComponent`] (ADR-0116, issue 1956). `Ok` carries the
+    /// content-address `hash` the bytes stored under (a re-upload of
+    /// identical bytes returns the same hash) and the `name` now pointing
+    /// at it, if any. `Err` carries a free-form reason — an unreadable
+    /// `staged_path` or a wasm whose manifest can't be parsed.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.upload_component_result")]
+    pub enum UploadComponentResult {
+        Ok { hash: String, name: Option<String> },
+        Err { error: String },
+    }
+
+    /// `aether.engine.resolve_component` — resolve a [`ComponentSelector`]
+    /// to a stored component's wasm bytes + manifest (ADR-0116, issue
+    /// 1956). aether-mcp calls this hub-local before forwarding a
+    /// `LoadComponent` to the target substrate, so the resolve hop keeps the
+    /// load seam path-free. Reply: [`ResolveComponentResult`].
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.resolve_component")]
+    pub struct ResolveComponent {
+        pub selector: ComponentSelector,
+    }
+
+    /// Reply to [`ResolveComponent`] (ADR-0116, issue 1956). `Ok` carries
+    /// the resolved content `hash`, the `wasm` bytes the load forwards, the
+    /// `name` pointing at the hash (if any), the `manifest` the store read
+    /// from the wasm, and `export` — the `@actor` half of a `module@actor`
+    /// selector, threaded into the forwarded `LoadComponent.export` so a
+    /// specific actor type is instantiated from a multi-actor module
+    /// (ADR-0096); `None` for a plain selector. `Err` carries a free-form
+    /// reason — a selector that resolves to no stored component, or an
+    /// attribute query matching more than one (a clean ambiguity error).
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.resolve_component_result")]
+    pub enum ResolveComponentResult {
+        Ok {
+            hash: String,
+            wasm: Vec<u8>,
+            name: Option<String>,
+            manifest: ComponentManifest,
+            export: Option<String>,
+        },
+        Err {
+            error: String,
+        },
+    }
+
+    /// `aether.engine.list_components` — enumerate the hub's stored
+    /// components (ADR-0116, issue 1956). The filter fields are
+    /// AND-combined and each defaults to "no constraint": `namespace` keeps
+    /// only entries exporting that actor namespace, `handled_kind` keeps
+    /// only entries handling that `KindId`. Reply: [`ListComponentsResult`].
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
+    )]
+    #[kind(name = "aether.engine.list_components")]
+    pub struct ListComponents {
+        pub namespace: Option<String>,
+        pub handled_kind: Option<aether_data::KindId>,
+    }
+
+    /// Reply to [`ListComponents`] (ADR-0116, issue 1956): every stored
+    /// component matching the filter, each as a [`ComponentEntry`] carrying
+    /// its hash, optional name, and the manifest read from the wasm.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.list_components_result")]
+    pub struct ListComponentsResult {
+        pub components: Vec<ComponentEntry>,
+    }
 }
 
 mod control_plane {
@@ -4277,6 +4445,107 @@ mod tests {
         assert_eq!(back.chassis.as_deref(), Some("headless"));
         assert_eq!(back.caps, vec!["aether.fs".to_string()]);
         assert_eq!(back.target, None);
+    }
+
+    #[test]
+    fn component_store_kinds_roundtrip() {
+        // The hub component-store registry kinds (ADR-0116, issue 1956) ride
+        // the postcard path — `Option<String>` + `Vec`s + a nested `Schema`
+        // manifest carrying `KindId`s and the wasm bytes. The upload, the
+        // resolve carrying the wasm + manifest + export, and the list reply
+        // with its embedded `ComponentEntry`/`ComponentManifest` must all
+        // survive the engines-cap encode/decode.
+        use alloc::string::ToString;
+        use alloc::vec;
+
+        let upload = UploadComponent {
+            staged_path: "/tmp/staged/probe.wasm".to_string(),
+            name: Some("probe".to_string()),
+        };
+        let back = UploadComponent::decode_from_bytes(&upload.encode_into_bytes())
+            .expect("test setup: UploadComponent decodes");
+        assert_eq!(back.staged_path, upload.staged_path);
+        assert_eq!(back.name.as_deref(), Some("probe"));
+
+        let ok = UploadComponentResult::Ok {
+            hash: "abc123".to_string(),
+            name: Some("probe".to_string()),
+        };
+        match UploadComponentResult::decode_from_bytes(&ok.encode_into_bytes())
+            .expect("test setup: UploadComponentResult decodes")
+        {
+            UploadComponentResult::Ok { hash, name } => {
+                assert_eq!(hash, "abc123");
+                assert_eq!(name.as_deref(), Some("probe"));
+            }
+            UploadComponentResult::Err { error } => panic!("expected Ok, got Err {error}"),
+        }
+
+        let manifest = ComponentManifest {
+            namespaces: vec!["test_fixture_probe".to_string()],
+            actors: vec![ComponentActor {
+                namespace: "test_fixture_probe".to_string(),
+                handled_kinds: vec![Tick::ID, Key::ID],
+                fallback: false,
+            }],
+            handled_kinds: vec![Tick::ID, Key::ID],
+            fallback: false,
+            provenance: "rustc 1.0; processed-by clang".to_string(),
+        };
+
+        let resolved = ResolveComponentResult::Ok {
+            hash: "abc123".to_string(),
+            wasm: vec![0, 1, 2, 3],
+            name: Some("probe".to_string()),
+            manifest: manifest.clone(),
+            export: Some("test_fixture_probe".to_string()),
+        };
+        match ResolveComponentResult::decode_from_bytes(&resolved.encode_into_bytes())
+            .expect("test setup: ResolveComponentResult decodes")
+        {
+            ResolveComponentResult::Ok {
+                hash,
+                wasm,
+                name,
+                manifest: got,
+                export,
+            } => {
+                assert_eq!(hash, "abc123");
+                assert_eq!(wasm, vec![0, 1, 2, 3]);
+                assert_eq!(name.as_deref(), Some("probe"));
+                assert_eq!(got, manifest);
+                assert_eq!(export.as_deref(), Some("test_fixture_probe"));
+            }
+            ResolveComponentResult::Err { error } => panic!("expected Ok, got Err {error}"),
+        }
+
+        let listed = ListComponentsResult {
+            components: vec![ComponentEntry {
+                hash: "abc123".to_string(),
+                name: Some("probe".to_string()),
+                manifest: manifest.clone(),
+            }],
+        };
+        let back = ListComponentsResult::decode_from_bytes(&listed.encode_into_bytes())
+            .expect("test setup: ListComponentsResult decodes");
+        assert_eq!(back.components.len(), 1);
+        assert_eq!(back.components[0].hash, "abc123");
+        assert_eq!(back.components[0].manifest, manifest);
+
+        // A handled-kind attribute selector round-trips its nested `KindId`.
+        let selector = ComponentSelector {
+            query: None,
+            namespace: Some("test_fixture_probe".to_string()),
+            handled_kind: Some(Tick::ID),
+        };
+        let resolve = ResolveComponent { selector };
+        let back = ResolveComponent::decode_from_bytes(&resolve.encode_into_bytes())
+            .expect("test setup: ResolveComponent decodes");
+        assert_eq!(
+            back.selector.namespace.as_deref(),
+            Some("test_fixture_probe")
+        );
+        assert_eq!(back.selector.handled_kind, Some(Tick::ID));
     }
 
     #[test]

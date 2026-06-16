@@ -51,7 +51,7 @@ use aether_kinds::{
 };
 use serde::de::DeserializeOwned;
 use std::str;
-use wasmparser::{Parser, Payload};
+use wasmparser::{BinaryReader, Parser, Payload, ProducersSectionReader};
 
 /// Section name the derive writes to for canonical schema bytes.
 /// Must match `aether-actor-derive`'s
@@ -192,6 +192,55 @@ pub fn read_namespace_from_bytes(wasm: &[u8]) -> Result<Option<String>, String> 
         }
     }
     Ok(None)
+}
+
+/// Read the wasm tool-conventions `producers` custom section (ADR-0116,
+/// issue 1956) and render it as a short single-line provenance string:
+/// `"<field>: <name> <version>; …"` — e.g.
+/// `"language: Rust; processed-by: rustc 1.86.0"`. Returns an empty string
+/// when the section is absent (a component built without producer
+/// metadata) or can't be parsed — provenance is best-effort, not
+/// load-bearing, so a malformed section degrades to empty rather than
+/// failing the upload. The hub stores this in the [`ComponentManifest`]'s
+/// `provenance` field.
+///
+/// [`ComponentManifest`]: aether_kinds::ComponentManifest
+#[must_use]
+pub fn read_producers_from_bytes(wasm: &[u8]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for payload in Parser::new(0).parse_all(wasm) {
+        let Ok(Payload::CustomSection(reader)) = payload else {
+            continue;
+        };
+        if reader.name() != "producers" {
+            continue;
+        }
+        let Ok(producers) =
+            ProducersSectionReader::new(BinaryReader::new(reader.data(), reader.data_offset()))
+        else {
+            return String::new();
+        };
+        for field in producers {
+            let Ok(field) = field else { continue };
+            let values: Vec<String> = field
+                .values
+                .into_iter()
+                .filter_map(Result::ok)
+                .map(|v| {
+                    if v.version.is_empty() {
+                        v.name.to_owned()
+                    } else {
+                        format!("{} {}", v.name, v.version)
+                    }
+                })
+                .collect();
+            if !values.is_empty() {
+                parts.push(format!("{}: {}", field.name, values.join(", ")));
+            }
+        }
+        break;
+    }
+    parts.join("; ")
 }
 
 /// One exported actor's receive-side surface within a (possibly

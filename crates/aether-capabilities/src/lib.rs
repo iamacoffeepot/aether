@@ -176,7 +176,9 @@ pub use render::RenderCapability;
 #[cfg(feature = "render-native")]
 pub use render::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
 #[cfg(feature = "native")]
-pub use store::{ArtifactKind, ArtifactStore, Selector, StoredArtifact};
+pub use store::{
+    ArtifactKind, ArtifactStore, Selector, StoredArtifact, StoredManifest, component_manifest,
+};
 pub use tcp::{TcpCapability, TcpListenerActor};
 pub use test_bench::UnsupportedTestBenchCapability;
 #[cfg(feature = "text")]

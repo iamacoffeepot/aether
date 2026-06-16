@@ -38,8 +38,8 @@
 // `#[bridge]` macro emits `impl HandlesKind<K>` markers as siblings of
 // the mod.
 use aether_kinds::{
-    EngineAlive, EngineDied, ListBinaries, ListEngines, RouteEnvelope, SpawnEngine,
-    TerminateEngine, UploadBinary,
+    EngineAlive, EngineDied, ListBinaries, ListComponents, ListEngines, ResolveComponent,
+    RouteEnvelope, SpawnEngine, TerminateEngine, UploadBinary, UploadComponent,
 };
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
@@ -55,20 +55,21 @@ pub use server_native::{EngineConfig, EngineOverlay};
 #[aether_actor::bridge(singleton)]
 mod server_native {
     use super::{
-        EngineAlive, EngineDied, ListBinaries, ListEngines, RouteEnvelope, SpawnEngine,
-        TerminateEngine, UploadBinary,
+        EngineAlive, EngineDied, ListBinaries, ListComponents, ListEngines, ResolveComponent,
+        RouteEnvelope, SpawnEngine, TerminateEngine, UploadBinary, UploadComponent,
     };
     use crate::engine::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams};
     use crate::store::{
         ArtifactKind, ArtifactStore, DEFAULT_DISK_BUDGET_BYTES, LAYOUT_VERSION_DIR, Selector,
-        StoredArtifact,
+        StoredArtifact, StoredManifest, component_manifest,
     };
     use aether_actor::actor;
     use aether_data::{EngineId, Kind, MailboxId, Uuid};
     use aether_kinds::{
-        BinaryManifest, BinarySelector, CallSettled, DeadEngineDescriptor, DeathReason,
-        EngineDescriptor, ForwardEnvelope, ListBinariesResult, ListEnginesResult,
-        SpawnEngineResult, TerminateEngineResult, UploadBinaryResult,
+        BinaryManifest, BinarySelector, CallSettled, ComponentSelector, DeadEngineDescriptor,
+        DeathReason, EngineDescriptor, ForwardEnvelope, ListBinariesResult, ListComponentsResult,
+        ListEnginesResult, ResolveComponentResult, SpawnEngineResult, TerminateEngineResult,
+        UploadBinaryResult, UploadComponentResult,
     };
     use aether_substrate::Mail;
     use aether_substrate::Subname;
@@ -748,7 +749,70 @@ mod server_native {
             mail: ListBinaries,
         ) -> ListBinariesResult {
             ListBinariesResult {
-                binaries: self.store.list(&mail),
+                binaries: self.store.list_binaries(&mail),
+            }
+        }
+
+        /// Ingest a component wasm into the hub's content-addressed store
+        /// (ADR-0116, issue 1956).
+        ///
+        /// # Agent
+        /// Send `UploadComponent { staged_path, name }`. The hub reads the
+        /// staged path itself (aether-mcp never reads the bytes — too large
+        /// for the tool channel), sha256-hashes it, dedups against the
+        /// store, reads the manifest straight from the wasm (no execution
+        /// step), stores both, and points `name` (when set) at the hash.
+        /// Reply: `UploadComponentResult::Ok { hash, name }`, or
+        /// `Err { error }` for an unreadable path or an unparseable wasm.
+        #[handler]
+        fn on_upload_component(
+            &mut self,
+            _ctx: &mut NativeCtx<'_>,
+            mail: UploadComponent,
+        ) -> UploadComponentResult {
+            match ingest_component(&mut self.store, &mail.staged_path, mail.name.clone()) {
+                Ok(hash) => UploadComponentResult::Ok {
+                    hash,
+                    name: mail.name,
+                },
+                Err(error) => UploadComponentResult::Err { error },
+            }
+        }
+
+        /// Resolve a component selector to its wasm bytes + manifest.
+        ///
+        /// # Agent
+        /// Send `ResolveComponent { selector }`. aether-mcp calls this
+        /// hub-local before forwarding a `LoadComponent` to the target
+        /// substrate, so the load seam stays path-free. The selector is a
+        /// `hash` / `name` (latest) / `module@actor` exact token, or a
+        /// namespace / handled-kind attribute query (an attribute query
+        /// matching more than one component is a clean ambiguity error).
+        /// Reply: `ResolveComponentResult::Ok { hash, wasm, name, manifest,
+        /// export }`, or `Err { error }` for no match / ambiguity.
+        #[handler]
+        fn on_resolve_component(
+            &mut self,
+            _ctx: &mut NativeCtx<'_>,
+            mail: ResolveComponent,
+        ) -> ResolveComponentResult {
+            resolve_component(&mut self.store, &mail.selector)
+        }
+
+        /// Enumerate the hub's stored components.
+        ///
+        /// # Agent
+        /// Send `ListComponents { namespace?, handled_kind? }` (each filter
+        /// AND-combined; an absent field is no constraint). Reply:
+        /// `ListComponentsResult { components: [{ hash, name, manifest }] }`.
+        #[handler]
+        fn on_list_components(
+            &mut self,
+            _ctx: &mut NativeCtx<'_>,
+            mail: ListComponents,
+        ) -> ListComponentsResult {
+            ListComponentsResult {
+                components: self.store.list_components(&mail),
             }
         }
     }
@@ -789,7 +853,12 @@ mod server_native {
     ) -> Result<String, String> {
         let bytes = fs::read(path).map_err(|e| format!("reading binary path {path:?}: {e}"))?;
         let manifest = describe_binary(path)?;
-        Ok(store.upload(&bytes, ArtifactKind::Binary, manifest, name))
+        Ok(store.upload(
+            &bytes,
+            ArtifactKind::Binary,
+            StoredManifest::Binary(manifest),
+            name,
+        ))
     }
 
     /// Bootstrap-ingest each chassis bin in `paths` into `store`, naming
@@ -819,6 +888,148 @@ mod server_native {
                     "binary bootstrap: skipping a bin that failed to ingest",
                 ),
             }
+        }
+    }
+
+    /// Ingest the component wasm at `path` into `store` content-addressed,
+    /// reading its manifest straight from the wasm (ADR-0116, issue 1956) —
+    /// no execution step. Returns the stored content hash, or a
+    /// human-readable error for an unreadable path or an unparseable wasm.
+    /// Idempotent — identical bytes dedup to the same hash.
+    fn ingest_component(
+        store: &mut ArtifactStore,
+        path: &str,
+        name: Option<String>,
+    ) -> Result<String, String> {
+        let bytes = fs::read(path).map_err(|e| format!("reading component path {path:?}: {e}"))?;
+        let manifest = component_manifest(&bytes)
+            .map_err(|e| format!("reading component manifest from {path:?}: {e}"))?;
+        Ok(store.upload(
+            &bytes,
+            ArtifactKind::Component,
+            StoredManifest::Component(manifest),
+            name,
+        ))
+    }
+
+    /// Resolve a [`ComponentSelector`] against `store` to its wasm bytes +
+    /// manifest (ADR-0116, issue 1956). Resolution order mirrors the binary
+    /// selector: an exact `query` token wins first (`hash` > `module@actor`
+    /// > `name@version` (latest in v1) > `name`); absent a token, the
+    /// `namespace` / `handled_kind` attribute query resolves, where a query
+    /// matching more than one component is a clean ambiguity error (never a
+    /// silent pick). A `module@actor` token's `@actor` part populates the
+    /// reply `export` so the forwarded `LoadComponent` instantiates that
+    /// actor type (ADR-0096). Returns `Err` for no match / ambiguity.
+    fn resolve_component(
+        store: &mut ArtifactStore,
+        selector: &ComponentSelector,
+    ) -> ResolveComponentResult {
+        // An exact token, with the `@actor` half (if any) split off as the
+        // export selector forwarded to the substrate.
+        if let Some(token) = selector
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            return resolve_component_token(store, token);
+        }
+        // No exact token: a namespace / handled-kind attribute query. A
+        // match-more-than-one is a clean ambiguity error.
+        let mut matches = store.list_components(&ListComponents {
+            namespace: selector.namespace.clone(),
+            handled_kind: selector.handled_kind,
+        });
+        match matches.len() {
+            0 => ResolveComponentResult::Err {
+                error: format!(
+                    "no stored component matches the attribute query (namespace = {:?}, handled_kind = {:?})",
+                    selector.namespace, selector.handled_kind,
+                ),
+            },
+            1 => {
+                let hash = matches.remove(0).hash;
+                stored_component_reply(store, &hash, None)
+            }
+            n => ResolveComponentResult::Err {
+                error: format!(
+                    "the attribute query (namespace = {:?}, handled_kind = {:?}) matches {n} components — narrow it to a single component (by hash or name)",
+                    selector.namespace, selector.handled_kind,
+                ),
+            },
+        }
+    }
+
+    /// Resolve an exact component selector token to a [`ResolveComponentResult`]
+    /// (ADR-0116). A `module@actor` token splits into the `module`
+    /// hash/name and the `@actor` export selector; a `name@version` token
+    /// is treated as `name` (latest) — v1 keeps no per-name version index;
+    /// a bare token resolves as a hash first, then a name.
+    fn resolve_component_token(store: &mut ArtifactStore, token: &str) -> ResolveComponentResult {
+        // `module@actor` (ADR-0096) takes precedence: the `@actor` half is a
+        // component `Actor::NAMESPACE`, distinct from a binary `name@version`
+        // build id. Resolve the module half (hash, then name), forward the
+        // actor half as `export`.
+        if let Some((module, actor)) = token.split_once('@') {
+            // A hash never contains `@`, so the module half resolves as a
+            // hash first, then a name (latest). The actor half is the export.
+            if store.contains(module) {
+                return stored_component_reply(store, module, Some(actor.to_owned()));
+            }
+            if let Some(found) = store.get(&Selector::Name(module.to_owned())) {
+                return stored_component_reply(store, &found.hash, Some(actor.to_owned()));
+            }
+            return ResolveComponentResult::Err {
+                error: format!("no stored component matches the selector {token:?}"),
+            };
+        }
+        // A bare token: an exact hash wins, else a name (latest).
+        if store.contains(token) {
+            return stored_component_reply(store, token, None);
+        }
+        if let Some(found) = store.get(&Selector::Name(token.to_owned())) {
+            return stored_component_reply(store, &found.hash, None);
+        }
+        ResolveComponentResult::Err {
+            error: format!("no stored component matches the selector {token:?}"),
+        }
+    }
+
+    /// Read the stored component `hash`'s wasm bytes + manifest off disk and
+    /// build a `ResolveComponentResult::Ok` (ADR-0116). `export` threads a
+    /// `module@actor` selector's actor half through to the forwarded
+    /// `LoadComponent.export`. An entry that isn't a component (a binary
+    /// hash) or whose bytes can't be read is a clean `Err`.
+    fn stored_component_reply(
+        store: &mut ArtifactStore,
+        hash: &str,
+        export: Option<String>,
+    ) -> ResolveComponentResult {
+        let Some(found) = store.get(&Selector::Hash(hash.to_owned())) else {
+            return ResolveComponentResult::Err {
+                error: format!("no stored artifact has hash {hash:?}"),
+            };
+        };
+        let Some(manifest) = found.manifest.as_component().cloned() else {
+            return ResolveComponentResult::Err {
+                error: format!("artifact {hash:?} is not a component"),
+            };
+        };
+        let wasm = match fs::read(&found.path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return ResolveComponentResult::Err {
+                    error: format!("reading stored component bytes for {hash:?}: {e}"),
+                };
+            }
+        };
+        ResolveComponentResult::Ok {
+            hash: found.hash,
+            wasm,
+            name: found.name,
+            manifest,
+            export,
         }
     }
 
@@ -853,7 +1064,7 @@ mod server_native {
         }
         // No exact token: an attribute query, else `default` = headless.
         let hash = store
-            .list(&attribute_filter(selector))
+            .list_binaries(&attribute_filter(selector))
             .into_iter()
             .map(|entry| entry.hash)
             .min()?;
@@ -885,7 +1096,7 @@ mod server_native {
     /// `None` when no current entry matches both.
     fn pick_versioned(store: &ArtifactStore, name: &str, version: &str) -> Option<String> {
         store
-            .list(&ListBinaries::default())
+            .list_binaries(&ListBinaries::default())
             .into_iter()
             .find(|entry| entry.name.as_deref() == Some(name) && entry.manifest.git_sha == version)
             .map(|entry| entry.hash)
@@ -1257,7 +1468,12 @@ mod tests {
             )
             .expect("the default selector resolves to the bootstrapped headless bin");
             assert_eq!(
-                resolved.manifest.chassis, "headless",
+                resolved
+                    .manifest
+                    .as_binary()
+                    .expect("the resolved artifact is a binary")
+                    .chassis,
+                "headless",
                 "default resolves to the headless chassis",
             );
 
