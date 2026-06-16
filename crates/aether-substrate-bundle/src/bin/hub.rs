@@ -46,6 +46,16 @@ fn main() -> anyhow::Result<()> {
         print!("{}", dump_config(&[], HUB_KNOBS));
         return Ok(());
     }
+    // `--describe` (ADR-0115, issue 1953): print this binary's manifest —
+    // chassis kind, linked caps, build provenance — as JSON, then exit
+    // before boot.
+    if cli.describe {
+        println!(
+            "{}",
+            serde_json::to_string(&HubChassis::describe_manifest())?
+        );
+        return Ok(());
+    }
     let chassis = HubChassis::build(HubEnv::from_env_with_argv(&cli))?;
     eprintln!(
         "aether-substrate-bundle: hub chassis initialised (profile={})",

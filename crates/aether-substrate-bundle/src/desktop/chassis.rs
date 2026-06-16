@@ -18,12 +18,15 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use aether_actor::Actor;
 use aether_capabilities::LifecycleCapability;
+use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
     AnthropicConfig, AudioCapability, CaptureBackend, ComponentHostConfig, GeminiConfig,
     HttpServerConfig, InputConfig, RenderCapability, RenderConfig, UnsupportedTestBenchCapability,
     audio::AudioConfig as AudioConf, fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
+use aether_kinds::BinaryManifest;
 use aether_kinds::WindowMode;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
@@ -135,6 +138,28 @@ impl Chassis for DesktopChassis {
     }
 }
 
+impl DesktopChassis {
+    /// The `--describe` manifest (ADR-0115, issue 1953): the chassis
+    /// profile, the mailbox namespaces this binary links, and the
+    /// `build.rs` provenance. The desktop chassis layers the audio /
+    /// render / test-bench / lifecycle caps plus the RPC server onto the
+    /// shared [`common_cap_namespaces`](crate::common_cap_namespaces)
+    /// base. `--describe` prints this without opening a winit event loop —
+    /// the hub can capture a desktop binary's manifest on a headless host.
+    #[must_use]
+    pub fn describe_manifest() -> BinaryManifest {
+        let mut caps = crate::common_cap_namespaces();
+        caps.extend([
+            <AudioCapability as Actor>::NAMESPACE,
+            <RenderCapability as Actor>::NAMESPACE,
+            <UnsupportedTestBenchCapability as Actor>::NAMESPACE,
+            <LifecycleCapability as Actor>::NAMESPACE,
+            <RpcServerCapability as Actor>::NAMESPACE,
+        ]);
+        crate::binary_manifest(Self::PROFILE, caps)
+    }
+}
+
 /// Bag of resolved configs the desktop chassis takes at build time.
 /// `main()` populates it from env vars (per ADR-0070's "substrate-core
 /// never reads env" invariant); tests construct one directly.
@@ -223,9 +248,10 @@ impl DesktopEnv {
             audio: audio_overlay,
             window_mode: cli_window_mode,
             window_title: cli_window_title,
-            // The bin handles `--config` (print + exit) before this
-            // resolver runs; ignore it here.
+            // The bin handles `--config` / `--describe` (print + exit)
+            // before this resolver runs; ignore them here.
             config: _,
+            describe: _,
         } = cli;
         let CommonOverlay {
             http,

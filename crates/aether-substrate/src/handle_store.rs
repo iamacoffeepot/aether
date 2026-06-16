@@ -307,8 +307,14 @@ impl Drop for LockGuard {
 /// we can't signal (still counts as alive). Non-Unix: conservatively
 /// reports `false` so the lock is always reclaimable (substrate on
 /// Windows is deferred per ADR-0049 §7).
+///
+/// Public so the hub binary store's `lock.pid` reclaim (ADR-0115, issue
+/// 1953) reuses the same liveness check rather than duplicating the
+/// `kill(pid, 0)` unsafe — the two stores share the lock/reclaim shape,
+/// not the instance.
 #[cfg(unix)]
-fn is_pid_alive(pid: i32) -> bool {
+#[must_use]
+pub fn is_pid_alive(pid: i32) -> bool {
     // SAFETY: `kill` with signal 0 performs the error checks without
     // sending a signal. No memory is touched.
     let ret = unsafe { libc::kill(pid, 0) };
@@ -320,7 +326,8 @@ fn is_pid_alive(pid: i32) -> bool {
 }
 
 #[cfg(not(unix))]
-fn is_pid_alive(_pid: i32) -> bool {
+#[must_use]
+pub fn is_pid_alive(_pid: i32) -> bool {
     false
 }
 

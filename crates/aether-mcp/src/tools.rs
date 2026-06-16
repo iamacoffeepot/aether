@@ -35,10 +35,11 @@ use aether_data::{EnumVariant, Primitive, SchemaType};
 use aether_kinds::dag::{DagDescriptor, Edge, Node, NodeId};
 use aether_kinds::{
     Cancel, CancelResult, CaptureFrame, CaptureFrameResult, ComponentCapabilities, CostTail,
-    CostTailResult, DeathReason, FrameCheck, FrameReduction, ListEngines, ListEnginesResult,
-    ListKinds, ListKindsResult, LoadComponent, LoadResult, MailEnvelope as KindMailEnvelope,
-    ReplaceComponent, ReplaceResult, SimilarityCheck, SpawnEngine, SpawnEngineResult, Status,
-    StatusResult, Submit, SubmitResult, TerminateEngine, TerminateEngineResult,
+    CostTailResult, DeathReason, FrameCheck, FrameReduction, ListBinaries, ListBinariesResult,
+    ListEngines, ListEnginesResult, ListKinds, ListKindsResult, LoadComponent, LoadResult,
+    MailEnvelope as KindMailEnvelope, ReplaceComponent, ReplaceResult, SimilarityCheck,
+    SpawnEngine, SpawnEngineResult, Status, StatusResult, Submit, SubmitResult, TerminateEngine,
+    TerminateEngineResult, UploadBinary, UploadBinaryResult,
     trace::{
         DescribeTreeResult, DispatchTraced, DispatchTracedAck, MailNodeWire, TRACE_MAILBOX_NAME,
         TraceTail, TraceTailResult,
@@ -60,10 +61,11 @@ use crate::args::{
     CaptureCheckSpec, CaptureFrameArgs, CaptureMailSpec, ComponentSpec, DagCancelArgs,
     DagDescriptorArg, DagStatusArgs, DeadEngineInfo, DescribeComponentArgs, DescribeHandlersArgs,
     DescribeHandlersResponse, DescribeHandlesArgs, DescribeHandlesResponse, DescribeKindsArgs,
-    EngineInfo, HandleSummaryJson, KindSummary, ListEnginesResponse, LoadComponentArgs, MailIdJson,
-    MailNodeJson, MailSpec, MailStatus, NativeCapHandlers, NativeHandlerJson, NodeArg,
-    ReplaceComponentArgs, ReplyEventJson, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse,
-    SpawnSubstrateArgs, SubmitDagArgs, TerminateSubstrateArgs, TracedMailSpec, TransformListing,
+    EngineInfo, HandleSummaryJson, KindSummary, ListBinariesArgs, ListEnginesResponse,
+    LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, MailStatus, NativeCapHandlers,
+    NativeHandlerJson, NodeArg, ReplaceComponentArgs, ReplyEventJson, SendMailArgs,
+    SendMailTracedArgs, SendMailTracedResponse, SpawnSubstrateArgs, SubmitDagArgs,
+    TerminateSubstrateArgs, TracedMailSpec, TransformListing, UploadBinaryArgs,
 };
 use crate::reverse::EngineNames;
 use crate::rpc::RpcSession;
@@ -304,6 +306,60 @@ impl Mcp {
             Some(TerminateEngineResult::Ok) => json(&serde_json::json!({ "status": "terminated" })),
             Some(TerminateEngineResult::Err { error }) => Err(internal_msg(&error)),
             None => Err(internal_msg("undecodable TerminateEngineResult")),
+        }
+    }
+
+    #[tool(
+        description = "Upload a binary into the hub's content-addressed store (ADR-0115). Pass `staged_path` — an absolute path to the binary on the fleet host — and an optional `name`. The hub reads the path itself (aether-mcp never reads the bytes — a binary is too large for the tool channel), sha256-hashes it, dedups against the store (a re-upload of identical bytes returns the same hash), forks `<binary> --describe` to capture its manifest (chassis kind, linked caps, build provenance), stores both, and points `name` (when given) at the hash. The store persists across a restart-hub. Returns {hash, name}."
+    )]
+    pub async fn upload_binary(
+        &self,
+        Parameters(args): Parameters<UploadBinaryArgs>,
+    ) -> Result<String, McpError> {
+        // The hub reads the staged path; aether-mcp forwards it, never
+        // reading the bytes (unlike load_component).
+        let reply = self
+            .session
+            .call_one(local_envelope(
+                ENGINE_CAP,
+                &UploadBinary {
+                    staged_path: args.staged_path,
+                    name: args.name,
+                },
+            ))
+            .await
+            .map_err(internal)?;
+        match UploadBinaryResult::decode_from_bytes(&reply.payload) {
+            Some(UploadBinaryResult::Ok { hash, name }) => {
+                json(&serde_json::json!({ "hash": hash, "name": name }))
+            }
+            Some(UploadBinaryResult::Err { error }) => Err(internal_msg(&error)),
+            None => Err(internal_msg("undecodable UploadBinaryResult")),
+        }
+    }
+
+    #[tool(
+        description = "Enumerate the hub's stored binaries (ADR-0115). Optional AND-combined filters: `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (keep only binaries whose linked caps are a superset of every listed cap), `target` (the build target triple). Omit all to list the whole store. Returns an array of {hash, name, manifest: {chassis, caps, git_sha, profile, target}} — the manifest each binary reported via a one-time --describe at upload time."
+    )]
+    pub async fn list_binaries(
+        &self,
+        Parameters(args): Parameters<ListBinariesArgs>,
+    ) -> Result<String, McpError> {
+        let reply = self
+            .session
+            .call_one(local_envelope(
+                ENGINE_CAP,
+                &ListBinaries {
+                    chassis: args.chassis,
+                    caps: args.caps,
+                    target: args.target,
+                },
+            ))
+            .await
+            .map_err(internal)?;
+        match ListBinariesResult::decode_from_bytes(&reply.payload) {
+            Some(result) => json(&result.binaries),
+            None => Err(internal_msg("undecodable ListBinariesResult")),
         }
     }
 

@@ -61,6 +61,39 @@ pub struct TerminateSubstrateArgs {
     pub engine_id: String,
 }
 
+/// `upload_binary` arguments (ADR-0115, issue 1953).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UploadBinaryArgs {
+    /// Absolute path to the binary on the fleet host. The hub reads this
+    /// path itself, content-addresses it (sha256), and forks
+    /// `<path> --describe` to capture its manifest — aether-mcp never
+    /// reads the bytes (unlike `load_component`, a binary is too large
+    /// for the tool channel).
+    pub staged_path: String,
+    /// Optional human-readable name to point at the resulting hash. A
+    /// later upload with the same name repoints it; the named entry is
+    /// protected from LRU eviction.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// `list_binaries` arguments (ADR-0115, issue 1953). Every field is an
+/// optional AND-combined filter; omit all to list the whole store.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListBinariesArgs {
+    /// Keep only binaries whose manifest chassis matches (`"headless"` /
+    /// `"desktop"` / `"hub"`).
+    #[serde(default)]
+    pub chassis: Option<String>,
+    /// Keep only binaries whose linked caps are a superset of every cap
+    /// listed here (e.g. `["aether.render"]`).
+    #[serde(default)]
+    pub caps: Vec<String>,
+    /// Keep only binaries whose manifest target triple matches.
+    #[serde(default)]
+    pub target: Option<String>,
+}
+
 /// `send_mail` arguments — a best-effort batch.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendMailArgs {

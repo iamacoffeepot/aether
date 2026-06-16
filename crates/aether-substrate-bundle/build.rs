@@ -14,6 +14,7 @@
 //! so the bins still compile — they just boot componentless if run,
 //! which only the bundle flow ever does for real.
 
+use std::process::Command;
 use std::{env, fs, path::Path, path::PathBuf};
 
 // The pack encoder + manifest schema + reader, shared with the lib
@@ -28,6 +29,7 @@ mod bundle_pack;
 use bundle_pack::{Pack, encode_pack, pack_from_manifest, read_manifest};
 
 fn main() {
+    emit_provenance();
     println!("cargo:rerun-if-env-changed=AETHER_BUNDLE_MANIFEST");
     println!("cargo:rerun-if-changed=src/bundle_pack.rs");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR set by cargo"))
@@ -36,6 +38,39 @@ fn main() {
         pack_for(Path::new(&manifest_path))
     });
     fs::write(&out, encode_pack(&pack)).expect("write bundle pack blob");
+}
+
+/// Bake build provenance into the chassis bins so their `--describe`
+/// manifest (ADR-0115, issue 1953) can report the source revision, build
+/// profile, and target triple without a runtime git / cargo probe. The
+/// bins read these back via `env!`:
+///
+/// - `AETHER_GIT_SHA` — `git rev-parse --short HEAD`, or `"unknown"` when
+///   the binary is built outside a git checkout (a published crate, a
+///   tarball). The `rerun-if-changed` on `.git/HEAD` re-runs the script
+///   when the checkout moves to a new commit.
+/// - `AETHER_BUILD_PROFILE` — cargo's `PROFILE` (`debug` / `release`).
+/// - `AETHER_TARGET_TRIPLE` — cargo's `TARGET` (e.g.
+///   `aarch64-apple-darwin`).
+fn emit_provenance() {
+    println!("cargo:rerun-if-changed=../../.git/HEAD");
+    let git_sha = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map_or_else(|| "unknown".to_owned(), |s| s.trim().to_owned());
+    let git_sha = if git_sha.is_empty() {
+        "unknown".to_owned()
+    } else {
+        git_sha
+    };
+    println!("cargo:rustc-env=AETHER_GIT_SHA={git_sha}");
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "unknown".to_owned());
+    println!("cargo:rustc-env=AETHER_BUILD_PROFILE={profile}");
+    let target = env::var("TARGET").unwrap_or_else(|_| "unknown".to_owned());
+    println!("cargo:rustc-env=AETHER_TARGET_TRIPLE={target}");
 }
 
 /// Register the manifest plus every wasm / config it names for
