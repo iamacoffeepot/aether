@@ -54,7 +54,7 @@ mod wasm {
     /// thread of the wasm linear memory: every component runs on
     /// one logical thread inside its own linear memory, so the
     /// static can never be racily aliased across threads. Same
-    /// loophole the [`crate::ffi::bridge::MAIL_BRIDGE`] static uses.
+    /// loophole `crate::ffi::bridge::mail`'s wasm linear-memory scope uses.
     ///
     /// `BTreeMap` instead of `HashMap` because `BTreeMap::new()`
     /// is `const fn` and `aether-actor` is `no_std + alloc` — we

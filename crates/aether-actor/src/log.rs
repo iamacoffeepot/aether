@@ -15,7 +15,7 @@
 //! ADR-0081 retires the pre-ADR flush-hop machinery alongside this
 //! rewrite: `LogBuffer`, `drain_buffer`, the `IN_LOG_PIPELINE`
 //! re-entry guard, the chassis-pushed `ConfigureLogDrain` mail, the
-//! `set_native_log_shipper` hook, the wasm `MAIL_BRIDGE` route for
+//! `set_native_log_shipper` hook, the wasm mail-bridge route for
 //! `LogBatch`, and `LogCapability` itself. The new query path
 //! ([`LogTail`] / [`LogTailResult`]) is served by a framework-built-
 //! in dispatch arm every actor inherits — no `#[handler]` for it on
@@ -367,7 +367,7 @@ impl Subscriber for WasmSubscriber {
 
     fn event(&self, event: &Event<'_>) {
         let (level, target, message) = render_event(event);
-        crate::ffi::bridge::MAIL_BRIDGE.emit_log_event(level, &target, &message);
+        crate::ffi::bridge::mail::emit_log_event(level, &target, &message);
     }
 }
 

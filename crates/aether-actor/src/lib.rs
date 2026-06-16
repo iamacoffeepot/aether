@@ -13,8 +13,8 @@
 //! `MailTransport` trait that originally tied the FFI and native
 //! halves together — the cross-target abstraction is now the
 //! per-stage capability traits in [`actor::ctx`]; the per-target
-//! dispatch surfaces are [`ffi::bridge`] (FFI: [`ffi::MAIL_BRIDGE`],
-//! [`ffi::PERSIST_BRIDGE`]) and the inherent methods on
+//! dispatch surfaces are [`ffi::bridge`] (FFI: `ffi::bridge::mail`,
+//! `ffi::bridge::persist`) and the inherent methods on
 //! `aether_substrate::actor::native::binding::NativeBinding`.
 //!
 //! Public surface:

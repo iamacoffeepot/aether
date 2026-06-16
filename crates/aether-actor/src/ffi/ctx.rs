@@ -8,13 +8,13 @@
 //! `DropCtx<'a, T>` aliases. The ctx interface is now spelled by the
 //! per-stage capability traits in [`crate::actor::ctx`]; these structs
 //! are concrete impls that route outbound calls through the
-//! per-concern bridge ZSTs in [`crate::ffi::bridge`] ([`MAIL_BRIDGE`] /
-//! [`PERSIST_BRIDGE`]).
+//! per-concern bridge functions in `crate::ffi::bridge::mail` and
+//! `crate::ffi::bridge::persist`.
 //!
 //! Issue 665 retired the `transport: &'a FfiTransport` field along
 //! with the `FfiTransport` ZST and `MailTransport` trait — ctxs hold
 //! per-mail state only (mailbox id at init; reply target at receive),
-//! and dispatch goes through the bridge statics directly.
+//! and dispatch goes through the bridge functions directly.
 
 use core::marker::PhantomData;
 use core::ptr;
@@ -29,7 +29,7 @@ use crate::actor::ctx::resolver::Resolver;
 use crate::actor::{
     Actor, HandlesKind, Instanced, NamespaceError, Singleton, Subname, validate_namespace_segment,
 };
-use crate::ffi::bridge::{MAIL_BRIDGE, PERSIST_BRIDGE};
+use crate::ffi::bridge::{mail, persist};
 use crate::ffi::inline::InlineRegistry;
 use crate::ffi::mailbox::FfiActorMailbox;
 use crate::ffi::{BootError, ErasedFfiActor, FfiActor};
@@ -226,7 +226,7 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
     )]
     pub fn reply_kind<K: Kind>(&self, sender: ReplyHandle, kind: KindId<K>, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.reply_mail(sender.raw(), kind.raw(), &bytes, 1);
+        mail::reply_mail(sender.raw(), kind.raw(), &bytes, 1);
     }
 
     /// Reply target for the mail currently being dispatched. Mirrors
@@ -299,7 +299,7 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
         let tag = mailbox_id_from_name(<A as Actor>::NAMESPACE).0;
         let (is_counter, full_subname) = resolve_subname(subname)?;
         let config_bytes = config.encode_into_bytes();
-        let id = MAIL_BRIDGE.spawn_sibling(tag, is_counter, &full_subname, &config_bytes);
+        let id = mail::spawn_sibling(tag, is_counter, &full_subname, &config_bytes);
         Ok(MailboxId(id))
     }
 
@@ -335,7 +335,7 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
         A: Instanced + FfiActor + ErasedFfiActor,
     {
         let (is_counter, full_subname) = resolve_subname(subname)?;
-        let alias = MailboxId(MAIL_BRIDGE.spawn_inline_child(is_counter, &full_subname));
+        let alias = MailboxId(mail::spawn_inline_child(is_counter, &full_subname));
         // Re-decode an owned `A::Config` for the in-guest `init` from the
         // same bytes the detached path would have shipped — symmetric with
         // `spawn_child`'s encode-in-guest / decode-in-host round-trip, and
@@ -473,7 +473,7 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, false);
+        mail::send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, false);
     }
 
     //noinspection DuplicatedCode
@@ -483,7 +483,7 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        MAIL_BRIDGE.send_mail(
+        mail::send_mail(
             R::resolve(self.mailbox).0,
             K::ID.0,
             bytes,
@@ -498,11 +498,11 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
     #[allow(clippy::disallowed_methods)]
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, false);
+        mail::send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, false);
     }
 
     fn prev_correlation(&self) -> u64 {
-        MAIL_BRIDGE.prev_correlation()
+        mail::prev_correlation()
     }
 
     //noinspection DuplicatedCode
@@ -512,7 +512,7 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, true);
+        mail::send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, true);
     }
 
     //noinspection DuplicatedCode
@@ -520,7 +520,7 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
     #[allow(clippy::disallowed_methods)]
     fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, true);
+        mail::send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, true);
     }
 }
 
@@ -537,20 +537,20 @@ impl OutboundReply for FfiCtx<'_, Manual> {
 
     fn source_mailbox(&self) -> Option<MailboxId> {
         let handle = self.sender?;
-        let id = MAIL_BRIDGE.source_of(handle);
+        let id = mail::source_of(handle);
         (id != MailboxId::NONE.0).then_some(MailboxId(id))
     }
 
     fn reply<K: Kind>(&mut self, payload: &K) {
         if let Some(raw) = self.sender {
             let bytes = payload.encode_into_bytes();
-            MAIL_BRIDGE.reply_mail(raw, K::ID.0, &bytes, 1);
+            mail::reply_mail(raw, K::ID.0, &bytes, 1);
         }
     }
 
     fn reply_to<K: Kind>(&mut self, sender: ReplyHandle, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.reply_mail(sender.raw(), K::ID.0, &bytes, 1);
+        mail::reply_mail(sender.raw(), K::ID.0, &bytes, 1);
     }
 }
 
@@ -632,7 +632,7 @@ impl<'a> FfiDropCtx<'a> {
             capture.saved = Some((version, bytes.to_vec()));
             return;
         }
-        let status = PERSIST_BRIDGE.save_state(version, bytes);
+        let status = persist::save_state(version, bytes);
         assert_eq!(
             status, 0,
             "aether-actor: save_state failed (status {status})"
@@ -657,7 +657,7 @@ impl MailSender for FfiDropCtx<'_> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, false);
+        mail::send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, false);
     }
 
     //noinspection DuplicatedCode
@@ -667,7 +667,7 @@ impl MailSender for FfiDropCtx<'_> {
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        MAIL_BRIDGE.send_mail(
+        mail::send_mail(
             R::resolve(self.mailbox).0,
             K::ID.0,
             bytes,
@@ -682,11 +682,11 @@ impl MailSender for FfiDropCtx<'_> {
     #[allow(clippy::disallowed_methods)]
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, false);
+        mail::send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, false);
     }
 
     fn prev_correlation(&self) -> u64 {
-        MAIL_BRIDGE.prev_correlation()
+        mail::prev_correlation()
     }
 
     //noinspection DuplicatedCode
@@ -696,7 +696,7 @@ impl MailSender for FfiDropCtx<'_> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, true);
+        mail::send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, true);
     }
 
     //noinspection DuplicatedCode
@@ -704,7 +704,7 @@ impl MailSender for FfiDropCtx<'_> {
     #[allow(clippy::disallowed_methods)]
     fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, true);
+        mail::send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, true);
     }
 }
 

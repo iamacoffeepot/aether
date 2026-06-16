@@ -7,7 +7,7 @@
 //! its own bodies — there are no default-impl bodies because the
 //! cross-target dispatch trait that backed them (`MailTransport`)
 //! retired in 665. Each side calls its dispatch surface inline:
-//! FFI bodies hit [`crate::ffi::bridge::MAIL_BRIDGE`], native bodies hit
+//! FFI bodies call `crate::ffi::bridge::mail::send_mail`, native bodies hit
 //! `NativeBinding`'s inherent `send_mail`.
 //!
 //! `actor::<R>()` / `resolve_actor::<R>(name)` retired from this trait

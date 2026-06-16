@@ -26,11 +26,10 @@
 // the dispatch ABI even when the actor carries no state.
 #![allow(clippy::unused_self)]
 
-use aether_actor::ffi::MAIL_BRIDGE;
+use aether_actor::ffi::FfiActorMailbox;
 use aether_actor::{
     BootError, FfiActor, FfiCtx, MailSender, Manual, OutboundReply, Resolver, actor,
 };
-use aether_data::Kind;
 use aether_test_fixtures::{
     SendSourceQuery, SourceQuery, SourceReport, TEST_BENCH_OBSERVER_MAILBOX_NAME,
 };
@@ -51,15 +50,12 @@ impl FfiActor for SourceObserver {
     /// Forward `SourceQuery` to the `MailboxId` named in `msg.to`, making
     /// *this* actor the component origin so the reader can recover our id
     /// via `ctx.source_mailbox()`. The target is a runtime-supplied `u64`
-    /// (not a compile-time type), so we dispatch through the raw bridge
-    /// rather than the typed `ctx.send::<R, K>` path.
+    /// (not a compile-time type), so we address it via `FfiActorMailbox::__new`
+    /// (doc-hidden but pub) with the `Self: HandlesKind<SourceQuery>` bound
+    /// that `#[actor]` generates for the `on_source_query` handler.
     #[handler]
     fn on_send_source_query(&mut self, _ctx: &mut FfiCtx<'_>, msg: SendSourceQuery) {
-        let bytes = SourceQuery.encode_into_bytes();
-        // SAFETY: forwards to `raw::send_mail`. The `(ptr, len)` pair comes
-        // from a valid `Vec<u8>` alive for the duration of this call; the
-        // host copies before returning.
-        MAIL_BRIDGE.send_mail(msg.to, SourceQuery::ID.0, &bytes, 1, false);
+        FfiActorMailbox::<Self>::__new(msg.to).send(&SourceQuery);
     }
 
     /// Read `source_mailbox()` from the inbound `SourceQuery`, log the value
