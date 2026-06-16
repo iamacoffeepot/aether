@@ -1,6 +1,6 @@
 # ADR-0115: Hub Binary Registry
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
 
 ## Context
