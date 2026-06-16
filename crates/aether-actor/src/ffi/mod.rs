@@ -7,18 +7,19 @@
 //!
 //!   - [`raw`] — `extern "C"` host-fn imports + host-target panic
 //!     stubs (the only place the `_p32` symbols are named).
-//!   - [`bridge`] — per-concern ZST dispatch surfaces ([`MAIL_BRIDGE`],
-//!     [`PERSIST_BRIDGE`]). Each ZST owns one FFI op family
-//!     and forwards inherent methods to the matching `raw::*`
+//!   - [`bridge`] — per-concern `pub(crate)` free-function modules
+//!     ([`bridge::mail`], [`bridge::persist`]). Each module owns one
+//!     FFI op family and forwards calls to the matching `raw::*`
 //!     host fn. Issue 665 split the prior monolithic
-//!     `MailTransport`-impl ZST into these per-concern bridges so
-//!     persistence isn't mixed with mail.
+//!     `MailTransport`-impl ZST into these per-concern modules so
+//!     persistence isn't mixed with mail; issue 1967 collapsed the
+//!     per-module ZST + static packaging into free functions.
 //!   - [`FfiInitCtx`] / [`FfiCtx`] / [`FfiDropCtx`] — concrete per-stage
 //!     ctx structs, each impling the relevant subset of the per-stage
 //!     capability traits in [`crate::actor::ctx`].
 //!   - [`FfiActorMailbox<R>`] — actor-typed sender returned by
 //!     `ctx.actor::<R>()` / `ctx.resolve_actor::<R>(name)`. Lifetime-
-//!     free — the global [`MAIL_BRIDGE`] static covers dispatch.
+//!     free — the bridge free functions cover dispatch.
 //!   - [`FfiActor`] trait — entry point with the `init` constructor and
 //!     the `wire` / `unwire` / `on_dehydrate` / `on_rehydrate` lifecycle
 //!     hooks (ADR-0101). `init` returns `Result<Self, BootError>` so a
@@ -64,7 +65,6 @@ pub mod inline;
 pub mod mailbox;
 pub mod raw;
 
-pub use bridge::{MAIL_BRIDGE, MailBridge, PERSIST_BRIDGE, PersistBridge};
 pub use ctx::{FfiCtx, FfiDropCtx, FfiInitCtx, SpawnError};
 pub use mailbox::FfiActorMailbox;
 

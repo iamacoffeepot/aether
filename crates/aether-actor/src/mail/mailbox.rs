@@ -6,8 +6,8 @@
 //! T was bound by retired. [`Mailbox<K>`] is now a pure addressing
 //! token: a (mailbox id, kind id) pair that callers thread around but
 //! that doesn't carry its own dispatch path. Sends go through each
-//! ctx's inherent / trait-provided `send` methods (FFI: bodies hit
-//! [`crate::ffi::bridge::MAIL_BRIDGE`]; native: bodies hit
+//! ctx's inherent / trait-provided `send` methods (FFI: bodies call
+//! `crate::ffi::bridge::mail::send_mail`; native: bodies hit
 //! `NativeBinding`'s inherent `send_mail`).
 //!
 //! Per-side actor-typed mailboxes ([`crate::ffi::FfiActorMailbox<R>`],

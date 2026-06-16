@@ -8,7 +8,7 @@
 //! per-side types so the `MailTransport` trait can retire. The FFI
 //! variant is lifetime-free — it carries no transport reference
 //! because the FFI imports are global to the loaded module
-//! ([`MAIL_BRIDGE`] is the dispatch surface).
+//! (`crate::ffi::bridge::mail` functions are the dispatch surface).
 //!
 //! Built via [`crate::ffi::ctx::FfiCtx::actor`] /
 //! [`crate::ffi::ctx::FfiCtx::resolve_actor`] and their init/drop
@@ -21,11 +21,11 @@ use core::marker::PhantomData;
 use aether_data::{ActorId, Kind, Tag, fold_lineage, mailbox_id_from_name, with_tag};
 
 use crate::actor::{Actor, HandlesKind};
-use crate::ffi::bridge::MAIL_BRIDGE;
+use crate::ffi::bridge::mail;
 
 /// Phantom-typed receiver-actor handle for FFI guests. ZST modulo the
 /// stored mailbox id; cheap to construct, cheap to copy, no borrow
-/// bookkeeping (the global [`MAIL_BRIDGE`] static covers dispatch).
+/// bookkeeping (the `crate::ffi::bridge::mail` free functions cover dispatch).
 pub struct FfiActorMailbox<R> {
     mailbox: u64,
     _r: PhantomData<fn() -> R>,
@@ -117,7 +117,7 @@ impl<R: Actor> FfiActorMailbox<R> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(self.mailbox, K::ID.0, &bytes, 1, false);
+        mail::send_mail(self.mailbox, K::ID.0, &bytes, 1, false);
     }
 
     /// Send a slice of payloads as a contiguous batch. Cast-only —
@@ -130,7 +130,7 @@ impl<R: Actor> FfiActorMailbox<R> {
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        MAIL_BRIDGE.send_mail(self.mailbox, K::ID.0, bytes, payloads.len() as u32, false);
+        mail::send_mail(self.mailbox, K::ID.0, bytes, payloads.len() as u32, false);
     }
 
     /// ADR-0080 §7 fire-and-forget escape hatch: send `payload` to `R`
@@ -148,6 +148,6 @@ impl<R: Actor> FfiActorMailbox<R> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(self.mailbox, K::ID.0, &bytes, 1, true);
+        mail::send_mail(self.mailbox, K::ID.0, &bytes, 1, true);
     }
 }
