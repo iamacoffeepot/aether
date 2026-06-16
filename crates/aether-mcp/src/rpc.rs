@@ -365,10 +365,19 @@ impl RpcSession {
     /// [`Self::call`], expecting exactly one `ReplyEvent` — the shape
     /// of the engines-cap result kinds (`ListEnginesResult`, etc.).
     pub async fn call_one(&self, envelope: MailEnvelope) -> anyhow::Result<MailEnvelope> {
+        let kind = envelope.kind;
+        let mailbox = envelope.to.mailbox;
         let mut events = self.call(envelope).await?;
         match events.len() {
             1 => Ok(events.pop().expect("len checked")),
-            n => Err(anyhow::anyhow!("expected exactly one reply event, got {n}")),
+            0 => Err(anyhow::anyhow!(
+                "recipient settled without a reply event (kind {kind}, mailbox {mailbox}); \
+                 this usually means the capability is unavailable on that engine \
+                 (e.g. frame capture on a windowless/headless substrate emits no frame)"
+            )),
+            n => Err(anyhow::anyhow!(
+                "expected exactly one reply event, got {n} (kind {kind}, mailbox {mailbox})"
+            )),
         }
     }
 
@@ -1032,6 +1041,74 @@ mod tests {
             pending_count(&session),
             0,
             "fire registers nothing in pending",
+        );
+
+        hub.stop();
+    }
+
+    /// `call_one` against a hub that settles with zero reply events
+    /// returns an actionable zero-reply error (issue 1934), naming the
+    /// kind and mailbox so the caller can correlate the diagnostic.
+    #[tokio::test]
+    async fn call_one_zero_replies_is_actionable_error() {
+        let (hub, port) = FakeHub::serve_with(
+            0,
+            ServeMode {
+                reply_events: 0,
+                send_end: true,
+            },
+        );
+        let session =
+            task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
+                .await
+                .expect("connect task")
+                .expect("connect");
+
+        let err = session
+            .call_one(probe_envelope())
+            .await
+            .expect_err("zero-reply settle must be an error");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("settled without a reply event"),
+            "zero-reply error should mention the settled-without-reply condition, got: {msg:?}",
+        );
+        assert!(
+            msg.contains("unavailable") || msg.contains("windowless") || msg.contains("headless"),
+            "zero-reply error should hint at capability unavailability, got: {msg:?}",
+        );
+
+        hub.stop();
+    }
+
+    /// `call_one` against a hub that emits two reply events returns
+    /// an error that distinguishes the multi-reply condition from the
+    /// zero-reply case (issue 1934) and names the kind and mailbox.
+    #[tokio::test]
+    async fn call_one_multi_reply_is_protocol_error() {
+        let (hub, port) = FakeHub::serve_with(
+            0,
+            ServeMode {
+                reply_events: 2,
+                send_end: true,
+            },
+        );
+        let session =
+            task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
+                .await
+                .expect("connect task")
+                .expect("connect");
+
+        let err = session
+            .call_one(probe_envelope())
+            .await
+            .expect_err("multi-reply settle must be an error");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exactly one reply event") && msg.contains("got 2"),
+            "multi-reply error should mention the expected-one / got-N condition, got: {msg:?}",
         );
 
         hub.stop();
