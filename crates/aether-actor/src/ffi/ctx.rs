@@ -587,7 +587,7 @@ impl<'a> FfiDropCtx<'a> {
     }
 
     /// Not part of the public API; called only by the dehydrate compose
-    /// (`crate::ffi::inline_compose`). `save_state` records into `capture`
+    /// (`crate::ffi::inline::compose`). `save_state` records into `capture`
     /// rather than the host import, so the composite can be assembled
     /// before a single real host `save_state`.
     #[doc(hidden)]

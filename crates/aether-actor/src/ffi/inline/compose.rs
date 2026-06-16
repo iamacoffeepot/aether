@@ -6,7 +6,7 @@
 //! On dehydrate ([`compose_dehydrate`]): run the parent's `on_dehydrate`
 //! into a capture buffer, walk every resident inline child running its
 //! `erased_on_dehydrate` into its own capture buffer, and pack the
-//! parent's blob plus each child's into one composite (`inline_bundle`).
+//! parent's blob plus each child's into one composite (`bundle`).
 //! The shim then calls the host `save_state` **once** with the result.
 //!
 //! On rehydrate ([`reconstruct_inline_children`]): decompose the
@@ -27,7 +27,7 @@ use aether_data::{Kind, MailboxId};
 
 use crate::ffi::ctx::{CapturedState, FfiDropCtx, FfiInitCtx};
 use crate::ffi::inline::INLINE_CHILDREN;
-use crate::ffi::inline_bundle::{self, ChildEntry};
+use crate::ffi::inline::bundle::{self, ChildEntry};
 use crate::ffi::{ErasedFfiActor, FfiActor, FfiCtx};
 use crate::mail::PriorState;
 
@@ -87,11 +87,7 @@ pub fn compose_dehydrate(
     }
 
     let (parent_version, parent_bytes) = parent_saved.unwrap_or((0, Vec::new()));
-    Some(inline_bundle::compose(
-        parent_version,
-        &parent_bytes,
-        &children,
-    ))
+    Some(bundle::compose(parent_version, &parent_bytes, &children))
 }
 
 /// One inline child to reconstruct, handed to the codegen-supplied
@@ -141,7 +137,7 @@ pub fn reconstruct_inline_children(
     run_parent_rehydrate: impl FnOnce(u32, &[u8]),
     mut reconstruct_child: impl FnMut(&InlineChildToReconstruct<'_>) -> bool,
 ) {
-    let decomposed = inline_bundle::decompose(version, bytes);
+    let decomposed = bundle::decompose(version, bytes);
 
     run_parent_rehydrate(decomposed.parent.version, &decomposed.parent.bytes);
 
@@ -228,7 +224,7 @@ mod tests {
     use super::{compose_dehydrate, reconstruct_inline_children};
     use crate::ffi::ctx::FfiDropCtx;
     use crate::ffi::inline::INLINE_CHILDREN;
-    use crate::ffi::inline_bundle;
+    use crate::ffi::inline::bundle;
     use crate::ffi::{ErasedFfiActor, FfiCtx};
     use crate::mail::{Mail, PriorState};
     use aether_data::MailboxId;
@@ -300,7 +296,7 @@ mod tests {
         // Decompose and assert both children + the parent survived. The
         // registry is process-global across unit tests, so assert by
         // looking up our own aliases rather than the total child count.
-        let decomposed = inline_bundle::decompose(version, &bytes);
+        let decomposed = bundle::decompose(version, &bytes);
         assert_eq!(decomposed.parent.version, 3, "parent version is carried");
         assert_eq!(decomposed.parent.bytes, vec![0xDE, 0xAD]);
         let a = decomposed
@@ -332,7 +328,7 @@ mod tests {
     fn reconstruct_offers_each_child_and_parent_slice() {
         // Build a composite with a parent blob + two children directly
         // through the bundle helpers (no live registry needed).
-        use crate::ffi::inline_bundle::{ChildEntry, compose};
+        use crate::ffi::inline::bundle::{ChildEntry, compose};
 
         const TAG_KNOWN: u64 = 0xBEEF;
         const TAG_UNKNOWN: u64 = 0xDEAD;

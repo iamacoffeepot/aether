@@ -35,6 +35,9 @@ use crate::ffi::ErasedFfiActor;
 use crate::ffi::ctx::FfiCtx;
 use crate::mail::Mail;
 
+mod bundle;
+pub mod compose;
+
 /// One inline child's slot. `actor` is `None` while the child is taken
 /// out for dispatch (the slot-shaped take / reinsert) and `Some` at rest.
 /// The child's alias [`MailboxId`] is carried as the map key in

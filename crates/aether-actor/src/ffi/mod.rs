@@ -61,8 +61,6 @@ use core::fmt;
 pub mod bridge;
 pub mod ctx;
 pub mod inline;
-pub mod inline_bundle;
-pub mod inline_compose;
 pub mod mailbox;
 pub mod raw;
 
@@ -865,7 +863,7 @@ macro_rules! __export_internal {
             // composite is byte-identical to the parent's own blob, so a
             // childless component dehydrates exactly as before; a parent
             // that saves nothing and has no children skips the host save.
-            if let Some((version, bytes)) = $crate::ffi::inline_compose::compose_dehydrate(
+            if let Some((version, bytes)) = $crate::ffi::inline::compose::compose_dehydrate(
                 mailbox_id,
                 |ctx| <$component as $crate::FfiActor>::on_dehydrate(instance, ctx),
             ) {
@@ -906,7 +904,7 @@ macro_rules! __export_internal {
                 // ABI); the slice is bounded by this call.
                 unsafe { ::core::slice::from_raw_parts(ptr as usize as *const u8, len as usize) }
             };
-            $crate::ffi::inline_compose::reconstruct_inline_children(
+            $crate::ffi::inline::compose::reconstruct_inline_children(
                 version,
                 prior_bytes,
                 |parent_version, parent_bytes| {
@@ -935,7 +933,7 @@ macro_rules! __export_internal {
     // Reconstruct one inline child by matching its persisted type tag
     // against the module's exported type set (ADR-0114 §5). For each
     // candidate type whose `hash(NAMESPACE)` matches, re-`init` it and
-    // restore its state via `inline_compose::reconstruct_one_child`. An
+    // restore its state via `inline::compose::reconstruct_one_child`. An
     // unmatched tag returns `false` so the caller logs + skips it.
     (@reconstruct_child $child:ident ; $($candidate:ty),+) => {{
         let mut __aether_reconstructed = false;
@@ -947,7 +945,7 @@ macro_rules! __export_internal {
                 .0
             {
                 __aether_reconstructed =
-                    $crate::ffi::inline_compose::reconstruct_one_child::<$candidate>($child);
+                    $crate::ffi::inline::compose::reconstruct_one_child::<$candidate>($child);
             }
         )+
         __aether_reconstructed
@@ -1233,7 +1231,7 @@ macro_rules! __export_multi_internal {
             // composite, then `save_state` once (the boxed instance's
             // dehydrate routes through `erased_on_dehydrate`). Childless ⇒
             // byte-identical to the boxed parent's own blob.
-            if let Some((version, bytes)) = $crate::ffi::inline_compose::compose_dehydrate(
+            if let Some((version, bytes)) = $crate::ffi::inline::compose::compose_dehydrate(
                 mailbox_id,
                 |ctx| instance.erased_on_dehydrate(ctx),
             ) {
@@ -1271,7 +1269,7 @@ macro_rules! __export_multi_internal {
                 // ABI); the slice is bounded by this call.
                 unsafe { ::core::slice::from_raw_parts(ptr as usize as *const u8, len as usize) }
             };
-            $crate::ffi::inline_compose::reconstruct_inline_children(
+            $crate::ffi::inline::compose::reconstruct_inline_children(
                 version,
                 prior_bytes,
                 |parent_version, parent_bytes| {
