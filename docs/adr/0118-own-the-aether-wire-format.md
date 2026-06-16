@@ -76,7 +76,7 @@ cannot hold.
 | `Array { T, len }` | the `len` elements in order — no count (the schema has `len`) |
 | `Struct { fields }` | each field in schema order — no names, no count |
 | `Enum { variants }` | the variant index as a fixed `u32` little-endian (serde's `variant_index`; the schema-walker matches by declaration position), then the selected variant's fields in order |
-| `Ref(T)` | a two-variant sum encoded like any `Enum`: a `u32` selector — `0` inline → the `T` encoding; `1` handle → `id` (8 LE) + `kind_id` (8 LE) |
+| `Ref(T)` | a two-variant sum encoded like any `Enum`: a `u32` selector — `0` inline → `u32` length-prefix + the inline kind's own encoded image (`K::encode_into_bytes`); `1` handle → `id` (8 LE) + `kind_id` (8 LE) |
 | `Map { K, V }` | `u32` little-endian entry count, then `(K, V)` pairs in ascending encoded-key byte order |
 | `TypeId` (`KindId` / `MailboxId` / `HandleId`) | fixed 8 bytes little-endian |
 
@@ -94,11 +94,12 @@ Three choices in that table carry the most weight:
   schema is not derivable on that side. A fixed `u32` is what both consumers can
   produce identically, which is the property the whole format rests on.
 
-The inline `Ref` body carries no length prefix. The schema-less serde consumer
-cannot add one — a generic `Serialize` impl has no measure-then-prefix hook — and
-requiring it would make the two consumers emit different bytes. The handle store
-instead locates an inline `Ref`'s extent with the schema walk it already performs
-to resolve handles (ADR-0049).
+The inline `Ref` body is length-prefixed: `Ref`'s serde impl (ADR-0100) emits the
+inline kind's own `encode_into_bytes` image through `serialize_bytes`, which both
+consumers render as `u32` length + raw bytes. The prefix lets the handle store
+skip or splice a resolved value in place without walking the subtree (ADR-0049),
+and the body is the kind's codec image rather than a recursive re-encoding — so a
+cast kind's inline value stays a cast image.
 
 ### Envelope
 
