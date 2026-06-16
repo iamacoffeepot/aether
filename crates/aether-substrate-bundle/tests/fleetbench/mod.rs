@@ -50,11 +50,12 @@ use aether_kinds::MailEnvelope as TracedEnvelope;
 use aether_kinds::descriptors;
 use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME};
 use aether_kinds::{
-    BinaryEntry, Cancel, CancelResult, ComponentCapabilities, DagDescriptor, DeadEngineDescriptor,
-    EngineDescriptor, HandleDescribe, HandleDescribeResult, ListBinaries, ListBinariesResult,
-    ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail, LogTailResult,
-    ReplaceComponent, ReplaceResult, SpawnEngine, SpawnEngineResult, Status, StatusResult, Submit,
-    SubmitResult, TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult,
+    BinaryEntry, BinarySelector, Cancel, CancelResult, ComponentCapabilities, DagDescriptor,
+    DeadEngineDescriptor, EngineDescriptor, HandleDescribe, HandleDescribeResult, ListBinaries,
+    ListBinariesResult, ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail,
+    LogTailResult, ReplaceComponent, ReplaceResult, SpawnEngine, SpawnEngineResult, Status,
+    StatusResult, Submit, SubmitResult, TerminateEngine, TerminateEngineResult, UploadBinary,
+    UploadBinaryResult,
 };
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
@@ -148,7 +149,7 @@ impl FleetBench {
     /// `TcpStream`, and complete the `Hello`/`HelloAck` handshake.
     pub fn start() -> Self {
         let store_root = isolate_store_root();
-        let (chassis, port) = boot_hub();
+        let (chassis, port) = boot_hub(&store_root.join("binaries"));
         let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
             .expect("test setup: connecting to the hub's bound RPC port succeeds");
         stream
@@ -175,13 +176,27 @@ impl FleetBench {
 
     /// Fork a real `aether-substrate-headless` through the hub's engines
     /// cap and return its `EngineId`. Records the engine for teardown.
+    ///
+    /// Pins the binary by content hash (ADR-0115, #1954): upload the
+    /// headless bin into the hub's content-addressed store, then spawn
+    /// exactly that hash — so every run forks the same binary regardless of
+    /// local build state, instead of handing the cap a host path.
     pub fn spawn_headless(&mut self) -> EngineId {
         let headless = env!("CARGO_BIN_EXE_aether-substrate-headless");
+        let hash = match self.upload_binary(headless, Some("headless")) {
+            UploadBinaryResult::Ok { hash, .. } => hash,
+            UploadBinaryResult::Err { error } => panic!("spawn_headless upload failed: {error}"),
+        };
         let replies = self.call(
             None,
             "aether.engine",
             &SpawnEngine {
-                binary_path: headless.to_owned(),
+                selector: BinarySelector {
+                    query: Some(hash),
+                    chassis: None,
+                    caps: vec![],
+                    target: None,
+                },
                 args: vec![],
                 boot_manifest: None,
             },
@@ -695,14 +710,13 @@ fn isolate_store_root() -> PathBuf {
     // SAFETY: nextest runs each integration test in its own process, so
     // this env mutation can't race a sibling test; each `FleetBench` in a
     // process gets a fresh `nanos`-tagged root.
+    //
+    // The hub's binary store (ADR-0115) is isolated under `root/binaries`
+    // too, but that dir rides `EngineConfig::binary_store_dir` (ADR-0090)
+    // now, threaded into `boot_hub` from the returned root — not an env var.
     unsafe {
         env::set_var("AETHER_ENGINE_STORE_ROOT", &root);
         env::remove_var("AETHER_HANDLE_STORE_DIR");
-        // Isolate the hub's binary store (ADR-0115) under the same per-bench
-        // root so the EngineServer's `ArtifactStore::from_env` doesn't touch
-        // the real data dir and a binary-store scenario can't see another
-        // bench's entries. Removed on `Drop` with the rest of the root.
-        env::set_var("AETHER_BINARY_STORE_DIR", root.join("binaries"));
     }
     root
 }
@@ -711,8 +725,10 @@ fn isolate_store_root() -> PathBuf {
 /// (engine-addressed Calls route through `aether.engine`), the engines
 /// cap, and `TraceDispatchCapability` so the `RpcServer`'s local Calls
 /// settle and close. Returns the chassis and the port the RPC server
-/// bound. Mirrors the seed's `boot_hub`.
-fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
+/// bound. Mirrors the seed's `boot_hub`. `binary_store_dir` isolates the
+/// hub's content-addressed store (ADR-0115) per-bench via `EngineConfig`
+/// (ADR-0090); the heartbeat stays disabled (the `Default`).
+fn boot_hub(binary_store_dir: &Path) -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
         let _ = registry.register_kind_with_descriptor(d);
@@ -722,7 +738,10 @@ fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<EngineServer>(EngineConfig::default())
+        .with_actor::<EngineServer>(EngineConfig {
+            binary_store_dir: Some(binary_store_dir.to_string_lossy().into_owned()),
+            ..EngineConfig::default()
+        })
         .with_actor::<RpcServerCapability>(RpcServerConfig {
             bind_addr: "127.0.0.1:0".into(),
             peer_kind: PeerKind::Substrate {

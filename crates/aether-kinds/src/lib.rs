@@ -1090,15 +1090,47 @@ mod engine {
         pub recently_died: Vec<DeadEngineDescriptor>,
     }
 
+    /// How a [`SpawnEngine`] names the binary to fork — a registry
+    /// selector resolved against the hub's content-addressed binary store
+    /// (ADR-0115), not a host filesystem path. The engines cap resolves it
+    /// in this order:
+    ///
+    /// - `query` is the exact selector token: a sha256 content `hash`, a
+    ///   `name@version` (where `version` is the binary's self-reported
+    ///   build id — its manifest `git_sha`), or a `name` an upload pointed
+    ///   at a hash. `None` means `default` — the configured fallback, the
+    ///   `headless` chassis (no window, runs on any host), so a bare
+    ///   `SpawnEngine` with an empty selector returns a working engine.
+    /// - `chassis` / `caps` / `target` are an attribute query over the
+    ///   stored manifests, consulted when `query` is `None`: keep only
+    ///   binaries whose `chassis` matches, whose linked `caps` are a
+    ///   superset of every listed cap, and whose `target` triple matches.
+    ///   They mirror [`ListBinaries`]' filter shape.
+    ///
+    /// An exact `query` wins first; absent one, the attribute query
+    /// resolves, then `default`. A selector that resolves to no stored
+    /// binary fails the spawn.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct BinarySelector {
+        pub query: Option<String>,
+        pub chassis: Option<String>,
+        pub caps: Vec<String>,
+        pub target: Option<String>,
+    }
+
     /// `aether.engine.spawn` — ask the engines cap to fork+exec a
     /// substrate binary and connect a per-engine proxy to it. Issue
     /// 763 P4.
     ///
-    /// The cap picks a free localhost port for the substrate's
-    /// `RpcServerCapability`, injects it as `AETHER_RPC_PORT`, forks
-    /// `binary_path` with `args` forwarded verbatim, then boots an
-    /// `aether.engine.proxy:<id>` actor that dials it. Reply:
-    /// [`SpawnEngineResult`].
+    /// The cap resolves `selector` against its content-addressed binary
+    /// store (ADR-0115) to the stored content bytes, materializes them to
+    /// an executable temp file, picks a free localhost port for the
+    /// substrate's `RpcServerCapability`, injects it as `AETHER_RPC_PORT`,
+    /// forks the realized binary with `args` forwarded verbatim, then
+    /// boots an `aether.engine.proxy:<id>` actor that dials it. Reply:
+    /// [`SpawnEngineResult`] — `Err` if the selector resolves to no stored
+    /// binary. The host filesystem path is gone from the spawn surface;
+    /// the only path input is the one-time [`UploadBinary`].
     ///
     /// `boot_manifest` (when `Some`) is the absolute path to a
     /// `BundleManifest` JSON of components to auto-load at boot; the cap
@@ -1110,7 +1142,7 @@ mod engine {
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.engine.spawn")]
     pub struct SpawnEngine {
-        pub binary_path: String,
+        pub selector: BinarySelector,
         pub args: Vec<String>,
         pub boot_manifest: Option<String>,
     }
@@ -4132,34 +4164,52 @@ mod tests {
 
     #[test]
     fn spawn_engine_roundtrip_carries_boot_manifest() {
-        // `boot_manifest` rides the wire (postcard path — non-`repr(C)`
-        // struct with `Vec<String>` + `Option<String>`); both `Some`
-        // (a spawn carrying a component list) and `None` (a bare spawn)
-        // must survive the engines-cap encode/decode.
+        // The spawn kind rides the wire (postcard path — non-`repr(C)`
+        // struct with a nested `BinarySelector`, `Vec<String>`, and
+        // `Option<String>`). Both `Some` (a spawn carrying a component
+        // list) and `None` (a bare spawn) must survive the engines-cap
+        // encode/decode, and the registry selector must round-trip in both
+        // its exact-hash and `default` forms (ADR-0115, #1954).
         use alloc::string::ToString;
         use alloc::vec;
 
         let spawn = SpawnEngine {
-            binary_path: "/abs/aether-substrate-headless".to_string(),
+            selector: BinarySelector {
+                query: Some("abc123def456".to_string()),
+                chassis: Some("headless".to_string()),
+                caps: vec!["aether.fs".to_string()],
+                target: None,
+            },
             args: vec!["--tick-hz".to_string(), "30".to_string()],
             boot_manifest: Some("/tmp/aether-boot-manifest.json".to_string()),
         };
         let back = SpawnEngine::decode_from_bytes(&spawn.encode_into_bytes())
             .expect("test setup: SpawnEngine decodes");
-        assert_eq!(back.binary_path, spawn.binary_path);
+        assert_eq!(back.selector.query.as_deref(), Some("abc123def456"));
+        assert_eq!(back.selector.chassis.as_deref(), Some("headless"));
+        assert_eq!(back.selector.caps, vec!["aether.fs".to_string()]);
+        assert_eq!(back.selector.target, None);
         assert_eq!(back.args, spawn.args);
         assert_eq!(
             back.boot_manifest.as_deref(),
             Some("/tmp/aether-boot-manifest.json"),
         );
 
+        // The `default` selector — empty query, no attribute filters, the
+        // bare-spawn form — round-trips too.
         let bare = SpawnEngine {
-            binary_path: "/abs/aether-substrate".to_string(),
+            selector: BinarySelector {
+                query: None,
+                chassis: None,
+                caps: vec![],
+                target: None,
+            },
             args: vec![],
             boot_manifest: None,
         };
         let back = SpawnEngine::decode_from_bytes(&bare.encode_into_bytes())
             .expect("test setup: bare SpawnEngine decodes");
+        assert_eq!(back.selector.query, None);
         assert_eq!(back.boot_manifest, None);
     }
 
