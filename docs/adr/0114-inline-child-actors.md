@@ -1,6 +1,6 @@
 # ADR-0114: Inline Child Actors
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
 
 ## Context
