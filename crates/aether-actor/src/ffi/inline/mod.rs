@@ -2,18 +2,19 @@
 //!
 //! An inline child shares its parent's WASM instance, slot, and
 //! run-token (ADR-0114). [`FfiCtx::spawn_inline_child`] inserts
-//! the constructed child into the process-global [`INLINE_CHILDREN`]
-//! registry keyed by the child's alias [`MailboxId`]; the
-//! [`crate::export!`] `receive_p32` shims route every inbound mail
-//! through [`membrane_dispatch`], which dispatches the parent when the
-//! routed recipient is the parent's own id and otherwise demuxes to the
-//! co-located child the producer addressed.
+//! the constructed child into the per-component [`InlineRegistry`] the
+//! [`crate::export!`] macro emits as a `static __AETHER_INLINE` (one per
+//! component, mirroring the parent's `static __AETHER_COMPONENT` slot),
+//! keyed by the child's alias [`MailboxId`]. The `export!` `receive_p32`
+//! shims hand that registry to [`membrane_dispatch`], which dispatches the
+//! parent when the routed recipient is the parent's own id and otherwise
+//! demuxes to the co-located child the producer addressed.
 //!
 //! The registry is a `BTreeMap<MailboxId, InlineSlot>` — every keyed
 //! operation (`take`, `reinsert`, `with_child_mut`, `remove`,
 //! `insert_child`) is O(log n) in the resident child count. `MailboxId`
 //! derives `Ord` and `BTreeMap::new()` is `const`, so the map still backs
-//! the `static INLINE_CHILDREN` with no init-time cost.
+//! a `static __AETHER_INLINE` with no init-time cost.
 //!
 //! The registry is slot-shaped (take-out / dispatch / reinsert) so a
 //! running child can spawn or mutate siblings through `ctx` while it is
@@ -71,30 +72,32 @@ struct InlineSlot {
 /// for the dehydrate walk. The compose path reads each child's state
 /// through [`InlineRegistry::with_child_mut`] keyed by `id`.
 #[derive(Clone)]
-pub struct InlineChildMeta {
+pub(crate) struct InlineChildMeta {
     /// The child's alias [`MailboxId`] (the registry key).
-    pub id: MailboxId,
+    pub(crate) id: MailboxId,
     /// The actor-type tag — `mailbox_id_from_name(NAMESPACE)`.
-    pub type_tag: u64,
+    pub(crate) type_tag: u64,
     /// The resolved subname the alias id was folded from.
-    pub full_subname: String,
+    pub(crate) full_subname: String,
     /// Whether the original spawn used a counter discriminator.
-    pub is_counter: bool,
+    pub(crate) is_counter: bool,
 }
 
-/// The process-global inline-child registry (ADR-0114 decision #3), keyed
-/// by each child's alias [`MailboxId`]. The membrane demuxes the inbound
-/// recipient against it. Every operation is O(log n) in the resident child
-/// count (`BTreeMap` lookup).
+/// The per-component inline-child registry (ADR-0114 decision #3), keyed
+/// by each child's alias [`MailboxId`]. The [`crate::export!`] macro emits
+/// one as a `static __AETHER_INLINE` per component (mirroring the parent's
+/// `static __AETHER_COMPONENT` slot) and threads it to the membrane; the
+/// membrane demuxes the inbound recipient against it. Every operation is
+/// O(log n) in the resident child count (`BTreeMap` lookup).
 pub struct InlineRegistry {
     inner: UnsafeCell<BTreeMap<MailboxId, InlineSlot>>,
 }
 
 // SAFETY: identical argument to [`crate::Slot`] — the WASM guest is
 // single-threaded (ADR-0010 §5) and the substrate serializes delivery
-// under the run token, so `INLINE_CHILDREN` is only ever touched from one
-// thread at a time. On the host unit-test build the static is reached
-// from one test thread.
+// under the run token, so a `static __AETHER_INLINE` is only ever touched
+// from one thread at a time. On the host unit-test build each test owns a
+// local registry, reached from one test thread.
 unsafe impl Sync for InlineRegistry {}
 
 impl InlineRegistry {
@@ -110,7 +113,7 @@ impl InlineRegistry {
     /// `id`, recording the reconstruct metadata alongside the actor box.
     /// Replaces the actor + metadata if `id` is already present (a
     /// re-spawn / rehydrate re-register of the same alias). O(log n).
-    pub fn insert_child(
+    pub(crate) fn insert_child(
         &self,
         id: MailboxId,
         type_tag: u64,
@@ -146,7 +149,7 @@ impl InlineRegistry {
     /// or never registered). The borrow drops before the returned box is
     /// dispatched, so a child may re-enter the registry mid-dispatch.
     /// O(log n).
-    pub fn take(&self, id: MailboxId) -> Option<Box<dyn ErasedFfiActor>> {
+    pub(crate) fn take(&self, id: MailboxId) -> Option<Box<dyn ErasedFfiActor>> {
         // SAFETY: see [`Self::insert_child`].
         let map = unsafe { &mut *self.inner.get() };
         map.get_mut(&id).and_then(|s| s.actor.take())
@@ -162,7 +165,7 @@ impl InlineRegistry {
     /// back to, so the live box drops at end of scope rather than
     /// re-entering the registry. This no-op is what makes self-despawn
     /// fall out for free (ADR-0114) — no pending-removal flag. O(log n).
-    pub fn reinsert(&self, id: MailboxId, actor: Box<dyn ErasedFfiActor>) {
+    pub(crate) fn reinsert(&self, id: MailboxId, actor: Box<dyn ErasedFfiActor>) {
         // SAFETY: see [`Self::insert_child`].
         let map = unsafe { &mut *self.inner.get() };
         if let Some(slot) = map.get_mut(&id) {
@@ -184,7 +187,7 @@ impl InlineRegistry {
     /// [`Self::reinsert`] find nothing and no-op, so the box drops at end
     /// of dispatch instead of re-entering — the reentrant case the
     /// slot-shaped take/reinsert design handles with no extra state.
-    pub fn remove(&self, id: MailboxId) -> bool {
+    pub(crate) fn remove(&self, id: MailboxId) -> bool {
         // SAFETY: see [`Self::insert_child`] — the borrow is taken fresh
         // and released before return, never spanning a dispatch.
         let map = unsafe { &mut *self.inner.get() };
@@ -199,7 +202,7 @@ impl InlineRegistry {
     /// reconstructs each child independently by its own `alias_id` /
     /// `type_tag` / `full_subname`, so order is irrelevant.
     #[must_use]
-    pub fn child_metas(&self) -> Vec<InlineChildMeta> {
+    pub(crate) fn child_metas(&self) -> Vec<InlineChildMeta> {
         // SAFETY: see [`Self::insert_child`].
         let map = unsafe { &*self.inner.get() };
         map.iter()
@@ -218,7 +221,7 @@ impl InlineRegistry {
     /// compose to drive each child's `erased_on_dehydrate` in place. The
     /// borrow drops before this returns, so it never spans a dispatch.
     /// O(log n).
-    pub fn with_child_mut<R>(
+    pub(crate) fn with_child_mut<R>(
         &self,
         id: MailboxId,
         f: impl FnOnce(&mut dyn ErasedFfiActor) -> R,
@@ -235,25 +238,27 @@ impl Default for InlineRegistry {
     }
 }
 
-/// The registry the [`crate::export!`] membrane and
-/// [`FfiCtx::spawn_inline_child`] share.
-pub static INLINE_CHILDREN: InlineRegistry = InlineRegistry::new();
-
 /// ADR-0114 decision #3: the receive membrane every `export!`
-/// `receive_p32` shim routes inbound mail through. When the routed
-/// recipient is the parent's own mailbox id, dispatch the parent
-/// (`dispatch_own`); otherwise take the inline child the producer
-/// addressed out of [`INLINE_CHILDREN`], dispatch it with a ctx
-/// self-identified as the child ([`FfiCtx::__new`]), and reinsert. An
-/// unrecognised recipient falls back to the parent's dispatch — the
-/// existing unmatched path (the parent's `#[fallback]`, or the
+/// `receive_p32` shim routes inbound mail through. The shim passes its
+/// component's own `registry` (the emitted `static __AETHER_INLINE`).
+/// When the routed recipient is the parent's own mailbox id, dispatch the
+/// parent (`dispatch_own`); otherwise take the inline child the producer
+/// addressed out of `registry`, dispatch it with a ctx self-identified as
+/// the child and carrying the same `registry` ([`FfiCtx::__new`]), and
+/// reinsert. An unrecognised recipient falls back to the parent's dispatch
+/// — the existing unmatched path (the parent's `#[fallback]`, or the
 /// `DISPATCH_UNKNOWN_KIND` sentinel for a strict receiver), never a
 /// short-circuit drop.
 ///
 /// For a normal (non-inline) actor the routed recipient equals the
 /// parent's own id, so the membrane no-ops straight to `dispatch_own` —
 /// the regression guard the whole demux rests on.
-pub fn membrane_dispatch<F>(own_mailbox_id: u64, mail: Mail<'_>, dispatch_own: F) -> u32
+pub fn membrane_dispatch<F>(
+    own_mailbox_id: u64,
+    mail: Mail<'_>,
+    registry: &InlineRegistry,
+    dispatch_own: F,
+) -> u32
 where
     F: FnOnce(Mail<'_>) -> u32,
 {
@@ -262,11 +267,11 @@ where
         return dispatch_own(mail);
     }
     let id = MailboxId(recipient);
-    match INLINE_CHILDREN.take(id) {
+    match registry.take(id) {
         Some(mut child) => {
-            let mut ctx = FfiCtx::__new(recipient);
+            let mut ctx = FfiCtx::__new(recipient, registry);
             let rc = child.erased_dispatch(&mut ctx, mail);
-            INLINE_CHILDREN.reinsert(id, child);
+            registry.reinsert(id, child);
             rc
         }
         // An alias whose child isn't resident (a race against teardown, or
@@ -278,34 +283,42 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{INLINE_CHILDREN, InlineRegistry, membrane_dispatch};
+    use super::{InlineRegistry, membrane_dispatch};
     use crate::FfiCtx;
     use crate::ffi::ErasedFfiActor;
     use crate::mail::{Mail, PriorState};
     use aether_data::MailboxId;
     use alloc::boxed::Box;
+    use alloc::rc::Rc;
     use alloc::string::String;
-    use core::sync::atomic::{AtomicU32, Ordering};
+    use core::cell::Cell;
 
     /// Distinct return codes so an assertion can tell which dispatch path
     /// the membrane took.
     const OWN_CODE: u32 = 0xA0;
     const CHILD_CODE: u32 = 0xC0;
 
-    /// Process-global dispatch counter the recording child bumps, so a
-    /// test can prove a child taken out for dispatch was reinserted (a
-    /// second dispatch lands again).
-    static CHILD_DISPATCHES: AtomicU32 = AtomicU32::new(0);
+    /// Minimal `ErasedFfiActor` for the membrane tests: bumps a
+    /// test-local dispatch counter (shared via [`Rc`] so the test reads it
+    /// back without a process-global) and returns [`CHILD_CODE`]. The
+    /// lifecycle hooks are unreachable in these tests.
+    struct RecordingChild {
+        dispatches: Rc<Cell<u32>>,
+    }
 
-    /// Process-global drop counter the self-despawning child bumps from its
-    /// `Drop`, so the reentrancy test can prove the box dropped (rather than
-    /// being reinserted) after it removed its own slot mid-dispatch.
-    static SELF_DESPAWN_DROPS: AtomicU32 = AtomicU32::new(0);
-
-    /// Minimal `ErasedFfiActor` for the membrane tests: records each
-    /// dispatch and returns [`CHILD_CODE`]. The lifecycle hooks are
-    /// unreachable in these tests.
-    struct RecordingChild;
+    impl RecordingChild {
+        /// A recording child plus the shared counter a test reads to
+        /// confirm how many times the membrane dispatched it.
+        fn new() -> (Self, Rc<Cell<u32>>) {
+            let dispatches = Rc::new(Cell::new(0));
+            (
+                Self {
+                    dispatches: Rc::clone(&dispatches),
+                },
+                dispatches,
+            )
+        }
+    }
 
     impl ErasedFfiActor for RecordingChild {
         fn erased_namespace(&self) -> &'static str {
@@ -316,7 +329,7 @@ mod tests {
             _ctx: &mut FfiCtx<'_, crate::Manual>,
             _mail: Mail<'_>,
         ) -> u32 {
-            CHILD_DISPATCHES.fetch_add(1, Ordering::Relaxed);
+            self.dispatches.set(self.dispatches.get() + 1);
             CHILD_CODE
         }
         fn erased_wire(&mut self, _ctx: &mut FfiCtx<'_, crate::Manual>) {}
@@ -330,18 +343,20 @@ mod tests {
         }
     }
 
-    /// A child that despawns *itself* from [`INLINE_CHILDREN`] during its
-    /// own dispatch and bumps [`SELF_DESPAWN_DROPS`] when dropped — used to
-    /// prove the reentrant self-despawn drops the live box rather than
-    /// reinserting it. Carries its own alias id so `erased_dispatch` can
-    /// remove the matching slot.
+    /// A child that despawns *itself* during its own dispatch — through the
+    /// `ctx`, whose inline registry the membrane threaded in — and bumps a
+    /// test-local drop counter (shared via [`Rc`]) when dropped, so the
+    /// reentrancy test can prove the box dropped (rather than being
+    /// reinserted) after it removed its own slot mid-dispatch. Carries its
+    /// own alias id so `erased_dispatch` can despawn the matching slot.
     struct SelfDespawningChild {
         id: MailboxId,
+        drops: Rc<Cell<u32>>,
     }
 
     impl Drop for SelfDespawningChild {
         fn drop(&mut self) {
-            SELF_DESPAWN_DROPS.fetch_add(1, Ordering::Relaxed);
+            self.drops.set(self.drops.get() + 1);
         }
     }
 
@@ -349,15 +364,12 @@ mod tests {
         fn erased_namespace(&self) -> &'static str {
             "test.inline.self_despawning_child"
         }
-        fn erased_dispatch(
-            &mut self,
-            _ctx: &mut FfiCtx<'_, crate::Manual>,
-            _mail: Mail<'_>,
-        ) -> u32 {
-            // Self-despawn mid-dispatch: this box is currently taken out
-            // (held on the membrane's stack), so `remove` clears the empty
-            // slot and the membrane's `reinsert` will find nothing.
-            INLINE_CHILDREN.remove(self.id);
+        fn erased_dispatch(&mut self, ctx: &mut FfiCtx<'_, crate::Manual>, _mail: Mail<'_>) -> u32 {
+            // Self-despawn mid-dispatch through the threaded registry: this
+            // box is currently taken out (held on the membrane's stack), so
+            // the ctx's despawn clears the empty slot and the membrane's
+            // `reinsert` will find nothing.
+            ctx.despawn_inline_child(self.id);
             CHILD_CODE
         }
         fn erased_wire(&mut self, _ctx: &mut FfiCtx<'_, crate::Manual>) {}
@@ -394,7 +406,7 @@ mod tests {
             0,
             String::from("widget"),
             false,
-            Box::new(RecordingChild),
+            Box::new(RecordingChild::new().0),
         );
         let taken = registry
             .take(id)
@@ -423,7 +435,7 @@ mod tests {
             tag,
             String::from("widget"),
             false,
-            Box::new(RecordingChild),
+            Box::new(RecordingChild::new().0),
         );
 
         let metas = registry.child_metas();
@@ -441,8 +453,9 @@ mod tests {
     /// the child registry.
     #[test]
     fn membrane_routes_own_recipient_to_parent() {
+        let registry = InlineRegistry::new();
         let own = 0x2000_u64;
-        let rc = membrane_dispatch(own, mail_to(own), |_mail| OWN_CODE);
+        let rc = membrane_dispatch(own, mail_to(own), &registry, |_mail| OWN_CODE);
         assert_eq!(rc, OWN_CODE, "own-id recipient runs the parent dispatch");
     }
 
@@ -451,41 +464,39 @@ mod tests {
     /// again (the take/reinsert round-trip under the membrane).
     #[test]
     fn membrane_routes_child_recipient_and_reinserts() {
+        let registry = InlineRegistry::new();
         let own = 0x3000_u64;
         let child = 0x3001_u64;
-        let before = CHILD_DISPATCHES.load(Ordering::Relaxed);
-        INLINE_CHILDREN.insert_child(
+        let (recording, dispatches) = RecordingChild::new();
+        registry.insert_child(
             MailboxId(child),
             0,
             String::from("widget"),
             false,
-            Box::new(RecordingChild),
+            Box::new(recording),
         );
 
-        let rc = membrane_dispatch(own, mail_to(child), |_mail| {
+        let rc = membrane_dispatch(own, mail_to(child), &registry, |_mail| {
             panic!("own dispatch must not run for a child recipient")
         });
         assert_eq!(rc, CHILD_CODE, "child recipient runs the child dispatch");
 
         // Reinserted: a second send to the same alias dispatches again.
-        let rc2 = membrane_dispatch(own, mail_to(child), |_mail| {
+        let rc2 = membrane_dispatch(own, mail_to(child), &registry, |_mail| {
             panic!("own dispatch must not run for a reinserted child")
         });
         assert_eq!(rc2, CHILD_CODE, "the child was reinserted after dispatch");
-        assert_eq!(
-            CHILD_DISPATCHES.load(Ordering::Relaxed) - before,
-            2,
-            "both sends reached the child",
-        );
+        assert_eq!(dispatches.get(), 2, "both sends reached the child");
     }
 
     /// Step 4 coverage: an unrecognised recipient (no resident child) runs
     /// the parent's unmatched path rather than short-circuit dropping.
     #[test]
     fn membrane_routes_unknown_recipient_to_parent_unmatched_path() {
+        let registry = InlineRegistry::new();
         let own = 0x4000_u64;
         let stray = 0x4999_u64;
-        let rc = membrane_dispatch(own, mail_to(stray), |_mail| OWN_CODE);
+        let rc = membrane_dispatch(own, mail_to(stray), &registry, |_mail| OWN_CODE);
         assert_eq!(
             rc, OWN_CODE,
             "an unknown recipient falls back to the parent's unmatched path",
@@ -509,7 +520,7 @@ mod tests {
             0,
             String::from("widget"),
             false,
-            Box::new(RecordingChild),
+            Box::new(RecordingChild::new().0),
         );
         assert!(
             registry.remove(id),
@@ -527,40 +538,43 @@ mod tests {
 
     /// Step 3 coverage: a child that despawns itself mid-dispatch drops
     /// correctly. `membrane_dispatch` takes it out, the dispatch removes the
-    /// now-empty slot via `INLINE_CHILDREN.remove`, the membrane's
-    /// `reinsert` finds nothing and no-ops, and the live box drops at end of
-    /// scope — proving the slot-shaped take/reinsert handles the reentrant
-    /// drop with no pending-removal flag. A subsequent send to the same
-    /// alias then falls through to the parent's unmatched path.
+    /// now-empty slot via `ctx.despawn_inline_child` (driving the same
+    /// registry the membrane threaded in), the membrane's `reinsert` finds
+    /// nothing and no-ops, and the live box drops at end of scope — proving
+    /// the slot-shaped take/reinsert handles the reentrant drop with no
+    /// pending-removal flag. A subsequent send to the same alias then falls
+    /// through to the parent's unmatched path.
     #[test]
     fn membrane_self_despawn_drops_box_and_falls_through() {
+        let registry = InlineRegistry::new();
         let own = 0x5000_u64;
         let child = 0x5001_u64;
-        let before_drops = SELF_DESPAWN_DROPS.load(Ordering::Relaxed);
-        INLINE_CHILDREN.insert_child(
+        let drops = Rc::new(Cell::new(0));
+        registry.insert_child(
             MailboxId(child),
             0,
             String::from("widget"),
             false,
             Box::new(SelfDespawningChild {
                 id: MailboxId(child),
+                drops: Rc::clone(&drops),
             }),
         );
 
-        // Dispatch the child; it removes its own slot mid-dispatch.
-        let rc = membrane_dispatch(own, mail_to(child), |_mail| {
+        // Dispatch the child; it despawns its own slot mid-dispatch.
+        let rc = membrane_dispatch(own, mail_to(child), &registry, |_mail| {
             panic!("own dispatch must not run while the child is resident")
         });
         assert_eq!(rc, CHILD_CODE, "the child handled the despawning dispatch");
         assert_eq!(
-            SELF_DESPAWN_DROPS.load(Ordering::Relaxed) - before_drops,
+            drops.get(),
             1,
             "the self-despawned box dropped at end of dispatch, not reinserted",
         );
 
         // The alias is gone: a second send falls through to the parent's
         // unmatched path rather than re-dispatching a dropped child.
-        let rc2 = membrane_dispatch(own, mail_to(child), |_mail| OWN_CODE);
+        let rc2 = membrane_dispatch(own, mail_to(child), &registry, |_mail| OWN_CODE);
         assert_eq!(
             rc2, OWN_CODE,
             "the torn-down alias falls through to the parent",

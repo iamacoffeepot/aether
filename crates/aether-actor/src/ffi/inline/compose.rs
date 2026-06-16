@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 use aether_data::{Kind, MailboxId};
 
 use crate::ffi::ctx::{CapturedState, FfiDropCtx, FfiInitCtx};
-use crate::ffi::inline::INLINE_CHILDREN;
+use crate::ffi::inline::InlineRegistry;
 use crate::ffi::inline::bundle::{self, ChildEntry};
 use crate::ffi::{ErasedFfiActor, FfiActor, FfiCtx};
 use crate::mail::PriorState;
@@ -36,7 +36,9 @@ use crate::mail::PriorState;
 ///
 /// `run_parent_dehydrate` runs the live parent instance's `on_dehydrate`
 /// against the supplied capturing [`FfiDropCtx`] (so the parent's own
-/// `save_state` is captured, not forwarded to the host).
+/// `save_state` is captured, not forwarded to the host). `registry` is the
+/// component's inline-child registry (the `export!`-emitted
+/// `static __AETHER_INLINE`); its resident children are walked here.
 ///
 /// Returns `None` when the parent's `on_dehydrate` saved nothing **and**
 /// no inline children are resident — the no-bundle case, so the shim
@@ -48,6 +50,7 @@ use crate::mail::PriorState;
 #[must_use]
 pub fn compose_dehydrate(
     mailbox_id: u64,
+    registry: &InlineRegistry,
     run_parent_dehydrate: impl FnOnce(&mut FfiDropCtx<'_>),
 ) -> Option<(u32, Vec<u8>)> {
     // Parent half: capture whatever the parent's `on_dehydrate` saves.
@@ -61,11 +64,11 @@ pub fn compose_dehydrate(
     // Child half: walk the registry, driving each child's `on_dehydrate`
     // into its own capture buffer. The metadata snapshot is taken first so
     // the per-child borrow in `with_child_mut` never overlaps the walk.
-    let metas = INLINE_CHILDREN.child_metas();
+    let metas = registry.child_metas();
     let mut children = Vec::with_capacity(metas.len());
     for meta in metas {
         let mut child_capture = CapturedState::default();
-        INLINE_CHILDREN.with_child_mut(meta.id, |child| {
+        registry.with_child_mut(meta.id, |child| {
             let mut ctx = FfiDropCtx::__new_capturing(meta.id.0, &mut child_capture);
             child.erased_on_dehydrate(&mut ctx);
         });
@@ -94,10 +97,10 @@ pub fn compose_dehydrate(
 /// reconstruct callback. The callback resolves [`Self::type_tag`] against
 /// the module's `export!` types, re-`init`s that type, restores its
 /// `type State` from `(state_version, state_bytes)` via `on_rehydrate`,
-/// and re-registers it in `INLINE_CHILDREN` under `alias` — all of which
-/// it can do because it expands inside the `export!` arm that knows the
-/// type set. An unknown tag is logged and skipped (the callback returns
-/// `false`).
+/// and re-registers it in the component's inline-child registry under
+/// `alias` — all of which it can do because it expands inside the
+/// `export!` arm that knows the type set. An unknown tag is logged and
+/// skipped (the callback returns `false`).
 pub struct InlineChildToReconstruct<'a> {
     /// The alias [`MailboxId`] to re-register the reconstructed child
     /// under — the substrate route under this id survived the swap
@@ -123,10 +126,12 @@ pub struct InlineChildToReconstruct<'a> {
 ///
 /// `run_parent_rehydrate` runs the freshly-`init`ed parent instance's
 /// `on_rehydrate` with the parent's saved `(version, bytes)` rebuilt as a
-/// [`crate::PriorState`]. `reconstruct_child` is the codegen callback that
-/// re-`init`s one child by type tag, restores its state, and re-registers
-/// it; it returns `false` for an unknown tag (logged + skipped by the
-/// callback).
+/// [`crate::PriorState`]. `registry` is the component's inline-child
+/// registry (the `export!`-emitted `static __AETHER_INLINE`), forwarded to
+/// each `reconstruct_child` call. `reconstruct_child` is the codegen
+/// callback that re-`init`s one child by type tag, restores its state, and
+/// re-registers it in that registry; it returns `false` for an unknown tag
+/// (logged + skipped by the callback).
 ///
 /// For a childless bundle the decompose yields the raw parent
 /// `(version, bytes)` and no children, so the parent's `on_rehydrate`
@@ -134,8 +139,9 @@ pub struct InlineChildToReconstruct<'a> {
 pub fn reconstruct_inline_children(
     version: u32,
     bytes: &[u8],
+    registry: &InlineRegistry,
     run_parent_rehydrate: impl FnOnce(u32, &[u8]),
-    mut reconstruct_child: impl FnMut(&InlineChildToReconstruct<'_>) -> bool,
+    mut reconstruct_child: impl FnMut(&InlineRegistry, &InlineChildToReconstruct<'_>) -> bool,
 ) {
     let decomposed = bundle::decompose(version, bytes);
 
@@ -150,7 +156,7 @@ pub fn reconstruct_inline_children(
             state_version: entry.version,
             state_bytes: &entry.state_bytes,
         };
-        if !reconstruct_child(&to_reconstruct) {
+        if !reconstruct_child(registry, &to_reconstruct) {
             // An unknown type tag (a replace that dropped a child type) or
             // a failed re-`init`: skip it. The codegen callback has already
             // logged; nothing else to do for this entry.
@@ -166,9 +172,9 @@ pub fn reconstruct_inline_children(
 }
 
 /// Re-`init` one inline child of concrete type `A`, restore its
-/// `type State`, and re-register it under `alias` (ADR-0114 §5). Called
-/// by the `export!`-generated reconstruct callback once it has matched the
-/// child's type tag to one of the module's exported types.
+/// `type State`, and re-register it under `alias` in `registry` (ADR-0114
+/// §5). Called by the `export!`-generated reconstruct callback once it has
+/// matched the child's type tag to one of the module's exported types.
 ///
 /// Returns `false` (and does not register) when `A::Config` cannot decode
 /// from empty bytes (a typed-config inline child — its config isn't
@@ -177,7 +183,10 @@ pub fn reconstruct_inline_children(
 /// (ADR-0022; the parent slot is stable), so re-keying the guest registry
 /// by `alias` restores addressing with no host round-trip.
 #[must_use]
-pub fn reconstruct_one_child<A>(to_reconstruct: &InlineChildToReconstruct<'_>) -> bool
+pub fn reconstruct_one_child<A>(
+    registry: &InlineRegistry,
+    to_reconstruct: &InlineChildToReconstruct<'_>,
+) -> bool
 where
     A: FfiActor + ErasedFfiActor,
 {
@@ -196,7 +205,7 @@ where
     // Restore the child's `type State` from its saved bundle before it is
     // registered, so the first inbound mail sees the rehydrated state.
     {
-        let mut ctx = FfiCtx::__new(to_reconstruct.alias.0);
+        let mut ctx = FfiCtx::__new(to_reconstruct.alias.0, registry);
         // SAFETY: `state_bytes` lives for this call; `PriorState::__from_ptr`
         // forms a slice over it bounded by the borrow, never escaping.
         let prior = unsafe {
@@ -209,7 +218,7 @@ where
         child.erased_on_rehydrate(&mut ctx, prior);
     }
 
-    INLINE_CHILDREN.insert_child(
+    registry.insert_child(
         to_reconstruct.alias,
         to_reconstruct.type_tag,
         String::from(to_reconstruct.full_subname),
@@ -221,9 +230,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{compose_dehydrate, reconstruct_inline_children};
+    use super::{InlineRegistry, compose_dehydrate, reconstruct_inline_children};
     use crate::ffi::ctx::FfiDropCtx;
-    use crate::ffi::inline::INLINE_CHILDREN;
     use crate::ffi::inline::bundle;
     use crate::ffi::{ErasedFfiActor, FfiCtx};
     use crate::mail::{Mail, PriorState};
@@ -269,17 +277,19 @@ mod tests {
     /// composed through one logical `save_state`.
     #[test]
     fn compose_dehydrate_packs_parent_and_children() {
-        // Two children with distinct tags + type tags + aliases.
+        // Two children with distinct tags + type tags + aliases, in a
+        // test-local registry (no shared-global aliasing across tests).
+        let registry = InlineRegistry::new();
         let id_a = MailboxId(0xA1);
         let id_b = MailboxId(0xB2);
-        INLINE_CHILDREN.insert_child(
+        registry.insert_child(
             id_a,
             0xAAAA,
             String::from("a"),
             false,
             Box::new(SavingChild { tag: 0x1111_2222 }),
         );
-        INLINE_CHILDREN.insert_child(
+        registry.insert_child(
             id_b,
             0xBBBB,
             String::from("b"),
@@ -288,17 +298,21 @@ mod tests {
         );
 
         // Parent saves a marker blob of its own.
-        let (version, bytes) = compose_dehydrate(0x7000, |ctx| {
+        let (version, bytes) = compose_dehydrate(0x7000, &registry, |ctx| {
             ctx.save_state(3, &[0xDE, 0xAD]);
         })
         .expect("a parent that saves plus two children yields a bundle");
 
         // Decompose and assert both children + the parent survived. The
-        // registry is process-global across unit tests, so assert by
-        // looking up our own aliases rather than the total child count.
+        // local registry holds exactly the two inserted children.
         let decomposed = bundle::decompose(version, &bytes);
         assert_eq!(decomposed.parent.version, 3, "parent version is carried");
         assert_eq!(decomposed.parent.bytes, vec![0xDE, 0xAD]);
+        assert_eq!(
+            decomposed.children.len(),
+            2,
+            "exactly the two inserted children are packed",
+        );
         let a = decomposed
             .children
             .iter()
@@ -313,11 +327,6 @@ mod tests {
             .expect("child b present");
         assert!(b.is_counter, "child b's counter flag is carried");
         assert_eq!(b.state_bytes, 0x3333_4444u32.to_le_bytes().to_vec());
-
-        // Empty the slots so the children's actor boxes don't linger in the
-        // process-global registry for sibling tests.
-        let _ = INLINE_CHILDREN.take(id_a);
-        let _ = INLINE_CHILDREN.take(id_b);
     }
 
     /// Step 4 coverage: each child entry is offered to the reconstruct
@@ -327,7 +336,8 @@ mod tests {
     #[test]
     fn reconstruct_offers_each_child_and_parent_slice() {
         // Build a composite with a parent blob + two children directly
-        // through the bundle helpers (no live registry needed).
+        // through the bundle helpers. The callback only records, so the
+        // registry threaded in is never inserted into here.
         use crate::ffi::inline::bundle::{ChildEntry, compose};
 
         const TAG_KNOWN: u64 = 0xBEEF;
@@ -353,17 +363,19 @@ mod tests {
         ];
         let (version, bytes) = compose(5, &[7, 7], &children);
 
+        let registry = InlineRegistry::new();
         let mut parent_runs = 0u32;
         let mut offered: Vec<(u64, Vec<u8>)> = Vec::new();
         reconstruct_inline_children(
             version,
             &bytes,
+            &registry,
             |pv, pb| {
                 assert_eq!(pv, 5, "parent version slice is carried");
                 assert_eq!(pb, &[7, 7], "parent bytes slice is carried");
                 parent_runs += 1;
             },
-            |child| {
+            |_registry, child| {
                 offered.push((child.type_tag, child.state_bytes.to_vec()));
                 // An unknown tag is offered but the callback skips it.
                 child.type_tag != TAG_UNKNOWN

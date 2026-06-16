@@ -590,6 +590,14 @@ macro_rules! __export_internal {
     ($component:ty) => {
         static __AETHER_COMPONENT: $crate::Slot<$component> = $crate::Slot::new();
 
+        // ADR-0114: the component's own inline-child registry — one per
+        // `export!`, mirroring `__AETHER_COMPONENT`. The `receive`
+        // membrane and the dehydrate / rehydrate shims thread
+        // `&__AETHER_INLINE` to the inline-child consumers instead of
+        // reaching for a crate-global static.
+        static __AETHER_INLINE: $crate::ffi::inline::InlineRegistry =
+            $crate::ffi::inline::InlineRegistry::new();
+
         // ADR-0033 / issue 442: pin the actor's `aether.kinds.inputs`
         // bytes into the cdylib's wasm custom section. The const data
         // (`__AETHER_INPUTS_MANIFEST_LEN` / `__AETHER_INPUTS_MANIFEST`)
@@ -745,7 +753,7 @@ macro_rules! __export_internal {
             };
             // ADR-0112: the runtime builds the `Manual` view; `wire`'s
             // default signature is `FfiCtx<'_>` (= Single), so downgrade.
-            let mut ctx = $crate::FfiCtx::__new(mailbox_id);
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
             <$component as $crate::FfiActor>::wire(instance, ctx.as_single());
             0
         }
@@ -761,7 +769,7 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx = $crate::FfiCtx::__new(mailbox_id);
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
             <$component as $crate::FfiActor>::unwire(instance, ctx.as_single());
             0
         }
@@ -801,8 +809,8 @@ macro_rules! __export_internal {
             // so the closure runs verbatim. ADR-0112: dispatch receives
             // the full `Manual` ctx; `__aether_dispatch` downgrades per
             // handler class.
-            $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, move |__aether_mail| {
-                let mut ctx = $crate::FfiCtx::__new(mailbox_id);
+            $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, move |__aether_mail| {
+                let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
                 instance.__aether_dispatch(&mut ctx, __aether_mail)
             })
         }
@@ -865,6 +873,7 @@ macro_rules! __export_internal {
             // that saves nothing and has no children skips the host save.
             if let Some((version, bytes)) = $crate::ffi::inline::compose::compose_dehydrate(
                 mailbox_id,
+                &__AETHER_INLINE,
                 |ctx| <$component as $crate::FfiActor>::on_dehydrate(instance, ctx),
             ) {
                 let mut ctx: $crate::FfiDropCtx<'_> = $crate::FfiDropCtx::__new(mailbox_id);
@@ -907,8 +916,9 @@ macro_rules! __export_internal {
             $crate::ffi::inline::compose::reconstruct_inline_children(
                 version,
                 prior_bytes,
+                &__AETHER_INLINE,
                 |parent_version, parent_bytes| {
-                    let mut ctx = $crate::FfiCtx::__new(mailbox_id);
+                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
                     // SAFETY: `parent_bytes` lives for this closure call;
                     // `PriorState::__from_ptr` bounds the slice to it.
                     let parent_prior = unsafe {
@@ -924,7 +934,9 @@ macro_rules! __export_internal {
                         parent_prior,
                     );
                 },
-                |child| $crate::__export_internal!(@reconstruct_child child ; $component),
+                |registry, child| {
+                    $crate::__export_internal!(@reconstruct_child registry, child ; $component)
+                },
             );
             0
         }
@@ -935,7 +947,7 @@ macro_rules! __export_internal {
     // candidate type whose `hash(NAMESPACE)` matches, re-`init` it and
     // restore its state via `inline::compose::reconstruct_one_child`. An
     // unmatched tag returns `false` so the caller logs + skips it.
-    (@reconstruct_child $child:ident ; $($candidate:ty),+) => {{
+    (@reconstruct_child $registry:ident, $child:ident ; $($candidate:ty),+) => {{
         let mut __aether_reconstructed = false;
         $(
             if $child.type_tag
@@ -945,7 +957,9 @@ macro_rules! __export_internal {
                 .0
             {
                 __aether_reconstructed =
-                    $crate::ffi::inline::compose::reconstruct_one_child::<$candidate>($child);
+                    $crate::ffi::inline::compose::reconstruct_one_child::<$candidate>(
+                        $registry, $child,
+                    );
             }
         )+
         __aether_reconstructed
@@ -982,6 +996,14 @@ macro_rules! __export_multi_internal {
         static __AETHER_MULTI: $crate::Slot<
             $crate::__macro_internals::Box<dyn $crate::ErasedFfiActor>
         > = $crate::Slot::new();
+
+        // ADR-0114: the module's own inline-child registry — one per
+        // `export!`, mirroring `__AETHER_MULTI`. The `receive` membrane
+        // and the dehydrate / rehydrate shims thread `&__AETHER_INLINE` to
+        // the inline-child consumers instead of reaching for a crate-global
+        // static.
+        static __AETHER_INLINE: $crate::ffi::inline::InlineRegistry =
+            $crate::ffi::inline::InlineRegistry::new();
 
         // ADR-0096: per-actor `aether.kinds.inputs` section. Each
         // exported type's records are preceded by an
@@ -1133,7 +1155,7 @@ macro_rules! __export_multi_internal {
             };
             // ADR-0112: the boxed `ErasedFfiActor` seam carries the `Manual`
             // view; the synthesized impl downgrades to `Single` per hook.
-            let mut ctx = $crate::FfiCtx::__new(mailbox_id);
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
             instance.erased_wire(&mut ctx);
             0
         }
@@ -1146,7 +1168,7 @@ macro_rules! __export_multi_internal {
             };
             // ADR-0112: the boxed `ErasedFfiActor` seam carries the `Manual`
             // view; the synthesized impl downgrades to `Single` per hook.
-            let mut ctx = $crate::FfiCtx::__new(mailbox_id);
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
             instance.erased_unwire(&mut ctx);
             0
         }
@@ -1180,8 +1202,8 @@ macro_rules! __export_multi_internal {
             // alias dispatches the co-located child. ADR-0112: the boxed
             // `ErasedFfiActor` seam carries the `Manual` view; the
             // synthesized impl downgrades to `Single` per hook.
-            $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, move |__aether_mail| {
-                let mut ctx = $crate::FfiCtx::__new(mailbox_id);
+            $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, move |__aether_mail| {
+                let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
                 instance.erased_dispatch(&mut ctx, __aether_mail)
             })
         }
@@ -1233,6 +1255,7 @@ macro_rules! __export_multi_internal {
             // byte-identical to the boxed parent's own blob.
             if let Some((version, bytes)) = $crate::ffi::inline::compose::compose_dehydrate(
                 mailbox_id,
+                &__AETHER_INLINE,
                 |ctx| instance.erased_on_dehydrate(ctx),
             ) {
                 let mut ctx: $crate::FfiDropCtx<'_> = $crate::FfiDropCtx::__new(mailbox_id);
@@ -1272,10 +1295,11 @@ macro_rules! __export_multi_internal {
             $crate::ffi::inline::compose::reconstruct_inline_children(
                 version,
                 prior_bytes,
+                &__AETHER_INLINE,
                 |parent_version, parent_bytes| {
                     // ADR-0112: the boxed `ErasedFfiActor` seam carries the
                     // `Manual` view; the synthesized impl downgrades per hook.
-                    let mut ctx = $crate::FfiCtx::__new(mailbox_id);
+                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
                     // SAFETY: `parent_bytes` lives for this closure call.
                     let parent_prior = unsafe {
                         $crate::PriorState::__from_ptr(
@@ -1286,7 +1310,9 @@ macro_rules! __export_multi_internal {
                     };
                     instance.erased_on_rehydrate(&mut ctx, parent_prior);
                 },
-                |child| $crate::__export_internal!(@reconstruct_child child ; $($component),+),
+                |registry, child| {
+                    $crate::__export_internal!(@reconstruct_child registry, child ; $($component),+)
+                },
             );
             0
         }

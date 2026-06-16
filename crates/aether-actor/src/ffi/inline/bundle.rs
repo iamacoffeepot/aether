@@ -55,7 +55,7 @@ const COMPOSITE_MAGIC: [u8; 4] = *b"AEIC";
 pub struct ChildEntry {
     /// The child's alias [`aether_data::MailboxId`] raw value — the key
     /// the rehydrate path re-registers the reconstructed child under in
-    /// the guest `INLINE_CHILDREN` registry.
+    /// the guest inline-child registry.
     pub alias_id: u64,
     /// The actor-type tag (`mailbox_id_from_name(NAMESPACE)`) the
     /// rehydrate reconstruct matches against the module's exported types.
