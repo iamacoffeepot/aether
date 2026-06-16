@@ -75,12 +75,12 @@ cannot hold.
 | `Vec(T)` | `u32` little-endian element count, then each element in order |
 | `Array { T, len }` | the `len` elements in order — no count (the schema has `len`) |
 | `Struct { fields }` | each field in schema order — no names, no count |
-| `Enum { variants }` | discriminant in the minimal fixed width that holds the schema's largest declared discriminant (1 byte for ≤256 variants), then the selected variant's fields in order |
-| `Ref(T)` | 1 byte selector: `0` inline → `u32` length-prefix + the `T` encoding; `1` handle → `id` (8 LE) + `kind_id` (8 LE) |
+| `Enum { variants }` | the variant index as a fixed `u32` little-endian (serde's `variant_index`; the schema-walker matches by declaration position), then the selected variant's fields in order |
+| `Ref(T)` | a two-variant sum encoded like any `Enum`: a `u32` selector — `0` inline → the `T` encoding; `1` handle → `id` (8 LE) + `kind_id` (8 LE) |
 | `Map { K, V }` | `u32` little-endian entry count, then `(K, V)` pairs in ascending encoded-key byte order |
 | `TypeId` (`KindId` / `MailboxId` / `HandleId`) | fixed 8 bytes little-endian |
 
-Two choices in that table carry the most weight:
+Three choices in that table carry the most weight:
 
 - **Collection lengths are the one quantity the schema does not bound**, so they
   are a fixed `u32` (a 4 GB ceiling). Payloads that could approach it stage
@@ -88,9 +88,17 @@ Two choices in that table carry the most weight:
 - **Identifiers are high-entropy 64-bit hashes** (`KindId`, `MailboxId`,
   `HandleId`), so they are fixed 8 bytes. A variable-length integer would be
   strictly larger for full-range values — the opposite of compaction.
+- **Sum-type selectors (`Enum`, `Ref`) are a fixed `u32`, not a schema-derived
+  width.** The serde consumer is schema-less — it receives serde's
+  `variant_index` but never the variant count — so a width that depends on the
+  schema is not derivable on that side. A fixed `u32` is what both consumers can
+  produce identically, which is the property the whole format rests on.
 
-The inline `Ref` body is length-prefixed so the handle store can skip or splice
-a resolved value in place without walking the subtree (ADR-0049).
+The inline `Ref` body carries no length prefix. The schema-less serde consumer
+cannot add one — a generic `Serialize` impl has no measure-then-prefix hook — and
+requiring it would make the two consumers emit different bytes. The handle store
+instead locates an inline `Ref`'s extent with the schema walk it already performs
+to resolve handles (ADR-0049).
 
 ### Envelope
 
