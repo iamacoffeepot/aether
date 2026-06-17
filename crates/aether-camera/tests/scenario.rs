@@ -105,14 +105,15 @@ fn camera_component_lifecycle() {
     not_all_black(&img).expect("camera scene should not be all black");
 }
 
-/// Phase 2 Phase 1-asserts smoke test: the camera component publishes
-/// `aether.camera` to the chassis render mailbox every tick. This is
-/// the load-bearing flow for camera matrices reaching the GPU; if it
-/// regresses, every scene goes back to identity-projection until
-/// someone notices visually. `count_observed` queries the bench's
-/// chassis-cap observation log for the kind name.
+/// Smoke test: the default camera (a frozen orbit, `speed: 0.0`) still
+/// publishes `aether.camera` to the chassis render mailbox every tick
+/// even though the eye does not move. This is the load-bearing flow for
+/// camera matrices reaching the GPU; if it regresses, every scene goes
+/// back to identity-projection until someone notices visually.
+/// `count_observed` queries the bench's chassis-cap observation log for
+/// the kind name.
 #[test]
-fn camera_default_orbit_publishes_view_proj() {
+fn camera_default_static_publishes_view_proj() {
     let Some(wasm_path) = require_runtime("aether_camera") else {
         return;
     };

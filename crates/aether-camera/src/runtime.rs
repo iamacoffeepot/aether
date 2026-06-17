@@ -12,10 +12,12 @@
 //! `"aether.render"` (the camera mailbox folded into render per
 //! ADR-0074 §Decision 7; the kind name `aether.camera` is unchanged).
 //!
-//! Boots with one default camera, `name = "main"`, in orbit mode and
-//! marked active, so loading the component still produces a visible
-//! 3D camera with no further mail. Create / destroy / activate / mode-
-//! switch via the `aether.camera.*` mail family.
+//! Boots with one default camera, `name = "main"`, in orbit mode at a
+//! static (frozen) pose — `speed: 0.0`, yaw `0.0`, pitch `0.3`,
+//! distance `3.0`, target origin — and marked active, so loading the
+//! component produces a visible 3D camera with a fixed eye point and no
+//! further mail. Create / destroy / activate / mode-switch via the
+//! `aether.camera.*` mail family.
 //!
 //! # Mail surface
 //!
@@ -236,8 +238,10 @@ pub struct CameraComponent {
 /// the active one's `view_proj` each frame.
 ///
 /// # Agent
-/// Boots with a default camera named `"main"` in orbit mode, marked
-/// active. Iterate from there:
+/// Boots with a default camera named `"main"` in a frozen orbit pose
+/// (speed `0.0`, yaw `0.0`, pitch `0.3`, distance `3.0`, target
+/// origin), marked active. The eye is pinned — no auto-rotation on
+/// load. Iterate from there:
 ///
 /// - `aether.camera.create { name, mode: Orbit(OrbitParams { … }) }`
 ///   to add another camera (e.g. a topdown overview).
@@ -262,7 +266,10 @@ impl FfiActor for CameraComponent {
         cameras.insert(
             "main".to_owned(),
             CameraState {
-                mode: ModeState::Orbit(OrbitState::from_params(&OrbitParams::default())),
+                mode: ModeState::Orbit(OrbitState::from_params(&OrbitParams {
+                    speed: Some(0.0),
+                    ..Default::default()
+                })),
             },
         );
         Ok(CameraComponent {
@@ -457,3 +464,69 @@ impl FfiActor for CameraComponent {
 }
 
 aether_actor::export!(CameraComponent);
+
+#[cfg(test)]
+mod tests {
+    use aether_actor::{FfiActor, KindId, Mailbox, Resolver, resolve, resolve_mailbox};
+    use aether_data::Kind;
+
+    use super::*;
+
+    /// Minimal stub that satisfies `Resolver` for `init` calls whose
+    /// implementations don't reach the resolver (e.g. `CameraComponent::init`
+    /// is a pure constructor with no resolver calls).
+    struct StubResolver;
+
+    impl Resolver for StubResolver {
+        fn mailbox_id(&self) -> u64 {
+            0
+        }
+
+        fn resolve<K: Kind>(&self) -> KindId<K> {
+            resolve::<K>()
+        }
+
+        fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K> {
+            resolve_mailbox::<K>(name)
+        }
+    }
+
+    /// The boot `"main"` camera is seeded with `speed: 0.0`, so its orbit
+    /// speed must be exactly zero after `init`.
+    #[test]
+    fn default_camera_boots_with_zero_speed() {
+        let mut ctx = StubResolver;
+        let comp = CameraComponent::init((), &mut ctx).expect("init");
+        let main = comp.cameras.get("main").expect("\"main\" camera present");
+        match main.mode {
+            ModeState::Orbit(state) => {
+                assert_eq!(
+                    state.speed, 0.0,
+                    "boot \"main\" orbit speed must be 0.0 (frozen); got {}",
+                    state.speed
+                );
+            }
+            ModeState::Topdown(_) => panic!("\"main\" camera must boot in orbit mode"),
+        }
+    }
+
+    /// An `OrbitState` with `speed: 0.0` must not change its yaw across
+    /// repeated `tick()` calls.
+    #[test]
+    fn frozen_orbit_yaw_is_stable_across_ticks() {
+        let mut state = OrbitState::from_params(&OrbitParams {
+            speed: Some(0.0),
+            ..Default::default()
+        });
+        let yaw_before = state.yaw;
+        for _ in 0..10 {
+            state.tick();
+        }
+        assert_eq!(
+            state.yaw, yaw_before,
+            "frozen orbit (speed=0.0) yaw must not change across ticks; \
+             before={yaw_before}, after={}",
+            state.yaw
+        );
+    }
+}
