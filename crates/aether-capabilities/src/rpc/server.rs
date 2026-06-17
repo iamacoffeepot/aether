@@ -1593,18 +1593,19 @@ mod tests {
         assert_eq!(pong, WireFrame::Pong(0xfeed_face));
     }
 
-    /// Tiny postcard roundtrip for the new `RpcError::FrameTooLarge`
+    /// Tiny wire roundtrip for the new `RpcError::FrameTooLarge`
     /// variant — protects the wire shape against accidental rename /
     /// re-ordering.
     #[test]
     fn rpc_error_frame_too_large_postcard_roundtrips() {
         use crate::rpc::RpcError;
+        use aether_data::wire;
         let err = RpcError::FrameTooLarge {
             size: 99_000_000,
             max: 64 * 1024 * 1024,
         };
-        let bytes = postcard::to_allocvec(&err).expect("postcard encode");
-        let back: RpcError = postcard::from_bytes(&bytes).expect("postcard decode");
+        let bytes = wire::to_vec(&err).expect("wire encode");
+        let back: RpcError = wire::from_bytes(&bytes).expect("wire decode");
         assert_eq!(err, back);
     }
 
