@@ -91,6 +91,22 @@ fn content_addressed_handles_disjoint_domain() {
     assert_eq!(tag_of(via_transform.0), Some(Tag::Handle));
 }
 
+/// Pin the concrete `HandleId` output for `transform_id=tx(0xabcd)` and
+/// `inputs=[hid(0x1234), hid(0x5678)]` to detect any byte-order regression
+/// in the FNV-1a derivation. The value is produced by the byte-identical
+/// feed sequence: `HANDLE_DOMAIN ++ transform_id LE ++ [input_count] ++
+/// [slot0] ++ input0_LE ++ [slot1] ++ input1_LE`.
+#[test]
+fn content_addressed_handles_golden_value() {
+    let id = content_addressed_handle_id(tx(0xabcd), &[hid(0x1234), hid(0x5678)]);
+    assert_eq!(
+        id.0, GOLDEN_HANDLE_ID,
+        "byte-order regression in FNV-1a derivation"
+    );
+}
+
+const GOLDEN_HANDLE_ID: u64 = 0x3e52_9cb8_843e_6a02;
+
 /// 10k random `(transform_id, inputs)` tuples — no id collides. 10k vs
 /// 64-bit (60-bit body) is well under the birthday bound; a collision
 /// would indicate a derivation bug. Uses a deterministic xorshift PRNG

@@ -265,14 +265,7 @@ fn variant_to_shape(v: &EnumVariant) -> VariantShape {
     }
 }
 
-/// Domain tag prefixed to every kind-id hash input so the `Kind::ID`
-/// space is disjoint from `MailboxId`. Must stay byte-identical to
-/// `crate::hash::KIND_DOMAIN`; duplicated here at module scope for
-/// the same reason `fnv1a_64_prefixed` is (the canonical-bytes path
-/// hashes `KIND_DOMAIN ++ bytes` without reaching across module
-/// boundaries).
-pub const KIND_DOMAIN: &[u8] = b"kind:";
-
+use crate::hash::{KIND_DOMAIN, fnv1a_64_prefixed};
 use crate::tag_bits::{HASH_MASK, TAG_KIND, TAG_SHIFT};
 
 /// Derive a `Kind::ID` from a `(name, schema)` pair at runtime. Matches
@@ -304,28 +297,6 @@ pub fn kind_id_from_parts(name: &str, schema: &SchemaType) -> u64 {
 pub fn kind_id_from_shape(shape: &KindShape) -> u64 {
     let bytes = wire::to_vec_bare(shape).expect("canonical KindShape serialization is infallible");
     (u64::from(TAG_KIND) << TAG_SHIFT) | (fnv1a_64_prefixed(KIND_DOMAIN, &bytes) & HASH_MASK)
-}
-
-/// FNV-1a 64 over `prefix ++ payload`, mirrored from
-/// `crate::hash::fnv1a_64_prefixed`. Duplicated at module scope so
-/// the canonical-bytes path can hash `KIND_DOMAIN ++ bytes` without
-/// a transient `Vec<u8>` — same offset basis and prime, identical
-/// output.
-pub const fn fnv1a_64_prefixed(prefix: &[u8], payload: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut i = 0;
-    while i < prefix.len() {
-        hash ^= prefix[i] as u64;
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-        i += 1;
-    }
-    let mut i = 0;
-    while i < payload.len() {
-        hash ^= payload[i] as u64;
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-        i += 1;
-    }
-    hash
 }
 
 const fn write_schema(schema: &SchemaType, out: &mut [u8], cursor: usize) -> usize {

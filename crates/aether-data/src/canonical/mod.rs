@@ -71,8 +71,8 @@ mod tests {
     //! Each test constructs a schema via `static` so `SchemaCell::Static`
     //! is reachable in const context, runs both passes, and compares
     //! against a hand-built `SchemaShape` that matches the stripped shape.
-    use super::schema::{KIND_DOMAIN, fnv1a_64_prefixed};
     use super::*;
+    use crate::hash::{KIND_DOMAIN, fnv1a_64_prefixed};
     use crate::ids::KindId;
     use crate::schema::{
         EnumVariant, KindLabels, KindShape, LabelCell, LabelNode, NamedField, Primitive,
