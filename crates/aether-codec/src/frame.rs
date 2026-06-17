@@ -1,10 +1,10 @@
 //! Length-prefixed stream framing for serde-derived message types.
 //!
 //! Each frame on the wire is a 4-byte little-endian body length
-//! followed by the postcard-encoded message. Two enum types per
-//! protocol typically enforce direction at the type level; the
-//! helpers here are generic over `<T: Serialize>` /
-//! `<T: DeserializeOwned>` so any postcard-derived enum can ride
+//! followed by the `aether_data::wire`-encoded message body (ADR-0118).
+//! Two enum types per protocol typically enforce direction at the type
+//! level; the helpers here are generic over `<T: Serialize>` /
+//! `<T: DeserializeOwned>` so any wire-derived enum can ride
 //! the same framing.
 //!
 //! The hub channel (`aether_hub::wire`) is the first consumer.
@@ -15,19 +15,20 @@
 //! in-process bridge) reuses the same helpers without taking a
 //! `aether-hub` dep.
 //!
-//! Today the body is hardcoded postcard. When a second body format
-//! arrives (msgpack, protobuf), the right shape is to subdivide this
-//! module into `frame::postcard` / `frame::protobuf` siblings rather
-//! than parameterising the existing helpers — most callers know which
-//! format their protocol speaks at compile time.
+//! The body uses `aether_data::wire` (ADR-0118). When a second body
+//! format arrives, the right shape is to subdivide this module into
+//! `frame::wire` / `frame::protobuf` siblings rather than
+//! parameterising the existing helpers — most callers know which format
+//! their protocol speaks at compile time.
 
 use std::env;
+use std::error;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::sync::OnceLock;
 
+use aether_data::wire;
 use serde::{Serialize, de::DeserializeOwned};
-use std::error;
 
 /// Maximum accepted frame body size, default. Bounded so a malformed
 /// length prefix cannot drive a reader into an OOM. 64 MiB is large
@@ -75,20 +76,20 @@ fn resolve_max_frame_size(raw: Option<String>) -> usize {
     })
 }
 
-/// Errors from the framing helpers. Wraps I/O and postcard decode
+/// Errors from the framing helpers. Wraps I/O and wire decode
 /// errors; adds its own variants for an oversize length prefix on
 /// inbound frames ([`FrameError::FrameTooLarge`]) and a pre-write
 /// oversize check on outbound bodies ([`FrameError::EncodeTooLarge`]).
 #[derive(Debug)]
 pub enum FrameError {
     Io(io::Error),
-    Postcard(postcard::Error),
+    Wire(wire::Error),
     /// Inbound: length prefix exceeded [`max_frame_size`].
     FrameTooLarge {
         size: usize,
         max: usize,
     },
-    /// Outbound: the postcard-encoded body exceeded [`max_frame_size`].
+    /// Outbound: the wire-encoded body exceeded [`max_frame_size`].
     /// Surfaced from [`encode_frame`] / [`write_frame`] so the sender
     /// learns the rejection client-side instead of writing a frame
     /// the peer will reject (or drop the connection over).
@@ -102,7 +103,7 @@ impl fmt::Display for FrameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(e) => write!(f, "frame io: {e}"),
-            Self::Postcard(e) => write!(f, "frame decode: {e}"),
+            Self::Wire(e) => write!(f, "frame decode: {e}"),
             Self::FrameTooLarge { size, max } => {
                 write!(f, "frame too large: {size} > {max}")
             }
@@ -121,28 +122,28 @@ impl From<io::Error> for FrameError {
     }
 }
 
-impl From<postcard::Error> for FrameError {
-    fn from(e: postcard::Error) -> Self {
-        Self::Postcard(e)
+impl From<wire::Error> for FrameError {
+    fn from(e: wire::Error) -> Self {
+        Self::Wire(e)
     }
 }
 
 /// Encode a message into its framed wire representation (4-byte LE
-/// length prefix + postcard body). Returns
+/// length prefix + `aether_data::wire` body). Returns
 /// [`FrameError::EncodeTooLarge`] if the encoded body exceeds
 /// [`max_frame_size`], so the sender learns the rejection client-side
-/// instead of writing a frame the peer will reject. Postcard encoding
-/// of `alloc::Vec` is itself infallible for the types this is used
-/// with, so the postcard step is a `.expect` rather than an `Err`
+/// instead of writing a frame the peer will reject. Wire encoding
+/// of a `Vec` is itself infallible for the types this is used
+/// with, so the wire step is a `.expect` rather than an `Err`
 /// path per ADR-0063.
 ///
 /// # Panics
-/// Panics if postcard encoding of `msg` fails — fail-fast per ADR-0063:
-/// `postcard::to_allocvec` into a growable `Vec` cannot fail for the
+/// Panics if wire encoding of `msg` fails — fail-fast per ADR-0063:
+/// `wire::to_vec` into a growable `Vec` cannot fail for the
 /// `Serialize` types this is used with, so a failure indicates the
 /// caller passed a type whose serializer is observably broken.
 pub fn encode_frame<T: Serialize>(msg: &T) -> Result<Vec<u8>, FrameError> {
-    let body = postcard::to_allocvec(msg).expect("postcard encode to Vec is infallible");
+    let body = wire::to_vec(msg).expect("wire encode to Vec is infallible");
     let max = max_frame_size();
     if body.len() > max {
         return Err(FrameError::EncodeTooLarge {
@@ -174,7 +175,7 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<T, FrameErr
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
-    Ok(postcard::from_bytes(&buf)?)
+    Ok(wire::from_bytes(&buf)?)
 }
 
 /// Synchronous write of one framed message. Returns
@@ -219,13 +220,13 @@ mod tests {
     }
 
     #[test]
-    fn unit_variant_is_five_bytes() {
-        // 4 byte prefix + 1 byte postcard tag.
+    fn unit_variant_is_nine_bytes() {
+        // 4 byte prefix + 5 byte wire body (1 version byte + 4 byte variant index u32).
         assert_eq!(
             encode_frame(&Msg::Tick)
                 .expect("test setup: encode unit variant")
                 .len(),
-            5,
+            9,
         );
     }
 
@@ -269,13 +270,13 @@ mod tests {
     }
 
     #[test]
-    fn malformed_body_returns_postcard_error() {
+    fn malformed_body_returns_wire_error() {
         let mut buf = Vec::new();
         buf.extend_from_slice(&1u32.to_le_bytes());
         buf.push(0xff);
         let err = read_frame::<_, Msg>(&mut Cursor::new(buf))
-            .expect_err("malformed body must surface postcard error");
-        assert!(matches!(err, FrameError::Postcard(_)));
+            .expect_err("malformed body must surface wire error");
+        assert!(matches!(err, FrameError::Wire(_)));
     }
 
     /// An oversize encode body trips `FrameError::EncodeTooLarge`
@@ -283,7 +284,7 @@ mod tests {
     #[test]
     fn encode_too_large_rejected_pre_write() {
         // Build a `Note` whose text alone exceeds the resolved cap.
-        // The encode-side check sees the postcard-encoded body length
+        // The encode-side check sees the wire-encoded body length
         // and bails before allocating the framed `Vec`.
         let oversize_text = "x".repeat(max_frame_size() + 16);
         let msg = Msg::Note {
