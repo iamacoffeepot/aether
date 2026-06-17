@@ -16,11 +16,6 @@ aether-math = { path = "../aether-math" }
 bytemuck = { workspace = true, features = ["derive"] }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 
-[dev-dependencies]
-# ADR-0041 I/O kind roundtrip tests exercise the postcard wire
-# directly (the mail-path `encode_struct` helper wraps this).
-postcard = { workspace = true, default-features = false, features = ["alloc"] }
-
 # Issue #243: descriptors.rs::all() iterates the substrate-native
 # `inventory` slot to materialize the descriptor list. inventory's
 # `submit!` macro (called from the Kind derive) references `::inventory`

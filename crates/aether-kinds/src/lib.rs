@@ -4841,7 +4841,7 @@ mod tests {
     // iamacoffeepot/aether#1777 capture-verdict kind roundtrips. The
     // request gains an optional-background `checks` list and the result
     // gains an optional `verdict` carrying scalar / coordinate reduction
-    // results; postcard roundtrip proves the derived Serialize/Deserialize
+    // results; kind codec roundtrip proves the derived Serialize/Deserialize
     // agree on the wire for the new shapes.
     mod capture_verdict_roundtrips {
         use super::*;
@@ -4867,10 +4867,9 @@ mod tests {
                 ],
                 similarity: None,
             };
-            let bytes =
-                postcard::to_allocvec(&frame).expect("test setup: postcard encodes CaptureFrame");
-            let back: CaptureFrame =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes CaptureFrame");
+            let bytes = frame.encode_into_bytes();
+            let back: CaptureFrame = CaptureFrame::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes CaptureFrame");
             assert_eq!(back.checks.len(), 2);
             assert_eq!(back.checks[0].reduction, FrameReduction::NotAllBlack);
             assert_eq!(back.checks[0].background, None);
@@ -4917,10 +4916,9 @@ mod tests {
                     ],
                 }),
             };
-            let bytes = postcard::to_allocvec(&ok)
-                .expect("test setup: postcard encodes CaptureFrameResult::Ok");
-            let back: CaptureFrameResult = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes CaptureFrameResult::Ok");
+            let bytes = ok.encode_into_bytes();
+            let back: CaptureFrameResult = CaptureFrameResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes CaptureFrameResult::Ok");
             match back {
                 CaptureFrameResult::Ok {
                     png,
@@ -4972,10 +4970,9 @@ mod tests {
                 similarity_score: None,
                 similarity_pass: None,
             };
-            let bytes = postcard::to_allocvec(&ok)
-                .expect("test setup: postcard encodes CaptureFrameResult::Ok");
-            let back: CaptureFrameResult = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes CaptureFrameResult::Ok");
+            let bytes = ok.encode_into_bytes();
+            let back: CaptureFrameResult = CaptureFrameResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes CaptureFrameResult::Ok");
             match back {
                 CaptureFrameResult::Ok { verdict, .. } => assert!(verdict.is_none()),
                 CaptureFrameResult::Err { .. } => panic!("expected Ok"),
@@ -4997,10 +4994,9 @@ mod tests {
                     threshold: 0.02,
                 }),
             };
-            let bytes = postcard::to_allocvec(&frame)
-                .expect("test setup: postcard encodes CaptureFrame with similarity");
-            let back: CaptureFrame = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes CaptureFrame with similarity");
+            let bytes = frame.encode_into_bytes();
+            let back: CaptureFrame = CaptureFrame::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes CaptureFrame with similarity");
             let sim = back.similarity.expect("similarity survives the roundtrip");
             assert_eq!(sim.namespace, "assets");
             assert_eq!(sim.reference_path, "golden/demo.png");
@@ -5012,10 +5008,9 @@ mod tests {
                 similarity_score: Some(0.005),
                 similarity_pass: Some(true),
             };
-            let rbytes = postcard::to_allocvec(&result)
-                .expect("test setup: postcard encodes CaptureFrameResult with similarity");
-            let rback: CaptureFrameResult = postcard::from_bytes(&rbytes)
-                .expect("test setup: postcard decodes CaptureFrameResult with similarity");
+            let rbytes = result.encode_into_bytes();
+            let rback: CaptureFrameResult = CaptureFrameResult::decode_from_bytes(&rbytes)
+                .expect("test setup: kind codec decodes CaptureFrameResult with similarity");
             match rback {
                 CaptureFrameResult::Ok {
                     similarity_score,
@@ -5033,7 +5028,7 @@ mod tests {
 
     // ADR-0105 textured-quad render-surface kind roundtrips. The request
     // types carry `Vec<u8>` pixels and a `space` enum carrying nested
-    // arrays; postcard roundtrip proves the derived Serialize/Deserialize
+    // arrays; kind codec roundtrip proves the derived Serialize/Deserialize
     // agree on the wire for each shape.
     mod render_quad_roundtrips {
         use super::*;
@@ -5047,10 +5042,9 @@ mod tests {
                 height: 2,
                 pixels: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             };
-            let bytes =
-                postcard::to_allocvec(&c).expect("test setup: postcard encodes CreateTexture");
-            let back: CreateTexture =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes CreateTexture");
+            let bytes = c.encode_into_bytes();
+            let back: CreateTexture = CreateTexture::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes CreateTexture");
             assert_eq!(back.width, 2);
             assert_eq!(back.height, 2);
             assert_eq!(back.pixels.len(), 16);
@@ -5059,10 +5053,9 @@ mod tests {
         #[test]
         fn create_texture_result_roundtrip_both_arms() {
             let ok = CreateTextureResult::Ok { texture_id: 7 };
-            let bytes = postcard::to_allocvec(&ok)
-                .expect("test setup: postcard encodes CreateTextureResult::Ok");
-            let back: CreateTextureResult = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes CreateTextureResult::Ok");
+            let bytes = ok.encode_into_bytes();
+            let back: CreateTextureResult = CreateTextureResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes CreateTextureResult::Ok");
             match back {
                 CreateTextureResult::Ok { texture_id } => assert_eq!(texture_id, 7),
                 CreateTextureResult::Err { .. } => panic!("expected Ok"),
@@ -5071,10 +5064,9 @@ mod tests {
             let err = CreateTextureResult::Err {
                 error: "pixels length mismatch".to_string(),
             };
-            let bytes = postcard::to_allocvec(&err)
-                .expect("test setup: postcard encodes CreateTextureResult::Err");
-            let back: CreateTextureResult = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes CreateTextureResult::Err");
+            let bytes = err.encode_into_bytes();
+            let back: CreateTextureResult = CreateTextureResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes CreateTextureResult::Err");
             match back {
                 CreateTextureResult::Err { error } => assert_eq!(error, "pixels length mismatch"),
                 CreateTextureResult::Ok { .. } => panic!("expected Err"),
@@ -5091,10 +5083,9 @@ mod tests {
                 height: 1,
                 pixels: vec![9, 8, 7, 6],
             };
-            let bytes =
-                postcard::to_allocvec(&u).expect("test setup: postcard encodes UpdateTexture");
-            let back: UpdateTexture =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes UpdateTexture");
+            let bytes = u.encode_into_bytes();
+            let back: UpdateTexture = UpdateTexture::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes UpdateTexture");
             assert_eq!(back.texture_id, 3);
             assert_eq!((back.x, back.y), (4, 5));
             assert_eq!(back.pixels, vec![9, 8, 7, 6]);
@@ -5117,10 +5108,9 @@ mod tests {
                     tint: [1.0, 1.0, 1.0, 1.0],
                 }],
             };
-            let bytes =
-                postcard::to_allocvec(&d).expect("test setup: postcard encodes DrawTexturedQuads");
-            let back: DrawTexturedQuads = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes DrawTexturedQuads");
+            let bytes = d.encode_into_bytes();
+            let back: DrawTexturedQuads = DrawTexturedQuads::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes DrawTexturedQuads");
             assert_eq!(back.texture_id, 1);
             assert_eq!(back.space, QuadSpace::Screen);
             assert_eq!(back.quads.len(), 1);
@@ -5140,10 +5130,9 @@ mod tests {
                 },
                 quads: vec![],
             };
-            let bytes = postcard::to_allocvec(&d)
-                .expect("test setup: postcard encodes DrawTexturedQuads (World)");
-            let back: DrawTexturedQuads = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes DrawTexturedQuads (World)");
+            let bytes = d.encode_into_bytes();
+            let back: DrawTexturedQuads = DrawTexturedQuads::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes DrawTexturedQuads (World)");
             match back.space {
                 QuadSpace::World { anchor, scale } => {
                     assert_eq!(anchor, [1.0, 2.0, 3.0]);
@@ -5170,10 +5159,9 @@ mod tests {
                     color: [1.0, 0.0, 0.5, 1.0],
                 }],
             };
-            let bytes =
-                postcard::to_allocvec(&d).expect("test setup: postcard encodes DrawSolidQuads");
-            let back: DrawSolidQuads =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes DrawSolidQuads");
+            let bytes = d.encode_into_bytes();
+            let back: DrawSolidQuads = DrawSolidQuads::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes DrawSolidQuads");
             assert_eq!(back.space, QuadSpace::Screen);
             assert_eq!(back.quads.len(), 1);
             assert_eq!(back.quads[0].width, 20.0);
@@ -5186,9 +5174,9 @@ mod tests {
                 namespace: "assets".to_string(),
                 path: "fonts/RobotoMono.ttf".to_string(),
             };
-            let bytes = postcard::to_allocvec(&r).expect("test setup: postcard encodes LoadFont");
-            let back: LoadFont =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes LoadFont");
+            let bytes = r.encode_into_bytes();
+            let back: LoadFont = LoadFont::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes LoadFont");
             assert_eq!(back.namespace, r.namespace);
             assert_eq!(back.path, r.path);
         }
@@ -5200,10 +5188,9 @@ mod tests {
                 name: "RobotoMono".to_string(),
                 resident_bytes: 183_700,
             };
-            let bytes = postcard::to_allocvec(&ok)
-                .expect("test setup: postcard encodes LoadFontResult::Ok");
-            let back: LoadFontResult = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes LoadFontResult::Ok");
+            let bytes = ok.encode_into_bytes();
+            let back: LoadFontResult = LoadFontResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes LoadFontResult::Ok");
             match back {
                 LoadFontResult::Ok {
                     font_id,
@@ -5222,10 +5209,9 @@ mod tests {
                 path: "missing.ttf".to_string(),
                 error: "file read failed".to_string(),
             };
-            let bytes = postcard::to_allocvec(&err)
-                .expect("test setup: postcard encodes LoadFontResult::Err");
-            let back: LoadFontResult = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes LoadFontResult::Err");
+            let bytes = err.encode_into_bytes();
+            let back: LoadFontResult = LoadFontResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes LoadFontResult::Err");
             match back {
                 LoadFontResult::Err {
                     namespace,
@@ -5250,9 +5236,9 @@ mod tests {
                 origin: [24.0, 48.0],
                 space: QuadSpace::Screen,
             };
-            let bytes = postcard::to_allocvec(&d).expect("test setup: postcard encodes DrawText");
-            let back: DrawText =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes DrawText");
+            let bytes = d.encode_into_bytes();
+            let back: DrawText = DrawText::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes DrawText");
             assert_eq!(back.font_id, 1);
             assert_eq!(back.text, "hello aether");
             assert_eq!(back.size_pixels, 32.0);
@@ -5271,10 +5257,9 @@ mod tests {
                 },
             ] {
                 let r = FontMetricsRequest { font: font.clone() };
-                let bytes = postcard::to_allocvec(&r)
-                    .expect("test setup: postcard encodes FontMetricsRequest");
-                let back: FontMetricsRequest = postcard::from_bytes(&bytes)
-                    .expect("test setup: postcard decodes FontMetricsRequest");
+                let bytes = r.encode_into_bytes();
+                let back: FontMetricsRequest = FontMetricsRequest::decode_from_bytes(&bytes)
+                    .expect("test setup: kind codec decodes FontMetricsRequest");
                 assert_eq!(back.font, font);
             }
         }
@@ -5300,10 +5285,9 @@ mod tests {
                     ],
                 },
             };
-            let bytes = postcard::to_allocvec(&ok)
-                .expect("test setup: postcard encodes FontMetricsResult::Ok");
-            let back: FontMetricsResult = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes FontMetricsResult::Ok");
+            let bytes = ok.encode_into_bytes();
+            let back: FontMetricsResult = FontMetricsResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes FontMetricsResult::Ok");
             match back {
                 FontMetricsResult::Ok { metrics } => {
                     assert_eq!(metrics.units_per_em, 1000.0);
@@ -5317,10 +5301,9 @@ mod tests {
             let err = FontMetricsResult::Err {
                 error: "unknown font_id".to_string(),
             };
-            let bytes = postcard::to_allocvec(&err)
-                .expect("test setup: postcard encodes FontMetricsResult::Err");
-            let back: FontMetricsResult = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes FontMetricsResult::Err");
+            let bytes = err.encode_into_bytes();
+            let back: FontMetricsResult = FontMetricsResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes FontMetricsResult::Err");
             match back {
                 FontMetricsResult::Err { error } => assert_eq!(error, "unknown font_id"),
                 FontMetricsResult::Ok { .. } => panic!("expected Err"),
@@ -5329,7 +5312,7 @@ mod tests {
     }
 
     // ADR-0107 `aether.ui` widget kind round-trips. Each kind is
-    // postcard-encoded and decoded, proving the derived
+    // encoded and decoded via the kind codec, proving the derived
     // Serialize/Deserialize agree on the wire for each shape.
     mod ui_roundtrips {
         use super::*;
@@ -5341,9 +5324,9 @@ mod tests {
                 rect: [10.0, 20.0, 100.0, 50.0],
                 color: [0.1, 0.2, 0.3, 0.8],
             };
-            let bytes = postcard::to_allocvec(&p).expect("test setup: postcard encodes UiPanel");
+            let bytes = p.encode_into_bytes();
             let back: UiPanel =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes UiPanel");
+                UiPanel::decode_from_bytes(&bytes).expect("test setup: kind codec decodes UiPanel");
             assert_eq!(back.rect, [10.0, 20.0, 100.0, 50.0]);
             assert_eq!(back.color, [0.1, 0.2, 0.3, 0.8]);
         }
@@ -5356,9 +5339,9 @@ mod tests {
                 track_color: [0.2, 0.2, 0.2, 1.0],
                 fill_color: [0.1, 0.8, 0.2, 1.0],
             };
-            let bytes = postcard::to_allocvec(&b).expect("test setup: postcard encodes UiBar");
+            let bytes = b.encode_into_bytes();
             let back: UiBar =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes UiBar");
+                UiBar::decode_from_bytes(&bytes).expect("test setup: kind codec decodes UiBar");
             assert_eq!(back.rect, [0.0, 0.0, 200.0, 24.0]);
             assert_eq!(back.frac, 0.75);
             assert_eq!(back.track_color, [0.2, 0.2, 0.2, 1.0]);
@@ -5375,9 +5358,9 @@ mod tests {
                 size_pixels: 16.0,
                 color: [1.0, 1.0, 1.0, 1.0],
             };
-            let bytes = postcard::to_allocvec(&l).expect("test setup: postcard encodes UiLabel");
+            let bytes = l.encode_into_bytes();
             let back: UiLabel =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes UiLabel");
+                UiLabel::decode_from_bytes(&bytes).expect("test setup: kind codec decodes UiLabel");
             assert_eq!(back.x, 10.0);
             assert_eq!(back.y, 20.0);
             assert_eq!(back.font_id, 2);
@@ -5397,9 +5380,9 @@ mod tests {
                 size_pixels: 18.0,
                 text_color: [0.9, 0.9, 0.9, 1.0],
             };
-            let bytes = postcard::to_allocvec(&b).expect("test setup: postcard encodes UiButton");
-            let back: UiButton =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes UiButton");
+            let bytes = b.encode_into_bytes();
+            let back: UiButton = UiButton::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes UiButton");
             assert_eq!(back.id, 7);
             assert_eq!(back.rect, [4.0, 8.0, 120.0, 32.0]);
             assert_eq!(back.color, [0.15, 0.15, 0.2, 1.0]);
@@ -5412,19 +5395,20 @@ mod tests {
         #[test]
         fn ui_clicked_roundtrip() {
             let c = UiClicked { id: 7 };
-            let bytes = postcard::to_allocvec(&c).expect("test setup: postcard encodes UiClicked");
-            let back: UiClicked =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes UiClicked");
+            let bytes = c.encode_into_bytes();
+            let back: UiClicked = UiClicked::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes UiClicked");
             assert_eq!(back.id, 7);
         }
     }
 
     // ADR-0041 I/O kind roundtrips. Request types carry String /
     // Vec<u8>, reply types are Ok/Err enums with the error arm
-    // wrapping `FsError`. postcard roundtrip proves the derived
+    // wrapping `FsError`. Kind codec roundtrip proves the derived
     // Serialize/Deserialize agree on the wire for each shape.
     mod fs_roundtrips {
         use super::*;
+        use aether_data::wire;
         use alloc::string::ToString;
         use alloc::vec;
 
@@ -5434,9 +5418,9 @@ mod tests {
                 namespace: "save".to_string(),
                 path: "slot1.bin".to_string(),
             };
-            let bytes = postcard::to_allocvec(&r).expect("test setup: postcard encodes Read");
+            let bytes = r.encode_into_bytes();
             let back: Read =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes Read");
+                Read::decode_from_bytes(&bytes).expect("test setup: kind codec decodes Read");
             assert_eq!(back.namespace, r.namespace);
             assert_eq!(back.path, r.path);
         }
@@ -5448,10 +5432,9 @@ mod tests {
                 path: "slot.bin".to_string(),
                 bytes: vec![1, 2, 3, 4],
             };
-            let bytes =
-                postcard::to_allocvec(&r).expect("test setup: postcard encodes ReadResult::Ok");
-            let back: ReadResult =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes ReadResult::Ok");
+            let bytes = r.encode_into_bytes();
+            let back: ReadResult = ReadResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes ReadResult::Ok");
             match back {
                 ReadResult::Ok {
                     namespace,
@@ -5473,10 +5456,9 @@ mod tests {
                 path: "ghost.bin".to_string(),
                 error: FsError::NotFound,
             };
-            let bytes =
-                postcard::to_allocvec(&r).expect("test setup: postcard encodes ReadResult::Err");
-            let back: ReadResult =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes ReadResult::Err");
+            let bytes = r.encode_into_bytes();
+            let back: ReadResult = ReadResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes ReadResult::Err");
             match back {
                 ReadResult::Err {
                     namespace,
@@ -5494,9 +5476,8 @@ mod tests {
         #[test]
         fn io_error_adapter_carries_payload() {
             let e = FsError::AdapterError("disk full".to_string());
-            let bytes = postcard::to_allocvec(&e).expect("test setup: postcard encodes FsError");
-            let back: FsError =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes FsError");
+            let bytes = wire::to_vec(&e).expect("test setup: wire encodes FsError");
+            let back: FsError = wire::from_bytes(&bytes).expect("test setup: wire decodes FsError");
             match back {
                 FsError::AdapterError(msg) => assert_eq!(msg, "disk full"),
                 other => panic!("expected AdapterError, got {other:?}"),
@@ -5510,9 +5491,9 @@ mod tests {
                 path: "state.bin".to_string(),
                 bytes: vec![0xde, 0xad, 0xbe, 0xef],
             };
-            let bytes = postcard::to_allocvec(&w).expect("test setup: postcard encodes Write");
+            let bytes = w.encode_into_bytes();
             let back: Write =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes Write");
+                Write::decode_from_bytes(&bytes).expect("test setup: kind codec decodes Write");
             assert_eq!(back.bytes, vec![0xde, 0xad, 0xbe, 0xef]);
         }
 
@@ -5523,10 +5504,9 @@ mod tests {
                 prefix: "slots/".to_string(),
                 entries: vec!["a".to_string(), "b".to_string(), "c".to_string()],
             };
-            let bytes =
-                postcard::to_allocvec(&r).expect("test setup: postcard encodes ListResult::Ok");
-            let back: ListResult =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes ListResult::Ok");
+            let bytes = r.encode_into_bytes();
+            let back: ListResult = ListResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes ListResult::Ok");
             match back {
                 ListResult::Ok {
                     namespace,
@@ -5550,10 +5530,9 @@ mod tests {
                 namespace: "save".to_string(),
                 path: "state.bin".to_string(),
             };
-            let bytes =
-                postcard::to_allocvec(&r).expect("test setup: postcard encodes WriteResult::Ok");
-            let back: WriteResult =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes WriteResult::Ok");
+            let bytes = r.encode_into_bytes();
+            let back: WriteResult = WriteResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes WriteResult::Ok");
             match back {
                 WriteResult::Ok { namespace, path } => {
                     assert_eq!(namespace, "save");
@@ -5570,10 +5549,9 @@ mod tests {
                 path: "ghost.bin".to_string(),
                 error: FsError::NotFound,
             };
-            let bytes =
-                postcard::to_allocvec(&r).expect("test setup: postcard encodes DeleteResult::Err");
-            let back: DeleteResult = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes DeleteResult::Err");
+            let bytes = r.encode_into_bytes();
+            let back: DeleteResult = DeleteResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes DeleteResult::Err");
             match back {
                 DeleteResult::Err {
                     namespace,
@@ -5592,7 +5570,7 @@ mod tests {
     // iamacoffeepot/aether#1128 cost-table dump roundtrips. `CostTail`
     // carries an optional kind filter; `CostTailResult::Ok` carries one
     // `CostRow` per handler. Both go through the derived
-    // Serialize/Deserialize (postcard wire) — pin that the optional
+    // Serialize/Deserialize (wire codec) — pin that the optional
     // filter and the per-row fields survive the round trip.
     mod cost_roundtrips {
         use super::*;
@@ -5603,10 +5581,9 @@ mod tests {
         fn cost_tail_request_roundtrips_filter() {
             for kind in [None, Some(aether_data::KindId(0xABCD))] {
                 let r = CostTail { kind };
-                let bytes =
-                    postcard::to_allocvec(&r).expect("test setup: postcard encodes CostTail");
-                let back: CostTail =
-                    postcard::from_bytes(&bytes).expect("test setup: postcard decodes CostTail");
+                let bytes = r.encode_into_bytes();
+                let back: CostTail = CostTail::decode_from_bytes(&bytes)
+                    .expect("test setup: kind codec decodes CostTail");
                 assert_eq!(back.kind, kind);
             }
         }
@@ -5631,10 +5608,9 @@ mod tests {
                     },
                 ],
             };
-            let bytes =
-                postcard::to_allocvec(&r).expect("test setup: postcard encodes CostTailResult::Ok");
-            let back: CostTailResult = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes CostTailResult::Ok");
+            let bytes = r.encode_into_bytes();
+            let back: CostTailResult = CostTailResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes CostTailResult::Ok");
             let CostTailResult::Ok { rows } = back else {
                 panic!("expected Ok");
             };
@@ -5653,10 +5629,9 @@ mod tests {
             let r = CostTailResult::Err {
                 error: "no stamped slots".to_string(),
             };
-            let bytes = postcard::to_allocvec(&r)
-                .expect("test setup: postcard encodes CostTailResult::Err");
-            let back: CostTailResult = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes CostTailResult::Err");
+            let bytes = r.encode_into_bytes();
+            let back: CostTailResult = CostTailResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes CostTailResult::Err");
             match back {
                 CostTailResult::Err { error } => assert_eq!(error, "no stamped slots"),
                 CostTailResult::Ok { .. } => panic!("expected Err"),
@@ -5666,13 +5641,14 @@ mod tests {
 
     // ADR-0043 HTTP kind roundtrips. `Fetch` carries String + typed
     // method + Vec<HttpHeader> + Vec<u8> body + Option<u32>;
-    // `FetchResult` mirrors `ReadResult`'s Ok/Err split with a
+    // `FetchResult` mirrors `ReadResult's Ok/Err split with a
     // typed error arm wrapping `HttpError`. Tests prove the derived
     // Serialize/Deserialize agree on the wire for each shape, with
     // special attention to the `body`-not-echoed invariant and the
     // payload-carrying `HttpError` variants.
     mod http_roundtrips {
         use super::*;
+        use aether_data::wire;
         use alloc::string::ToString;
         use alloc::vec;
         use alloc::vec::Vec;
@@ -5699,9 +5675,9 @@ mod tests {
                 body: vec![b'{', b'}'],
                 timeout_ms: Some(5000),
             };
-            let bytes = postcard::to_allocvec(&f).expect("test setup: postcard encodes Fetch");
+            let bytes = f.encode_into_bytes();
             let back: Fetch =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes Fetch");
+                Fetch::decode_from_bytes(&bytes).expect("test setup: kind codec decodes Fetch");
             assert_eq!(back.url, f.url);
             assert_eq!(back.method, HttpMethod::Post);
             assert_eq!(back.headers, f.headers);
@@ -5718,10 +5694,9 @@ mod tests {
                 body: vec![],
                 timeout_ms: None,
             };
-            let bytes =
-                postcard::to_allocvec(&f).expect("test setup: postcard encodes Fetch (no timeout)");
-            let back: Fetch = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes Fetch (no timeout)");
+            let bytes = f.encode_into_bytes();
+            let back: Fetch = Fetch::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes Fetch (no timeout)");
             assert_eq!(back.timeout_ms, None);
             assert_eq!(back.method, HttpMethod::Get);
         }
@@ -5734,10 +5709,9 @@ mod tests {
                 headers: sample_headers(),
                 body: vec![0xde, 0xad, 0xbe, 0xef],
             };
-            let bytes =
-                postcard::to_allocvec(&r).expect("test setup: postcard encodes FetchResult::Ok");
-            let back: FetchResult =
-                postcard::from_bytes(&bytes).expect("test setup: postcard decodes FetchResult::Ok");
+            let bytes = r.encode_into_bytes();
+            let back: FetchResult = FetchResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes FetchResult::Ok");
             match back {
                 FetchResult::Ok {
                     url,
@@ -5760,10 +5734,9 @@ mod tests {
                 url: "https://api.example.com/gone".to_string(),
                 error: HttpError::Timeout,
             };
-            let bytes =
-                postcard::to_allocvec(&r).expect("test setup: postcard encodes FetchResult::Err");
-            let back: FetchResult = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes FetchResult::Err");
+            let bytes = r.encode_into_bytes();
+            let back: FetchResult = FetchResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes FetchResult::Err");
             match back {
                 FetchResult::Err { url, error } => {
                     assert_eq!(url, "https://api.example.com/gone");
@@ -5776,10 +5749,9 @@ mod tests {
         #[test]
         fn http_error_invalid_url_carries_payload() {
             let e = HttpError::InvalidUrl("not a url".to_string());
-            let bytes = postcard::to_allocvec(&e)
-                .expect("test setup: postcard encodes HttpError::InvalidUrl");
-            let back: HttpError = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes HttpError::InvalidUrl");
+            let bytes = wire::to_vec(&e).expect("test setup: wire encodes HttpError::InvalidUrl");
+            let back: HttpError =
+                wire::from_bytes(&bytes).expect("test setup: wire decodes HttpError::InvalidUrl");
             match back {
                 HttpError::InvalidUrl(s) => assert_eq!(s, "not a url"),
                 other => panic!("expected InvalidUrl, got {other:?}"),
@@ -5789,10 +5761,9 @@ mod tests {
         #[test]
         fn http_error_adapter_carries_detail() {
             let e = HttpError::AdapterError("dns lookup failed".to_string());
-            let bytes = postcard::to_allocvec(&e)
-                .expect("test setup: postcard encodes HttpError::AdapterError");
-            let back: HttpError = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes HttpError::AdapterError");
+            let bytes = wire::to_vec(&e).expect("test setup: wire encodes HttpError::AdapterError");
+            let back: HttpError =
+                wire::from_bytes(&bytes).expect("test setup: wire decodes HttpError::AdapterError");
             match back {
                 HttpError::AdapterError(s) => assert_eq!(s, "dns lookup failed"),
                 other => panic!("expected AdapterError, got {other:?}"),
@@ -5807,10 +5778,10 @@ mod tests {
                 HttpError::AllowlistDenied,
                 HttpError::Disabled,
             ] {
-                let bytes = postcard::to_allocvec(&e)
-                    .expect("test setup: postcard encodes HttpError unit variant");
-                let back: HttpError = postcard::from_bytes(&bytes)
-                    .expect("test setup: postcard decodes HttpError unit variant");
+                let bytes =
+                    wire::to_vec(&e).expect("test setup: wire encodes HttpError unit variant");
+                let back: HttpError = wire::from_bytes(&bytes)
+                    .expect("test setup: wire decodes HttpError unit variant");
                 assert_eq!(back, e);
             }
         }
@@ -5826,10 +5797,9 @@ mod tests {
                 HttpMethod::Head,
                 HttpMethod::Options,
             ] {
-                let bytes = postcard::to_allocvec(&m)
-                    .expect("test setup: postcard encodes HttpMethod variant");
-                let back: HttpMethod = postcard::from_bytes(&bytes)
-                    .expect("test setup: postcard decodes HttpMethod variant");
+                let bytes = wire::to_vec(&m).expect("test setup: wire encodes HttpMethod variant");
+                let back: HttpMethod =
+                    wire::from_bytes(&bytes).expect("test setup: wire decodes HttpMethod variant");
                 assert_eq!(back, m);
             }
         }
@@ -5844,10 +5814,9 @@ mod tests {
                 headers: sample_headers(),
                 body: vec![0x01, 0x02, 0x03],
             };
-            let bytes =
-                postcard::to_allocvec(&r).expect("test setup: postcard encodes HttpServerRequest");
-            let back: HttpServerRequest = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes HttpServerRequest");
+            let bytes = r.encode_into_bytes();
+            let back: HttpServerRequest = HttpServerRequest::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes HttpServerRequest");
             assert_eq!(back.method, HttpMethod::Post);
             assert_eq!(back.path, "/api/v1/things");
             assert_eq!(back.query, "foo=bar&baz=1");
@@ -5864,10 +5833,9 @@ mod tests {
                 headers: vec![],
                 body: vec![],
             };
-            let bytes = postcard::to_allocvec(&r)
-                .expect("test setup: postcard encodes HttpServerRequest (empty query)");
-            let back: HttpServerRequest = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes HttpServerRequest (empty query)");
+            let bytes = r.encode_into_bytes();
+            let back: HttpServerRequest = HttpServerRequest::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes HttpServerRequest (empty query)");
             assert_eq!(back.query, "");
             assert_eq!(back.method, HttpMethod::Get);
         }
@@ -5880,10 +5848,9 @@ mod tests {
                 headers: sample_headers(),
                 body: vec![0xde, 0xad, 0xbe, 0xef],
             };
-            let bytes =
-                postcard::to_allocvec(&r).expect("test setup: postcard encodes HttpServerResponse");
-            let back: HttpServerResponse = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes HttpServerResponse");
+            let bytes = r.encode_into_bytes();
+            let back: HttpServerResponse = HttpServerResponse::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes HttpServerResponse");
             assert_eq!(back.status, 200);
             assert_eq!(back.headers, r.headers);
             assert_eq!(back.body, vec![0xde, 0xad, 0xbe, 0xef]);
@@ -5896,10 +5863,9 @@ mod tests {
                 headers: vec![],
                 body: b"not found".to_vec(),
             };
-            let bytes = postcard::to_allocvec(&r)
-                .expect("test setup: postcard encodes HttpServerResponse (404)");
-            let back: HttpServerResponse = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes HttpServerResponse (404)");
+            let bytes = r.encode_into_bytes();
+            let back: HttpServerResponse = HttpServerResponse::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes HttpServerResponse (404)");
             assert_eq!(back.status, 404);
             assert_eq!(back.body, b"not found");
         }
