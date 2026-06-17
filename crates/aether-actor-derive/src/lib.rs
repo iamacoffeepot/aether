@@ -88,8 +88,9 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
     // ADR-0033 wire-shape autodetect: `#[repr(C)]` on the type means
     // the substrate carried it as raw cast bytes (and the user has
-    // `#[derive(Pod, Zeroable)]`); anything else is postcard-shaped
-    // (and the user has `#[derive(Serialize, Deserialize)]`). The
+    // `#[derive(Pod, Zeroable)]`); anything else is wire-shaped
+    // (ADR-0118 `aether_data::wire`, and the user has
+    // `#[derive(Serialize, Deserialize)]`). The
     // dispatcher in `#[actor]` calls `Kind::decode_from_bytes` via
     // `Mail::decode_kind::<K>()`; emitting the body per-impl here is
     // what lets that one call site compile against types whose Pod /
@@ -98,16 +99,16 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let decode_body = if has_repr_c {
         quote! { ::aether_data::__derive_runtime::decode_cast::<Self>(bytes) }
     } else {
-        quote! { ::aether_data::__derive_runtime::decode_postcard::<Self>(bytes) }
+        quote! { ::aether_data::__derive_runtime::decode_wire::<Self>(bytes) }
     };
     // Issue #240: encode mirror. Same `#[repr(C)]` autodetect as
     // `decode_body` — a single `Sink::send` call site routes through
-    // `Kind::encode_into_bytes`, picking cast or postcard at the
+    // `Kind::encode_into_bytes`, picking cast or wire at the
     // kind's derive instead of at every send site.
     let encode_body = if has_repr_c {
         quote! { ::aether_data::__derive_runtime::encode_cast::<Self>(self) }
     } else {
-        quote! { ::aether_data::__derive_runtime::encode_postcard::<Self>(self) }
+        quote! { ::aether_data::__derive_runtime::encode_wire::<Self>(self) }
     };
 
     // ADR-0032 section emission goes through trait dispatch, not a

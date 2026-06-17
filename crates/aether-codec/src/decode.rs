@@ -1,8 +1,7 @@
 // Wire-decode: bytes laid out per `SchemaType` → serde_json. The
-// narrowing casts (`u64 → u32`, varint slot to signed via
-// `cast_possible_wrap`) are the load-bearing inverse of the encode
-// path; `From::from` / `try_into` would obscure the byte-layout
-// contract this function implements.
+// narrowing / sign casts (`u8 → i8` in the cast-shape path) are the
+// load-bearing inverse of the encode path; `From::from` / `try_into`
+// would obscure the byte-layout contract this function implements.
 #![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 
 // `decode_schema`: wire bytes + `SchemaType` descriptor → serde_json
@@ -13,20 +12,23 @@
 //    under it): walk `#[repr(C)]` byte layout, lift each scalar / fixed
 //    array into JSON. Encoder pads to alignment between fields and
 //    rounds total size to the largest field alignment; the decoder does
-//    the same skips.
+//    the same skips. No version byte (the cast image is its own codec).
 //
-// 2. Postcard (everything else): consume the postcard 1.x wire format
-//    directly — varints, zigzag, length-prefixed strings/vecs/bytes,
-//    externally-tagged enums.
+// 2. Wire (everything else): consume the ADR-0118 `aether_data::wire`
+//    format directly — a leading `WIRE_VERSION` byte stripped on entry,
+//    then fixed-width little-endian scalars, `u32` lengths/selectors,
+//    presence bytes, length-prefixed strings/vecs/bytes, externally-
+//    tagged enums, encoded-key-sorted maps, and the `Ref` arms.
 //
 // We decode the bytes directly rather than going through serde's
 // deserializer because the descriptor is structural (not a typed
 // schema), and the encoder writes bytes directly for the same reason.
-// Round-trip tests against the encoder pin the wire format from both
-// sides.
+// Round-trip tests against the encoder — and the adapter-vs-walker
+// conformance test — pin the wire format from both sides.
 
 use std::fmt;
 
+use aether_data::wire::WIRE_VERSION;
 use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
 use serde_json::{Map, Value};
 
@@ -53,8 +55,12 @@ pub enum DecodeError {
     InvalidUtf8 {
         path: String,
     },
-    VarintOverflow {
-        path: String,
+    /// The top-level wire payload did not begin with [`WIRE_VERSION`]
+    /// (ADR-0118 §Envelope). A reader that strips the version byte on
+    /// entry rejects a bare or wrong-version image rather than
+    /// misparsing it.
+    BadVersion {
+        byte: u8,
     },
     UnknownEnumDiscriminant {
         path: String,
@@ -92,8 +98,11 @@ impl fmt::Display for DecodeError {
                 write!(f, "invalid bool at {path}: 0x{byte:02x} not 0 or 1")
             }
             Self::InvalidUtf8 { path } => write!(f, "invalid utf-8 in string at {path}"),
-            Self::VarintOverflow { path } => {
-                write!(f, "varint at {path} exceeds 10 bytes (overflow)")
+            Self::BadVersion { byte } => {
+                write!(
+                    f,
+                    "bad wire format version byte: 0x{byte:02x} (expected {WIRE_VERSION})"
+                )
             }
             Self::ValueBudgetExceeded { path, budget } => write!(
                 f,
@@ -135,20 +144,31 @@ impl error::Error for DecodeError {}
 const VALUE_BUDGET_BASE: usize = 4096;
 const VALUES_PER_INPUT_BYTE: usize = 4;
 
-/// ADR-0020: decode `bytes` against a `SchemaType` descriptor into a
-/// JSON value symmetric to what `encode_schema` would accept.
-/// Dispatches on the schema's wire shape (same split as the encoder):
+/// ADR-0020 / ADR-0118: decode `bytes` against a `SchemaType`
+/// descriptor into a JSON value symmetric to what `encode_schema`
+/// would accept. Dispatches on the schema's wire shape (same split as
+/// the encoder):
 ///
-/// - `Unit` → `null` (empty payload).
+/// - `Unit` → `null` (bare empty payload, no version byte).
 /// - `Struct { repr_c: true }` (and the recursive cast-shaped tree
-///   under it) → walk the `#[repr(C)]` byte layout.
-/// - Everything else → consume postcard 1.x wire format.
+///   under it) → walk the `#[repr(C)]` byte layout, no version byte.
+/// - Everything else → strip the leading `WIRE_VERSION` byte, then
+///   consume the `aether_data::wire` format.
 ///
 /// Trailing bytes are an error (the encoder writes exactly the right
 /// number of bytes; extras mean schema/payload drift the agent should
 /// see).
 pub fn decode_schema(bytes: &[u8], schema: &SchemaType) -> Result<Value, DecodeError> {
-    let mut cur = Cursor::new(bytes);
+    // The cast image and the unit kind are bare; every other (wire)
+    // schema carries the leading version byte at this top-level
+    // kind-image boundary. Interior values are bare, so the recursive
+    // walk never strips again — except the `Ref` inline arm, which
+    // re-enters `decode_schema` on a nested versioned image.
+    let body = match schema {
+        SchemaType::Unit | SchemaType::Struct { repr_c: true, .. } => bytes,
+        _ => strip_version(bytes)?,
+    };
+    let mut cur = Cursor::new(body);
     let value = decode_value(&mut cur, schema, "$")?;
     if cur.remaining() != 0 {
         return Err(DecodeError::TrailingBytes {
@@ -157,6 +177,20 @@ pub fn decode_schema(bytes: &[u8], schema: &SchemaType) -> Result<Value, DecodeE
         });
     }
     Ok(value)
+}
+
+/// Strip and validate the leading [`WIRE_VERSION`] byte (ADR-0118
+/// §Envelope) from a top-level or nested kind image.
+fn strip_version(bytes: &[u8]) -> Result<&[u8], DecodeError> {
+    match bytes.split_first() {
+        Some((&v, rest)) if v == WIRE_VERSION => Ok(rest),
+        Some((&v, _)) => Err(DecodeError::BadVersion { byte: v }),
+        None => Err(DecodeError::Truncated {
+            path: "$".into(),
+            needed: 1,
+            had: 0,
+        }),
+    }
 }
 
 fn decode_value(
@@ -175,7 +209,7 @@ fn decode_value(
             cur.skip_pad_to(max_align);
             Ok(Value::Object(obj))
         }
-        _ => decode_postcard(cur, schema, path),
+        _ => decode_wire_value(cur, schema, path),
     }
 }
 
@@ -307,17 +341,19 @@ fn alignment_of_schema(ty: &SchemaType) -> Result<usize, DecodeError> {
     }
 }
 
-// Schema-driven postcard decoder: one match arm per `SchemaType`
+// Schema-driven wire decoder: one match arm per `SchemaType`
 // variant. Each arm is short but the arm count adds up — extracting
 // per-type helpers obscures the schema → wire mapping that's the
-// purpose of this fn.
+// purpose of this fn. Values are bare interior bytes; the leading
+// version byte was stripped by `decode_schema` (and the `Ref` inline
+// arm re-enters `decode_schema` on its own nested versioned image).
 #[allow(clippy::too_many_lines)]
-fn decode_postcard(
+fn decode_wire_value(
     cur: &mut Cursor<'_>,
     schema: &SchemaType,
     path: &str,
 ) -> Result<Value, DecodeError> {
-    // Every postcard node charges exactly once — collection elements,
+    // Every wire node charges exactly once — collection elements,
     // struct fields, enum bodies — including through recursion, so the
     // decode-wide budget bounds the zero-wire-byte-element class whose
     // loop allocates without consuming input.
@@ -335,16 +371,16 @@ fn decode_postcard(
                 }),
             }
         }
-        SchemaType::Scalar(p) => read_primitive_postcard(cur, *p, path),
+        SchemaType::Scalar(p) => read_primitive_wire(cur, *p, path),
         SchemaType::String => {
-            let len = read_varint_u64(cur, path)? as usize;
+            let len = cur.read_count(path)? as usize;
             let bytes = cur.take_slice(len, path)?;
             let s = str::from_utf8(bytes)
                 .map_err(|_| DecodeError::InvalidUtf8 { path: path.into() })?;
             Ok(Value::String(s.into()))
         }
         SchemaType::Bytes => {
-            let len = read_varint_u64(cur, path)? as usize;
+            let len = cur.read_count(path)? as usize;
             let bytes = cur.take_slice(len, path)?;
             // Mirror encoder input shape: array of byte values.
             let arr = bytes.iter().map(|b| Value::from(*b)).collect();
@@ -354,7 +390,7 @@ fn decode_postcard(
             let [tag] = cur.take::<1>(path)?;
             match tag {
                 0 => Ok(Value::Null),
-                1 => decode_postcard(cur, inner, path),
+                1 => decode_wire_value(cur, inner, path),
                 _ => Err(DecodeError::InvalidBool {
                     path: path.into(),
                     byte: tag,
@@ -362,16 +398,16 @@ fn decode_postcard(
             }
         }
         SchemaType::Vec(inner) => {
-            let len = read_varint_u64(cur, path)? as usize;
+            let len = cur.read_count(path)? as usize;
             // Clamp the pre-allocation against the bytes that remain: a
-            // varint-encoded element occupies ≥ 1 byte, so a `len` past
+            // wire-encoded element occupies ≥ 1 byte, so a `len` past
             // `remaining` can't be valid non-degenerate input. Zero-byte
             // elements start small and grow by push; the decode-wide
             // budget bounds that loop.
             let mut arr = Vec::with_capacity(len.min(cur.remaining()));
             for i in 0..len {
                 let elem_path = format!("{path}[{i}]");
-                arr.push(decode_postcard(cur, inner, &elem_path)?);
+                arr.push(decode_wire_value(cur, inner, &elem_path)?);
             }
             Ok(Value::Array(arr))
         }
@@ -379,23 +415,22 @@ fn decode_postcard(
             let mut arr = Vec::with_capacity(*len as usize);
             for i in 0..*len {
                 let elem_path = format!("{path}[{i}]");
-                arr.push(decode_postcard(cur, element, &elem_path)?);
+                arr.push(decode_wire_value(cur, element, &elem_path)?);
             }
             Ok(Value::Array(arr))
         }
         SchemaType::Struct { fields, .. } => {
-            // Postcard struct: concatenated field bytes in declaration
-            // order.
+            // Wire struct: concatenated field bytes in declaration order.
             let mut obj = Map::with_capacity(fields.len());
             for field in fields.iter() {
                 let field_path = format!("{path}.{}", field.name);
-                let value = decode_postcard(cur, &field.ty, &field_path)?;
+                let value = decode_wire_value(cur, &field.ty, &field_path)?;
                 obj.insert(field.name.to_string(), value);
             }
             Ok(Value::Object(obj))
         }
         SchemaType::Enum { variants } => {
-            let disc = read_varint_u64(cur, path)? as u32;
+            let disc = cur.read_count(path)?;
             let variant = variants
                 .iter()
                 .find(|v| v.discriminant() == disc)
@@ -409,21 +444,21 @@ fn decode_postcard(
             key: key_schema,
             value: value_schema,
         } => {
-            // Issue #232 + proto3-style JSON mapping. Wire is
-            // postcard's `BTreeMap<K, V>` shape — varint(len) followed
-            // by `(k, v)` pairs in key-sorted order. We emit a JSON
-            // object with the proto3 stringify rule: integer keys as
-            // decimal-string keys, bool keys as `"true"`/`"false"`,
+            // Issue #232 + proto3-style JSON mapping. Wire is the
+            // `aether_data::wire` `Map` shape — `u32(count)` followed by
+            // `(k, v)` pairs in ascending encoded-key byte order. We emit
+            // a JSON object with the proto3 stringify rule: integer keys
+            // as decimal-string keys, bool keys as `"true"`/`"false"`,
             // string keys identity. Order in the emitted object isn't
             // load-bearing for decoders that compare by value.
-            let len = read_varint_u64(cur, path)? as usize;
+            let len = cur.read_count(path)? as usize;
             // Same clamp as the `Vec` arm: a `(k, v)` pair occupies ≥ 1
             // byte, so cap the pre-allocation at the bytes remaining.
             let mut obj = Map::with_capacity(len.min(cur.remaining()));
             for i in 0..len {
                 let entry_path = format!("{path}[{i}]");
-                let key_value = decode_postcard(cur, key_schema, &entry_path)?;
-                let val_value = decode_postcard(cur, value_schema, &entry_path)?;
+                let key_value = decode_wire_value(cur, key_schema, &entry_path)?;
+                let val_value = decode_wire_value(cur, value_schema, &entry_path)?;
                 let key_string = render_map_key(&key_value, key_schema, &entry_path)?;
                 obj.insert(key_string, val_value);
             }
@@ -431,17 +466,18 @@ fn decode_postcard(
         }
         SchemaType::Ref(inner) => {
             // ADR-0045 typed handle, inline arm revised by ADR-0100.
-            // Wire matches the postcard enum encoding: discriminant
-            // varint, then either the inline body (Inline = 0) or two
-            // varints id + kind_id (Handle = 1). The inline body is the
-            // inner kind's own codec image, length-prefixed — read the
-            // length, slice it off, and decode it with the same
-            // cast-or-postcard dispatch as a top-level kind. Render as
-            // externally-tagged JSON to match the encoder's input shape.
-            let disc = read_varint_u64(cur, path)? as u32;
+            // Wire is a `u32` little-endian selector, then either the
+            // inline body (Inline = 0) or `id` (8 LE) + `kind_id` (8 LE)
+            // (Handle = 1). The inline body is the inner kind's own codec
+            // image, `u32`-length-prefixed — read the length, slice it
+            // off, and decode it with the same cast-or-wire dispatch as a
+            // top-level kind (`decode_schema` strips the inner version
+            // byte for a wire inner). Render as externally-tagged JSON to
+            // match the encoder's input shape.
+            let disc = cur.read_count(path)?;
             match disc {
                 0 => {
-                    let len = read_varint_u64(cur, path)? as usize;
+                    let len = cur.read_count(path)? as usize;
                     let body = cur.take_slice(len, path)?;
                     let inner_value = decode_schema(body, inner)?;
                     let mut obj = Map::with_capacity(1);
@@ -449,8 +485,8 @@ fn decode_postcard(
                     Ok(Value::Object(obj))
                 }
                 1 => {
-                    let id = read_varint_u64(cur, &format!("{path}.id"))?;
-                    let kind_id = read_varint_u64(cur, &format!("{path}.kind_id"))?;
+                    let id = u64::from_le_bytes(cur.take::<8>(&format!("{path}.id"))?);
+                    let kind_id = u64::from_le_bytes(cur.take::<8>(&format!("{path}.kind_id"))?);
                     let mut handle_obj = Map::with_capacity(2);
                     handle_obj.insert("id".into(), Value::from(id));
                     handle_obj.insert("kind_id".into(), Value::from(kind_id));
@@ -465,47 +501,31 @@ fn decode_postcard(
             }
         }
         SchemaType::TypeId(type_id) => {
-            // ADR-0065 typed id. Wire is a u64 varint; emit the
-            // tagged string form (or back-compat number for
+            // ADR-0065 typed id. Wire is a `u64` fixed little-endian;
+            // emit the tagged string form (or back-compat number for
             // reserved-tag sentinels).
-            let id = read_varint_u64(cur, path)?;
+            let id = u64::from_le_bytes(cur.take::<8>(path)?);
             render_type_id_value(id, *type_id, path)
         }
     }
 }
 
-fn read_primitive_postcard(
+fn read_primitive_wire(
     cur: &mut Cursor<'_>,
     p: Primitive,
     path: &str,
 ) -> Result<Value, DecodeError> {
+    // Fixed-width little-endian of the declared width — the inverse of
+    // `encode::write_scalar_wire`. No varints, no zigzag.
     match p {
-        Primitive::U8 => Ok(Value::from(cur.take::<1>(path)?[0])),
-        Primitive::U16 => {
-            let n = read_varint_u64(cur, path)?;
-            Ok(Value::from(n as u16))
-        }
-        Primitive::U32 => {
-            let n = read_varint_u64(cur, path)?;
-            Ok(Value::from(n as u32))
-        }
-        Primitive::U64 => {
-            let n = read_varint_u64(cur, path)?;
-            Ok(Value::from(n))
-        }
-        Primitive::I8 => Ok(Value::from(cur.take::<1>(path)?[0] as i8)),
-        Primitive::I16 => {
-            let n = read_varint_u64(cur, path)?;
-            Ok(Value::from(unzigzag(n) as i16))
-        }
-        Primitive::I32 => {
-            let n = read_varint_u64(cur, path)?;
-            Ok(Value::from(unzigzag(n) as i32))
-        }
-        Primitive::I64 => {
-            let n = read_varint_u64(cur, path)?;
-            Ok(Value::from(unzigzag(n)))
-        }
+        Primitive::U8 => Ok(Value::from(u8::from_le_bytes(cur.take::<1>(path)?))),
+        Primitive::U16 => Ok(Value::from(u16::from_le_bytes(cur.take::<2>(path)?))),
+        Primitive::U32 => Ok(Value::from(u32::from_le_bytes(cur.take::<4>(path)?))),
+        Primitive::U64 => Ok(Value::from(u64::from_le_bytes(cur.take::<8>(path)?))),
+        Primitive::I8 => Ok(Value::from(i8::from_le_bytes(cur.take::<1>(path)?))),
+        Primitive::I16 => Ok(Value::from(i16::from_le_bytes(cur.take::<2>(path)?))),
+        Primitive::I32 => Ok(Value::from(i32::from_le_bytes(cur.take::<4>(path)?))),
+        Primitive::I64 => Ok(Value::from(i64::from_le_bytes(cur.take::<8>(path)?))),
         Primitive::F32 => Ok(json_f64(f64::from(f32::from_le_bytes(
             cur.take::<4>(path)?,
         )))),
@@ -528,12 +548,12 @@ fn decode_enum_body(
         EnumVariant::Tuple { fields, .. } => {
             let body = if fields.len() == 1 {
                 let nested_path = format!("{path}::{name}.0");
-                decode_postcard(cur, &fields[0], &nested_path)?
+                decode_wire_value(cur, &fields[0], &nested_path)?
             } else {
                 let mut arr = Vec::with_capacity(fields.len());
                 for (i, ty) in fields.iter().enumerate() {
                     let nested = format!("{path}::{name}.{i}");
-                    arr.push(decode_postcard(cur, ty, &nested)?);
+                    arr.push(decode_wire_value(cur, ty, &nested)?);
                 }
                 Value::Array(arr)
             };
@@ -545,7 +565,7 @@ fn decode_enum_body(
             let mut body = Map::with_capacity(fields.len());
             for field in fields.iter() {
                 let nested = format!("{path}::{name}.{}", field.name);
-                let v = decode_postcard(cur, &field.ty, &nested)?;
+                let v = decode_wire_value(cur, &field.ty, &nested)?;
                 body.insert(field.name.to_string(), v);
             }
             let mut obj = Map::with_capacity(1);
@@ -595,26 +615,6 @@ fn render_map_key(
     }
 }
 
-/// Postcard 1.x varint: 7 bits per byte, MSB set means continue. Cap at
-/// 10 bytes — anything longer is overflow for u64.
-fn read_varint_u64(cur: &mut Cursor<'_>, path: &str) -> Result<u64, DecodeError> {
-    let mut n: u64 = 0;
-    let mut shift = 0u32;
-    for _ in 0..10 {
-        let [b] = cur.take::<1>(path)?;
-        n |= u64::from(b & 0x7f) << shift;
-        if b & 0x80 == 0 {
-            return Ok(n);
-        }
-        shift += 7;
-    }
-    Err(DecodeError::VarintOverflow { path: path.into() })
-}
-
-fn unzigzag(n: u64) -> i64 {
-    ((n >> 1) as i64) ^ -((n & 1) as i64)
-}
-
 /// JSON numbers can't represent NaN/infinity. The encoder accepts
 /// arbitrary `f64`s; on decode we coerce non-finite to `null` so the
 /// JSON value remains valid. Round-trip semantics: finite floats round
@@ -627,7 +627,7 @@ struct Cursor<'a> {
     bytes: &'a [u8],
     pos: usize,
     /// Remaining value budget for this decode (see `VALUE_BUDGET_BASE`).
-    /// Each postcard node decrements it via `charge_value`.
+    /// Each wire node decrements it via `charge_value`.
     values_left: usize,
 }
 
@@ -691,6 +691,13 @@ impl<'a> Cursor<'a> {
         let slice = &self.bytes[self.pos..self.pos + n];
         self.pos += n;
         Ok(slice)
+    }
+
+    /// Read a `u32` little-endian count/length/selector — the `wire`
+    /// framing for string / bytes / vec / map lengths, the enum
+    /// discriminant, and the `Ref` selector.
+    fn read_count(&mut self, path: &str) -> Result<u32, DecodeError> {
+        Ok(u32::from_le_bytes(self.take::<4>(path)?))
     }
 
     /// Advance past zero-padding so `pos` lands on a multiple of `align`.
@@ -870,8 +877,23 @@ mod tests {
             name: "flag".into(),
             ty: SchemaType::Bool,
         }]);
-        let err = decode_schema(&[2], &schema).expect_err("non-0/1 bool byte must error");
+        let err =
+            decode_schema(&[WIRE_VERSION, 2], &schema).expect_err("non-0/1 bool byte must error");
         assert!(matches!(err, DecodeError::InvalidBool { .. }));
+    }
+
+    #[test]
+    fn bare_or_wrong_version_byte_errors() {
+        // A wire-shaped payload that doesn't open with WIRE_VERSION is
+        // rejected on entry (ADR-0118 §Envelope) rather than misparsed.
+        let schema = pc_struct(vec![NamedField {
+            name: "flag".into(),
+            ty: SchemaType::Bool,
+        }]);
+        let err = decode_schema(&[0xEE, 1], &schema).expect_err("wrong version byte must error");
+        assert!(matches!(err, DecodeError::BadVersion { byte: 0xEE }));
+        let err = decode_schema(&[], &schema).expect_err("empty wire payload must error");
+        assert!(matches!(err, DecodeError::Truncated { .. }));
     }
 
     #[test]
@@ -891,8 +913,8 @@ mod tests {
             name: "body".into(),
             ty: SchemaType::String,
         }]);
-        // varint length 2, then two invalid utf-8 bytes.
-        let err = decode_schema(&[2, 0xff, 0xfe], &schema)
+        // version byte, u32 length 2, then two invalid utf-8 bytes.
+        let err = decode_schema(&[WIRE_VERSION, 2, 0, 0, 0, 0xff, 0xfe], &schema)
             .expect_err("invalid utf-8 string body must error");
         assert!(matches!(err, DecodeError::InvalidUtf8 { .. }));
     }
@@ -966,49 +988,25 @@ mod tests {
 
     #[test]
     fn postcard_enum_unknown_discriminant_errors() {
-        // discriminant 99 isn't in the schema.
+        // discriminant 99 isn't in the schema; the u32 selector is
+        // little-endian behind the version byte.
         let schema = sum_schema();
-        let err = decode_schema(&[99], &schema).expect_err("unknown enum discriminant must error");
+        let err = decode_schema(&[WIRE_VERSION, 99, 0, 0, 0], &schema)
+            .expect_err("unknown enum discriminant must error");
         assert!(matches!(err, DecodeError::UnknownEnumDiscriminant { .. }));
     }
 
     #[test]
-    fn varint_decodes_at_byte_boundaries() {
-        for n in [0u64, 127, 128, 16383, 16384, u64::from(u32::MAX), u64::MAX] {
-            let bytes =
-                postcard::to_allocvec(&n).expect("test setup: postcard reference varint u64");
-            let mut cur = Cursor::new(&bytes);
-            let back = read_varint_u64(&mut cur, "$").expect("test setup: read varint u64");
-            assert_eq!(back, n, "varint decode mismatch for {n}");
-        }
-    }
-
-    #[test]
-    fn varint_overflow_errors() {
-        // 11 continuation bytes — exceeds u64.
-        let bytes = vec![0xff; 11];
-        let mut cur = Cursor::new(&bytes);
-        let err = read_varint_u64(&mut cur, "$").expect_err("varint exceeding 10 bytes must error");
-        assert!(matches!(err, DecodeError::VarintOverflow { .. }));
-    }
-
-    #[test]
-    fn zigzag_decodes_to_signed() {
-        for n in [
-            0i64,
-            -1,
-            1,
-            -128,
-            127,
-            i64::from(i32::MIN),
-            i64::from(i32::MAX),
-        ] {
-            let bytes =
-                postcard::to_allocvec(&n).expect("test setup: postcard reference zigzag i64");
-            let mut cur = Cursor::new(&bytes);
-            let raw = read_varint_u64(&mut cur, "$").expect("test setup: read zigzag varint");
-            assert_eq!(unzigzag(raw), n, "zigzag mismatch for {n}");
-        }
+    fn scalars_are_fixed_width_little_endian() {
+        // u16/u32/i16/i32 are the declared width LE, not varints — pin a
+        // couple of round-trips that a varint layout would have shrunk.
+        roundtrip(
+            json!({"a": 256u16, "b": -2i32}),
+            &pc_struct(vec![
+                scalar("a", Primitive::U16),
+                scalar("b", Primitive::I32),
+            ]),
+        );
     }
 
     #[test]
@@ -1016,12 +1014,12 @@ mod tests {
         // Encoder writes raw f64 bytes; decoder coerces non-finite to
         // null so the JSON value is always valid.
         let schema = pc_struct(vec![scalar("x", Primitive::F64)]);
-        let mut bytes = Vec::new();
+        let mut bytes = vec![WIRE_VERSION];
         bytes.extend_from_slice(&f64::NAN.to_le_bytes());
         let v = decode_schema(&bytes, &schema).expect("test setup: decode NaN f64");
         assert_eq!(v, json!({"x": null}));
 
-        let mut bytes = Vec::new();
+        let mut bytes = vec![WIRE_VERSION];
         bytes.extend_from_slice(&f64::INFINITY.to_le_bytes());
         let v = decode_schema(&bytes, &schema).expect("test setup: decode infinity f64");
         assert_eq!(v, json!({"x": null}));
@@ -1172,10 +1170,10 @@ mod tests {
         )
         .expect("encode subscribe_input via TypeId schema");
 
-        // Substrate decode path — wire is byte-identical to a
-        // hand-postcard'd `SubscribeInput`.
-        let decoded: aether_kinds::SubscribeInput = postcard::from_bytes(&bytes)
-            .expect("postcard decode subscribe_input from hub-encoded bytes");
+        // Substrate decode path — the hub-encoded bytes are byte-identical
+        // to `SubscribeInput::encode_into_bytes` (the `wire` image).
+        let decoded = aether_kinds::SubscribeInput::decode_from_bytes(&bytes)
+            .expect("wire decode subscribe_input from hub-encoded bytes");
         assert_eq!(decoded.kind, kind_id);
         assert_eq!(decoded.mailbox, mailbox);
 
@@ -1205,21 +1203,25 @@ mod tests {
     #[test]
     fn ref_inline_cast_inner_wire_is_length_prefixed_cast_image() {
         // ADR-0100: the inline body of a cast inner kind is the raw
-        // cast image, length-prefixed — not a postcard varint image.
+        // cast image, `u32`-length-prefixed — and no nested version byte
+        // (the cast image is bare).
         let inner = cast_struct(vec![scalar("code", Primitive::U32)]);
         let schema = SchemaType::Ref(SchemaCell::owned(inner.clone()));
         let value = json!({ "Inline": { "code": 0x0102_0304u32 } });
 
         let bytes = encode_schema(&value, &schema).expect("encode Inline Ref");
         // The inner image is exactly what `encode_schema` emits for the
-        // inner kind standalone (the cast image).
+        // inner kind standalone (the cast image, no version byte).
         let body = encode_schema(&json!({ "code": 0x0102_0304u32 }), &inner).expect("encode inner");
         assert_eq!(body.len(), 4, "u32 cast image is 4 raw bytes");
-        let mut expected = vec![0u8, 4u8];
+        // Top-level version byte + u32 inline selector + u32 length + body.
+        let mut expected = vec![WIRE_VERSION];
+        expected.extend_from_slice(&0u32.to_le_bytes());
+        expected.extend_from_slice(&4u32.to_le_bytes());
         expected.extend_from_slice(&body);
         assert_eq!(
             bytes, expected,
-            "inline wire is disc 0 + varint(len) + cast image"
+            "inline wire is version + u32 sel 0 + u32 len + cast image"
         );
 
         // JSON descriptor round-trips through wire and back.
@@ -1231,15 +1233,16 @@ mod tests {
     // wire-decoded length must not drive the decoder into an unbounded
     // allocation; the four classes below pin the fix.
 
-    /// (a) The `ASan` repro class (#1562 fuzz crash): a varint of
+    /// (a) The `ASan` repro class (#1562 fuzz crash): a `u32` length of
     /// `u32::MAX` followed by an empty tail against `Vec<u32>` and
     /// `Map<u32, u32>`. The pre-allocation clamp keeps `with_capacity`
     /// from requesting an exabyte; the decode then errors `Truncated`
     /// reading the first absent element rather than aborting the process.
     #[test]
     fn oversized_collection_length_errors_without_allocating() {
-        let len_bytes =
-            postcard::to_allocvec(&u64::from(u32::MAX)).expect("test setup: varint u32::MAX");
+        // Version byte + a `u32` count of `u32::MAX`, no elements.
+        let mut len_bytes = vec![WIRE_VERSION];
+        len_bytes.extend_from_slice(&u32::MAX.to_le_bytes());
 
         let vec_schema = SchemaType::Vec(SchemaCell::owned(SchemaType::Scalar(Primitive::U32)));
         let err = decode_schema(&len_bytes, &vec_schema)
@@ -1262,8 +1265,9 @@ mod tests {
     /// stops it with `ValueBudgetExceeded`.
     #[test]
     fn zero_byte_element_bomb_exceeds_value_budget() {
-        let count_bytes =
-            postcard::to_allocvec(&u64::from(u32::MAX)).expect("test setup: varint count");
+        // Version byte + a `u32` count of `u32::MAX`.
+        let mut count_bytes = vec![WIRE_VERSION];
+        count_bytes.extend_from_slice(&u32::MAX.to_le_bytes());
 
         let unit_vec = SchemaType::Vec(SchemaCell::owned(SchemaType::Unit));
         let err = decode_schema(&count_bytes, &unit_vec)
@@ -1295,14 +1299,18 @@ mod tests {
     }
 
     #[test]
-    fn ref_handle_wire_is_byte_unchanged() {
+    fn ref_handle_wire_is_selector_then_two_le_ids() {
         let inner = cast_struct(vec![scalar("code", Primitive::U32)]);
         let schema = SchemaType::Ref(SchemaCell::owned(inner));
         let value = json!({ "Handle": { "id": 7u64, "kind_id": 42u64 } });
 
         let bytes = encode_schema(&value, &schema).expect("encode Handle Ref");
-        // disc 1 + varint(7) + varint(42) — unchanged from ADR-0045.
-        assert_eq!(bytes, vec![1u8, 7u8, 42u8]);
+        // version + u32 selector 1 + id (8 LE) + kind_id (8 LE).
+        let mut expected = vec![WIRE_VERSION];
+        expected.extend_from_slice(&1u32.to_le_bytes());
+        expected.extend_from_slice(&7u64.to_le_bytes());
+        expected.extend_from_slice(&42u64.to_le_bytes());
+        assert_eq!(bytes, expected);
 
         let back = decode_schema(&bytes, &schema).expect("decode Handle Ref");
         assert_eq!(back, value);

@@ -445,7 +445,12 @@ mod proxy_native {
                 // proxy dropped the sender) returns otherwise and ends
                 // the loop.
                 while stop_rx.recv_timeout(interval) == Err(mpsc::RecvTimeoutError::Timeout) {
-                    mailer.push(Mail::new(self_mailbox, tick_kind, Vec::new(), 1));
+                    mailer.push(Mail::new(
+                        self_mailbox,
+                        tick_kind,
+                        EngineHeartbeatTick::default().encode_into_bytes(),
+                        1,
+                    ));
                 }
             })
             .expect("spawn aether-engine-heartbeat thread");
@@ -478,7 +483,12 @@ mod proxy_native {
             // closure, so a retry needs a fresh one.
             let wake_mailer = Arc::clone(mailer);
             let on_frame = move || {
-                wake_mailer.push(Mail::new(self_mailbox, wake_kind, Vec::new(), 1));
+                wake_mailer.push(Mail::new(
+                    self_mailbox,
+                    wake_kind,
+                    RpcInboundReady::default().encode_into_bytes(),
+                    1,
+                ));
             };
             return match RpcClient::connect(
                 addr,

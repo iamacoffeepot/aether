@@ -388,8 +388,8 @@ mod native {
             let (stored_kind, stored_bytes) =
                 fix.store.get(handle_id).expect("handle exists in store");
             assert_eq!(stored_kind, TrajectoryLog::ID, "stored kind id matches");
-            let log: TrajectoryLog =
-                postcard::from_bytes(&stored_bytes).expect("stored bytes decode to TrajectoryLog");
+            let log = TrajectoryLog::decode_from_bytes(&stored_bytes)
+                .expect("stored bytes decode to TrajectoryLog");
             assert_eq!(log.seed, seed);
             assert_eq!(log.end_reason, TrajectoryEndReason::Completed);
             assert_eq!(log.samples.len(), 2);
@@ -550,7 +550,7 @@ mod native {
                 let (stored_kind, stored_bytes) =
                     store.get(handle_id).expect("handle exists in store");
                 assert_eq!(stored_kind, TrajectoryLog::ID);
-                let log: TrajectoryLog = postcard::from_bytes(&stored_bytes)
+                let log = TrajectoryLog::decode_from_bytes(&stored_bytes)
                     .expect("stored bytes decode to TrajectoryLog");
                 assert_eq!(log.seed, seed);
                 assert_eq!(log.end_reason, TrajectoryEndReason::Completed);

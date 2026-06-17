@@ -521,10 +521,11 @@ mod tests {
         );
     }
 
-    /// Postcard round-trip for `TrajectoryLog`: encode via `Kind::encode_into_bytes`,
-    /// decode via postcard, assert equality of all fields and samples in order.
+    /// Wire round-trip for `TrajectoryLog`: encode and decode through the
+    /// `Kind` codec (ADR-0118 `aether_data::wire`), asserting equality of
+    /// all fields and samples in order.
     #[test]
-    fn trajectory_log_postcard_roundtrip() {
+    fn trajectory_log_wire_roundtrip() {
         use crate::{TrajectoryEndReason, TrajectorySampleEntry};
 
         let original = TrajectoryLog {
@@ -547,8 +548,8 @@ mod tests {
         };
 
         let bytes = original.encode_into_bytes();
-        let decoded: TrajectoryLog =
-            postcard::from_bytes(&bytes).expect("TrajectoryLog round-trips via postcard");
+        let decoded = TrajectoryLog::decode_from_bytes(&bytes)
+            .expect("TrajectoryLog round-trips through the wire codec");
 
         assert_eq!(decoded.seed, original.seed);
         assert_eq!(decoded.samples.len(), 2);

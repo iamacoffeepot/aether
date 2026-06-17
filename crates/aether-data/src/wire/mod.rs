@@ -103,13 +103,22 @@ impl DeError for Error {
 /// Encode a value to a versioned wire payload: [`WIRE_VERSION`] followed by the
 /// value's encoding.
 pub fn to_vec<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, Error> {
-    let mut serializer = ser::Serializer::new();
-    value.serialize(&mut serializer)?;
-    let body = serializer.into_output();
+    let body = to_vec_bare(value)?;
     let mut out = Vec::with_capacity(body.len() + 1);
     out.push(WIRE_VERSION);
     out.extend_from_slice(&body);
     Ok(out)
+}
+
+/// Encode a value to **bare** wire bytes with no leading [`WIRE_VERSION`]. The
+/// bytes are an interior value, not a self-describing kind image — for
+/// hand-assembly sites (e.g. the DAG executor) that concatenate interior values
+/// into one kind image and prepend the single version byte themselves. Most
+/// callers want [`to_vec`].
+pub fn to_vec_bare<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, Error> {
+    let mut serializer = ser::Serializer::new();
+    value.serialize(&mut serializer)?;
+    Ok(serializer.into_output())
 }
 
 /// Decode a value from a versioned wire payload, requiring every byte consumed.

@@ -1,8 +1,8 @@
 // Wire-encode: serde_json input → bytes laid out per `SchemaType`.
-// The narrowing casts (`u64 → u32 / u16 / u8`, signed varint slot
-// reuse) and sign-loss casts (`i*` to the `u*` zigzag-encoded slot)
-// are the load-bearing byte layout — `From::from` / `try_into` would
-// obscure the wire-format contract these functions implement.
+// The narrowing casts (`u64 → u32 / u16 / u8` length and scalar
+// fits, `f64 → f32`) are the load-bearing fixed-width byte layout —
+// `From::from` / `try_into` would obscure the wire-format contract
+// these functions implement.
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 // `encode_schema`: serde_json params + `SchemaType` descriptor → wire
@@ -15,31 +15,34 @@
 //    under it): `#[repr(C)]` byte layout. Scalars and fixed arrays
 //    laid out at the alignment they'd occupy in a Rust struct;
 //    trailing padding rounds total size to the largest field
-//    alignment. Substrate decode is `bytemuck::cast`.
+//    alignment. Substrate decode is `bytemuck::cast`. No version byte
+//    — the cast image is its own codec, like `<() as Kind>`.
 //
-// 2. Postcard (everything else): postcard 1.x wire format, written
-//    directly:
-//      - bool: 1 byte (0 or 1)
-//      - u8/i8: 1 byte
-//      - u16..u64: LEB128 varint
-//      - i16..i64: zigzag-then-LEB128
-//      - f32/f64: little-endian
-//      - String / &[u8] (Bytes): varint length + bytes
-//      - Vec<T>: varint length + concatenated encoded elements
-//      - [T; N]: concatenated encoded elements (no length prefix)
-//      - Option<T>: 1-byte tag (0 or 1), then T if Some
-//      - enum: varint discriminant, then variant body
+// 2. Wire (everything else): the ADR-0118 `aether_data::wire` format,
+//    a fixed-width, schema-driven layout written directly. A leading
+//    `WIRE_VERSION` byte prefixes the top-level kind image; interior
+//    values are bare:
+//      - bool / option-presence: 1 byte (0 or 1)
+//      - u8..u128 / i8..i128: fixed little-endian of the declared width
+//      - f32/f64: bit-faithful little-endian
+//      - String / Bytes / Vec / Map: `u32` little-endian count, then
+//        elements (maps in ascending encoded-key byte order)
+//      - [T; N]: concatenated encoded elements (no count)
+//      - Option<T>: presence byte, then T if Some
+//      - enum / Ref selector: `u32` little-endian (the variant index)
 //      - struct: concatenated field bytes in declaration order
+//      - Ref handle arm: `id` (8 LE) + `kind_id` (8 LE)
+//      - Ref inline arm: `u32` length + a nested versioned kind image
 //
 // We write the bytes directly rather than going through a serde
 // serializer because the JSON-driven encoding is structural — matching
-// postcard's wire format byte-for-byte is the contract, not "calling
-// postcard".
+// the `wire` byte layout byte-for-byte is the contract (the
+// adapter-vs-walker conformance test pins it), not "calling serde".
 
 use std::fmt;
 
-use aether_data::tagged_id;
-use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
+use aether_data::wire::WIRE_VERSION;
+use aether_data::{EnumVariant, NamedField, Primitive, SchemaType, tagged_id};
 use serde_json::Value;
 
 use crate::cast::{align_of_primitive, non_cast_variant_error};
@@ -64,8 +67,8 @@ pub enum EncodeError {
         got: usize,
     },
     /// A schema arm the hub encoder can't handle in this position.
-    /// PR 5's postcard path covers every top-level `SchemaType`, so
-    /// this variant only fires for fields-inside-cast-structs that
+    /// The wire path covers every top-level `SchemaType`, so this
+    /// variant only fires for fields-inside-cast-structs that
     /// disqualify the parent from cast eligibility. Carries a short
     /// description so the agent error is actionable.
     UnsupportedSchema(&'static str),
@@ -100,21 +103,24 @@ impl fmt::Display for EncodeError {
 
 impl error::Error for EncodeError {}
 
-/// ADR-0019: encode `params` against a `SchemaType` descriptor.
-/// Dispatches on the schema's wire shape:
+/// ADR-0019 / ADR-0118: encode `params` against a `SchemaType`
+/// descriptor. Dispatches on the schema's wire shape:
 ///
-/// - `Unit` → empty payload.
+/// - `Unit` → empty payload, no version byte (the `<() as Kind>` image
+///   is bare, matching its hand-rolled codec).
 /// - `Struct { repr_c: true }` (and the recursive cast-shaped tree
 ///   under it) → `#[repr(C)]` byte layout, decodable by
-///   `bytemuck::cast` on the substrate side.
-/// - Everything else → postcard wire format, written directly per the
-///   format described at the top of this file.
+///   `bytemuck::cast` on the substrate side. No version byte.
+/// - Everything else → the `aether_data::wire` format, written
+///   directly per the layout described at the top of this file, with a
+///   leading `WIRE_VERSION` byte on the top-level image.
 pub fn encode_schema(params: &Value, schema: &SchemaType) -> Result<Vec<u8>, EncodeError> {
     match schema {
         SchemaType::Unit => {
-            // Empty payload. Accept an empty object or null; reject
-            // explicit non-empty input so a typo doesn't get silently
-            // swallowed.
+            // Empty payload, no version byte — the unit kind's image is
+            // bare (`<() as Kind>::encode_into_bytes` yields `[]`).
+            // Accept an empty object or null; reject explicit non-empty
+            // input so a typo doesn't get silently swallowed.
             if let Some(obj) = params.as_object()
                 && !obj.is_empty()
             {
@@ -139,25 +145,29 @@ pub fn encode_schema(params: &Value, schema: &SchemaType) -> Result<Vec<u8>, Enc
             pad_to(&mut out, max_align);
             Ok(out)
         }
-        // Postcard path: every non-cast schema. The walker handles
-        // top-level scalars / strings / vecs / enums uniformly with
-        // their nested counterparts.
+        // Wire path: every non-cast, non-unit schema. The walker
+        // handles top-level scalars / strings / vecs / enums uniformly
+        // with their nested counterparts. The version byte sits at this
+        // top-level kind-image boundary only; interior values are bare.
         _ => {
-            let mut out = Vec::new();
-            encode_postcard(params, schema, "$", &mut out)?;
+            let mut out = vec![WIRE_VERSION];
+            encode_wire_value(params, schema, "$", &mut out)?;
             Ok(out)
         }
     }
 }
 
-/// Recursively encode `value` into postcard wire format under `schema`.
+/// Recursively encode `value` into the `aether_data::wire` format under
+/// `schema`. Interior values are bare — the caller (`encode_schema`)
+/// owns the single leading `WIRE_VERSION` byte, and the `Ref` inline
+/// arm recurses through `encode_schema` to nest a fresh versioned image.
 /// `path` is a dotted breadcrumb (`$.field.subfield[2]`) used to make
 /// error messages locate the offending field in deeply-nested params.
 // One match arm per `SchemaType`; each arm is short but they sum up.
 // Splitting the arms into helpers would force per-arm context structs
 // without saving readability.
 #[allow(clippy::too_many_lines)]
-fn encode_postcard(
+fn encode_wire_value(
     value: &Value,
     schema: &SchemaType,
     path: &str,
@@ -173,13 +183,13 @@ fn encode_postcard(
             out.push(u8::from(b));
             Ok(())
         }
-        SchemaType::Scalar(p) => write_scalar_postcard(*p, value, path, out),
+        SchemaType::Scalar(p) => write_scalar_wire(*p, value, path, out),
         SchemaType::String => {
             let s = value.as_str().ok_or_else(|| EncodeError::TypeMismatch {
                 field: path.to_owned(),
                 expected: "string",
             })?;
-            write_varint_u64(out, s.len() as u64);
+            write_count(out, s.len(), path)?;
             out.extend_from_slice(s.as_bytes());
             Ok(())
         }
@@ -188,7 +198,7 @@ fn encode_postcard(
                 field: path.to_owned(),
                 expected: "byte array",
             })?;
-            write_varint_u64(out, arr.len() as u64);
+            write_count(out, arr.len(), path)?;
             for (i, v) in arr.iter().enumerate() {
                 let n = as_unsigned(v, path, "u8")?;
                 let b: u8 = n
@@ -203,7 +213,7 @@ fn encode_postcard(
                 out.push(0);
             } else {
                 out.push(1);
-                encode_postcard(value, inner, path, out)?;
+                encode_wire_value(value, inner, path, out)?;
             }
             Ok(())
         }
@@ -212,10 +222,10 @@ fn encode_postcard(
                 field: path.to_owned(),
                 expected: "array",
             })?;
-            write_varint_u64(out, arr.len() as u64);
+            write_count(out, arr.len(), path)?;
             for (i, v) in arr.iter().enumerate() {
                 let elem_path = format!("{path}[{i}]");
-                encode_postcard(v, inner, &elem_path, out)?;
+                encode_wire_value(v, inner, &elem_path, out)?;
             }
             Ok(())
         }
@@ -233,12 +243,12 @@ fn encode_postcard(
             }
             for (i, v) in arr.iter().enumerate() {
                 let elem_path = format!("{path}[{i}]");
-                encode_postcard(v, element, &elem_path, out)?;
+                encode_wire_value(v, element, &elem_path, out)?;
             }
             Ok(())
         }
         SchemaType::Struct { fields, .. } => {
-            // Postcard struct: concatenated field bytes in declaration
+            // Wire struct: concatenated field bytes in declaration
             // order. Reject unexpected keys (typo defense) and require
             // every field to be present.
             let obj = value.as_object().ok_or_else(|| EncodeError::TypeMismatch {
@@ -255,14 +265,15 @@ fn encode_postcard(
                     .get(&*field.name)
                     .ok_or_else(|| EncodeError::MissingField(format!("{path}.{}", field.name)))?;
                 let field_path = format!("{path}.{}", field.name);
-                encode_postcard(v, &field.ty, &field_path, out)?;
+                encode_wire_value(v, &field.ty, &field_path, out)?;
             }
             Ok(())
         }
         SchemaType::Enum { variants } => {
             // Externally-tagged JSON: `{"VariantName": <body>}` for
             // tuple/struct variants, `"VariantName"` (string) for unit
-            // variants. Same shape serde emits by default.
+            // variants. Same shape serde emits by default. Wire is a
+            // `u32` little-endian discriminant, then the variant body.
             let (tag, body) = decode_enum_tag(value, path)?;
             let variant = variants.iter().find(|v| v.name() == tag).ok_or_else(|| {
                 EncodeError::TypeMismatch {
@@ -270,7 +281,7 @@ fn encode_postcard(
                     expected: "enum variant matching schema",
                 }
             })?;
-            write_varint_u64(out, u64::from(variant.discriminant()));
+            out.extend_from_slice(&variant.discriminant().to_le_bytes());
             encode_enum_body(body, variant, path, out)?;
             Ok(())
         }
@@ -281,28 +292,35 @@ fn encode_postcard(
             // Issue #232 + proto3-style JSON mapping. Input is a JSON
             // object: keys live as strings on the wire-side regardless
             // of declared key type. We parse each JSON-string key
-            // through the key schema, then sort by the parsed value
-            // so the wire bytes match what `postcard::to_allocvec`
-            // would produce on a `BTreeMap` with the same contents
-            // (sorted by key). Sender-order independence keeps two
-            // tools producing byte-identical payloads from
-            // semantically-equal inputs.
+            // through the key schema, encode each `(key, value)` pair to
+            // its wire bytes, then sort the pairs by ascending
+            // encoded-key byte order — the canonical map ordering the
+            // `wire` serializer uses (`MapSerializer::end`). Sorting on
+            // the encoded bytes (not the parsed value) is what makes the
+            // walker byte-identical to the serde adapter for multi-byte
+            // integer keys, whose little-endian order differs from their
+            // numeric order. Sender-order independence keeps two tools
+            // producing byte-identical payloads from semantically-equal
+            // inputs.
             let json_map = value.as_object().ok_or_else(|| EncodeError::TypeMismatch {
                 field: path.to_owned(),
                 expected: "object",
             })?;
-            let mut entries: Vec<(ParsedMapKey, Value, &Value)> =
-                Vec::with_capacity(json_map.len());
+            let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(json_map.len());
             for (k_str, v_json) in json_map {
                 let entry_path = format!("{path}.{k_str}");
-                let (parsed, key_json) = parse_map_key(k_str, key_schema, &entry_path)?;
-                entries.push((parsed, key_json, v_json));
+                let key_json = parse_map_key(k_str, key_schema, &entry_path)?;
+                let mut key_bytes = Vec::new();
+                encode_wire_value(&key_json, key_schema, path, &mut key_bytes)?;
+                let mut value_bytes = Vec::new();
+                encode_wire_value(v_json, value_schema, path, &mut value_bytes)?;
+                entries.push((key_bytes, value_bytes));
             }
             entries.sort_by(|a, b| a.0.cmp(&b.0));
-            write_varint_u64(out, entries.len() as u64);
-            for (_pk, k_json, v_json) in &entries {
-                encode_postcard(k_json, key_schema, path, out)?;
-                encode_postcard(v_json, value_schema, path, out)?;
+            write_count(out, entries.len(), path)?;
+            for (key_bytes, value_bytes) in &entries {
+                out.extend_from_slice(key_bytes);
+                out.extend_from_slice(value_bytes);
             }
             Ok(())
         }
@@ -311,25 +329,27 @@ fn encode_postcard(
             // Externally-tagged JSON matches the Rust enum:
             // `{"Inline": <inner-K>}` chooses the inline arm;
             // `{"Handle": {"id": u64, "kind_id": u64}}` chooses the
-            // handle arm. Wire is the postcard enum encoding —
-            // discriminant varint + body. The inline body is the inner
-            // kind's own codec image (cast or postcard, dispatched on
-            // `inner`) length-prefixed (`varint(len)` + bytes); the
-            // handle body is two varints.
+            // handle arm. Wire is a `u32` little-endian selector + body.
+            // The inline body is the inner kind's own codec image (cast
+            // or wire, dispatched on `inner` via `encode_schema`, so a
+            // wire inner carries its own `WIRE_VERSION`) length-prefixed
+            // with a `u32`; the handle body is `id` (8 LE) + `kind_id`
+            // (8 LE).
             let (tag, body) = decode_enum_tag(value, path)?;
             match tag {
                 "Inline" => {
-                    write_varint_u64(out, 0);
+                    out.extend_from_slice(&0u32.to_le_bytes());
                     // The inner image is the same bytes `Kind::encode_into_bytes`
                     // produces for the inner kind — `encode_schema` picks
-                    // cast for a `repr_c: true` struct, postcard otherwise.
+                    // cast for a `repr_c: true` struct, a versioned wire
+                    // image otherwise.
                     let body_bytes = encode_schema(body, inner)?;
-                    write_varint_u64(out, body_bytes.len() as u64);
+                    write_count(out, body_bytes.len(), path)?;
                     out.extend_from_slice(&body_bytes);
                     Ok(())
                 }
                 "Handle" => {
-                    write_varint_u64(out, 1);
+                    out.extend_from_slice(&1u32.to_le_bytes());
                     let obj = body.as_object().ok_or_else(|| EncodeError::TypeMismatch {
                         field: path.to_owned(),
                         expected: "Handle object",
@@ -349,8 +369,8 @@ fn encode_postcard(
                         .ok_or_else(|| EncodeError::MissingField(kind_id_path.clone()))?;
                     let id = as_unsigned(id_v, &id_path, "u64")?;
                     let kind_id = as_unsigned(kind_id_v, &kind_id_path, "u64")?;
-                    write_varint_u64(out, id);
-                    write_varint_u64(out, kind_id);
+                    out.extend_from_slice(&id.to_le_bytes());
+                    out.extend_from_slice(&kind_id.to_le_bytes());
                     Ok(())
                 }
                 _ => Err(EncodeError::TypeMismatch {
@@ -359,14 +379,14 @@ fn encode_postcard(
                 }),
             }
         }
-        // ADR-0065 typed id. Wire is a u64 varint; JSON is the
-        // ADR-0064 tagged-string form (`mbx-XXXX-XXXX-XXXX` etc.)
+        // ADR-0065 typed id. Wire is a `u64` fixed little-endian; JSON is
+        // the ADR-0064 tagged-string form (`mbx-XXXX-XXXX-XXXX` etc.)
         // for the post-migration shape, with a back-compat path that
         // accepts a JSON number for callers (test fixtures, older
         // examples) that haven't migrated yet.
         SchemaType::TypeId(type_id) => {
             let id = decode_type_id_value(value, *type_id, path)?;
-            write_varint_u64(out, id);
+            out.extend_from_slice(&id.to_le_bytes());
             Ok(())
         }
     }
@@ -396,38 +416,21 @@ fn decode_type_id_value(value: &Value, type_id: u64, path: &str) -> Result<u64, 
     }
 }
 
-/// Normalized map-key form for sorting (issue #232). Cross-variant
-/// ordering is irrelevant — every key in a single map shares the
-/// declared key schema, so all `ParsedMapKey` values produced for one
-/// encode call land in the same arm. The derived `Ord` keeps the type
-/// total so callers don't need a custom comparator.
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-enum ParsedMapKey<'a> {
-    Bool(bool),
-    UInt(u64),
-    SInt(i64),
-    Str(&'a str),
-}
-
-/// Parse a JSON-string map key per the declared key schema and produce
-/// (a) a sortable normalized form and (b) a `serde_json::Value` shaped
-/// for `encode_postcard` so the actual wire bytes flow through the
-/// existing scalar/string/bool encoders. Proto3 stringify rule —
-/// integer keys land as JSON-string digits, bool keys as `"true"` /
-/// `"false"`, string keys identity. Any other key shape is
-/// `UnsupportedSchema`; the `BTreeMap<K: Ord, V>` bound at the Rust
-/// layer makes most of these unreachable, but the codec rejects them
-/// defensively.
-fn parse_map_key<'a>(
-    k_str: &'a str,
-    schema: &SchemaType,
-    path: &str,
-) -> Result<(ParsedMapKey<'a>, Value), EncodeError> {
+/// Parse a JSON-string map key per the declared key schema into a
+/// `serde_json::Value` shaped for `encode_wire_value` so the actual
+/// wire bytes flow through the existing scalar/string/bool encoders.
+/// Proto3 stringify rule — integer keys arrive as JSON-string digits,
+/// bool keys as `"true"` / `"false"`, string keys identity. Any other
+/// key shape is `UnsupportedSchema`; the `BTreeMap<K: Ord, V>` bound at
+/// the Rust layer makes most of these unreachable, but the codec rejects
+/// them defensively. The caller sorts by the encoded key bytes (the
+/// `wire` canonical map order), so no separate sortable form is needed.
+fn parse_map_key(k_str: &str, schema: &SchemaType, path: &str) -> Result<Value, EncodeError> {
     match schema {
-        SchemaType::String => Ok((ParsedMapKey::Str(k_str), Value::String(k_str.to_owned()))),
+        SchemaType::String => Ok(Value::String(k_str.to_owned())),
         SchemaType::Bool => match k_str {
-            "true" => Ok((ParsedMapKey::Bool(true), Value::Bool(true))),
-            "false" => Ok((ParsedMapKey::Bool(false), Value::Bool(false))),
+            "true" => Ok(Value::Bool(true)),
+            "false" => Ok(Value::Bool(false)),
             _ => Err(EncodeError::TypeMismatch {
                 field: path.to_owned(),
                 expected: "\"true\" or \"false\" (bool map key)",
@@ -440,16 +443,16 @@ fn parse_map_key<'a>(
                     expected: "unsigned integer (map key as decimal string)",
                 })?;
                 // Range-check happens at the scalar-write step via
-                // `as_unsigned`; storing as u64 here is lossless for
+                // `as_unsigned`; carrying as u64 here is lossless for
                 // every supported key width.
-                Ok((ParsedMapKey::UInt(n), Value::Number(n.into())))
+                Ok(Value::Number(n.into()))
             }
             Primitive::I8 | Primitive::I16 | Primitive::I32 | Primitive::I64 => {
                 let n: i64 = k_str.parse().map_err(|_| EncodeError::TypeMismatch {
                     field: path.to_owned(),
                     expected: "signed integer (map key as decimal string)",
                 })?;
-                Ok((ParsedMapKey::SInt(n), Value::Number(n.into())))
+                Ok(Value::Number(n.into()))
             }
             Primitive::F32 | Primitive::F64 => {
                 Err(EncodeError::UnsupportedSchema("float as Map key (no Ord)"))
@@ -461,7 +464,10 @@ fn parse_map_key<'a>(
     }
 }
 
-fn write_scalar_postcard(
+/// Write one `Primitive` scalar in the `aether_data::wire` layout:
+/// fixed-width little-endian of the declared width, bit-faithful floats,
+/// no varints and no zigzag.
+fn write_scalar_wire(
     p: Primitive,
     v: &Value,
     name: &str,
@@ -469,42 +475,48 @@ fn write_scalar_postcard(
 ) -> Result<(), EncodeError> {
     match p {
         Primitive::U8 => {
-            let n = as_unsigned(v, name, "u8")?;
-            let n: u8 = n.try_into().map_err(|_| oor(name, "u8"))?;
-            out.push(n);
+            let n: u8 = as_unsigned(v, name, "u8")?
+                .try_into()
+                .map_err(|_| oor(name, "u8"))?;
+            out.extend_from_slice(&n.to_le_bytes());
         }
         Primitive::U16 => {
-            let n = as_unsigned(v, name, "u16")?;
-            let _: u16 = n.try_into().map_err(|_| oor(name, "u16"))?;
-            write_varint_u64(out, n);
+            let n: u16 = as_unsigned(v, name, "u16")?
+                .try_into()
+                .map_err(|_| oor(name, "u16"))?;
+            out.extend_from_slice(&n.to_le_bytes());
         }
         Primitive::U32 => {
-            let n = as_unsigned(v, name, "u32")?;
-            let _: u32 = n.try_into().map_err(|_| oor(name, "u32"))?;
-            write_varint_u64(out, n);
+            let n: u32 = as_unsigned(v, name, "u32")?
+                .try_into()
+                .map_err(|_| oor(name, "u32"))?;
+            out.extend_from_slice(&n.to_le_bytes());
         }
         Primitive::U64 => {
             let n = as_unsigned(v, name, "u64")?;
-            write_varint_u64(out, n);
+            out.extend_from_slice(&n.to_le_bytes());
         }
         Primitive::I8 => {
-            let n = as_signed(v, name, "i8")?;
-            let n: i8 = n.try_into().map_err(|_| oor(name, "i8"))?;
-            out.push(n as u8);
+            let n: i8 = as_signed(v, name, "i8")?
+                .try_into()
+                .map_err(|_| oor(name, "i8"))?;
+            out.extend_from_slice(&n.to_le_bytes());
         }
         Primitive::I16 => {
-            let n = as_signed(v, name, "i16")?;
-            let n: i16 = n.try_into().map_err(|_| oor(name, "i16"))?;
-            write_varint_u64(out, zigzag_i64(i64::from(n)));
+            let n: i16 = as_signed(v, name, "i16")?
+                .try_into()
+                .map_err(|_| oor(name, "i16"))?;
+            out.extend_from_slice(&n.to_le_bytes());
         }
         Primitive::I32 => {
-            let n = as_signed(v, name, "i32")?;
-            let n: i32 = n.try_into().map_err(|_| oor(name, "i32"))?;
-            write_varint_u64(out, zigzag_i64(i64::from(n)));
+            let n: i32 = as_signed(v, name, "i32")?
+                .try_into()
+                .map_err(|_| oor(name, "i32"))?;
+            out.extend_from_slice(&n.to_le_bytes());
         }
         Primitive::I64 => {
             let n = as_signed(v, name, "i64")?;
-            write_varint_u64(out, zigzag_i64(n));
+            out.extend_from_slice(&n.to_le_bytes());
         }
         Primitive::F32 => {
             let n = v.as_f64().ok_or_else(|| EncodeError::TypeMismatch {
@@ -524,18 +536,14 @@ fn write_scalar_postcard(
     Ok(())
 }
 
-/// LEB128-style varint write. Postcard 1.x uses this for u16/u32/u64
-/// and (zigzagged) for i16/i32/i64, plus all collection lengths.
-fn write_varint_u64(out: &mut Vec<u8>, mut n: u64) {
-    while n >= 0x80 {
-        out.push((n as u8) | 0x80);
-        n >>= 7;
-    }
-    out.push(n as u8);
-}
-
-fn zigzag_i64(n: i64) -> u64 {
-    ((n << 1) ^ (n >> 63)) as u64
+/// Write a `u32` little-endian count/length — the `wire` framing for
+/// every string / bytes / vec / map length and the `Ref` inline-body
+/// length. A count past the `u32` ceiling errors (`OutOfRange`) rather
+/// than truncating.
+fn write_count(out: &mut Vec<u8>, len: usize, name: &str) -> Result<(), EncodeError> {
+    let count = u32::try_from(len).map_err(|_| oor(name, "u32 length"))?;
+    out.extend_from_slice(&count.to_le_bytes());
+    Ok(())
 }
 
 /// Pull `(tag, body)` out of an enum-shaped JSON value. Accepts:
@@ -586,7 +594,7 @@ fn encode_enum_body(
             // both interchangeably.
             if fields.len() == 1 {
                 let nested_path = format!("{path}::{name}.0");
-                encode_postcard(body, &fields[0], &nested_path, out)
+                encode_wire_value(body, &fields[0], &nested_path, out)
             } else {
                 let arr = body.as_array().ok_or_else(|| EncodeError::TypeMismatch {
                     field: path.to_owned(),
@@ -601,7 +609,7 @@ fn encode_enum_body(
                 }
                 for (i, (v, ty)) in arr.iter().zip(fields.iter()).enumerate() {
                     let nested = format!("{path}::{name}.{i}");
-                    encode_postcard(v, ty, &nested, out)?;
+                    encode_wire_value(v, ty, &nested, out)?;
                 }
                 Ok(())
             }
@@ -623,7 +631,7 @@ fn encode_enum_body(
                     EncodeError::MissingField(format!("{path}::{name}.{}", field.name))
                 })?;
                 let nested = format!("{path}::{name}.{}", field.name);
-                encode_postcard(v, &field.ty, &nested, out)?;
+                encode_wire_value(v, &field.ty, &nested, out)?;
             }
             Ok(())
         }
@@ -1097,30 +1105,33 @@ mod tests {
         );
     }
 
-    // Postcard path. Each test asserts byte-identity with
-    // `postcard::to_allocvec` on an equivalent typed value — if these
-    // match, the substrate decode (via `postcard::from_bytes`) sees
-    // the same value the agent sent.
+    // Wire path. Each test asserts byte-identity with
+    // `aether_data::wire::to_vec` on an equivalent typed value — if
+    // these match, the substrate decode (via `Kind::decode_from_bytes`,
+    // i.e. `wire::from_bytes`) sees the same value the agent sent. The
+    // dedicated `conformance` module pins the adapter-vs-walker law over
+    // a broader fixture set.
 
+    use aether_data::wire;
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]
-    struct PostcardString {
+    struct WireString {
         body: String,
     }
 
     #[derive(Serialize, Deserialize)]
-    struct PostcardBytes {
+    struct WireBytes {
         blob: Vec<u8>,
     }
 
     #[derive(Serialize, Deserialize)]
-    struct PostcardOption {
+    struct WireOption {
         name: Option<String>,
     }
 
     #[derive(Serialize, Deserialize)]
-    struct PostcardVec {
+    struct WireVec {
         tags: Vec<String>,
     }
 
@@ -1130,7 +1141,7 @@ mod tests {
     }
 
     #[derive(Serialize, Deserialize)]
-    struct PostcardNested {
+    struct WireNested {
         items: Vec<Inner>,
     }
 
@@ -1149,32 +1160,30 @@ mod tests {
     }
 
     #[test]
-    fn postcard_string_field_matches_serde() {
-        let value = PostcardString {
+    fn wire_string_field_matches_serde() {
+        let value = WireString {
             body: "hello world".into(),
         };
-        let expected =
-            postcard::to_allocvec(&value).expect("test setup: postcard reference string");
+        let expected = wire::to_vec(&value).expect("test setup: wire reference string");
         let bytes = encode_schema(&json!({"body": "hello world"}), &pc_string_schema())
             .expect("test setup: encode string field");
         assert_eq!(bytes, expected);
     }
 
     #[test]
-    fn postcard_string_decodes_back() {
+    fn wire_string_decodes_back() {
         let bytes = encode_schema(&json!({"body": "round-trip"}), &pc_string_schema())
             .expect("test setup: encode string for round-trip");
-        let back: PostcardString =
-            postcard::from_bytes(&bytes).expect("test setup: postcard decode string");
+        let back: WireString = wire::from_bytes(&bytes).expect("test setup: wire decode string");
         assert_eq!(back.body, "round-trip");
     }
 
     #[test]
-    fn postcard_bytes_field_matches_serde() {
-        let value = PostcardBytes {
+    fn wire_bytes_field_matches_serde() {
+        let value = WireBytes {
             blob: vec![1, 2, 3, 4, 5],
         };
-        let expected = postcard::to_allocvec(&value).expect("test setup: postcard reference bytes");
+        let expected = wire::to_vec(&value).expect("test setup: wire reference bytes");
         let schema = postcard_struct(vec![NamedField {
             name: "blob".into(),
             ty: SchemaType::Bytes,
@@ -1185,7 +1194,7 @@ mod tests {
     }
 
     #[test]
-    fn postcard_bytes_non_array_errors() {
+    fn wire_bytes_non_array_errors() {
         // The wire codec is strict and canonical: a `Bytes` field accepts
         // only a JSON byte array. String / base64-object ergonomics live in
         // the aether-mcp preprocessor, never in the codec.
@@ -1202,37 +1211,36 @@ mod tests {
     }
 
     #[test]
-    fn postcard_option_some_and_none() {
+    fn wire_option_some_and_none() {
         let schema = postcard_struct(vec![NamedField {
             name: "name".into(),
             ty: SchemaType::Option(SchemaCell::owned(SchemaType::String)),
         }]);
-        let some = PostcardOption {
+        let some = WireOption {
             name: Some("Aether".into()),
         };
         let some_bytes = encode_schema(&json!({"name": "Aether"}), &schema)
             .expect("test setup: encode some(name)");
         assert_eq!(
             some_bytes,
-            postcard::to_allocvec(&some).expect("test setup: postcard reference some")
+            wire::to_vec(&some).expect("test setup: wire reference some")
         );
 
-        let none = PostcardOption { name: None };
+        let none = WireOption { name: None };
         let none_bytes =
             encode_schema(&json!({"name": null}), &schema).expect("test setup: encode none(name)");
         assert_eq!(
             none_bytes,
-            postcard::to_allocvec(&none).expect("test setup: postcard reference none")
+            wire::to_vec(&none).expect("test setup: wire reference none")
         );
     }
 
     #[test]
-    fn postcard_vec_of_strings_matches_serde() {
-        let value = PostcardVec {
+    fn wire_vec_of_strings_matches_serde() {
+        let value = WireVec {
             tags: vec!["alpha".into(), "beta".into(), "gamma".into()],
         };
-        let expected =
-            postcard::to_allocvec(&value).expect("test setup: postcard reference vec<string>");
+        let expected = wire::to_vec(&value).expect("test setup: wire reference vec<string>");
         let schema = postcard_struct(vec![NamedField {
             name: "tags".into(),
             ty: SchemaType::Vec(SchemaCell::owned(SchemaType::String)),
@@ -1243,12 +1251,11 @@ mod tests {
     }
 
     #[test]
-    fn postcard_vec_of_nested_structs_matches_serde() {
-        let value = PostcardNested {
+    fn wire_vec_of_nested_structs_matches_serde() {
+        let value = WireNested {
             items: vec![Inner { seq: 1 }, Inner { seq: 256 }, Inner { seq: 0xDEAD }],
         };
-        let expected =
-            postcard::to_allocvec(&value).expect("test setup: postcard reference vec<inner>");
+        let expected = wire::to_vec(&value).expect("test setup: wire reference vec<inner>");
         let inner_schema = postcard_struct(vec![NamedField {
             name: "seq".into(),
             ty: SchemaType::Scalar(Primitive::U32),
@@ -1270,92 +1277,58 @@ mod tests {
     }
 
     #[test]
-    fn postcard_enum_unit_variant_as_string_tag() {
+    fn wire_enum_unit_variant_as_string_tag() {
         // Unit variant accepts the bare-string form `"Pending"`.
         let bytes = encode_schema(&json!("Pending"), &sum_schema())
             .expect("test setup: encode unit variant");
         assert_eq!(
             bytes,
-            postcard::to_allocvec(&SimpleSum::Pending)
-                .expect("test setup: postcard reference pending")
+            wire::to_vec(&SimpleSum::Pending).expect("test setup: wire reference pending")
         );
     }
 
     #[test]
-    fn postcard_enum_tuple_variant_with_unwrapped_body() {
+    fn wire_enum_tuple_variant_with_unwrapped_body() {
         // Single-element tuple variants accept either `{"Ok": 42}` or
         // `{"Ok": [42]}`. Cover the unwrapped-body form here.
         let bytes = encode_schema(&json!({"Ok": 42u64}), &sum_schema())
             .expect("test setup: encode tuple variant");
         assert_eq!(
             bytes,
-            postcard::to_allocvec(&SimpleSum::Ok(42))
-                .expect("test setup: postcard reference ok(42)")
+            wire::to_vec(&SimpleSum::Ok(42)).expect("test setup: wire reference ok(42)")
         );
     }
 
     #[test]
-    fn postcard_enum_struct_variant() {
+    fn wire_enum_struct_variant() {
         let bytes = encode_schema(&json!({"Err": {"reason": "kind conflict"}}), &sum_schema())
             .expect("test setup: encode struct variant");
-        let expected = postcard::to_allocvec(&SimpleSum::Err {
+        let expected = wire::to_vec(&SimpleSum::Err {
             reason: "kind conflict".into(),
         })
-        .expect("test setup: postcard reference err{reason}");
+        .expect("test setup: wire reference err{reason}");
         assert_eq!(bytes, expected);
     }
 
     #[test]
-    fn postcard_enum_unknown_tag_errors() {
+    fn wire_enum_unknown_tag_errors() {
         let err =
             encode_schema(&json!("Nope"), &sum_schema()).expect_err("unknown enum tag must error");
         assert!(matches!(err, EncodeError::TypeMismatch { .. }));
     }
 
     #[test]
-    fn postcard_string_rejects_non_string() {
+    fn wire_string_rejects_non_string() {
         let err = encode_schema(&json!({"body": 7}), &pc_string_schema())
             .expect_err("number for string field must error");
         assert!(matches!(err, EncodeError::TypeMismatch { .. }));
     }
 
     #[test]
-    fn postcard_struct_rejects_unexpected_field() {
+    fn wire_struct_rejects_unexpected_field() {
         let err = encode_schema(&json!({"body": "ok", "extra": "nope"}), &pc_string_schema())
-            .expect_err("extra field in postcard struct must error");
+            .expect_err("extra field in wire struct must error");
         assert!(matches!(err, EncodeError::UnexpectedField(_)));
-    }
-
-    #[test]
-    fn varint_matches_postcard_for_boundaries() {
-        // 0, 127, 128, 16383, 16384 — each crosses a varint byte
-        // boundary and is the most likely place for an off-by-one.
-        for n in [0u64, 127, 128, 16383, 16384, u64::from(u32::MAX), u64::MAX] {
-            let mut ours = Vec::new();
-            write_varint_u64(&mut ours, n);
-            let theirs =
-                postcard::to_allocvec(&n).expect("test setup: postcard reference varint u64");
-            assert_eq!(ours, theirs, "varint mismatch for {n}");
-        }
-    }
-
-    #[test]
-    fn zigzag_matches_postcard_for_signed() {
-        for n in [
-            0i64,
-            -1,
-            1,
-            -128,
-            127,
-            i64::from(i32::MIN),
-            i64::from(i32::MAX),
-        ] {
-            let mut ours = Vec::new();
-            write_varint_u64(&mut ours, zigzag_i64(n));
-            let theirs =
-                postcard::to_allocvec(&n).expect("test setup: postcard reference zigzag i64");
-            assert_eq!(ours, theirs, "zigzag mismatch for {n}");
-        }
     }
 
     // Issue #232 — `SchemaType::Map` encode tests. proto3-style JSON:
@@ -1369,11 +1342,11 @@ mod tests {
     }
 
     #[test]
-    fn map_string_keys_matches_postcard_btreemap() {
-        // Reference value is a `BTreeMap<String, String>` postcarded by
-        // serde — that's the wire shape every receiving substrate will
-        // decode into. Sender input is unsorted to lock in the
-        // sort-after-parse step.
+    fn map_string_keys_matches_wire_btreemap() {
+        // Reference value is a `BTreeMap<String, String>` encoded by the
+        // `wire` serde adapter — that's the wire shape every receiving
+        // substrate will decode into. Sender input is unsorted to lock in
+        // the sort-by-encoded-key step.
         let schema = postcard_struct(vec![NamedField {
             name: "headers".into(),
             ty: map_schema(SchemaType::String, SchemaType::String),
@@ -1383,8 +1356,8 @@ mod tests {
         reference.insert("content-type".into(), "application/json".into());
         reference.insert("x-trace".into(), "abc123".into());
 
-        let expected = postcard::to_allocvec(&reference)
-            .expect("test setup: postcard reference btreemap<string,string>");
+        let expected =
+            wire::to_vec(&reference).expect("test setup: wire reference btreemap<string,string>");
 
         let bytes = encode_schema(
             &json!({"headers": {"x-trace": "abc123", "content-type": "application/json"}}),
@@ -1392,16 +1365,16 @@ mod tests {
         )
         .expect("test setup: encode map<string,string> field");
 
-        // Strip the schema-struct field-prefix bytes — there are none
-        // here since the field's value is the whole map. The encoded
-        // payload is exactly the BTreeMap postcard bytes.
+        // A one-field wire struct adds no framing, so the encoded payload
+        // is exactly the BTreeMap wire image (one leading version byte +
+        // the encoded-key-sorted entries).
         assert_eq!(bytes, expected);
     }
 
     #[test]
     fn map_string_keys_sender_order_independent() {
         // Two callers produce the same wire bytes regardless of JSON
-        // input order. Pins the sort-by-parsed-key step.
+        // input order. Pins the sort-by-encoded-key step.
         let schema = map_schema(SchemaType::String, SchemaType::Scalar(Primitive::U32));
         let a = encode_schema(&json!({"alpha": 1, "beta": 2, "gamma": 3}), &schema)
             .expect("test setup: encode map in order A");
@@ -1411,7 +1384,7 @@ mod tests {
     }
 
     #[test]
-    fn map_u32_keys_match_postcard_btreemap() {
+    fn map_u32_keys_match_wire_btreemap() {
         let schema = map_schema(SchemaType::Scalar(Primitive::U32), SchemaType::String);
 
         let mut reference: BTreeMap<u32, String> = BTreeMap::new();
@@ -1419,8 +1392,8 @@ mod tests {
         reference.insert(42, "answer".into());
         reference.insert(255, "max-u8".into());
 
-        let expected = postcard::to_allocvec(&reference)
-            .expect("test setup: postcard reference btreemap<u32,string>");
+        let expected =
+            wire::to_vec(&reference).expect("test setup: wire reference btreemap<u32,string>");
 
         let bytes = encode_schema(
             &json!({"42": "answer", "1": "one", "255": "max-u8"}),
@@ -1431,13 +1404,42 @@ mod tests {
     }
 
     #[test]
-    fn map_bool_keys_match_postcard_btreemap() {
+    fn map_u32_keys_sort_by_encoded_little_endian_bytes() {
+        // Keys 1 and 256 sort numerically as 1 < 256, but their
+        // little-endian u32 encodings (`[1,0,0,0]` vs `[0,1,0,0]`) sort
+        // 256 < 1. The codec must match `wire`'s encoded-byte order — this
+        // is the multi-byte-key case the adapter-vs-walker cross-check
+        // guards.
+        let schema = map_schema(
+            SchemaType::Scalar(Primitive::U32),
+            SchemaType::Scalar(Primitive::U8),
+        );
+        let mut reference: BTreeMap<u32, u8> = BTreeMap::new();
+        reference.insert(1, 10);
+        reference.insert(256, 20);
+        let expected =
+            wire::to_vec(&reference).expect("test setup: wire reference btreemap<u32,u8>");
+        let bytes = encode_schema(&json!({"1": 10, "256": 20}), &schema)
+            .expect("test setup: encode map<u32,u8> field");
+        assert_eq!(bytes, expected);
+        // The 256 entry (`[0,1,0,0]`) precedes the 1 entry (`[1,0,0,0]`).
+        let mut hand = vec![WIRE_VERSION];
+        hand.extend_from_slice(&2u32.to_le_bytes()); // count
+        hand.extend_from_slice(&256u32.to_le_bytes()); // key 256
+        hand.push(20); // value
+        hand.extend_from_slice(&1u32.to_le_bytes()); // key 1
+        hand.push(10); // value
+        assert_eq!(bytes, hand);
+    }
+
+    #[test]
+    fn map_bool_keys_match_wire_btreemap() {
         let schema = map_schema(SchemaType::Bool, SchemaType::Scalar(Primitive::U32));
         let mut reference: BTreeMap<bool, u32> = BTreeMap::new();
         reference.insert(false, 0);
         reference.insert(true, 1);
-        let expected = postcard::to_allocvec(&reference)
-            .expect("test setup: postcard reference btreemap<bool,u32>");
+        let expected =
+            wire::to_vec(&reference).expect("test setup: wire reference btreemap<bool,u32>");
         let bytes = encode_schema(&json!({"true": 1, "false": 0}), &schema)
             .expect("test setup: encode map<bool,u32> field");
         assert_eq!(bytes, expected);
@@ -1485,12 +1487,13 @@ mod tests {
         assert!(matches!(err, EncodeError::UnsupportedSchema(_)));
     }
 
-    // ADR-0065: typed-id JSON ↔ postcard.
+    // ADR-0065: typed-id JSON ↔ wire.
 
     #[test]
-    fn type_id_postcard_accepts_tagged_string() {
+    fn type_id_wire_accepts_tagged_string() {
         // `mailbox` field carrying a tagged `mbx-...` string lands as
-        // a postcard u64 varint — wire-identical to a raw `u64` field.
+        // a fixed `u64` little-endian — wire-identical to a raw `u64`
+        // field, behind the leading version byte.
         let schema = postcard_struct(vec![NamedField {
             name: "mailbox".into(),
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
@@ -1498,14 +1501,14 @@ mod tests {
         let mailbox = aether_data::MailboxId::from_name("aether.component");
         let s = tagged_id::encode(mailbox.0).expect("test setup: encode tagged mailbox id");
         let bytes = encode_schema(&json!({ "mailbox": s }), &schema)
-            .expect("test setup: encode typed-id postcard field");
-        let mut expected = Vec::new();
-        write_varint_u64(&mut expected, mailbox.0);
+            .expect("test setup: encode typed-id wire field");
+        let mut expected = vec![WIRE_VERSION];
+        expected.extend_from_slice(&mailbox.0.to_le_bytes());
         assert_eq!(bytes, expected);
     }
 
     #[test]
-    fn type_id_postcard_accepts_raw_number_for_back_compat() {
+    fn type_id_wire_accepts_raw_number_for_back_compat() {
         // Pre-ADR-0065 callers passing a JSON number still work — the
         // codec falls through to the back-compat `as_unsigned` path.
         let schema = postcard_struct(vec![NamedField {
@@ -1515,13 +1518,13 @@ mod tests {
         let mailbox = aether_data::MailboxId::from_name("aether.component");
         let bytes = encode_schema(&json!({ "mailbox": mailbox.0 }), &schema)
             .expect("test setup: encode typed-id from raw number");
-        let mut expected = Vec::new();
-        write_varint_u64(&mut expected, mailbox.0);
+        let mut expected = vec![WIRE_VERSION];
+        expected.extend_from_slice(&mailbox.0.to_le_bytes());
         assert_eq!(bytes, expected);
     }
 
     #[test]
-    fn type_id_postcard_rejects_wrong_tag() {
+    fn type_id_wire_rejects_wrong_tag() {
         // A `KindId`-tagged string passed to a `MailboxId` field
         // surfaces a typed `OutOfRange` so the agent learns the field
         // expected `mbx-...` rather than corrupting the wire.
@@ -1561,7 +1564,7 @@ mod tests {
     }
 
     #[test]
-    fn type_id_postcard_rejects_unknown_type_id() {
+    fn type_id_wire_rejects_unknown_type_id() {
         // A schema declaring a `TypeId(...)` value the codec doesn't
         // recognise must surface `UnsupportedSchema` rather than
         // corrupt the wire or silently fall through.

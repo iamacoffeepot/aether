@@ -496,7 +496,7 @@ impl Mailer {
                 .is_some_and(|outbound| outbound.send_reply(sender, result)),
             SourceAddr::Component(mailbox) => {
                 // ADR-0100: encode the reply through the kind's declared
-                // codec (cast or postcard), not a hardcoded postcard path.
+                // codec (cast or wire), not a hardcoded codec path.
                 let payload = result.encode_into_bytes();
                 // ADR-0042: echo the caller's correlation_id onto the
                 // reply envelope so the originating handler can pick
@@ -902,6 +902,7 @@ mod tests {
     use crate::mail::MailboxId;
     use crate::mail::outbound::EgressEvent;
     use crate::mail::registry::{InboxHandler, InlineHandler};
+    use aether_data::wire::{self, WIRE_VERSION};
     use aether_data::{Kind, Ref};
     use aether_data::{KindDescriptor, NamedField, Primitive, SchemaCell, SchemaType};
 
@@ -1123,11 +1124,11 @@ mod tests {
         const ID: KindId = KindId(0xDEAD_BEEF_0003_0001);
 
         fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-            postcard::from_bytes(bytes).ok()
+            wire::from_bytes(bytes).ok()
         }
 
         fn encode_into_bytes(&self) -> Vec<u8> {
-            postcard::to_allocvec(self).expect("postcard encode to Vec is infallible")
+            wire::to_vec(self).expect("wire encode to Vec is infallible")
         }
     }
 
@@ -1247,7 +1248,7 @@ mod tests {
 
     /// ADR-0100: `Mailer::send_reply_unchained` to a `Component` target encodes the
     /// reply through `Kind::encode_into_bytes`. A cast reply kind reaches
-    /// the sink as its raw cast image, not a postcard varint image — and
+    /// the sink as its raw cast image, not a wire image — and
     /// a `Pod`-without-`Serialize` kind is repliable at all.
     #[test]
     fn send_reply_cast_kind_delivers_cast_image() {
@@ -1373,7 +1374,7 @@ mod tests {
             body: "verbatim".into(),
             seq: 1,
         };
-        let bytes = postcard::to_allocvec(&note).unwrap();
+        let bytes = wire::to_vec(&note).unwrap();
         mailer.push(Mail::new(sink_id, note_id, bytes.clone(), 1));
 
         let captured = sink.captured.read().unwrap().clone();
@@ -1415,7 +1416,7 @@ mod tests {
             },
             seq: 11,
         };
-        let outer_bytes = postcard::to_allocvec(&outer).unwrap();
+        let outer_bytes = wire::to_vec(&outer).unwrap();
         mailer.push(Mail::new(sink_id, outer_kind_id, outer_bytes, 1));
         assert_eq!(
             sink.delivery_count.load(Ordering::SeqCst),
@@ -1430,7 +1431,7 @@ mod tests {
             body: "resolved".into(),
             seq: 99,
         };
-        let inner_bytes = postcard::to_allocvec(&inner).unwrap();
+        let inner_bytes = wire::to_vec(&inner).unwrap();
         mailer
             .resolve_handle(HandleId(7), inner_kind_id, inner_bytes)
             .unwrap();
@@ -1438,7 +1439,7 @@ mod tests {
         assert_eq!(sink.delivery_count.load(Ordering::SeqCst), 1);
 
         let captured = sink.captured.read().unwrap();
-        let delivered: HeldNote = postcard::from_bytes(&captured[0]).unwrap();
+        let delivered: HeldNote = wire::from_bytes(&captured[0]).unwrap();
         assert_eq!(delivered.seq, 11);
         match delivered.held {
             Ref::Inline(got) => {
@@ -1467,8 +1468,9 @@ mod tests {
         let sink = CapturingSink::new();
         let sink_id = registry.register_inbox("test.sink", sink.inbox_handler());
 
-        // Truncated payload — the walker bails Truncated mid-walk.
-        mailer.push(Mail::new(sink_id, kind_id, vec![0u8; 1], 1));
+        // Truncated payload — a valid version byte then a lone body byte,
+        // so the walker bails Truncated mid-walk reading the first field.
+        mailer.push(Mail::new(sink_id, kind_id, vec![WIRE_VERSION, 0u8], 1));
         assert_eq!(sink.delivery_count.load(Ordering::SeqCst), 0);
     }
 
@@ -1542,7 +1544,7 @@ mod tests {
             },
             seq: 7,
         };
-        let payload = postcard::to_allocvec(&held).unwrap();
+        let payload = wire::to_vec(&held).unwrap();
 
         let mail = Mail::new(sink_id, outer_kind_id, payload, 1).with_lineage(root, root, None);
         mailer.push(mail);
@@ -1570,7 +1572,7 @@ mod tests {
             body: "hi".into(),
             seq: 99,
         };
-        let note_bytes = postcard::to_allocvec(&note).unwrap();
+        let note_bytes = wire::to_vec(&note).unwrap();
         mailer
             .resolve_handle(handle, inner_kind_id, note_bytes)
             .expect("resolve_handle");
@@ -1628,7 +1630,7 @@ mod tests {
             },
             seq: 42,
         };
-        let payload = postcard::to_allocvec(&held).unwrap();
+        let payload = wire::to_vec(&held).unwrap();
 
         let mail = Mail::new(sink_id, outer_kind_id, payload, 1).with_lineage(root, root, None);
         mailer.push(mail);
@@ -1877,7 +1879,7 @@ mod tests {
                         },
                         seq: 1,
                     };
-                    let payload = postcard::to_allocvec(&held).unwrap();
+                    let payload = wire::to_vec(&held).unwrap();
                     mailer.push(
                         Mail::new(id, outer_kind_id, payload, 1)
                             .with_lineage(mail_id, mail_id, None),

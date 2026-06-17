@@ -294,8 +294,12 @@ mod server_native {
             if self.inbound_tx.send(event).is_err() {
                 return false;
             }
-            self.mailer
-                .push(Mail::new(self.self_id, self.wake_kind, Vec::new(), 1));
+            self.mailer.push(Mail::new(
+                self.self_id,
+                self.wake_kind,
+                HttpInboundReady::default().encode_into_bytes(),
+                1,
+            ));
             true
         }
     }

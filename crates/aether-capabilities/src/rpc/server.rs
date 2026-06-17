@@ -230,7 +230,12 @@ mod server_native {
                             {
                                 break;
                             }
-                            mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+                            mailer.push(Mail::new(
+                                self_id,
+                                wake_kind,
+                                RpcInboundReady::default().encode_into_bytes(),
+                                1,
+                            ));
                         } else if accept_shutdown_for_thread.load(Ordering::Acquire) {
                             break;
                         }
@@ -766,14 +771,24 @@ mod server_native {
                     {
                         return;
                     }
-                    mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+                    mailer.push(Mail::new(
+                        self_id,
+                        wake_kind,
+                        RpcInboundReady::default().encode_into_bytes(),
+                        1,
+                    ));
                 }
                 Err(FrameError::Io(io_err)) if io_err.kind() == io::ErrorKind::UnexpectedEof => {
                     let _ = inbound_tx.send(InboundEvent::ReaderClosed {
                         conn_id,
                         reason: "eof".into(),
                     });
-                    mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+                    mailer.push(Mail::new(
+                        self_id,
+                        wake_kind,
+                        RpcInboundReady::default().encode_into_bytes(),
+                        1,
+                    ));
                     return;
                 }
                 Err(FrameError::FrameTooLarge { size, max }) => {
@@ -799,7 +814,12 @@ mod server_native {
                         conn_id,
                         reason: format!("read error: {e}"),
                     });
-                    mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+                    mailer.push(Mail::new(
+                        self_id,
+                        wake_kind,
+                        RpcInboundReady::default().encode_into_bytes(),
+                        1,
+                    ));
                     return;
                 }
             }
@@ -850,7 +870,12 @@ mod server_native {
             if inbound_tx.send(event).is_err() {
                 return OversizeOutcome::Terminal;
             }
-            mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+            mailer.push(Mail::new(
+                self_id,
+                wake_kind,
+                RpcInboundReady::default().encode_into_bytes(),
+                1,
+            ));
             return OversizeOutcome::Terminal;
         }
         // `take(size)` bounds the drain so a racy / lying peer can't
@@ -863,7 +888,12 @@ mod server_native {
                 conn_id,
                 reason: format!("frame too large drain failed: {size} > {max}"),
             });
-            mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+            mailer.push(Mail::new(
+                self_id,
+                wake_kind,
+                RpcInboundReady::default().encode_into_bytes(),
+                1,
+            ));
             return OversizeOutcome::Terminal;
         };
         if (drained as usize) != size {
@@ -872,7 +902,12 @@ mod server_native {
                 conn_id,
                 reason: format!("frame too large partial drain: {drained}/{size}"),
             });
-            mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+            mailer.push(Mail::new(
+                self_id,
+                wake_kind,
+                RpcInboundReady::default().encode_into_bytes(),
+                1,
+            ));
             return OversizeOutcome::Terminal;
         }
         let event = InboundEvent::FrameDecodeError {
@@ -885,7 +920,12 @@ mod server_native {
         if inbound_tx.send(event).is_err() {
             return OversizeOutcome::Terminal;
         }
-        mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+        mailer.push(Mail::new(
+            self_id,
+            wake_kind,
+            RpcInboundReady::default().encode_into_bytes(),
+            1,
+        ));
         OversizeOutcome::Continue
     }
 }

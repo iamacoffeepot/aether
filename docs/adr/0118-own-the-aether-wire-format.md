@@ -109,6 +109,13 @@ byte versions the *encoding*, so the format can evolve without ambiguity, and
 "is this aether wire or garbage" stays decidable. It is per-message, not
 per-value.
 
+A nested inline-`Ref` body — and the bytes the handle store retains for a
+handle — is itself a versioned kind image, so the version byte recurs at every
+*kind-image* boundary (the top-level payload, a nested inline-`Ref` body, a
+retained handle body) and never on interior values (scalars, fields, collection
+elements, the `Ref` handle arm). Every reader strips the byte on entering a kind
+image; no reader assumes a bare body.
+
 ### Determinism
 
 Encoding is deterministic by construction — the same value always produces the

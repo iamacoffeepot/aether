@@ -852,6 +852,8 @@ pub mod __derive_runtime {
     pub use alloc::vec::Vec;
     use serde::de::DeserializeOwned;
 
+    use crate::wire;
+
     /// Cast-shape decode helper. Routes through `bytemuck::pod_read_unaligned`
     /// after a length check so the Kind derive can emit a uniform call
     /// without the user crate needing `bytemuck` in scope. `T` satisfies
@@ -879,15 +881,16 @@ pub mod __derive_runtime {
         bytemuck::try_cast_slice(bytes).ok()
     }
 
-    /// Postcard-shape decode helper. Sibling of `decode_cast` for
+    /// Wire-shape decode helper. Sibling of `decode_cast` for
     /// schema-shaped kinds (anything carrying `Vec` / `String` /
     /// `Option` / a tagged enum). `T` satisfies `DeserializeOwned`
     /// via the user's `#[derive(Deserialize)]`; the bound lives on
     /// this helper rather than on `Kind` so cast kinds stay
-    /// independent of `serde`.
+    /// independent of `serde`. Strips the leading `WIRE_VERSION` byte
+    /// (ADR-0118) before reading the value.
     #[must_use]
-    pub fn decode_postcard<T: DeserializeOwned>(bytes: &[u8]) -> Option<T> {
-        postcard::from_bytes(bytes).ok()
+    pub fn decode_wire<T: DeserializeOwned>(bytes: &[u8]) -> Option<T> {
+        wire::from_bytes(bytes).ok()
     }
 
     /// Cast-shape encode helper. Mirror of `decode_cast`. Routes
@@ -899,11 +902,12 @@ pub mod __derive_runtime {
         bytemuck::bytes_of(value).to_vec()
     }
 
-    /// Postcard-shape encode helper. Mirror of `decode_postcard`. The
+    /// Wire-shape encode helper. Mirror of `decode_wire`. The
     /// `Serialize` bound lives here, not on `Kind`, so cast kinds stay
-    /// independent of `serde`.
-    pub fn encode_postcard<T: serde::Serialize>(value: &T) -> Vec<u8> {
-        postcard::to_allocvec(value).expect("postcard encode to Vec is infallible")
+    /// independent of `serde`. Prepends the leading `WIRE_VERSION` byte
+    /// (ADR-0118); encoding fails only past the `u32` length ceiling.
+    pub fn encode_wire<T: serde::Serialize>(value: &T) -> Vec<u8> {
+        wire::to_vec(value).expect("wire encode to Vec fails only past the u32 length ceiling")
     }
 }
 
@@ -916,8 +920,8 @@ pub enum DecodeError {
     SizeMismatch { expected: usize, actual: usize },
     /// Alignment of the input slice is incompatible with the target type.
     Alignment,
-    /// Postcard decode failed for a structural payload.
-    Postcard(postcard::Error),
+    /// Wire decode failed for a structural payload (ADR-0118).
+    Wire(wire::Error),
 }
 
 impl fmt::Display for DecodeError {
@@ -930,7 +934,7 @@ impl fmt::Display for DecodeError {
                 )
             }
             Self::Alignment => f.write_str("data payload alignment mismatch"),
-            Self::Postcard(e) => write!(f, "postcard decode failed: {e}"),
+            Self::Wire(e) => write!(f, "wire decode failed: {e}"),
         }
     }
 }
@@ -951,9 +955,9 @@ impl From<bytemuck::PodCastError> for DecodeError {
     }
 }
 
-impl From<postcard::Error> for DecodeError {
-    fn from(err: postcard::Error) -> Self {
-        Self::Postcard(err)
+impl From<wire::Error> for DecodeError {
+    fn from(err: wire::Error) -> Self {
+        Self::Wire(err)
     }
 }
 
@@ -1048,11 +1052,11 @@ mod tests {
         const ID: KindId = KindId(0xDEAD_BEEF_0000_0003);
 
         fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-            __derive_runtime::decode_postcard::<Self>(bytes)
+            __derive_runtime::decode_wire::<Self>(bytes)
         }
 
         fn encode_into_bytes(&self) -> Vec<u8> {
-            __derive_runtime::encode_postcard::<Self>(self)
+            __derive_runtime::encode_wire::<Self>(self)
         }
     }
 
