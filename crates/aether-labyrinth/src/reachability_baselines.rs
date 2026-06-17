@@ -57,18 +57,15 @@ fn start_at_origin(width: usize, height: usize) -> Vec<u32> {
     s
 }
 
-/// Cheap FNV-1a digest of a `Vec<u32>` result field (interpreted as
-/// little-endian bytes). Returns a `u64` that serves as the inline
-/// content anchor for seed-deterministic runs.
+/// Cheap FNV-1a digest of a `Vec<u32>` result field (each element
+/// interpreted as little-endian bytes). Returns a `u64` that serves as
+/// the inline content anchor for seed-deterministic runs. Composes
+/// `aether_data::fnv1a_64_bytes` over the concatenated little-endian
+/// byte stream to reuse the shared primitive rather than re-implementing
+/// the fold.
 fn fnv1a_digest(v: &[u32]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &val in v {
-        for byte in val.to_le_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-    hash
+    let bytes: Vec<u8> = v.iter().flat_map(|val| val.to_le_bytes()).collect();
+    aether_data::fnv1a_64_bytes(&bytes)
 }
 
 /// Minimum cost-to-reach over the final tick of `v`.
