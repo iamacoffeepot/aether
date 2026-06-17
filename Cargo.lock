@@ -42,7 +42,6 @@ dependencies = [
  "aether-kinds",
  "bytemuck",
  "inventory",
- "postcard",
  "serde",
  "tracing",
 ]

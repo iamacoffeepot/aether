@@ -24,10 +24,9 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # request kinds — that whole vocabulary lives in `aether-kinds`.
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = { workspace = true, default-features = false }
-postcard = { workspace = true, default-features = false, features = ["alloc"] }
-# Postcard-decoding typed payloads (e.g. `PriorState::as_kind`,
-# `Mail::decode_kind`) is serde-driven. The crate stays
-# `no_std`-friendly with `default-features = false`.
+# Decoding typed payloads (e.g. `PriorState::as_kind`,
+# `Mail::decode_kind`) is serde-driven via `aether_data::wire`. The crate
+# stays `no_std`-friendly with `default-features = false`.
 serde = { workspace = true, default-features = false, features = ["alloc"] }
 # ADR-0060: the wasm shim installs a `tracing::Subscriber`
 # (`MailSubscriber`) at component boot that turns `tracing::warn!` /
@@ -47,7 +46,6 @@ tracing = { workspace = true, default-features = false }
 aether-capabilities = { path = "../aether-capabilities", features = ["render"] }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 bytemuck = { workspace = true, features = ["derive"] }
-postcard = { workspace = true, features = ["alloc", "heapless-cas"] }
 # Issue #243: `#[derive(Kind)]` test fixtures emit `inventory::submit!`
 # on native targets; the macro path needs `::inventory` reachable.
 # Tests run native, so an unconditional dev-dep is fine.

@@ -22,7 +22,7 @@ pub mod mailbox;
 
 use core::marker::PhantomData;
 
-use aether_data::{Kind, MailboxId, Schema};
+use aether_data::{Kind, MailboxId, Schema, wire};
 
 use crate::mail::mailbox::KindId;
 
@@ -409,7 +409,7 @@ impl<'a> PriorState<'a> {
 
     /// Decode the prior-state bundle as kind `K` (ADR-0040). Returns
     /// `Some(K)` when the leading 8 bytes match `K::ID` (little-
-    /// endian) and the trailing bytes decode cleanly via postcard;
+    /// endian) and the trailing bytes decode cleanly via wire;
     /// `None` on id mismatch, short buffer (fewer than 8 bytes), or
     /// decode failure.
     ///
@@ -436,7 +436,7 @@ impl<'a> PriorState<'a> {
         if id != K::ID.0 {
             return None;
         }
-        postcard::from_bytes(payload).ok()
+        wire::from_bytes(payload).ok()
     }
 }
 
@@ -849,7 +849,7 @@ mod tests {
     // exercised end-to-end on host (the underlying `T::save_state`
     // panics on the wasm transport's host stub), so these tests pair
     // a hand-built bundle matching the documented framing
-    // (`[0..8) = K::ID LE`, `[8..) = postcard(value)`) against
+    // (`[0..8) = K::ID LE`, `[8..) = wire(value)`) against
     // `PriorState::as_kind` — the one we *can* unit-test on host. A
     // mismatch between framing and decode surfaces here before either
     // diverges from the ADR's wire shape.
@@ -874,8 +874,7 @@ mod tests {
 
     fn frame_bundle<K: Kind + Schema + Serialize>(value: &K) -> Vec<u8> {
         let mut out = Vec::from(K::ID.0.to_le_bytes());
-        let payload =
-            postcard::to_allocvec(value).expect("test setup: postcard encodes test value");
+        let payload = wire::to_vec(value).expect("test setup: wire encodes test value");
         out.extend_from_slice(&payload);
         out
     }
@@ -906,7 +905,7 @@ mod tests {
     #[test]
     fn as_kind_id_mismatch_returns_none() {
         // Frame under one kind, decode as a different one — the
-        // leading `K::ID` compare rejects before postcard runs.
+        // leading `K::ID` compare rejects before wire runs.
         let value = OtherState { flag: true };
         let buf = frame_bundle(&value);
         let prior = prior_from(&buf, 0);
@@ -936,7 +935,7 @@ mod tests {
 
     #[test]
     fn as_kind_correct_id_garbage_payload_returns_none() {
-        // Leading id matches but the postcard tail is truncated.
+        // Leading id matches but the wire tail is truncated.
         // Decode error must surface as None, not a panic.
         let mut buf = Vec::from(StateStruct::ID.0.to_le_bytes());
         buf.push(0xff);

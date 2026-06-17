@@ -12,14 +12,14 @@
 //!
 //! `save_state_kind` is the typed-state convenience (ADR-0040): the
 //! bundle is framed as `[0..8)` little-endian `K::ID` followed by the
-//! postcard encoding of `value`; the replacement instance recovers `K`
+//! wire encoding of `value`; the replacement instance recovers `K`
 //! via [`crate::mail::PriorState::as_kind`]. Use the raw `save_state`
 //! when persisting bytes that aren't a kind or when driving an
 //! explicit migration off the leading id.
 
 use alloc::vec::Vec;
 
-use aether_data::{Kind, Schema};
+use aether_data::{Kind, Schema, wire};
 
 /// Migration-bundle deposit surface for the `on_dehydrate` save hook.
 /// Init / runtime ctxs deliberately don't implement this.
@@ -44,7 +44,7 @@ pub trait Persistence {
 
     /// Persist a typed kind value across `replace_component`
     /// (ADR-0040). The bundle is framed as `[0..8)` little-endian
-    /// `K::ID` followed by the postcard encoding of `value`; the
+    /// `K::ID` followed by the wire encoding of `value`; the
     /// replacement instance recovers `K` via [`crate::mail::PriorState::as_kind`].
     ///
     /// `K::ID` is the ADR-0030 schema hash — changing the shape of
@@ -60,7 +60,7 @@ pub trait Persistence {
         K: Kind + Schema + serde::Serialize,
     {
         let mut out = Vec::from(K::ID.0.to_le_bytes());
-        let payload = postcard::to_allocvec(value).expect("postcard encode to Vec is infallible");
+        let payload = wire::to_vec(value).expect("wire encode to Vec is infallible");
         out.extend_from_slice(&payload);
         self.save_state(version, &out);
     }
