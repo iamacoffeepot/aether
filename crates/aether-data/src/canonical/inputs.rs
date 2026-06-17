@@ -1,38 +1,38 @@
 //! `InputsRecord` const-fn encoders (ADR-0033). The `#[actor]`
-//! macro emits one postcard-compatible byte array per handler /
+//! macro emits one ADR-0118 aether-wire byte array per handler /
 //! fallback / component-doc record, length-prefixed with the section
 //! version tag, and drops the bytes into the `aether.kinds.inputs`
 //! custom section. Writing at const-eval time keeps everything in
 //! `#[link_section]` statics with no runtime serializer on the
-//! guest — the wire shape matches `postcard(InputsRecord)`
+//! guest — the wire shape matches `wire::to_vec_bare(InputsRecord)`
 //! byte-for-byte so the substrate/hub reader decodes via
-//! `postcard::take_from_bytes` symmetrically.
+//! `wire::take_from_bytes_bare` symmetrically.
 
 use super::primitives::{
-    option_borrowed_str_len, str_len, varint_u64_len, write_option_borrowed_str, write_str,
-    write_varint_u64,
+    U32_WIDTH, U64_WIDTH, option_borrowed_str_len, str_len, write_option_borrowed_str, write_str,
+    write_u32_le, write_u64_le,
 };
 
-/// Byte length of a [`ReplyContract`](crate::ReplyContract)'s postcard
-/// encoding from its `(tag, id)` pair. The discriminant varint is one
-/// byte for these four variants; the `One` / `Stream` arms carry a
-/// trailing `varint(id)`, the `None` / `Manual` arms carry nothing.
-/// Variant order (`None` = 0, `One` = 1, `Stream` = 2, `Manual` = 3) is
-/// the discriminant, matching the enum's declared order.
+/// Byte length of a [`ReplyContract`](crate::ReplyContract)'s aether-wire
+/// encoding from its `(tag, id)` pair. The selector is a fixed `u32`; the
+/// `One` / `Stream` arms carry a trailing `KindId` (a bare `u64`), the
+/// `None` / `Manual` arms carry nothing. Variant order (`None` = 0,
+/// `One` = 1, `Stream` = 2, `Manual` = 3) is the selector, matching the
+/// enum's declared order.
 #[must_use]
-pub const fn reply_contract_len(reply_tag: u8, reply_id: u64) -> usize {
+pub const fn reply_contract_len(reply_tag: u8, _reply_id: u64) -> usize {
     match reply_tag {
-        // One / Stream carry a trailing varint(id).
-        1 | 2 => 1 + varint_u64_len(reply_id),
-        // None / Manual (and any other) carry just the discriminant.
-        _ => 1,
+        // One / Stream carry a trailing `KindId` (bare u64).
+        1 | 2 => U32_WIDTH + U64_WIDTH,
+        // None / Manual (and any other) carry just the selector.
+        _ => U32_WIDTH,
     }
 }
 
 /// Serialize a [`ReplyContract`](crate::ReplyContract) into `out` at
 /// `pos` from its `(tag, id)` pair, returning the new cursor. Exact
-/// `postcard(ReplyContract)` wire shape: `varint(tag)` then, for
-/// `One` / `Stream`, `varint(id)`.
+/// `wire::to_vec_bare(ReplyContract)` shape: a `u32` LE selector then, for
+/// `One` / `Stream`, the `KindId` as a bare `u64` LE.
 #[must_use]
 pub const fn write_reply_contract(
     reply_tag: u8,
@@ -40,34 +40,34 @@ pub const fn write_reply_contract(
     out: &mut [u8],
     mut pos: usize,
 ) -> usize {
-    out[pos] = reply_tag;
-    pos += 1;
+    pos = write_u32_le(reply_tag as u32, out, pos);
     if reply_tag == 1 || reply_tag == 2 {
-        pos = write_varint_u64(reply_id, out, pos);
+        pos = write_u64_le(reply_id, out, pos);
     }
     pos
 }
 
-/// Byte length of a `Handler` record's postcard encoding. One-byte
-/// enum-variant tag (`0x00`) + `varint(id)` + `postcard(name)` +
+/// Byte length of a `Handler` record's aether-wire encoding. A `u32` LE
+/// variant selector (`0`) + the `KindId` id (bare `u64`) + `wire(name)` +
 /// `option_str(doc)` + `reply_contract(reply_tag, reply_id)` — the
 /// ADR-0112 reply class.
 #[must_use]
 pub const fn inputs_handler_len(
-    id: u64,
+    _id: u64,
     name: &str,
     doc: Option<&str>,
     reply_tag: u8,
     reply_id: u64,
 ) -> usize {
-    1 + varint_u64_len(id)
+    U32_WIDTH
+        + U64_WIDTH
         + str_len(name)
         + option_borrowed_str_len(doc)
         + reply_contract_len(reply_tag, reply_id)
 }
 
 /// Serialize an `InputsRecord::Handler` into a fixed-size array sized
-/// by `inputs_handler_len`. Exact postcard wire shape for
+/// by `inputs_handler_len`. Exact aether-wire shape for
 /// `InputsRecord::Handler { id, name, doc, reply }`.
 #[must_use]
 pub const fn write_inputs_handler<const N: usize>(
@@ -78,10 +78,8 @@ pub const fn write_inputs_handler<const N: usize>(
     reply_id: u64,
 ) -> [u8; N] {
     let mut out = [0u8; N];
-    let mut pos = 0usize;
-    out[pos] = 0; // variant tag: Handler
-    pos += 1;
-    pos = write_varint_u64(id, &mut out, pos);
+    let mut pos = write_u32_le(0, &mut out, 0); // variant selector: Handler
+    pos = write_u64_le(id, &mut out, pos);
     pos = write_str(name, &mut out, pos);
     pos = write_option_borrowed_str(doc, &mut out, pos);
     pos = write_reply_contract(reply_tag, reply_id, &mut out, pos);
@@ -90,82 +88,74 @@ pub const fn write_inputs_handler<const N: usize>(
     out
 }
 
-/// Byte length of a `Fallback` record's postcard encoding.
+/// Byte length of a `Fallback` record's aether-wire encoding.
 #[must_use]
 pub const fn inputs_fallback_len(doc: Option<&str>) -> usize {
-    1 + option_borrowed_str_len(doc)
+    U32_WIDTH + option_borrowed_str_len(doc)
 }
 
 /// Serialize an `InputsRecord::Fallback` into a fixed-size array.
 #[must_use]
 pub const fn write_inputs_fallback<const N: usize>(doc: Option<&str>) -> [u8; N] {
     let mut out = [0u8; N];
-    let mut pos = 0usize;
-    out[pos] = 1; // variant tag: Fallback
-    pos += 1;
+    let mut pos = write_u32_le(1, &mut out, 0); // variant selector: Fallback
     pos = write_option_borrowed_str(doc, &mut out, pos);
     let _ = pos;
     out
 }
 
-/// Byte length of a `Component` record's postcard encoding.
+/// Byte length of a `Component` record's aether-wire encoding.
 #[must_use]
 pub const fn inputs_component_len(doc: &str) -> usize {
-    1 + str_len(doc)
+    U32_WIDTH + str_len(doc)
 }
 
 /// Serialize an `InputsRecord::Component` into a fixed-size array.
 #[must_use]
 pub const fn write_inputs_component<const N: usize>(doc: &str) -> [u8; N] {
     let mut out = [0u8; N];
-    let mut pos = 0usize;
-    out[pos] = 2; // variant tag: Component
-    pos += 1;
+    let mut pos = write_u32_le(2, &mut out, 0); // variant selector: Component
     pos = write_str(doc, &mut out, pos);
     let _ = pos;
     out
 }
 
-/// Byte length of a `Config` record's postcard encoding (ADR-0090 /
-/// issue 1257). One-byte enum-variant tag (`0x03`) + `varint(id)` +
-/// `postcard(name)`.
+/// Byte length of a `Config` record's aether-wire encoding (ADR-0090 /
+/// issue 1257). A `u32` LE variant selector (`3`) + the `KindId` id (bare
+/// `u64`) + `wire(name)`.
 #[must_use]
-pub const fn inputs_config_len(id: u64, name: &str) -> usize {
-    1 + varint_u64_len(id) + str_len(name)
+pub const fn inputs_config_len(_id: u64, name: &str) -> usize {
+    U32_WIDTH + U64_WIDTH + str_len(name)
 }
 
 /// Serialize an `InputsRecord::Config` into a fixed-size array sized by
-/// `inputs_config_len`. Exact postcard wire shape for
+/// `inputs_config_len`. Exact aether-wire shape for
 /// `InputsRecord::Config { id, name }`.
 #[must_use]
 pub const fn write_inputs_config<const N: usize>(id: u64, name: &str) -> [u8; N] {
     let mut out = [0u8; N];
-    let mut pos = 0usize;
-    out[pos] = 3; // variant tag: Config
-    pos += 1;
-    pos = write_varint_u64(id, &mut out, pos);
+    let mut pos = write_u32_le(3, &mut out, 0); // variant selector: Config
+    pos = write_u64_le(id, &mut out, pos);
     pos = write_str(name, &mut out, pos);
     let _ = pos;
     out
 }
 
-/// Byte length of an `ActorBoundary` record's postcard encoding
-/// (ADR-0096). One-byte enum-variant tag (`0x04`) + `postcard(namespace)`.
+/// Byte length of an `ActorBoundary` record's aether-wire encoding
+/// (ADR-0096). A `u32` LE variant selector (`4`) + `wire(namespace)`.
 #[must_use]
 pub const fn inputs_actor_boundary_len(namespace: &str) -> usize {
-    1 + str_len(namespace)
+    U32_WIDTH + str_len(namespace)
 }
 
 /// Serialize an `InputsRecord::ActorBoundary` into a fixed-size array
-/// sized by `inputs_actor_boundary_len`. Exact postcard wire shape for
+/// sized by `inputs_actor_boundary_len`. Exact aether-wire shape for
 /// `InputsRecord::ActorBoundary { namespace }` — the per-actor group
 /// marker `export!(A, B, …)` writes ahead of each type's records.
 #[must_use]
 pub const fn write_inputs_actor_boundary<const N: usize>(namespace: &str) -> [u8; N] {
     let mut out = [0u8; N];
-    let mut pos = 0usize;
-    out[pos] = 4; // variant tag: ActorBoundary
-    pos += 1;
+    let mut pos = write_u32_le(4, &mut out, 0); // variant selector: ActorBoundary
     pos = write_str(namespace, &mut out, pos);
     let _ = pos;
     out

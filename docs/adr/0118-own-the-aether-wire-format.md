@@ -116,6 +116,15 @@ retained handle body) and never on interior values (scalars, fields, collection
 elements, the `Ref` handle arm). Every reader strips the byte on entering a kind
 image; no reader assumes a bare body.
 
+The build-time **manifest sections** — `aether.kinds`, `aether.kinds.labels`,
+`aether.kinds.inputs` — sit outside this envelope. Each carries a per-section
+version byte for its own encoding evolution and hashes the *bare* structural
+body (`wire::to_vec_bare`, no leading version byte) into `KindId`. Holding the
+encoding-version out of the hash keeps `KindId` a function of the schema alone:
+a future encoding-only `WIRE_VERSION` bump re-frames mail-path kind images while
+every manifest id stays put, and an id regenerates only when the canonical bytes
+themselves change — as they do at the postcard→wire cutover of these sections.
+
 ### Determinism
 
 Encoding is deterministic by construction — the same value always produces the

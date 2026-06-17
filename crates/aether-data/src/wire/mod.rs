@@ -142,6 +142,35 @@ pub fn take_from_bytes<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<(T, &'
     Ok((value, deserializer.remaining()))
 }
 
+/// Decode a value from **bare** wire bytes carrying no leading [`WIRE_VERSION`],
+/// requiring every byte consumed. The symmetric counterpart to [`to_vec_bare`]:
+/// for sites that frame the bare structural body themselves and version the
+/// frame independently of [`WIRE_VERSION`] — e.g. the `aether.kinds` manifest,
+/// whose per-section version byte versions the encoding and whose bare body is
+/// the `Kind::ID` hash input. Most callers want [`from_bytes`].
+pub fn from_bytes_bare<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, Error> {
+    let mut deserializer = de::Deserializer::new(bytes);
+    let value = T::deserialize(&mut deserializer)?;
+    if deserializer.is_empty() {
+        Ok(value)
+    } else {
+        Err(Error::TrailingBytes)
+    }
+}
+
+/// Decode a value from the front of **bare** wire bytes (no leading
+/// [`WIRE_VERSION`]), returning the value and the unconsumed remainder. The
+/// symmetric counterpart to [`to_vec_bare`] for walking back-to-back bare
+/// records (e.g. the manifest reader stepping `[version][bare body]` records,
+/// where the version byte is the frame's, not [`WIRE_VERSION`]).
+pub fn take_from_bytes_bare<'a, T: Deserialize<'a>>(
+    bytes: &'a [u8],
+) -> Result<(T, &'a [u8]), Error> {
+    let mut deserializer = de::Deserializer::new(bytes);
+    let value = T::deserialize(&mut deserializer)?;
+    Ok((value, deserializer.remaining()))
+}
+
 fn strip_version(bytes: &[u8]) -> Result<&[u8], Error> {
     match bytes.split_first() {
         Some((&v, rest)) if v == WIRE_VERSION => Ok(rest),

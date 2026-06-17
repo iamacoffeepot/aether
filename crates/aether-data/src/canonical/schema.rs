@@ -1,23 +1,27 @@
 //! Canonical `SchemaType` + `(name, schema)` kind serializers
-//! (ADR-0032). Produces postcard-compatible bytes at const-eval time
+//! (ADR-0032). Produces ADR-0118 aether-wire bytes at const-eval time
 //! plus a runtime sibling (`canonical_kind_bytes`) that goes through
 //! `SchemaShape` so the hub can re-derive ids for kinds decoded off
 //! the wire.
 //!
-//! The wire-tag constants here are hand-pinned (not source-order
+//! The selector constants here are hand-pinned (not source-order
 //! inferred) so rearranging `SchemaType`/`EnumVariant` in `types.rs`
-//! can't silently change the wire without showing up here too. The
-//! substrate/hub `SchemaShape` enum must keep the same order.
+//! can't silently change the wire without showing up here too. They are
+//! the serde `variant_index` of the matching `SchemaShape`/`VariantShape`
+//! arm, written as a fixed `u32` little-endian selector — so the
+//! const-fn output stays byte-identical to `wire::to_vec_bare(KindShape)`,
+//! and the substrate/hub `SchemaShape` enum must keep the same order.
 
 use crate::schema::{EnumVariant, Primitive, SchemaCell, SchemaType};
 
 use super::primitives::{
-    cow_enum_variants, cow_named_fields, cow_schema_types, str_len, varint_u32_len, varint_u64_len,
-    varint_usize_len, write_str, write_varint_u32, write_varint_u64, write_varint_usize,
+    FLAG_WIDTH, U32_WIDTH, U64_WIDTH, cow_enum_variants, cow_named_fields, cow_schema_types,
+    str_len, write_count, write_str, write_u32_le, write_u64_le,
 };
 use crate::schema::KindShape;
 use crate::schema::SchemaShape;
 use crate::schema::VariantShape;
+use crate::wire;
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -51,31 +55,35 @@ const PRIM_I64: u8 = 7;
 const PRIM_F32: u8 = 8;
 const PRIM_F64: u8 = 9;
 
-/// Byte length the canonical schema encoding will take.
+/// Byte length the canonical schema encoding will take. Each `SchemaShape`
+/// arm is a `u32` little-endian selector (`U32_WIDTH` bytes) followed by its
+/// positional body — the wire encoding `wire::to_vec_bare(SchemaShape)`
+/// produces.
 #[must_use]
 pub const fn canonical_len_schema(schema: &SchemaType) -> usize {
     match schema {
-        SchemaType::Unit | SchemaType::Bool | SchemaType::String | SchemaType::Bytes => 1,
-        SchemaType::Scalar(_) => 1 + 1,
+        SchemaType::Unit | SchemaType::Bool | SchemaType::String | SchemaType::Bytes => U32_WIDTH,
+        // Selector + the inner `Primitive` as its own `u32` unit-variant index.
+        SchemaType::Scalar(_) => U32_WIDTH + U32_WIDTH,
         SchemaType::Option(cell) | SchemaType::Vec(cell) | SchemaType::Ref(cell) => {
-            1 + canonical_len_cell(cell)
+            U32_WIDTH + canonical_len_cell(cell)
         }
-        SchemaType::Array { element, len } => {
-            1 + canonical_len_cell(element) + varint_u32_len(*len)
+        SchemaType::Array { element, len: _ } => {
+            U32_WIDTH + canonical_len_cell(element) + U32_WIDTH
         }
         SchemaType::Struct { fields, repr_c: _ } => {
             let slice = cow_named_fields(fields);
-            let mut total = 1 + varint_usize_len(slice.len());
+            let mut total = U32_WIDTH + U32_WIDTH;
             let mut i = 0;
             while i < slice.len() {
                 total += canonical_len_schema(&slice[i].ty);
                 i += 1;
             }
-            total + 1
+            total + FLAG_WIDTH
         }
         SchemaType::Enum { variants } => {
             let slice = cow_enum_variants(variants);
-            let mut total = 1 + varint_usize_len(slice.len());
+            let mut total = U32_WIDTH + U32_WIDTH;
             let mut i = 0;
             while i < slice.len() {
                 total += canonical_len_variant(&slice[i]);
@@ -83,8 +91,10 @@ pub const fn canonical_len_schema(schema: &SchemaType) -> usize {
             }
             total
         }
-        SchemaType::Map { key, value } => 1 + canonical_len_cell(key) + canonical_len_cell(value),
-        SchemaType::TypeId(id) => 1 + varint_u64_len(*id),
+        SchemaType::Map { key, value } => {
+            U32_WIDTH + canonical_len_cell(key) + canonical_len_cell(value)
+        }
+        SchemaType::TypeId(_) => U32_WIDTH + U64_WIDTH,
     }
 }
 
@@ -99,14 +109,12 @@ const fn canonical_len_cell(cell: &SchemaCell) -> usize {
 
 const fn canonical_len_variant(variant: &EnumVariant) -> usize {
     match variant {
-        EnumVariant::Unit { discriminant, .. } => 1 + varint_u32_len(*discriminant),
-        EnumVariant::Tuple {
-            discriminant,
-            fields,
-            ..
-        } => {
+        // `VariantShape` selector + the `discriminant: u32` field.
+        EnumVariant::Unit { .. } => U32_WIDTH + U32_WIDTH,
+        EnumVariant::Tuple { fields, .. } => {
             let slice = cow_schema_types(fields);
-            let mut total = 1 + varint_u32_len(*discriminant) + varint_usize_len(slice.len());
+            // selector + discriminant + the `fields: Vec` count.
+            let mut total = U32_WIDTH + U32_WIDTH + U32_WIDTH;
             let mut i = 0;
             while i < slice.len() {
                 total += canonical_len_schema(&slice[i]);
@@ -114,13 +122,9 @@ const fn canonical_len_variant(variant: &EnumVariant) -> usize {
             }
             total
         }
-        EnumVariant::Struct {
-            discriminant,
-            fields,
-            ..
-        } => {
+        EnumVariant::Struct { fields, .. } => {
             let slice = cow_named_fields(fields);
-            let mut total = 1 + varint_u32_len(*discriminant) + varint_usize_len(slice.len());
+            let mut total = U32_WIDTH + U32_WIDTH + U32_WIDTH;
             let mut i = 0;
             while i < slice.len() {
                 total += canonical_len_schema(&slice[i].ty);
@@ -131,7 +135,7 @@ const fn canonical_len_variant(variant: &EnumVariant) -> usize {
     }
 }
 
-/// Serialize `schema` into `N` bytes of canonical postcard form.
+/// Serialize `schema` into `N` bytes of canonical aether-wire form.
 /// Caller passes `N = canonical_len_schema(schema)`.
 ///
 /// # Panics
@@ -150,14 +154,14 @@ pub const fn canonical_serialize_schema<const N: usize>(schema: &SchemaType) -> 
     out
 }
 
-/// Byte length for a full `(name, schema)` canonical record —
-/// matches `postcard(KindShape { name, schema })`.
+/// Byte length for a full `(name, schema)` canonical record — matches
+/// the bare aether-wire body of `KindShape { name, schema }`.
 #[must_use]
 pub const fn canonical_len_kind(name: &str, schema: &SchemaType) -> usize {
     str_len(name) + canonical_len_schema(schema)
 }
 
-/// Serialize `(name, schema)` into `N` bytes of a canonical postcard
+/// Serialize `(name, schema)` into `N` bytes of a canonical aether-wire
 /// record. These are the bytes that populate `aether.kinds` (one
 /// record per `#[derive(Kind)]` type) and that `Kind::ID` hashes over.
 ///
@@ -185,24 +189,25 @@ pub const fn canonical_serialize_kind<const N: usize>(name: &str, schema: &Schem
 /// manifest, where the length isn't const and the `Cow` variants on
 /// the input are `Owned` (const-path helpers panic on those).
 ///
-/// Implementation goes `SchemaType → SchemaShape → postcard`. The
-/// canonical bytes format is defined as `postcard(KindShape { name,
-/// schema: shape })`, and `SchemaShape` drops every nominal field the
-/// const serializer also drops, so the two paths produce
+/// Implementation goes `SchemaType → SchemaShape → wire::to_vec_bare`.
+/// The canonical bytes are the bare aether-wire body of `KindShape {
+/// name, schema: shape }`, and `SchemaShape` drops every nominal field
+/// the const serializer also drops, so the two paths produce
 /// byte-identical output. Pinned by the `canonical_kind_bytes_runtime_
 /// matches_const` test below.
 ///
 /// # Panics
-/// Panics if postcard encoding of the `KindShape` fails — fail-fast
-/// per ADR-0063: `postcard::to_allocvec` into a growable `Vec` cannot
-/// fail for `KindShape`, so a failure indicates a serializer bug.
+/// Panics if wire encoding of the `KindShape` fails — fail-fast per
+/// ADR-0063: `wire::to_vec_bare` into a growable `Vec` fails only when a
+/// length exceeds the `u32` ceiling, unreachable for a `KindShape`, so a
+/// failure indicates a serializer bug.
 #[must_use]
 pub fn canonical_kind_bytes(name: &str, schema: &SchemaType) -> Vec<u8> {
     let shape = KindShape {
         name: Cow::Owned(name.into()),
         schema: schema_to_shape(schema),
     };
-    postcard::to_allocvec(&shape).expect("canonical KindShape serialization is infallible")
+    wire::to_vec_bare(&shape).expect("canonical KindShape serialization is infallible")
 }
 
 fn schema_to_shape(s: &SchemaType) -> SchemaShape {
@@ -285,19 +290,19 @@ pub fn kind_id_from_parts(name: &str, schema: &SchemaType) -> u64 {
 }
 
 /// Derive a `Kind::ID` from a decoded `KindShape`. Same hash as
-/// `kind_id_from_parts` — the canonical bytes format is
-/// `postcard(KindShape)`, so we postcard the shape directly without a
+/// `kind_id_from_parts` — the canonical bytes are the bare aether-wire
+/// body of `KindShape`, so we wire-encode the shape directly without a
 /// `SchemaShape → SchemaType` detour. Used by `kind_manifest` to key
 /// labels records by id after decoding both sections off the wasm.
 ///
 /// # Panics
-/// Panics if postcard encoding of `shape` fails — fail-fast per
-/// ADR-0063: `postcard::to_allocvec` into a growable `Vec` cannot fail
-/// for `KindShape`, so a failure indicates a serializer bug.
+/// Panics if wire encoding of `shape` fails — fail-fast per ADR-0063:
+/// `wire::to_vec_bare` into a growable `Vec` fails only when a length
+/// exceeds the `u32` ceiling, unreachable for a `KindShape`, so a
+/// failure indicates a serializer bug.
 #[must_use]
 pub fn kind_id_from_shape(shape: &KindShape) -> u64 {
-    let bytes =
-        postcard::to_allocvec(shape).expect("canonical KindShape serialization is infallible");
+    let bytes = wire::to_vec_bare(shape).expect("canonical KindShape serialization is infallible");
     (u64::from(TAG_KIND) << TAG_SHIFT) | (fnv1a_64_prefixed(KIND_DOMAIN, &bytes) & HASH_MASK)
 }
 
@@ -327,48 +332,38 @@ const fn write_schema(schema: &SchemaType, out: &mut [u8], cursor: usize) -> usi
     let mut pos = cursor;
     match schema {
         SchemaType::Unit => {
-            out[pos] = SCHEMA_UNIT;
-            pos += 1;
+            pos = write_u32_le(SCHEMA_UNIT as u32, out, pos);
         }
         SchemaType::Bool => {
-            out[pos] = SCHEMA_BOOL;
-            pos += 1;
+            pos = write_u32_le(SCHEMA_BOOL as u32, out, pos);
         }
         SchemaType::Scalar(p) => {
-            out[pos] = SCHEMA_SCALAR;
-            pos += 1;
-            out[pos] = primitive_tag(*p);
-            pos += 1;
+            pos = write_u32_le(SCHEMA_SCALAR as u32, out, pos);
+            pos = write_u32_le(primitive_tag(*p) as u32, out, pos);
         }
         SchemaType::String => {
-            out[pos] = SCHEMA_STRING;
-            pos += 1;
+            pos = write_u32_le(SCHEMA_STRING as u32, out, pos);
         }
         SchemaType::Bytes => {
-            out[pos] = SCHEMA_BYTES;
-            pos += 1;
+            pos = write_u32_le(SCHEMA_BYTES as u32, out, pos);
         }
         SchemaType::Option(cell) => {
-            out[pos] = SCHEMA_OPTION;
-            pos += 1;
+            pos = write_u32_le(SCHEMA_OPTION as u32, out, pos);
             pos = write_cell(cell, out, pos);
         }
         SchemaType::Vec(cell) => {
-            out[pos] = SCHEMA_VEC;
-            pos += 1;
+            pos = write_u32_le(SCHEMA_VEC as u32, out, pos);
             pos = write_cell(cell, out, pos);
         }
         SchemaType::Array { element, len } => {
-            out[pos] = SCHEMA_ARRAY;
-            pos += 1;
+            pos = write_u32_le(SCHEMA_ARRAY as u32, out, pos);
             pos = write_cell(element, out, pos);
-            pos = write_varint_u32(*len, out, pos);
+            pos = write_u32_le(*len, out, pos);
         }
         SchemaType::Struct { fields, repr_c } => {
             let slice = cow_named_fields(fields);
-            out[pos] = SCHEMA_STRUCT;
-            pos += 1;
-            pos = write_varint_usize(slice.len(), out, pos);
+            pos = write_u32_le(SCHEMA_STRUCT as u32, out, pos);
+            pos = write_count(slice.len(), out, pos);
             let mut i = 0;
             while i < slice.len() {
                 pos = write_schema(&slice[i].ty, out, pos);
@@ -379,9 +374,8 @@ const fn write_schema(schema: &SchemaType, out: &mut [u8], cursor: usize) -> usi
         }
         SchemaType::Enum { variants } => {
             let slice = cow_enum_variants(variants);
-            out[pos] = SCHEMA_ENUM;
-            pos += 1;
-            pos = write_varint_usize(slice.len(), out, pos);
+            pos = write_u32_le(SCHEMA_ENUM as u32, out, pos);
+            pos = write_count(slice.len(), out, pos);
             let mut i = 0;
             while i < slice.len() {
                 pos = write_variant(&slice[i], out, pos);
@@ -389,20 +383,17 @@ const fn write_schema(schema: &SchemaType, out: &mut [u8], cursor: usize) -> usi
             }
         }
         SchemaType::Ref(cell) => {
-            out[pos] = SCHEMA_REF;
-            pos += 1;
+            pos = write_u32_le(SCHEMA_REF as u32, out, pos);
             pos = write_cell(cell, out, pos);
         }
         SchemaType::Map { key, value } => {
-            out[pos] = SCHEMA_MAP;
-            pos += 1;
+            pos = write_u32_le(SCHEMA_MAP as u32, out, pos);
             pos = write_cell(key, out, pos);
             pos = write_cell(value, out, pos);
         }
         SchemaType::TypeId(id) => {
-            out[pos] = SCHEMA_TYPE_ID;
-            pos += 1;
-            pos = write_varint_u64(*id, out, pos);
+            pos = write_u32_le(SCHEMA_TYPE_ID as u32, out, pos);
+            pos = write_u64_le(*id, out, pos);
         }
     }
     pos
@@ -421,9 +412,8 @@ const fn write_variant(variant: &EnumVariant, out: &mut [u8], cursor: usize) -> 
     let mut pos = cursor;
     match variant {
         EnumVariant::Unit { discriminant, .. } => {
-            out[pos] = VARIANT_UNIT;
-            pos += 1;
-            pos = write_varint_u32(*discriminant, out, pos);
+            pos = write_u32_le(VARIANT_UNIT as u32, out, pos);
+            pos = write_u32_le(*discriminant, out, pos);
         }
         EnumVariant::Tuple {
             discriminant,
@@ -431,10 +421,9 @@ const fn write_variant(variant: &EnumVariant, out: &mut [u8], cursor: usize) -> 
             ..
         } => {
             let slice = cow_schema_types(fields);
-            out[pos] = VARIANT_TUPLE;
-            pos += 1;
-            pos = write_varint_u32(*discriminant, out, pos);
-            pos = write_varint_usize(slice.len(), out, pos);
+            pos = write_u32_le(VARIANT_TUPLE as u32, out, pos);
+            pos = write_u32_le(*discriminant, out, pos);
+            pos = write_count(slice.len(), out, pos);
             let mut i = 0;
             while i < slice.len() {
                 pos = write_schema(&slice[i], out, pos);
@@ -447,10 +436,9 @@ const fn write_variant(variant: &EnumVariant, out: &mut [u8], cursor: usize) -> 
             ..
         } => {
             let slice = cow_named_fields(fields);
-            out[pos] = VARIANT_STRUCT;
-            pos += 1;
-            pos = write_varint_u32(*discriminant, out, pos);
-            pos = write_varint_usize(slice.len(), out, pos);
+            pos = write_u32_le(VARIANT_STRUCT as u32, out, pos);
+            pos = write_u32_le(*discriminant, out, pos);
+            pos = write_count(slice.len(), out, pos);
             let mut i = 0;
             while i < slice.len() {
                 pos = write_schema(&slice[i].ty, out, pos);

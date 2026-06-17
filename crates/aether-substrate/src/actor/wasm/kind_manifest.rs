@@ -8,9 +8,10 @@
 // the `Kind::ID` hash input) and `aether.kinds.labels` (Rust-nominal
 // sidecar: type paths, field names, variant names).
 //
-// Record formats:
-//   `aether.kinds`         — [0x04] [postcard(KindShape)]
-//   `aether.kinds.labels`  — [0x03] [postcard(KindLabels)]
+// Record formats (ADR-0118: the bytes are the owned aether-wire
+// encoding, not postcard, since issue 1984):
+//   `aether.kinds`         — [0x05] [wire(KindShape)]
+//   `aether.kinds.labels`  — [0x04] [wire(KindLabels)]
 //
 // `aether.kinds` records are identified by computing
 // `kind_id_from_parts(&shape.name, &shape.schema)`. `aether.kinds.labels`
@@ -26,7 +27,7 @@
 // rebuild-required boundary is explicit rather than "single-field
 // cast kinds have empty fields and encode-from-JSON silently fails."
 //
-// The parser walks each section sequentially; postcard stops decoding
+// The parser walks each section sequentially; the wire decoder stops
 // exactly at the record's end, so the next byte is the next record's
 // version tag. Unknown version bytes abort the parse rather than
 // silently skip.
@@ -44,7 +45,7 @@ use std::collections::HashMap;
 use aether_data::{
     EnumVariant, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, KindDescriptor, KindLabels,
     KindShape, LabelNode, NamedField, SchemaCell, SchemaShape, SchemaType, VariantLabel,
-    canonical::kind_id_from_shape,
+    canonical::kind_id_from_shape, wire,
 };
 use aether_kinds::{
     ComponentCapabilities, ConfigCapability, FallbackCapability, HandlerCapability,
@@ -75,28 +76,31 @@ pub const LABELS_SECTION: &str = "aether.kinds.labels";
 pub const NAMESPACE_SECTION: &str = "aether.namespace";
 
 /// Wire versions accepted in `aether.kinds`. The shape record's bytes
-/// are `Kind::ID` hash input, so the format is pinned indefinitely at
-/// the canonical-bytes layout — any change there would shift every id.
-/// v0x04 (issue 640) shrunk the per-record framing back to just
+/// are `Kind::ID` hash input, so a change to their layout regenerates
+/// every id — a deliberate clean break, taken loudly via this version
+/// byte. v0x04 (issue 640) shrunk the per-record framing back to just
 /// `[version_byte][canonical_bytes]` after the v0x03 trailing
-/// `is_stream` byte retired with the auto-subscribe path. The
-/// canonical bytes themselves are unchanged from v0x02 / v0x03 so
-/// `Kind::ID` is stable; only the framing shrunk by one byte. v0x02 /
-/// v0x03 are no longer accepted — a loud rebuild-required boundary,
-/// same as the v0x02→v0x03 bump on `aether.kinds.labels`.
+/// `is_stream` byte retired with the auto-subscribe path. v0x05
+/// (ADR-0118 / issue 1984) re-encoded the canonical body from postcard
+/// onto the owned aether-wire format (fixed little-endian selectors /
+/// ids / counts), so every `KindId` regenerates; v0x02 / v0x03 / v0x04
+/// are no longer accepted — a loud rebuild-required boundary, same as
+/// the bump on `aether.kinds.labels`.
 ///
 /// Note: this is the `aether.kinds` section version, distinct from the
 /// `aether.kinds.inputs` section version (`INPUTS_SECTION_VERSION`, also
-/// `0x04` since ADR-0112 / issue 1850). The two sections version
+/// `0x05` since ADR-0118 / issue 1984). The two sections version
 /// independently and happen to coincide at this revision — a shared
 /// number, not a shared format.
-const KINDS_VERSION: u8 = 0x04;
+const KINDS_VERSION: u8 = 0x05;
 
 /// Wire versions accepted in `aether.kinds.labels`. v0x03 added
 /// `kind_id` to `KindLabels`, making records self-identifying so the
-/// reader pairs by id rather than by declaration order. v0x02 is no
-/// longer accepted — a loud rebuild-required boundary.
-const LABELS_SUPPORTED_VERSIONS: &[u8] = &[0x03];
+/// reader pairs by id rather than by declaration order. v0x04 (ADR-0118
+/// / issue 1984) re-encoded the record from postcard onto the owned
+/// aether-wire format. v0x02 / v0x03 are no longer accepted — a loud
+/// rebuild-required boundary.
+const LABELS_SUPPORTED_VERSIONS: &[u8] = &[0x04];
 
 /// Decode every kind record in the component's `aether.kinds` and
 /// (when present) `aether.kinds.labels` sections, merging labels into
@@ -142,10 +146,10 @@ pub fn read_from_bytes(wasm: &[u8]) -> Result<Vec<KindDescriptor>, String> {
     Ok(descriptors)
 }
 
-/// Walk the `aether.kinds` v0x04 section: each record is
-/// `[0x04][postcard(KindShape)]`. Postcard stops decoding exactly at
-/// the shape record's end, so the next byte is the next record's
-/// version tag.
+/// Walk the `aether.kinds` v0x05 section: each record is
+/// `[0x05][wire(KindShape)]`. The wire decoder stops exactly at the
+/// shape record's end, so the next byte is the next record's version
+/// tag.
 fn decode_kinds_records(data: &[u8], out: &mut Vec<KindShape>) -> Result<(), String> {
     let mut cursor = data;
     while !cursor.is_empty() {
@@ -156,14 +160,14 @@ fn decode_kinds_records(data: &[u8], out: &mut Vec<KindShape>) -> Result<(), Str
             ));
         }
         let body = &cursor[1..];
-        match postcard::take_from_bytes::<KindShape>(body) {
+        match wire::take_from_bytes_bare::<KindShape>(body) {
             Ok((shape, rest)) => {
                 out.push(shape);
                 cursor = rest;
             }
             Err(e) => {
                 return Err(format!(
-                    "{MANIFEST_SECTION}: postcard decode failed at record {}: {e}",
+                    "{MANIFEST_SECTION}: wire decode failed at record {}: {e}",
                     out.len() + 1
                 ));
             }
@@ -262,7 +266,7 @@ pub struct ActorInputs {
 
 /// Decode the component's `aether.kinds.inputs` section (ADR-0033 /
 /// ADR-0096) into one [`ActorInputs`] per exported actor type. The
-/// record stream is `[0x03][postcard(InputsRecord)]` back-to-back; an
+/// record stream is `[0x05][wire(InputsRecord)]` back-to-back; an
 /// `ActorBoundary { namespace }` record opens a new group and the
 /// Handler / Fallback / Component / Config records that follow belong
 /// to it, in declaration order. A single-actor module emits no
@@ -387,14 +391,14 @@ fn decode_inputs_records(data: &[u8], out: &mut Vec<InputsRecord>) -> Result<(),
             ));
         }
         let body = &cursor[1..];
-        match postcard::take_from_bytes::<InputsRecord>(body) {
+        match wire::take_from_bytes_bare::<InputsRecord>(body) {
             Ok((record, rest)) => {
                 out.push(record);
                 cursor = rest;
             }
             Err(e) => {
                 return Err(format!(
-                    "{INPUTS_SECTION}: postcard decode failed at record {}: {e}",
+                    "{INPUTS_SECTION}: wire decode failed at record {}: {e}",
                     out.len() + 1
                 ));
             }
@@ -403,10 +407,10 @@ fn decode_inputs_records(data: &[u8], out: &mut Vec<InputsRecord>) -> Result<(),
     Ok(())
 }
 
-/// Walk one custom section: `[version][postcard(T)]` records until
-/// the section is exhausted. Abort on unknown version or postcard
-/// decode error. Per-section version allowlists are passed in so the
-/// shape and labels sections can evolve independently.
+/// Walk one custom section: `[version][wire(T)]` records until the
+/// section is exhausted. Abort on unknown version or wire decode error.
+/// Per-section version allowlists are passed in so the shape and labels
+/// sections can evolve independently.
 fn decode_records<T: DeserializeOwned>(
     section_name: &str,
     supported_versions: &[u8],
@@ -422,14 +426,14 @@ fn decode_records<T: DeserializeOwned>(
             ));
         }
         let body = &cursor[1..];
-        match postcard::take_from_bytes::<T>(body) {
+        match wire::take_from_bytes_bare::<T>(body) {
             Ok((record, rest)) => {
                 out.push(record);
                 cursor = rest;
             }
             Err(e) => {
                 return Err(format!(
-                    "{section_name}: postcard decode failed at record {}: {e}",
+                    "{section_name}: wire decode failed at record {}: {e}",
                     out.len() + 1
                 ));
             }
@@ -657,23 +661,23 @@ mod tests {
         wat::parse_str(wat).unwrap()
     }
 
-    /// Append `[0x03][postcard(shape)][is_stream_byte]` to `canonical`.
-    /// Matches what the Kind derive emits into the `aether.kinds`
-    /// section. Issue 640 retired the v0x03 trailing `is_stream`
-    /// byte; v0x04 is `[version_byte][postcard(KindShape)]`.
+    /// Append `[0x05][wire(KindShape)]` to `canonical`. Matches what the
+    /// Kind derive emits into the `aether.kinds` section (ADR-0118 v0x05:
+    /// the canonical body is the owned aether-wire encoding).
     fn push_shape(canonical: &mut Vec<u8>, shape: &KindShape) {
-        canonical.push(0x04);
-        canonical.extend(postcard::to_allocvec(shape).unwrap());
+        canonical.push(0x05);
+        canonical.extend(wire::to_vec_bare(shape).unwrap());
     }
 
-    /// Append `[0x03][postcard(labels)]` to `labels_bytes`, and stamp
+    /// Append `[0x04][wire(KindLabels)]` to `labels_bytes`, and stamp
     /// `labels.kind_id` from the paired shape so the reader's by-id
     /// merge finds it. Matches what the Kind derive emits into
-    /// `aether.kinds.labels` (v0x03 adds `kind_id`).
+    /// `aether.kinds.labels` (ADR-0118 v0x04: the owned aether-wire
+    /// encoding).
     fn push_labels(labels_bytes: &mut Vec<u8>, shape: &KindShape, labels: &mut KindLabels) {
         labels.kind_id = aether_data::KindId(kind_id_from_shape(shape));
-        labels_bytes.push(0x03);
-        labels_bytes.extend(postcard::to_allocvec(labels).unwrap());
+        labels_bytes.push(0x04);
+        labels_bytes.extend(wire::to_vec_bare(labels).unwrap());
     }
 
     #[test]
@@ -771,8 +775,8 @@ mod tests {
                 repr_c: false,
             },
         };
-        let mut canonical = vec![0x04u8];
-        canonical.extend(postcard::to_allocvec(&shape).unwrap());
+        let mut canonical = vec![0x05u8];
+        canonical.extend(wire::to_vec_bare(&shape).unwrap());
         let wasm = wasm_with_section(MANIFEST_SECTION, &canonical);
         let descs = read_from_bytes(&wasm).unwrap();
         assert_eq!(descs.len(), 1);
@@ -869,8 +873,8 @@ mod tests {
         let mut canonical = Vec::new();
         push_shape(&mut canonical, &shape);
         let mut labels_bytes = Vec::new();
-        labels_bytes.push(0x03);
-        labels_bytes.extend(postcard::to_allocvec(&orphan).unwrap());
+        labels_bytes.push(0x04);
+        labels_bytes.extend(wire::to_vec_bare(&orphan).unwrap());
         let wasm = wasm_with_two_sections(&canonical, &labels_bytes);
         let descs = read_from_bytes(&wasm).unwrap();
         assert_eq!(descs.len(), 1);
@@ -1016,7 +1020,7 @@ mod tests {
         let mut out = Vec::new();
         for rec in records {
             out.push(INPUTS_SECTION_VERSION);
-            out.extend(postcard::to_allocvec(rec).unwrap());
+            out.extend(wire::to_vec_bare(rec).unwrap());
         }
         out
     }
