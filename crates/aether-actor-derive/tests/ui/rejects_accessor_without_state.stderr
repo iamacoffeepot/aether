@@ -1,7 +1,7 @@
 error: `dehydrate` / `rehydrate` are the ADR-0113 persistence accessors and require a `type State = …` declaration; add it, or rename the method if it is an unrelated helper
-  --> tests/ui/rejects_accessor_without_state.rs:44:5
+  --> tests/ui/rejects_accessor_without_state.rs:42:5
    |
-44 | /     fn dehydrate(&self) -> CounterState {
-45 | |         CounterState { count: self.count }
-46 | |     }
+42 | /     fn dehydrate(&self) -> CounterState {
+43 | |         CounterState { count: self.count }
+44 | |     }
    | |_____^

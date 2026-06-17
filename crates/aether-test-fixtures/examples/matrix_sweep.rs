@@ -38,7 +38,7 @@ extern crate alloc;
 use core::cell::UnsafeCell;
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, Instanced, MailboxId, Manual, OutboundReply, Resolver, Subname,
+    BootError, FfiActor, FfiCtx, FfiInitCtx, Instanced, MailboxId, Manual, OutboundReply, Subname,
     actor,
 };
 use aether_test_fixtures::{
@@ -144,10 +144,7 @@ pub struct MatrixParent;
 impl FfiActor for MatrixParent {
     const NAMESPACE: &'static str = "test.matrix.parent";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(MatrixParent)
     }
 
@@ -202,10 +199,7 @@ impl Instanced for MatrixChild {}
 impl FfiActor for MatrixChild {
     const NAMESPACE: &'static str = "test.matrix.child";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(MatrixChild)
     }
 

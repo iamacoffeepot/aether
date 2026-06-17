@@ -28,7 +28,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, Instanced, Mail, Manual, OutboundReply, Resolver, Subname, actor,
+    BootError, FfiActor, FfiCtx, FfiInitCtx, Instanced, Mail, Manual, OutboundReply, Subname, actor,
 };
 use aether_test_fixtures::{Bump, CountQuery, CountReport};
 
@@ -52,10 +52,7 @@ pub struct InlineStatefulParent;
 impl FfiActor for InlineStatefulParent {
     const NAMESPACE: &'static str = "test.inline.stateful_parent";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(InlineStatefulParent)
     }
 
@@ -93,10 +90,7 @@ impl FfiActor for InlineStatefulChild {
     /// composite migration bundle.
     type State = InlineCounterState;
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(InlineStatefulChild { count: 0 })
     }
 

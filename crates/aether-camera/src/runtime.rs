@@ -45,7 +45,7 @@
 
 use std::collections::HashMap;
 
-use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
@@ -258,10 +258,7 @@ pub struct CameraComponent {
 impl FfiActor for CameraComponent {
     const NAMESPACE: &'static str = "camera";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         let mut cameras = HashMap::new();
         cameras.insert(
             "main".to_owned(),
@@ -282,7 +279,7 @@ impl FfiActor for CameraComponent {
     /// Subscribe the lifecycle stages the camera advances against
     /// (`Tick`, `Render`) on `aether.lifecycle`, plus the `WindowSize`
     /// input interrupt on `aether.input`. `wire` (post-init,
-    /// mail-allowed) is the placement — `init`'s ctx is `Resolver`-only
+    /// mail-allowed) is the placement — `init`'s ctx has no send surface
     /// and can't mail.
     ///
     /// `Tick` and `Render` are frame-lifecycle stages (ADR-0082), so they
@@ -467,35 +464,15 @@ aether_actor::export!(CameraComponent);
 
 #[cfg(test)]
 mod tests {
-    use aether_actor::{FfiActor, KindId, Mailbox, Resolver, resolve, resolve_mailbox};
-    use aether_data::Kind;
+    use aether_actor::{FfiActor, FfiInitCtx};
 
     use super::*;
-
-    /// Minimal stub that satisfies `Resolver` for `init` calls whose
-    /// implementations don't reach the resolver (e.g. `CameraComponent::init`
-    /// is a pure constructor with no resolver calls).
-    struct StubResolver;
-
-    impl Resolver for StubResolver {
-        fn mailbox_id(&self) -> u64 {
-            0
-        }
-
-        fn resolve<K: Kind>(&self) -> KindId<K> {
-            resolve::<K>()
-        }
-
-        fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K> {
-            resolve_mailbox::<K>(name)
-        }
-    }
 
     /// The boot `"main"` camera is seeded with `speed: 0.0`, so its orbit
     /// speed must be exactly zero after `init`.
     #[test]
     fn default_camera_boots_with_zero_speed() {
-        let mut ctx = StubResolver;
+        let mut ctx = FfiInitCtx::__new(0);
         let comp = CameraComponent::init((), &mut ctx).expect("init");
         let main = comp.cameras.get("main").expect("\"main\" camera present");
         match main.mode {

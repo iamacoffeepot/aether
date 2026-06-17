@@ -5,7 +5,6 @@
 //!
 //! - [`MailSender`] — outbound mail (every ctx).
 //! - [`OutboundReply`] — reply-to-originator (per-handler ctxs only).
-//! - [`Resolver`] — init-time mailbox/kind resolution (init ctxs only).
 //! - [`Persistence`] — `replace_component` migration bundle (drop
 //!   ctxs only).
 //! - [`LifecycleControl`] — self-shutdown + monitor (per-handler ctxs
@@ -24,11 +23,9 @@ pub mod mail_sender;
 pub mod outbound_reply;
 pub mod persistence;
 pub mod reply_mode;
-pub mod resolver;
 
 pub use lifecycle::LifecycleControl;
 pub use mail_sender::MailSender;
 pub use outbound_reply::OutboundReply;
 pub use persistence::Persistence;
 pub use reply_mode::{Manual, ReplyMode, Single, Stream};
-pub use resolver::Resolver;

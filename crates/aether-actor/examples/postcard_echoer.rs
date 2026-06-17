@@ -23,7 +23,7 @@
 // component state.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
 use aether_data::{Kind, Schema};
 use serde::{Deserialize, Serialize};
 
@@ -43,10 +43,7 @@ pub struct PostcardEchoer;
 impl FfiActor for PostcardEchoer {
     const NAMESPACE: &'static str = "postcard_echoer";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(PostcardEchoer)
     }
 

@@ -23,7 +23,7 @@
 //! Not a demo — its only job is to expose a realistic per-frame widget
 //! cost to the measurement.
 
-use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::{DrawSolidQuads, QuadSpace, SolidQuad, Tick};
@@ -38,10 +38,7 @@ impl FfiActor for UiWidget {
     type Config = UiWidgetConfig;
     const NAMESPACE: &'static str = "test_fixtures_ui_widget";
 
-    fn init<C>(config: UiWidgetConfig, _ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(config: UiWidgetConfig, _ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(UiWidget { config })
     }
 

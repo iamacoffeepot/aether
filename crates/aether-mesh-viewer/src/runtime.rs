@@ -33,7 +33,7 @@
 //!    triangles to `"aether.render"`.
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, Manual, OutboundReply, ReplyHandle, Resolver, actor,
+    BootError, FfiActor, FfiCtx, FfiInitCtx, Manual, OutboundReply, ReplyHandle, actor,
 };
 use aether_capabilities::fs::FsMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
@@ -234,10 +234,7 @@ struct ScrubIndex {
 impl FfiActor for MeshViewer {
     const NAMESPACE: &'static str = "mesh_viewer";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(MeshViewer {
             triangles: Vec::new(),
             overlay: Vec::new(),
@@ -254,8 +251,8 @@ impl FfiActor for MeshViewer {
     /// cached triangles re-emit once per frame, after the `Tick` chain
     /// has settled (ADR-0082 §11). The viewer has no per-tick compute —
     /// it only re-emits — so it subscribes `Render` alone, not `Tick`.
-    /// Lives in `wire` (post-init, mail-allowed); `init` is
-    /// `Resolver`-only.
+    /// Lives in `wire` (post-init, mail-allowed); `init` has no send
+    /// surface.
     ///
     /// On a chassis whose lifecycle graph omits `Render` (headless), the
     /// cap replies `Err(UnsupportedStage)` to this fire-and-forget

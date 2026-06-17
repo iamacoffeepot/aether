@@ -29,7 +29,7 @@
 
 use core::f32::consts::FRAC_PI_4;
 
-use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::{Camera, DrawTriangle, Tick, Vertex};
@@ -129,18 +129,15 @@ impl Cube {
 impl FfiActor for Cube {
     const NAMESPACE: &'static str = "cube";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Cube {
             view_proj: Cube::framing_view_proj(),
         })
     }
 
     /// Subscribe `Tick` so the chassis tick fanout drives `on_tick`.
-    /// `init` is `Resolver`-only and can't mail, so the subscribe lands
-    /// here in `wire` (mirrors the probe and the reference camera).
+    /// `init` can't mail (its ctx has no send surface), so the subscribe
+    /// lands here in `wire` (mirrors the probe and the reference camera).
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
     }

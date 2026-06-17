@@ -10,7 +10,7 @@
 //! config round-tripped intact. No tick / render behaviour — the
 //! sibling `probe` covers that.
 
-use aether_actor::{BootError, FfiActor, FfiCtx, Manual, OutboundReply, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, Manual, OutboundReply, actor};
 use aether_test_fixtures::{ConfigEcho, ConfigQuery, ProbeConfig};
 
 pub struct ProbeWithConfig {
@@ -23,10 +23,7 @@ impl FfiActor for ProbeWithConfig {
     type Config = ProbeConfig;
     const NAMESPACE: &'static str = "test_fixtures_probe_with_config";
 
-    fn init<C>(config: ProbeConfig, _ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(config: ProbeConfig, _ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(ProbeWithConfig {
             seed: config.seed,
             label: config.label,

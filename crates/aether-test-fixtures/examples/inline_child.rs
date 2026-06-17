@@ -19,7 +19,7 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, Instanced, Manual, OutboundReply, Resolver, Subname, actor,
+    BootError, FfiActor, FfiCtx, FfiInitCtx, Instanced, Manual, OutboundReply, Subname, actor,
 };
 use aether_test_fixtures::{INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho, InlineProbe};
 
@@ -39,10 +39,7 @@ pub struct InlineParent;
 impl FfiActor for InlineParent {
     const NAMESPACE: &'static str = "test.inline.parent";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(InlineParent)
     }
 
@@ -72,10 +69,7 @@ impl Instanced for InlineChild {}
 impl FfiActor for InlineChild {
     const NAMESPACE: &'static str = "test.inline.child";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(InlineChild)
     }
 

@@ -21,7 +21,7 @@
 // fine but must keep the signature.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::{DrawTriangle, Ping, Pong, Tick, Vertex};
@@ -70,10 +70,7 @@ pub struct Hello {}
 impl FfiActor for Hello {
     const NAMESPACE: &'static str = "hello";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Hello {})
     }
 

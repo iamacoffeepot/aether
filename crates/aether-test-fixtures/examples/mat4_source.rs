@@ -20,7 +20,7 @@
 // even though this source is stateless.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
 use aether_kinds::Mat4Apply;
 use aether_math::{Mat4, Vec4};
 use aether_test_fixtures::Mat4SourceTrigger;
@@ -31,10 +31,7 @@ pub struct MatSource;
 impl FfiActor for MatSource {
     const NAMESPACE: &'static str = "mat4_source";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(MatSource)
     }
 

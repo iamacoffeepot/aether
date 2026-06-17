@@ -74,7 +74,7 @@ use core::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
 
-use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability, UiCapability};
@@ -361,7 +361,7 @@ pub struct Locomotion {
 impl FfiActor for Locomotion {
     const NAMESPACE: &'static str = "locomotion";
 
-    fn init<C: Resolver>(_ctx: &mut C) -> Result<Self, BootError> {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         let mover = Mover {
             x: tile_center_octimeters(GRID_W / 2),
             z: tile_center_octimeters(GRID_H / 2),

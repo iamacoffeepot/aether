@@ -27,9 +27,7 @@ impl aether_actor::FfiActor for StrayConst {
     const NAMESPACE: &'static str = "stray";
     const BUFFER_CAPACITY: usize = 64;
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, aether_actor::BootError>
-    where
-        C: aether_actor::Resolver,
+    fn init(_ctx: &mut aether_actor::FfiInitCtx<'_>) -> Result<Self, aether_actor::BootError>
     {
         Ok(StrayConst)
     }

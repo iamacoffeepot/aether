@@ -25,7 +25,7 @@
 //!     route through each ctx's send methods, not through the mailbox
 //!     itself.
 //!   - [`actor::ctx`] — per-stage capability traits ([`MailSender`],
-//!     [`OutboundReply`], [`Resolver`], [`Persistence`],
+//!     [`OutboundReply`], [`Persistence`],
 //!     [`LifecycleControl`]). FFI ctxs in [`ffi::ctx`]
 //!     and substrate's `NativeCtx` family impl the relevant subset.
 //!   - [`Slot`] — single-instance backing store the consumer's
@@ -64,8 +64,7 @@ pub mod mail;
 pub mod trace_ring;
 
 pub use actor::ctx::{
-    LifecycleControl, MailSender, Manual, OutboundReply, Persistence, ReplyMode, Resolver, Single,
-    Stream,
+    LifecycleControl, MailSender, Manual, OutboundReply, Persistence, ReplyMode, Single, Stream,
 };
 pub use actor::slot::Slot;
 pub use actor::{
