@@ -1,6 +1,6 @@
 //! On-disk sidecar metadata for the persistent handle store (ADR-0049
 //! §2). Each `<hash>.bin` byte blob is paired with a `<hash>.meta`
-//! postcard-encoded [`HandleMeta`] describing its identity, provenance,
+//! wire-encoded [`HandleMeta`] describing its identity, provenance,
 //! and durability flags.
 //!
 //! The meta is the index entry: the boot scan (issue #985) reads only
@@ -33,7 +33,7 @@ pub const SCHEMA_VERSION: u8 = 3;
 ///
 /// Ids are stored as raw `u64` rather than the typed [`aether_data::HandleId`]
 /// / [`aether_data::KindId`] newtypes so the on-disk format is a flat
-/// postcard struct independent of the tagged-id serde branch.
+/// wire struct independent of the tagged-id serde branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandleMeta {
     /// On-disk format version. Set to [`SCHEMA_VERSION`] on write; a
@@ -92,7 +92,7 @@ pub const INDEX_FORMAT_VERSION: u8 = 1;
 /// mirror of the in-memory `DiskEntry`, keyed by raw `u64` handle id in
 /// the snapshot map. Ids are raw `u64` (not the typed
 /// [`aether_data::KindId`] newtype) so the on-disk format is a flat
-/// postcard struct independent of the tagged-id serde branch, matching
+/// wire struct independent of the tagged-id serde branch, matching
 /// [`HandleMeta`]'s convention.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexEntry {
@@ -113,7 +113,7 @@ pub struct IndexEntry {
 /// boot to populate the index in one read + decode instead of one
 /// `open()` per `.meta` sidecar.
 ///
-/// This is a plain postcard struct — deliberately not an aether `Kind`
+/// This is a plain wire struct — deliberately not an aether `Kind`
 /// (no derive, no registry entry, no schema-driven codec): persistence
 /// is substrate-internal (ADR-0049) and the snapshot never crosses the
 /// wire.
@@ -129,6 +129,7 @@ pub struct IndexSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_data::wire;
 
     #[test]
     fn index_snapshot_postcard_round_trips() {
@@ -155,10 +156,10 @@ mod tests {
             schema_version: INDEX_FORMAT_VERSION,
             entries,
         };
-        let bytes = postcard::to_allocvec(&snapshot).expect("snapshot encodes");
-        // The leading byte is the version header.
-        assert_eq!(bytes[0], INDEX_FORMAT_VERSION);
-        let decoded: IndexSnapshot = postcard::from_bytes(&bytes).expect("snapshot decodes");
+        let bytes = wire::to_vec(&snapshot).expect("snapshot encodes");
+        // Byte 0 is the wire format-version envelope; schema_version is at index 1.
+        assert_eq!(bytes[1], INDEX_FORMAT_VERSION);
+        let decoded: IndexSnapshot = wire::from_bytes(&bytes).expect("snapshot decodes");
         assert_eq!(decoded, snapshot);
     }
 }

@@ -25,6 +25,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
 
 use aether_data::canonical::canonical_kind_bytes;
+use aether_data::wire;
 use aether_data::{Kind, Schema, SchemaType};
 use aether_kinds::{Bundle, DagDescriptor, DagError, Edge, Node, NodeId};
 
@@ -46,7 +47,7 @@ pub const ENV_MAX_DESCRIPTOR_BYTES: &str = "AETHER_DAG_MAX_DESCRIPTOR_BYTES";
 pub const DEFAULT_MAX_NODES: u64 = 256;
 /// Default ceiling on `edges.len()` (ADR-0047 §3).
 pub const DEFAULT_MAX_EDGES: u64 = 1024;
-/// Default ceiling on the postcard-serialized descriptor size, in
+/// Default ceiling on the wire-serialized descriptor size, in
 /// bytes (ADR-0047 §3).
 pub const DEFAULT_MAX_DESCRIPTOR_BYTES: u64 = 1024 * 1024;
 
@@ -152,8 +153,8 @@ fn check_structure(descriptor: &DagDescriptor) -> Result<Structure, DagError> {
             ),
         });
     }
-    let serialized = postcard::to_allocvec(descriptor)
-        .expect("descriptor postcard serialization is infallible into a growable Vec");
+    let serialized = wire::to_vec(descriptor)
+        .expect("descriptor wire serialization is infallible into a growable Vec");
     if serialized.len() as u64 > caps.descriptor_bytes {
         return Err(DagError::TooLarge {
             reason: format!(

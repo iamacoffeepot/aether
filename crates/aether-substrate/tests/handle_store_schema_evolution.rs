@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use aether_data::wire;
 use aether_data::{HandleId, KindId};
 use aether_substrate::handle_store::meta::{HandleMeta, TransformOrigin};
 use aether_substrate::handle_store::{HandleStore, KindResolver, PersistConfig, entry_paths};
@@ -150,9 +151,7 @@ fn schema_evolution_evicts_old_schema_version() {
     let (bin, meta_path) = entry_paths(&cfg.root, id);
     fs::create_dir_all(bin.parent().unwrap()).unwrap();
     fs::write(&bin, b"legacy").unwrap();
-    // postcard-encode a meta that claims version 1. We build the
-    // current struct and overwrite the leading version byte: the
-    // schema_version is the first field, encoded as a single byte.
+    // wire-encode a meta that claims version 1.
     let meta = HandleMeta {
         schema_version: 1,
         handle_id: id.0,
@@ -163,7 +162,7 @@ fn schema_evolution_evicts_old_schema_version() {
         created_at: 1,
         pinned: false,
     };
-    fs::write(&meta_path, postcard::to_allocvec(&meta).unwrap()).unwrap();
+    fs::write(&meta_path, wire::to_vec(&meta).unwrap()).unwrap();
 
     let restored = store_with(&cfg, &[("demo.kind", 0xAAAA)]);
     assert_eq!(restored.disk_index_len(), 0, "version-1 entry evicted");

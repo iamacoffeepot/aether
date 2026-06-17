@@ -66,7 +66,7 @@ use crate::config::ConfigError;
 use crate::mail::Mail;
 use crate::mail::registry::Registry;
 use crate::pid_lock::{LockAcquisition, LockGuard, acquire_lock_pid};
-use aether_data::wire::WIRE_VERSION;
+use aether_data::wire::{self, WIRE_VERSION};
 use aether_data::{EnumVariant, Primitive, SchemaType};
 use aether_data::{HandleId, KindId};
 use std::env;
@@ -884,7 +884,7 @@ impl HandleStore {
             created_at: now_millis(),
             pinned,
         };
-        let meta_bytes = match postcard::to_allocvec(&meta) {
+        let meta_bytes = match wire::to_vec(&meta) {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(
@@ -1027,7 +1027,7 @@ impl HandleStore {
             schema_version: INDEX_FORMAT_VERSION,
             entries,
         };
-        let bytes = match postcard::to_allocvec(&snapshot) {
+        let bytes = match wire::to_vec(&snapshot) {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(
@@ -1085,7 +1085,7 @@ impl HandleStore {
             // snapshot; a crash left none).
             return false;
         };
-        let snapshot = match postcard::from_bytes::<IndexSnapshot>(&raw) {
+        let snapshot = match wire::from_bytes::<IndexSnapshot>(&raw) {
             Ok(s) if s.schema_version == INDEX_FORMAT_VERSION => s,
             Ok(s) => {
                 tracing::warn!(
@@ -1956,7 +1956,7 @@ fn read_pinned_set(cfg: &PersistConfig) -> HashSet<HandleId> {
 /// failure (the boot scan treats that as a corrupt entry to scrub).
 fn read_meta_file(path: &Path) -> Option<HandleMeta> {
     let raw = fs::read(path).ok()?;
-    postcard::from_bytes::<HandleMeta>(&raw).ok()
+    wire::from_bytes::<HandleMeta>(&raw).ok()
 }
 
 /// Advance the access clock and return the new value. Takes `&Inner`
@@ -3270,7 +3270,7 @@ mod tests {
         let path = cfg.index_path();
         assert!(path.exists(), "index.bin written");
         let raw = fs::read(&path).unwrap();
-        let snapshot: IndexSnapshot = postcard::from_bytes(&raw).unwrap();
+        let snapshot: IndexSnapshot = wire::from_bytes(&raw).unwrap();
         assert_eq!(snapshot.schema_version, INDEX_FORMAT_VERSION);
         assert_eq!(snapshot.entries.len(), 2);
         let e1 = snapshot.entries.get(&1).expect("id 1 in snapshot");
@@ -3353,11 +3353,12 @@ mod tests {
             }
             store.snapshot_index();
         }
-        // Flip the leading version byte; the rest of the postcard struct
-        // stays valid, so it decodes but trips the version gate.
+        // Flip the schema_version byte; the wire envelope owns byte 0, so
+        // schema_version is at index 1. The rest stays valid, so it
+        // decodes but trips the version gate.
         let path = cfg.index_path();
         let mut raw = fs::read(&path).unwrap();
-        raw[0] = INDEX_FORMAT_VERSION.wrapping_add(1);
+        raw[1] = INDEX_FORMAT_VERSION.wrapping_add(1);
         fs::write(&path, &raw).unwrap();
 
         let restored = HandleStore::with_persist(64 * 1024 * 1024, Some(cfg));
