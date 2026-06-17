@@ -467,6 +467,40 @@ impl FleetBench {
         }
     }
 
+    /// Like [`load_full`](Self::load_full) but selects a specific actor type
+    /// from a multi-actor bundle via `export` (ADR-0096, issue 1994). The
+    /// `export` string is the actor's `NAMESPACE` const. Returns all three
+    /// `LoadResult::Ok` fields as a [`Loaded`].
+    pub fn load_full_export(&mut self, engine: EngineId, stem: &str, export: &str) -> Loaded {
+        let wasm = read_component_wasm(stem);
+        let replies = self.call(
+            Some(engine),
+            "aether.component",
+            &LoadComponent {
+                wasm,
+                name: None,
+                config: Vec::new(),
+                export: Some(export.to_owned()),
+            },
+        );
+        let payload = single_reply(&replies, "LoadComponent");
+        match LoadResult::decode_from_bytes(&payload) {
+            Some(LoadResult::Ok {
+                mailbox_id,
+                name,
+                capabilities,
+            }) => Loaded {
+                mailbox_id,
+                addr: name,
+                capabilities,
+            },
+            Some(LoadResult::Err { error }) => {
+                panic!("load of {stem:?}@{export:?} failed: {error}")
+            }
+            None => panic!("undecodable LoadResult"),
+        }
+    }
+
     /// Terminate `engine` through the asserting [`call`](Self::call)
     /// path — the agent-facing `terminate_substrate`, distinct from the
     /// `Drop`-only best-effort
@@ -708,6 +742,42 @@ impl FleetBench {
         match LoadResult::decode_from_bytes(&payload) {
             Some(LoadResult::Ok { name, .. }) => name,
             Some(LoadResult::Err { error }) => panic!("load of {stem:?} failed: {error}"),
+            None => panic!("undecodable LoadResult"),
+        }
+    }
+
+    /// Like [`load_with_config`](Self::load_with_config) but also selects a
+    /// specific actor type from a multi-actor bundle via `export` (ADR-0096,
+    /// issue 1994). The `export` string is the actor's `NAMESPACE` const —
+    /// `LoadComponent.export` routes the host to that type instead of the
+    /// module's entry type. Returns the registered ADR-0099 lineage address.
+    pub fn load_with_config_export<C>(
+        &mut self,
+        engine: EngineId,
+        stem: &str,
+        config: &C,
+        export: &str,
+    ) -> String
+    where
+        C: Kind + Serialize,
+    {
+        let wasm = read_component_wasm(stem);
+        let replies = self.call(
+            Some(engine),
+            "aether.component",
+            &LoadComponent {
+                wasm,
+                name: None,
+                config: config.encode_into_bytes(),
+                export: Some(export.to_owned()),
+            },
+        );
+        let payload = single_reply(&replies, "LoadComponent");
+        match LoadResult::decode_from_bytes(&payload) {
+            Some(LoadResult::Ok { name, .. }) => name,
+            Some(LoadResult::Err { error }) => {
+                panic!("load of {stem:?}@{export:?} failed: {error}")
+            }
             None => panic!("undecodable LoadResult"),
         }
     }

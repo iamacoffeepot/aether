@@ -1,6 +1,7 @@
 //! ADR-0090 c1 (issue 1256) integration coverage for the typed
-//! `FfiActor::Config` path. Loads the `probe_with_config` example
-//! cdylib through a [`TestBench`] and asserts the wasm guest's
+//! `FfiActor::Config` path. Loads the `ProbeWithConfig` actor from the
+//! `probe` bundle (issue 1994, ADR-0096) via `export: Some("test_fixtures_probe_with_config")`
+//! through a [`TestBench`] and asserts the wasm guest's
 //! `init_with_config_p32` decode-error surfaces in `LoadResult::Err` when the
 //! load mail carries no config bytes — c1 wires the host probe and
 //! the guest shim but does not yet thread real config bytes through
@@ -39,7 +40,7 @@ use aether_test_fixtures as _;
 /// config.
 #[test]
 fn typed_config_guest_without_config_bytes_surfaces_decode_error() {
-    let Some(wasm_path) = require_runtime("probe_with_config") else {
+    let Some(wasm_path) = require_runtime("probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -54,7 +55,7 @@ fn typed_config_guest_without_config_bytes_surfaces_decode_error() {
                     wasm,
                     name: Some("probe_with_config".to_owned()),
                     config: Vec::new(),
-                    export: None,
+                    export: Some("test_fixtures_probe_with_config".to_owned()),
                 },
             ),
         )])
@@ -88,7 +89,7 @@ fn typed_config_guest_without_config_bytes_surfaces_decode_error() {
 /// hardcoded `&[]`; c2 wires it, so the test runs unconditionally now.
 #[test]
 fn typed_config_guest_with_config_bytes_round_trips() {
-    let Some(wasm_path) = require_runtime("probe_with_config") else {
+    let Some(wasm_path) = require_runtime("probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -110,7 +111,7 @@ fn typed_config_guest_with_config_bytes_round_trips() {
                         wasm,
                         name: Some("probe_with_config".to_owned()),
                         config: config_bytes,
-                        export: None,
+                        export: Some("test_fixtures_probe_with_config".to_owned()),
                     },
                 ),
             ),

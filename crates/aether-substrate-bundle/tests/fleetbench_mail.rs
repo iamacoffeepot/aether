@@ -25,7 +25,7 @@ mod tests {
         use crate::fleetbench::{FleetBench, dist_manifest_present};
 
         /// Ping-pong (verify-first, the #1451 deferral): load
-        /// `probe_with_config` with a seeded `ProbeConfig`, send it a
+        /// `ProbeWithConfig` from the `probe` bundle with a seeded `ProbeConfig`, send it a
         /// `ConfigQuery`, and assert the single `ConfigEcho` decodes back
         /// to the same `{ seed, label }`. This is the first end-to-end
         /// proof that a wasm guest reply correlates home over the real
@@ -48,7 +48,12 @@ mod tests {
                 seed: 0x00C0_FFEE,
                 label: "fleetbench".to_owned(),
             };
-            let addr = bench.load_with_config(engine, "probe_with_config", &config);
+            let addr = bench.load_with_config_export(
+                engine,
+                "probe",
+                &config,
+                "test_fixtures_probe_with_config",
+            );
 
             let replies = bench.send(engine, &addr, &ConfigQuery);
             let reply = match replies.as_slice() {

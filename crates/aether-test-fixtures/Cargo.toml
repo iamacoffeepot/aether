@@ -10,11 +10,11 @@ license.workspace = true
 # Per-fixture wasm components live as `[[example]]` cdylibs that
 # depend on the lib — each example produces its own
 # `target/wasm32-unknown-unknown/{profile}/examples/<name>.wasm`.
-#
-# Pre-#1256 this crate was `aether-test-fixture-probe` (single-cdylib
-# crate). ADR-0090 c1 split the fixture surface so a typed-config
-# fixture (`probe_with_config`) can live next to the original probe
-# without each fixture being its own member crate.
+# Issue 1994 consolidated related fixtures into multi-actor bundles
+# (ADR-0096): `probe` carries `ProbeWithConfig`; `inline_child` carries
+# `InlineStatefulParent/Child` and `InlineDespawnParent`; `mat4_source`
+# carries `Vec4Observer`. Consumers address an in-bundle actor by
+# passing `export: Some("<NAMESPACE>")` on the load call.
 [lib]
 crate-type = ["rlib"]
 
@@ -41,17 +41,11 @@ aether-capabilities = { path = "../aether-capabilities", default-features = fals
 # to LogCapability.
 tracing = { workspace = true, default-features = false }
 
-# ADR-0090 c1 reference fixture: the pre-1256 probe, now an example
-# cdylib. Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/probe.wasm
+# ADR-0090 c1 reference fixture bundle (issue 1994): the entry `Probe`
+# plus the typed-config `ProbeWithConfig` (`export: Some("test_fixtures_probe_with_config")`).
+# Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/probe.wasm
 [[example]]
 name = "probe"
-crate-type = ["cdylib"]
-
-# ADR-0090 c1 fixture exercising the typed `FfiActor::Config` path —
-# declares `type Config = ProbeConfig` and receives a seeded config
-# struct in its `init` body.
-[[example]]
-name = "probe_with_config"
 crate-type = ["cdylib"]
 
 # ADR-0096 multi-actor module fixture: two FfiActor types exported from
@@ -94,18 +88,11 @@ crate-type = ["cdylib"]
 name = "cube"
 crate-type = ["cdylib"]
 
-# Issue 1472: DAG `Source` fixture. Replies a fixed `Mat4Apply` operand
-# on `Mat4SourceTrigger`, feeding the `mat4_apply` transform downstream.
+# Issue 1472 DAG fixture bundle (issue 1994): entry `MatSource` plus
+# `Vec4Observer` (`export: Some("vec4_observer")`).
 # Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/mat4_source.wasm
 [[example]]
 name = "mat4_source"
-crate-type = ["cdylib"]
-
-# Issue 1472: DAG `Observer` fixture. Resolves the transform's
-# `Ref<Vec4>` output and surfaces the value via `aether.fs.write` so the
-# FleetBench test can read it back and assert `M·v`.
-[[example]]
-name = "vec4_observer"
 crate-type = ["cdylib"]
 
 # Issue 1793 widget-actor cost spike: a synthetic UI widget that
@@ -126,37 +113,17 @@ crate-type = ["cdylib"]
 name = "http_handler"
 crate-type = ["cdylib"]
 
-# ADR-0114 inline-child fixture (#1916): the entry `InlineParent` spawns a
-# co-located `InlineChild` in `wire` via `ctx.spawn_inline_child`. Both
-# answer `InlineProbe` with a `who`-tagged `InlineEcho` so the FleetBench
-# scenario can address the child by its first-class lineage name over the
-# wire and assert the membrane demuxed to the child (not the parent).
+# ADR-0114 inline-child fixture bundle (issue 1994): entry `InlineParent`
+# (#1916) plus `InlineStatefulParent` (`export: Some("test.inline.stateful_parent")`
+# — ADR-0114 §5 hot-swap, #1930) and `InlineDespawnParent`
+# (`export: Some("test.inline.despawn_parent")` — teardown, #1939).
+# NOT bundled: `stateful_replace{,_typed,_reshaped}` — the typed→reshaped
+# cross-module replace test (`test_bench_scenario.rs`) loads one wasm and
+# replaces it with the other; a cross-module replace needs two distinct wasm
+# binaries, so these cannot share a bundle.
 # Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/inline_child.wasm
 [[example]]
 name = "inline_child"
-crate-type = ["cdylib"]
-
-# ADR-0114 §5 inline-child-reload fixture (#1930): a multi-actor module
-# `export!(InlineStatefulParent, InlineStatefulChild)` whose entry spawns
-# a stateful inline child in `wire`. The child declares `type State` and
-# answers `Bump` / `CountQuery`, so a TestBench scenario can mutate its
-# state, `replace_component` the same wasm, and assert the prior count
-# survived the dehydrate → composite bundle → rehydrate reconstruct.
-# Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/inline_child_stateful.wasm
-[[example]]
-name = "inline_child_stateful"
-crate-type = ["cdylib"]
-
-# ADR-0114 inline-child teardown fixture (#1939): the entry
-# `InlineDespawnParent` spawns a co-located `InlineDespawnChild` in `wire`,
-# stores its alias, and tears it down on a `DespawnChild` trigger via
-# `ctx.despawn_inline_child`. A TestBench scenario probes the live child,
-# despawns it, then probes the same alias and asserts the parent answered
-# (membrane fallthrough) and the chain still settled — the post-teardown
-# settlement guarantee (the kept alias routes orphan mail to the parent).
-# Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/inline_child_despawn.wasm
-[[example]]
-name = "inline_child_despawn"
 crate-type = ["cdylib"]
 
 # Issue 1958: `source_mailbox()` end-to-end fixture. A `SourceObserver`

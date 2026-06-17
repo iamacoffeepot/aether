@@ -2,12 +2,13 @@
 //! `Source → Transform → Observer` computation DAG (ADR-0047 / ADR-0048)
 //! over the real hub → RPC → forked-headless-substrate stack. Where
 //! `fleetbench_dag.rs` (#1461) covers only terminal effectful `Source`
-//! nodes, this drives the production `Transform`-node dispatch path: a
-//! first-party `mat4_source` fixture replies the transform's `Mat4Apply`
-//! input, the linked `mat4_apply` transform computes `M·v`, and a
-//! `vec4_observer` fixture resolves the transform's `Ref<Vec4>` output
-//! and surfaces the value via `aether.fs.write` so the test can read it
-//! back and assert exact equality.
+//! nodes, this drives the production `Transform`-node dispatch path: the
+//! `MatSource` fixture from the `mat4_source` bundle replies the transform's
+//! `Mat4Apply` input, the linked `mat4_apply` transform computes `M·v`, and
+//! the `Vec4Observer` (also in the bundle, loaded via `export: "vec4_observer"`,
+//! issue 1994) resolves the transform's `Ref<Vec4>` output and surfaces the
+//! value via `aether.fs.write` so the test can read it back and assert exact
+//! equality.
 //!
 //! This is also the only end-to-end check of the cast `Mat4Apply` /
 //! `Vec4` wire round-trip across the source-reply → transform-input and
@@ -76,13 +77,13 @@ mod tests {
             let mut bench = FleetBench::start();
             let engine = bench.spawn_headless();
 
-            // Load both fixtures. `LoadResult.mailbox_id` is the ADR-0099
-            // lineage-fold id the load actually registered (the id is the
-            // lineage fold, not `hash(name)`), so the descriptor's
+            // Load both fixtures from the `mat4_source` bundle (issue 1994,
+            // ADR-0096). `LoadResult.mailbox_id` is the ADR-0099 lineage-fold
+            // id the load actually registered, so the descriptor's
             // `Source.mailbox` / `Observer.recipient` route to exactly the
             // mailboxes the components occupy.
             let source = bench.load_full(engine, "mat4_source");
-            let observer = bench.load_full(engine, "vec4_observer");
+            let observer = bench.load_full_export(engine, "mat4_source", "vec4_observer");
 
             // Resolve `mat4_apply`'s TransformId from the link-time
             // inventory linked into this test binary (via the bundle's
