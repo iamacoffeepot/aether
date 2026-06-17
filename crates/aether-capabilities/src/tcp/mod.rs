@@ -165,16 +165,16 @@ pub trait TcpFfiExt {
     /// itself, but the type parameter lets callers address a custom
     /// wrapper that handles a different kind vocabulary on the same
     /// mailbox).
-    fn listener<R: Actor>(&self, name: &str) -> FfiActorMailbox<R>;
+    fn listener<R: Actor>(&self, name: &str) -> FfiActorMailbox<'_, R>;
 
     /// Resolve a typed session-instance mailbox for the open session
     /// named `name`. The full mailbox address is
     /// `format!("{}:{}", TcpSessionActor::NAMESPACE, name)`. See
     /// [`Self::listener`] for the `R` parameter shape.
-    fn session<R: Actor>(&self, listener_name: &str, session_name: &str) -> FfiActorMailbox<R>;
+    fn session<R: Actor>(&self, listener_name: &str, session_name: &str) -> FfiActorMailbox<'_, R>;
 }
 
-impl TcpFfiExt for FfiActorMailbox<TcpCapability> {
+impl TcpFfiExt for FfiActorMailbox<'_, TcpCapability> {
     //noinspection DuplicatedCode
     fn bind_listener(&self, addr: &str, name: Option<&str>) {
         self.send(&BindListener {
@@ -205,14 +205,17 @@ impl TcpFfiExt for FfiActorMailbox<TcpCapability> {
         self.session::<TcpSessionActor>(listener_name, session_name)
             .send(&SessionClose::default());
     }
-    fn listener<R: Actor>(&self, name: &str) -> FfiActorMailbox<R> {
+    fn listener<R: Actor>(&self, name: &str) -> FfiActorMailbox<'_, R> {
         // ADR-0099 §3: a listener is this cap's child — fold its node
         // onto the cap's carry (the cap is depth-1, so `self`'s id is
         // its carry).
         self.resolve_peer_scoped::<R>(TcpListenerActor::NAMESPACE, name)
     }
-    fn session<R: Actor>(&self, listener_name: &str, session_name: &str) -> FfiActorMailbox<R> {
-        FfiActorMailbox::__new(session_mailbox_id(
+    fn session<R: Actor>(&self, listener_name: &str, session_name: &str) -> FfiActorMailbox<'_, R> {
+        // The session id is folded by a custom scheme rather than by name, so
+        // rewrap it with `at`, inheriting this cap handle's ctx binding so the
+        // session handle's sends stamp the same origin (issue 1987).
+        self.at::<R>(session_mailbox_id(
             self.mailbox_id().0,
             listener_name,
             session_name,

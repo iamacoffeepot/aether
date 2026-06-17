@@ -764,7 +764,7 @@ macro_rules! __export_internal {
             __AETHER_INLINE.set_self_id(mailbox_id);
             // ADR-0112: the runtime builds the `Manual` view; `wire`'s
             // default signature is `FfiCtx<'_>` (= Single), so downgrade.
-            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, 0);
             <$component as $crate::FfiActor>::wire(instance, ctx.as_single());
             0
         }
@@ -780,7 +780,7 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, 0);
             <$component as $crate::FfiActor>::unwire(instance, ctx.as_single());
             0
         }
@@ -836,16 +836,21 @@ macro_rules! __export_internal {
                 let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                     return 1;
                 };
-                $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, move |__aether_mail| {
-                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
+                // Top-level dispatch: the inbound source is `NONE` on the ctx, so
+                // `ctx.source_mailbox()` falls back to the host reply table via
+                // the dispatcher-stamped reply handle (issue 1987).
+                $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, 0, move |__aether_mail| {
+                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, 0);
                     instance.__aether_dispatch(&mut ctx, __aether_mail)
                 })
             };
             // ADR-0114 addressing amendment: drain every intra-cluster send
             // the dispatch (and any cascade it triggers) buffered, in place
             // under this one run-token. Each item re-acquires the instance
-            // inside the per-item `dispatch_own` factory.
-            $crate::ffi::inline::drain_cluster_queue(&__AETHER_INLINE, || {
+            // inside the per-item `dispatch_own` factory, which the drain
+            // hands the item's inbound source (`__aether_source`, issue 1987)
+            // so the own-path ctx reads the same source the child path threads.
+            $crate::ffi::inline::drain_cluster_queue(&__AETHER_INLINE, |__aether_source| {
                 move |__aether_mail| {
                     // SAFETY: re-acquired fresh per drained item; the prior
                     // iteration's borrow has already dropped (the membrane
@@ -853,7 +858,7 @@ macro_rules! __export_internal {
                     // — the slot was present for the top-level dispatch above.
                     let instance = unsafe { __AETHER_COMPONENT.get_mut() }
                         .expect("instance present for the cluster-queue drain");
-                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
+                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, __aether_source);
                     instance.__aether_dispatch(&mut ctx, __aether_mail)
                 }
             });
@@ -963,7 +968,7 @@ macro_rules! __export_internal {
                 prior_bytes,
                 &__AETHER_INLINE,
                 |parent_version, parent_bytes| {
-                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
+                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, 0);
                     // SAFETY: `parent_bytes` lives for this closure call;
                     // `PriorState::__from_ptr` bounds the slice to it.
                     let parent_prior = unsafe {
@@ -1210,7 +1215,7 @@ macro_rules! __export_multi_internal {
             __AETHER_INLINE.set_self_id(mailbox_id);
             // ADR-0112: the boxed `ErasedFfiActor` seam carries the `Manual`
             // view; the synthesized impl downgrades to `Single` per hook.
-            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, 0);
             instance.erased_wire(&mut ctx);
             0
         }
@@ -1223,7 +1228,7 @@ macro_rules! __export_multi_internal {
             };
             // ADR-0112: the boxed `ErasedFfiActor` seam carries the `Manual`
             // view; the synthesized impl downgrades to `Single` per hook.
-            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, 0);
             instance.erased_unwire(&mut ctx);
             0
         }
@@ -1274,21 +1279,26 @@ macro_rules! __export_multi_internal {
                 let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                     return 1;
                 };
-                $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, move |__aether_mail| {
-                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
+                // Top-level dispatch: `NONE` source on the ctx, so
+                // `ctx.source_mailbox()` falls back to the host reply table via
+                // the dispatcher-stamped reply handle (issue 1987).
+                $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, 0, move |__aether_mail| {
+                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, 0);
                     instance.erased_dispatch(&mut ctx, __aether_mail)
                 })
             };
             // ADR-0114 addressing amendment: drain every intra-cluster send
             // in place under this one run-token; each item re-acquires the
-            // boxed instance inside the per-item `dispatch_own` factory.
-            $crate::ffi::inline::drain_cluster_queue(&__AETHER_INLINE, || {
+            // boxed instance inside the per-item `dispatch_own` factory, which
+            // the drain hands the item's inbound source (`__aether_source`,
+            // issue 1987) so the own-path ctx matches the child path.
+            $crate::ffi::inline::drain_cluster_queue(&__AETHER_INLINE, |__aether_source| {
                 move |__aether_mail| {
                     // SAFETY: re-acquired fresh per drained item; the prior
                     // iteration's borrow has dropped (the membrane returned).
                     let instance = unsafe { __AETHER_MULTI.get_mut() }
                         .expect("instance present for the cluster-queue drain");
-                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
+                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, __aether_source);
                     instance.erased_dispatch(&mut ctx, __aether_mail)
                 }
             });
@@ -1386,7 +1396,7 @@ macro_rules! __export_multi_internal {
                 |parent_version, parent_bytes| {
                     // ADR-0112: the boxed `ErasedFfiActor` seam carries the
                     // `Manual` view; the synthesized impl downgrades per hook.
-                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE);
+                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, 0);
                     // SAFETY: `parent_bytes` lives for this closure call.
                     let parent_prior = unsafe {
                         $crate::PriorState::__from_ptr(

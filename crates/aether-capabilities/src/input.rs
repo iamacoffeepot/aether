@@ -102,7 +102,7 @@ pub trait InputMailboxExt {
     fn unsubscribe_all(&self, mailbox: MailboxId);
 }
 
-impl InputMailboxExt for FfiActorMailbox<InputCapability> {
+impl InputMailboxExt for FfiActorMailbox<'_, InputCapability> {
     fn subscribe<K: Kind>(&self) {
         self.send(&SubscribeInputSelf { kind: K::ID });
     }

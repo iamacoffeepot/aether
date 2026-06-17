@@ -364,7 +364,7 @@ pub trait FsMailboxExt {
     fn copy(&self, from: &str, to_namespace: &str, to_path: &str);
 }
 
-impl FsMailboxExt for FfiActorMailbox<FsCapability> {
+impl FsMailboxExt for FfiActorMailbox<'_, FsCapability> {
     fn read(&self, namespace: &str, path: &str) {
         self.send(&Read {
             namespace: namespace.into(),

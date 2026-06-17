@@ -5,47 +5,76 @@
 //! [`FfiActorMailbox`] — actor-typed sender handle for FFI guests.
 //!
 //! Issue 665 split the prior parametric `ActorMailbox<'a, R, T>` into
-//! per-side types so the `MailTransport` trait can retire. The FFI
-//! variant is lifetime-free — it carries no transport reference
-//! because the FFI imports are global to the loaded module
-//! (`crate::ffi::bridge::mail` functions are the dispatch surface).
+//! per-side types so the `MailTransport` trait can retire. Issue 1987
+//! made the FFI variant a ctx-bound transient (`FfiActorMailbox<'a, R>`),
+//! symmetric with the native `NativeActorMailbox<'a, R>`: it carries the
+//! resolving actor's own id as the send's "from" half plus a borrow of
+//! the per-component inline registry the send routes through. The `'a`
+//! borrow keeps origin a property of the executing actor — the handle
+//! cannot be stored past the handler, so it can never carry a stale
+//! origin.
 //!
 //! Built via [`crate::ffi::ctx::FfiCtx::actor`] /
-//! [`crate::ffi::ctx::FfiCtx::resolve_actor`] and their init/drop
-//! variants. The compile-time `R: HandlesKind<K>` gate is the same as
-//! the prior parametric form: `ctx.actor::<RenderCapability>().send(&triangle)`
-//! compiles only when `RenderCapability: HandlesKind<DrawTriangle>`.
+//! [`crate::ffi::ctx::FfiCtx::resolve_actor`]. The compile-time
+//! `R: HandlesKind<K>` gate is the same as the prior parametric form:
+//! `ctx.actor::<RenderCapability>().send(&triangle)` compiles only when
+//! `RenderCapability: HandlesKind<DrawTriangle>`.
 
 use core::marker::PhantomData;
 
 use aether_data::{ActorId, Kind, Tag, fold_lineage, mailbox_id_from_name, with_tag};
 
 use crate::actor::{Actor, HandlesKind};
-use crate::ffi::bridge::mail;
+use crate::ffi::inline::InlineRegistry;
 
-/// Phantom-typed receiver-actor handle for FFI guests. ZST modulo the
-/// stored mailbox id; cheap to construct, cheap to copy, no borrow
-/// bookkeeping (the `crate::ffi::bridge::mail` free functions cover dispatch).
-pub struct FfiActorMailbox<R> {
+/// Phantom-typed receiver-actor handle for FFI guests, built by
+/// [`crate::ffi::FfiCtx::actor`] / [`crate::ffi::FfiCtx::resolve_actor`].
+///
+/// Issue 1987 made it a ctx-bound transient (mirroring the native
+/// `NativeActorMailbox<'a, R>` and the in-cluster [`crate::ffi::RelativeMailbox`]):
+/// it carries the resolving actor's own folded id as the `sender` (the "from"
+/// half every send stamps as origin) plus a borrow of the per-component inline
+/// registry the send routes through. The `'a` borrow is what keeps origin a
+/// property of the *executing* actor — the handle cannot outlive the handler,
+/// so it can never carry a stale origin the way a stored address-only token
+/// would.
+pub struct FfiActorMailbox<'a, R> {
     mailbox: u64,
+    /// The resolving actor's own folded [`aether_data::MailboxId`] raw value —
+    /// the "from" half threaded onto every send so the recipient's
+    /// `ctx.source_mailbox()` resolves who sent it, and so the host stamps the
+    /// correct origin without an ambient per-receive cell (issue 1987). Set by
+    /// the ctx-level constructors to the resolving ctx's own id.
+    sender: u64,
+    /// The per-component inline registry the send routes through
+    /// ([`InlineRegistry::route_or_enqueue`]): a cluster-member recipient
+    /// dispatches in place, any other recipient hands off to the host. A typed
+    /// peer / cap recipient is always cross-cluster, so this resolves to the
+    /// host send — the registry borrow only keeps the routing path uniform with
+    /// the in-cluster [`crate::ffi::RelativeMailbox`].
+    inline: &'a InlineRegistry,
     _r: PhantomData<fn() -> R>,
 }
 
-impl<R> Copy for FfiActorMailbox<R> {}
-impl<R> Clone for FfiActorMailbox<R> {
+impl<R> Copy for FfiActorMailbox<'_, R> {}
+impl<R> Clone for FfiActorMailbox<'_, R> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<R> FfiActorMailbox<R> {
+impl<'a, R> FfiActorMailbox<'a, R> {
     /// Not part of the public API; the ctx-level constructors go
-    /// through here so the field stays private.
+    /// through here so the fields stay private. `sender` is the
+    /// resolving actor's own id (the "from" half); `inline` is the ctx's
+    /// per-component inline registry the send routes through.
     #[doc(hidden)]
     #[must_use]
-    pub fn __new(mailbox: u64) -> Self {
+    pub fn __new(mailbox: u64, sender: u64, inline: &'a InlineRegistry) -> Self {
         Self {
             mailbox,
+            sender,
+            inline,
             _r: PhantomData,
         }
     }
@@ -57,6 +86,16 @@ impl<R> FfiActorMailbox<R> {
         aether_data::MailboxId(self.mailbox)
     }
 
+    /// Rewrap a precomputed `mailbox` id as a typed peer handle that
+    /// inherits this handle's ctx binding (`sender` + inline registry), so
+    /// the rewrapped handle's sends stamp the same origin and route the
+    /// same way. The by-id counterpart of [`Self::resolve_peer`], for a cap
+    /// that folds a child / session id itself rather than resolving by name.
+    #[must_use]
+    pub fn at<Peer>(&self, mailbox: u64) -> FfiActorMailbox<'a, Peer> {
+        FfiActorMailbox::__new(mailbox, self.sender, self.inline)
+    }
+
     /// Resolve a sibling mailbox on the same transport, addressed by
     /// `name`. Same FNV-hash name resolution as
     /// [`crate::ffi::FfiCtx::resolve_actor`] — `name` must be the peer's
@@ -65,13 +104,15 @@ impl<R> FfiActorMailbox<R> {
     /// [`Self::resolve_peer_scoped`] instead. Kept as an inherent
     /// method so cap-owned ext traits (which only have a mailbox in
     /// hand, not a ctx) can hand back peer handles without rethreading
-    /// the ctx.
+    /// the ctx. The resolving actor's `sender` + inline registry ride
+    /// through, so the peer handle's sends stamp the same origin and
+    /// route the same way.
     // Runtime-name escape hatch (the by-name peer-resolution counterpart of
     // `FfiCtx::resolve_actor`): the peer name is supplied at runtime.
     #[must_use]
     #[allow(clippy::disallowed_methods)]
-    pub fn resolve_peer<Peer: Actor>(&self, name: &str) -> FfiActorMailbox<Peer> {
-        FfiActorMailbox::__new(mailbox_id_from_name(name).0)
+    pub fn resolve_peer<Peer: Actor>(&self, name: &str) -> FfiActorMailbox<'a, Peer> {
+        FfiActorMailbox::__new(mailbox_id_from_name(name).0, self.sender, self.inline)
     }
 
     /// Resolve a child mailbox of *this* actor, where the child is the
@@ -89,24 +130,29 @@ impl<R> FfiActorMailbox<R> {
         &self,
         scope: &str,
         segment: &str,
-    ) -> FfiActorMailbox<Peer> {
+    ) -> FfiActorMailbox<'a, Peer> {
         let node = ActorId::instanced(scope, segment);
-        FfiActorMailbox::__new(with_tag(Tag::Mailbox, fold_lineage(self.mailbox, node)))
+        FfiActorMailbox::__new(
+            with_tag(Tag::Mailbox, fold_lineage(self.mailbox, node)),
+            self.sender,
+            self.inline,
+        )
     }
 }
 
-impl<R: Actor> FfiActorMailbox<R> {
+impl<R: Actor> FfiActorMailbox<'_, R> {
     /// Send a single payload of kind `K` to actor `R`. Compile-checked
     /// against `R: HandlesKind<K>` — wrong-kind sends are rejected at
     /// the call site.
     ///
-    /// Inherits the handler's in-flight causal chain by default
-    /// (ADR-0080 §7): the host stamps the dispatch's `parent`/`root`
-    /// onto this send, so the recipient's work settles back into the
-    /// caller's chain. A guest holds no trace ids, so the inherit-vs-
-    /// detach choice rides as a flag on the `send_mail` bridge and the
-    /// host does the stamping. Reach for [`Self::send_detached`] for
-    /// the rare fire-and-forget send that should start its own chain.
+    /// Threads the resolving actor's own id as the send's `from`
+    /// (issue 1987): the host stamps it as origin (validated in-cluster),
+    /// so the recipient's `ctx.source_mailbox()` resolves the sender with
+    /// no ambient host cell. Inherits the handler's in-flight causal
+    /// chain by default (ADR-0080 §7): the host stamps the dispatch's
+    /// `parent`/`root` onto this send, so the recipient's work settles
+    /// back into the caller's chain. Reach for [`Self::send_detached`]
+    /// for the rare fire-and-forget send that should start its own chain.
     ///
     /// Wire shape (cast or postcard) follows `Kind::encode_into_bytes`
     /// — same single source of truth as the kind-typed sends per
@@ -117,7 +163,8 @@ impl<R: Actor> FfiActorMailbox<R> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(self.mailbox, K::ID.0, &bytes, 1, false);
+        self.inline
+            .route_or_enqueue(self.mailbox, K::ID.0, &bytes, 1, false, self.sender);
     }
 
     /// Send a slice of payloads as a contiguous batch. Cast-only —
@@ -130,7 +177,14 @@ impl<R: Actor> FfiActorMailbox<R> {
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        mail::send_mail(self.mailbox, K::ID.0, bytes, payloads.len() as u32, false);
+        self.inline.route_or_enqueue(
+            self.mailbox,
+            K::ID.0,
+            bytes,
+            payloads.len() as u32,
+            false,
+            self.sender,
+        );
     }
 
     /// ADR-0080 §7 fire-and-forget escape hatch: send `payload` to `R`
@@ -148,6 +202,7 @@ impl<R: Actor> FfiActorMailbox<R> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(self.mailbox, K::ID.0, &bytes, 1, true);
+        self.inline
+            .route_or_enqueue(self.mailbox, K::ID.0, &bytes, 1, true, self.sender);
     }
 }

@@ -205,7 +205,8 @@ where
     // Restore the child's `type State` from its saved bundle before it is
     // registered, so the first inbound mail sees the rehydrated state.
     {
-        let mut ctx = FfiCtx::__new(to_reconstruct.alias.0, registry);
+        // Rehydrate is not a mail dispatch — no inbound source on the ctx.
+        let mut ctx = FfiCtx::__new(to_reconstruct.alias.0, registry, 0);
         // SAFETY: `state_bytes` lives for this call; `PriorState::__from_ptr`
         // forms a slice over it bounded by the borrow, never escaping.
         let prior = unsafe {

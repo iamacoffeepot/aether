@@ -16,9 +16,9 @@
 //! - child[a] → self (in place): child[a]'s source is its own id.
 //! - cross-cluster (child[a] → a second loaded component, *during the drain*):
 //!   observed out-of-band by the observer (read via `log_tail`). The observer
-//!   reads child[a]'s id: the in-place drain re-stamps the host's dispatch
-//!   identity to the member it dispatches, so a member's own cross-cluster
-//!   send carries the member as origin (validated host-side to the cluster).
+//!   reads child[a]'s id: the member's ctx-mediated `send_to` threads its own
+//!   id as the send's `from`, so the host stamps the member as origin
+//!   (validated host-side to the cluster), not the cluster's inbound parent.
 //!
 //! The observation log is a cluster-shared `static` with the same
 //! single-run-token `UnsafeCell` + blanket `Sync` discipline the inline
@@ -37,10 +37,9 @@ extern crate alloc;
 
 use core::cell::UnsafeCell;
 
-use aether_actor::ffi::FfiActorMailbox;
 use aether_actor::{
-    Actor, BootError, FfiActor, FfiCtx, HandlesKind, Instanced, Manual, OutboundReply, Resolver,
-    Subname, actor,
+    BootError, FfiActor, FfiCtx, Instanced, MailboxId, Manual, OutboundReply, Resolver, Subname,
+    actor,
 };
 use aether_test_fixtures::{
     CollectMatrix, MATRIX_CELL_CHILD_TO_PARENT, MATRIX_CELL_CHILD_TO_SELF,
@@ -135,20 +134,6 @@ fn snapshot_report() -> MatrixReport {
         parent_id: log.parent_id,
     }
 }
-
-/// Zero-cost marker receiver for the cross-cluster send: it claims to handle
-/// `SourceQuery` so `FfiActorMailbox::<CrossClusterObserver>::send` type-checks,
-/// but it is never constructed or loaded — the cross-cluster send is addressed
-/// by the observer component's raw `MailboxId`, so only the `HandlesKind`
-/// bound matters at the call site (the same pattern `source_observer` uses to
-/// address a runtime-supplied `MailboxId`).
-struct CrossClusterObserver;
-
-impl Actor for CrossClusterObserver {
-    const NAMESPACE: &'static str = "test.matrix.cross_cluster_observer";
-}
-
-impl HandlesKind<SourceQuery> for CrossClusterObserver {}
 
 /// Entry export — the loaded component and cluster root. Spawns the two
 /// inline children in `wire`, drives the sweep on `RunMatrix`, records the
@@ -265,13 +250,13 @@ impl FfiActor for MatrixChild {
         }
 
         // Cross-cluster send *during the in-place drain*: addressed by the
-        // observer's raw `MailboxId`, so it takes the host send path. The
-        // observer's `source_mailbox()` reads this child's id (child[a]),
-        // because the drain re-stamps the host's dispatch identity to the
-        // member it dispatches before that member's own sends fire.
+        // observer's raw `MailboxId` via the ctx-mediated `send_to`, so it
+        // takes the host send path. The send threads this child's own id
+        // (`ctx.mailbox`, == child[a] during the drain) as the `from`, so the
+        // observer's `source_mailbox()` reads child[a]'s id — the host stamps
+        // the guest-carried, in-cluster-validated origin (issue 1987).
         if ping.observer_mailbox != 0 {
-            FfiActorMailbox::<CrossClusterObserver>::__new(ping.observer_mailbox)
-                .send(&SourceQuery);
+            ctx.send_to(MailboxId(ping.observer_mailbox), &SourceQuery);
         }
     }
 }
