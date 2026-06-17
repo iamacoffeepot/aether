@@ -20,8 +20,12 @@ use serde::{Deserialize, Serialize};
 ///
 /// v2 (issue #988) added `kind_name` so the schema-evolution check can
 /// look the kind up in the current registry by name; v1 entries (which
-/// lack the field) are un-rescuable and evict on mismatch.
-pub const SCHEMA_VERSION: u8 = 2;
+/// lack the field) are un-rescuable and evict on mismatch. v3 (ADR-0118
+/// / issue 1984) carries no struct change — it invalidates entries whose
+/// stored `kind_id` was computed under the pre-wire canonical bytes,
+/// since moving the `Kind::ID` hash input onto the aether-wire format
+/// regenerates every id. Pre-1.0 this is a wipe, not a migrate.
+pub const SCHEMA_VERSION: u8 = 3;
 
 /// Postcard-encoded sidecar describing one persistent handle. Written
 /// atomically next to the handle's `<hash>.bin` payload; the boot scan

@@ -943,11 +943,14 @@ pub const INPUTS_SECTION: &str = "aether.kinds.inputs";
 /// `Handler` variant; v0x04 (ADR-0112 / issue 1850) widened that field
 /// from `Option<KindId>` to [`ReplyContract`] so a handler's reply
 /// *class* (single / manual / stream) is reported, not just a single
-/// reply kind. A component built before any of these and a substrate
-/// after would otherwise disagree on the record shape, so the reader
-/// rejects an older version byte loudly — a hard rebuild boundary.
+/// reply kind; v0x05 (ADR-0118 / issue 1984) re-encoded every record
+/// from postcard onto the owned aether-wire format (fixed little-endian
+/// selectors / ids / counts). A component built before any of these and
+/// a substrate after would otherwise disagree on the record shape, so
+/// the reader rejects an older version byte loudly — a hard rebuild
+/// boundary.
 ///
-/// Distinct from the `aether.kinds` section's own version (also `0x04`,
+/// Distinct from the `aether.kinds` section's own version (also `0x05`,
 /// `kind_manifest::KINDS_VERSION`): the two sections version
 /// independently and happen to share a number at this revision.
-pub const INPUTS_SECTION_VERSION: u8 = 0x04;
+pub const INPUTS_SECTION_VERSION: u8 = 0x05;

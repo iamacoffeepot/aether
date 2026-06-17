@@ -204,17 +204,16 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 &#labels_ident,
             );
 
-        // ADR-0028 / ADR-0032 / issue 640: `aether.kinds` v0x04 ships
-        // just `[version_byte][canonical_bytes]` — the v0x03 trailing
-        // `is_stream` byte retired with the auto-subscribe path.
-        // Canonical bytes (and therefore `Kind::ID`) unchanged from
-        // v0x02 / v0x03; only the per-record framing shrunk by one byte.
+        // ADR-0028 / ADR-0032 / ADR-0118: `aether.kinds` v0x05 ships
+        // `[version_byte][canonical_bytes]`, where the canonical bytes are
+        // now the owned aether-wire encoding (issue 1984) — so every
+        // `Kind::ID` regenerates, gated loudly behind this version byte.
         #[cfg(target_arch = "wasm32")]
         #[used]
         #[unsafe(link_section = "aether.kinds")]
         static #kind_static_ident: [u8; #canonical_len_ident + 1] = {
             let mut out = [0u8; #canonical_len_ident + 1];
-            out[0] = 0x04;
+            out[0] = 0x05;
             let mut i = 0;
             while i < #canonical_len_ident {
                 out[i + 1] = #canonical_bytes_ident[i];
@@ -228,9 +227,10 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #[unsafe(link_section = "aether.kinds.labels")]
         static #kind_labels_static_ident: [u8; #labels_len_ident + 1] = {
             let mut out = [0u8; #labels_len_ident + 1];
-            // v0x03: `KindLabels` gained `kind_id`, making records
-            // self-identifying. Reader pairs by id, not index.
-            out[0] = 0x03;
+            // v0x04 (ADR-0118 / issue 1984): the labels record is the owned
+            // aether-wire encoding of `KindLabels`. v0x03 made records
+            // self-identifying (`kind_id`); the reader still pairs by id.
+            out[0] = 0x04;
             let mut i = 0;
             while i < #labels_len_ident {
                 out[i + 1] = #labels_bytes_ident[i];
@@ -3336,7 +3336,7 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
 /// `__AETHER_INPUTS_MANIFEST_LEN: usize` and
 /// `__AETHER_INPUTS_MANIFEST: [u8; …LEN]` — carrying the
 /// concatenated `aether.kinds.inputs` record bytes. Each record is
-/// `[INPUTS_SECTION_VERSION (0x03), ..postcard(InputsRecord)..]`,
+/// `[INPUTS_SECTION_VERSION (0x05), ..wire(InputsRecord)..]`,
 /// assembled at const-eval via the hub-protocol const-fn encoders.
 /// `aether_actor::export!()` reads these consts and emits the
 /// `#[unsafe(link_section = "aether.kinds.inputs")]` static in the
@@ -3406,11 +3406,11 @@ fn build_inputs_manifest_consts(
                         #reply_tag_expr,
                         #reply_id_expr,
                     );
-                // Per-record section version byte, bumped to 0x04 by
-                // ADR-0112 (issue 1850) — the `Handler` variant's reply
-                // field widened from `Option<KindId>` to `ReplyContract`.
-                // Keep in lockstep with `INPUTS_SECTION_VERSION`.
-                out[pos] = 0x04;
+                // Per-record section version byte, bumped to 0x05 by
+                // ADR-0118 (issue 1984) — the record is now the owned
+                // aether-wire encoding rather than postcard. Keep in
+                // lockstep with `INPUTS_SECTION_VERSION`.
+                out[pos] = 0x05;
                 pos += 1;
                 let mut i = 0;
                 while i < REC_LEN {
@@ -3434,8 +3434,8 @@ fn build_inputs_manifest_consts(
                 const REC_BYTES: [u8; REC_LEN] =
                     ::aether_actor::__macro_internals::canonical::write_inputs_fallback::<REC_LEN>(#doc_expr);
                 // Per-record section version byte, in lockstep with
-                // `INPUTS_SECTION_VERSION` (0x04, ADR-0112 / issue 1850).
-                out[pos] = 0x04;
+                // `INPUTS_SECTION_VERSION` (0x05, ADR-0118 / issue 1984).
+                out[pos] = 0x05;
                 pos += 1;
                 let mut i = 0;
                 while i < REC_LEN {
@@ -3459,8 +3459,8 @@ fn build_inputs_manifest_consts(
                 const REC_BYTES: [u8; REC_LEN] =
                     ::aether_actor::__macro_internals::canonical::write_inputs_component::<REC_LEN>(#doc_lit);
                 // Per-record section version byte, in lockstep with
-                // `INPUTS_SECTION_VERSION` (0x04, ADR-0112 / issue 1850).
-                out[pos] = 0x04;
+                // `INPUTS_SECTION_VERSION` (0x05, ADR-0118 / issue 1984).
+                out[pos] = 0x05;
                 pos += 1;
                 let mut i = 0;
                 while i < REC_LEN {
@@ -3496,9 +3496,9 @@ fn build_inputs_manifest_consts(
                         <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
                         <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
                     );
-                // Per-record section version byte (0x04), in lockstep
-                // with `INPUTS_SECTION_VERSION` (ADR-0112 / issue 1850).
-                out[pos] = 0x04;
+                // Per-record section version byte (0x05), in lockstep
+                // with `INPUTS_SECTION_VERSION` (ADR-0118 / issue 1984).
+                out[pos] = 0x05;
                 pos += 1;
                 let mut i = 0;
                 while i < REC_LEN {
@@ -3647,18 +3647,16 @@ fn build_kinds_section_retention_statics(
                     <#k as ::aether_actor::__macro_internals::Kind>::NAME,
                     &#schema_ident,
                 );
-            // ADR-0068 v0x03: trailing byte after canonical bytes
-            // Same v0x04 wire shape as `expand_kind`'s primary
-            // emission so retention records (when this kind lives in a
-            // dependency rlib) pair cleanly with the primary records
-            // by id (issue 640 retired the v0x03 trailing IS_STREAM
-            // byte alongside the auto-subscribe path).
+            // Same v0x05 wire shape as `expand_kind`'s primary emission
+            // (ADR-0118 / issue 1984: the owned aether-wire encoding) so
+            // retention records (when this kind lives in a dependency
+            // rlib) pair cleanly with the primary records by id.
             #[cfg(target_arch = "wasm32")]
             #[used]
             #[unsafe(link_section = "aether.kinds")]
             static #section_ident: [u8; #len_ident + 1] = {
                 let mut out = [0u8; #len_ident + 1];
-                out[0] = 0x04;
+                out[0] = 0x05;
                 let mut i = 0;
                 while i < #len_ident {
                     out[i + 1] = #bytes_ident[i];
@@ -3703,7 +3701,9 @@ fn build_kinds_section_retention_statics(
             #[unsafe(link_section = "aether.kinds.labels")]
             static #labels_section_ident: [u8; #labels_len_ident + 1] = {
                 let mut out = [0u8; #labels_len_ident + 1];
-                out[0] = 0x03;
+                // v0x04 (ADR-0118 / issue 1984): the owned aether-wire
+                // encoding of `KindLabels`, matching `expand_kind`.
+                out[0] = 0x04;
                 let mut i = 0;
                 while i < #labels_len_ident {
                     out[i + 1] = #labels_bytes_ident[i];

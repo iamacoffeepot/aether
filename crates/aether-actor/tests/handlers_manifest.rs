@@ -23,7 +23,7 @@
 
 use aether_actor::{BootError, FfiActor, FfiCtx, Manual, Resolver, actor};
 use aether_data::Kind;
-use aether_data::{INPUTS_SECTION_VERSION, InputsRecord, ReplyContract};
+use aether_data::{INPUTS_SECTION_VERSION, InputsRecord, ReplyContract, wire};
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]
@@ -108,8 +108,8 @@ fn parse_section(bytes: &[u8]) -> Vec<InputsRecord> {
             "every record must start with the section version byte"
         );
         cursor = &cursor[1..];
-        let (rec, rest) = postcard::take_from_bytes::<InputsRecord>(cursor)
-            .expect("postcard decode of InputsRecord failed");
+        let (rec, rest) = wire::take_from_bytes_bare::<InputsRecord>(cursor)
+            .expect("wire decode of InputsRecord failed");
         out.push(rec);
         cursor = rest;
     }

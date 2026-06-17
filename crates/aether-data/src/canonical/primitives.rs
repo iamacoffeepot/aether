@@ -1,18 +1,25 @@
-// Wire-encode: postcard varint slot writes narrow `u64 → u8` after
-// the LEB128 logic guarantees the high bytes are zero (or the
-// continuation bit is set). The byte layout is the load-bearing
-// contract; `try_into` would obscure the wire-format shape.
+// Wire-encode: the `write_count` slot narrows a `usize` length to `u32`
+// after an explicit `<= u32::MAX` assert (a count past the ceiling is an
+// encode error, not a silent truncation). The fixed little-endian byte
+// layout is the load-bearing contract; `try_into` would obscure it and is
+// not available in const context anyway.
 #![allow(clippy::cast_possible_truncation)]
 
-//! Const-fn postcard primitives shared across the canonical
-//! submodules (schema / labels / inputs). Varint encoders, string
-//! length + write helpers, `Option<str>` helpers, and the `Cow`
-//! narrowing shims that hand out `&[T]` / `&str` from a borrowed
-//! `Cow` in const context.
+//! Const-fn aether-wire primitives shared across the canonical
+//! submodules (schema / labels / inputs). Fixed little-endian integer
+//! writers, string length + write helpers, `Option<str>` helpers, and
+//! the `Cow` narrowing shims that hand out `&[T]` / `&str` from a
+//! borrowed `Cow` in const context.
 //!
-//! Everything here is either `pub` (re-exported at `canonical::*`)
-//! or `pub(super)` (reachable from sibling submodules via
-//! `super::primitives::*`). No runtime allocations; no `std`.
+//! The encoding is the ADR-0118 aether wire format (the same layout
+//! `aether_data::wire` drives through serde): little-endian fixed-width
+//! integers, a `u32` little-endian length prefix on strings, a one-byte
+//! option-presence flag. The const-fn writers here must stay byte-for-byte
+//! identical to that runtime path — the `*_runtime_matches_const` cross-checks
+//! in `canonical::tests` are the guard.
+//!
+//! Everything here is `pub(super)` — reachable from sibling submodules via
+//! `super::primitives::*`. No runtime allocations; no `std`.
 
 use alloc::borrow::Cow;
 
@@ -79,91 +86,66 @@ pub(super) const fn cow_str_as_str<'a>(c: &'a Cow<'static, str>) -> &'a str {
     }
 }
 
-/// Byte count of `val` in postcard's unsigned-varint encoding
-/// (7 bits per byte, MSB set until the last byte).
-#[must_use]
-pub const fn varint_u32_len(val: u32) -> usize {
-    if val < (1 << 7) {
-        1
-    } else if val < (1 << 14) {
-        2
-    } else if val < (1 << 21) {
-        3
-    } else if val < (1 << 28) {
-        4
-    } else {
-        5
+/// Byte width of a fixed little-endian `u32` on the wire — the size of a
+/// collection/string count, a sum-type selector (serde's `variant_index`),
+/// and a schema discriminant.
+pub(super) const U32_WIDTH: usize = 4;
+
+/// Byte width of a fixed little-endian `u64` on the wire — the size of a
+/// typed id (`KindId`) and a `SchemaType::TypeId`.
+pub(super) const U64_WIDTH: usize = 8;
+
+/// Byte width of a one-byte flag — `bool` and option-presence.
+pub(super) const FLAG_WIDTH: usize = 1;
+
+/// Write `val` as four fixed little-endian bytes (the wire encoding of a
+/// `u32` count / selector / discriminant), returning the advanced cursor.
+pub(super) const fn write_u32_le(val: u32, out: &mut [u8], cursor: usize) -> usize {
+    let bytes = val.to_le_bytes();
+    let mut i = 0;
+    while i < U32_WIDTH {
+        out[cursor + i] = bytes[i];
+        i += 1;
     }
+    cursor + U32_WIDTH
 }
 
-/// Byte count of `val` in postcard's unsigned-varint encoding, after
-/// narrowing `usize` to `u32`. Used by `const` size passes that walk
-/// schema arrays whose lengths fit in `u32` by construction.
+/// Write `val` as eight fixed little-endian bytes (the wire encoding of a
+/// `u64` typed id / `TypeId`), returning the advanced cursor.
+pub(super) const fn write_u64_le(val: u64, out: &mut [u8], cursor: usize) -> usize {
+    let bytes = val.to_le_bytes();
+    let mut i = 0;
+    while i < U64_WIDTH {
+        out[cursor + i] = bytes[i];
+        i += 1;
+    }
+    cursor + U64_WIDTH
+}
+
+/// Write a wire collection/string count: `val` narrowed to a fixed
+/// little-endian `u32`.
 ///
 /// # Panics
-/// Panics if `val > u32::MAX` — fail-fast per ADR-0063: callers
-/// guarantee the input fits in `u32` by walking bounded `const`
-/// structures, so an overflow indicates a bug in the caller.
-#[must_use]
-pub const fn varint_usize_len(val: usize) -> usize {
+/// Panics if `val > u32::MAX` — fail-fast per ADR-0063: callers walk
+/// bounded `const` structures whose lengths fit in `u32` by construction,
+/// so an overflow indicates a bug in the caller.
+pub(super) const fn write_count(val: usize, out: &mut [u8], cursor: usize) -> usize {
     assert!(
         val <= u32::MAX as usize,
-        "varint_usize_len: value exceeds u32::MAX"
+        "canonical: count exceeds u32::MAX"
     );
-    varint_u32_len(val as u32)
+    write_u32_le(val as u32, out, cursor)
 }
 
-/// Byte count of `val` in postcard's unsigned-varint encoding for u64.
-/// Extends `varint_u32_len` to the full u64 range needed by `Kind::ID`.
-#[must_use]
-pub const fn varint_u64_len(val: u64) -> usize {
-    let mut bytes = 1usize;
-    let mut v = val >> 7;
-    while v != 0 {
-        bytes += 1;
-        v >>= 7;
-    }
-    bytes
-}
-
-pub(super) const fn write_varint_u32(mut val: u32, out: &mut [u8], cursor: usize) -> usize {
-    let mut pos = cursor;
-    while val >= 0x80 {
-        out[pos] = ((val & 0x7F) as u8) | 0x80;
-        val >>= 7;
-        pos += 1;
-    }
-    out[pos] = val as u8;
-    pos + 1
-}
-
-pub(super) const fn write_varint_usize(val: usize, out: &mut [u8], cursor: usize) -> usize {
-    assert!(
-        val <= u32::MAX as usize,
-        "write_varint_usize: value exceeds u32::MAX"
-    );
-    write_varint_u32(val as u32, out, cursor)
-}
-
-pub(super) const fn write_varint_u64(mut val: u64, out: &mut [u8], cursor: usize) -> usize {
-    let mut pos = cursor;
-    while val >= 0x80 {
-        out[pos] = ((val & 0x7F) as u8) | 0x80;
-        val >>= 7;
-        pos += 1;
-    }
-    out[pos] = val as u8;
-    pos + 1
-}
-
+/// Wire byte length of `s`: a `u32` little-endian length prefix plus the
+/// UTF-8 bytes.
 pub(super) const fn str_len(s: &str) -> usize {
-    let bytes = s.as_bytes();
-    varint_usize_len(bytes.len()) + bytes.len()
+    U32_WIDTH + s.len()
 }
 
 pub(super) const fn write_str(s: &str, out: &mut [u8], cursor: usize) -> usize {
     let bytes = s.as_bytes();
-    let mut pos = write_varint_usize(bytes.len(), out, cursor);
+    let mut pos = write_count(bytes.len(), out, cursor);
     let mut i = 0;
     while i < bytes.len() {
         out[pos] = bytes[i];

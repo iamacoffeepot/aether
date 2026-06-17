@@ -13,7 +13,10 @@ use alloc::vec::Vec;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
 
-use super::{Error, WIRE_VERSION, from_bytes, take_from_bytes, to_vec};
+use super::{
+    Error, WIRE_VERSION, from_bytes, from_bytes_bare, take_from_bytes, take_from_bytes_bare,
+    to_vec, to_vec_bare,
+};
 use crate::ids::KindId;
 use crate::{Kind, Ref};
 
@@ -246,4 +249,44 @@ fn take_from_bytes_returns_the_remainder() {
     let (value, rest): (u8, &[u8]) = take_from_bytes(&bytes).unwrap();
     assert_eq!(value, 7);
     assert_eq!(rest, &[0xAA, 0xBB]);
+}
+
+#[test]
+fn bare_roundtrip_carries_no_version_byte() {
+    // `to_vec_bare` emits the structural body with no leading WIRE_VERSION;
+    // `from_bytes_bare` reads it back, requiring every byte consumed.
+    let r = Rich {
+        name: "x".into(),
+        tags: vec!["a".into(), "b".into()],
+        maybe: Some(42),
+        nested: Point { x: 5, y: 6 },
+        flag: true,
+    };
+    let bare = to_vec_bare(&r).unwrap();
+    assert_eq!(
+        bare,
+        to_vec(&r).unwrap()[1..],
+        "bare body equals the versioned payload minus its leading version byte"
+    );
+    assert_eq!(from_bytes_bare::<Rich>(&bare).unwrap(), r);
+}
+
+#[test]
+fn from_bytes_bare_rejects_trailing_bytes() {
+    let mut bare = to_vec_bare(&7u8).unwrap();
+    bare.push(0xAA);
+    assert_eq!(from_bytes_bare::<u8>(&bare), Err(Error::TrailingBytes));
+}
+
+#[test]
+fn take_from_bytes_bare_walks_back_to_back_records() {
+    // Two bare records concatenated decode in sequence, each handing back the
+    // remainder — the shape the manifest reader relies on.
+    let mut buf = to_vec_bare(&7u8).unwrap();
+    buf.extend_from_slice(&to_vec_bare(&0x0102_0304u32).unwrap());
+    let (first, rest): (u8, &[u8]) = take_from_bytes_bare(&buf).unwrap();
+    assert_eq!(first, 7);
+    let (second, rest): (u32, &[u8]) = take_from_bytes_bare(rest).unwrap();
+    assert_eq!(second, 0x0102_0304);
+    assert!(rest.is_empty());
 }
