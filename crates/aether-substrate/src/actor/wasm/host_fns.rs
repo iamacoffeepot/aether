@@ -5,6 +5,7 @@
 // as any other architectural change.
 
 use core::str::from_utf8;
+use std::sync::Arc;
 
 use wasmtime::{Caller, Linker};
 
@@ -502,6 +503,47 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
+    // HOST_FN_OK: ADR-0114 amendment — scalar set/read of the per-instance
+    // `in_flight_recipient` the substrate already maintains, same shape as
+    // `source_of_p32` (scalar in, scalar out, no new substrate resource). A
+    // mail-sink approach makes no sense: this re-stamps the dispatch identity
+    // for the very call frame the guest is inside, so it must be synchronous.
+    //
+    // ADR-0114 amendment: re-stamp the host's dispatch identity to the cluster
+    // member the in-place drain is dispatching, so that member's own
+    // (cross-cluster) sends carry the member as origin instead of the
+    // cluster's inbound recipient. The guest's `drain_cluster_queue` brackets
+    // each item's `membrane_dispatch` with this call and restores the prior
+    // identity afterward. Returns the *previous* `in_flight_recipient` (raw,
+    // no `self.sender` fallback) so the guest can restore it.
+    //
+    // Anti-spoof: `id` is accepted only when it is the component's own id
+    // (`ctx.sender`) or a registered inline-child alias of *this* component —
+    // an alias whose `Inbox` handler is the same `Arc<dyn InboxHandler>` as
+    // this component's own slot (`spawn_inline_child_p32` clones the parent's
+    // handler under the alias, so handler-identity is exactly cluster
+    // membership). `MailboxId::NONE` (0) is the restore sentinel and is always
+    // allowed (it is how the guest passes back a saved value). On any other /
+    // foreign `id` the identity is left unchanged and the (unchanged) previous
+    // value is returned, so a guest can only claim origins inside its own
+    // cluster.
+    linker.func_wrap(
+        "aether",
+        "set_dispatch_source_p32",
+        |caller: Caller<'_, ComponentCtx>, id: u64| -> u64 {
+            let ctx = caller.data();
+            let prev = ctx.in_flight_recipient().0;
+            let requested = MailboxId(id);
+            let allowed = requested == MailboxId::NONE
+                || requested == ctx.sender
+                || is_own_cluster_alias(ctx, requested);
+            if allowed {
+                ctx.set_in_flight_recipient(requested);
+            }
+            prev
+        },
+    )?;
+
     // ADR-0042: read back the correlation id the substrate minted
     // for this component's most recent `send_mail`. A guest handler
     // captures the id right after a send, then matches it against the
@@ -604,4 +646,26 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     )?;
 
     Ok(())
+}
+
+/// Whether `candidate` is a registered inline-child alias of *this* component
+/// (ADR-0114). `spawn_inline_child_p32` routes a child's alias to the parent
+/// trampoline's own dispatcher slot by cloning the parent's `Inbox` handler
+/// under the alias id, so an alias's handler and the component's own
+/// (`ctx.sender`) handler are clones of one `Arc<dyn InboxHandler>`. Cluster
+/// membership is therefore exactly handler-pointer identity: resolve both
+/// `Inbox` handlers and compare with `Arc::ptr_eq`. A non-`Inbox` entry, a
+/// missing entry, or a handler from a different component is `false`.
+fn is_own_cluster_alias(ctx: &ComponentCtx, candidate: MailboxId) -> bool {
+    let (
+        Some(MailboxEntry::Inbox { handler: own, .. }),
+        Some(MailboxEntry::Inbox { handler: alias, .. }),
+    ) = (
+        ctx.registry.entry(ctx.sender),
+        ctx.registry.entry(candidate),
+    )
+    else {
+        return false;
+    };
+    Arc::ptr_eq(&own, &alias)
 }

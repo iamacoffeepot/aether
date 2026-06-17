@@ -15,11 +15,10 @@
 //! - child[a] → sibling child[b] (in place): child[b]'s source is child[a]'s id.
 //! - child[a] → self (in place): child[a]'s source is its own id.
 //! - cross-cluster (child[a] → a second loaded component, *during the drain*):
-//!   observed out-of-band by the observer (read via `log_tail`). Per the
-//!   Task 2 documented boundary, the observer reads the cluster's inbound
-//!   identity (the parent's id), NOT child[a]'s id, because the in-place
-//!   drain runs inside one `receive_p32` and never updates the host-side
-//!   dispatch identity.
+//!   observed out-of-band by the observer (read via `log_tail`). The observer
+//!   reads child[a]'s id: the in-place drain re-stamps the host's dispatch
+//!   identity to the member it dispatches, so a member's own cross-cluster
+//!   send carries the member as origin (validated host-side to the cluster).
 //!
 //! The observation log is a cluster-shared `static` with the same
 //! single-run-token `UnsafeCell` + blanket `Sync` discipline the inline
@@ -265,11 +264,11 @@ impl FfiActor for MatrixChild {
             });
         }
 
-        // Cross-cluster send *during the in-place drain* (the Task 2
-        // boundary): addressed by the observer's raw `MailboxId`, so it takes
-        // the host send path. The observer's `source_mailbox()` reads the
-        // cluster's inbound identity (the parent's id), not this child's,
-        // because the drain never updates the host-side dispatch identity.
+        // Cross-cluster send *during the in-place drain*: addressed by the
+        // observer's raw `MailboxId`, so it takes the host send path. The
+        // observer's `source_mailbox()` reads this child's id (child[a]),
+        // because the drain re-stamps the host's dispatch identity to the
+        // member it dispatches before that member's own sends fire.
         if ping.observer_mailbox != 0 {
             FfiActorMailbox::<CrossClusterObserver>::__new(ping.observer_mailbox)
                 .send(&SourceQuery);

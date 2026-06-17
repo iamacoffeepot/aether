@@ -13,13 +13,11 @@
 //!   child[a]'s id.
 //! - child[a] → self: child[a] re-received it; its source is its own id.
 //!
-//! Cell asserted out-of-band (cross-cluster, during the in-place drain — the
-//! Task 2 documented boundary): the `source_observer`, mailed by child[a]
-//! during the `RunMatrix` drain, logs the source it read. Per Task 2 that is
-//! the cluster's *inbound* dispatch identity (the parent, the recipient of
-//! the wire `RunMatrix` call), NOT child[a]'s id — the drain runs inside one
-//! `receive_p32` and never updates the host-side dispatch identity. The test
-//! asserts that documented behavior; it does not fail on it.
+//! Cell asserted out-of-band (cross-cluster, during the in-place drain): the
+//! `source_observer`, mailed by child[a] during the `RunMatrix` drain, logs
+//! the source it read — child[a]'s id. The drain re-stamps the host's dispatch
+//! identity to the member it dispatches (validated host-side to the cluster),
+//! so a member's own cross-cluster send carries the member as origin.
 //!
 //! What this layer proves vs. the unit tests: `FleetBench` proves to-and-from
 //! delivery and the source the recipient reads, end-to-end over the real RPC
@@ -146,13 +144,12 @@ mod tests {
                 "child[a] should read its own id as the source of child[a] -> self",
             );
 
-            // Cross-cluster cell (the Task 2 documented boundary): the
-            // observer, mailed by child[a] during the RunMatrix drain, logged
-            // the source it read. The drain runs inside the parent's one
-            // `receive_p32`, so the host stamps the cluster's inbound
-            // identity (the parent) as the origin — NOT child[a]. Assert the
-            // documented behavior.
-            let expected = format!("source_mailbox={parent_id}");
+            // Cross-cluster cell: the observer, mailed by child[a] during the
+            // RunMatrix drain, logged the source it read. The drain re-stamps
+            // the host's dispatch identity to the member it dispatches before
+            // that member's own sends fire, so the host stamps child[a] (not
+            // the cluster's inbound parent) as the origin of this send.
+            let expected = format!("source_mailbox={child_a_id}");
             let entries = match bench.log_tail(engine, &observer.addr, None) {
                 LogTailResult::Ok { entries, .. } => entries,
                 LogTailResult::Err { error } => panic!("log_tail on observer failed: {error}"),
@@ -163,9 +160,10 @@ mod tests {
                 .collect();
             assert!(
                 logged.iter().any(|e| e.message == expected),
-                "the cross-cluster observer should log the cluster's inbound identity \
-                 (parent id {parent_id}) as the source of a send made during the in-place \
-                 drain (Task 2 boundary), not child[a]'s id {child_a_id};\n\
+                "the cross-cluster observer should log child[a]'s id {child_a_id} as the source \
+                 of a send made during the in-place drain — the drain re-stamps the dispatch \
+                 identity to the dispatched member — not the cluster's inbound parent id \
+                 {parent_id};\n\
                  expected message: {expected:?}\n\
                  logged source_mailbox entries: {logged:?}",
             );

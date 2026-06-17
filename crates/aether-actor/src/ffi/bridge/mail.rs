@@ -123,6 +123,25 @@ pub fn source_of(handle: u32) -> u64 {
     unsafe { raw::source_of(handle) }
 }
 
+/// ADR-0114 amendment: re-stamp the host's dispatch identity to the cluster
+/// member `id` the in-place drain is dispatching, so that member's own
+/// (cross-cluster) sends carry it as origin instead of the cluster's inbound
+/// recipient. Returns the *previous* dispatch identity (raw `MailboxId`, `0`
+/// outside a dispatch) so the caller can restore it after the member's
+/// dispatch. The host validates `id` against the calling cluster (own id, a
+/// registered inline-child alias, or `0` as the restore sentinel) and leaves
+/// the identity unchanged on a foreign id. The cluster drain
+/// (`drain_cluster_queue`) is the only intended caller.
+#[must_use]
+pub fn set_dispatch_source(id: u64) -> u64 {
+    // SAFETY: `raw::set_dispatch_source` takes a scalar id and reads/writes a
+    // host-side per-instance `Cell` — no guest memory access, no ABI
+    // invariants beyond "we are the FFI guest", enforced by the
+    // `#[cfg(target_arch = "wasm32")]` import gate (the non-wasm build links
+    // an inert host stub that returns 0).
+    unsafe { raw::set_dispatch_source(id) }
+}
+
 /// ADR-0081 §7: re-emit one `tracing::*` event on the host side.
 /// Called by the wasm subscriber per event so the host's
 /// `ActorAwareLayer` lands the entry in the trampoline's

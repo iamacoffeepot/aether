@@ -447,18 +447,17 @@ impl InlineRegistry {
     /// table is empty, so this is the only carrier of an in-place send's
     /// immediate sender). On the `Remote` branch it is unused: the host
     /// stamps origin from its own per-receive dispatch identity
-    /// (`ComponentCtx::dispatch_identity` = the cluster's inbound
-    /// `in_flight_recipient`), not from a guest-supplied id.
+    /// (`ComponentCtx::dispatch_identity` = `in_flight_recipient`).
     ///
-    /// Cross-cluster-from-in-place boundary (ADR-0114 amendment, Task 2): a
-    /// cross-cluster send made by an inline child *during the in-place drain*
-    /// takes this `Remote` branch and is stamped by the host with the
-    /// cluster's inbound dispatch identity, NOT the in-place child's id —
-    /// the in-place drain runs inside one `receive_p32` and never updates the
-    /// host-side identity, so the host cannot see the child as the origin.
-    /// This is intended: cross-cluster origin is cluster-granular, the same
-    /// component-granular attribution ADR-0114 §"Settlement and tracing"
-    /// records for observability.
+    /// Cross-cluster from in place (ADR-0114 amendment): a cross-cluster send
+    /// made by an inline child *during the in-place drain* takes this `Remote`
+    /// branch and is stamped by the host with the dispatched member's id, not
+    /// the cluster's inbound recipient. [`drain_cluster_queue`] re-stamps the
+    /// host's dispatch identity (`mail::set_dispatch_source`) to the member it
+    /// dispatches before that member runs — the in-guest analog of the
+    /// trampoline's inbound stamp — and the host validates the claim to this
+    /// cluster, so a member's own outbound mail carries the member as origin
+    /// and a guest cannot spoof a foreign id.
     pub(crate) fn route_or_enqueue(
         &self,
         recipient: u64,
@@ -603,6 +602,17 @@ where
                 item.recipient,
             )
         };
+        // Re-stamp the host's dispatch identity to the member being
+        // dispatched (`item.recipient`) — the in-guest analog of what
+        // `forward_to_wasm` does for an inbound receive, so a member's own
+        // outbound *cross-cluster* send carries the member as origin rather
+        // than the cluster's inbound recipient. The host validates the id
+        // against this cluster and returns the prior identity, restored after
+        // the dispatch. Distinct from `current_source` below: that is the
+        // "from" the recipient reads (`item.sender`); this is the identity the
+        // member's own sends stamp (`item.recipient`). Set before the dispatch
+        // and restored after, so both are correct for the whole item.
+        let prev_dispatch_source = mail::set_dispatch_source(item.recipient);
         // Publish this item's "from" half around its dispatch so the
         // recipient's `ctx.source_mailbox()` resolves it (the in-place reply
         // table is empty). The drain is a flat loop — never nested — so
@@ -614,6 +624,9 @@ where
         let dispatch_own = mk_own();
         membrane_dispatch(self_id, mail, registry, dispatch_own);
         registry.set_current_source(0);
+        // Restore the prior dispatch identity; the return (the value we just
+        // set, `item.recipient`) is not needed on the restore leg.
+        let _ = mail::set_dispatch_source(prev_dispatch_source);
     }
 }
 
