@@ -570,6 +570,17 @@ impl ComponentCtx {
         self.in_flight_recipient.set(recipient);
     }
 
+    /// The raw in-flight dispatch identity (the routed recipient), with no
+    /// `self.sender` fallback — [`MailboxId::NONE`] outside an in-flight
+    /// dispatch. The `set_dispatch_source_p32` host fn returns this so the
+    /// guest's in-place drain can save the value before re-stamping the
+    /// identity to the member it dispatches, then restore it afterward
+    /// (ADR-0114 amendment). Distinct from [`Self::dispatch_identity`], which
+    /// resolves `NONE` to `self.sender` for outbound origin stamping.
+    pub(crate) fn in_flight_recipient(&self) -> MailboxId {
+        self.in_flight_recipient.get()
+    }
+
     /// Clear the in-flight context after the guest's `receive_p32`
     /// shim returns. Symmetric with [`Self::set_in_flight`] /
     /// [`Self::set_in_flight_recipient`].

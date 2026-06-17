@@ -169,5 +169,17 @@ crate-type = ["cdylib"]
 name = "source_observer"
 crate-type = ["cdylib"]
 
+# Issue 1977 (ADR-0114 amendment) cluster-addressing matrix fixture: the
+# multi-actor entry `MatrixParent` spawns two inline children (`a`, `b`) and,
+# on `RunMatrix`, drives every in-cluster addressing direction in place plus
+# one cross-cluster send during the drain. Cluster members record what they
+# observed into a shared log; `CollectMatrix` replies a `MatrixReport`. The
+# FleetBench matrix-sweep test loads it and asserts each cell's delivery +
+# the source the recipient read.
+# Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/matrix_sweep.wasm
+[[example]]
+name = "matrix_sweep"
+crate-type = ["cdylib"]
+
 [lints]
 workspace = true

@@ -87,7 +87,7 @@ pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyHandle};
 // an extra `ffi::` segment.
 pub use ffi::{
     BootError, ErasedFfiActor, FfiActor, FfiActorMailbox, FfiCtx, FfiDropCtx, FfiInitCtx,
-    SpawnError,
+    RelativeMailbox, SpawnError,
 };
 
 // Issue 665 retired `MailTransport` and its `MailTransportTrait`

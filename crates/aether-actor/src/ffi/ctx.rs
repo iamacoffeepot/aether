@@ -109,6 +109,60 @@ impl Resolver for FfiInitCtx<'_> {
     }
 }
 
+/// A type-erased sendable handle to a cluster relative — the parent,
+/// a sibling, or a child of the addressing actor (ADR-0114 addressing
+/// amendment). Returned by [`FfiCtx::parent`] / [`FfiCtx::sibling`] /
+/// [`FfiCtx::child`], it wraps the relative's resolved [`MailboxId`] (looked
+/// up in the per-component inline registry, never folded) plus the registry
+/// the send routes through.
+///
+/// Unlike [`FfiActorMailbox`] this carries no receiver type and no
+/// `R: HandlesKind<K>` bound — relative addressing is positional, so the
+/// target's handler set is not known at the call site (the by-id counterpart
+/// of the runtime-name `send_to_named` escape hatch). The send routes through
+/// the inline registry's cluster router: a cluster-member recipient (which a
+/// resolved relative always is) dispatches in place via the queue + drain,
+/// never the scheduler.
+pub struct RelativeMailbox<'a> {
+    id: MailboxId,
+    /// The addressing actor's own folded [`MailboxId`] raw value — the "from"
+    /// half stamped on the in-place send so the relative recipient's
+    /// `ctx.source_mailbox()` resolves who sent it. Set by
+    /// [`FfiCtx::parent`] / [`FfiCtx::child`] / [`FfiCtx::sibling`] to the
+    /// resolving ctx's `mailbox`.
+    sender: u64,
+    inline: &'a InlineRegistry,
+}
+
+impl RelativeMailbox<'_> {
+    /// The relative's resolved [`MailboxId`].
+    #[must_use]
+    pub fn mailbox_id(&self) -> MailboxId {
+        self.id
+    }
+
+    /// Send `payload` to this relative, routed in place through the cluster
+    /// membrane (queue + drain) — no scheduler hop. Inherits the handler's
+    /// in-flight causal chain (the default, ADR-0080 §7); the local path
+    /// carries no host trace ids, so the flag is moot for an in-cluster
+    /// send.
+    pub fn send<K: Kind>(&self, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        self.inline
+            .route_or_enqueue(self.id.0, K::ID.0, &bytes, 1, false, self.sender);
+    }
+
+    /// Fire-and-forget send to this relative (ADR-0080 §7 detach signal).
+    /// In-cluster the recipient dispatches in place regardless; the detach
+    /// flag rides through only on the cross-cluster fallback path, which a
+    /// resolved relative never takes.
+    pub fn send_detached<K: Kind>(&self, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        self.inline
+            .route_or_enqueue(self.id.0, K::ID.0, &bytes, 1, true, self.sender);
+    }
+}
+
 /// Why a synchronous spawn verb failed.
 ///
 /// For the detached [`FfiCtx::spawn_child`] (ADR-0097), only subname
@@ -322,6 +376,15 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
     /// A [`Subname::Named`] that fails validation returns
     /// [`SpawnError::SubnameInvalid`]; a synchronous `init` `Err` returns
     /// [`SpawnError::InitFailed`].
+    ///
+    /// The alias is folded on the instance carry (flat), so a child's
+    /// subname must be unique within the whole cluster — two children that
+    /// resolve to the same `aether.embedded:<subname>` collide on one alias.
+    /// The spawning actor's real id is recorded as the child's logical
+    /// parent so relative addressing (`ctx.parent()` / `ctx.sibling(name)` /
+    /// `ctx.child(name)`) resolves over the registry. Per-parent subname
+    /// scoping (the nested-alias fold, ADR-0117) is a follow-up needing a
+    /// substrate change.
     pub fn spawn_inline_child<A>(
         &self,
         subname: Subname<'_>,
@@ -352,12 +415,19 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
         // child type, so the disallowed-method allow mirrors `spawn_child`.
         #[allow(clippy::disallowed_methods)]
         let type_tag = mailbox_id_from_name(<A as Actor>::NAMESPACE).0;
+        // The spawner's real folded id is recorded as the child's logical
+        // parent so relative addressing (`ctx.parent()` / `ctx.sibling()`)
+        // resolves over the registry. The alias fold itself stays flat on
+        // the instance carry (the substrate's current `spawn_inline_child`),
+        // so subnames are cluster-unique; per-parent subname scoping (the
+        // nested-alias fold) is a follow-up needing a substrate change.
         install_inline_child::<A>(
             self.inline,
             alias,
             type_tag,
             full_subname,
             is_counter,
+            self.mailbox,
             owned,
         )
     }
@@ -403,6 +473,55 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
     }
 }
 
+impl<'a, M: ReplyMode> FfiCtx<'a, M> {
+    /// ADR-0114 addressing amendment: a sendable handle to this actor's
+    /// **parent** in the cluster, or `None` if this actor is the cluster
+    /// root (the instance itself — its parent is cross-cluster, addressed
+    /// through a chassis cap or the runtime-name escape hatch, not here).
+    ///
+    /// Resolves by registry lookup over the per-component inline registry,
+    /// never by folding (a [`MailboxId`] is a one-way hash chain, so the
+    /// guest cannot reproduce the parent id; it looks the recorded parent
+    /// up). A send through the returned handle routes in place through the
+    /// cluster membrane.
+    #[must_use]
+    pub fn parent(&self) -> Option<RelativeMailbox<'a>> {
+        let id = self.inline.parent_of(MailboxId(self.mailbox))?;
+        Some(RelativeMailbox {
+            id,
+            sender: self.mailbox,
+            inline: self.inline,
+        })
+    }
+
+    /// ADR-0114 addressing amendment: a sendable handle to this actor's
+    /// inline **child** whose subname is `name`, or `None` if no such child
+    /// is resident in the cluster. Pure registry lookup, never a fold.
+    #[must_use]
+    pub fn child(&self, name: &str) -> Option<RelativeMailbox<'a>> {
+        let id = self.inline.child_of(MailboxId(self.mailbox), name)?;
+        Some(RelativeMailbox {
+            id,
+            sender: self.mailbox,
+            inline: self.inline,
+        })
+    }
+
+    /// ADR-0114 addressing amendment: a sendable handle to this actor's
+    /// **sibling** whose subname is `name` — the child of this actor's
+    /// parent named `name` — or `None` if this actor has no recorded parent
+    /// or no such sibling resides. Pure registry lookup, never a fold.
+    #[must_use]
+    pub fn sibling(&self, name: &str) -> Option<RelativeMailbox<'a>> {
+        let id = self.inline.sibling_of(MailboxId(self.mailbox), name)?;
+        Some(RelativeMailbox {
+            id,
+            sender: self.mailbox,
+            inline: self.inline,
+        })
+    }
+}
+
 /// Resolve a [`Subname`] into the `(is_counter, discriminator)` pair the
 /// spawn host fns take, shared by [`FfiCtx::spawn_child`] and
 /// [`FfiCtx::spawn_inline_child`]. `Counter` passes an empty discriminator
@@ -436,6 +555,7 @@ fn install_inline_child<A>(
     type_tag: u64,
     full_subname: String,
     is_counter: bool,
+    parent: u64,
     config: A::Config,
 ) -> Result<MailboxId, SpawnError>
 where
@@ -444,7 +564,14 @@ where
     let mut ctx = FfiInitCtx::__new(alias.0);
     match A::init(config, &mut ctx) {
         Ok(child) => {
-            registry.insert_child(alias, type_tag, full_subname, is_counter, Box::new(child));
+            registry.insert_child(
+                alias,
+                type_tag,
+                full_subname,
+                is_counter,
+                parent,
+                Box::new(child),
+            );
             Ok(alias)
         }
         Err(err) => Err(SpawnError::InitFailed(err)),
@@ -465,6 +592,13 @@ impl<M: ReplyMode> Resolver for FfiCtx<'_, M> {
     }
 }
 
+// ADR-0114 addressing amendment: every `FfiCtx` send resolves the recipient
+// id then routes through the inline registry's `route_or_enqueue`, so a send
+// to a cluster member (own id or a resident inline-child alias) dispatches in
+// place through the membrane (queue + drain) and only a cross-cluster
+// recipient hits the host. For a childless component with no captured
+// `self_id` match the recipient is always `Remote`, so the path is identical
+// to a bare `mail::send_mail`.
 impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
     //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
@@ -473,7 +607,14 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, false);
+        self.inline.route_or_enqueue(
+            R::resolve(self.mailbox).0,
+            K::ID.0,
+            &bytes,
+            1,
+            false,
+            self.mailbox,
+        );
     }
 
     //noinspection DuplicatedCode
@@ -483,12 +624,13 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        mail::send_mail(
+        self.inline.route_or_enqueue(
             R::resolve(self.mailbox).0,
             K::ID.0,
             bytes,
             payloads.len() as u32,
             false,
+            self.mailbox,
         );
     }
 
@@ -498,7 +640,14 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
     #[allow(clippy::disallowed_methods)]
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, false);
+        self.inline.route_or_enqueue(
+            mailbox_id_from_name(name).0,
+            K::ID.0,
+            &bytes,
+            1,
+            false,
+            self.mailbox,
+        );
     }
 
     fn prev_correlation(&self) -> u64 {
@@ -512,7 +661,14 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, true);
+        self.inline.route_or_enqueue(
+            R::resolve(self.mailbox).0,
+            K::ID.0,
+            &bytes,
+            1,
+            true,
+            self.mailbox,
+        );
     }
 
     //noinspection DuplicatedCode
@@ -520,7 +676,14 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
     #[allow(clippy::disallowed_methods)]
     fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, true);
+        self.inline.route_or_enqueue(
+            mailbox_id_from_name(name).0,
+            K::ID.0,
+            &bytes,
+            1,
+            true,
+            self.mailbox,
+        );
     }
 }
 
@@ -536,6 +699,19 @@ impl OutboundReply for FfiCtx<'_, Manual> {
     }
 
     fn source_mailbox(&self) -> Option<MailboxId> {
+        // ADR-0114 amendment: an in-place (intra-cluster) send carries its
+        // "from" half in the inline registry's `current_source` rather than
+        // the host reply table, because a drained item dispatches with
+        // `NO_REPLY_HANDLE` (the local fast path is fire-and-forget). When a
+        // dispatch runs off the cluster-queue drain `current_source` is the
+        // immediate sender; outside the drain it is `0`, and a top-level
+        // dispatch resolves its sender from the host reply table as before.
+        // The two never collide: an in-place item has no reply handle, so
+        // `self.sender` is `None` exactly when `current_source` is set.
+        let local = self.inline.current_source();
+        if local != MailboxId::NONE.0 {
+            return Some(MailboxId(local));
+        }
         let handle = self.sender?;
         let id = mail::source_of(handle);
         (id != MailboxId::NONE.0).then_some(MailboxId(id))
@@ -724,6 +900,7 @@ mod tests {
     use crate::Actor;
     use crate::actor::ctx::{OutboundReply, Resolver};
     use crate::actor::{Instanced, Subname};
+    use crate::ffi::inline::RouteDecision;
     use crate::ffi::{BootError, ErasedFfiActor, FfiActor, FfiDropCtx};
     use crate::mail::{Mail, PriorState};
     use aether_data::MailboxId;
@@ -789,6 +966,7 @@ mod tests {
             0,
             String::from("child"),
             false,
+            0,
             (),
         );
         assert!(
@@ -863,6 +1041,7 @@ mod tests {
             0,
             String::from("widget"),
             false,
+            0,
             (),
         )
         .expect("a succeeding init installs the inline child");
@@ -901,5 +1080,63 @@ mod tests {
     fn outbound_reply_present_on_manual() {
         fn assert_impls<C: OutboundReply>() {}
         assert_impls::<FfiCtx<'static, Manual>>();
+    }
+
+    /// ADR-0114 addressing amendment: a ctx self-identified as the cluster
+    /// root resolves `child(name)` to the resident inline child, returns
+    /// `None` for a missing name, and a send through the resolved relative
+    /// routes in place (enqueues locally — no host call, which would panic
+    /// on the host build). `parent()` of the root is `None` (cross-cluster).
+    #[test]
+    fn ctx_relative_verbs_resolve_and_route_in_place() {
+        let registry = InlineRegistry::new();
+        let root = 0x7100_u64;
+        registry.set_self_id(root);
+        // Install a child of the root keyed by a synthetic alias; record the
+        // root as its parent (what `spawn_inline_child` would record).
+        let widget = MailboxId(0x7101);
+        install_inline_child::<SucceedingChild>(
+            &registry,
+            widget,
+            0,
+            String::from("widget"),
+            false,
+            root,
+            (),
+        )
+        .expect("a succeeding init installs the inline child");
+
+        let ctx: FfiCtx<'_, Manual> = FfiCtx::__new(root, &registry);
+
+        // The root has no registry parent entry — its parent is cross-cluster.
+        assert!(
+            ctx.parent().is_none(),
+            "the cluster root resolves no in-cluster parent",
+        );
+
+        // child(name) resolves the resident widget; a missing name is None.
+        let child = ctx.child("widget").expect("the widget resolves by subname");
+        assert_eq!(child.mailbox_id(), widget, "child resolves to the alias id");
+        assert!(
+            ctx.child("missing").is_none(),
+            "a missing subname resolves to None",
+        );
+
+        // The resolved relative is a cluster member, so a send routes in
+        // place; the local path enqueues and makes no host call (the host
+        // stub panics on the host build, so reaching this line without a
+        // panic proves the send took the local branch). A `()` payload
+        // encodes to empty bytes.
+        assert_eq!(
+            registry.route_decision(child.mailbox_id().0),
+            RouteDecision::Local,
+            "the resolved relative is classified as an in-cluster recipient",
+        );
+        child.send(&());
+        assert_eq!(
+            registry.queued_len(),
+            1,
+            "a send to a resolved relative enqueues locally — no scheduler hop",
+        );
     }
 }
