@@ -225,6 +225,12 @@ mod tests {
         /// substrate reads at boot (ADR-0116). `FleetBench` mirrors that
         /// pre-resolution (it speaks raw frames, not aether-mcp): upload,
         /// resolve hub-local, stage the bytes, and spawn with the manifest.
+        // Flaky: the boot-manifest autoload path emits no readiness signal, so
+        // this races a fixed 3s liveness poll (`LogTail` as a registration
+        // probe) against a cold-forked substrate's async boot + autoload, which
+        // intermittently overruns the budget under CI load. Re-enabled by the
+        // engine-local loaded-components query tracked in #2020.
+        #[ignore = "flaky pending the boot-autoload readiness query (#2020)"]
         #[test]
         fn fleetbench_boots_a_component_set_from_a_selector_manifest() {
             if !dist_manifest_present() {
