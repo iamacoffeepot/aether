@@ -824,26 +824,20 @@ impl App {
             return;
         }
         if mail.kind() == self.kind_set_window_mode {
-            let payload: SetWindowMode = match postcard::from_bytes(mail.payload()) {
-                Ok(p) => p,
-                Err(e) => {
-                    mail.reply(&SetWindowModeResult::Err {
-                        error: format!("postcard decode failed: {e}"),
-                    });
-                    return;
-                }
+            let Some(payload) = SetWindowMode::decode_from_bytes(mail.payload()) else {
+                mail.reply(&SetWindowModeResult::Err {
+                    error: "SetWindowMode decode failed".to_owned(),
+                });
+                return;
             };
             let result = self.apply_window_mode(payload.mode, payload.width, payload.height);
             mail.reply(&result);
         } else if mail.kind() == self.kind_set_window_title {
-            let payload: SetWindowTitle = match postcard::from_bytes(mail.payload()) {
-                Ok(p) => p,
-                Err(e) => {
-                    mail.reply(&SetWindowTitleResult::Err {
-                        error: format!("postcard decode failed: {e}"),
-                    });
-                    return;
-                }
+            let Some(payload) = SetWindowTitle::decode_from_bytes(mail.payload()) else {
+                mail.reply(&SetWindowTitleResult::Err {
+                    error: "SetWindowTitle decode failed".to_owned(),
+                });
+                return;
             };
             let result = self.apply_window_title(payload.title);
             mail.reply(&result);
@@ -1633,12 +1627,12 @@ mod tests {
         let mail_id = MailId::new(window_mailbox, 2);
         mailer.record_sent_inflight(root);
         let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 0x99);
-        let bytes = postcard::to_allocvec(&LogTail {
+        let bytes = LogTail {
             max: 8,
             min_level: None,
             since: None,
-        })
-        .expect("encode LogTail");
+        }
+        .encode_into_bytes();
         mailer.push(
             Mail::new(window_mailbox, <LogTail as Kind>::ID, bytes, 1)
                 .with_reply_to(caller_source)
@@ -1711,10 +1705,10 @@ mod tests {
 
         // A `MailId::NONE` push keeps the drained guard disarmed (no armed
         // Call to settle) — the test pins only the skip verdict.
-        let payload = postcard::to_allocvec(&SetWindowTitle {
+        let payload = SetWindowTitle {
             title: "ignored".to_owned(),
-        })
-        .expect("encode SetWindowTitle");
+        }
+        .encode_into_bytes();
         mailer.push(
             Mail::new(window_mailbox, <SetWindowTitle as Kind>::ID, payload, 1).with_lineage(
                 MailId::NONE,
@@ -1753,10 +1747,10 @@ mod tests {
         use aether_substrate::mail::registry::{InboxHandler, Registry};
 
         fn title_payload() -> Vec<u8> {
-            postcard::to_allocvec(&SetWindowTitle {
+            SetWindowTitle {
                 title: "ignored".to_owned(),
-            })
-            .expect("encode SetWindowTitle")
+            }
+            .encode_into_bytes()
         }
 
         let registry = Arc::new(Registry::new());

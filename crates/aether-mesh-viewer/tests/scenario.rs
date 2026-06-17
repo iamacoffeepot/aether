@@ -20,6 +20,7 @@
 //! `TestBench::builder().namespace_roots(...)` rather than env-var
 //! mutation.
 
+use aether_data::Kind;
 use aether_kinds::{
     LoadComponent, LoadResult, MeshLoadResult, TrajectoryEndReason, TrajectoryLog,
     TrajectorySampleEntry,
@@ -184,7 +185,7 @@ fn field_loads_and_renders() {
         ticks: t,
         values,
     };
-    let bytes = postcard::to_allocvec(&field).expect("encode ScalarField fixture");
+    let bytes = field.encode_into_bytes();
     let path = write_fixture("reach.field", &bytes);
 
     let mut bench = TestBench::builder()
@@ -234,7 +235,7 @@ fn field_then_paths_overlay_renders() {
         ticks: t,
         values: vec![1u32; (w * h * t) as usize],
     };
-    let field_bytes = postcard::to_allocvec(&field).expect("encode ScalarField fixture");
+    let field_bytes = field.encode_into_bytes();
     let field_path = write_fixture("reach.field", &field_bytes);
 
     // Two paths threading the volume; they share the first grid step so
@@ -258,7 +259,7 @@ fn field_then_paths_overlay_renders() {
             make_log(2, &[(0, 0, 0), (1, 1, 0), (2, 2, 1), (3, 3, 1)]),
         ],
     };
-    let paths_bytes = postcard::to_allocvec(&set).expect("encode TrajectorySet fixture");
+    let paths_bytes = set.encode_into_bytes();
     let paths_path = write_fixture("herd.paths", &paths_bytes);
 
     let mut bench = TestBench::builder()
@@ -539,7 +540,7 @@ fn split_corridor_bytes() -> Vec<u8> {
         nodes: vec![node(0, 0, 16), node(1, 0, 8), node(1, 1, 8)],
         edges: vec![flow(0, 1, 5), flow(0, 2, 5)],
     };
-    postcard::to_allocvec(&graph).expect("encode CorridorGraph fixture")
+    graph.encode_into_bytes()
 }
 
 /// Issue 1869 acceptance: load a fixture `CorridorGraph`, scrub to two

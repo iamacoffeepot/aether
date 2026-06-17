@@ -1559,7 +1559,7 @@ mod native {
                     color: [1.0, 0.0, 0.5, 0.8],
                 }],
             };
-            let payload = postcard::to_allocvec(&mail).expect("encode DrawSolidQuads");
+            let payload = mail.encode_into_bytes();
             deliver(
                 &registry,
                 RenderCapability::NAMESPACE,

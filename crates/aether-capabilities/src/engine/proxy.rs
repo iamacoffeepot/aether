@@ -837,15 +837,13 @@ mod tests {
         let fwd = aether_kinds::ForwardEnvelope {
             mailbox: echo_mailbox,
             kind: <TestEchoRequest as Kind>::ID,
-            payload: postcard::to_allocvec(&TestEchoRequest { value: 42 })
-                .expect("test setup: TestEchoRequest serializes via postcard"),
+            payload: TestEchoRequest { value: 42 }.encode_into_bytes(),
         };
         mailer.push(
             Mail::new(
                 proxy_mailbox,
                 <aether_kinds::ForwardEnvelope as Kind>::ID,
-                postcard::to_allocvec(&fwd)
-                    .expect("test setup: ForwardEnvelope serializes via postcard"),
+                fwd.encode_into_bytes(),
                 1,
             )
             .with_reply_to(Source::with_correlation(

@@ -1088,8 +1088,8 @@ mod native {
                 } = event
                     && kind_id == DrawTexturedQuads::ID
                 {
-                    return postcard::from_bytes(&payload)
-                        .expect("test: DrawTexturedQuads payload decodes via postcard");
+                    return DrawTexturedQuads::decode_from_bytes(&payload)
+                        .expect("test: DrawTexturedQuads payload decodes");
                 }
             }
         }

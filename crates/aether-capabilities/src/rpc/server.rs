@@ -1083,8 +1083,7 @@ mod tests {
 
         // Fire a Call against the echo actor. cid = 0xabc; the cap
         // correlates and ends with ReplyEnd matching the same cid.
-        let echo_payload = postcard::to_allocvec(&TestEchoRequest { value: 42 })
-            .expect("test setup: TestEchoRequest serializes via postcard");
+        let echo_payload = TestEchoRequest { value: 42 }.encode_into_bytes();
         let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Actor>::NAMESPACE);
         write_frame(
             &mut stream,
@@ -1112,7 +1111,7 @@ mod tests {
             other => panic!("expected ReplyEvent, got {other:?}"),
         };
         assert_eq!(envelope.kind, <TestEchoReply as Kind>::ID);
-        let decoded: TestEchoReply = postcard::from_bytes(&envelope.payload).expect("decode reply");
+        let decoded = TestEchoReply::decode_from_bytes(&envelope.payload).expect("decode reply");
         assert_eq!(decoded.value, 42);
 
         // Then the ReplyEnd closes the call.
@@ -1159,12 +1158,12 @@ mod tests {
         let mut stream = connect_to_rpc_server(&chassis, Duration::from_secs(5));
         complete_handshake(&mut stream);
 
-        let payload = postcard::to_allocvec(&SetWindowMode {
+        let payload = SetWindowMode {
             mode: WindowMode::Windowed,
             width: None,
             height: None,
-        })
-        .expect("test setup: SetWindowMode serializes via postcard");
+        }
+        .encode_into_bytes();
         let window_mailbox = mailbox_id_from_name(<HeadlessWindowCapability as Actor>::NAMESPACE);
         write_frame(
             &mut stream,
@@ -1192,8 +1191,8 @@ mod tests {
             other => panic!("expected ReplyEvent, got {other:?}"),
         };
         assert_eq!(envelope.kind, <SetWindowModeResult as Kind>::ID);
-        let decoded: SetWindowModeResult =
-            postcard::from_bytes(&envelope.payload).expect("decode SetWindowModeResult");
+        let decoded = SetWindowModeResult::decode_from_bytes(&envelope.payload)
+            .expect("decode SetWindowModeResult");
         assert!(
             matches!(decoded, SetWindowModeResult::Err { .. }),
             "headless window cap replies Err, got {decoded:?}"
@@ -1228,8 +1227,7 @@ mod tests {
 
         let (_chassis, mut stream) = boot_with_deferred_echo(Duration::from_secs(5));
 
-        let payload = postcard::to_allocvec(&DeferredEchoRequest { value: 99 })
-            .expect("test setup: DeferredEchoRequest serializes via postcard");
+        let payload = DeferredEchoRequest { value: 99 }.encode_into_bytes();
         let mailbox = mailbox_id_from_name(<DeferredEchoActor as Actor>::NAMESPACE);
         write_frame(
             &mut stream,
@@ -1258,8 +1256,8 @@ mod tests {
             other => panic!("expected ReplyEvent for the deferred reply, got {other:?}"),
         };
         assert_eq!(envelope.kind, <DeferredEchoReply as Kind>::ID);
-        let decoded: DeferredEchoReply =
-            postcard::from_bytes(&envelope.payload).expect("decode deferred reply");
+        let decoded =
+            DeferredEchoReply::decode_from_bytes(&envelope.payload).expect("decode deferred reply");
         assert_eq!(decoded.value, 99);
 
         // ReplyEnd follows — settlement fired after the deferred reply,
@@ -1315,21 +1313,19 @@ mod tests {
                 TracedEnvelope {
                     recipient_name: <DeferredEchoActor as Actor>::NAMESPACE.into(),
                     kind_name: <DeferredEchoRequest as Kind>::NAME.into(),
-                    payload: postcard::to_allocvec(&DeferredEchoRequest { value: 11 })
-                        .expect("encode req 11"),
+                    payload: DeferredEchoRequest { value: 11 }.encode_into_bytes(),
                     count: 1,
                 },
                 TracedEnvelope {
                     recipient_name: <DeferredEchoActor as Actor>::NAMESPACE.into(),
                     kind_name: <DeferredEchoRequest as Kind>::NAME.into(),
-                    payload: postcard::to_allocvec(&DeferredEchoRequest { value: 22 })
-                        .expect("encode req 22"),
+                    payload: DeferredEchoRequest { value: 22 }.encode_into_bytes(),
                     count: 1,
                 },
             ],
         };
         let trace_mailbox = mailbox_id_from_name(<TraceDispatchCapability as Actor>::NAMESPACE);
-        let payload = postcard::to_allocvec(&batch).expect("encode DispatchTraced");
+        let payload = batch.encode_into_bytes();
         write_frame(
             &mut stream,
             &WireFrame::Call {
@@ -1361,8 +1357,8 @@ mod tests {
                 WireFrame::ReplyEvent { cid, envelope } => {
                     assert_eq!(cid, 0xbeef);
                     if envelope.kind == <DeferredEchoReply as Kind>::ID {
-                        let decoded: DeferredEchoReply =
-                            postcard::from_bytes(&envelope.payload).expect("decode deferred reply");
+                        let decoded = DeferredEchoReply::decode_from_bytes(&envelope.payload)
+                            .expect("decode deferred reply");
                         deferred_values.push(decoded.value);
                     } else {
                         // Otherwise this is the DispatchTracedAck::Ok
@@ -1423,8 +1419,7 @@ mod tests {
         // Fire-and-forget Call (cid = None). The echo actor will
         // still reply, but with cid None there's no in-flight entry
         // so the reply has no matching correlation and gets dropped.
-        let echo_payload = postcard::to_allocvec(&TestEchoRequest { value: 7 })
-            .expect("test setup: TestEchoRequest serializes via postcard");
+        let echo_payload = TestEchoRequest { value: 7 }.encode_into_bytes();
         let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Actor>::NAMESPACE);
         write_frame(
             &mut stream,
@@ -1633,8 +1628,7 @@ mod tests {
             PeerKind::Client { .. } => panic!("expected Substrate peer kind from server"),
         }
 
-        let echo_payload = postcard::to_allocvec(&TestEchoRequest { value: 42 })
-            .expect("test setup: TestEchoRequest serializes via postcard");
+        let echo_payload = TestEchoRequest { value: 42 }.encode_into_bytes();
         let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Actor>::NAMESPACE);
         let cid = conn
             .client
@@ -1665,7 +1659,7 @@ mod tests {
             other => panic!("expected ReplyEvent, got {other:?}"),
         };
         assert_eq!(envelope.kind, <TestEchoReply as Kind>::ID);
-        let decoded: TestEchoReply = postcard::from_bytes(&envelope.payload).expect("decode reply");
+        let decoded = TestEchoReply::decode_from_bytes(&envelope.payload).expect("decode reply");
         assert_eq!(decoded.value, 42);
 
         // Then ReplyEnd closes the call.

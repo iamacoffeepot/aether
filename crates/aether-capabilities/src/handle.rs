@@ -281,8 +281,7 @@ mod native {
                     kind_id: KindId(0xCAFE),
                     bytes: vec![1, 2, 3, 4, 5],
                 };
-                let bytes = postcard::to_allocvec(&req)
-                    .expect("test setup: HandlePublish serializes via postcard");
+                let bytes = req.encode_into_bytes();
                 handler.enqueue(OwnedDispatch::disarmed(
                     <HandlePublish as Kind>::ID,
                     "aether.handle.publish".to_owned(),
@@ -313,8 +312,8 @@ mod native {
                     EgressEvent::ToSession { payload, .. } => payload,
                     other => panic!("expected ToSession egress, got {other:?}"),
                 };
-                let result: HandlePublishResult = postcard::from_bytes(&payload)
-                    .expect("test setup: HandlePublishResult decodes via postcard");
+                let result = HandlePublishResult::decode_from_bytes(&payload)
+                    .expect("test setup: HandlePublishResult decodes");
                 let HandlePublishResult::Ok {
                     kind_id,
                     id: handle_id,
@@ -363,7 +362,7 @@ mod native {
                 };
 
                 let req = HandleDescribe { max: 16 };
-                let bytes = postcard::to_allocvec(&req).expect("HandleDescribe serializes");
+                let bytes = req.encode_into_bytes();
                 handler.enqueue(OwnedDispatch::disarmed(
                     <HandleDescribe as Kind>::ID,
                     "aether.handle.describe".to_owned(),
@@ -391,8 +390,8 @@ mod native {
                     EgressEvent::ToSession { payload, .. } => payload,
                     other => panic!("expected ToSession egress, got {other:?}"),
                 };
-                let result: HandleDescribeResult =
-                    postcard::from_bytes(&payload).expect("HandleDescribeResult decodes");
+                let result = HandleDescribeResult::decode_from_bytes(&payload)
+                    .expect("HandleDescribeResult decodes");
                 assert_eq!(result.total_entries, 3);
                 assert_eq!(result.in_memory_entries, 3);
                 assert_eq!(result.pinned_entries, 1);

@@ -932,7 +932,8 @@ mod tests {
         }
 
         #[test]
-        fn crossing_classification_postcard_round_trips() {
+        fn crossing_classification_round_trips() {
+            use aether_data::Kind;
             let cls = CrossingClassification {
                 crossings: vec![
                     CrossingVerdict {
@@ -957,10 +958,9 @@ mod tests {
                     },
                 ],
             };
-            let bytes = postcard::to_allocvec(&cls)
-                .expect("test setup: postcard encodes CrossingClassification");
-            let back: CrossingClassification = postcard::from_bytes(&bytes)
-                .expect("test setup: postcard decodes CrossingClassification");
+            let bytes = cls.encode_into_bytes();
+            let back = CrossingClassification::decode_from_bytes(&bytes)
+                .expect("decodes CrossingClassification");
             assert_eq!(back, cls);
         }
 

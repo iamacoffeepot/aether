@@ -496,19 +496,9 @@ mod native {
             kind: KindId,
             payload: &P,
         ) where
-            P: serde::Serialize,
+            P: Kind,
         {
-            let bytes = match postcard::to_allocvec(payload) {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::error!(
-                        target: "aether_capabilities::component",
-                        error = %e,
-                        "encode failed forwarding to trampoline; mail dropped",
-                    );
-                    return;
-                }
-            };
+            let bytes = payload.encode_into_bytes();
             let _ =
                 ctx.send_envelope_traced_with_reply_to(recipient, kind, &bytes, ctx.reply_target());
         }

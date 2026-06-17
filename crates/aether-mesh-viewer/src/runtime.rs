@@ -622,16 +622,12 @@ impl MeshViewer {
     /// frames the result through `view_proj`. A decode or mesh failure
     /// leaves the prior cache intact, mirroring the `.dsl` / `.obj` arms.
     fn try_replace_field(&mut self, bytes: &[u8]) -> LoadOutcome {
-        let field: ScalarField = match postcard::from_bytes(bytes) {
-            Ok(field) => field,
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_mesh_viewer",
-                    error = ?error,
-                    "ScalarField decode failed; keeping prior mesh",
-                );
-                return LoadOutcome::failed(format!("ScalarField decode failed: {error}"));
-            }
+        let Some(field) = ScalarField::decode_from_bytes(bytes) else {
+            tracing::warn!(
+                target: "aether_mesh_viewer",
+                "ScalarField decode failed; keeping prior mesh",
+            );
+            return LoadOutcome::failed("ScalarField decode failed".to_string());
         };
         let expected = (field.width as usize)
             .saturating_mul(field.height as usize)
@@ -1463,7 +1459,7 @@ mod tests {
             ticks: 3,
             values,
         };
-        postcard::to_allocvec(&field).expect("test setup: encode ScalarField")
+        field.encode_into_bytes()
     }
 
     /// Issue 1868: a `.field` load decodes a postcard `ScalarField`,
@@ -1524,7 +1520,7 @@ mod tests {
             ticks: 4,
             values: vec![1u32; 10], // not 4*4*4
         };
-        let bytes = postcard::to_allocvec(&field).expect("encode mismatched field");
+        let bytes = field.encode_into_bytes();
         let outcome = viewer.load_bytes("mismatch.field", &bytes);
         assert!(outcome.error.is_some(), "length mismatch reports a failure");
         assert_eq!(
@@ -1560,7 +1556,7 @@ mod tests {
 
     fn paths_bytes(logs: Vec<aether_kinds::TrajectoryLog>) -> Vec<u8> {
         let set = TrajectorySet { logs };
-        postcard::to_allocvec(&set).expect("test setup: encode TrajectorySet")
+        set.encode_into_bytes()
     }
 
     /// Issue 1870: `segment_tube` emits a `+`-cross of two ribbons (4
@@ -1750,7 +1746,7 @@ mod tests {
             ticks: t,
             values,
         };
-        let bytes = postcard::to_allocvec(&field).expect("encode rate field");
+        let bytes = field.encode_into_bytes();
 
         let mut viewer = empty_viewer();
         let outcome = viewer.load_bytes("rate.field", &bytes);

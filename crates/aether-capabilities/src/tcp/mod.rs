@@ -600,7 +600,6 @@ mod cap_native {
         use aether_substrate::mail::registry::OwnedDispatch;
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
         use aether_substrate::mail::{MailRef, Source, SourceAddr};
-        use serde::de::DeserializeOwned;
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
             let registry = Arc::new(Registry::new());
@@ -652,7 +651,7 @@ mod cap_native {
         ) -> R
         where
             K: Kind,
-            R: DeserializeOwned,
+            R: Kind,
         {
             let id = registry
                 .lookup(cap_namespace)
@@ -692,7 +691,7 @@ mod cap_native {
                 EgressEvent::ToSession { payload, .. } => payload,
                 other => panic!("expected ToSession egress, got {other:?}"),
             };
-            postcard::from_bytes(&payload).expect("decode reply")
+            R::decode_from_bytes(&payload).expect("decode reply")
         }
 
         /// Contention-sensitive driver tests: each boots a
