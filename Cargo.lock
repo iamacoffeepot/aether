@@ -116,7 +116,6 @@ dependencies = [
  "aether-data",
  "aether-kinds",
  "bytemuck",
- "postcard",
  "proptest",
  "serde",
  "serde_json",

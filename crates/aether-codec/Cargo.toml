@@ -25,17 +25,16 @@ path = "src/lib.rs"
 
 [dependencies]
 aether-data = { path = "../aether-data" }
-postcard = { workspace = true, features = ["alloc", "heapless-cas"] }
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true }
 
 [dev-dependencies]
 # Round-trip tests in this crate encode JSON params via the schema
 # encoder, then decode the bytes back through `bytemuck::cast` (cast
-# kinds), `postcard::from_bytes` (postcard kinds), or a `serde`
-# deserialize. Decoder tests also reach for concrete kinds (e.g.
-# `SubscribeInput`) to assert tagged-id round-trips. Production
-# callers don't need any of this — only pulled in for `cargo test`.
+# kinds) or a `serde` deserialize. Decoder tests also reach for concrete
+# kinds (e.g. `SubscribeInput`) to assert tagged-id round-trips.
+# Production callers don't need any of this — only pulled in for
+# `cargo test`.
 aether-kinds = { path = "../aether-kinds" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 bytemuck = { workspace = true, features = ["derive"] }
