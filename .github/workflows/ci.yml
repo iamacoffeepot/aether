@@ -114,10 +114,15 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    # Normal run is ≤ 2 min; cap at 15 so a hang doesn't eat the
-    # default 6h quota before anyone notices. If this tripping
-    # becomes routine, lower it — routine failure is a signal.
-    timeout-minutes: 15
+    # A warm-cache run is ~13 min (cargo xtask dist + the lightweight
+    # build/run + the heavy serial pass), so the old 15-min cap left
+    # almost no margin: under runner-load variance the heavy step ran
+    # into the wall and the job was cancelled mid-run ("The operation
+    # was canceled", no test failure). Cap at 30 — roughly 2× the warm
+    # run — so variance no longer trips it, while a genuine hang still
+    # can't eat the default 6h quota. Splitting the heavy pass into its
+    # own job to cut the warm time back down is tracked separately.
+    timeout-minutes: 30
     env:
       # Use mold to reduce peak link memory and speed up the test
       # build — keeps the linker OOM (collect2: ld terminated with
