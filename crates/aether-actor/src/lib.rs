@@ -143,7 +143,8 @@ pub mod __macro_internals {
 /// alongside the existing actor derives so component / capability
 /// authors only need `aether-actor` in their dep list.
 pub use aether_data::{
-    Kind, KindId as DataKindId, Schema, actor, bridge, capability, fallback, handler, local,
+    Kind, KindId as DataKindId, MailboxId, Schema, actor, bridge, capability, fallback, handler,
+    local,
 };
 // `Singleton` and `Instanced` each live in two namespaces:
 //   - the type namespace for the marker trait (`Actor` super-trait),

@@ -32,6 +32,12 @@ use crate::ffi::raw;
 /// guest holds no trace ids, so the flag is all it can contribute;
 /// the host owns the stamping.
 ///
+/// `from` (issue 1987) is the sending actor's own folded `MailboxId`
+/// raw value — the dispatch identity carried on the send so the host
+/// stamps it as origin without consulting an ambient per-receive cell.
+/// The host validates it is in-cluster and falls back to the
+/// component's own id for a zero / foreign value.
+///
 /// Returns `0` on success; `1` on substrate-side recipient
 /// lookup miss. Other non-zero values are reserved for future
 /// host-side failure surfaces.
@@ -46,7 +52,14 @@ use crate::ffi::raw;
     clippy::must_use_candidate,
     reason = "fire-and-forget by contract — see doc-comment above; #[must_use] retired in issue 892"
 )]
-pub fn send_mail(recipient: u64, kind: u64, bytes: &[u8], count: u32, detached: bool) -> u32 {
+pub fn send_mail(
+    recipient: u64,
+    kind: u64,
+    bytes: &[u8],
+    count: u32,
+    detached: bool,
+    from: u64,
+) -> u32 {
     // SAFETY: forwards to `raw::send_mail`, whose ABI is documented
     // at the import site in `ffi/raw.rs`. The `(ptr, len)` pair is
     // derived from the `&[u8]` slice we just received, which the
@@ -60,6 +73,7 @@ pub fn send_mail(recipient: u64, kind: u64, bytes: &[u8], count: u32, detached: 
             bytes.len() as u32,
             count,
             u32::from(detached),
+            from,
         )
     }
 }
@@ -68,7 +82,9 @@ pub fn send_mail(recipient: u64, kind: u64, bytes: &[u8], count: u32, detached: 
 /// (ADR-0013). `sender` is the per-instance handle the dispatcher
 /// threaded onto the ctx at receive time; the substrate routes it
 /// to the right Claude session, sibling component, or remote
-/// engine mailbox.
+/// engine mailbox. `from` (issue 1987) is the replying actor's own
+/// folded `MailboxId` raw value — the dispatch identity stamped on
+/// the reply's lineage, validated host-side like `send_mail`'s.
 ///
 /// Not `#[must_use]`: the trait surface (`OutboundReply::reply`)
 /// is fire-and-forget by contract — see the
@@ -77,7 +93,7 @@ pub fn send_mail(recipient: u64, kind: u64, bytes: &[u8], count: u32, detached: 
     clippy::must_use_candidate,
     reason = "fire-and-forget by contract — see doc-comment above; #[must_use] retired in issue 892"
 )]
-pub fn reply_mail(sender: u32, kind: u64, bytes: &[u8], count: u32) -> u32 {
+pub fn reply_mail(sender: u32, kind: u64, bytes: &[u8], count: u32, from: u64) -> u32 {
     // SAFETY: forwards to `raw::reply_mail`, whose ABI is documented
     // at the import site in `ffi/raw.rs`. The `(ptr, len)` pair is
     // derived from the `&[u8]` slice we just received, which the
@@ -90,6 +106,7 @@ pub fn reply_mail(sender: u32, kind: u64, bytes: &[u8], count: u32) -> u32 {
             bytes.as_ptr().addr() as u32,
             bytes.len() as u32,
             count,
+            from,
         )
     }
 }
@@ -121,25 +138,6 @@ pub fn source_of(handle: u32) -> u64 {
     // invariants beyond "we are the FFI guest", enforced by the
     // `#[cfg(target_arch = "wasm32")]` import gate.
     unsafe { raw::source_of(handle) }
-}
-
-/// ADR-0114 amendment: re-stamp the host's dispatch identity to the cluster
-/// member `id` the in-place drain is dispatching, so that member's own
-/// (cross-cluster) sends carry it as origin instead of the cluster's inbound
-/// recipient. Returns the *previous* dispatch identity (raw `MailboxId`, `0`
-/// outside a dispatch) so the caller can restore it after the member's
-/// dispatch. The host validates `id` against the calling cluster (own id, a
-/// registered inline-child alias, or `0` as the restore sentinel) and leaves
-/// the identity unchanged on a foreign id. The cluster drain
-/// (`drain_cluster_queue`) is the only intended caller.
-#[must_use]
-pub fn set_dispatch_source(id: u64) -> u64 {
-    // SAFETY: `raw::set_dispatch_source` takes a scalar id and reads/writes a
-    // host-side per-instance `Cell` — no guest memory access, no ABI
-    // invariants beyond "we are the FFI guest", enforced by the
-    // `#[cfg(target_arch = "wasm32")]` import gate (the non-wasm build links
-    // an inert host stub that returns 0).
-    unsafe { raw::set_dispatch_source(id) }
 }
 
 /// ADR-0081 §7: re-emit one `tracing::*` event on the host side.

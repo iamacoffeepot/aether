@@ -253,7 +253,7 @@ pub trait HttpMailboxExt {
     fn post(&self, url: &str, body: &[u8]);
 }
 
-impl HttpMailboxExt for FfiActorMailbox<HttpCapability> {
+impl HttpMailboxExt for FfiActorMailbox<'_, HttpCapability> {
     //noinspection DuplicatedCode
     fn get(&self, url: &str) {
         self.send(&Fetch {

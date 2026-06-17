@@ -62,7 +62,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          ptr: u32,
          len: u32,
          count: u32,
-         detached: u32|
+         detached: u32,
+         from: u64|
          -> u32 {
             let Some(memory) = caller
                 .get_export("memory")
@@ -86,12 +87,18 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             // (the guest's `send_detached`) opts out and starts a fresh
             // causal chain.
             let ctx = caller.data();
+            // Issue 1987: the guest carried its own dispatch identity as
+            // `from`; validate it is in-cluster (own id or a registered
+            // inline-child alias) before trusting it as origin — a zero or
+            // foreign value falls back to the component's own id, so a guest
+            // cannot spoof a foreign origin.
+            let identity = resolve_dispatch_identity(ctx, MailboxId(from));
             let recipient = MailboxId(recipient);
             let kind = KindId(kind);
             if detached == 0 {
-                ctx.send(recipient, kind, payload, count);
+                ctx.send(recipient, kind, payload, count, identity);
             } else {
-                ctx.send_detached(recipient, kind, payload, count);
+                ctx.send_detached(recipient, kind, payload, count, identity);
             }
             0
         },
@@ -388,7 +395,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          kind: u64,
          ptr: u32,
          len: u32,
-         count: u32|
+         count: u32,
+         from: u64|
          -> u32 {
             let Some(memory) = caller
                 .get_export("memory")
@@ -438,7 +446,12 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     // fresh-mint a `Component(self)` correlation,
                     // dropping the originator's id so the reply can't
                     // be matched home over the RPC `in_flight` table.
-                    ctx.reply(mbox, kind, payload, count, correlation);
+                    //
+                    // Issue 1987: the reply's lineage identity is the
+                    // guest-carried `from`, validated in-cluster (a zero /
+                    // foreign value falls back to the component's own id).
+                    let identity = resolve_dispatch_identity(ctx, MailboxId(from));
+                    ctx.reply(mbox, kind, payload, count, correlation, identity);
                 }
                 SourceAddr::EngineMailbox {
                     engine_id,
@@ -500,47 +513,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 Some(SourceAddr::Component(m)) => m.0,
                 _ => MailboxId::NONE.0,
             }
-        },
-    )?;
-
-    // HOST_FN_OK: ADR-0114 amendment — scalar set/read of the per-instance
-    // `in_flight_recipient` the substrate already maintains, same shape as
-    // `source_of_p32` (scalar in, scalar out, no new substrate resource). A
-    // mail-sink approach makes no sense: this re-stamps the dispatch identity
-    // for the very call frame the guest is inside, so it must be synchronous.
-    //
-    // ADR-0114 amendment: re-stamp the host's dispatch identity to the cluster
-    // member the in-place drain is dispatching, so that member's own
-    // (cross-cluster) sends carry the member as origin instead of the
-    // cluster's inbound recipient. The guest's `drain_cluster_queue` brackets
-    // each item's `membrane_dispatch` with this call and restores the prior
-    // identity afterward. Returns the *previous* `in_flight_recipient` (raw,
-    // no `self.sender` fallback) so the guest can restore it.
-    //
-    // Anti-spoof: `id` is accepted only when it is the component's own id
-    // (`ctx.sender`) or a registered inline-child alias of *this* component —
-    // an alias whose `Inbox` handler is the same `Arc<dyn InboxHandler>` as
-    // this component's own slot (`spawn_inline_child_p32` clones the parent's
-    // handler under the alias, so handler-identity is exactly cluster
-    // membership). `MailboxId::NONE` (0) is the restore sentinel and is always
-    // allowed (it is how the guest passes back a saved value). On any other /
-    // foreign `id` the identity is left unchanged and the (unchanged) previous
-    // value is returned, so a guest can only claim origins inside its own
-    // cluster.
-    linker.func_wrap(
-        "aether",
-        "set_dispatch_source_p32",
-        |caller: Caller<'_, ComponentCtx>, id: u64| -> u64 {
-            let ctx = caller.data();
-            let prev = ctx.in_flight_recipient().0;
-            let requested = MailboxId(id);
-            let allowed = requested == MailboxId::NONE
-                || requested == ctx.sender
-                || is_own_cluster_alias(ctx, requested);
-            if allowed {
-                ctx.set_in_flight_recipient(requested);
-            }
-            prev
         },
     )?;
 
@@ -646,6 +618,22 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     )?;
 
     Ok(())
+}
+
+/// Issue 1987: resolve the dispatch identity a guest claimed on a send /
+/// reply (`from`) to a value the host trusts. A guest may claim only an
+/// origin inside its own cluster — the component's own id (`ctx.sender`) or
+/// one of its registered inline-child aliases (`is_own_cluster_alias`). A
+/// zero (`MailboxId::NONE`) or foreign `from` falls back to the component's
+/// own id, so the host stays authoritative on cross-cluster origin and a
+/// guest cannot spoof a foreign id. This is the in-cluster check that the
+/// retired `set_dispatch_source_p32` host fn used to gate the ambient cell.
+fn resolve_dispatch_identity(ctx: &ComponentCtx, from: MailboxId) -> MailboxId {
+    if from != MailboxId::NONE && (from == ctx.sender || is_own_cluster_alias(ctx, from)) {
+        from
+    } else {
+        ctx.sender
+    }
 }
 
 /// Whether `candidate` is a registered inline-child alias of *this* component

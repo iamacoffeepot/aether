@@ -154,19 +154,6 @@ pub struct ComponentCtx {
     in_flight_mail_id: Cell<MailId>,
     /// ADR-0080 §5 in-flight inbound `root`. See `in_flight_mail_id`.
     in_flight_root: Cell<MailId>,
-    /// ADR-0114 decision #4: the mailbox the in-flight inbound was routed
-    /// to — the dispatch's self-identity. Set by [`Component::deliver`]
-    /// from `mail.recipient` before the guest's `receive_p32` shim runs
-    /// (the recipient the capabilities trampoline now forwards as the
-    /// guest `Mail`'s recipient, ADR-0114 §2). Outbound origin stamping
-    /// (`send` / `reply`) reads it via [`Self::dispatch_identity`] so an
-    /// inline child's sends carry the child's address instead of the fixed
-    /// `self.sender`. For a normally-addressed actor it equals `self.sender`
-    /// (the component's own id), so the stamp is unchanged — the
-    /// no-op regression guard. [`MailboxId::NONE`] outside an in-flight
-    /// dispatch (and on substrate-internal call sites that bypass
-    /// `deliver`, e.g. test fixtures), where it falls back to `self.sender`.
-    in_flight_recipient: Cell<MailboxId>,
     /// Issue iamacoffeepot/aether#1465: lineage-`MailId` counter for
     /// [`ComponentCtx::reply`]. A reply echoes the inbound correlation
     /// on its `reply_to` (so it correlates home), but its own trace
@@ -249,7 +236,6 @@ impl ComponentCtx {
             correlation_counter: Cell::new(1),
             in_flight_mail_id: Cell::new(MailId::NONE),
             in_flight_root: Cell::new(MailId::NONE),
-            in_flight_recipient: Cell::new(MailboxId::NONE),
             reply_lineage_counter: Cell::new(REPLY_LINEAGE_BASE),
             pending_spawn: None,
         }
@@ -291,18 +277,20 @@ impl ComponentCtx {
         id
     }
 
-    /// ADR-0114 decision #4: the self-identity outbound mail is stamped
-    /// with — the in-flight dispatch's routed recipient. For an inline
-    /// child (ADR-0114) this is the child's alias, so its sends stamp the
-    /// child's address as origin and its replies route back to the child;
-    /// for a normally-addressed actor it equals `self.sender`, so the
-    /// stamp is unchanged. Falls back to `self.sender` when no recipient
-    /// is in flight (substrate-internal call sites that bypass
-    /// [`Component::deliver`], e.g. test fixtures).
-    fn dispatch_identity(&self) -> MailboxId {
-        match self.in_flight_recipient.get() {
-            id if id == MailboxId::NONE => self.sender,
-            id => id,
+    /// Issue 1987: resolve the dispatch identity outbound mail is stamped
+    /// with from the `from` the guest carried on its send / reply. The
+    /// caller (the `send_mail_p32` / `reply_mail_p32` host fn) has already
+    /// validated `from` is in-cluster; [`MailboxId::NONE`] (a zero / foreign
+    /// `from`, or a substrate-internal call site that bypasses the host fn,
+    /// e.g. a test fixture) falls back to `self.sender` — the component's
+    /// own id. For an inline child `from` is the child's alias, so its sends
+    /// stamp the child's address; for a normally-addressed actor it is the
+    /// component's own id, so the stamp is unchanged.
+    fn dispatch_identity(&self, from: MailboxId) -> MailboxId {
+        if from == MailboxId::NONE {
+            self.sender
+        } else {
+            from
         }
     }
 
@@ -323,7 +311,14 @@ impl ComponentCtx {
     /// routes to the component's inbox, warn-drops dropped/unknown
     /// mailboxes, or bubbles unknown ids up to the hub-substrate when
     /// a `HubOutbound` is wired (ADR-0037).
-    pub fn send(&self, recipient: MailboxId, kind: MailKind, payload: Vec<u8>, count: u32) {
+    pub fn send(
+        &self,
+        recipient: MailboxId,
+        kind: MailKind,
+        payload: Vec<u8>,
+        count: u32,
+        from: MailboxId,
+    ) {
         // ADR-0042: mint a fresh correlation_id for this send and
         // stash it on `last_correlation` so `prev_correlation_p32`
         // can return it to the guest. The minted id rides on the
@@ -331,11 +326,11 @@ impl ComponentCtx {
         // (auto-routed by `Mailer::send_reply`) carries it back so a
         // handler can match the reply to this send.
         let correlation = self.mint_correlation();
-        // ADR-0114 decision #4: stamp origin from the dispatch identity
-        // (the routed recipient) so an inline child's sends carry the
-        // child's address; a normally-addressed actor stamps `self.sender`
-        // unchanged.
-        let identity = self.dispatch_identity();
+        // Issue 1987: stamp origin from the dispatch identity the guest
+        // carried on the send (`from`, validated in-cluster by the host fn)
+        // so an inline child's sends carry the child's address; a
+        // zero / foreign `from` falls back to `self.sender`.
+        let identity = self.dispatch_identity(from);
         let reply_to = Source::with_correlation(SourceAddr::Component(identity), correlation);
 
         // ADR-0080 §1 (issue iamacoffeepot/aether#722): mint the
@@ -343,7 +338,9 @@ impl ComponentCtx {
         // reply routing — symmetric with `NativeBinding::send_mail_with_lineage`,
         // which uses one counter for both.
         let mail_id = MailId::new(identity, correlation);
-        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, false);
+        self.send_routed(
+            recipient, kind, payload, count, reply_to, mail_id, false, identity,
+        );
     }
 
     /// ADR-0080 §7 fire-and-forget escape hatch: the detached
@@ -352,19 +349,23 @@ impl ComponentCtx {
     /// starts a fresh causal chain. Reached from the `send_mail_p32`
     /// host fn when the guest sets the detached flag (`FfiActorMailbox::
     /// send_detached`). Correlation / reply-routing are identical to
-    /// `send` — only the trace lineage differs.
+    /// `send` — only the trace lineage differs. `from` (issue 1987) is the
+    /// guest-carried dispatch identity, resolved the same way as in `send`.
     pub fn send_detached(
         &self,
         recipient: MailboxId,
         kind: MailKind,
         payload: Vec<u8>,
         count: u32,
+        from: MailboxId,
     ) {
         let correlation = self.mint_correlation();
-        let identity = self.dispatch_identity();
+        let identity = self.dispatch_identity(from);
         let reply_to = Source::with_correlation(SourceAddr::Component(identity), correlation);
         let mail_id = MailId::new(identity, correlation);
-        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, true);
+        self.send_routed(
+            recipient, kind, payload, count, reply_to, mail_id, true, identity,
+        );
     }
 
     /// Issue iamacoffeepot/aether#1465: correlation-preserving sibling
@@ -394,13 +395,18 @@ impl ComponentCtx {
         payload: Vec<u8>,
         count: u32,
         correlation: u64,
+        from: MailboxId,
     ) {
         let reply_to = Source::with_correlation(SourceAddr::None, correlation);
-        // ADR-0114 decision #4: a child's reply stamps the child's
-        // identity (the routed recipient) on its lineage `MailId`, like
-        // its sends; a normally-addressed actor stamps `self.sender`.
-        let mail_id = MailId::new(self.dispatch_identity(), self.next_reply_lineage());
-        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, false);
+        // Issue 1987: a child's reply stamps the child's identity (the
+        // guest-carried `from`, validated in-cluster by the host fn) on its
+        // lineage `MailId`, like its sends; a zero / foreign `from` falls
+        // back to `self.sender`.
+        let identity = self.dispatch_identity(from);
+        let mail_id = MailId::new(identity, self.next_reply_lineage());
+        self.send_routed(
+            recipient, kind, payload, count, reply_to, mail_id, false, identity,
+        );
     }
 
     /// Shared routing body of [`Self::send`] and [`Self::reply`]: stamp
@@ -418,6 +424,9 @@ impl ComponentCtx {
     // The arg list is the routing surface `send` / `send_detached` /
     // `reply` all funnel through; bundling it into a struct would only
     // move the same fields one indirection away with no call-site win.
+    // `identity` is the resolved dispatch identity (issue 1987) — the
+    // caller computed it from the guest-carried `from`, so the recorded
+    // source + the `origin` name read it directly.
     #[allow(clippy::too_many_arguments)]
     fn send_routed(
         &self,
@@ -428,6 +437,7 @@ impl ComponentCtx {
         reply_to: Source,
         mail_id: MailId,
         force_detach: bool,
+        identity: MailboxId,
     ) {
         // ADR-0080 §1 (issue iamacoffeepot/aether#722): the in-flight
         // cells were populated by `Component::deliver` for guest-triggered
@@ -448,11 +458,10 @@ impl ComponentCtx {
             (parent_mail, inherited_root)
         };
         let root = inherited_root.unwrap_or(mail_id);
-        // ADR-0114 decision #4: the recorded source + the `origin` name
-        // stamped below read the dispatch identity (the routed recipient),
-        // so an inline child's mail is attributed to the child's address;
-        // a normally-addressed actor reads `self.sender` unchanged.
-        let identity = self.dispatch_identity();
+        // Issue 1987: the recorded source + the `origin` name stamped below
+        // read the dispatch `identity` the caller resolved from the guest's
+        // `from`, so an inline child's mail is attributed to the child's
+        // address; a normally-addressed actor's is its own id.
         self.queue
             .record_sent(mail_id, root, parent_mail, identity, recipient, kind);
 
@@ -559,35 +568,11 @@ impl ComponentCtx {
         self.in_flight_root.set(root);
     }
 
-    /// ADR-0114 decision #4: publish the in-flight dispatch's routed
-    /// recipient (the dispatch identity) so [`Self::dispatch_identity`]
-    /// stamps a guest-triggered `send` / `reply` with it. Called by
-    /// [`Component::deliver`] alongside [`Self::set_in_flight`], from
-    /// `mail.recipient` (the recipient the capabilities trampoline now
-    /// forwards as the guest `Mail`'s recipient). For a normally-addressed
-    /// actor this equals `self.sender`, so the stamp is unchanged.
-    pub(crate) fn set_in_flight_recipient(&self, recipient: MailboxId) {
-        self.in_flight_recipient.set(recipient);
-    }
-
-    /// The raw in-flight dispatch identity (the routed recipient), with no
-    /// `self.sender` fallback — [`MailboxId::NONE`] outside an in-flight
-    /// dispatch. The `set_dispatch_source_p32` host fn returns this so the
-    /// guest's in-place drain can save the value before re-stamping the
-    /// identity to the member it dispatches, then restore it afterward
-    /// (ADR-0114 amendment). Distinct from [`Self::dispatch_identity`], which
-    /// resolves `NONE` to `self.sender` for outbound origin stamping.
-    pub(crate) fn in_flight_recipient(&self) -> MailboxId {
-        self.in_flight_recipient.get()
-    }
-
     /// Clear the in-flight context after the guest's `receive_p32`
-    /// shim returns. Symmetric with [`Self::set_in_flight`] /
-    /// [`Self::set_in_flight_recipient`].
+    /// shim returns. Symmetric with [`Self::set_in_flight`].
     pub(crate) fn clear_in_flight(&self) {
         self.in_flight_mail_id.set(MailId::NONE);
         self.in_flight_root.set(MailId::NONE);
-        self.in_flight_recipient.set(MailboxId::NONE);
     }
 }
 
@@ -1124,12 +1109,6 @@ impl Component {
         // call site that bypasses `deliver` (today: only test
         // fixtures) doesn't accidentally pick up stale lineage.
         self.store.data().set_in_flight(mail.mail_id, mail.root);
-        // ADR-0114 decision #4: publish the routed recipient as the
-        // dispatch identity so a guest-triggered `send` / `reply` stamps
-        // its origin with the address the mail was sent to (the inline
-        // child's alias, or the actor's own id for normal mail). Cleared
-        // alongside the lineage cells after the call.
-        self.store.data().set_in_flight_recipient(mail.recipient);
         // ADR-0114 decision #1: thread the routed recipient through to
         // the guest as the trailing `receive_p32` frame slot so a guest
         // handler (and the inline-child membrane) can read which address
@@ -1742,7 +1721,7 @@ mod tests {
             r#"
         (module
             (import "aether" "reply_mail_p32"
-                (func $reply_mail (param i32 i64 i32 i32 i32) (result i32)))
+                (func $reply_mail (param i32 i64 i32 i32 i32 i64) (result i32)))
             (memory (export "memory") 1)
             {WAT_REALLOC}
             (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
@@ -1751,7 +1730,8 @@ mod tests {
                     (i64.const {kind_id}) ;; hashed kind id of "test.pong"
                     (i32.const 0) ;; ptr
                     (i32.const 0) ;; len
-                    (i32.const 1))) ;; count
+                    (i32.const 1) ;; count
+                    (i64.const 0))) ;; from = NONE (issue 1987); falls back to self id
                 i32.const 0))
         "#
         )
@@ -2406,7 +2386,8 @@ mod tests {
 
         let unknown = MailboxId(0xDEAD_BEEF_u64);
         let kind = aether_data::KindId(0xABCD_u64);
-        ctx.send(unknown, kind, vec![1, 2, 3], 1);
+        // `from = NONE` → the dispatch identity falls back to `self.sender`.
+        ctx.send(unknown, kind, vec![1, 2, 3], 1, MailboxId::NONE);
 
         let event = outbound_rx.try_recv().expect("bubble-up event emitted");
         match event {
@@ -2450,6 +2431,7 @@ mod tests {
             aether_data::KindId(0xABCD),
             vec![],
             0,
+            MailboxId::NONE,
         );
         assert!(
             outbound_rx.try_recv().is_err(),
@@ -2486,7 +2468,13 @@ mod tests {
         let inbound_mail = MailId::new(MailboxId(aether_data::with_tag(Tag::Mailbox, 0x99)), 42);
         ctx.set_in_flight(inbound_mail, inbound_root);
 
-        ctx.send(sink_id, aether_data::KindId(0xABCD), vec![1, 2, 3], 1);
+        ctx.send(
+            sink_id,
+            aether_data::KindId(0xABCD),
+            vec![1, 2, 3],
+            1,
+            MailboxId::NONE,
+        );
 
         let captured = captured.lock().unwrap();
         assert_eq!(captured.len(), 1, "sink should have been called once");
@@ -2524,7 +2512,13 @@ mod tests {
         );
         // No `set_in_flight` call.
 
-        ctx.send(sink_id, aether_data::KindId(0xCAFE), vec![], 1);
+        ctx.send(
+            sink_id,
+            aether_data::KindId(0xCAFE),
+            vec![],
+            1,
+            MailboxId::NONE,
+        );
 
         let captured = captured.lock().unwrap();
         assert_eq!(captured.len(), 1);
@@ -2562,7 +2556,13 @@ mod tests {
         let inbound_mail = MailId::new(MailboxId(aether_data::with_tag(Tag::Mailbox, 0x77)), 13);
         ctx.set_in_flight(inbound_mail, inbound_root);
 
-        ctx.send_detached(sink_id, aether_data::KindId(0xF00D), vec![7, 8], 1);
+        ctx.send_detached(
+            sink_id,
+            aether_data::KindId(0xF00D),
+            vec![7, 8],
+            1,
+            MailboxId::NONE,
+        );
 
         let captured = captured.lock().unwrap();
         assert_eq!(captured.len(), 1, "sink should have been called once");
@@ -2666,10 +2666,9 @@ mod tests {
         );
     }
 
-    /// ADR-0114 step 2: a guest `send` during a dispatch whose routed
-    /// recipient equals the component's own mailbox stamps the component
-    /// as origin — the no-op regression that guards a normally-addressed
-    /// actor.
+    /// Issue 1987: a guest `send` carrying `from == self` (a
+    /// normally-addressed actor) stamps the component as origin — the no-op
+    /// regression that guards a normally-addressed actor.
     #[test]
     fn send_stamps_self_when_recipient_is_own_mailbox() {
         let registry = Arc::new(Registry::new());
@@ -2685,22 +2684,20 @@ mod tests {
             HubOutbound::disconnected(),
         );
 
-        // Recipient == own mailbox (a normally-addressed actor).
-        ctx.set_in_flight_recipient(sender);
-        ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1);
+        // `from == self` (a normally-addressed actor).
+        ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1, sender);
 
         let captured = captured.lock().unwrap();
         let (mail_id, _root, _parent) = captured[0];
         assert_eq!(
             mail_id.sender, sender,
-            "origin stamps the component's own id when recipient == self",
+            "origin stamps the component's own id when from == self",
         );
     }
 
-    /// ADR-0114 step 2: a guest `send` during a dispatch routed to an
-    /// inline-child alias stamps the alias as origin — the recipient
-    /// becomes the dispatch identity, so the child's sends carry the
-    /// child's address.
+    /// Issue 1987: a guest `send` carrying `from == an inline-child alias`
+    /// stamps the alias as origin — the guest-carried `from` becomes the
+    /// dispatch identity, so the child's sends carry the child's address.
     #[test]
     fn send_stamps_alias_when_recipient_is_inline_child() {
         let registry = Arc::new(Registry::new());
@@ -2717,16 +2714,14 @@ mod tests {
             HubOutbound::disconnected(),
         );
 
-        // Recipient == an inline-child alias distinct from the component's
-        // own id.
-        ctx.set_in_flight_recipient(alias);
-        ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1);
+        // `from == an inline-child alias` distinct from the component's own id.
+        ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1, alias);
 
         let captured = captured.lock().unwrap();
         let (mail_id, _root, _parent) = captured[0];
         assert_eq!(
             mail_id.sender, alias,
-            "origin stamps the alias (dispatch identity) when recipient is a child",
+            "origin stamps the alias (dispatch identity) when from is a child",
         );
         assert_ne!(
             mail_id.sender, sender,

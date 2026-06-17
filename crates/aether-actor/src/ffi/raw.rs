@@ -30,6 +30,14 @@ unsafe extern "C" {
     /// this send), `1` suppresses inheritance so the host mints a fresh
     /// causal chain. The default guest path passes `0`; `send_detached`
     /// passes `1`.
+    ///
+    /// `from` (issue 1987) is the sending actor's own folded `MailboxId`
+    /// raw value — the dispatch identity the host stamps as origin. The
+    /// host validates it is in-cluster (the component's own id or a
+    /// registered inline-child alias) and falls back to the component's
+    /// own id for a zero / foreign value, so a guest can only claim an
+    /// origin inside its own cluster. Carrying it on the send is what
+    /// retires the host's ambient per-receive dispatch-identity cell.
     #[link_name = "send_mail_p32"]
     pub fn send_mail(
         recipient: u64,
@@ -38,9 +46,13 @@ unsafe extern "C" {
         len: u32,
         count: u32,
         detached: u32,
+        from: u64,
     ) -> u32;
+    /// `from` (issue 1987) is the replying actor's own folded `MailboxId`
+    /// raw value — the dispatch identity the host stamps on the reply's
+    /// lineage, validated and fallback-resolved exactly like `send_mail`.
     #[link_name = "reply_mail_p32"]
-    pub fn reply_mail(sender: u32, kind: u64, ptr: u32, len: u32, count: u32) -> u32;
+    pub fn reply_mail(sender: u32, kind: u64, ptr: u32, len: u32, count: u32, from: u64) -> u32;
     #[link_name = "save_state_p32"]
     pub fn save_state(version: u32, ptr: u32, len: u32) -> u32;
     /// ADR-0042: return the correlation id the substrate minted for
@@ -120,19 +132,6 @@ unsafe extern "C" {
     /// host-side error (no memory, OOB, bad UTF-8, no binding/spawner).
     #[link_name = "spawn_inline_child_p32"]
     pub fn spawn_inline_child(is_counter: u32, subname_ptr: u32, subname_len: u32) -> u64;
-    /// ADR-0114 amendment: re-stamp the host's dispatch identity to the
-    /// cluster member `id` the in-place drain is dispatching, so that
-    /// member's own (cross-cluster) sends carry it as origin instead of the
-    /// cluster's inbound recipient. Returns the *previous* dispatch identity
-    /// (raw `MailboxId`, `0` outside a dispatch) so the guest can restore it
-    /// after the member's dispatch. The host validates `id` against this
-    /// cluster (own id, or a registered inline-child alias; `0` is the
-    /// restore sentinel) and leaves the identity unchanged on a foreign id —
-    /// a guest can only claim origins inside its own cluster. The
-    /// `aether-actor` cluster drain (`drain_cluster_queue`) is the only
-    /// intended caller.
-    #[link_name = "set_dispatch_source_p32"]
-    pub fn set_dispatch_source(id: u64) -> u64;
 }
 
 /// Host-side stub for the FFI `aether::send_mail` import. Always
@@ -153,6 +152,7 @@ pub unsafe fn send_mail(
     _len: u32,
     _count: u32,
     _detached: u32,
+    _from: u64,
 ) -> u32 {
     panic!("aether-actor: send_mail called outside the FFI guest");
 }
@@ -168,7 +168,14 @@ pub unsafe fn send_mail(
 /// has no FFI host to call, so any invocation is a bug.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
-pub unsafe fn reply_mail(_sender: u32, _kind: u64, _ptr: u32, _len: u32, _count: u32) -> u32 {
+pub unsafe fn reply_mail(
+    _sender: u32,
+    _kind: u64,
+    _ptr: u32,
+    _len: u32,
+    _count: u32,
+    _from: u64,
+) -> u32 {
     panic!("aether-actor: reply_mail called outside the FFI guest");
 }
 
@@ -287,23 +294,4 @@ pub unsafe fn spawn_sibling(
 #[must_use]
 pub unsafe fn spawn_inline_child(_is_counter: u32, _subname_ptr: u32, _subname_len: u32) -> u64 {
     panic!("aether-actor: spawn_inline_child called outside the FFI guest");
-}
-
-/// Host-side stub for the FFI `aether::set_dispatch_source` import
-/// (ADR-0114 amendment). A no-op that returns `0` (no prior identity),
-/// unlike the other stubs which fail-fast with a panic.
-///
-/// The difference is deliberate: `drain_cluster_queue` brackets every
-/// in-place item with this call, and the drain's pure-routing behavior is
-/// unit-tested on the host build (`drained_child_reads_*`). The host build has
-/// no real per-instance dispatch identity to re-stamp, so the inert no-op
-/// keeps those tests running without a live FFI host; the actual re-stamp
-/// (and its anti-spoof validation) is exercised on the wasm / `FleetBench` path.
-///
-/// # Safety
-/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
-#[cfg(not(target_arch = "wasm32"))]
-#[must_use]
-pub unsafe fn set_dispatch_source(_id: u64) -> u64 {
-    0
 }

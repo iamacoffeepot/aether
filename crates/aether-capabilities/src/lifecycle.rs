@@ -106,7 +106,7 @@ pub trait LifecycleMailboxExt {
     fn unsubscribe_for<K: Kind>(&self, mailbox: MailboxId);
 }
 
-impl LifecycleMailboxExt for FfiActorMailbox<LifecycleCapability> {
+impl LifecycleMailboxExt for FfiActorMailbox<'_, LifecycleCapability> {
     fn subscribe<K: Kind>(&self) {
         self.send(&LifecycleSubscribeSelf { stage: K::ID.0 });
     }

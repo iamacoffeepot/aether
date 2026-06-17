@@ -77,22 +77,12 @@ impl FfiInitCtx<'_> {
         resolve_mailbox::<K>(name)
     }
 
-    /// Singleton sender shortcut. Returns a typed [`FfiActorMailbox`]
-    /// addressing the unique instance of receiver actor `R`.
-    #[must_use]
-    pub fn actor<R: Singleton>(&self) -> FfiActorMailbox<R> {
-        FfiActorMailbox::__new(R::resolve(self.mailbox).0)
-    }
-
-    /// Multi-instance sender. Resolve a typed [`FfiActorMailbox`]
-    /// from a runtime instance name.
-    // Runtime-name escape hatch: the instance name is only known at runtime,
-    // so there is no `R::resolve` lineage carry to route through.
-    #[must_use]
-    #[allow(clippy::disallowed_methods)]
-    pub fn resolve_actor<R: Actor>(&self, name: &str) -> FfiActorMailbox<R> {
-        FfiActorMailbox::__new(mailbox_id_from_name(name).0)
-    }
+    // Issue 1987: the init ctx exposes no `actor()` / `resolve_actor()`
+    // sender shortcut. A `FfiActorMailbox` is now a ctx-bound sender that
+    // routes through the per-component inline registry, which the init
+    // stage does not hold — and init is mail-forbidden anyway (the ctx is
+    // `Resolver`-only by design). Addressing + sending begin at `wire`,
+    // where `FfiCtx` carries the registry.
 }
 
 impl Resolver for FfiInitCtx<'_> {
@@ -195,6 +185,16 @@ pub enum SpawnError {
 pub struct FfiCtx<'a, M: ReplyMode = Single> {
     mailbox: u64,
     sender: Option<u32>,
+    /// Issue 1987: the inbound source — the folded [`MailboxId`] raw value
+    /// of whoever sent the mail currently being dispatched, threaded onto
+    /// the ctx at construction. For an in-place (intra-cluster) dispatch
+    /// off the drain this is the enqueuing member's id (the in-place reply
+    /// table is empty, so the ctx is the only carrier); for a top-level
+    /// dispatch it is [`MailboxId::NONE`] (`0`) and
+    /// [`Self::source_mailbox`] falls back to the host reply table via the
+    /// `sender` handle. Replaces the registry's ambient `current_source`
+    /// cell.
+    source: u64,
     /// ADR-0114: the per-component inline-child registry the
     /// [`Self::spawn_inline_child`] / [`Self::despawn_inline_child`] verbs
     /// drive. The `export!` membrane threads in the component's emitted
@@ -210,17 +210,31 @@ pub struct FfiCtx<'a, M: ReplyMode = Single> {
     _mode: PhantomData<M>,
 }
 
+/// The `source` argument to [`FfiCtx::__new`] for a dispatch with no in-place
+/// sender — a top-level mail dispatch or a lifecycle hook, where
+/// [`FfiCtx::source_mailbox`] falls back to the host reply table. Equals
+/// [`MailboxId::NONE`]. (The drained-member path threads the enqueuing member's
+/// own id instead.) Named so the `__new` call sites read intent, not a bare `0`.
+#[doc(hidden)]
+pub const NO_INBOUND_SOURCE: u64 = MailboxId::NONE.0;
+
 impl<'a> FfiCtx<'a, Manual> {
-    /// Not part of the public API; called only by [`crate::export!`].
-    /// The runtime builds the most-permissive [`Manual`] view; the
-    /// `#[actor]` dispatcher / lifecycle shims downgrade it per handler
-    /// class with [`Self::as_single`].
+    /// Not part of the public API; called only by [`crate::export!`] and
+    /// the inline membrane / drain. The runtime builds the most-permissive
+    /// [`Manual`] view; the `#[actor]` dispatcher / lifecycle shims
+    /// downgrade it per handler class with [`Self::as_single`].
+    ///
+    /// `source` is the inbound source (issue 1987): the enqueuing member's
+    /// id for an in-place drained dispatch, or [`MailboxId::NONE`] (`0`)
+    /// for a top-level dispatch / lifecycle hook (where
+    /// [`Self::source_mailbox`] falls back to the host reply table).
     #[doc(hidden)]
     #[must_use]
-    pub fn __new(mailbox: u64, inline: &'a InlineRegistry) -> Self {
+    pub fn __new(mailbox: u64, inline: &'a InlineRegistry, source: u64) -> Self {
         Self {
             mailbox,
             sender: None,
+            source,
             inline,
             _borrow: PhantomData,
             _mode: PhantomData,
@@ -280,7 +294,7 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
     )]
     pub fn reply_kind<K: Kind>(&self, sender: ReplyHandle, kind: KindId<K>, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        mail::reply_mail(sender.raw(), kind.raw(), &bytes, 1);
+        mail::reply_mail(sender.raw(), kind.raw(), &bytes, 1, self.mailbox);
     }
 
     /// Reply target for the mail currently being dispatched. Mirrors
@@ -289,21 +303,24 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
         self.sender.map(ReplyHandle::__from_raw)
     }
 
-    /// Singleton sender shortcut. Returns a typed [`FfiActorMailbox`]
-    /// addressing the unique instance of receiver actor `R`.
+    /// Singleton sender shortcut. Returns a ctx-bound [`FfiActorMailbox`]
+    /// addressing the unique instance of receiver actor `R`, carrying this
+    /// actor's own id as the send's `from` (issue 1987) and a borrow of
+    /// the inline registry the send routes through.
     #[must_use]
-    pub fn actor<R: Singleton>(&self) -> FfiActorMailbox<R> {
-        FfiActorMailbox::__new(R::resolve(self.mailbox).0)
+    pub fn actor<R: Singleton>(&self) -> FfiActorMailbox<'_, R> {
+        FfiActorMailbox::__new(R::resolve(self.mailbox).0, self.mailbox, self.inline)
     }
 
-    /// Multi-instance sender. Resolve a typed [`FfiActorMailbox`]
-    /// from a runtime instance name.
+    /// Multi-instance sender. Resolve a ctx-bound [`FfiActorMailbox`]
+    /// from a runtime instance name, carrying this actor's own id as the
+    /// send's `from` and the inline registry the send routes through.
     // Runtime-name escape hatch: the instance name is only known at runtime,
     // so there is no `R::resolve` lineage carry to route through.
     #[must_use]
     #[allow(clippy::disallowed_methods)]
-    pub fn resolve_actor<R: Actor>(&self, name: &str) -> FfiActorMailbox<R> {
-        FfiActorMailbox::__new(mailbox_id_from_name(name).0)
+    pub fn resolve_actor<R: Actor>(&self, name: &str) -> FfiActorMailbox<'_, R> {
+        FfiActorMailbox::__new(mailbox_id_from_name(name).0, self.mailbox, self.inline)
     }
 
     /// ADR-0063 fail-fast: bring the substrate down with `reason`.
@@ -520,6 +537,34 @@ impl<'a, M: ReplyMode> FfiCtx<'a, M> {
             inline: self.inline,
         })
     }
+
+    /// Issue 1987: send `payload` through a stored [`Mailbox<K>`] addressing
+    /// token, threading this actor's own id as the send's `from` so the
+    /// recipient's `ctx.source_mailbox()` resolves the sender and the host
+    /// stamps the correct origin. A `Mailbox<K>` is a pure address (it
+    /// carries no origin), so the ctx supplies the "from" half — the
+    /// by-token counterpart of `ctx.actor::<R>().send(&k)`. Routes through
+    /// the inline registry like every ctx send: a cluster-member recipient
+    /// dispatches in place, any other hands off to the host. Inherits the
+    /// handler's in-flight causal chain (ADR-0080 §7).
+    pub fn send<K: Kind>(&mut self, mailbox: Mailbox<K>, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        self.inline
+            .route_or_enqueue(mailbox.mailbox(), K::ID.0, &bytes, 1, false, self.mailbox);
+    }
+
+    /// Issue 1987: send `payload` to a raw [`MailboxId`], threading this
+    /// actor's own id as the send's `from`. The by-id escape hatch for a
+    /// recipient address known only at runtime (the typed-token counterpart
+    /// is [`Self::send`]; the by-name counterpart is
+    /// [`crate::actor::ctx::MailSender::send_to_named`]). Routes through the
+    /// inline registry and inherits the handler's causal chain like every
+    /// ctx send.
+    pub fn send_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        self.inline
+            .route_or_enqueue(id.0, K::ID.0, &bytes, 1, false, self.mailbox);
+    }
 }
 
 /// Resolve a [`Subname`] into the `(is_counter, discriminator)` pair the
@@ -699,18 +744,16 @@ impl OutboundReply for FfiCtx<'_, Manual> {
     }
 
     fn source_mailbox(&self) -> Option<MailboxId> {
-        // ADR-0114 amendment: an in-place (intra-cluster) send carries its
-        // "from" half in the inline registry's `current_source` rather than
-        // the host reply table, because a drained item dispatches with
-        // `NO_REPLY_HANDLE` (the local fast path is fire-and-forget). When a
-        // dispatch runs off the cluster-queue drain `current_source` is the
-        // immediate sender; outside the drain it is `0`, and a top-level
-        // dispatch resolves its sender from the host reply table as before.
+        // Issue 1987: an in-place (intra-cluster) dispatch carries its "from"
+        // half on the ctx's `source` field (threaded by the membrane / drain),
+        // because a drained item dispatches with `NO_REPLY_HANDLE` (the local
+        // fast path is fire-and-forget) so the host reply table holds nothing
+        // for it. For a top-level dispatch `source` is `0`, and the sender
+        // resolves from the host reply table via the `sender` handle as before.
         // The two never collide: an in-place item has no reply handle, so
-        // `self.sender` is `None` exactly when `current_source` is set.
-        let local = self.inline.current_source();
-        if local != MailboxId::NONE.0 {
-            return Some(MailboxId(local));
+        // `self.sender` is `None` exactly when `source` is set.
+        if self.source != MailboxId::NONE.0 {
+            return Some(MailboxId(self.source));
         }
         let handle = self.sender?;
         let id = mail::source_of(handle);
@@ -720,13 +763,13 @@ impl OutboundReply for FfiCtx<'_, Manual> {
     fn reply<K: Kind>(&mut self, payload: &K) {
         if let Some(raw) = self.sender {
             let bytes = payload.encode_into_bytes();
-            mail::reply_mail(raw, K::ID.0, &bytes, 1);
+            mail::reply_mail(raw, K::ID.0, &bytes, 1, self.mailbox);
         }
     }
 
     fn reply_to<K: Kind>(&mut self, sender: ReplyHandle, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        mail::reply_mail(sender.raw(), K::ID.0, &bytes, 1);
+        mail::reply_mail(sender.raw(), K::ID.0, &bytes, 1, self.mailbox);
     }
 }
 
@@ -833,7 +876,14 @@ impl MailSender for FfiDropCtx<'_> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, false);
+        mail::send_mail(
+            R::resolve(self.mailbox).0,
+            K::ID.0,
+            &bytes,
+            1,
+            false,
+            self.mailbox,
+        );
     }
 
     //noinspection DuplicatedCode
@@ -849,6 +899,7 @@ impl MailSender for FfiDropCtx<'_> {
             bytes,
             payloads.len() as u32,
             false,
+            self.mailbox,
         );
     }
 
@@ -858,7 +909,14 @@ impl MailSender for FfiDropCtx<'_> {
     #[allow(clippy::disallowed_methods)]
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, false);
+        mail::send_mail(
+            mailbox_id_from_name(name).0,
+            K::ID.0,
+            &bytes,
+            1,
+            false,
+            self.mailbox,
+        );
     }
 
     fn prev_correlation(&self) -> u64 {
@@ -872,7 +930,14 @@ impl MailSender for FfiDropCtx<'_> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, true);
+        mail::send_mail(
+            R::resolve(self.mailbox).0,
+            K::ID.0,
+            &bytes,
+            1,
+            true,
+            self.mailbox,
+        );
     }
 
     //noinspection DuplicatedCode
@@ -880,7 +945,14 @@ impl MailSender for FfiDropCtx<'_> {
     #[allow(clippy::disallowed_methods)]
     fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, true);
+        mail::send_mail(
+            mailbox_id_from_name(name).0,
+            K::ID.0,
+            &bytes,
+            1,
+            true,
+            self.mailbox,
+        );
     }
 }
 
@@ -896,7 +968,9 @@ impl Persistence for FfiDropCtx<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FfiCtx, InlineRegistry, Manual, Single, SpawnError, install_inline_child};
+    use super::{
+        FfiCtx, InlineRegistry, Manual, NO_INBOUND_SOURCE, Single, SpawnError, install_inline_child,
+    };
     use crate::Actor;
     use crate::actor::ctx::{OutboundReply, Resolver};
     use crate::actor::{Instanced, Subname};
@@ -982,7 +1056,7 @@ mod tests {
     #[test]
     fn spawn_inline_child_rejects_invalid_subname() {
         let registry = InlineRegistry::new();
-        let ctx = FfiCtx::__new(0, &registry);
+        let ctx = FfiCtx::__new(0, &registry, NO_INBOUND_SOURCE);
         let result = ctx.spawn_inline_child::<FailingChild>(Subname::Named("bad:name"), &());
         assert!(
             matches!(result, Err(SpawnError::SubnameInvalid(_))),
@@ -1046,7 +1120,7 @@ mod tests {
         )
         .expect("a succeeding init installs the inline child");
 
-        let ctx = FfiCtx::__new(alias.0, &registry);
+        let ctx = FfiCtx::__new(alias.0, &registry, NO_INBOUND_SOURCE);
         assert!(
             ctx.despawn_inline_child(alias),
             "despawning a resident child returns true",
@@ -1106,7 +1180,7 @@ mod tests {
         )
         .expect("a succeeding init installs the inline child");
 
-        let ctx: FfiCtx<'_, Manual> = FfiCtx::__new(root, &registry);
+        let ctx: FfiCtx<'_, Manual> = FfiCtx::__new(root, &registry, NO_INBOUND_SOURCE);
 
         // The root has no registry parent entry — its parent is cross-cluster.
         assert!(

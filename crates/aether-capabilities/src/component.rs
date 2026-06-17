@@ -63,12 +63,14 @@ pub use native::ComponentHostConfig;
 pub trait ComponentHostFfiExt {
     /// Resolve a typed peer-component mailbox for the loaded component
     /// named `name`. The full mailbox address is
-    /// `format!("{}:{}", WasmTrampoline::NAMESPACE, name)`.
-    fn loaded<R: Actor>(&self, name: &str) -> FfiActorMailbox<R>;
+    /// `format!("{}:{}", WasmTrampoline::NAMESPACE, name)`. The resolved
+    /// handle inherits this handle's ctx binding (`sender` + inline
+    /// registry), so its sends stamp the same origin (issue 1987).
+    fn loaded<R: Actor>(&self, name: &str) -> FfiActorMailbox<'_, R>;
 }
 
-impl ComponentHostFfiExt for FfiActorMailbox<ComponentHostCapability> {
-    fn loaded<R: Actor>(&self, name: &str) -> FfiActorMailbox<R> {
+impl ComponentHostFfiExt for FfiActorMailbox<'_, ComponentHostCapability> {
+    fn loaded<R: Actor>(&self, name: &str) -> FfiActorMailbox<'_, R> {
         self.resolve_peer_scoped::<R>(WasmTrampoline::NAMESPACE, name)
     }
 }
@@ -511,6 +513,7 @@ mod tests {
     // trampoline-address fold against the flat name hash — the primitive is
     // the reference value under test, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
+    use aether_actor::ffi::inline::InlineRegistry;
     use aether_actor::{Actor, FfiActorMailbox};
     use aether_data::{ActorId, MailboxId, Tag, fold_lineage, mailbox_id_from_name, with_tag};
 
@@ -529,9 +532,14 @@ mod tests {
     #[test]
     fn loaded_composes_the_canonical_trampoline_address() {
         // `R` is arbitrary here — the resolved id depends only on the
-        // host carry + the trampoline node name.
+        // host carry + the trampoline node name. The ctx binding (sender +
+        // inline registry) is irrelevant to id resolution, so a throwaway
+        // registry and a zero sender suffice (issue 1987).
+        let registry = InlineRegistry::new();
         let host = FfiActorMailbox::<ComponentHostCapability>::__new(
             mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0,
+            0,
+            &registry,
         );
         let camera = host.loaded::<ComponentHostCapability>("camera");
 
@@ -554,8 +562,11 @@ mod tests {
     /// composition: the cap's own mailbox id is its bare `NAMESPACE`.
     #[test]
     fn root_singleton_id_is_the_bare_namespace() {
+        let registry = InlineRegistry::new();
         let host = FfiActorMailbox::<ComponentHostCapability>::__new(
             mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0,
+            0,
+            &registry,
         );
         assert_eq!(
             host.mailbox_id(),
