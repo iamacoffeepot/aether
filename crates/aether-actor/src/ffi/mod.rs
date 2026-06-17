@@ -64,7 +64,7 @@ pub mod inline;
 pub mod mailbox;
 pub mod raw;
 
-pub use ctx::{FfiCtx, FfiDropCtx, FfiInitCtx, RelativeMailbox, SpawnError};
+pub use ctx::{FfiCtx, FfiDropCtx, FfiInitCtx, NO_INBOUND_SOURCE, RelativeMailbox, SpawnError};
 pub use mailbox::FfiActorMailbox;
 
 // Issue 665 retired the `ffi::Mailbox<K>` 1-arg alias and the
@@ -764,7 +764,7 @@ macro_rules! __export_internal {
             __AETHER_INLINE.set_self_id(mailbox_id);
             // ADR-0112: the runtime builds the `Manual` view; `wire`'s
             // default signature is `FfiCtx<'_>` (= Single), so downgrade.
-            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, 0);
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::ffi::NO_INBOUND_SOURCE);
             <$component as $crate::FfiActor>::wire(instance, ctx.as_single());
             0
         }
@@ -780,7 +780,7 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, 0);
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::ffi::NO_INBOUND_SOURCE);
             <$component as $crate::FfiActor>::unwire(instance, ctx.as_single());
             0
         }
@@ -840,7 +840,7 @@ macro_rules! __export_internal {
                 // `ctx.source_mailbox()` falls back to the host reply table via
                 // the dispatcher-stamped reply handle (issue 1987).
                 $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, 0, move |__aether_mail| {
-                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, 0);
+                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::ffi::NO_INBOUND_SOURCE);
                     instance.__aether_dispatch(&mut ctx, __aether_mail)
                 })
             };
@@ -968,7 +968,7 @@ macro_rules! __export_internal {
                 prior_bytes,
                 &__AETHER_INLINE,
                 |parent_version, parent_bytes| {
-                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, 0);
+                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::ffi::NO_INBOUND_SOURCE);
                     // SAFETY: `parent_bytes` lives for this closure call;
                     // `PriorState::__from_ptr` bounds the slice to it.
                     let parent_prior = unsafe {
@@ -1215,7 +1215,7 @@ macro_rules! __export_multi_internal {
             __AETHER_INLINE.set_self_id(mailbox_id);
             // ADR-0112: the boxed `ErasedFfiActor` seam carries the `Manual`
             // view; the synthesized impl downgrades to `Single` per hook.
-            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, 0);
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::ffi::NO_INBOUND_SOURCE);
             instance.erased_wire(&mut ctx);
             0
         }
@@ -1228,7 +1228,7 @@ macro_rules! __export_multi_internal {
             };
             // ADR-0112: the boxed `ErasedFfiActor` seam carries the `Manual`
             // view; the synthesized impl downgrades to `Single` per hook.
-            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, 0);
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::ffi::NO_INBOUND_SOURCE);
             instance.erased_unwire(&mut ctx);
             0
         }
@@ -1283,7 +1283,7 @@ macro_rules! __export_multi_internal {
                 // `ctx.source_mailbox()` falls back to the host reply table via
                 // the dispatcher-stamped reply handle (issue 1987).
                 $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, 0, move |__aether_mail| {
-                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, 0);
+                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::ffi::NO_INBOUND_SOURCE);
                     instance.erased_dispatch(&mut ctx, __aether_mail)
                 })
             };
@@ -1396,7 +1396,7 @@ macro_rules! __export_multi_internal {
                 |parent_version, parent_bytes| {
                     // ADR-0112: the boxed `ErasedFfiActor` seam carries the
                     // `Manual` view; the synthesized impl downgrades per hook.
-                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, 0);
+                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::ffi::NO_INBOUND_SOURCE);
                     // SAFETY: `parent_bytes` lives for this closure call.
                     let parent_prior = unsafe {
                         $crate::PriorState::__from_ptr(

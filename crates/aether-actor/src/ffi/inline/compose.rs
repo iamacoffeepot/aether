@@ -25,7 +25,7 @@ use alloc::vec::Vec;
 
 use aether_data::{Kind, MailboxId};
 
-use crate::ffi::ctx::{CapturedState, FfiDropCtx, FfiInitCtx};
+use crate::ffi::ctx::{CapturedState, FfiDropCtx, FfiInitCtx, NO_INBOUND_SOURCE};
 use crate::ffi::inline::InlineRegistry;
 use crate::ffi::inline::bundle::{self, ChildEntry};
 use crate::ffi::{ErasedFfiActor, FfiActor, FfiCtx};
@@ -206,7 +206,7 @@ where
     // registered, so the first inbound mail sees the rehydrated state.
     {
         // Rehydrate is not a mail dispatch — no inbound source on the ctx.
-        let mut ctx = FfiCtx::__new(to_reconstruct.alias.0, registry, 0);
+        let mut ctx = FfiCtx::__new(to_reconstruct.alias.0, registry, NO_INBOUND_SOURCE);
         // SAFETY: `state_bytes` lives for this call; `PriorState::__from_ptr`
         // forms a slice over it bounded by the borrow, never escaping.
         let prior = unsafe {

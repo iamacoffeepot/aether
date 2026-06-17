@@ -210,6 +210,14 @@ pub struct FfiCtx<'a, M: ReplyMode = Single> {
     _mode: PhantomData<M>,
 }
 
+/// The `source` argument to [`FfiCtx::__new`] for a dispatch with no in-place
+/// sender — a top-level mail dispatch or a lifecycle hook, where
+/// [`FfiCtx::source_mailbox`] falls back to the host reply table. Equals
+/// [`MailboxId::NONE`]. (The drained-member path threads the enqueuing member's
+/// own id instead.) Named so the `__new` call sites read intent, not a bare `0`.
+#[doc(hidden)]
+pub const NO_INBOUND_SOURCE: u64 = MailboxId::NONE.0;
+
 impl<'a> FfiCtx<'a, Manual> {
     /// Not part of the public API; called only by [`crate::export!`] and
     /// the inline membrane / drain. The runtime builds the most-permissive
@@ -960,7 +968,9 @@ impl Persistence for FfiDropCtx<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FfiCtx, InlineRegistry, Manual, Single, SpawnError, install_inline_child};
+    use super::{
+        FfiCtx, InlineRegistry, Manual, NO_INBOUND_SOURCE, Single, SpawnError, install_inline_child,
+    };
     use crate::Actor;
     use crate::actor::ctx::{OutboundReply, Resolver};
     use crate::actor::{Instanced, Subname};
@@ -1046,7 +1056,7 @@ mod tests {
     #[test]
     fn spawn_inline_child_rejects_invalid_subname() {
         let registry = InlineRegistry::new();
-        let ctx = FfiCtx::__new(0, &registry, 0);
+        let ctx = FfiCtx::__new(0, &registry, NO_INBOUND_SOURCE);
         let result = ctx.spawn_inline_child::<FailingChild>(Subname::Named("bad:name"), &());
         assert!(
             matches!(result, Err(SpawnError::SubnameInvalid(_))),
@@ -1110,7 +1120,7 @@ mod tests {
         )
         .expect("a succeeding init installs the inline child");
 
-        let ctx = FfiCtx::__new(alias.0, &registry, 0);
+        let ctx = FfiCtx::__new(alias.0, &registry, NO_INBOUND_SOURCE);
         assert!(
             ctx.despawn_inline_child(alias),
             "despawning a resident child returns true",
@@ -1170,7 +1180,7 @@ mod tests {
         )
         .expect("a succeeding init installs the inline child");
 
-        let ctx: FfiCtx<'_, Manual> = FfiCtx::__new(root, &registry, 0);
+        let ctx: FfiCtx<'_, Manual> = FfiCtx::__new(root, &registry, NO_INBOUND_SOURCE);
 
         // The root has no registry parent entry — its parent is cross-cluster.
         assert!(
