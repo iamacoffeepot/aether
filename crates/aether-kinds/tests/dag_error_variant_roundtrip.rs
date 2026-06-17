@@ -1,14 +1,14 @@
-//! ADR-0047 §3: every `DagError` variant postcard-roundtrips with
-//! structural equality. Catches accidental wire breakage when future
-//! variants are appended (postcard discriminants are positional).
+//! ADR-0047 §3: every `DagError` variant roundtrips with structural
+//! equality. Catches accidental wire breakage when future variants are
+//! appended (wire enum selectors are also positional).
 
+use aether_data::wire;
 use aether_data::{KindId, TransformId};
 use aether_kinds::dag::{DagError, NodeId};
 
 fn roundtrip(error: &DagError) {
-    let bytes = postcard::to_allocvec(error).expect("DagError encodes via postcard");
-    let decoded: DagError =
-        postcard::from_bytes(&bytes).expect("DagError decodes from its own bytes");
+    let bytes = wire::to_vec(error).expect("DagError encodes via wire codec");
+    let decoded: DagError = wire::from_bytes(&bytes).expect("DagError decodes from its own bytes");
     assert_eq!(&decoded, error);
 }
 
