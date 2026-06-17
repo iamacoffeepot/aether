@@ -1183,8 +1183,8 @@ impl Mcp {
         let descriptor = build_descriptor(args.descriptor)
             .await
             .map_err(|e| McpError::invalid_params(format!("submit_dag descriptor: {e}"), None))?;
-        // Encode via the kind's native (postcard) wire encode — ids
-        // serialize in their u64 form, matching the substrate's decode.
+        // Encode via the kind's wire encode — ids serialize in their u64
+        // form, matching the substrate's decode.
         let payload = Submit { descriptor }.encode_into_bytes();
         let envelope = MailEnvelope {
             to: MailboxAddress {
@@ -1588,11 +1588,11 @@ impl Mcp {
             return;
         };
 
-        // Decode each `schema_postcard` back into a `SchemaType`; an
-        // entry whose schema fails to decode is dropped (the
-        // substrate's wire form is canonical, so a decode failure is
-        // a substrate / aether-data version mismatch — better to skip
-        // the entry than panic the tool call).
+        // Decode each `schema_postcard` back into a `SchemaType` via
+        // `wire::from_bytes`; an entry whose schema fails to decode is
+        // dropped (the substrate's wire form is canonical, so a decode
+        // failure is a substrate / aether-data version mismatch —
+        // better to skip the entry than panic the tool call).
         let fresh: Vec<KindDescriptor> = kinds
             .into_iter()
             .filter_map(|wire| {
@@ -3726,7 +3726,7 @@ mod tests {
     /// builders, which bound `K: Kind` (not `K: Kind + Serialize`) and
     /// encode via the descriptor-aware `encode_into_bytes`. The payload
     /// is the kind's cast image (length == `size_of`, distinct from a
-    /// postcard varint encode of these `u64`s) and round-trips through
+    /// wire varint encode of these `u64`s) and round-trips through
     /// `Kind::decode_from_bytes`. Compiling at all is the bound check:
     /// the old `serde::Serialize` bound would reject this kind.
     #[test]
@@ -3739,7 +3739,7 @@ mod tests {
         assert_eq!(
             cast_bytes.len(),
             size_of::<aether_kinds::LifecycleSubscribe>(),
-            "cast image is the fixed struct size, not a postcard varint encode",
+            "cast image is the fixed struct size, not a wire varint encode",
         );
 
         let local = local_envelope("aether.lifecycle", &mail);
@@ -4140,8 +4140,8 @@ mod tests {
             .await
             .expect("build_mail_envelope encodes the component-defined kind");
         // The schema-encoded payload for a `SchemaType::String` is the
-        // postcard string wire shape; decoding back via the same
-        // schema must yield the original JSON value.
+        // wire-codec string shape; decoding back via the same schema
+        // must yield the original JSON value.
         let decoded = aether_codec::decode_schema(&envelope.payload, &component_kind.schema)
             .expect("payload decodes against the cached schema");
         assert_eq!(
