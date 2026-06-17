@@ -68,6 +68,7 @@ mod native {
         Cardinality, ParamKind, handler_entries, name_entries, template_entries,
     };
     use aether_data::tagged_id;
+    use aether_data::wire;
     use aether_kinds::{
         CardinalityWire, HandlerEntryWire, KindDescriptorWire, NameEntryWire, ParamKindWire,
         ResolvedName, TemplateEntryWire,
@@ -176,7 +177,7 @@ mod native {
         /// Reply with the substrate's live kind vocabulary: every
         /// [`KindDescriptor`](aether_data::KindDescriptor) currently
         /// registered in the engine's `Registry`, projected onto the
-        /// wire (id + name + postcard-encoded
+        /// wire (id + name + wire-encoded
         /// [`SchemaType`](aether_data::SchemaType)). ADR-0091 §1–§2.
         ///
         /// # Agent
@@ -187,9 +188,9 @@ mod native {
         /// calls this on the first `send_mail` for an unknown kind
         /// name, then reuses the cached vocabulary until the next miss
         /// (no TTL, no background poll). The schema rides as opaque
-        /// postcard bytes (`schema_postcard`) because `SchemaType` has
+        /// wire bytes (`schema_postcard`) because `SchemaType` has
         /// no `Schema` impl of its own; decode it with
-        /// `postcard::from_bytes::<SchemaType>(&desc.schema_postcard)`.
+        /// `wire::from_bytes::<SchemaType>(&desc.schema_postcard)`.
         #[handler]
         fn on_list_kinds(&mut self, _ctx: &mut NativeCtx<'_>, _mail: ListKinds) -> ListKindsResult {
             let kinds = self
@@ -197,13 +198,13 @@ mod native {
                 .list_kind_descriptors()
                 .into_iter()
                 .map(|desc| {
-                    // The schema rides as opaque postcard bytes — see
+                    // The schema rides as opaque wire bytes — see
                     // `KindDescriptorWire` for the rationale. The
                     // serialization is infallible for `SchemaType`
                     // (no `Map<String, _>` non-string-key edge cases
                     // because every nested field is a derive output).
-                    let schema_postcard = postcard::to_allocvec(&desc.schema)
-                        .expect("SchemaType always postcard-encodes (ADR-0030 canonical form)");
+                    let schema_postcard = wire::to_vec(&desc.schema)
+                        .expect("SchemaType always wire-encodes (ADR-0118 canonical form)");
                     KindDescriptorWire {
                         id: KindId(kind_id_from_parts(&desc.name, &desc.schema)),
                         name: desc.name,
@@ -455,8 +456,8 @@ mod native {
                     )
                 });
             assert_eq!(entry.id, expected_id, "id matches kind_id_from_parts");
-            let schema: SchemaType = postcard::from_bytes(&entry.schema_postcard)
-                .expect("schema_postcard round-trips through postcard");
+            let schema: SchemaType = wire::from_bytes(&entry.schema_postcard)
+                .expect("schema_postcard round-trips through wire");
             assert!(
                 matches!(schema, SchemaType::String),
                 "schema decodes back to the originally registered SchemaType",

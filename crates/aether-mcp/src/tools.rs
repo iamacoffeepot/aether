@@ -27,6 +27,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use aether_codec::frame::max_frame_size;
 use aether_data::MailId;
 use aether_data::canonical::kind_id_from_parts;
+use aether_data::wire;
 use aether_data::{
     DagId, EngineId, HandleId, Kind, KindDescriptor, KindId, MailboxId, ScopePathError, Tag, Uuid,
     mailbox_id_from_name, mailbox_id_from_path, tagged_id, validate_scope_path,
@@ -1595,7 +1596,7 @@ impl Mcp {
         let fresh: Vec<KindDescriptor> = kinds
             .into_iter()
             .filter_map(|wire| {
-                let schema = postcard::from_bytes::<SchemaType>(&wire.schema_postcard).ok()?;
+                let schema = wire::from_bytes::<SchemaType>(&wire.schema_postcard).ok()?;
                 Some(KindDescriptor {
                     name: wire.name,
                     schema,
@@ -4110,7 +4111,7 @@ mod tests {
                 )
             });
         let decoded_schema: SchemaType =
-            postcard::from_bytes(&entry.schema_postcard).expect("schema_postcard decodes");
+            wire::from_bytes(&entry.schema_postcard).expect("schema_postcard decodes");
         assert!(
             matches!(decoded_schema, SchemaType::String),
             "the registered schema round-trips through the wire",

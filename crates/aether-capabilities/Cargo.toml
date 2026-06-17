@@ -41,7 +41,6 @@ native = [
     "dep:confique",
     "dep:dirs",
     "dep:httparse",
-    "dep:postcard",
     "dep:serde_json",
     "dep:sha2",
     "dep:tracing",
@@ -127,7 +126,6 @@ dirs = { version = "6", optional = true }
 # `aether.http.server` cap. Pure-Rust, no_std-capable, already a transitive
 # dependency; rides the `native` feature so wasm / marker-only builds skip it.
 httparse = { version = "1", optional = true }
-postcard = { workspace = true, optional = true, features = ["alloc", "heapless-cas"] }
 # JSON request/response bodies for the content-gen provider APIs
 # (ADR-0050) — the Anthropic Messages API and the Gemini media APIs.
 serde_json = { workspace = true, optional = true }
