@@ -125,6 +125,12 @@ impl Resolver for FfiInitCtx<'_> {
 /// never the scheduler.
 pub struct RelativeMailbox<'a> {
     id: MailboxId,
+    /// The addressing actor's own folded [`MailboxId`] raw value — the "from"
+    /// half stamped on the in-place send so the relative recipient's
+    /// `ctx.source_mailbox()` resolves who sent it. Set by
+    /// [`FfiCtx::parent`] / [`FfiCtx::child`] / [`FfiCtx::sibling`] to the
+    /// resolving ctx's `mailbox`.
+    sender: u64,
     inline: &'a InlineRegistry,
 }
 
@@ -143,7 +149,7 @@ impl RelativeMailbox<'_> {
     pub fn send<K: Kind>(&self, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.inline
-            .route_or_enqueue(self.id.0, K::ID.0, &bytes, 1, false);
+            .route_or_enqueue(self.id.0, K::ID.0, &bytes, 1, false, self.sender);
     }
 
     /// Fire-and-forget send to this relative (ADR-0080 §7 detach signal).
@@ -153,7 +159,7 @@ impl RelativeMailbox<'_> {
     pub fn send_detached<K: Kind>(&self, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.inline
-            .route_or_enqueue(self.id.0, K::ID.0, &bytes, 1, true);
+            .route_or_enqueue(self.id.0, K::ID.0, &bytes, 1, true, self.sender);
     }
 }
 
@@ -483,6 +489,7 @@ impl<'a, M: ReplyMode> FfiCtx<'a, M> {
         let id = self.inline.parent_of(MailboxId(self.mailbox))?;
         Some(RelativeMailbox {
             id,
+            sender: self.mailbox,
             inline: self.inline,
         })
     }
@@ -495,6 +502,7 @@ impl<'a, M: ReplyMode> FfiCtx<'a, M> {
         let id = self.inline.child_of(MailboxId(self.mailbox), name)?;
         Some(RelativeMailbox {
             id,
+            sender: self.mailbox,
             inline: self.inline,
         })
     }
@@ -508,6 +516,7 @@ impl<'a, M: ReplyMode> FfiCtx<'a, M> {
         let id = self.inline.sibling_of(MailboxId(self.mailbox), name)?;
         Some(RelativeMailbox {
             id,
+            sender: self.mailbox,
             inline: self.inline,
         })
     }
@@ -598,8 +607,14 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        self.inline
-            .route_or_enqueue(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, false);
+        self.inline.route_or_enqueue(
+            R::resolve(self.mailbox).0,
+            K::ID.0,
+            &bytes,
+            1,
+            false,
+            self.mailbox,
+        );
     }
 
     //noinspection DuplicatedCode
@@ -615,6 +630,7 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
             bytes,
             payloads.len() as u32,
             false,
+            self.mailbox,
         );
     }
 
@@ -624,8 +640,14 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
     #[allow(clippy::disallowed_methods)]
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.inline
-            .route_or_enqueue(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, false);
+        self.inline.route_or_enqueue(
+            mailbox_id_from_name(name).0,
+            K::ID.0,
+            &bytes,
+            1,
+            false,
+            self.mailbox,
+        );
     }
 
     fn prev_correlation(&self) -> u64 {
@@ -639,8 +661,14 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        self.inline
-            .route_or_enqueue(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, true);
+        self.inline.route_or_enqueue(
+            R::resolve(self.mailbox).0,
+            K::ID.0,
+            &bytes,
+            1,
+            true,
+            self.mailbox,
+        );
     }
 
     //noinspection DuplicatedCode
@@ -648,8 +676,14 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
     #[allow(clippy::disallowed_methods)]
     fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.inline
-            .route_or_enqueue(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, true);
+        self.inline.route_or_enqueue(
+            mailbox_id_from_name(name).0,
+            K::ID.0,
+            &bytes,
+            1,
+            true,
+            self.mailbox,
+        );
     }
 }
 
@@ -665,6 +699,19 @@ impl OutboundReply for FfiCtx<'_, Manual> {
     }
 
     fn source_mailbox(&self) -> Option<MailboxId> {
+        // ADR-0114 amendment: an in-place (intra-cluster) send carries its
+        // "from" half in the inline registry's `current_source` rather than
+        // the host reply table, because a drained item dispatches with
+        // `NO_REPLY_HANDLE` (the local fast path is fire-and-forget). When a
+        // dispatch runs off the cluster-queue drain `current_source` is the
+        // immediate sender; outside the drain it is `0`, and a top-level
+        // dispatch resolves its sender from the host reply table as before.
+        // The two never collide: an in-place item has no reply handle, so
+        // `self.sender` is `None` exactly when `current_source` is set.
+        let local = self.inline.current_source();
+        if local != MailboxId::NONE.0 {
+            return Some(MailboxId(local));
+        }
         let handle = self.sender?;
         let id = mail::source_of(handle);
         (id != MailboxId::NONE.0).then_some(MailboxId(id))

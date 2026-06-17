@@ -120,6 +120,14 @@ struct QueuedMail {
     kind: u64,
     bytes: Vec<u8>,
     count: u32,
+    /// The sending actor's own folded [`MailboxId`] raw value — the "from"
+    /// half of an in-place send. An in-place dispatch carries `NO_REPLY_HANDLE`
+    /// (the local fast path is fire-and-forget), so the host reply table holds
+    /// no immediate-sender for it; [`drain_cluster_queue`] instead publishes
+    /// this value into [`InlineRegistry::current_source`] around the item's
+    /// dispatch, so the recipient's `ctx.source_mailbox()` resolves it. `0`
+    /// (`MailboxId::NONE`) when the sender is unknown.
+    sender: u64,
 }
 
 /// Whether a resolved recipient is in this cluster (dispatch in place
@@ -158,6 +166,16 @@ pub struct InlineRegistry {
     /// `wire`, which should not happen). The instance's runtime identity at
     /// any depth, not the ADR-0099 depth-1 fixed point.
     self_id: Cell<u64>,
+    /// The immediate sender of the in-place item currently being dispatched
+    /// ([`drain_cluster_queue`] sets it from the popped [`QueuedMail::sender`]
+    /// before each `membrane_dispatch` and clears it to `0` after), so a
+    /// recipient dispatched off the drain reads the "from" half through
+    /// `FfiCtx::source_mailbox`. `0` (`MailboxId::NONE`) outside the drain —
+    /// a top-level dispatch reads its sender from the host reply table, not
+    /// from here. Mirrors `self_id`'s single-run-token `Cell` framing: the
+    /// drain is a flat loop in the single-threaded guest, so set / read /
+    /// clear never race.
+    current_source: Cell<u64>,
     /// The cluster-local mail queue. A send to a cluster member is pushed
     /// here ([`Self::route_or_enqueue`]) instead of going to the host;
     /// [`drain_cluster_queue`] dispatches each item through the membrane
@@ -173,9 +191,10 @@ pub struct InlineRegistry {
 // under the run token, so a `static __AETHER_INLINE` is only ever touched
 // from one thread at a time. On the host unit-test build each test owns a
 // local registry, reached from one test thread. The same argument covers
-// the added interior-mutable fields (`self_id`, `queue`): each is touched
-// only from the single run-token thread, and every borrow of `queue` is
-// taken fresh and released before return (never spanning a dispatch).
+// the added interior-mutable fields (`self_id`, `current_source`, `queue`):
+// each is touched only from the single run-token thread, and every borrow
+// of `queue` is taken fresh and released before return (never spanning a
+// dispatch).
 unsafe impl Sync for InlineRegistry {}
 
 impl InlineRegistry {
@@ -185,6 +204,7 @@ impl InlineRegistry {
         Self {
             inner: UnsafeCell::new(BTreeMap::new()),
             self_id: Cell::new(0),
+            current_source: Cell::new(0),
             queue: UnsafeCell::new(VecDeque::new()),
         }
     }
@@ -207,6 +227,28 @@ impl InlineRegistry {
     #[must_use]
     pub fn self_id(&self) -> u64 {
         self.self_id.get()
+    }
+
+    /// Publish the immediate sender of the in-place item about to dispatch
+    /// (its `QueuedMail::sender`), so the recipient's
+    /// `FfiCtx::source_mailbox` resolves the "from" half of a queued send.
+    /// [`drain_cluster_queue`] sets this before each item's
+    /// `membrane_dispatch` and clears it to `0` after, so `current_source`
+    /// reflects exactly the item being dispatched. Mirrors [`Self::set_self_id`]'s
+    /// single-run-token framing: the drain is a flat loop in the single-threaded
+    /// guest, so the set / read / clear sequence is race-free.
+    pub fn set_current_source(&self, id: u64) {
+        self.current_source.set(id);
+    }
+
+    /// The immediate sender of the in-place item currently being dispatched,
+    /// or `0` (`MailboxId::NONE`) outside the drain. Read by
+    /// `FfiCtx::source_mailbox` to surface the "from" half of an in-place
+    /// send (a top-level dispatch reads its sender from the host reply table
+    /// instead, since its `current_source` is `0`).
+    #[must_use]
+    pub fn current_source(&self) -> u64 {
+        self.current_source.get()
     }
 
     /// Register a freshly-spawned (or reconstructed) inline child under
@@ -397,6 +439,26 @@ impl InlineRegistry {
     /// rides through to the host on the remote path (the lineage signal,
     /// ADR-0080 §7); an in-place dispatch carries no host trace ids, so the
     /// flag is irrelevant on the local path.
+    ///
+    /// `sender` is the sending actor's own folded [`MailboxId`] raw value —
+    /// the "from" half. On the `Local` branch it is stored in the
+    /// [`QueuedMail`] so [`drain_cluster_queue`] can publish it as
+    /// `current_source` around the recipient's dispatch (the in-place reply
+    /// table is empty, so this is the only carrier of an in-place send's
+    /// immediate sender). On the `Remote` branch it is unused: the host
+    /// stamps origin from its own per-receive dispatch identity
+    /// (`ComponentCtx::dispatch_identity` = the cluster's inbound
+    /// `in_flight_recipient`), not from a guest-supplied id.
+    ///
+    /// Cross-cluster-from-in-place boundary (ADR-0114 amendment, Task 2): a
+    /// cross-cluster send made by an inline child *during the in-place drain*
+    /// takes this `Remote` branch and is stamped by the host with the
+    /// cluster's inbound dispatch identity, NOT the in-place child's id —
+    /// the in-place drain runs inside one `receive_p32` and never updates the
+    /// host-side identity, so the host cannot see the child as the origin.
+    /// This is intended: cross-cluster origin is cluster-granular, the same
+    /// component-granular attribution ADR-0114 §"Settlement and tracing"
+    /// records for observability.
     pub(crate) fn route_or_enqueue(
         &self,
         recipient: u64,
@@ -404,6 +466,7 @@ impl InlineRegistry {
         bytes: &[u8],
         count: u32,
         detached: bool,
+        sender: u64,
     ) {
         match self.route_decision(recipient) {
             RouteDecision::Local => {
@@ -416,6 +479,7 @@ impl InlineRegistry {
                     kind,
                     bytes: bytes.to_vec(),
                     count,
+                    sender,
                 });
             }
             RouteDecision::Remote => {
@@ -539,8 +603,17 @@ where
                 item.recipient,
             )
         };
+        // Publish this item's "from" half around its dispatch so the
+        // recipient's `ctx.source_mailbox()` resolves it (the in-place reply
+        // table is empty). The drain is a flat loop — never nested — so
+        // `current_source` reflects exactly the item being dispatched, and
+        // clearing to `0` afterward keeps any code that runs between items
+        // (or a top-level dispatch after the drain) from reading a stale
+        // sender.
+        registry.set_current_source(item.sender);
         let dispatch_own = mk_own();
         membrane_dispatch(self_id, mail, registry, dispatch_own);
+        registry.set_current_source(0);
     }
 }
 
@@ -548,6 +621,7 @@ where
 mod tests {
     use super::{InlineRegistry, RouteDecision, drain_cluster_queue, membrane_dispatch};
     use crate::FfiCtx;
+    use crate::actor::ctx::OutboundReply;
     use crate::ffi::ErasedFfiActor;
     use crate::mail::{Mail, PriorState};
     use aether_data::MailboxId;
@@ -557,6 +631,10 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
 
+    /// Shared cell a [`RecordingChild`] writes the `source_mailbox()` it
+    /// observed into, read back by the source-attribution tests.
+    type SourceCell = Rc<Cell<Option<MailboxId>>>;
+
     /// Distinct return codes so an assertion can tell which dispatch path
     /// the membrane took.
     const OWN_CODE: u32 = 0xA0;
@@ -564,22 +642,40 @@ mod tests {
 
     /// Minimal `ErasedFfiActor` for the membrane tests: bumps a
     /// test-local dispatch counter (shared via [`Rc`] so the test reads it
-    /// back without a process-global) and returns [`CHILD_CODE`]. The
-    /// lifecycle hooks are unreachable in these tests.
+    /// back without a process-global), records the `ctx.source_mailbox()`
+    /// it observed on the most recent dispatch (the in-place "from" half),
+    /// and returns [`CHILD_CODE`]. The lifecycle hooks are unreachable in
+    /// these tests.
     struct RecordingChild {
         dispatches: Rc<Cell<u32>>,
+        /// The `source_mailbox()` the child read on its last dispatch,
+        /// shared with the test so it can assert the in-place sender. `None`
+        /// until the first dispatch and whenever the source resolves to
+        /// none.
+        observed_source: SourceCell,
     }
 
     impl RecordingChild {
-        /// A recording child plus the shared counter a test reads to
+        /// A recording child plus the shared dispatch counter a test reads to
         /// confirm how many times the membrane dispatched it.
         fn new() -> (Self, Rc<Cell<u32>>) {
+            let (child, dispatches, _source) = Self::new_with_source();
+            (child, dispatches)
+        }
+
+        /// A recording child plus both its shared dispatch counter and its
+        /// shared observed-source cell, for the tests that assert the
+        /// in-place sender a drained dispatch reads.
+        fn new_with_source() -> (Self, Rc<Cell<u32>>, SourceCell) {
             let dispatches = Rc::new(Cell::new(0));
+            let observed_source = Rc::new(Cell::new(None));
             (
                 Self {
                     dispatches: Rc::clone(&dispatches),
+                    observed_source: Rc::clone(&observed_source),
                 },
                 dispatches,
+                observed_source,
             )
         }
     }
@@ -588,12 +684,9 @@ mod tests {
         fn erased_namespace(&self) -> &'static str {
             "test.inline.recording_child"
         }
-        fn erased_dispatch(
-            &mut self,
-            _ctx: &mut FfiCtx<'_, crate::Manual>,
-            _mail: Mail<'_>,
-        ) -> u32 {
+        fn erased_dispatch(&mut self, ctx: &mut FfiCtx<'_, crate::Manual>, _mail: Mail<'_>) -> u32 {
             self.dispatches.set(self.dispatches.get() + 1);
+            self.observed_source.set(ctx.source_mailbox());
             CHILD_CODE
         }
         fn erased_wire(&mut self, _ctx: &mut FfiCtx<'_, crate::Manual>) {}
@@ -987,13 +1080,13 @@ mod tests {
         install_recording(&registry, child, root);
 
         assert_eq!(registry.queued_len(), 0, "the queue starts empty");
-        registry.route_or_enqueue(root, 7, &[1, 2, 3], 1, false);
+        registry.route_or_enqueue(root, 7, &[1, 2, 3], 1, false, root);
         assert_eq!(
             registry.queued_len(),
             1,
             "an own-id send enqueues locally, no host call",
         );
-        registry.route_or_enqueue(child, 8, &[4], 1, false);
+        registry.route_or_enqueue(child, 8, &[4], 1, false, root);
         assert_eq!(
             registry.queued_len(),
             2,
@@ -1013,7 +1106,7 @@ mod tests {
         let dispatches = install_recording(&registry, child, root);
 
         // Seed one local send addressed to the child.
-        registry.route_or_enqueue(child, 1, &[0xAB], 1, false);
+        registry.route_or_enqueue(child, 1, &[0xAB], 1, false, root);
 
         let own_dispatches = Rc::new(Cell::new(0));
         let own_counter = Rc::clone(&own_dispatches);
@@ -1057,7 +1150,7 @@ mod tests {
 
         // Seed one own-addressed item; the parent dispatch, on its first
         // run, enqueues a follow-up addressed to the child.
-        registry.route_or_enqueue(root, 1, &[0x01], 1, false);
+        registry.route_or_enqueue(root, 1, &[0x01], 1, false, root);
 
         // Record the order dispatches happened in, to prove a single drain
         // loop carried both the seed and the cascaded follow-up.
@@ -1079,7 +1172,7 @@ mod tests {
                     if !own_ran_inner.get() {
                         own_ran_inner.set(true);
                         // Cascade: enqueue a follow-up to the child mid-drain.
-                        registry_ref.route_or_enqueue(child, 2, &[0x02], 1, false);
+                        registry_ref.route_or_enqueue(child, 2, &[0x02], 1, false, root);
                     }
                 }
                 OWN_CODE
@@ -1101,6 +1194,125 @@ mod tests {
             registry.queued_len(),
             0,
             "the cascade drained fully — queue empty",
+        );
+    }
+
+    /// Install a recording child under `id` with `parent`, returning both the
+    /// shared dispatch counter and the shared observed-source cell, so a test
+    /// can assert the in-place "from" half a drained dispatch reads.
+    fn install_recording_with_source(
+        registry: &InlineRegistry,
+        id: u64,
+        parent: u64,
+    ) -> (Rc<Cell<u32>>, SourceCell) {
+        let (recording, dispatches, source) = RecordingChild::new_with_source();
+        registry.insert_child(
+            MailboxId(id),
+            0,
+            String::from("recording"),
+            false,
+            parent,
+            Box::new(recording),
+        );
+        (dispatches, source)
+    }
+
+    /// Task 1: a child dispatched off the drain reads
+    /// `ctx.source_mailbox()` == the enqueuing sender — the child → parent
+    /// direction. The parent (the cluster root) enqueues a send to the child
+    /// stamped with the parent's own id; the drained child observes exactly
+    /// that id, not `None`.
+    #[test]
+    fn drained_child_reads_enqueuing_sender_parent() {
+        let registry = InlineRegistry::new();
+        let root = 0x6000_u64;
+        let child = 0x6001_u64;
+        registry.set_self_id(root);
+        let (dispatches, observed) = install_recording_with_source(&registry, child, root);
+
+        // The parent (root) sends to the child, stamping its own id as sender.
+        registry.route_or_enqueue(child, 1, &[0x00], 1, false, root);
+
+        drain_cluster_queue(&registry, || {
+            |_mail| panic!("own dispatch must not run for a child-addressed item")
+        });
+
+        assert_eq!(dispatches.get(), 1, "the child was dispatched once");
+        assert_eq!(
+            observed.get(),
+            Some(MailboxId(root)),
+            "the drained child reads the enqueuing parent's id as its source, not None",
+        );
+    }
+
+    /// Task 1: a child dispatched off the drain reads
+    /// `ctx.source_mailbox()` == the sending sibling — the child → sibling
+    /// direction. A sibling enqueues a send to the recipient child stamped
+    /// with the sibling's own id; the drained child observes exactly that
+    /// sibling id.
+    #[test]
+    fn drained_child_reads_enqueuing_sender_sibling() {
+        let registry = InlineRegistry::new();
+        let root = 0x7000_u64;
+        let sender_sibling = 0x7001_u64;
+        let recipient_child = 0x7002_u64;
+        registry.set_self_id(root);
+        // Both children are siblings under the root.
+        install_recording(&registry, sender_sibling, root);
+        let (dispatches, observed) =
+            install_recording_with_source(&registry, recipient_child, root);
+
+        // The sibling sends to the recipient child, stamping its own id.
+        registry.route_or_enqueue(recipient_child, 1, &[0x00], 1, false, sender_sibling);
+
+        drain_cluster_queue(&registry, || {
+            |_mail| panic!("own dispatch must not run for a child-addressed item")
+        });
+
+        assert_eq!(
+            dispatches.get(),
+            1,
+            "the recipient child was dispatched once"
+        );
+        assert_eq!(
+            observed.get(),
+            Some(MailboxId(sender_sibling)),
+            "the drained child reads the sending sibling's id as its source",
+        );
+    }
+
+    /// Task 1: outside the drain `current_source` is `0`, so a top-level
+    /// (non-drain) dispatch reads `source_mailbox() == None` — the drain's
+    /// set/clear is the only thing that publishes an in-place sender, and it
+    /// clears back to `0` after each item. Here a child is dispatched
+    /// directly through the membrane with no drain framing, so its observed
+    /// source is `None` (no host reply handle either, on the host build).
+    #[test]
+    fn top_level_dispatch_reads_no_source() {
+        let registry = InlineRegistry::new();
+        let own = 0x8000_u64;
+        let child = 0x8001_u64;
+        registry.set_self_id(own);
+        let (dispatches, observed) = install_recording_with_source(&registry, child, own);
+
+        // Dispatch the child directly — not through the drain — so
+        // `current_source` was never set (it is `0`).
+        let rc = membrane_dispatch(own, mail_to(child), &registry, |_mail| {
+            panic!("own dispatch must not run for a child recipient")
+        });
+        assert_eq!(rc, CHILD_CODE, "the child handled the direct dispatch");
+        assert_eq!(dispatches.get(), 1, "the child was dispatched once");
+        assert_eq!(
+            observed.get(),
+            None,
+            "a top-level dispatch reads no in-place source (current_source is 0)",
+        );
+
+        // And after a drain runs and clears, current_source is back to 0.
+        assert_eq!(
+            registry.current_source(),
+            0,
+            "current_source is 0 outside the drain",
         );
     }
 }

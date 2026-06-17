@@ -353,6 +353,130 @@ pub struct SourceReport {
     pub mailbox_id: u64,
 }
 
+/// Issue 1977 (ADR-0114 amendment) cluster-addressing matrix driver. Sent to
+/// the `matrix_sweep` fixture's parent over the wire to kick off the sweep:
+/// the parent drives every in-cluster addressing direction (parent → child,
+/// child → parent, child → sibling, child → self) and one cross-cluster send,
+/// and each participant records the cell it observed (did the mail arrive,
+/// what `ctx.source_mailbox()` did it read). `observer_mailbox` is the raw
+/// `MailboxId` of a separate loaded component the cluster sends cross-cluster
+/// to *during the in-place drain* — the recipient's observed source reflects
+/// the documented Task 2 boundary (the cluster's inbound identity, not the
+/// in-place child's id). `0` skips the cross-cluster cell.
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+)]
+#[kind(name = "aether.test_fixtures.run_matrix")]
+pub struct RunMatrix {
+    /// Raw `MailboxId` of the cross-cluster observer component, or `0` to
+    /// skip the cross-cluster cell.
+    pub observer_mailbox: u64,
+}
+
+/// Issue 1977 in-cluster ping for the `matrix_sweep` fixture. `cell` selects
+/// which matrix cell the recipient records (one of the `MATRIX_CELL_*`
+/// markers); `fan_out` (set only on the parent → child a ping) instructs the
+/// receiving child to drive the child-origin cells (child → parent, child →
+/// sibling, child → self) and the cross-cluster send. Postcard-shaped.
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+)]
+#[kind(name = "aether.test_fixtures.matrix_ping")]
+pub struct MatrixPing {
+    /// Which matrix cell the recipient records (a `MATRIX_CELL_*` marker).
+    pub cell: u32,
+    /// Set on the parent → child a ping: the receiving child fans out the
+    /// child-origin cells and the cross-cluster send. `0` on every other ping.
+    pub fan_out: u32,
+    /// Raw `MailboxId` of the cross-cluster observer, threaded to the
+    /// fanning-out child so it can address the cross-cluster send. `0` when
+    /// the cross-cluster cell is skipped.
+    pub observer_mailbox: u64,
+}
+
+/// Issue 1977 report query for the `matrix_sweep` fixture. Sent to the
+/// parent over the wire *after* `RunMatrix` settles; the parent reads the
+/// cluster's shared observation log and replies a [`MatrixReport`].
+/// Postcard-shaped unit struct.
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Clone,
+    Default,
+)]
+#[kind(name = "aether.test_fixtures.collect_matrix")]
+pub struct CollectMatrix;
+
+/// Issue 1977 structured matrix report — the `matrix_sweep` fixture's reply
+/// to [`CollectMatrix`]. Each `*_arrived` flag is `1` when that cell's mail
+/// was delivered (the recipient's handler ran), and each `*_source` is the
+/// raw `MailboxId` the recipient read from `ctx.source_mailbox()` for that
+/// cell (`0` for none). The cross-cluster cell is observed out-of-band by the
+/// separate observer component (read via `log_tail`), so it carries no field
+/// here. Postcard-shaped.
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Default,
+)]
+#[kind(name = "aether.test_fixtures.matrix_report")]
+pub struct MatrixReport {
+    /// parent → child a (in place): did child a receive the ping.
+    pub parent_to_child_arrived: u32,
+    /// parent → child a: the source child a read (expected: the parent id).
+    pub parent_to_child_source: u64,
+    /// child a → parent (in place): did the parent receive the ping.
+    pub child_to_parent_arrived: u32,
+    /// child a → parent: the source the parent read (expected: child a id).
+    pub child_to_parent_source: u64,
+    /// child a → sibling child b (in place): did child b receive the ping.
+    pub child_to_sibling_arrived: u32,
+    /// child a → sibling: the source child b read (expected: child a id).
+    pub child_to_sibling_source: u64,
+    /// child a → self (in place): did child a receive its own ping.
+    pub child_to_self_arrived: u32,
+    /// child a → self: the source child a read (expected: child a id).
+    pub child_to_self_source: u64,
+    /// child a's own folded `MailboxId` raw value, so the test can assert
+    /// the child-origin sources equal the actual child id.
+    pub child_a_id: u64,
+    /// The parent's own folded `MailboxId` raw value, so the test can assert
+    /// the parent-origin source (and the cross-cluster observed source).
+    pub parent_id: u64,
+}
+
+/// [`MatrixPing::cell`] marker — parent to child a (in place).
+pub const MATRIX_CELL_PARENT_TO_CHILD: u32 = 1;
+/// [`MatrixPing::cell`] marker — child a to parent (in place).
+pub const MATRIX_CELL_CHILD_TO_PARENT: u32 = 2;
+/// [`MatrixPing::cell`] marker — child a to sibling child b (in place).
+pub const MATRIX_CELL_CHILD_TO_SIBLING: u32 = 3;
+/// [`MatrixPing::cell`] marker — child a to self (in place).
+pub const MATRIX_CELL_CHILD_TO_SELF: u32 = 4;
+
 #[cfg(test)]
 mod tests {
     use aether_data::{Kind, Ref};
