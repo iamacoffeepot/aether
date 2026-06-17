@@ -86,19 +86,12 @@ pub const HANDLE_DOMAIN: [u8; 16] = *b"aether/handle/v1";
 #[must_use]
 #[allow(clippy::cast_possible_truncation)]
 pub fn content_addressed_handle_id(transform_id: TransformId, inputs: &[HandleId]) -> HandleId {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut feed = |bytes: &[u8]| {
-        for &b in bytes {
-            hash ^= u64::from(b);
-            hash = hash.wrapping_mul(0x0100_0000_01b3);
-        }
-    };
-    feed(&HANDLE_DOMAIN);
-    feed(&transform_id.0.to_le_bytes());
-    feed(&[inputs.len() as u8]);
+    let mut hash = fnv1a_64_fold(0xcbf2_9ce4_8422_2325, &HANDLE_DOMAIN);
+    hash = fnv1a_64_fold(hash, &transform_id.0.to_le_bytes());
+    hash = fnv1a_64_fold(hash, &[inputs.len() as u8]);
     for (slot, handle) in inputs.iter().enumerate() {
-        feed(&[slot as u8]);
-        feed(&handle.0.to_le_bytes());
+        hash = fnv1a_64_fold(hash, &[slot as u8]);
+        hash = fnv1a_64_fold(hash, &handle.0.to_le_bytes());
     }
     HandleId(with_tag(Tag::Handle, hash))
 }
