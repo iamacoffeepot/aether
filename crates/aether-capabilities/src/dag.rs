@@ -100,7 +100,12 @@ mod native {
                         if reap_shutdown_for_thread.load(Ordering::Acquire) {
                             break;
                         }
-                        timer_mailer.push(Mail::new(self_id, reap_kind, Vec::new(), 1));
+                        timer_mailer.push(Mail::new(
+                            self_id,
+                            reap_kind,
+                            DagReapTick::default().encode_into_bytes(),
+                            1,
+                        ));
                     }
                 });
             if let Err(e) = spawned {

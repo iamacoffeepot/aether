@@ -23,6 +23,8 @@
 //! `frame::postcard` / `frame::protobuf`.
 
 mod cast;
+#[cfg(test)]
+mod conformance;
 mod decode;
 mod encode;
 pub mod frame;

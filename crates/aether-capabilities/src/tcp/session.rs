@@ -141,7 +141,7 @@ mod session_native {
                                 mailer_for_thread.push(Mail::new(
                                     self_id,
                                     data_ready_kind,
-                                    Vec::new(),
+                                    SessionDataReady::default().encode_into_bytes(),
                                     1,
                                 ));
                                 break;
@@ -154,7 +154,7 @@ mod session_native {
                                 mailer_for_thread.push(Mail::new(
                                     self_id,
                                     data_ready_kind,
-                                    Vec::new(),
+                                    SessionDataReady::default().encode_into_bytes(),
                                     1,
                                 ));
                             }
@@ -167,7 +167,7 @@ mod session_native {
                                 mailer_for_thread.push(Mail::new(
                                     self_id,
                                     data_ready_kind,
-                                    Vec::new(),
+                                    SessionDataReady::default().encode_into_bytes(),
                                     1,
                                 ));
                                 break;

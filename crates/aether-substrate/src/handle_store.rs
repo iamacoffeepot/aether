@@ -1,7 +1,7 @@
-// Wire-encode: `usize → u32` narrowings encode handle-cache byte
-// lengths into the postcard varint slots described in the wire
-// format below; `u32 → u64` widenings move handle ids into the
-// 64-bit id slot. Both are part of the load-bearing wire layout.
+// Wire-encode: `usize → u32` narrowings write handle-cache byte
+// lengths into the `u32` length slots of the `aether_data::wire` format
+// below; `u32 → u64` widenings move handle ids into the 64-bit id slot.
+// Both are part of the load-bearing wire layout.
 #![allow(clippy::cast_lossless, clippy::cast_possible_truncation)]
 // `HandleStore` Mutex guards are intentionally held across read-then-
 // update sequences (lookup + refcount mutation, eviction scan + drop)
@@ -18,14 +18,19 @@
 //! of the inline value; the substrate resolves the handle on dispatch
 //! and substitutes the inline bytes before delivering the mail.
 //!
-//! Wire format (ADR-0045 §1, inline arm revised by ADR-0100):
-//! - Inline arm: discriminant 0 + `varint(len)` + `K::encode_into_bytes`
-//!   (`len` bytes) — the kind's own codec image (cast or postcard),
-//!   an opaque length-delimited blob the walker skips by length.
-//! - Handle arm: discriminant 1 + `varint(id)` + `varint(kind_id)`.
+//! Wire format (ADR-0045 §1, inline arm revised by ADR-0100,
+//! re-laid-out onto `aether_data::wire` by ADR-0118): the payload is a
+//! versioned kind image — a leading `WIRE_VERSION` byte the walker
+//! strips on entry (and again at each inline-arm descent), then bare
+//! interior values. A `Ref` is:
+//! - Inline arm: `u32` selector 0 + `u32` length + `K::encode_into_bytes`
+//!   (`len` bytes) — the kind's own codec image (cast or wire, itself
+//!   versioned for a wire kind), an opaque length-delimited blob the
+//!   walker skips by length.
+//! - Handle arm: `u32` selector 1 + `id` (8 LE) + `kind_id` (8 LE).
 //!
 //! Resolution is structural: the walker reads the schema and skips
-//! through the payload bytes, splicing inline-discriminant + cached
+//! through the payload bytes, splicing inline-selector + cached
 //! bytes at every Handle position. Mail addressed to an unresolved
 //! handle parks under that handle's id; the next put-and-resolve
 //! drains the queue and re-routes through the mailer.
@@ -61,6 +66,7 @@ use crate::config::ConfigError;
 use crate::mail::Mail;
 use crate::mail::registry::Registry;
 use crate::pid_lock::{LockAcquisition, LockGuard, acquire_lock_pid};
+use aether_data::wire::WIRE_VERSION;
 use aether_data::{EnumVariant, Primitive, SchemaType};
 use aether_data::{HandleId, KindId};
 use std::env;
@@ -464,9 +470,10 @@ fn now_millis() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// Per-entry store record. Bytes are the postcard-encoded `K` body
-/// (the same shape `Ref::Inline` would carry), kept owned because the
-/// walker copies them into spliced output during dispatch.
+/// Per-entry store record. Bytes are `K`'s own codec image
+/// (`K::encode_into_bytes` — a versioned wire image, or a bare cast
+/// image), the same shape `Ref::Inline` would carry, kept owned because
+/// the walker copies them into spliced output during dispatch.
 #[derive(Debug)]
 struct HandleEntry {
     kind: KindId,
@@ -597,7 +604,10 @@ pub enum WalkError {
     Truncated,
     InvalidBool,
     UnknownEnumDiscriminant,
-    VarintOverflow,
+    /// The payload did not open with [`WIRE_VERSION`] (ADR-0118).
+    BadVersion(u8),
+    /// A spliced inline body exceeded the `u32` length ceiling.
+    Length,
     UnknownRefDiscriminant,
 }
 
@@ -2053,9 +2063,18 @@ pub fn walk_and_resolve<'a>(
             payload: Cow::Borrowed(payload),
         });
     }
+    // The payload is a versioned wire kind image (ADR-0118). Strip the
+    // leading version byte for reading, but leave it in the output:
+    // `pos` starts after it while `prefix_end` stays at 0, so the first
+    // splice's `flush_up_to` copies the version byte into the resolved
+    // image (and the no-splice path returns the whole input verbatim).
+    let version = *payload.first().ok_or(WalkError::Truncated)?;
+    if version != WIRE_VERSION {
+        return Err(WalkError::BadVersion(version));
+    }
     let mut state = State {
         input: payload,
-        pos: 0,
+        pos: 1,
         out: Vec::new(),
         prefix_end: 0,
         out_initialised: false,
@@ -2111,18 +2130,27 @@ impl<'a> State<'a> {
         Ok(b)
     }
 
-    fn read_varint(&mut self) -> Result<u64, WalkError> {
-        let mut n: u64 = 0;
-        let mut shift: u32 = 0;
-        for _ in 0..10 {
-            let b = self.read_byte()?;
-            n |= ((b & 0x7f) as u64) << shift;
-            if b & 0x80 == 0 {
-                return Ok(n);
-            }
-            shift += 7;
+    fn read_array<const N: usize>(&mut self) -> Result<[u8; N], WalkError> {
+        if self.pos + N > self.input.len() {
+            return Err(WalkError::Truncated);
         }
-        Err(WalkError::VarintOverflow)
+        let mut out = [0u8; N];
+        out.copy_from_slice(&self.input[self.pos..self.pos + N]);
+        self.pos += N;
+        Ok(out)
+    }
+
+    /// Read a `u32` little-endian count / length / selector — the `wire`
+    /// framing for string / bytes / vec / map lengths, the enum
+    /// discriminant, and the `Ref` selector.
+    fn read_count(&mut self) -> Result<u32, WalkError> {
+        Ok(u32::from_le_bytes(self.read_array::<4>()?))
+    }
+
+    /// Read a `u64` little-endian id — the `Ref` handle arm's `id` and
+    /// `kind_id`.
+    fn read_u64(&mut self) -> Result<u64, WalkError> {
+        Ok(u64::from_le_bytes(self.read_array::<8>()?))
     }
 
     fn skip_n(&mut self, n: usize) -> Result<(), WalkError> {
@@ -2132,22 +2160,12 @@ impl<'a> State<'a> {
         self.pos += n;
         Ok(())
     }
-
-    fn skip_varint(&mut self) -> Result<(), WalkError> {
-        for _ in 0..10 {
-            let b = self.read_byte()?;
-            if b & 0x80 == 0 {
-                return Ok(());
-            }
-        }
-        Err(WalkError::VarintOverflow)
-    }
 }
 
-/// Walk one `schema` node, advancing `state.pos` past its postcard
-/// wire. Returns `Ok(Some((handle, kind)))` to signal "park on this
-/// handle", `Ok(None)` for fully-walked, `Err(...)` for malformed
-/// wire.
+/// Walk one `schema` node, advancing `state.pos` past its
+/// `aether_data::wire` bytes. Returns `Ok(Some((handle, kind)))` to
+/// signal "park on this handle", `Ok(None)` for fully-walked,
+/// `Err(...)` for malformed wire.
 // One match arm per `SchemaType` variant; extracting per-type helpers
 // would force per-arm `&mut State<'_>` plumbing without saving
 // readability.
@@ -2167,11 +2185,11 @@ fn walk(
             Ok(None)
         }
         SchemaType::Scalar(p) => {
-            skip_primitive_postcard(state, *p)?;
+            skip_primitive_wire(state, *p)?;
             Ok(None)
         }
         SchemaType::String | SchemaType::Bytes => {
-            let len = state.read_varint()? as usize;
+            let len = state.read_count()? as usize;
             state.skip_n(len)?;
             Ok(None)
         }
@@ -2184,7 +2202,7 @@ fn walk(
             }
         }
         SchemaType::Vec(inner) => {
-            let len = state.read_varint()? as usize;
+            let len = state.read_count()? as usize;
             for _ in 0..len {
                 if let Some(parked) = walk(inner, state, store)? {
                     return Ok(Some(parked));
@@ -2201,11 +2219,11 @@ fn walk(
             Ok(None)
         }
         SchemaType::Struct { fields, .. } => {
-            // Postcard wire encodes a struct as concatenated field
-            // bytes regardless of `repr_c`. The walker is only
-            // invoked on postcard kinds (cast-shaped kinds skip the
-            // walker via the fast path), so descending into each
-            // field as postcard is correct.
+            // The wire format encodes a struct as concatenated field
+            // bytes regardless of `repr_c`. The walker is only invoked
+            // on wire (ref-bearing) kinds (cast-shaped kinds skip the
+            // walker via the fast path), so descending into each field
+            // as a wire value is correct.
             for f in fields.iter() {
                 if let Some(parked) = walk(&f.ty, state, store)? {
                     return Ok(Some(parked));
@@ -2214,7 +2232,7 @@ fn walk(
             Ok(None)
         }
         SchemaType::Enum { variants } => {
-            let disc = state.read_varint()? as u32;
+            let disc = state.read_count()?;
             let variant = variants
                 .iter()
                 .find(|v| v.discriminant() == disc)
@@ -2247,7 +2265,7 @@ fn walk(
             // rules, but the walker treats them uniformly so a
             // hand-rolled `Schema` impl that lands a `Ref` key here
             // doesn't silently corrupt the wire.
-            let len = state.read_varint()? as usize;
+            let len = state.read_count()? as usize;
             for _ in 0..len {
                 if let Some(parked) = walk(key, state, store)? {
                     return Ok(Some(parked));
@@ -2260,23 +2278,24 @@ fn walk(
         }
         SchemaType::Ref(inner) => {
             let ref_disc_start = state.pos;
-            let disc = state.read_varint()? as u32;
+            let disc = state.read_count()?;
             match disc {
                 0 => {
                     // ADR-0100: the inline body is an opaque
-                    // length-prefixed blob (`varint(len)` +
+                    // length-prefixed blob (`u32(len)` +
                     // `K::encode_into_bytes`) — the kind's own codec
-                    // image, cast or postcard. Skip it by length rather
+                    // image, cast or wire. Skip it by length rather
                     // than re-deriving `K`'s byte layout from `inner`;
-                    // a cast image is not a schema-walkable postcard
-                    // structure.
-                    let len = state.read_varint()? as usize;
+                    // a cast image is not a schema-walkable wire
+                    // structure, and the wire inner carries its own
+                    // version byte inside the blob.
+                    let len = state.read_count()? as usize;
                     state.skip_n(len)?;
                     Ok(None)
                 }
                 1 => {
-                    let id = HandleId(state.read_varint()?);
-                    let kind = KindId(state.read_varint()?);
+                    let id = HandleId(state.read_u64()?);
+                    let kind = KindId(state.read_u64()?);
                     let after_handle = state.pos;
                     let Some((stored_kind, bytes)) = store.get(id) else {
                         return Ok(Some((id, kind)));
@@ -2311,15 +2330,20 @@ fn walk(
                     match resolved_inner {
                         WalkOutcome::Parked { handle, kind } => Ok(Some((handle, kind))),
                         WalkOutcome::Resolved { payload } => {
-                            // Splice: flush prefix, write the Inline arm
-                            // (disc 0 + varint(len) + payload, ADR-0100),
-                            // skip past the Handle wire bytes. The
-                            // payload is the resolved inline blob — the
-                            // byte image is identical whether it arrived
-                            // inline or was spliced from a handle here.
+                            // Splice: flush prefix (which carries the
+                            // top-level version byte), write the Inline
+                            // arm (`u32` selector 0 + `u32` length +
+                            // payload, ADR-0118), skip past the Handle
+                            // wire bytes. The payload is the resolved
+                            // inline blob — a pure byte-copy of the
+                            // stored versioned (or cast) image, identical
+                            // whether the value arrived inline or was
+                            // spliced from a handle here.
+                            let len =
+                                u32::try_from(payload.len()).map_err(|_| WalkError::Length)?;
                             state.flush_up_to(ref_disc_start);
-                            state.out.push(0u8);
-                            push_varint(&mut state.out, payload.len() as u64);
+                            state.out.extend_from_slice(&0u32.to_le_bytes());
+                            state.out.extend_from_slice(&len.to_le_bytes());
                             state.out.extend_from_slice(&payload);
                             state.prefix_end = after_handle;
                             Ok(None)
@@ -2329,45 +2353,24 @@ fn walk(
                 _ => Err(WalkError::UnknownRefDiscriminant),
             }
         }
-        // ADR-0065: typed-id wire is a u64 varint regardless of
-        // which `TYPE_ID` is set. Skip the varint; nothing to
+        // ADR-0065: typed-id wire is a `u64` fixed little-endian
+        // regardless of which `TYPE_ID` is set. Skip 8 bytes; nothing to
         // resolve since typed-ids don't embed `Ref`s.
         SchemaType::TypeId(_) => {
-            state.skip_varint()?;
+            state.skip_n(8)?;
             Ok(None)
         }
     }
 }
 
-/// Append `value` as an unsigned LEB128 varint — the same encoding
-/// postcard uses for the inline arm's `varint(len)` length prefix
-/// (ADR-0100). Mirror of [`State::read_varint`].
-fn push_varint(out: &mut Vec<u8>, mut value: u64) {
-    loop {
-        let byte = (value & 0x7f) as u8;
-        value >>= 7;
-        if value == 0 {
-            out.push(byte);
-            return;
-        }
-        out.push(byte | 0x80);
-    }
-}
-
-fn skip_primitive_postcard(state: &mut State<'_>, p: Primitive) -> Result<(), WalkError> {
+/// Skip one `Primitive` scalar in the `aether_data::wire` layout: a
+/// fixed little-endian of the declared width (no varints, no zigzag).
+fn skip_primitive_wire(state: &mut State<'_>, p: Primitive) -> Result<(), WalkError> {
     match p {
         Primitive::U8 | Primitive::I8 => state.skip_n(1),
-        // Multi-byte integers ride varints (with zigzag for signed).
-        // The zigzag transform doesn't change byte length, so skipping
-        // a varint covers both.
-        Primitive::U16
-        | Primitive::U32
-        | Primitive::U64
-        | Primitive::I16
-        | Primitive::I32
-        | Primitive::I64 => state.skip_varint(),
-        Primitive::F32 => state.skip_n(4),
-        Primitive::F64 => state.skip_n(8),
+        Primitive::U16 | Primitive::I16 => state.skip_n(2),
+        Primitive::U32 | Primitive::I32 | Primitive::F32 => state.skip_n(4),
+        Primitive::U64 | Primitive::I64 | Primitive::F64 => state.skip_n(8),
     }
 }
 
@@ -2380,6 +2383,7 @@ mod tests {
     use Arc;
 
     use crate::mail::{Mail, MailboxId};
+    use aether_data::wire;
     use aether_data::{Kind, Ref};
     use aether_data::{NamedField, SchemaCell};
 
@@ -2601,7 +2605,7 @@ mod tests {
 
     // Walker tests — schema-driven over real Ref<K> wire
 
-    /// Tiny postcard kind for walker tests. Kept here rather than
+    /// Tiny wire kind for walker tests. Kept here rather than
     /// pulling the derive macro into substrate-core's dev-deps:
     /// the derive expansion is exercised end-to-end in
     /// aether-actor-derive's tests; here we just need a payload that
@@ -2618,15 +2622,15 @@ mod tests {
         const ID: KindId = KindId(0xDEAD_BEEF_0002_0001);
 
         fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-            postcard::from_bytes(bytes).ok()
+            wire::from_bytes(bytes).ok()
         }
 
         fn encode_into_bytes(&self) -> Vec<u8> {
-            postcard::to_allocvec(self).expect("postcard encode to Vec is infallible")
+            wire::to_vec(self).expect("wire encode to Vec is infallible")
         }
     }
 
-    /// Postcard-shape `Struct { repr_c: false, fields }` builder
+    /// Wire-shape `Struct { repr_c: false, fields }` builder
     /// shared by the test schemas in this module.
     fn postcard_struct(fields: Vec<NamedField>) -> SchemaType {
         SchemaType::Struct {
@@ -2669,11 +2673,11 @@ mod tests {
         const ID: KindId = KindId(0xDEAD_BEEF_0002_0002);
 
         fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-            postcard::from_bytes(bytes).ok()
+            wire::from_bytes(bytes).ok()
         }
 
         fn encode_into_bytes(&self) -> Vec<u8> {
-            postcard::to_allocvec(self).expect("postcard encode to Vec is infallible")
+            wire::to_vec(self).expect("wire encode to Vec is infallible")
         }
     }
 
@@ -2686,8 +2690,9 @@ mod tests {
 
     /// Cast-shaped walker fixture with non-`f32` fields (`u16`). ADR-0100
     /// makes its inline body a raw cast image, whose `u16` bytes a
-    /// postcard reader would misread — the walker must treat the inline
-    /// body as an opaque length-prefixed blob, not walk it as postcard.
+    /// wire reader would misread — the walker must treat the inline
+    /// body as an opaque length-prefixed blob, not walk it as a wire
+    /// structure.
     #[repr(C)]
     #[derive(Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
     struct Coord {
@@ -2742,7 +2747,7 @@ mod tests {
             body: "hi".to_string(),
             seq: 7,
         };
-        let bytes = postcard::to_allocvec(&note).unwrap();
+        let bytes = wire::to_vec(&note).unwrap();
         let outcome = walk_and_resolve(&note_schema(), &bytes, &store).unwrap();
         match outcome {
             WalkOutcome::Resolved {
@@ -2768,7 +2773,7 @@ mod tests {
             held: Ref::Inline(inner),
             seq: 11,
         };
-        let bytes = postcard::to_allocvec(&outer).unwrap();
+        let bytes = wire::to_vec(&outer).unwrap();
         let outcome = walk_and_resolve(&held_note_schema(), &bytes, &store).unwrap();
         // Inline refs cause no substitution; payload should still be
         // Cow::Borrowed.
@@ -2790,7 +2795,7 @@ mod tests {
             held: Ref::handle(0xCAFE),
             seq: 11,
         };
-        let bytes = postcard::to_allocvec(&outer).unwrap();
+        let bytes = wire::to_vec(&outer).unwrap();
         let outcome = walk_and_resolve(&held_note_schema(), &bytes, &store).unwrap();
         match outcome {
             WalkOutcome::Parked { handle, kind } => {
@@ -2808,14 +2813,14 @@ mod tests {
             body: "stored".to_string(),
             seq: 99,
         };
-        let inner_bytes = postcard::to_allocvec(&inner).unwrap();
+        let inner_bytes = wire::to_vec(&inner).unwrap();
         store.put(HandleId(0xCAFE), Note::ID, inner_bytes).unwrap();
 
         let outer = HeldNote {
             held: Ref::handle(0xCAFE),
             seq: 11,
         };
-        let outer_bytes = postcard::to_allocvec(&outer).unwrap();
+        let outer_bytes = wire::to_vec(&outer).unwrap();
 
         let outcome = walk_and_resolve(&held_note_schema(), &outer_bytes, &store).unwrap();
         let resolved_bytes = match outcome {
@@ -2825,7 +2830,7 @@ mod tests {
 
         // The resolved payload should decode as HeldNote with
         // `held = Ref::Inline(inner)`.
-        let decoded: HeldNote = postcard::from_bytes(&resolved_bytes).unwrap();
+        let decoded: HeldNote = wire::from_bytes(&resolved_bytes).unwrap();
         assert_eq!(decoded.seq, 11);
         match decoded.held {
             Ref::Inline(got) => {
@@ -2853,18 +2858,10 @@ mod tests {
             seq: 2,
         };
         store
-            .put(
-                HandleId(1),
-                Note::ID,
-                postcard::to_allocvec(&stored_a).unwrap(),
-            )
+            .put(HandleId(1), Note::ID, wire::to_vec(&stored_a).unwrap())
             .unwrap();
         store
-            .put(
-                HandleId(2),
-                Note::ID,
-                postcard::to_allocvec(&stored_b).unwrap(),
-            )
+            .put(HandleId(2), Note::ID, wire::to_vec(&stored_b).unwrap())
             .unwrap();
 
         let outer: Vec<Ref<Note>> = vec![
@@ -2875,14 +2872,14 @@ mod tests {
             }),
             Ref::handle(2),
         ];
-        let bytes = postcard::to_allocvec(&outer).unwrap();
+        let bytes = wire::to_vec(&outer).unwrap();
         let outcome = walk_and_resolve(&schema, &bytes, &store).unwrap();
         let resolved = match outcome {
             WalkOutcome::Resolved { payload } => payload.into_owned(),
             WalkOutcome::Parked { .. } => panic!("expected resolved"),
         };
 
-        let decoded: Vec<Ref<Note>> = postcard::from_bytes(&resolved).unwrap();
+        let decoded: Vec<Ref<Note>> = wire::from_bytes(&resolved).unwrap();
         assert_eq!(decoded.len(), 3);
         for r in &decoded {
             assert!(r.is_inline(), "every ref should be inline after walk");
@@ -2901,15 +2898,11 @@ mod tests {
             seq: 1,
         };
         store
-            .put(
-                HandleId(1),
-                Note::ID,
-                postcard::to_allocvec(&stored).unwrap(),
-            )
+            .put(HandleId(1), Note::ID, wire::to_vec(&stored).unwrap())
             .unwrap();
 
         let outer: Vec<Ref<Note>> = vec![Ref::handle(1), Ref::handle(99)];
-        let bytes = postcard::to_allocvec(&outer).unwrap();
+        let bytes = wire::to_vec(&outer).unwrap();
         let outcome = walk_and_resolve(&schema, &bytes, &store).unwrap();
         match outcome {
             WalkOutcome::Parked { handle, .. } => {
@@ -2930,7 +2923,7 @@ mod tests {
             }),
             seq: 1,
         };
-        let mut bytes = postcard::to_allocvec(&outer).unwrap();
+        let mut bytes = wire::to_vec(&outer).unwrap();
         bytes.truncate(2);
         let err = walk_and_resolve(&held_note_schema(), &bytes, &store).unwrap_err();
         assert!(matches!(err, WalkError::Truncated));
@@ -2942,7 +2935,7 @@ mod tests {
     #[test]
     fn walk_fast_path_avoids_allocation_for_ref_free_schema() {
         let store = HandleStore::new(64);
-        let bytes = postcard::to_allocvec(&Note {
+        let bytes = wire::to_vec(&Note {
             body: "x".to_string(),
             seq: 1,
         })
@@ -2975,7 +2968,7 @@ mod tests {
             body: "deep".to_string(),
             seq: 7,
         };
-        let inner_bytes = postcard::to_allocvec(&inner_note).unwrap();
+        let inner_bytes = wire::to_vec(&inner_note).unwrap();
         store.put(HandleId(20), Note::ID, inner_bytes).unwrap();
 
         // Mid-level HeldNote, with held = Handle(Y), goes under X.
@@ -2983,7 +2976,7 @@ mod tests {
             held: Ref::handle(20),
             seq: 5,
         };
-        let mid_bytes = postcard::to_allocvec(&mid).unwrap();
+        let mid_bytes = wire::to_vec(&mid).unwrap();
         // Use a synthetic kind id for HeldNote — the walker only uses
         // the kind id to validate against the wire, and the test
         // schemas don't go through registry registration.
@@ -2994,13 +2987,13 @@ mod tests {
             id: 10,
             kind_id: 0xBEEF,
         };
-        let bytes = postcard::to_allocvec(&top).unwrap();
+        let bytes = wire::to_vec(&top).unwrap();
         let outcome = walk_and_resolve(&outer_schema, &bytes, &store).unwrap();
         let resolved = match outcome {
             WalkOutcome::Resolved { payload } => payload.into_owned(),
             WalkOutcome::Parked { .. } => panic!("expected resolved"),
         };
-        let decoded: Ref<HeldNote> = postcard::from_bytes(&resolved).unwrap();
+        let decoded: Ref<HeldNote> = wire::from_bytes(&resolved).unwrap();
         match decoded {
             Ref::Inline(held) => match held.held {
                 Ref::Inline(note) => {
@@ -3013,11 +3006,68 @@ mod tests {
         }
     }
 
+    /// ADR-0118 nested-inline case: the bytes a handle stores are
+    /// themselves a versioned wire image (`HeldNote` whose inner ref is
+    /// already `Inline`). Resolving the outer handle recurses into those
+    /// stored bytes — the walker must strip the *inner* version byte on
+    /// descent to read the ref-bearing struct, yet splice the stored
+    /// image back verbatim (version byte and all). Decoding the result
+    /// proves the inner version byte survived the round-trip.
+    #[test]
+    fn walk_nested_inline_ref_preserves_inner_version_byte() {
+        let outer_schema = SchemaType::Ref(SchemaCell::owned(held_note_schema()));
+        let store = HandleStore::new(4096);
+
+        // Stored value: a HeldNote that already holds an INLINE Note —
+        // no further handle to resolve, but it is ref-bearing, so the
+        // recursive walk_and_resolve does walk (and strips its version
+        // byte on entry).
+        let stored = HeldNote {
+            held: Ref::Inline(Note {
+                body: "inner".to_string(),
+                seq: 3,
+            }),
+            seq: 5,
+        };
+        let stored_bytes = wire::to_vec(&stored).unwrap();
+        assert_eq!(stored_bytes[0], WIRE_VERSION, "stored image is versioned");
+        store
+            .put(HandleId(70), KindId(0xBEEF), stored_bytes)
+            .unwrap();
+
+        let top: Ref<HeldNote> = Ref::Handle {
+            id: 70,
+            kind_id: 0xBEEF,
+        };
+        let bytes = wire::to_vec(&top).unwrap();
+        let outcome = walk_and_resolve(&outer_schema, &bytes, &store).unwrap();
+        let resolved = match outcome {
+            WalkOutcome::Resolved { payload } => payload.into_owned(),
+            WalkOutcome::Parked { .. } => panic!("expected resolved"),
+        };
+        // The spliced inline body is a pure byte-copy of the stored
+        // versioned image, so decoding the whole thing reconstructs it.
+        let decoded: Ref<HeldNote> = wire::from_bytes(&resolved).unwrap();
+        match decoded {
+            Ref::Inline(held) => {
+                assert_eq!(held.seq, 5);
+                match held.held {
+                    Ref::Inline(note) => {
+                        assert_eq!(note.body, "inner");
+                        assert_eq!(note.seq, 3);
+                    }
+                    Ref::Handle { .. } => panic!("inner ref was inline, must stay inline"),
+                }
+            }
+            Ref::Handle { .. } => panic!("outer ref must be resolved"),
+        }
+    }
+
     /// ADR-0100: a handle to a non-`f32` cast kind resolves to an inline
     /// arm whose body is the raw cast image, and the spliced wire decodes
     /// on the guest path (`Ref<Coord>::decode → Kind::decode_from_bytes`)
     /// uncorrupted — the `u16` fields survive because the walker never
-    /// re-interprets the cast image as postcard.
+    /// re-interprets the cast image as a wire structure.
     #[test]
     fn walk_handle_ref_resolves_cast_kind_non_f32() {
         let schema = SchemaType::Ref(SchemaCell::owned(coord_schema()));
@@ -3030,20 +3080,30 @@ mod tests {
         let cast_bytes = bytemuck::bytes_of(&pt).to_vec();
         store.put(HandleId(3), Coord::ID, cast_bytes).unwrap();
 
-        let wire = postcard::to_allocvec(&Ref::<Coord>::handle(3)).unwrap();
-        let outcome = walk_and_resolve(&schema, &wire, &store).unwrap();
+        let handle_wire = wire::to_vec(&Ref::<Coord>::handle(3)).unwrap();
+        let outcome = walk_and_resolve(&schema, &handle_wire, &store).unwrap();
         let resolved = match outcome {
             WalkOutcome::Resolved { payload } => payload.into_owned(),
             WalkOutcome::Parked { .. } => panic!("expected resolved"),
         };
 
-        // The spliced inline arm carries the 4-byte cast image,
-        // length-prefixed: disc 0 + varint(4) + 4 raw bytes.
-        assert_eq!(resolved[0], 0, "spliced Inline discriminant");
-        assert_eq!(resolved[1], 4, "varint length of the 4-byte cast image");
-        assert_eq!(&resolved[2..], bytemuck::bytes_of(&pt));
+        // The resolved image keeps the top-level version byte, then the
+        // spliced inline arm: u32 selector 0 + u32 length 4 + the 4-byte
+        // cast image (the cast image is itself bare — no nested version).
+        assert_eq!(resolved[0], WIRE_VERSION, "top-level version byte");
+        assert_eq!(
+            &resolved[1..5],
+            &0u32.to_le_bytes(),
+            "spliced Inline selector"
+        );
+        assert_eq!(
+            &resolved[5..9],
+            &4u32.to_le_bytes(),
+            "u32 length of the cast image"
+        );
+        assert_eq!(&resolved[9..], bytemuck::bytes_of(&pt));
 
-        let back: Ref<Coord> = postcard::from_bytes(&resolved).unwrap();
+        let back: Ref<Coord> = wire::from_bytes(&resolved).unwrap();
         match back {
             Ref::Inline(got) => assert_eq!(got, pt, "u16 cast fields survive resolution"),
             Ref::Handle { .. } => panic!("walker must replace Handle with Inline"),
