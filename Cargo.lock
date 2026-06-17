@@ -130,7 +130,6 @@ dependencies = [
  "aether-data-derive",
  "bytemuck",
  "inventory",
- "postcard",
  "serde",
  "uuid",
 ]
