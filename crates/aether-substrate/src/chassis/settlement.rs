@@ -44,7 +44,8 @@ use std::time::{Duration, Instant};
 
 use crate::mail::Mail;
 use crate::mail::mailer::Mailer;
-use aether_data::{KindId, MailId, MailboxId};
+use aether_data::{Kind, KindId, MailId, MailboxId};
+use aether_kinds::trace::Settled;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 
 /// Chassis-owned settlement notification registry. Owned by the
@@ -80,8 +81,8 @@ struct Inner {
 enum SettlementSubscriber {
     /// Wake an in-thread waiter on a `bounded(1)` channel.
     Channel(Sender<()>),
-    /// Push a notification mail to `target` via `mailer` with the
-    /// settled root postcard-encoded as the payload.
+    /// Push a notification mail to `target` via `mailer` carrying a
+    /// [`Settled`] with the settled root as the payload.
     Mail {
         target: MailboxId,
         kind: KindId,
@@ -157,8 +158,8 @@ impl SettlementRegistry {
 
     /// Subscribe a mailbox to receive a notification mail when `root`
     /// settles. The notification is a [`Mail`] with the
-    /// given `kind`, the [`MailId`] of the settled root postcard-encoded
-    /// as payload, and `count = 1`. Pre-fires immediately (synchronously
+    /// given `kind`, a [`Settled`] carrying the settled root as payload,
+    /// and `count = 1`. Pre-fires immediately (synchronously
     /// pushes the mail) if `root` has already settled at least once.
     ///
     /// Coexists with [`Self::subscribe_settlement`] — a root can have
@@ -268,22 +269,10 @@ impl SettlementRegistry {
 }
 
 /// Push a settlement-notice mail to `target` via `mailer`. The payload
-/// is the postcard-encoded settled-root [`MailId`]; on encode failure
-/// the notification is dropped (logged at error) — `MailId` is a small
-/// `repr(C)` postcard-shaped struct, so encode failure here is a "this
-/// should never happen" path rather than a recoverable condition.
+/// is a [`Settled`] carrying the settled root, encoded through the kind
+/// codec — the same shape the consumer's `on_settled` handler decodes.
 fn push_settlement_notice(mailer: &Mailer, target: MailboxId, kind: KindId, root: MailId) {
-    let payload = match postcard::to_allocvec(&root) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(
-                target: "aether_substrate::settlement",
-                error = %e,
-                "settlement registry: postcard encode of MailId failed; notification dropped"
-            );
-            return;
-        }
-    };
+    let payload = Settled { root }.encode_into_bytes();
     mailer.push(Mail::new(target, kind, payload, 1));
 }
 
@@ -616,7 +605,9 @@ mod tests {
         let mail = &captured[0];
         assert_eq!(mail.kind, kind);
         assert_eq!(mail.count, 1);
-        let decoded: MailId = postcard::from_bytes(&mail.payload).expect("decode MailId");
+        let decoded = Settled::decode_from_bytes(&mail.payload)
+            .expect("decode Settled")
+            .root;
         assert_eq!(decoded, r);
     }
 
@@ -639,7 +630,9 @@ mod tests {
         let captured = captured.lock().unwrap();
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].kind, kind);
-        let decoded: MailId = postcard::from_bytes(&captured[0].payload).expect("decode MailId");
+        let decoded = Settled::decode_from_bytes(&captured[0].payload)
+            .expect("decode Settled")
+            .root;
         assert_eq!(decoded, r);
     }
 
@@ -664,7 +657,9 @@ mod tests {
         assert_eq!(captured.len(), 3);
         for entry in captured.iter() {
             assert_eq!(entry.kind, kind);
-            let decoded: MailId = postcard::from_bytes(&entry.payload).expect("decode MailId");
+            let decoded = Settled::decode_from_bytes(&entry.payload)
+                .expect("decode Settled")
+                .root;
             assert_eq!(decoded, r);
         }
     }
@@ -712,7 +707,9 @@ mod tests {
 
         let after_r1 = captured.lock().unwrap().clone();
         assert_eq!(after_r1.len(), 1);
-        let decoded: MailId = postcard::from_bytes(&after_r1[0].payload).expect("decode MailId");
+        let decoded = Settled::decode_from_bytes(&after_r1[0].payload)
+            .expect("decode Settled")
+            .root;
         assert_eq!(decoded, r1);
 
         reg.fire_settled(r2);
@@ -720,7 +717,9 @@ mod tests {
 
         let after_r2 = captured.lock().unwrap().clone();
         assert_eq!(after_r2.len(), 2);
-        let decoded: MailId = postcard::from_bytes(&after_r2[1].payload).expect("decode MailId");
+        let decoded = Settled::decode_from_bytes(&after_r2[1].payload)
+            .expect("decode Settled")
+            .root;
         assert_eq!(decoded, r2);
     }
 
@@ -832,7 +831,9 @@ mod tests {
 
         let captured = captured.lock().unwrap();
         assert_eq!(captured.len(), 1);
-        let decoded: MailId = postcard::from_bytes(&captured[0].payload).expect("decode MailId");
+        let decoded = Settled::decode_from_bytes(&captured[0].payload)
+            .expect("decode Settled")
+            .root;
         assert_eq!(decoded, r);
     }
 }

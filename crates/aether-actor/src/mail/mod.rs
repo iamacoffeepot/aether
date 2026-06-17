@@ -674,10 +674,9 @@ mod tests {
             tag: String::from("greet"),
             ids: alloc::vec![1, 2, 3, 4],
         };
-        let bytes =
-            postcard::to_allocvec(&value).expect("test setup: postcard encodes FakePostcard");
-        // SAFETY: `bytes` (a `Vec<u8>` from postcard) outlives `mail`;
-        // its `(addr, len)` pair is valid for the rest of the body.
+        let bytes = value.encode_into_bytes();
+        // SAFETY: `bytes` (a `Vec<u8>` from the kind encoder) outlives
+        // `mail`; its `(addr, len)` pair is valid for the rest of the body.
         let mail = unsafe {
             Mail::__from_ptr(
                 FakePostcard::ID.0,
@@ -731,8 +730,7 @@ mod tests {
             tag: String::from("x"),
             ids: alloc::vec![],
         };
-        let bytes =
-            postcard::to_allocvec(&value).expect("test setup: postcard encodes FakePostcard");
+        let bytes = value.encode_into_bytes();
         // SAFETY: `bytes` outlives `mail`; the `(addr, len)` pair is
         // valid for `bytes.len()` bytes for the rest of the body.
         let mail = unsafe {
@@ -754,8 +752,7 @@ mod tests {
             tag: String::from("x"),
             ids: alloc::vec![],
         };
-        let bytes =
-            postcard::to_allocvec(&value).expect("test setup: postcard encodes FakePostcard");
+        let bytes = value.encode_into_bytes();
         // SAFETY: `bytes` outlives `mail`; the `(addr, len)` pair is
         // valid for `bytes.len()` bytes for the rest of the body.
         let mail = unsafe {
@@ -777,11 +774,10 @@ mod tests {
             tag: String::from("longer"),
             ids: alloc::vec![1, 2, 3],
         };
-        let bytes =
-            postcard::to_allocvec(&value).expect("test setup: postcard encodes FakePostcard");
+        let bytes = value.encode_into_bytes();
         // Pretend the substrate only wrote the first 2 bytes —
-        // `decode_from_bytes` (postcard arm) gets the truncated slice
-        // and surfaces the parse error as `None`.
+        // `decode_from_bytes` gets the truncated slice and surfaces the
+        // parse error as `None`.
         // SAFETY: `bytes` outlives `mail`; the declared `byte_len=2`
         // is within the actual allocation so the bounded read is
         // valid even though it's deliberately a truncation.

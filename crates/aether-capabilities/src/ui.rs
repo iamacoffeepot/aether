@@ -328,8 +328,8 @@ mod native {
                 } = event
                     && kind_id == UiClicked::ID
                 {
-                    let decoded: UiClicked =
-                        postcard::from_bytes(&payload).expect("test: decodes UiClicked");
+                    let decoded =
+                        UiClicked::decode_from_bytes(&payload).expect("test: decodes UiClicked");
                     return (recipient_mailbox_id, decoded);
                 }
             }
@@ -405,8 +405,8 @@ mod native {
                 panic!("expected UnresolvedMail for DrawSolidQuads");
             };
             assert_eq!(kind_id, DrawSolidQuads::ID, "expected DrawSolidQuads");
-            let decoded: DrawSolidQuads =
-                postcard::from_bytes(&payload).expect("test: decodes DrawSolidQuads");
+            let decoded =
+                DrawSolidQuads::decode_from_bytes(&payload).expect("test: decodes DrawSolidQuads");
             assert_eq!(decoded.quads.len(), 2, "bar emits track + fill quad");
             assert_eq!(decoded.quads[1].width, 100.0, "fill is frac * full width");
         }
@@ -436,8 +436,8 @@ mod native {
                 panic!("expected UnresolvedMail");
             };
             assert_eq!(kind_id, DrawSolidQuads::ID);
-            let decoded: DrawSolidQuads =
-                postcard::from_bytes(&payload).expect("test: decodes DrawSolidQuads");
+            let decoded =
+                DrawSolidQuads::decode_from_bytes(&payload).expect("test: decodes DrawSolidQuads");
             assert_eq!(
                 decoded.quads[1].width, 200.0,
                 "frac > 1 clamps to full width"
@@ -469,8 +469,8 @@ mod native {
                 panic!("expected UnresolvedMail");
             };
             assert_eq!(kind_id, DrawSolidQuads::ID);
-            let decoded: DrawSolidQuads =
-                postcard::from_bytes(&payload).expect("test: decodes DrawSolidQuads");
+            let decoded =
+                DrawSolidQuads::decode_from_bytes(&payload).expect("test: decodes DrawSolidQuads");
             assert_eq!(decoded.quads[1].width, 0.0, "frac < 0 clamps to zero width");
         }
 
@@ -501,7 +501,7 @@ mod native {
                 panic!("expected UnresolvedMail for DrawText");
             };
             assert_eq!(kind_id, DrawText::ID, "expected DrawText");
-            let decoded: DrawText = postcard::from_bytes(&payload).expect("test: decodes DrawText");
+            let decoded = DrawText::decode_from_bytes(&payload).expect("test: decodes DrawText");
             assert_eq!(decoded.space, QuadSpace::Screen, "label uses Screen space");
             assert_eq!(decoded.origin, [50.0, 100.0], "label origin is (x, y)");
         }

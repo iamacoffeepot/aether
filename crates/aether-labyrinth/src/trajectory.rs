@@ -477,7 +477,7 @@ mod native {
                         y,
                         value,
                     };
-                    let bytes = postcard::to_allocvec(&s).expect("TrajectorySample serializes");
+                    let bytes = s.encode_into_bytes();
                     handler.enqueue(OwnedDispatch::disarmed(
                         <TrajectorySample as Kind>::ID,
                         "aether.trajectory.sample".to_owned(),
@@ -502,7 +502,7 @@ mod native {
                     seed,
                     reason: TrajectoryEndReason::Completed,
                 };
-                let bytes = postcard::to_allocvec(&end).expect("TrajectoryEnd serializes");
+                let bytes = end.encode_into_bytes();
                 handler.enqueue(OwnedDispatch::disarmed(
                     <TrajectoryEnd as Kind>::ID,
                     "aether.trajectory.end".to_owned(),
@@ -531,8 +531,8 @@ mod native {
                     thread::sleep(Duration::from_millis(5));
                 };
 
-                let result: RecordResult =
-                    postcard::from_bytes(&payload).expect("RecordResult decodes via postcard");
+                let result =
+                    RecordResult::decode_from_bytes(&payload).expect("RecordResult decodes");
                 let RecordResult::Ok {
                     seed: out_seed,
                     handle_id,

@@ -631,9 +631,9 @@ mod tests {
             Answer::ID,
             "reply carries the worker's output kind"
         );
-        // A Component-targeted reply is postcard-encoded by
+        // A Component-targeted reply is encoded through the kind codec by
         // `Mailer::send_reply` (not cast), so decode it the same way.
-        let answer: Answer = postcard::from_bytes(reply.payload.bytes()).expect("reply decodes");
+        let answer = Answer::decode_from_bytes(reply.payload.bytes()).expect("reply decodes");
         assert_eq!(answer, Answer { value: 42 });
         assert_eq!(
             reply.sender.correlation_id, 77,
@@ -784,9 +784,9 @@ mod tests {
         let reply = reply_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("the mapped re-reply lands");
-        // A Component-targeted reply is postcard-encoded by
+        // A Component-targeted reply is encoded through the kind codec by
         // `Mailer::send_reply` (not cast), so decode it the same way.
-        let answer: Answer = postcard::from_bytes(reply.payload.bytes()).expect("reply decodes");
+        let answer = Answer::decode_from_bytes(reply.payload.bytes()).expect("reply decodes");
         assert_eq!(
             answer,
             Answer { value: 107 },

@@ -1013,7 +1013,7 @@ mod tests {
         let (kind, correlation, payload) = &recorded[0];
         assert_eq!(*kind, <LogTailResult as Kind>::ID);
         assert_eq!(*correlation, 0xCAFE, "correlation echoed onto the reply");
-        match postcard::from_bytes::<LogTailResult>(payload).unwrap() {
+        match LogTailResult::decode_from_bytes(payload).unwrap() {
             LogTailResult::Err { error } => assert!(
                 error.contains(&unknown.to_string()),
                 "error names the recipient id: {error}",
@@ -1099,7 +1099,7 @@ mod tests {
         let (kind, correlation, payload) = &recorded[0];
         assert_eq!(*kind, TraceTailResult::ID);
         assert_eq!(*correlation, 0xCAFE, "correlation echoed onto the reply");
-        match postcard::from_bytes::<TraceTailResult>(payload).unwrap() {
+        match TraceTailResult::decode_from_bytes(payload).unwrap() {
             TraceTailResult::Ok { entries, .. } => assert!(
                 entries
                     .iter()

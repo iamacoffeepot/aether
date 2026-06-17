@@ -35,7 +35,6 @@ use aether_kinds::{
     Bundle, Cancel, CancelResult, DagDescriptor, DagReapTick, Edge, Node, NodeId, Status,
     StatusResult, Submit, SubmitResult,
 };
-use serde::de::DeserializeOwned;
 
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::handle_store::HandleStore;
@@ -137,10 +136,7 @@ fn enqueue<K: Kind>(registry: &Registry, mailbox_name: &str, payload: &K, sender
 
 /// Drain egress until a `ToSession` reply of kind `K` arrives, decoding
 /// it via postcard. Panics on timeout.
-fn await_session_reply<K: Kind + DeserializeOwned>(
-    rx: &Receiver<EgressEvent>,
-    timeout: Duration,
-) -> K {
+fn await_session_reply<K: Kind>(rx: &Receiver<EgressEvent>, timeout: Duration) -> K {
     let deadline = Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -152,7 +148,7 @@ fn await_session_reply<K: Kind + DeserializeOwned>(
         } = event
             && kind_name == K::NAME
         {
-            return postcard::from_bytes(&payload).expect("decode session reply");
+            return K::decode_from_bytes(&payload).expect("decode session reply");
         }
     }
 }
@@ -223,9 +219,9 @@ fn mbx<A: Actor>() -> MailboxId {
     MailboxId(aether_data::mailbox_id_from_name(A::NAMESPACE).0)
 }
 
-/// Postcard-encode a `TestSourceRequest`.
+/// Encode a `TestSourceRequest` via the kind codec.
 fn source_req(value: u64, fail: bool) -> Vec<u8> {
-    postcard::to_allocvec(&super::test_support::TestSourceRequest { value, fail }).unwrap()
+    super::test_support::TestSourceRequest { value, fail }.encode_into_bytes()
 }
 
 /// The `TestSourceRequest` kind id.
@@ -694,7 +690,7 @@ fn dag_executor_call_collects_multi_reply_bundle() {
     let bundle = run_call_dag_to(&registry, &rx, &recorder, mbx::<TestCallActor>());
     assert_eq!(bundle.elements.len(), 3);
     for (i, el) in bundle.elements.iter().enumerate() {
-        let reply: TestCallReply = postcard::from_bytes(&el.payload).unwrap();
+        let reply = TestCallReply::decode_from_bytes(&el.payload).unwrap();
         assert_eq!(reply.index, i as u64);
     }
 
@@ -721,7 +717,7 @@ fn dag_executor_call_inherited_worker_counts_toward_settlement() {
         1,
         "the deferred worker's reply must land in the bundle, not an already-closed one",
     );
-    let reply: TestCallReply = postcard::from_bytes(&bundle.elements[0].payload).unwrap();
+    let reply = TestCallReply::decode_from_bytes(&bundle.elements[0].payload).unwrap();
     assert_eq!(reply.index, 1);
 
     drop(chassis);

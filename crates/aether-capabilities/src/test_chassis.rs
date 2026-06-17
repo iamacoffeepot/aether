@@ -31,7 +31,6 @@ use aether_substrate::handle_store::HandleStore;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
 use aether_substrate::mail::registry::Registry;
-use serde::de::DeserializeOwned;
 
 /// Canonical test chassis. `build()` is unreachable — every consumer
 /// drives the chassis through `Builder::<TestChassis>::new(...)` directly
@@ -158,7 +157,7 @@ pub fn drive_task_completion<A>(
 }
 
 /// Drain egress until a `ToSession` reply of kind `K` arrives, decoding
-/// it via postcard. Skips non-`ToSession` events and replies of other
+/// it via the kind codec. Skips non-`ToSession` events and replies of other
 /// kinds — the content-gen caps spawn a real ephemeral dispatch thread
 /// whose loopback mail (to an unregistered stand-in mailbox in
 /// `new_for_test`) bubbles up as a non-`ToSession` egress, so a cap
@@ -167,7 +166,7 @@ pub fn drive_task_completion<A>(
 /// `aether.anthropic` / `aether.gemini` test modules.
 pub fn decode_session_reply<K>(rx: &Receiver<EgressEvent>) -> K
 where
-    K: Kind + DeserializeOwned,
+    K: Kind,
 {
     loop {
         let event = rx
@@ -178,8 +177,7 @@ where
         } = event
             && kind_name == K::NAME
         {
-            return postcard::from_bytes(&payload)
-                .expect("test: reply payload decodes via postcard");
+            return K::decode_from_bytes(&payload).expect("test: reply payload decodes");
         }
     }
 }
@@ -194,7 +192,7 @@ where
 #[allow(dead_code)]
 pub fn decode_reply<K>(rx: &Receiver<EgressEvent>) -> K
 where
-    K: Kind + DeserializeOwned,
+    K: Kind,
 {
     let event = rx
         .recv_timeout(Duration::from_secs(1))
@@ -206,7 +204,7 @@ where
         panic!("expected ToSession egress, got {event:?}");
     };
     assert_eq!(kind_name, K::NAME);
-    postcard::from_bytes(&payload).expect("test: reply payload decodes via postcard")
+    K::decode_from_bytes(&payload).expect("test: reply payload decodes")
 }
 
 /// Manual tempdir under the system temp root, namespaced by `prefix` and
