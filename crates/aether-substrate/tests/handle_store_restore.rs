@@ -26,6 +26,7 @@ use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use aether_data::wire;
 use aether_data::{HandleId, KindId};
 use aether_substrate::handle_store::meta::{HandleMeta, SCHEMA_VERSION};
 use aether_substrate::handle_store::{HandleStore, PersistConfig, entry_paths};
@@ -69,7 +70,7 @@ fn write_meta(cfg: &PersistConfig, id: HandleId, kind: KindId, bytes_len: u32) {
         created_at: 1,
         pinned: false,
     };
-    fs::write(&meta_path, postcard::to_allocvec(&meta).unwrap()).unwrap();
+    fs::write(&meta_path, wire::to_vec(&meta).unwrap()).unwrap();
 }
 
 #[test]

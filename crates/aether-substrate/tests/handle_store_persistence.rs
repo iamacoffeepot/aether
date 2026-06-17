@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use aether_data::wire;
 use aether_data::{HandleId, KindId};
 use aether_substrate::handle_store::meta::{HandleMeta, SCHEMA_VERSION};
 use aether_substrate::handle_store::{
@@ -58,7 +59,7 @@ fn persist_config(root: &Path) -> PersistConfig {
 
 fn read_meta(path: &Path) -> HandleMeta {
     let bytes = fs::read(path).expect("meta file present");
-    postcard::from_bytes(&bytes).expect("meta decodes")
+    wire::from_bytes(&bytes).expect("meta decodes")
 }
 
 #[test]

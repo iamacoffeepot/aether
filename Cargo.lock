@@ -292,7 +292,6 @@ dependencies = [
  "dirs",
  "libc",
  "png",
- "postcard",
  "proptest",
  "rustc-hash 2.1.2",
  "serde",
