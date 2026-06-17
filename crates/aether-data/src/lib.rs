@@ -1155,27 +1155,27 @@ mod tests {
     }
 
     #[test]
-    fn ref_inline_postcard_roundtrip() {
+    fn ref_inline_wire_roundtrip() {
         let v = TestStruct {
             tag: 42,
             label: String::from("hello"),
         };
         let r = Ref::Inline(v);
-        let bytes = postcard::to_allocvec(&r).expect("test setup: postcard encodes Inline Ref");
+        let bytes = wire::to_vec(&r).expect("test setup: wire encodes Inline Ref");
         let back: Ref<TestStruct> =
-            postcard::from_bytes(&bytes).expect("test setup: postcard decodes Inline Ref");
+            wire::from_bytes(&bytes).expect("test setup: wire decodes Inline Ref");
         assert_eq!(back, r);
     }
 
     #[test]
-    fn ref_handle_postcard_roundtrip() {
+    fn ref_handle_wire_roundtrip() {
         let r: Ref<TestStruct> = Ref::Handle {
             id: 0xdead_beef_cafe_babe,
             kind_id: 0x1234_5678_9abc_def0,
         };
-        let bytes = postcard::to_allocvec(&r).expect("test setup: postcard encodes Handle Ref");
+        let bytes = wire::to_vec(&r).expect("test setup: wire encodes Handle Ref");
         let back: Ref<TestStruct> =
-            postcard::from_bytes(&bytes).expect("test setup: postcard decodes Handle Ref");
+            wire::from_bytes(&bytes).expect("test setup: wire decodes Handle Ref");
         assert_eq!(back, r);
     }
 
@@ -1186,12 +1186,27 @@ mod tests {
             label: String::from("x"),
         });
         let handle: Ref<TestStruct> = Ref::Handle { id: 1, kind_id: 1 };
-        let inline_bytes =
-            postcard::to_allocvec(&inline).expect("test setup: postcard encodes Inline Ref");
-        let handle_bytes =
-            postcard::to_allocvec(&handle).expect("test setup: postcard encodes Handle Ref");
-        assert_eq!(inline_bytes[0], 0, "Inline discriminant must be 0");
-        assert_eq!(handle_bytes[0], 1, "Handle discriminant must be 1");
+        let inline_bytes = wire::to_vec(&inline).expect("test setup: wire encodes Inline Ref");
+        let handle_bytes = wire::to_vec(&handle).expect("test setup: wire encodes Handle Ref");
+        // Selector is a u32 LE at bytes[1..5] (after the version byte at bytes[0]).
+        assert_eq!(
+            u32::from_le_bytes(
+                inline_bytes[1..5]
+                    .try_into()
+                    .expect("selector slice is always 4 bytes"),
+            ),
+            0,
+            "Inline selector must be 0",
+        );
+        assert_eq!(
+            u32::from_le_bytes(
+                handle_bytes[1..5]
+                    .try_into()
+                    .expect("selector slice is always 4 bytes"),
+            ),
+            1,
+            "Handle selector must be 1",
+        );
     }
 
     #[test]
@@ -1202,24 +1217,40 @@ mod tests {
     #[test]
     fn ref_inline_cast_kind_body_is_cast_image() {
         // ADR-0100: a cast kind's inline body is the raw cast image,
-        // not a varint-postcard image. `TestPod` carries a `u32` field
-        // (`a`), whose cast bytes differ from postcard's varint.
+        // not a wire-encoded image. `TestPod` carries a `u32` field
+        // (`a`), whose cast bytes differ from a wire-encoded u32.
         let v = TestPod {
             a: 0x1234_5678,
             b: 1.5,
         };
         let r: Ref<TestPod> = Ref::Inline(v);
-        let bytes =
-            postcard::to_allocvec(&r).expect("test setup: postcard encodes Inline Ref<TestPod>");
-        assert_eq!(bytes[0], 0, "Inline discriminant");
-        assert_eq!(bytes[1], 8, "varint length prefix of the 8-byte cast image");
+        let bytes = wire::to_vec(&r).expect("test setup: wire encodes Inline Ref<TestPod>");
+        // Selector is a u32 LE at bytes[1..5]; length is a u32 LE at bytes[5..9].
         assert_eq!(
-            &bytes[2..],
+            u32::from_le_bytes(
+                bytes[1..5]
+                    .try_into()
+                    .expect("selector slice is always 4 bytes"),
+            ),
+            0,
+            "Inline selector",
+        );
+        assert_eq!(
+            u32::from_le_bytes(
+                bytes[5..9]
+                    .try_into()
+                    .expect("length slice is always 4 bytes"),
+            ),
+            8,
+            "u32 LE length prefix of the 8-byte cast image",
+        );
+        assert_eq!(
+            &bytes[9..],
             bytemuck::bytes_of(&v),
-            "inline body is the cast image, not a postcard varint image"
+            "inline body is the cast image, not a wire-encoded image"
         );
         let back: Ref<TestPod> =
-            postcard::from_bytes(&bytes).expect("test setup: postcard decodes Inline Ref<TestPod>");
+            wire::from_bytes(&bytes).expect("test setup: wire decodes Inline Ref<TestPod>");
         assert_eq!(back, r);
     }
 
@@ -1229,11 +1260,19 @@ mod tests {
             id: 7,
             kind_id: TestPod::ID.0,
         };
-        let bytes =
-            postcard::to_allocvec(&r).expect("test setup: postcard encodes Handle Ref<TestPod>");
-        assert_eq!(bytes[0], 1, "Handle discriminant");
+        let bytes = wire::to_vec(&r).expect("test setup: wire encodes Handle Ref<TestPod>");
+        // Selector is a u32 LE at bytes[1..5].
+        assert_eq!(
+            u32::from_le_bytes(
+                bytes[1..5]
+                    .try_into()
+                    .expect("selector slice is always 4 bytes"),
+            ),
+            1,
+            "Handle selector",
+        );
         let back: Ref<TestPod> =
-            postcard::from_bytes(&bytes).expect("test setup: postcard decodes Handle Ref<TestPod>");
+            wire::from_bytes(&bytes).expect("test setup: wire decodes Handle Ref<TestPod>");
         assert_eq!(back, r);
     }
 
