@@ -26,7 +26,7 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, Instanced, Manual, OutboundReply, Resolver, Subname, actor,
+    BootError, FfiActor, FfiCtx, FfiInitCtx, Instanced, Manual, OutboundReply, Subname, actor,
 };
 use aether_data::MailboxId;
 use aether_test_fixtures::{
@@ -55,10 +55,7 @@ pub struct InlineDespawnParent {
 impl FfiActor for InlineDespawnParent {
     const NAMESPACE: &'static str = "test.inline.despawn_parent";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(InlineDespawnParent { child: None })
     }
 
@@ -104,10 +101,7 @@ impl Instanced for InlineDespawnChild {}
 impl FfiActor for InlineDespawnChild {
     const NAMESPACE: &'static str = "test.inline.despawn_child";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(InlineDespawnChild)
     }
 

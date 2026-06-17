@@ -4,15 +4,15 @@ error[E0308]: mismatched types
 40 | #[actor]
    | ^^^^^^^^ expected `&mut FfiCtx<'_>`, found `&mut FfiCtx<'_, Manual>`
 ...
-54 |     fn on_ping(&mut self, _ctx: &mut FfiCtx<'_>, _ping: Ping) {}
+52 |     fn on_ping(&mut self, _ctx: &mut FfiCtx<'_>, _ping: Ping) {}
    |        ------- arguments to this method are incorrect
    |
    = note: expected mutable reference `&mut FfiCtx<'_, Single>`
               found mutable reference `&mut FfiCtx<'_, aether_actor::Manual>`
 note: method defined here
-  --> tests/ui/rejects_manual_marker_mismatch_ffi.rs:54:8
+  --> tests/ui/rejects_manual_marker_mismatch_ffi.rs:52:8
    |
-54 |     fn on_ping(&mut self, _ctx: &mut FfiCtx<'_>, _ping: Ping) {}
+52 |     fn on_ping(&mut self, _ctx: &mut FfiCtx<'_>, _ping: Ping) {}
    |        ^^^^^^^            ---------------------
    = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)
 
@@ -22,14 +22,14 @@ error[E0308]: mismatched types
 40 | #[actor]
    | ^^^^^^^^ expected `&mut FfiCtx<'_, Manual>`, found `&mut FfiCtx<'_>`
 ...
-59 |     fn on_pong(&mut self, _ctx: &mut FfiCtx<'_, Manual>, _pong: Pong) {}
+57 |     fn on_pong(&mut self, _ctx: &mut FfiCtx<'_, Manual>, _pong: Pong) {}
    |        ------- arguments to this method are incorrect
    |
    = note: expected mutable reference `&mut FfiCtx<'_, aether_actor::Manual>`
               found mutable reference `&mut FfiCtx<'_, Single>`
 note: method defined here
-  --> tests/ui/rejects_manual_marker_mismatch_ffi.rs:59:8
+  --> tests/ui/rejects_manual_marker_mismatch_ffi.rs:57:8
    |
-59 |     fn on_pong(&mut self, _ctx: &mut FfiCtx<'_, Manual>, _pong: Pong) {}
+57 |     fn on_pong(&mut self, _ctx: &mut FfiCtx<'_, Manual>, _pong: Pong) {}
    |        ^^^^^^^            -----------------------------
    = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)

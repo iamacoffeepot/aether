@@ -21,7 +21,7 @@
 // payload still has to match the trampoline ABI.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, MailSender, actor};
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_data::{Kind, Schema};
@@ -50,10 +50,7 @@ pub struct Caller {
 impl FfiActor for Caller {
     const NAMESPACE: &'static str = "caller";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Caller { next_seq: 0 })
     }
 

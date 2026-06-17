@@ -18,7 +18,7 @@
 // the mail's slot.
 #![allow(clippy::needless_pass_by_value, clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, MailSender, actor};
 use aether_data::Ref;
 use aether_kinds::Write;
 use aether_test_fixtures::Vec4Observed;
@@ -29,10 +29,7 @@ pub struct Vec4Observer;
 impl FfiActor for Vec4Observer {
     const NAMESPACE: &'static str = "vec4_observer";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Vec4Observer)
     }
 

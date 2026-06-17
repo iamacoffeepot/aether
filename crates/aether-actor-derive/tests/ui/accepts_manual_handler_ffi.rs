@@ -38,9 +38,7 @@ struct ManualProbe;
 impl aether_actor::FfiActor for ManualProbe {
     const NAMESPACE: &'static str = "manual_probe";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, aether_actor::BootError>
-    where
-        C: aether_actor::Resolver,
+    fn init(_ctx: &mut aether_actor::FfiInitCtx<'_>) -> Result<Self, aether_actor::BootError>
     {
         Ok(ManualProbe)
     }

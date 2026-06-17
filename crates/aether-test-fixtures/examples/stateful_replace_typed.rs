@@ -17,7 +17,7 @@
 // contract is the point, so silence the false positive here.
 #![allow(clippy::needless_pass_by_value)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, Manual, OutboundReply, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, Manual, OutboundReply, actor};
 use aether_test_fixtures::{Bump, CountQuery, CountReport};
 
 /// Durable state the `Counter` carries across `replace_component`. The
@@ -47,10 +47,7 @@ impl FfiActor for Counter {
     /// `on_rehydrate` hooks.
     type State = CounterState;
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Counter { count: 0 })
     }
 

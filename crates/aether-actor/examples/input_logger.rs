@@ -21,7 +21,7 @@
 // ADR-0033 / ADR-0038 dispatch ABI but doesn't need any field access.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
 use aether_capabilities::InputCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{Key, MouseButton, MouseMove, SubscribeInput};
@@ -32,10 +32,7 @@ pub struct InputLogger;
 impl FfiActor for InputLogger {
     const NAMESPACE: &'static str = "input_logger";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(InputLogger)
     }
 

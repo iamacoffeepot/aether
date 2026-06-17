@@ -25,7 +25,6 @@ use crate::actor::ctx::mail_sender::MailSender;
 use crate::actor::ctx::outbound_reply::OutboundReply;
 use crate::actor::ctx::persistence::Persistence;
 use crate::actor::ctx::reply_mode::{Manual, ReplyMode, Single, Stream};
-use crate::actor::ctx::resolver::Resolver;
 use crate::actor::{
     Actor, HandlesKind, Instanced, NamespaceError, Singleton, Subname, validate_namespace_segment,
 };
@@ -58,20 +57,23 @@ impl FfiInitCtx<'_> {
         }
     }
 
-    /// The component's own mailbox id. Mirrors [`Resolver::mailbox_id`].
+    /// The component's own mailbox id — the value the substrate uses to
+    /// address `receive` calls to this instance.
     #[must_use]
     pub fn mailbox_id(&self) -> u64 {
         self.mailbox
     }
 
-    /// Resolve a kind by its `const ID`. Mirrors [`Resolver::resolve`].
+    /// Resolve a kind by its `const ID`. Pure compile-time construction
+    /// under ADR-0030 Phase 2 — no host-fn round trip, never fails.
     #[must_use]
     pub const fn resolve<K: Kind>(&self) -> KindId<K> {
         resolve::<K>()
     }
 
-    /// Bind a mailbox name to kind `K`. Mirrors
-    /// [`Resolver::resolve_mailbox`].
+    /// Resolve a mailbox by name and bind it to kind `K`, producing a
+    /// typed [`Mailbox<K>`]. Pure compile-time construction; the returned
+    /// token is pure addressing.
     #[must_use]
     pub const fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K> {
         resolve_mailbox::<K>(name)
@@ -80,23 +82,9 @@ impl FfiInitCtx<'_> {
     // Issue 1987: the init ctx exposes no `actor()` / `resolve_actor()`
     // sender shortcut. A `FfiActorMailbox` is now a ctx-bound sender that
     // routes through the per-component inline registry, which the init
-    // stage does not hold — and init is mail-forbidden anyway (the ctx is
-    // `Resolver`-only by design). Addressing + sending begin at `wire`,
-    // where `FfiCtx` carries the registry.
-}
-
-impl Resolver for FfiInitCtx<'_> {
-    fn mailbox_id(&self) -> u64 {
-        self.mailbox
-    }
-
-    fn resolve<K: Kind>(&self) -> KindId<K> {
-        resolve::<K>()
-    }
-
-    fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K> {
-        resolve_mailbox::<K>(name)
-    }
+    // stage does not hold — and init is mail-forbidden anyway (the ctx
+    // carries no send surface by design). Addressing + sending begin at
+    // `wire`, where `FfiCtx` carries the registry.
 }
 
 /// A type-erased sendable handle to a cluster relative — the parent,
@@ -177,11 +165,10 @@ pub enum SpawnError {
 }
 
 /// Per-receive (and post-init `wire` / pre-shutdown `unwire`)
-/// capability handle for FFI guests. Exposes send, reply, and
-/// resolution primitives. Issue 703 added [`Resolver`] + a
-/// `mailbox_id` field so `wire`-stage explicit subscribes
-/// (sending [`SubscribeInput`](aether_kinds::SubscribeInput) to the
-/// `InputCapability`) can self-address.
+/// capability handle for FFI guests. Exposes send, reply, and the
+/// inherent [`mailbox_id`](FfiCtx::mailbox_id) so `wire`-stage explicit
+/// subscribes (sending [`SubscribeInput`](aether_kinds::SubscribeInput)
+/// to the `InputCapability`) can self-address.
 pub struct FfiCtx<'a, M: ReplyMode = Single> {
     mailbox: u64,
     sender: Option<u32>,
@@ -301,6 +288,16 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
     /// [`OutboundReply::reply_target`].
     pub fn reply_target(&self) -> Option<ReplyHandle> {
         self.sender.map(ReplyHandle::__from_raw)
+    }
+
+    /// The component's own mailbox id — the value the substrate uses to
+    /// address `receive` calls to this instance. `wire`-stage explicit
+    /// subscribes (sending
+    /// [`SubscribeInput`](aether_kinds::SubscribeInput) to the
+    /// `InputCapability`) self-address through this.
+    #[must_use]
+    pub fn mailbox_id(&self) -> u64 {
+        self.mailbox
     }
 
     /// Singleton sender shortcut. Returns a ctx-bound [`FfiActorMailbox`]
@@ -623,20 +620,6 @@ where
     }
 }
 
-impl<M: ReplyMode> Resolver for FfiCtx<'_, M> {
-    fn mailbox_id(&self) -> u64 {
-        self.mailbox
-    }
-
-    fn resolve<K: Kind>(&self) -> KindId<K> {
-        resolve::<K>()
-    }
-
-    fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K> {
-        resolve_mailbox::<K>(name)
-    }
-}
-
 // ADR-0114 addressing amendment: every `FfiCtx` send resolves the recipient
 // id then routes through the inline registry's `route_or_enqueue`, so a send
 // to a cluster member (own id or a resident inline-child alias) dispatches in
@@ -680,7 +663,7 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
     }
 
     //noinspection DuplicatedCode
-    // Runtime-name send escape hatch (the `Resolver::send_to_named` contract):
+    // Runtime-name send escape hatch (the `MailSender::send_to_named` contract):
     // the recipient name is supplied at runtime, no compile-time `R` to resolve.
     #[allow(clippy::disallowed_methods)]
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
@@ -904,7 +887,7 @@ impl MailSender for FfiDropCtx<'_> {
     }
 
     //noinspection DuplicatedCode
-    // Runtime-name send escape hatch (the `Resolver::send_to_named` contract):
+    // Runtime-name send escape hatch (the `MailSender::send_to_named` contract):
     // the recipient name is supplied at runtime, no compile-time `R` to resolve.
     #[allow(clippy::disallowed_methods)]
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
@@ -972,10 +955,10 @@ mod tests {
         FfiCtx, InlineRegistry, Manual, NO_INBOUND_SOURCE, Single, SpawnError, install_inline_child,
     };
     use crate::Actor;
-    use crate::actor::ctx::{OutboundReply, Resolver};
+    use crate::actor::ctx::OutboundReply;
     use crate::actor::{Instanced, Subname};
     use crate::ffi::inline::RouteDecision;
-    use crate::ffi::{BootError, ErasedFfiActor, FfiActor, FfiDropCtx};
+    use crate::ffi::{BootError, ErasedFfiActor, FfiActor, FfiDropCtx, FfiInitCtx};
     use crate::mail::{Mail, PriorState};
     use aether_data::MailboxId;
     use alloc::string::String;
@@ -997,10 +980,7 @@ mod tests {
         type Config = ();
         type State = ();
 
-        fn init<C>(_config: (), _ctx: &mut C) -> Result<Self, BootError>
-        where
-            C: Resolver,
-        {
+        fn init(_config: (), _ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
             Err(BootError::new("inline child init deliberately fails"))
         }
     }
@@ -1080,10 +1060,7 @@ mod tests {
         type Config = ();
         type State = ();
 
-        fn init<C>(_config: (), _ctx: &mut C) -> Result<Self, BootError>
-        where
-            C: Resolver,
-        {
+        fn init(_config: (), _ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self)
         }
     }

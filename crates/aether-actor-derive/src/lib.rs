@@ -2004,8 +2004,8 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     let mut init_method = init_method.ok_or_else(|| {
         syn::Error::new_spanned(
             self_ty,
-            "#[actor] requires `fn init<C: Resolver>(ctx: &mut C) -> Result<Self, BootError>` \
-             (or, with `type Config = T`, `fn init<C: Resolver>(config: T, ctx: &mut C) -> …`)",
+            "#[actor] requires `fn init(ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError>` \
+             (or, with `type Config = T`, `fn init(config: T, ctx: &mut FfiInitCtx<'_>) -> …`)",
         )
     })?;
 
@@ -2108,7 +2108,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     // init alone — they're expected to spell out the `config` param. If
     // they omitted it, the macro synthesizes `type Config = ();` AND
     // injects a `_config: ()` leading param so the user's pre-#1256 body
-    // (`fn init<C>(ctx: &mut C) -> …`) keeps compiling. The emitted shim
+    // (`fn init(ctx: &mut FfiInitCtx<'_>) -> …`) keeps compiling. The emitted shim
     // always decodes `<Self as FfiActor>::Config` from bytes, so the
     // synthesized `_config: ()` path round-trips uniformly via
     // `impl Kind for ()`.

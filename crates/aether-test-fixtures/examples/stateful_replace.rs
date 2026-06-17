@@ -21,8 +21,8 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, FfiDropCtx, Instanced, Mail, Manual, OutboundReply, PriorState,
-    Resolver, actor,
+    BootError, FfiActor, FfiCtx, FfiDropCtx, FfiInitCtx, Instanced, Mail, Manual, OutboundReply,
+    PriorState, actor,
 };
 use aether_test_fixtures::{Bump, CountQuery, CountReport};
 
@@ -36,10 +36,7 @@ pub struct Counter {
 impl FfiActor for Counter {
     const NAMESPACE: &'static str = "stateful.counter";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Counter { count: 0 })
     }
 
@@ -86,10 +83,7 @@ impl Instanced for Sidecar {}
 impl FfiActor for Sidecar {
     const NAMESPACE: &'static str = "stateful.sidecar";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Sidecar)
     }
 

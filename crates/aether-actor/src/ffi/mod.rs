@@ -55,7 +55,6 @@
 use alloc::borrow::Cow;
 use alloc::string::String;
 
-use crate::actor::ctx::Resolver;
 use core::fmt;
 
 pub mod bridge;
@@ -180,13 +179,13 @@ pub trait FfiActor: crate::Actor {
     /// `ctx.subscribe_input::<K>()` for every `K::IS_INPUT` handler
     /// kind so the user body never needs to do it by hand.
     ///
-    /// Issue 663 phase D: the ctx parameter is generic — implementations
-    /// program against the [`Resolver`] + [`MailSender`](crate::MailSender) trait surface
-    /// rather than naming a concrete ctx type. The [`crate::export!`]
-    /// macro constructs a [`FfiInitCtx`] and Rust infers `C` at the
-    /// call site; user code never spells the ctx struct directly, so
-    /// future hosts beyond wasm can be plugged in without touching the
-    /// trait.
+    /// Concrete `&mut FfiInitCtx<'_>`, symmetric with [`Self::wire`] and
+    /// native's `NativeActor::init(config, ctx: &mut NativeInitCtx<'_>)`.
+    /// The [`crate::export!`] macro constructs the [`FfiInitCtx`] and
+    /// passes it in; user bodies reach for the inherent
+    /// [`ctx.mailbox_id()`](FfiInitCtx::mailbox_id) /
+    /// [`ctx.resolve()`](FfiInitCtx::resolve) /
+    /// [`ctx.resolve_mailbox()`](FfiInitCtx::resolve_mailbox) directly.
     ///
     /// ADR-0090: the typed `Self::Config` arrives as the leading
     /// parameter, symmetric with `aether_substrate::NativeActor::init`.
@@ -200,13 +199,12 @@ pub trait FfiActor: crate::Actor {
     /// handle missing, malformed env var) can surface its own message
     /// in `LoadResult::Err { error }`.
     ///
-    /// Issue 703: the bound is `C: Resolver` only — init is the sync
-    /// constructor (ADR-0079) and must NOT mail. Use [`Self::wire`]
+    /// Issue 703: `FfiInitCtx` carries no send surface — init is the
+    /// sync constructor (ADR-0079) and must NOT mail. Use [`Self::wire`]
     /// for mail-driven setup (subscriptions, peer hellos, etc.).
-    fn init<C>(config: Self::Config, ctx: &mut C) -> Result<Self, BootError>
+    fn init(config: Self::Config, ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError>
     where
-        Self: Sized,
-        C: Resolver;
+        Self: Sized;
 
     /// Post-init mail-allowed hook (issue 584, ADR-0079 amended
     /// 2026-05-09). Runs after `init` returned `Ok` and the actor's
@@ -748,9 +746,9 @@ macro_rules! __export_internal {
         /// Mail-allowed — peer mailboxes are addressable. Receives the
         /// component's own mailbox id so the SDK ctx can self-address.
         ///
-        /// Issue 703: uses `FfiCtx` (Resolver + MailSender) so
+        /// Issue 703: uses `FfiCtx` (the send-capable runtime ctx) so
         /// `Subscriber::subscribe_input::<K>()` resolves; `FfiInitCtx`
-        /// is intentionally Resolver-only and can't mail.
+        /// carries no send surface and can't mail.
         #[cfg(target_arch = "wasm32")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn wire(mailbox_id: u64) -> u32 {

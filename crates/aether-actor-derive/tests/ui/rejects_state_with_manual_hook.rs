@@ -36,9 +36,7 @@ impl aether_actor::FfiActor for Counter {
 
     type State = CounterState;
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, aether_actor::BootError>
-    where
-        C: aether_actor::Resolver,
+    fn init(_ctx: &mut aether_actor::FfiInitCtx<'_>) -> Result<Self, aether_actor::BootError>
     {
         Ok(Counter { count: 0 })
     }

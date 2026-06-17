@@ -20,7 +20,7 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, Instanced, Mail, MailSender, Resolver, Subname, actor,
+    BootError, FfiActor, FfiCtx, FfiInitCtx, Instanced, Mail, MailSender, Subname, actor,
 };
 use aether_kinds::Ping;
 use aether_test_fixtures::{TEST_BENCH_OBSERVER_MAILBOX_NAME, TickObserved};
@@ -33,10 +33,7 @@ pub struct RootManager;
 impl FfiActor for RootManager {
     const NAMESPACE: &'static str = "ui.root";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(RootManager)
     }
 
@@ -63,10 +60,7 @@ impl Instanced for Panel {}
 impl FfiActor for Panel {
     const NAMESPACE: &'static str = "ui.panel";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Panel)
     }
 

@@ -27,7 +27,7 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, MailSender, MailboxId, Manual, OutboundReply, Resolver, actor,
+    BootError, FfiActor, FfiCtx, FfiInitCtx, MailSender, MailboxId, Manual, OutboundReply, actor,
 };
 use aether_test_fixtures::{
     SendSourceQuery, SourceQuery, SourceReport, TEST_BENCH_OBSERVER_MAILBOX_NAME,
@@ -39,10 +39,7 @@ pub struct SourceObserver;
 impl FfiActor for SourceObserver {
     const NAMESPACE: &'static str = "test.source_observer";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(SourceObserver)
     }
 

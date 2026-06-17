@@ -20,7 +20,7 @@
 // ignores `self` is correct but triggers `unused_self`.
 #![allow(clippy::needless_pass_by_value, clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
 use aether_kinds::{HttpServerRequest, HttpServerResponse};
 
 pub struct HttpHandler;
@@ -29,10 +29,7 @@ pub struct HttpHandler;
 impl FfiActor for HttpHandler {
     const NAMESPACE: &'static str = "web";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(HttpHandler)
     }
 

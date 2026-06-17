@@ -34,7 +34,7 @@
 // `self`; it keeps `&mut self` to match the `#[handler]` dispatch ABI.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, MailSender, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
@@ -52,10 +52,7 @@ pub struct Probe {
 impl FfiActor for Probe {
     const NAMESPACE: &'static str = "test_fixture_probe";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
-    where
-        C: Resolver,
-    {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Probe {
             tick_count: 0,
             render: SetRender::default(),
@@ -63,8 +60,8 @@ impl FfiActor for Probe {
     }
 
     //noinspection DuplicatedCode
-    /// Issue 640: explicit subscribe in `wire`; init is `Resolver`-only
-    /// post-issue-703 and can't mail.
+    /// Issue 640: explicit subscribe in `wire`; init can't mail (its ctx
+    /// has no send surface, issue 703).
     ///
     /// `Tick` is a frame-lifecycle stage, so it subscribes on
     /// `aether.lifecycle` (ADR-0082); `Key` is a genuine input interrupt,
