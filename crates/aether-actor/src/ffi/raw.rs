@@ -62,13 +62,6 @@ unsafe extern "C" {
     /// of this kind."
     #[link_name = "prev_correlation_p32"]
     pub fn prev_correlation() -> u64;
-    /// Resolve the source mailbox of the mail bound to `handle`. Returns
-    /// the sender's `MailboxId` raw value when the inbound mail originated
-    /// from a peer component (`SourceAddr::Component`); returns `0`
-    /// (`MailboxId::NONE`) for Session / EngineMailbox / None sources,
-    /// for `NO_REPLY_HANDLE`, and for unknown handles (issue 1958).
-    #[link_name = "source_of_p32"]
-    pub fn source_of(handle: u32) -> u64;
     /// Issue 525 Phase 4b / issue 531: stage a `BootError` message
     /// for the substrate to surface in `LoadResult::Err` after the
     /// guest's `init` returns non-zero. The `export!` macro is the
@@ -207,21 +200,6 @@ pub unsafe fn save_state(_version: u32, _ptr: u32, _len: u32) -> u32 {
 #[must_use]
 pub unsafe fn prev_correlation() -> u64 {
     panic!("aether-actor: prev_correlation called outside the FFI guest");
-}
-
-/// Host-side stub for the FFI `aether::source_of` import (issue 1958).
-/// Always panics — callers outside the FFI guest are misusing the SDK.
-///
-/// # Safety
-/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
-///
-/// # Panics
-/// Always panics — fail-fast per ADR-0063: the host build of the SDK
-/// has no FFI host to call, so any invocation is a bug.
-#[cfg(not(target_arch = "wasm32"))]
-#[must_use]
-pub unsafe fn source_of(_handle: u32) -> u64 {
-    panic!("aether-actor: source_of called outside the FFI guest");
 }
 
 /// Host-side stub for the FFI `aether::init_failed` import.

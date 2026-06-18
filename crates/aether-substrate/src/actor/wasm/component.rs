@@ -617,10 +617,16 @@ pub const DISPATCH_DROPPED_OVERSIZE: u32 = 2;
 /// `cabi_realloc`-shaped): `(old_ptr, old_size, align, new_size) -> ptr`.
 type ReallocFunc = TypedFunc<(u32, u32, u32, u32), u32>;
 
+/// The guest's mail-dispatch export (`receive_p32`):
+/// `(kind, ptr, byte_len, count, sender, recipient, source) -> rc`. The
+/// trailing `recipient` (ADR-0114) and `source` (issue 2001) frame slots
+/// thread the routed address and the resolved inbound source to the guest.
+type ReceiveFunc = TypedFunc<(u64, u32, u32, u32, u32, u64, u64), u32>;
+
 pub struct Component {
     store: Store<ComponentCtx>,
     memory: Memory,
-    receive: TypedFunc<(u64, u32, u32, u32, u32, u64), u32>,
+    receive: ReceiveFunc,
     /// Issue 584 Phase 2b: post-init mail-allowed hook. Stored (rather
     /// than called inside [`Self::instantiate`]) so the trampoline
     /// can fire it AFTER its mailbox is registered — issue 640
@@ -817,8 +823,10 @@ impl Component {
         let memory = instance
             .get_memory(&mut store, "memory")
             .ok_or_else(|| wasmtime::Error::msg("guest exports no `memory`"))?;
-        let receive = instance
-            .get_typed_func::<(u64, u32, u32, u32, u32, u64), u32>(&mut store, "receive_p32")?;
+        let receive = instance.get_typed_func::<(u64, u32, u32, u32, u32, u64, u64), u32>(
+            &mut store,
+            "receive_p32",
+        )?;
 
         // Optional `init(mailbox_id) -> u32` export: called once before
         // the first `receive`, handed the component's own mailbox id so
@@ -1030,6 +1038,20 @@ impl Component {
     /// Broadcast-origin and system-generated mail pass
     /// `NO_REPLY_HANDLE` so the guest's `mail.reply_handle()` accessor
     /// returns `None`.
+    /// Resolve the inbound mail's source `MailboxId` for the trailing
+    /// `receive_p32` frame slot (issue 2001). A peer-component origin
+    /// (`SourceAddr::Component`) yields that mailbox's raw id; every other
+    /// origin — session, remote engine, or no reply target — yields
+    /// `MailboxId::NONE.0` (0). Mirrors what `source_of_p32` resolved from
+    /// the reply table, but reads the inbound's `SourceAddr` directly (the
+    /// same value the reply entry is built from) without a table lookup.
+    fn resolve_inbound_source(addr: &SourceAddr) -> u64 {
+        match addr {
+            SourceAddr::Component(m) => m.0,
+            _ => MailboxId::NONE.0,
+        }
+    }
+
     pub fn deliver(&mut self, mail: &Mail) -> wasmtime::Result<u32> {
         // ADR-0042: carry the incoming correlation through to the
         // ReplyEntry so a subsequent `reply_mail` echoes it on the
@@ -1110,10 +1132,18 @@ impl Component {
         // fixtures) doesn't accidentally pick up stale lineage.
         self.store.data().set_in_flight(mail.mail_id, mail.root);
         // ADR-0114 decision #1: thread the routed recipient through to
-        // the guest as the trailing `receive_p32` frame slot so a guest
-        // handler (and the inline-child membrane) can read which address
-        // the mail was sent to. For a normally-addressed actor this equals
-        // the actor's own mailbox id.
+        // the guest as a `receive_p32` frame slot so a guest handler (and
+        // the inline-child membrane) can read which address the mail was
+        // sent to. For a normally-addressed actor this equals the actor's
+        // own mailbox id.
+        //
+        // Issue 2001: thread the resolved inbound source as the trailing
+        // slot too, so the guest's `FfiCtx::source_mailbox` is a single
+        // ctx-field read on both the in-place and top-level paths and the
+        // `source_of_p32` host round-trip can be retired. Resolved exactly
+        // as `source_of_p32` did — a peer-component origin yields its
+        // `MailboxId`, every other origin yields `MailboxId::NONE`.
+        let source = Self::resolve_inbound_source(&mail.reply_to.addr);
         let result = self.receive.call(
             &mut self.store,
             (
@@ -1123,6 +1153,7 @@ impl Component {
                 mail.count,
                 handle,
                 mail.recipient.0,
+                source,
             ),
         );
         self.store.data().clear_in_flight();
@@ -1409,7 +1440,7 @@ mod tests {
     const WAT_HOOKS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 i32.const 0)
             (func (export "on_dehydrate") (result i32)
                 i32.const 200
@@ -1421,7 +1452,7 @@ mod tests {
     const WAT_NO_HOOKS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 i32.const 0))
     "#;
 
@@ -1466,7 +1497,7 @@ mod tests {
         (module
             (memory (export "memory") 1)
             {WAT_REALLOC}
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 i32.const 16
                 local.get 1
                 i32.store
@@ -1492,7 +1523,7 @@ mod tests {
         (module
             (memory (export "memory") 1)
             {WAT_REALLOC}
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 i32.const 0)
             (func (export "init_with_config_p32") (param i64 i32 i32) (result i32)
                 ;; *(u32*)200 = low32(mailbox_id)
@@ -1542,7 +1573,7 @@ mod tests {
     const WAT_INIT_CONFIG_NO_ALLOC: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 i32.const 0)
             (func (export "init_with_config_p32") (param i64 i32 i32) (result i32)
                 i32.const 204
@@ -1562,7 +1593,7 @@ mod tests {
     const WAT_WIRE_UNWIRE: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 i32.const 0)
             (func (export "wire") (param i64) (result i32)
                 i32.const 100
@@ -1589,7 +1620,7 @@ mod tests {
     const WAT_WIRE_TRAPS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 i32.const 0)
             (func (export "wire") (param i64) (result i32)
                 unreachable))
@@ -1601,7 +1632,7 @@ mod tests {
     const WAT_UNWIRE_TRAPS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 i32.const 0)
             (func (export "unwire") (param i64) (result i32)
                 unreachable))
@@ -1615,7 +1646,7 @@ mod tests {
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (data (i32.const 300) "\de\ad\be\ef")
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 i32.const 0)
             (func (export "on_dehydrate") (result i32)
                 (drop (call $save_state
@@ -1633,7 +1664,7 @@ mod tests {
             (import "aether" "save_state_p32"
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 i32.const 0)
             (func (export "on_dehydrate") (result i32)
                 (drop (call $save_state
@@ -1654,7 +1685,7 @@ mod tests {
         (module
             (memory (export "memory") 1)
             {WAT_REALLOC}
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 i32.const 0)
             (func (export "on_rehydrate_p32") (param i32 i32 i32) (result i32)
                 ;; *(u32*)396 = version
@@ -1680,7 +1711,7 @@ mod tests {
         (module
             (memory (export "memory") 1)
             {WAT_REALLOC}
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 i32.const 500
                 local.get 4
                 i32.store
@@ -1700,7 +1731,7 @@ mod tests {
         (module
             (memory (export "memory") 1)
             {WAT_REALLOC}
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 i32.const 500
                 local.get 5
                 i32.wrap_i64
@@ -1724,7 +1755,7 @@ mod tests {
                 (func $reply_mail (param i32 i64 i32 i32 i32 i64) (result i32)))
             (memory (export "memory") 1)
             {WAT_REALLOC}
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 (drop (call $reply_mail
                     (local.get 4) ;; sender handle from receive param
                     (i64.const {kind_id}) ;; hashed kind id of "test.pong"
@@ -2146,20 +2177,20 @@ mod tests {
         );
     }
 
-    /// WAT fixture that imports `source_of_p32`, calls it with the sender
-    /// handle from `receive_p32`, and stores the low 32 bits of the result
-    /// at offset 500 for the host test to read back.
-    fn wat_calls_source_of() -> String {
+    /// Issue 2001: `receive` stores the low 32 bits of the `source` param
+    /// (the 7th, an `i64`) at offset 500 so the test can observe the
+    /// resolved inbound source the substrate threaded through. Mirrors
+    /// [`wat_stores_recipient`]. Exports `realloc_p32` so even an empty
+    /// mail has a (non-null) region to be placed in.
+    fn wat_stores_source() -> String {
         format!(
             r#"
         (module
-            (import "aether" "source_of_p32"
-                (func $source_of (param i32) (result i64)))
             (memory (export "memory") 1)
             {WAT_REALLOC}
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 i32.const 500
-                (call $source_of (local.get 4))
+                local.get 6
                 i32.wrap_i64
                 i32.store
                 i32.const 0))
@@ -2167,30 +2198,32 @@ mod tests {
         )
     }
 
-    // Issue 1958: `source_of_p32` returns the component sender's raw
-    // MailboxId when the entry is `Component`, and `0` for Session /
-    // unknown / `NO_REPLY_HANDLE`.
+    /// Issue 2001 end-to-end through the dispatch unit path: `deliver`
+    /// resolves the inbound `SourceAddr` and threads it as the trailing
+    /// `receive_p32` slot. A peer-component origin yields that mailbox's
+    /// raw id; a session / engine / no-reply origin yields `0`
+    /// (`MailboxId::NONE`) — the same contract `source_of_p32` had.
     #[test]
-    fn source_of_component_entry_returns_mailbox_id() {
+    fn deliver_threads_component_source_to_guest() {
         use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
 
-        let mut component = instantiate(&wat_calls_source_of());
+        let mut component = instantiate(&wat_stores_source());
         let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
-            .with_reply_to(Source::to(SourceAddr::Component(M(42))));
+            .with_reply_to(Source::to(SourceAddr::Component(M(0x9999_0000_1234_5678))));
         component.deliver(&mail).expect("deliver");
         assert_eq!(
             component.read_u32(500),
-            42,
-            "Component entry must return the MailboxId raw value"
+            0x1234_5678,
+            "guest must receive the peer-component source's low word as the 7th receive param",
         );
     }
 
     #[test]
-    fn source_of_session_entry_returns_zero() {
+    fn deliver_threads_zero_source_for_session_origin() {
         use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
         use aether_data::{SessionToken, Uuid};
 
-        let mut component = instantiate(&wat_calls_source_of());
+        let mut component = instantiate(&wat_stores_source());
         let token = SessionToken(Uuid::from_u128(0xdead));
         let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
             .with_reply_to(Source::to(SourceAddr::Session(token)));
@@ -2198,25 +2231,25 @@ mod tests {
         assert_eq!(
             component.read_u32(500),
             0,
-            "Session entry must return 0 (MailboxId::NONE)"
+            "a session origin must thread 0 (MailboxId::NONE) as the source param",
         );
     }
 
     #[test]
-    fn source_of_no_sender_returns_zero() {
-        use crate::actor::wasm::reply_table::NO_REPLY_HANDLE;
+    fn deliver_threads_zero_source_for_no_reply_target() {
         use crate::mail::{Mail as SubstrateMail, MailboxId as M};
 
-        let mut component = instantiate(&wat_calls_source_of());
-        // No reply target → guest gets NO_REPLY_HANDLE → source_of must return 0.
+        let mut component = instantiate(&wat_stores_source());
+        // No reply target → SourceAddr::None → source param is 0. The guest's
+        // store overwrites offset 500 with the threaded 0 regardless of any
+        // prior value, proving the substrate threaded NONE.
         let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1);
         component.deliver(&mail).expect("deliver");
-        // Pre-fill offset 500 to a non-zero sentinel to prove a write happened.
-        // The guest's i32.store writes AFTER source_of returns — if it returned
-        // 0 the store will overwrite any prior value with 0. We can't pre-seed
-        // via `read_u32` alone, so just assert the post-deliver value is 0.
-        let _ = NO_REPLY_HANDLE; // used implicitly through the test fixture
-        assert_eq!(component.read_u32(500), 0, "NO_REPLY_HANDLE must return 0");
+        assert_eq!(
+            component.read_u32(500),
+            0,
+            "a no-reply-target origin must thread 0 as the source param",
+        );
     }
 
     fn plane_ctx_for_reply() -> (ComponentCtx, Receiver<EgressEvent>, aether_data::KindId) {
