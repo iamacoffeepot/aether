@@ -24,8 +24,11 @@ use serde::{Deserialize, Serialize};
 /// / issue 1984) carries no struct change — it invalidates entries whose
 /// stored `kind_id` was computed under the pre-wire canonical bytes,
 /// since moving the `Kind::ID` hash input onto the aether-wire format
-/// regenerates every id. Pre-1.0 this is a wipe, not a migrate.
-pub const SCHEMA_VERSION: u8 = 3;
+/// regenerates every id. v4 (ADR-0118 §Envelope) drops the per-value
+/// `WIRE_VERSION` byte the stored `.bin` payloads carried, so prior
+/// entries (whose bodies open with the now-absent byte) invalidate
+/// rather than misparse. Pre-1.0 this is a wipe, not a migrate.
+pub const SCHEMA_VERSION: u8 = 4;
 
 /// Postcard-encoded sidecar describing one persistent handle. Written
 /// atomically next to the handle's `<hash>.bin` payload; the boot scan
@@ -85,8 +88,10 @@ pub struct TransformOrigin {
 /// directory scan rather than trusting a stale-format snapshot. Tracked
 /// independently of [`SCHEMA_VERSION`] (the per-entry `.meta` version):
 /// `index.bin` is a derived summary, so its layout can evolve without
-/// touching the authoritative sidecars.
-pub const INDEX_FORMAT_VERSION: u8 = 1;
+/// touching the authoritative sidecars. Bumped to 2 alongside the
+/// `SCHEMA_VERSION` v4 wire-byte drop (ADR-0118 §Envelope) so a stale
+/// snapshot from a prior binary falls back to a directory scan.
+pub const INDEX_FORMAT_VERSION: u8 = 2;
 
 /// One entry in the [`IndexSnapshot`] boot fast-path summary — a flat
 /// mirror of the in-memory `DiskEntry`, keyed by raw `u64` handle id in
@@ -157,8 +162,9 @@ mod tests {
             entries,
         };
         let bytes = wire::to_vec(&snapshot).expect("snapshot encodes");
-        // Byte 0 is the wire format-version envelope; schema_version is at index 1.
-        assert_eq!(bytes[1], INDEX_FORMAT_VERSION);
+        // The wire image is unversioned (ADR-0118); schema_version is the
+        // first field, at index 0.
+        assert_eq!(bytes[0], INDEX_FORMAT_VERSION);
         let decoded: IndexSnapshot = wire::from_bytes(&bytes).expect("snapshot decodes");
         assert_eq!(decoded, snapshot);
     }

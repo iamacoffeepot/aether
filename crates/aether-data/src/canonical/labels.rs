@@ -1,7 +1,7 @@
 //! Canonical `KindLabels` sidecar serializer (ADR-0032). Produces
 //! ADR-0118 aether-wire bytes for the `aether.kinds.labels` custom
 //! section at const-eval time, matching the substrate/hub runtime
-//! decode via `wire::from_bytes_bare::<KindLabels>`.
+//! decode via `wire::from_bytes::<KindLabels>`.
 
 use crate::schema::{KindLabels, LabelCell, LabelNode, VariantLabel};
 

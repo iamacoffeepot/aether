@@ -1077,7 +1077,6 @@ mod tests {
     use crate::mail::{KindId, MailRef};
     use crate::scheduler::{SeizeSeed, SlotState, SpinPark};
     use crate::test_util::fresh_substrate;
-    use aether_data::wire::WIRE_VERSION;
     use aether_data::{KindDescriptor, MailId, SchemaCell, SchemaType};
     use crossbeam_deque::{Injector, Steal};
     use std::sync::mpsc;
@@ -1299,11 +1298,12 @@ mod tests {
             })
             .expect("fresh ref kind registers");
 
-        // A valid versioned wire `Ref::Inline(empty)` image: version byte,
-        // u32 selector 0, u32 inline-length 0. The ref-walk resolves it
-        // (no substitution), and the deposit inbox forwards the resolved
-        // payload's first byte — the retained version byte.
-        let mut ref_payload = vec![WIRE_VERSION];
+        // A valid wire `Ref::Inline(empty)` image (unversioned, ADR-0118
+        // §Envelope): u32 selector 0, u32 inline-length 0. The ref-walk
+        // resolves it (no substitution), and the deposit inbox forwards
+        // the resolved payload's first byte — the inline selector's low
+        // byte (0).
+        let mut ref_payload: Vec<u8> = Vec::new();
         ref_payload.extend_from_slice(&0u32.to_le_bytes()); // inline selector
         ref_payload.extend_from_slice(&0u32.to_le_bytes()); // inline length
         let mut producer = BlobProducer::new(Arc::clone(&mailer), wake_sink(&injector));
@@ -1316,7 +1316,7 @@ mod tests {
         );
         assert_eq!(
             deposit_rx.try_recv().ok(),
-            Some(WIRE_VERSION),
+            Some(0u8),
             "ref kind deposited for the ref-walk"
         );
     }

@@ -103,27 +103,32 @@ cast kind's inline value stays a cast image.
 
 ### Envelope
 
-One **format-version byte** prefixes each top-level encoded payload. It is
-distinct from kind identity (`KindId` already versions the *schema*); the version
-byte versions the *encoding*, so the format can evolve without ambiguity, and
-"is this aether wire or garbage" stays decidable. It is per-message, not
-per-value.
+The encoding is **unversioned on the wire** — no per-payload format-version byte.
+Format agreement is settled out of band: between binaries the RPC handshake
+negotiates a `wire_version` once per connection (`aether-rpc` `Hello`/`HelloAck`)
+and kicks a mismatched peer, so two peers on the same handshake version share the
+same wire format by construction; within one binary the encoding is fixed at
+compile time and the schema is present on both ends. A per-payload byte buys
+nothing those two mechanisms don't already guarantee, and removing it collapses
+the `to_vec`/`from_bytes` family into one (no `bare`/non-`bare` split). Every
+kind image — the top-level payload, a nested inline-`Ref` body, a retained
+handle body — is read from the front with no version prefix; interior values
+(scalars, fields, collection elements, the `Ref` handle arm) were never
+versioned and still aren't.
 
-A nested inline-`Ref` body — and the bytes the handle store retains for a
-handle — is itself a versioned kind image, so the version byte recurs at every
-*kind-image* boundary (the top-level payload, a nested inline-`Ref` body, a
-retained handle body) and never on interior values (scalars, fields, collection
-elements, the `Ref` handle arm). Every reader strips the byte on entering a kind
-image; no reader assumes a bare body.
-
-The build-time **manifest sections** — `aether.kinds`, `aether.kinds.labels`,
-`aether.kinds.inputs` — sit outside this envelope. Each carries a per-section
-version byte for its own encoding evolution and hashes the *bare* structural
-body (`wire::to_vec_bare`, no leading version byte) into `KindId`. Holding the
-encoding-version out of the hash keeps `KindId` a function of the schema alone:
-a future encoding-only `WIRE_VERSION` bump re-frames mail-path kind images while
-every manifest id stays put, and an id regenerates only when the canonical bytes
-themselves change — as they do at the postcard→wire cutover of these sections.
+Two version mechanisms remain, each scoped to where it earns its keep. The
+build-time **manifest sections** — `aether.kinds`, `aether.kinds.labels`,
+`aether.kinds.inputs` — each carry a per-section version byte for their own
+encoding evolution, and hash the structural body (`wire::to_vec`) into `KindId`;
+the section byte is held out of the hash so `KindId` stays a function of the
+schema alone and an id regenerates only when the canonical bytes themselves
+change. The **handle store** versions itself at the meta level — `HandleMeta`'s
+`schema_version` (vs `SCHEMA_VERSION`), `index.bin`'s `INDEX_FORMAT_VERSION`, the
+`v1/` layout dir, and the stored `kind_id` vs the live registry — so a binary
+reading bytes its past self wrote detects staleness without a per-value byte;
+prior on-disk entries invalidate-and-drop on a `SCHEMA_VERSION` bump. A proper
+versioned file format for the handle store is future work; the meta-level
+versioning carries persistence versioning for now.
 
 ### Determinism
 

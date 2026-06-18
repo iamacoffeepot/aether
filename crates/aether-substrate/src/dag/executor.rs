@@ -41,7 +41,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use aether_data::wire::{self, WIRE_VERSION};
+use aether_data::wire;
 use aether_data::{
     DagId, HandleId, KindId, MailId, MailboxId, Ref, SchemaType, Tag, TransformId,
     content_addressed_handle_id, with_tag,
@@ -1342,12 +1342,11 @@ fn assemble_request(
     let by_id: HashMap<NodeId, &Node> =
         state.descriptor.nodes.iter().map(|n| (n.id(), n)).collect();
 
-    // The assembled request is one wire kind image: a single leading
-    // `WIRE_VERSION` byte (ADR-0118), then each slot's `Ref::Handle`
-    // encoded **bare** as an interior value and concatenated in
-    // declaration order — exactly what `wire::to_vec` of a struct of
-    // `Ref` fields produces.
-    let mut out: Vec<u8> = vec![WIRE_VERSION];
+    // The assembled request is one unversioned wire kind image
+    // (ADR-0118 §Envelope): each slot's `Ref::Handle` encoded as an
+    // interior value and concatenated in declaration order — exactly what
+    // `wire::to_vec` of a struct of `Ref` fields produces.
+    let mut out: Vec<u8> = Vec::new();
     for (slot_index, cell) in ref_slot_cells.iter().enumerate() {
         let slot = u32::try_from(slot_index).unwrap_or(u32::MAX);
         let from = slot_source.get(&slot)?;
@@ -1355,7 +1354,7 @@ fn assemble_request(
         let stamp = producer_output_kind(by_id.get(from).copied(), registry, cell);
         // The Handle variant carries no `K`, so any `Kind` marker works
         // (`Ref<K>`'s serde needs `K: Kind` post-ADR-0100, and the unit
-        // kind is the zero-cost marker) — emit the bare wire
+        // kind is the zero-cost marker) — emit the wire
         // `Ref::Handle { id, kind_id }` (`u32` selector 1 + two 8-LE
         // ids). The walk-and-resolve path validates against the *field's*
         // expected type at dispatch, splicing the stored bytes inline
@@ -1364,7 +1363,7 @@ fn assemble_request(
             id: handle.0,
             kind_id: stamp.0,
         };
-        let mut field_bytes = wire::to_vec_bare(&r).ok()?;
+        let mut field_bytes = wire::to_vec(&r).ok()?;
         out.append(&mut field_bytes);
     }
     Some(out)
@@ -1569,8 +1568,8 @@ mod assemble_tests {
         DagState::new(DagId(1), validated, handles)
     }
 
-    /// Decode the single emitted `Ref::Handle` from an assembled payload:
-    /// strip the leading `WIRE_VERSION` byte, then read the bare `Ref`.
+    /// Decode the single emitted `Ref::Handle` from an assembled payload
+    /// (an unversioned wire image, ADR-0118 §Envelope).
     fn decode_stamp(payload: &[u8]) -> (u64, u64) {
         let r: Ref<()> = wire::from_bytes(payload).expect("decode Ref wire");
         match r {

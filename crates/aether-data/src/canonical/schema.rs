@@ -9,7 +9,7 @@
 //! can't silently change the wire without showing up here too. They are
 //! the serde `variant_index` of the matching `SchemaShape`/`VariantShape`
 //! arm, written as a fixed `u32` little-endian selector — so the
-//! const-fn output stays byte-identical to `wire::to_vec_bare(KindShape)`,
+//! const-fn output stays byte-identical to `wire::to_vec(KindShape)`,
 //! and the substrate/hub `SchemaShape` enum must keep the same order.
 
 use crate::schema::{EnumVariant, Primitive, SchemaCell, SchemaType};
@@ -57,7 +57,7 @@ const PRIM_F64: u8 = 9;
 
 /// Byte length the canonical schema encoding will take. Each `SchemaShape`
 /// arm is a `u32` little-endian selector (`U32_WIDTH` bytes) followed by its
-/// positional body — the wire encoding `wire::to_vec_bare(SchemaShape)`
+/// positional body — the wire encoding `wire::to_vec(SchemaShape)`
 /// produces.
 #[must_use]
 pub const fn canonical_len_schema(schema: &SchemaType) -> usize {
@@ -189,7 +189,7 @@ pub const fn canonical_serialize_kind<const N: usize>(name: &str, schema: &Schem
 /// manifest, where the length isn't const and the `Cow` variants on
 /// the input are `Owned` (const-path helpers panic on those).
 ///
-/// Implementation goes `SchemaType → SchemaShape → wire::to_vec_bare`.
+/// Implementation goes `SchemaType → SchemaShape → wire::to_vec`.
 /// The canonical bytes are the bare aether-wire body of `KindShape {
 /// name, schema: shape }`, and `SchemaShape` drops every nominal field
 /// the const serializer also drops, so the two paths produce
@@ -198,7 +198,7 @@ pub const fn canonical_serialize_kind<const N: usize>(name: &str, schema: &Schem
 ///
 /// # Panics
 /// Panics if wire encoding of the `KindShape` fails — fail-fast per
-/// ADR-0063: `wire::to_vec_bare` into a growable `Vec` fails only when a
+/// ADR-0063: `wire::to_vec` into a growable `Vec` fails only when a
 /// length exceeds the `u32` ceiling, unreachable for a `KindShape`, so a
 /// failure indicates a serializer bug.
 #[must_use]
@@ -207,7 +207,7 @@ pub fn canonical_kind_bytes(name: &str, schema: &SchemaType) -> Vec<u8> {
         name: Cow::Owned(name.into()),
         schema: schema_to_shape(schema),
     };
-    wire::to_vec_bare(&shape).expect("canonical KindShape serialization is infallible")
+    wire::to_vec(&shape).expect("canonical KindShape serialization is infallible")
 }
 
 fn schema_to_shape(s: &SchemaType) -> SchemaShape {
@@ -290,12 +290,12 @@ pub fn kind_id_from_parts(name: &str, schema: &SchemaType) -> u64 {
 ///
 /// # Panics
 /// Panics if wire encoding of `shape` fails — fail-fast per ADR-0063:
-/// `wire::to_vec_bare` into a growable `Vec` fails only when a length
+/// `wire::to_vec` into a growable `Vec` fails only when a length
 /// exceeds the `u32` ceiling, unreachable for a `KindShape`, so a
 /// failure indicates a serializer bug.
 #[must_use]
 pub fn kind_id_from_shape(shape: &KindShape) -> u64 {
-    let bytes = wire::to_vec_bare(shape).expect("canonical KindShape serialization is infallible");
+    let bytes = wire::to_vec(shape).expect("canonical KindShape serialization is infallible");
     (u64::from(TAG_KIND) << TAG_SHIFT) | (fnv1a_64_prefixed(KIND_DOMAIN, &bytes) & HASH_MASK)
 }
 

@@ -886,8 +886,8 @@ pub mod __derive_runtime {
     /// `Option` / a tagged enum). `T` satisfies `DeserializeOwned`
     /// via the user's `#[derive(Deserialize)]`; the bound lives on
     /// this helper rather than on `Kind` so cast kinds stay
-    /// independent of `serde`. Strips the leading `WIRE_VERSION` byte
-    /// (ADR-0118) before reading the value.
+    /// independent of `serde`. Reads the unversioned wire body
+    /// (ADR-0118) directly.
     #[must_use]
     pub fn decode_wire<T: DeserializeOwned>(bytes: &[u8]) -> Option<T> {
         wire::from_bytes(bytes).ok()
@@ -904,7 +904,7 @@ pub mod __derive_runtime {
 
     /// Wire-shape encode helper. Mirror of `decode_wire`. The
     /// `Serialize` bound lives here, not on `Kind`, so cast kinds stay
-    /// independent of `serde`. Prepends the leading `WIRE_VERSION` byte
+    /// independent of `serde`. Emits the unversioned wire body
     /// (ADR-0118); encoding fails only past the `u32` length ceiling.
     pub fn encode_wire<T: serde::Serialize>(value: &T) -> Vec<u8> {
         wire::to_vec(value).expect("wire encode to Vec fails only past the u32 length ceiling")
@@ -1188,10 +1188,11 @@ mod tests {
         let handle: Ref<TestStruct> = Ref::Handle { id: 1, kind_id: 1 };
         let inline_bytes = wire::to_vec(&inline).expect("test setup: wire encodes Inline Ref");
         let handle_bytes = wire::to_vec(&handle).expect("test setup: wire encodes Handle Ref");
-        // Selector is a u32 LE at bytes[1..5] (after the version byte at bytes[0]).
+        // Selector is a u32 LE at bytes[0..4] (the image is unversioned,
+        // ADR-0118 §Envelope).
         assert_eq!(
             u32::from_le_bytes(
-                inline_bytes[1..5]
+                inline_bytes[0..4]
                     .try_into()
                     .expect("selector slice is always 4 bytes"),
             ),
@@ -1200,7 +1201,7 @@ mod tests {
         );
         assert_eq!(
             u32::from_le_bytes(
-                handle_bytes[1..5]
+                handle_bytes[0..4]
                     .try_into()
                     .expect("selector slice is always 4 bytes"),
             ),
@@ -1225,10 +1226,11 @@ mod tests {
         };
         let r: Ref<TestPod> = Ref::Inline(v);
         let bytes = wire::to_vec(&r).expect("test setup: wire encodes Inline Ref<TestPod>");
-        // Selector is a u32 LE at bytes[1..5]; length is a u32 LE at bytes[5..9].
+        // Selector is a u32 LE at bytes[0..4]; length is a u32 LE at
+        // bytes[4..8] (the image is unversioned, ADR-0118 §Envelope).
         assert_eq!(
             u32::from_le_bytes(
-                bytes[1..5]
+                bytes[0..4]
                     .try_into()
                     .expect("selector slice is always 4 bytes"),
             ),
@@ -1237,7 +1239,7 @@ mod tests {
         );
         assert_eq!(
             u32::from_le_bytes(
-                bytes[5..9]
+                bytes[4..8]
                     .try_into()
                     .expect("length slice is always 4 bytes"),
             ),
@@ -1245,7 +1247,7 @@ mod tests {
             "u32 LE length prefix of the 8-byte cast image",
         );
         assert_eq!(
-            &bytes[9..],
+            &bytes[8..],
             bytemuck::bytes_of(&v),
             "inline body is the cast image, not a wire-encoded image"
         );
@@ -1261,10 +1263,11 @@ mod tests {
             kind_id: TestPod::ID.0,
         };
         let bytes = wire::to_vec(&r).expect("test setup: wire encodes Handle Ref<TestPod>");
-        // Selector is a u32 LE at bytes[1..5].
+        // Selector is a u32 LE at bytes[0..4] (the image is unversioned,
+        // ADR-0118 §Envelope).
         assert_eq!(
             u32::from_le_bytes(
-                bytes[1..5]
+                bytes[0..4]
                     .try_into()
                     .expect("selector slice is always 4 bytes"),
             ),

@@ -13,36 +13,27 @@ use alloc::vec::Vec;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
 
-use super::{
-    Error, WIRE_VERSION, from_bytes, from_bytes_bare, take_from_bytes, take_from_bytes_bare,
-    to_vec, to_vec_bare,
-};
+use super::{Error, from_bytes, take_from_bytes, to_vec};
 use crate::ids::KindId;
 use crate::{Kind, Ref};
 
-fn versioned(body: &[u8]) -> Vec<u8> {
-    let mut out = vec![WIRE_VERSION];
-    out.extend_from_slice(body);
-    out
-}
-
 #[test]
 fn scalars_are_fixed_little_endian() {
-    assert_eq!(to_vec(&0x0403_0201u32).unwrap(), versioned(&[1, 2, 3, 4]));
-    assert_eq!(to_vec(&7u8).unwrap(), versioned(&[7]));
-    assert_eq!(to_vec(&(-1i16)).unwrap(), versioned(&[0xFF, 0xFF]));
+    assert_eq!(to_vec(&0x0403_0201u32).unwrap(), vec![1, 2, 3, 4]);
+    assert_eq!(to_vec(&7u8).unwrap(), vec![7]);
+    assert_eq!(to_vec(&(-1i16)).unwrap(), vec![0xFF, 0xFF]);
 }
 
 #[test]
 fn bool_is_one_byte() {
-    assert_eq!(to_vec(&true).unwrap(), versioned(&[1]));
-    assert_eq!(to_vec(&false).unwrap(), versioned(&[0]));
+    assert_eq!(to_vec(&true).unwrap(), vec![1]);
+    assert_eq!(to_vec(&false).unwrap(), vec![0]);
 }
 
 #[test]
 fn float_is_bit_faithful() {
     assert_eq!(
-        to_vec(&1.5f32).unwrap()[1..],
+        to_vec(&1.5f32).unwrap()[..],
         1.5f32.to_le_bytes()[..],
         "f32 is its IEEE bits, little-endian"
     );
@@ -54,23 +45,20 @@ fn float_is_bit_faithful() {
 
 #[test]
 fn string_is_u32_len_then_utf8() {
-    assert_eq!(to_vec("hi").unwrap(), versioned(&[2, 0, 0, 0, b'h', b'i']));
+    assert_eq!(to_vec("hi").unwrap(), vec![2, 0, 0, 0, b'h', b'i']);
     let back: String = from_bytes(&to_vec("héllo").unwrap()).unwrap();
     assert_eq!(back, "héllo");
 }
 
 #[test]
 fn option_is_a_presence_byte() {
-    assert_eq!(to_vec(&Some(7u8)).unwrap(), versioned(&[1, 7]));
-    assert_eq!(to_vec(&Option::<u8>::None).unwrap(), versioned(&[0]));
+    assert_eq!(to_vec(&Some(7u8)).unwrap(), vec![1, 7]);
+    assert_eq!(to_vec(&Option::<u8>::None).unwrap(), vec![0]);
 }
 
 #[test]
 fn vec_is_u32_count_then_elements() {
-    assert_eq!(
-        to_vec(&vec![1u8, 2, 3]).unwrap(),
-        versioned(&[3, 0, 0, 0, 1, 2, 3])
-    );
+    assert_eq!(to_vec(&vec![1u8, 2, 3]).unwrap(), vec![3, 0, 0, 0, 1, 2, 3]);
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -85,7 +73,7 @@ fn struct_fields_are_positional() {
     let mut body = Vec::new();
     body.extend_from_slice(&1i32.to_le_bytes());
     body.extend_from_slice(&(-1i32).to_le_bytes());
-    assert_eq!(to_vec(&p).unwrap(), versioned(&body));
+    assert_eq!(to_vec(&p).unwrap(), body);
     assert_eq!(from_bytes::<Point>(&to_vec(&p).unwrap()).unwrap(), p);
 }
 
@@ -98,12 +86,12 @@ enum Shape {
 
 #[test]
 fn enum_selector_is_u32_then_body() {
-    assert_eq!(to_vec(&Shape::Dot).unwrap(), versioned(&[0, 0, 0, 0]));
+    assert_eq!(to_vec(&Shape::Dot).unwrap(), vec![0, 0, 0, 0]);
 
     let mut circle = Vec::new();
     circle.extend_from_slice(&1u32.to_le_bytes());
     circle.extend_from_slice(&5u32.to_le_bytes());
-    assert_eq!(to_vec(&Shape::Circle(5)).unwrap(), versioned(&circle));
+    assert_eq!(to_vec(&Shape::Circle(5)).unwrap(), circle);
 
     for shape in [Shape::Dot, Shape::Circle(9), Shape::Rect { w: 2, h: 3 }] {
         let bytes = to_vec(&shape).unwrap();
@@ -130,7 +118,7 @@ fn map_is_canonical_key_sorted() {
     let unsorted = UnsortedMap(vec![(3, 30), (1, 10), (2, 20)]);
     assert_eq!(
         to_vec(&unsorted).unwrap(),
-        versioned(&[3, 0, 0, 0, 1, 10, 2, 20, 3, 30]),
+        vec![3, 0, 0, 0, 1, 10, 2, 20, 3, 30],
         "entries emit in ascending key order regardless of insertion order"
     );
 
@@ -146,7 +134,7 @@ fn map_is_canonical_key_sorted() {
 #[test]
 fn typed_ids_are_eight_le_bytes() {
     let id = KindId(0x0102_0304_0506_0708);
-    assert_eq!(to_vec(&id).unwrap()[1..], id.0.to_le_bytes()[..]);
+    assert_eq!(to_vec(&id).unwrap()[..], id.0.to_le_bytes()[..]);
     assert_eq!(from_bytes::<KindId>(&to_vec(&id).unwrap()).unwrap().0, id.0);
 }
 
@@ -174,7 +162,7 @@ fn ref_inline_is_selector_len_prefix_then_kind_image() {
     body.extend_from_slice(&0u32.to_le_bytes()); // inline selector
     body.extend_from_slice(&4u32.to_le_bytes()); // length-prefixed body
     body.extend_from_slice(&7u32.to_le_bytes()); // Tiny::encode_into_bytes image
-    assert_eq!(to_vec(&r).unwrap(), versioned(&body));
+    assert_eq!(to_vec(&r).unwrap(), body);
     assert_eq!(from_bytes::<Ref<Tiny>>(&to_vec(&r).unwrap()).unwrap(), r);
 }
 
@@ -185,7 +173,7 @@ fn ref_handle_is_selector_then_ids() {
     body.extend_from_slice(&1u32.to_le_bytes()); // handle selector
     body.extend_from_slice(&0xCAFE_u64.to_le_bytes()); // id
     body.extend_from_slice(&Tiny::ID.0.to_le_bytes()); // kind_id
-    assert_eq!(to_vec(&r).unwrap(), versioned(&body));
+    assert_eq!(to_vec(&r).unwrap(), body);
     assert_eq!(from_bytes::<Ref<Tiny>>(&to_vec(&r).unwrap()).unwrap(), r);
 }
 
@@ -213,33 +201,18 @@ fn nested_value_roundtrips_and_is_deterministic() {
 }
 
 #[test]
-fn from_bytes_rejects_bad_version() {
-    assert_eq!(from_bytes::<u8>(&[99, 1]), Err(Error::BadVersion(99)));
-    assert_eq!(from_bytes::<u8>(&[]), Err(Error::UnexpectedEof));
-}
-
-#[test]
 fn from_bytes_rejects_trailing_bytes() {
-    assert_eq!(
-        from_bytes::<u8>(&[WIRE_VERSION, 1, 2]),
-        Err(Error::TrailingBytes)
-    );
+    assert_eq!(from_bytes::<u8>(&[1, 2]), Err(Error::TrailingBytes));
 }
 
 #[test]
 fn truncated_input_is_unexpected_eof() {
-    assert_eq!(
-        from_bytes::<u32>(&[WIRE_VERSION, 1, 2]),
-        Err(Error::UnexpectedEof)
-    );
+    assert_eq!(from_bytes::<u32>(&[1, 2]), Err(Error::UnexpectedEof));
 }
 
 #[test]
 fn invalid_bool_byte_is_rejected() {
-    assert_eq!(
-        from_bytes::<bool>(&[WIRE_VERSION, 2]),
-        Err(Error::InvalidBool(2))
-    );
+    assert_eq!(from_bytes::<bool>(&[2]), Err(Error::InvalidBool(2)));
 }
 
 #[test]
@@ -252,41 +225,14 @@ fn take_from_bytes_returns_the_remainder() {
 }
 
 #[test]
-fn bare_roundtrip_carries_no_version_byte() {
-    // `to_vec_bare` emits the structural body with no leading WIRE_VERSION;
-    // `from_bytes_bare` reads it back, requiring every byte consumed.
-    let r = Rich {
-        name: "x".into(),
-        tags: vec!["a".into(), "b".into()],
-        maybe: Some(42),
-        nested: Point { x: 5, y: 6 },
-        flag: true,
-    };
-    let bare = to_vec_bare(&r).unwrap();
-    assert_eq!(
-        bare,
-        to_vec(&r).unwrap()[1..],
-        "bare body equals the versioned payload minus its leading version byte"
-    );
-    assert_eq!(from_bytes_bare::<Rich>(&bare).unwrap(), r);
-}
-
-#[test]
-fn from_bytes_bare_rejects_trailing_bytes() {
-    let mut bare = to_vec_bare(&7u8).unwrap();
-    bare.push(0xAA);
-    assert_eq!(from_bytes_bare::<u8>(&bare), Err(Error::TrailingBytes));
-}
-
-#[test]
-fn take_from_bytes_bare_walks_back_to_back_records() {
-    // Two bare records concatenated decode in sequence, each handing back the
+fn take_from_bytes_walks_back_to_back_records() {
+    // Two records concatenated decode in sequence, each handing back the
     // remainder — the shape the manifest reader relies on.
-    let mut buf = to_vec_bare(&7u8).unwrap();
-    buf.extend_from_slice(&to_vec_bare(&0x0102_0304u32).unwrap());
-    let (first, rest): (u8, &[u8]) = take_from_bytes_bare(&buf).unwrap();
+    let mut buf = to_vec(&7u8).unwrap();
+    buf.extend_from_slice(&to_vec(&0x0102_0304u32).unwrap());
+    let (first, rest): (u8, &[u8]) = take_from_bytes(&buf).unwrap();
     assert_eq!(first, 7);
-    let (second, rest): (u32, &[u8]) = take_from_bytes_bare(rest).unwrap();
+    let (second, rest): (u32, &[u8]) = take_from_bytes(rest).unwrap();
     assert_eq!(second, 0x0102_0304);
     assert!(rest.is_empty());
 }
