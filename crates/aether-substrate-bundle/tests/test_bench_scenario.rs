@@ -2267,25 +2267,26 @@ fn text_draws_world_space_label() {
 }
 
 /// ADR-0114 §5: an inline child carries its `type State` across a
-/// `replace_component` swap. Loads `inline_child_stateful` (the entry
-/// `InlineStatefulParent` spawns a stateful `InlineStatefulChild` in
-/// `wire`), bumps the **child's** counter to 2 through the child's
-/// first-class lineage address, replaces the wasm at the same mailbox id
-/// with the same binary, then re-queries the child's alias. The old
-/// instance's `on_dehydrate` packs the child's state into the composite
-/// migration bundle; the new instance's `on_rehydrate` reconstructs the
-/// child by type and restores its count — so the post-replace query reads
-/// 2, not the fresh-`init` 0. Reload is engine-internal correctness
-/// (dehydrate → composite → rehydrate reconstruct), which is `TestBench`'s
-/// lane; #1916's `FleetBench` already proved the over-the-wire child
-/// addressing, so this doesn't re-prove it.
+/// `replace_component` swap. Loads `InlineStatefulParent` from the
+/// `inline_child` bundle (issue 1994, ADR-0096) via
+/// `export: Some("test.inline.stateful_parent")`, bumps the **child's**
+/// counter to 2 through the child's first-class lineage address, replaces
+/// the wasm at the same mailbox id with the same binary, then re-queries
+/// the child's alias. The old instance's `on_dehydrate` packs the child's
+/// state into the composite migration bundle; the new instance's
+/// `on_rehydrate` reconstructs the child by type and restores its count —
+/// so the post-replace query reads 2, not the fresh-`init` 0. Reload is
+/// engine-internal correctness (dehydrate → composite → rehydrate
+/// reconstruct), which is `TestBench`'s lane; #1916's `FleetBench` already
+/// proved the over-the-wire child addressing, so this doesn't re-prove it.
 #[test]
 fn replace_preserves_inline_child_state_via_reconstruct() {
     use aether_actor::Actor;
 
+    const BUNDLE_STEM: &str = "inline_child";
     const FIXTURE_NAME: &str = "inline_child_stateful";
 
-    let Some(wasm_path) = require_runtime(FIXTURE_NAME) else {
+    let Some(wasm_path) = require_runtime(BUNDLE_STEM) else {
         return;
     };
     let parent_addr = format!(
@@ -2300,8 +2301,10 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    // Load the entry export (InlineStatefulParent), capturing its mailbox
-    // id for the replace.
+    // Load `InlineStatefulParent` from the `inline_child` bundle, capturing
+    // its mailbox id for the replace. The name override keeps the registered
+    // lineage address stable so the existing `parent_addr` / `child_addr`
+    // strings remain valid.
     let loaded = bench
         .execute(vec![(
             "load",
@@ -2311,7 +2314,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
                     wasm,
                     name: Some(FIXTURE_NAME.to_owned()),
                     config: Vec::new(),
-                    export: None,
+                    export: Some("test.inline.stateful_parent".to_owned()),
                 },
             ),
         )])
@@ -2398,25 +2401,27 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
 
 /// ADR-0114 teardown (#1939): an inline child torn down mid-life still
 /// settles mail to its now-dead alias through the parent. Loads
-/// `inline_child_despawn` (the entry `InlineDespawnParent` spawns an
-/// `InlineDespawnChild` in `wire`), probes the child's first-class alias and
-/// asserts the *child* answers + the chain settles, sends a `DespawnChild`
-/// trigger to the parent (which calls `ctx.despawn_inline_child` on the
-/// stored alias), then probes the **same** alias again. The substrate alias
-/// route is kept on teardown, so the orphaned probe lands in the parent's
-/// inbox, the membrane finds no resident child and falls through to the
-/// parent's dispatch tail — the *parent* answers and the chain **settles**.
-/// A `SettlementTimeout` on the post-teardown probe would be the leak this
-/// verb exists to prevent. Teardown settlement is engine-internal (membrane
-/// fallthrough → parent dispatch tail → `record_finished`), `TestBench`'s
-/// lane; #1916's `FleetBench` already proved over-the-wire inline addressing.
+/// `InlineDespawnParent` from the `inline_child` bundle (issue 1994,
+/// ADR-0096) via `export: Some("test.inline.despawn_parent")`, probes
+/// the child's first-class alias and asserts the *child* answers + the
+/// chain settles, sends a `DespawnChild` trigger to the parent (which
+/// calls `ctx.despawn_inline_child` on the stored alias), then probes the
+/// **same** alias again. The substrate alias route is kept on teardown, so
+/// the orphaned probe lands in the parent's inbox, the membrane finds no
+/// resident child and falls through to the parent's dispatch tail — the
+/// *parent* answers and the chain **settles**. A `SettlementTimeout` on
+/// the post-teardown probe would be the leak this verb exists to prevent.
+/// Teardown settlement is engine-internal (membrane fallthrough → parent
+/// dispatch tail → `record_finished`), `TestBench`'s lane; #1916's
+/// `FleetBench` already proved over-the-wire inline addressing.
 #[test]
 fn despawn_inline_child_settles_orphan_mail_via_parent() {
     use aether_actor::Actor;
 
+    const BUNDLE_STEM: &str = "inline_child";
     const FIXTURE_NAME: &str = "inline_child_despawn";
 
-    let Some(wasm_path) = require_runtime(FIXTURE_NAME) else {
+    let Some(wasm_path) = require_runtime(BUNDLE_STEM) else {
         return;
     };
     let parent_addr = format!(
@@ -2431,9 +2436,11 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    // Load the entry export, then probe the *live* child's alias: the
-    // membrane demuxes to the child, which answers with the child marker,
-    // and the chain settles.
+    // Load `InlineDespawnParent` from the `inline_child` bundle, then probe
+    // the *live* child's alias: the membrane demuxes to the child, which
+    // answers with the child marker, and the chain settles. The name override
+    // keeps the registered lineage address stable so `parent_addr` / `child_addr`
+    // remain valid.
     let live = bench
         .execute(vec![
             (
@@ -2444,7 +2451,7 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
                         wasm,
                         name: Some(FIXTURE_NAME.to_owned()),
                         config: Vec::new(),
-                        export: None,
+                        export: Some("test.inline.despawn_parent".to_owned()),
                     },
                 ),
             ),

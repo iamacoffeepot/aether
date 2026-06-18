@@ -658,7 +658,6 @@ mod tests {
         // xtask: a drop here surfaces as an AETHER_REQUIRE_RUNTIME panic.
         for expected in [
             "probe",
-            "probe_with_config",
             "multi_actor",
             "aether_camera",
             "aether_mesh_viewer",

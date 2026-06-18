@@ -81,8 +81,8 @@ pub fn has_wgpu_adapter() -> bool {
 ///
 /// `crate_name` is the underscore-cased crate name (for top-level
 /// cdylib crates, e.g. `"aether_camera"`) or the example name (for
-/// `[[example]]` cdylibs, e.g. `"probe"` /
-/// `"probe_with_config"`). The workspace target dir is resolved via
+/// `[[example]]` cdylibs, e.g. `"probe"` / `"inline_child"`). The
+/// workspace target dir is resolved via
 /// `CARGO_MANIFEST_DIR` of the calling integration test
 /// (`crates/<crate>` → workspace root two levels up); helper's own
 /// `CARGO_MANIFEST_DIR` is irrelevant because the wasm artifacts live
