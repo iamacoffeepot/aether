@@ -28,7 +28,7 @@ Bootstraps the label vocabulary + local marker the other release skills depend o
 bash scripts/release-project-init.sh <version> --owner <owner>
 ```
 
-The script ensures every pipeline label exists and is idempotent — a re-run only fills gaps. It covers the phase labels (`phase:define` … `phase:stalled`; Backlog and Done carry none), the `bounce-to:*` resume targets `/bounce` stamps, the `size:*` weights (including `size:xl` = fat, ADR-0110), and the `model:*` routing labels. `type:*` labels are stamped by `/sketch` from the title's conventional-commit prefix and `crate:*` labels are created on demand at filing, so this step doesn't touch them.
+The script ensures every pipeline label exists and is idempotent — a re-run only fills gaps. It covers the phase labels (`phase:define` … `phase:stalled`; Backlog and Done carry none), the `bounce-to:*` resume targets `/bounce` stamps, the `size:*` weights (including `size:xl` = fat), and the `model:*` routing labels. `type:*` labels are stamped by `/sketch` from the title's conventional-commit prefix and `crate:*` labels are created on demand at filing, so this step doesn't touch them.
 
 ### 2. Write `.claude/release-state.json`
 

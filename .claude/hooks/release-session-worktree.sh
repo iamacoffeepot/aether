@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # SessionEnd hook — release the git lock this session's worktree was given at
-# bind time (ADR-0110 § "Session binding"), so a later /sweep can reclaim the
-# worktree once the session is gone.
+# bind time, so a later /sweep can reclaim the worktree once the session is gone.
 #
-# The bind hook (bind-session-role.sh) locks .claude/worktrees/<session-id> so a
-# `git worktree remove` refuses to reclaim a live session's worktree. On a clean
-# exit this hook unlocks it; a crash that skips SessionEnd leaves the worktree
-# locked, which /sweep resolves by probing for a live cwd before unlocking.
+# The bind hook (bind-session-worktree.sh) locks .claude/worktrees/<session-id>
+# so a `git worktree remove` refuses to reclaim a live session's worktree. On a
+# clean exit this hook unlocks it; a crash that skips SessionEnd leaves the
+# worktree locked, which /sweep resolves by probing for a live cwd before
+# unlocking.
 #
 # Reads the SessionEnd hook payload JSON from stdin (Claude Code hook protocol).
 # Silent and never fatal — unlocking is best-effort cleanup, not a gate.

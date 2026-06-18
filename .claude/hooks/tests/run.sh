@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
-# Fixture-based regression tests for the role-model guardrail hooks
-# (ADR-0110 / ADR-0111). Zero-dependency bash, matching the hooks' own style:
-# feed each hook a crafted PreToolUse/PostToolUse stdin JSON inside a hermetic
-# throwaway scaffold, and assert its exit code and (where it matters) a stdout
-# substring. Run from anywhere; exits non-zero on any failed case.
+# Fixture-based regression tests for the worktree-boundary guardrail hooks.
+# Zero-dependency bash, matching the hooks' own style: feed each hook a crafted
+# PreToolUse/PostToolUse stdin JSON inside a hermetic throwaway scaffold, and
+# assert its exit code and (where it matters) a stdout substring. Run from
+# anywhere; exits non-zero on any failed case.
 #
-# Coverage is the role-model boundary hooks — check-role-boundary.sh (the
-# PreToolUse ask-gates), check-worktree-clean.sh (the PostToolUse tripwire), and
-# the session-worktree lock lifecycle (bind-session-role.sh locks on bind,
-# release-session-worktree.sh unlocks on session end). The remaining wired hooks
-# (check-pr-body, check-pre-push, check-host-fn-additions, check-no-divider-
-# comments) are not yet covered here; the case table below is the place to add
-# them.
+# Coverage is the don't-dirty-main boundary hooks — check-worktree-boundary.sh
+# (the PreToolUse edit ask-gate), check-worktree-clean.sh (the PostToolUse
+# tripwire), and the session-worktree lock lifecycle (bind-session-worktree.sh
+# locks on bind, release-session-worktree.sh unlocks on session end). The
+# remaining wired hooks (check-pr-body, check-pre-push, check-host-fn-additions,
+# check-no-divider-comments) are not yet covered here; the case table below is
+# the place to add them.
 #
-# The stateful hooks read a session role marker and inspect git state, so the
-# scaffold is a real throwaway git repo with a role marker and a committed
-# tracked file, addressed via CLAUDE_PROJECT_DIR. It lives OUTSIDE the temp
-# roots the edit gate sanctions as scratch (/tmp, /var/folders), so the gate
-# actually evaluates instead of short-circuiting.
+# The stateful hooks key off whether the session has a worktree
+# (.claude/worktrees/<session-id>) and inspect git state, so the scaffold is a
+# real throwaway git repo with a per-session worktree and a committed tracked
+# file, addressed via CLAUDE_PROJECT_DIR. It lives OUTSIDE the temp roots the
+# edit gate sanctions as scratch (/tmp, /var/folders), so the gate actually
+# evaluates instead of short-circuiting.
 set -u
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -30,14 +31,13 @@ trap cleanup EXIT
 git -C "$SCAFFOLD" init -q
 git -C "$SCAFFOLD" config user.email test@example.com
 git -C "$SCAFFOLD" config user.name test
-printf '/research/\n/.claude/roles/\n/.claude/worktrees/\n' > "$SCAFFOLD/.gitignore"
-mkdir -p "$SCAFFOLD/.claude/roles" "$SCAFFOLD/src" "$SCAFFOLD/research" "$SCAFFOLD/.claude/worktrees/SESS"
-printf 'dreamer\n' > "$SCAFFOLD/.claude/roles/SESS"
-printf 'orchestrator\n' > "$SCAFFOLD/.claude/roles/ORCH"
-printf 'everything\n' > "$SCAFFOLD/.claude/roles/EVERY"
+printf '/research/\n/.claude/worktrees/\n' > "$SCAFFOLD/.gitignore"
+mkdir -p "$SCAFFOLD/src" "$SCAFFOLD/research"
 printf 'fn main() {}\n' > "$SCAFFOLD/src/lib.rs"
 git -C "$SCAFFOLD" add -A
 git -C "$SCAFFOLD" commit -qm init
+# A session is "bound" when it has a worktree; SESS has one, NONE does not.
+git -C "$SCAFFOLD" worktree add -q "$SCAFFOLD/.claude/worktrees/SESS" >/dev/null 2>&1
 
 pass=0; fail=0
 # run <hook> <stdin-json>  ->  sets RC and OUT
@@ -67,45 +67,29 @@ expect_no() {
 
 ASK='"permissionDecision":"ask"'
 
-echo "## check-role-boundary.sh — PreToolUse ask-gates"
-expect    "role gate: dreamer git push -> ask"        check-role-boundary.sh \
-  '{"session_id":"SESS","tool_name":"Bash","tool_input":{"command":"git push"}}' 0 "$ASK"
-expect    "role gate: dreamer gh pr merge -> ask"      check-role-boundary.sh \
-  '{"session_id":"SESS","tool_name":"Bash","tool_input":{"command":"gh pr merge 1"}}' 0 "$ASK"
-expect    "role gate: orchestrator gh issue create -> ask" check-role-boundary.sh \
-  '{"session_id":"ORCH","tool_name":"Bash","tool_input":{"command":"gh issue create -t x"}}' 0 "$ASK"
-expect    "edit gate: dreamer write tracked path -> ask" check-role-boundary.sh \
+echo "## check-worktree-boundary.sh — PreToolUse edit ask-gate"
+expect    "edit gate: write tracked main path -> ask"   check-worktree-boundary.sh \
   "{\"session_id\":\"SESS\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SCAFFOLD/src/lib.rs\"}}" 0 "$ASK"
-expect_no "edit gate: gitignored path -> silent allow"  check-role-boundary.sh \
+expect_no "edit gate: gitignored path -> silent allow"  check-worktree-boundary.sh \
   "{\"session_id\":\"SESS\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SCAFFOLD/research/x.md\"}}" "$ASK"
-expect_no "edit gate: own worktree -> silent allow"     check-role-boundary.sh \
+expect_no "edit gate: own worktree -> silent allow"     check-worktree-boundary.sh \
   "{\"session_id\":\"SESS\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SCAFFOLD/.claude/worktrees/SESS/x\"}}" "$ASK"
-expect_no "edit gate: /tmp scratch -> silent allow"     check-role-boundary.sh \
+expect_no "edit gate: /tmp scratch -> silent allow"     check-worktree-boundary.sh \
   '{"session_id":"SESS","tool_name":"Write","tool_input":{"file_path":"/tmp/x"}}' "$ASK"
-expect_no "everything role -> no boundary"              check-role-boundary.sh \
-  '{"session_id":"EVERY","tool_name":"Bash","tool_input":{"command":"git push"}}' "$ASK"
-expect_no "unbound session -> fail open"                check-role-boundary.sh \
-  '{"session_id":"NONE","tool_name":"Bash","tool_input":{"command":"git push"}}' "$ASK"
-expect_no "harmless read command -> allow"              check-role-boundary.sh \
-  '{"session_id":"SESS","tool_name":"Bash","tool_input":{"command":"git status"}}' "$ASK"
-expect_no "merge gate: ff-only origin/main -> silent allow" check-role-boundary.sh \
-  '{"session_id":"SESS","tool_name":"Bash","tool_input":{"command":"git merge --ff-only origin/main"}}' "$ASK"
-expect_no "merge gate: ff-only @{u} -> silent allow"    check-role-boundary.sh \
-  '{"session_id":"SESS","tool_name":"Bash","tool_input":{"command":"git merge --ff-only @{u}"}}' "$ASK"
-expect    "merge gate: non-ff origin/main -> ask"       check-role-boundary.sh \
-  '{"session_id":"SESS","tool_name":"Bash","tool_input":{"command":"git merge origin/main"}}' 0 "$ASK"
-expect    "merge gate: local branch merge -> ask"       check-role-boundary.sh \
-  '{"session_id":"SESS","tool_name":"Bash","tool_input":{"command":"git merge feature"}}' 0 "$ASK"
+expect_no "edit gate: Bash tool -> not gated here"      check-worktree-boundary.sh \
+  '{"session_id":"SESS","tool_name":"Bash","tool_input":{"command":"git push"}}' "$ASK"
+expect_no "edit gate: no worktree -> fail open"         check-worktree-boundary.sh \
+  "{\"session_id\":\"NONE\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SCAFFOLD/src/lib.rs\"}}" "$ASK"
 
 echo "## check-worktree-clean.sh — PostToolUse tripwire"
 expect "clean main -> allow"          check-worktree-clean.sh '{"session_id":"SESS"}' 0
 printf 'dirtied\n' >> "$SCAFFOLD/src/lib.rs"
 expect "dirty main -> block (exit 2)" check-worktree-clean.sh '{"session_id":"SESS"}' 2
 git -C "$SCAFFOLD" checkout -q -- src/lib.rs
-expect "unbound session -> fail open" check-worktree-clean.sh '{"session_id":"NONE"}' 0
+expect "no worktree -> fail open"     check-worktree-clean.sh '{"session_id":"NONE"}' 0
 
-echo "## bind-session-role.sh — locks the session worktree against removal"
-expect "bind: exits 0 for a fresh session" bind-session-role.sh '{"session_id":"BINDLOCK"}' 0
+echo "## bind-session-worktree.sh — locks the session worktree against removal"
+expect "bind: exits 0 for a fresh session" bind-session-worktree.sh '{"session_id":"BINDLOCK"}' 0
 # The worktree it created must now refuse a plain `git worktree remove` — the
 # lock is what stops a /sweep or ad-hoc cleanup yanking a live session's tree.
 if git -C "$SCAFFOLD" worktree remove "$SCAFFOLD/.claude/worktrees/BINDLOCK" >/dev/null 2>&1; then
