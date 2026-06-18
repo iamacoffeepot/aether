@@ -85,6 +85,10 @@ fn main() -> anyhow::Result<()> {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         workers: WORKERS,
         pool_workers: None,
+        // Issue 1990: the standalone test-bench binary keeps the default
+        // ring caps; the in-process `TestBench` builder is the surface
+        // for tuning them (per-bench, no process env).
+        ring_caps: aether_substrate::RingCapacities::default(),
         observed_kinds: None,
         events_tx,
         capture_queue: capture_queue.clone(),

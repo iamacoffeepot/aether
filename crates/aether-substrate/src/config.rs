@@ -87,9 +87,39 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::fmt::Write as _;
 
+use aether_actor::log::DEFAULT_RING_CAP;
+use aether_actor::trace_ring::DEFAULT_TRACE_RING_CAP;
 use confique::meta::{Expr, Field, FieldKind, LeafKind, Meta};
 
 use crate::BootError;
+
+/// The two per-actor ring capacities resolved once at chassis boot and
+/// threaded down the spawn path (ADR-0081 log ring + ADR-0086 trace
+/// ring). `Copy` so it rides every `Spawner` / builder seam as an
+/// ordinary value — no process-global, no atomics. The chassis-bin
+/// `ActorRingConfig` derive-`Config` knob lowers to this; substrate-core
+/// never reads env (issue 464), so the resolution lives bundle-side and
+/// only the resolved capacities reach here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RingCapacities {
+    /// Per-actor [`ActorLogRing`](aether_actor::log::ActorLogRing)
+    /// capacity (env `AETHER_ACTOR_LOG_RING_SIZE`; default
+    /// [`DEFAULT_RING_CAP`]).
+    pub log: usize,
+    /// Per-actor [`ActorTraceRing`](aether_actor::trace_ring::ActorTraceRing)
+    /// and chassis-host-ring capacity (env `AETHER_ACTOR_TRACE_RING_SIZE`;
+    /// default [`DEFAULT_TRACE_RING_CAP`]).
+    pub trace: usize,
+}
+
+impl Default for RingCapacities {
+    fn default() -> Self {
+        Self {
+            log: DEFAULT_RING_CAP,
+            trace: DEFAULT_TRACE_RING_CAP,
+        }
+    }
+}
 
 /// Build a cap config by overlaying an argv-derived partial confique
 /// layer on top of the env layer (ADR-0090 unit d).

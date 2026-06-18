@@ -46,8 +46,8 @@ use aether_substrate::chassis::settlement::{
     TerminalDisposition, WaitOutcome, await_internal_signal,
 };
 use aether_substrate::{
-    EgressEvent, HubOutbound, Mailer, PassiveChassis, RecordingBackend, Source, SourceAddr,
-    SubstrateBoot,
+    EgressEvent, HubOutbound, Mailer, PassiveChassis, RecordingBackend, RingCapacities, Source,
+    SourceAddr, SubstrateBoot,
     capture::CaptureQueue,
     mail::{CapabilityRegistry, CostTable, Mail, MailId, MailboxId},
 };
@@ -221,6 +221,8 @@ pub struct TestBenchBuilder {
     height: u32,
     namespace_roots: Option<NamespaceRoots>,
     pool_workers: Option<usize>,
+    log_ring_capacity: Option<usize>,
+    trace_ring_capacity: Option<usize>,
 }
 
 impl Default for TestBenchBuilder {
@@ -230,6 +232,8 @@ impl Default for TestBenchBuilder {
             height: DEFAULT_HEIGHT,
             namespace_roots: None,
             pool_workers: None,
+            log_ring_capacity: None,
+            trace_ring_capacity: None,
         }
     }
 }
@@ -266,16 +270,46 @@ impl TestBenchBuilder {
         self
     }
 
+    /// Issue 1990: override the per-actor `ActorLogRing` capacity. `None`
+    /// (the default) keeps the `aether-actor` const cap
+    /// (`DEFAULT_RING_CAP`); `Some(n)` pins it. Per-bench, no process env
+    /// — concurrent benches with different caps don't interfere.
+    #[must_use]
+    pub fn log_ring_capacity(mut self, capacity: Option<usize>) -> Self {
+        self.log_ring_capacity = capacity;
+        self
+    }
+
+    /// Issue 1990: override the per-actor `ActorTraceRing` capacity (and
+    /// the chassis-host trace ring). `None` (the default) keeps the
+    /// `aether-actor` const cap (`DEFAULT_TRACE_RING_CAP`); `Some(n)`
+    /// pins it — a small value lets an eviction test observe
+    /// `truncated_before`. Per-bench, no process env.
+    #[must_use]
+    pub fn trace_ring_capacity(mut self, capacity: Option<usize>) -> Self {
+        self.trace_ring_capacity = capacity;
+        self
+    }
+
     /// Boot the bench. Equivalent to `TestBench::start_with_size` for
     /// the default builder; overrides applied via the builder methods
     /// flow through to `SubstrateBoot::builder` and the chassis-side
     /// IO sink wiring.
     pub fn build(self) -> Result<TestBench, TestBenchError> {
+        // Lower the per-field `Option` overrides onto the `Copy`
+        // `RingCapacities`, defaulting each unset field to the
+        // `aether-actor` const cap.
+        let default = RingCapacities::default();
+        let ring_caps = RingCapacities {
+            log: self.log_ring_capacity.unwrap_or(default.log),
+            trace: self.trace_ring_capacity.unwrap_or(default.trace),
+        };
         TestBench::start_inner(
             self.width,
             self.height,
             self.namespace_roots,
             self.pool_workers,
+            ring_caps,
         )
     }
 }
@@ -297,7 +331,7 @@ impl TestBench {
     /// Boot a `TestBench` with a specific offscreen target size.
     /// Width / height are clamped to a minimum of 1 inside `Gpu::new`.
     pub fn start_with_size(width: u32, height: u32) -> Result<Self, TestBenchError> {
-        Self::start_inner(width, height, None, None)
+        Self::start_inner(width, height, None, None, RingCapacities::default())
     }
 
     fn start_inner(
@@ -305,6 +339,7 @@ impl TestBench {
         height: u32,
         namespace_roots: Option<NamespaceRoots>,
         pool_workers: Option<usize>,
+        ring_caps: RingCapacities,
     ) -> Result<Self, TestBenchError> {
         let capture_queue = CaptureQueue::new();
         let (events_tx, events_rx) = event_channel();
@@ -322,6 +357,7 @@ impl TestBench {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             workers: WORKERS,
             pool_workers,
+            ring_caps,
             observed_kinds: Some(Arc::clone(&observed_kinds)),
             events_tx,
             capture_queue: capture_queue.clone(),

@@ -26,7 +26,7 @@ use aether_labyrinth::TrajectoryRecorderCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
-    Chassis, SubstrateBoot, capture::CaptureQueue, render::VERTEX_BUFFER_BYTES,
+    Chassis, RingCapacities, SubstrateBoot, capture::CaptureQueue, render::VERTEX_BUFFER_BYTES,
 };
 
 use super::cap::{TestBenchCapConfig, TestBenchCapability};
@@ -120,6 +120,11 @@ pub struct TestBenchEnv {
     /// pool-default dispatch model makes worker count the dominant
     /// latency variable for fan-out and under-load topologies.
     pub pool_workers: Option<usize>,
+    /// Issue 1990: per-actor ring capacities (`ActorLogRing` /
+    /// `ActorTraceRing`). `RingCapacities::default()` keeps the
+    /// `aether-actor` const caps; a `TestBench` eviction test pins a small
+    /// trace cap to observe `truncated_before`. Per-bench, no process env.
+    pub ring_caps: RingCapacities,
     /// Optional observation log: when `Some`, both render and
     /// camera dispatchers push every inbound mail's kind name to it.
     /// In-process API uses this to assert what the sinks have seen;
@@ -194,6 +199,7 @@ impl TestBenchChassis {
             version,
             workers,
             pool_workers,
+            ring_caps,
             observed_kinds,
             events_tx,
             capture_queue,
@@ -307,6 +313,7 @@ impl TestBenchChassis {
         // `aether.input` via the relay subscriber.
         let mut builder = Builder::<Self>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
             .with_workers(pool_workers)
+            .with_ring_caps(ring_caps)
             .with_actor::<HandleCapability>(())
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<TrajectoryRecorderCapability>(())

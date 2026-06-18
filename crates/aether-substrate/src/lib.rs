@@ -88,8 +88,8 @@ pub use chassis::ctx::{
 pub use chassis::error::BootError;
 pub use chassis::inbox::{InboundMail, SettlingInbox};
 pub use config::{
-    ConfigError, FromArgvThenEnv, KnobKind, KnobRecord, KnownKeys, dump_config, known_keys,
-    validate_env,
+    ConfigError, FromArgvThenEnv, KnobKind, KnobRecord, KnownKeys, RingCapacities, dump_config,
+    known_keys, validate_env,
 };
 pub use mail::mailer::Mailer;
 pub use mail::outbound::{

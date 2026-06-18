@@ -51,6 +51,10 @@ use aether_actor::HandlesKind;
 use aether_actor::cost::CostCells;
 use aether_actor::local;
 use aether_actor::local::ActorSlots;
+use aether_actor::log::ActorLogRing;
+use aether_actor::trace_ring::ActorTraceRing;
+
+use crate::config::RingCapacities;
 use aether_kinds::trace::Settled;
 use std::any::Any;
 use std::any::TypeId;
@@ -474,6 +478,13 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         // inside the actor (e.g., the issue-581 log buffer) can reach
         // `Local::with_mut` without threading a ctx through.
         let slots = Box::new(ActorSlots::new());
+        // Issue 1990: seed the per-actor rings at the chassis-wide
+        // configured capacities, read off the shared `Spawner` (the
+        // single source). Mirrors the instanced spawn funnel in
+        // `Spawner::spawn_actor`.
+        let ring_caps = ctx.spawner_arc().ring_caps();
+        slots.seed(ActorLogRing::with_capacity(ring_caps.log));
+        slots.seed(ActorTraceRing::with_capacity(ring_caps.trace));
 
         self.state = BootState::Claimed {
             resources: ClaimResources {
@@ -753,6 +764,13 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// `Some(n)` plumbs `n` into the pool at boot. Production chassis
     /// mains populate this from `AETHER_WORKERS`.
     workers: Option<usize>,
+    /// Issue 1990: per-actor ring capacities (`ActorLogRing` /
+    /// `ActorTraceRing`). Production chassis mains populate this from the
+    /// `ActorRingConfig` derive-`Config` knob (env `AETHER_ACTOR_*`);
+    /// tests / `TestBench` leave it [`RingCapacities::default`]. Threaded
+    /// into the `Spawner` (instanced spawns) + the cap-claim slot path
+    /// (singleton caps) + the chassis-host trace ring at boot.
+    ring_caps: RingCapacities,
     _chassis: PhantomData<fn() -> C>,
     _state: PhantomData<fn() -> S>,
 }
@@ -771,6 +789,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             driver: None,
             aborter: Arc::new(PanicAborter),
             workers: None,
+            ring_caps: RingCapacities::default(),
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -795,6 +814,20 @@ impl<C: Chassis> Builder<C, NoDriver> {
     #[must_use]
     pub fn with_workers(mut self, workers: Option<usize>) -> Self {
         self.workers = workers.map(|n| n.max(1));
+        self
+    }
+
+    /// Issue 1990: override the per-actor ring capacities (`ActorLogRing`
+    /// / `ActorTraceRing`). Default is [`RingCapacities::default`] (the
+    /// `aether-actor` const caps). Production chassis mains resolve the
+    /// `ActorRingConfig` derive-`Config` knob (`AETHER_ACTOR_LOG_RING_SIZE`
+    /// / `AETHER_ACTOR_TRACE_RING_SIZE`) and pass the lowered
+    /// `RingCapacities` here; the caps thread into every spawned actor's
+    /// rings and the chassis-host trace ring at boot. The override can be
+    /// applied either before or after `.driver(_)`.
+    #[must_use]
+    pub fn with_ring_caps(mut self, ring_caps: RingCapacities) -> Self {
+        self.ring_caps = ring_caps;
         self
     }
 
@@ -844,6 +877,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             driver: self.driver,
             aborter: self.aborter,
             workers: self.workers,
+            ring_caps: self.ring_caps,
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -872,6 +906,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             &self.mailer,
             &self.aborter,
             workers,
+            self.ring_caps,
             self.passives,
         )?;
         // ADR-0081 retired the chassis-pushed `ConfigureLogDrain` mail
@@ -916,6 +951,14 @@ impl<C: Chassis> Builder<C, HasDriver> {
         self
     }
 
+    /// Mirror of [`Builder::with_ring_caps`][Builder<C, NoDriver>::with_ring_caps]
+    /// for the post-driver state. Issue 1990.
+    #[must_use]
+    pub fn with_ring_caps(mut self, ring_caps: RingCapacities) -> Self {
+        self.ring_caps = ring_caps;
+        self
+    }
+
     /// Boot every passive in declaration order, then boot the driver
     /// against a [`DriverCtx`]. Any failure aborts the build and
     /// shuts down the passives that already booted (via the
@@ -934,11 +977,12 @@ impl<C: Chassis> Builder<C, HasDriver> {
             driver,
             aborter,
             workers,
+            ring_caps,
             ..
         } = self;
         let driver_boot = driver.expect("HasDriver state implies driver was supplied");
 
-        let mut booted = boot_passives(&registry, &mailer, &aborter, workers, passives)?;
+        let mut booted = boot_passives(&registry, &mailer, &aborter, workers, ring_caps, passives)?;
         // ADR-0081 retired the chassis-pushed `ConfigureLogDrain` mail
         // — each actor owns its own `ActorLogRing`.
         let driver_running = {
@@ -1056,6 +1100,7 @@ fn boot_passives(
     mailer: &Arc<Mailer>,
     aborter: &Arc<dyn FatalAborter>,
     workers: Option<usize>,
+    ring_caps: RingCapacities,
     passives: Vec<Box<dyn PassiveBoot>>,
 ) -> Result<BootedPassives, BootError> {
     let mut shutdowns: Vec<Box<dyn DynShutdown>> = Vec::with_capacity(passives.len());
@@ -1128,12 +1173,21 @@ fn boot_passives(
             );
         }
     }));
+    // Issue 1990: the chassis-host trace ring (off-actor producers —
+    // `Tick` / MCP sends / test injects) lives on the Mailer's
+    // `TraceHandle`, outside the `Spawner`/builder slot path, so set its
+    // capacity explicitly to the same configured trace cap the per-actor
+    // rings get. The ring is empty at boot, so resizing it now is safe.
+    mailer
+        .trace_handle()
+        .set_chassis_host_ring_capacity(ring_caps.trace);
     let spawner: Arc<crate::Spawner> = Arc::new(crate::Spawner::new(
         Arc::clone(registry),
         Arc::clone(&actor_registry),
         Arc::clone(mailer),
         Arc::clone(aborter),
         pool.wake_sink(),
+        ring_caps,
     ));
     // Issue 697: multi-pass boot — claim → init → wire → spawn,
     // synchronized across all passives. Each pass below walks every

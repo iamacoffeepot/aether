@@ -36,6 +36,7 @@ use crate::actor::registry::ActorRegistry;
 use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
 use crate::chassis::error::BootError;
 use crate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
+use crate::config::RingCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::{NameConflict, Registry};
@@ -47,6 +48,8 @@ use crate::scheduler::WakeHandle;
 use crate::scheduler::WakeSink;
 use aether_actor::local;
 use aether_actor::local::ActorSlots;
+use aether_actor::log::ActorLogRing;
+use aether_actor::trace_ring::ActorTraceRing;
 use std::sync::Weak;
 use std::time::Duration;
 
@@ -117,6 +120,13 @@ pub struct Spawner {
     /// slot whose inbox is empty would never enter `run_cycle` to
     /// observe the flag.
     instanced_slots: Mutex<HashMap<MailboxId, InstancedSlotEntry>>,
+    /// Issue 1990: the per-actor ring capacities resolved at chassis
+    /// boot. Every actor spawned through [`Self::spawn_actor`] seeds its
+    /// `ActorLogRing` / `ActorTraceRing` at these caps right after
+    /// `ActorSlots::new()`, so the chassis-wide knob reaches instanced
+    /// actors (and the wasm trampolines that spawn through this same
+    /// funnel) without per-spawn plumbing.
+    ring_caps: RingCapacities,
 }
 
 /// One entry in [`Spawner::instanced_slots`]. Holds both the strong
@@ -135,6 +145,7 @@ impl Spawner {
         mailer: Arc<Mailer>,
         aborter: Arc<dyn FatalAborter>,
         wake_sink: WakeSink,
+        ring_caps: RingCapacities,
     ) -> Self {
         Self {
             registry,
@@ -144,6 +155,7 @@ impl Spawner {
             counter: AtomicU64::new(0),
             wake_sink,
             instanced_slots: Mutex::new(HashMap::new()),
+            ring_caps,
         }
     }
 
@@ -152,6 +164,15 @@ impl Spawner {
     /// it into each slot's [`WakeHandle`].
     pub(crate) fn wake_sink(&self) -> &WakeSink {
         &self.wake_sink
+    }
+
+    /// The per-actor ring capacities resolved at chassis boot (issue
+    /// 1990). The chassis builder's singleton cap-claim path reads these
+    /// off the shared `Spawner` so it seeds its `ActorSlots` rings at the
+    /// same caps the instanced spawn funnel applies — one source of
+    /// truth for both slot sites.
+    pub(crate) fn ring_caps(&self) -> RingCapacities {
+        self.ring_caps
     }
 
     /// ADR-0097: allocate the next monotonic discriminator from the same
@@ -383,6 +404,12 @@ impl Spawner {
         // ctx through. Mirrors the singleton path in
         // `chassis::builder::make_native_actor_boot` (issue 672).
         let slots = Box::new(ActorSlots::new());
+        // Issue 1990: seed the two per-actor rings at the chassis-wide
+        // configured capacities before any handler dispatch, so the
+        // first `Local::with_mut::<Ring>` finds them instead of building
+        // the const-`Default` ring.
+        slots.seed(ActorLogRing::with_capacity(self.ring_caps.log));
+        slots.seed(ActorTraceRing::with_capacity(self.ring_caps.trace));
 
         let actor = {
             // Instanced actors don't publish driver-facing sub-handles
