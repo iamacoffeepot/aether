@@ -24,6 +24,7 @@ use aether_substrate::chassis::builder::{
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
 
+use crate::chassis_common::ActorRingConfig;
 use crate::cli::HubCli;
 use crate::hub::DEFAULT_RPC_PORT;
 use std::thread;
@@ -115,7 +116,13 @@ impl HubChassis {
 
         let driver = HubServerDriverCapability { boot };
 
+        // Issue 1990: resolve the per-actor ring capacities so the hub
+        // chassis honours `AETHER_ACTOR_{LOG,TRACE}_RING_SIZE` like the
+        // full-stack chassis (which thread it via `with_common_caps`).
+        let ring_caps = ActorRingConfig::try_from_env()?.to_ring_capacities();
+
         Builder::<Self>::new(registry, mailer)
+            .with_ring_caps(ring_caps)
             .with_actor::<TraceDispatchCapability>(())
             // Liveness-heartbeat tuning (issue 1339), resolved
             // argv-then-env in `HubEnv::from_env_with_argv`.

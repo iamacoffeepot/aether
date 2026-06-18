@@ -927,9 +927,27 @@ pub const DEFAULT_SATURATE_BACKLOG: u32 = 512;
 /// (`backlog * (2 + out_degree) <= ring_cap`) lives at the cell in
 /// [`run_sweep_samples`], which clamps each `Saturate` burst to
 /// `ring_cap / (2 + max_out_degree(topo))` (iamacoffeepot/aether#1226).
+/// Resolve the *effective* per-actor trace-ring capacity for the
+/// saturation-invariant math (issue 1990). Reads `AETHER_ACTOR_TRACE_RING_SIZE`
+/// (the chassis-wide knob) when set, else the `aether-actor` const
+/// [`DEFAULT_TRACE_RING_CAP`]. The sweep cell ([`run_sweep_samples`])
+/// pins the same value on its `TestBench` so the `backlog * (2 +
+/// out_degree) <= ring_cap` clamp and the ring the relay actually writes
+/// agree — bumping the knob to chase a high-volume lap (the use case that
+/// motivated the issue) lifts both together instead of silently keeping
+/// 4096.
+#[must_use]
+pub fn effective_trace_ring_cap() -> usize {
+    env::var("AETHER_ACTOR_TRACE_RING_SIZE")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_TRACE_RING_CAP)
+}
+
 #[must_use]
 pub fn saturate_backlog_from_env() -> u32 {
-    let cap = u32::try_from(DEFAULT_TRACE_RING_CAP).unwrap_or(u32::MAX);
+    let cap = u32::try_from(effective_trace_ring_cap()).unwrap_or(u32::MAX);
     env::var("AETHER_PERF_BACKLOG")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
@@ -1283,10 +1301,15 @@ fn harvest_keepup(
 pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
     let mut rows: Vec<CellSamples> = Vec::new();
 
+    // Issue 1990: the effective trace-ring cap (env knob or const
+    // default) governs both the sweep's `TestBench` rings and the
+    // per-cell burst clamp below — resolved once so they can't drift.
+    let trace_ring_cap = effective_trace_ring_cap();
     for &workers in &cfg.workers {
         for topo in &cfg.topologies {
             let Ok(mut tb) = TestBench::builder()
                 .with_workers(Some(workers))
+                .trace_ring_capacity(Some(trace_ring_cap))
                 .size(16, 16)
                 .build()
             else {
@@ -1341,7 +1364,7 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
             let burst = match drive {
                 Drive::Latency { .. } => 1,
                 Drive::Saturate { backlog } => {
-                    let ring_cap = u32::try_from(DEFAULT_TRACE_RING_CAP).unwrap_or(u32::MAX);
+                    let ring_cap = u32::try_from(trace_ring_cap).unwrap_or(u32::MAX);
                     let out_degree = u32::try_from(max_out_degree(topo)).unwrap_or(u32::MAX);
                     let fanout_divisor = out_degree.saturating_add(2);
                     backlog.min(ring_cap / fanout_divisor)
@@ -1751,7 +1774,10 @@ mod tests {
         // against the other env-reading test via a shared lock, since
         // nextest runs tests in one process across threads.
         let _guard = ENV_LOCK.lock().expect("env lock");
-        let cap = u32::try_from(DEFAULT_TRACE_RING_CAP).unwrap_or(u32::MAX);
+        // Re-pointed at the effective cap (issue 1990): with the trace
+        // ring knob unset it equals the const default, so the clamp
+        // target is unchanged.
+        let cap = u32::try_from(effective_trace_ring_cap()).unwrap_or(u32::MAX);
         // Safety: process-wide env mutation, serialised by `ENV_LOCK` and
         // restored before the guard drops.
         unsafe {

@@ -623,6 +623,7 @@ mod tests {
     use aether_kinds::trace::Nanos;
 
     use crate::actor::registry::ActorRegistry;
+    use crate::config::RingCapacities;
     use crate::handle_store::HandleStore;
     use crate::mail::registry::MailboxEntry;
     use crate::mail::{KindId, MailId, MailRef, Source};
@@ -659,6 +660,7 @@ mod tests {
             Arc::clone(&mailer),
             Arc::clone(&aborter),
             pool.wake_sink(),
+            RingCapacities::default(),
         ));
         let mut fallback: Option<FallbackRouter> = None;
         let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
@@ -726,6 +728,7 @@ mod tests {
             Arc::clone(&mailer),
             Arc::clone(&aborter),
             pool.wake_sink(),
+            RingCapacities::default(),
         ));
         (registry, mailer, spawner, aborter, pool)
     }

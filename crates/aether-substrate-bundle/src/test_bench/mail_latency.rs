@@ -513,6 +513,147 @@ fn trace_ring_dual_write_routes_events_to_owning_rings() {
     );
 }
 
+/// Issue 1990: a non-default `trace_ring_capacity` set on the
+/// `TestBenchBuilder` is honoured by the chassis-host trace ring — drive
+/// more off-actor injected roots than the small cap and the unfiltered
+/// tail reports `truncated_before` (the FIFO-eviction gap cursor). The
+/// chassis-host ring is outside the `Spawner`/builder slot path, so this
+/// directly exercises the explicit `set_chassis_host_ring_capacity`
+/// wiring at boot.
+#[test]
+#[allow(clippy::print_stderr)]
+fn small_trace_ring_cap_laps_chassis_host_ring() {
+    const CAP: usize = 4;
+    const INJECTS: usize = CAP + 6;
+    let Ok(tb) = TestBench::builder()
+        .with_workers(Some(2))
+        .trace_ring_capacity(Some(CAP))
+        .size(16, 16)
+        .build()
+    else {
+        eprintln!("skipping small_trace_ring_cap_laps_chassis_host_ring: no wgpu adapter");
+        return;
+    };
+
+    // No actor at this id: each inject pushes exactly one `Sent` into the
+    // chassis-host ring (off-actor producer) and nothing else, so the
+    // ring's depth is deterministic. The mail warn-drops with no
+    // recipient; we don't await settlement.
+    let orphan = relay_id(0);
+    for seq in 0..INJECTS {
+        let _ = tb.inject_root(
+            orphan,
+            Ping::ID,
+            Ping {
+                seq: u32::try_from(seq).unwrap_or(u32::MAX),
+            }
+            .encode_into_bytes(),
+        );
+    }
+
+    // Unfiltered tail from the start cursor: the ring holds at most CAP
+    // entries, so the earliest surviving sequence is past `since + 1` and
+    // `truncated_before` flags the evicted prefix.
+    let (entries, truncated_before) = match tb.chassis_host_trace_tail(&TraceTail {
+        max: 0,
+        since: None,
+        root: None,
+    }) {
+        TraceTailResult::Ok {
+            entries,
+            truncated_before,
+            ..
+        } => (entries, truncated_before),
+        TraceTailResult::Err { error } => panic!("chassis-host trace.tail error: {error}"),
+    };
+    assert!(
+        entries.len() <= CAP,
+        "ring retained more than its {CAP}-entry cap: {} entries",
+        entries.len()
+    );
+    assert!(
+        truncated_before.is_some(),
+        "expected a truncated_before gap after lapping a {CAP}-cap ring with {INJECTS} \
+         injects; got entries={entries:?}",
+    );
+}
+
+/// Issue 1990: the configured `trace_ring_capacity` reaches a spawned
+/// actor's *per-actor* trace ring (the `Spawner` spawn funnel seeds it),
+/// not just the chassis-host ring. Drive a single relay (no downstream)
+/// enough roots that its ring — two slots per inbound mail (`Received` +
+/// `Finished`) — laps the small cap, then a root-unfiltered
+/// `aether.trace.tail` against the relay reports `truncated_before`.
+#[test]
+#[allow(clippy::print_stderr)]
+fn small_trace_ring_cap_laps_per_actor_ring() {
+    const CAP: usize = 6;
+    // Two trace slots per settled inbound mail (Received + Finished), so
+    // enough roots to comfortably overrun CAP. Each is settled before the
+    // next so the ring fills deterministically.
+    const INJECTS: usize = CAP * 3;
+    let Ok(mut tb) = TestBench::builder()
+        .with_workers(Some(2))
+        .trace_ring_capacity(Some(CAP))
+        .size(16, 16)
+        .build()
+    else {
+        eprintln!("skipping small_trace_ring_cap_laps_per_actor_ring: no wgpu adapter");
+        return;
+    };
+
+    // Single leaf relay (depth-1 chain: relay 0, no downstream) — each
+    // inbound mail writes exactly Received + Finished into its own ring
+    // and nothing fans out.
+    spawn_topology(&tb, &depth_chain(1));
+    for seq in 0..INJECTS {
+        let (_root, rx) = tb.inject_root(
+            relay_id(0),
+            Ping::ID,
+            Ping {
+                seq: u32::try_from(seq).unwrap_or(u32::MAX),
+            }
+            .encode_into_bytes(),
+        );
+        assert_settled(&rx, "mlat.small_trace_ring_cap_laps_per_actor_ring");
+    }
+
+    // The relay's ring holds at most CAP entries, so its earliest
+    // surviving sequence is past the start cursor — `truncated_before`
+    // flags the evicted prefix. Query without a root filter (it would
+    // also drop the trace-query mail's own Received/Finished, but the gap
+    // cursor is computed over the whole ring regardless of the filter).
+    let req = TraceTail {
+        max: 0,
+        since: None,
+        root: None,
+    }
+    .encode_into_bytes();
+    let reply = tb
+        .send_bytes_and_await("mlat.relay:0", TraceTail::ID, req)
+        .expect("aether.trace.tail reply");
+    let truncated_before =
+        match TraceTailResult::decode_from_bytes(&reply).expect("decode TraceTailResult") {
+            TraceTailResult::Ok {
+                entries,
+                truncated_before,
+                ..
+            } => {
+                assert!(
+                    entries.len() <= CAP,
+                    "per-actor ring retained more than its {CAP}-entry cap: {} entries",
+                    entries.len()
+                );
+                truncated_before
+            }
+            TraceTailResult::Err { error } => panic!("trace.tail error: {error}"),
+        };
+    assert!(
+        truncated_before.is_some(),
+        "expected a truncated_before gap after lapping a {CAP}-cap per-actor ring",
+    );
+}
+
 /// ADR-0086 Phase 3: the decentralized guided walk reconstructs a
 /// causally-coherent tree for a settled root over the per-actor rings —
 /// the rings are the source of truth post-3c (the central observer this

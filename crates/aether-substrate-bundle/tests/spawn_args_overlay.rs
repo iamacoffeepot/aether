@@ -27,6 +27,17 @@ use std::time::{Duration, Instant};
 /// Drive the headless binary with `args`; harvest stderr for ~`wait`
 /// then SIGTERM and join. Returns every stderr line observed.
 fn run_headless_capture(args: &[&str], wait: Duration) -> Vec<String> {
+    run_headless_capture_with_env(args, &[], wait)
+}
+
+/// Like [`run_headless_capture`] but layers extra `(key, value)` env
+/// pairs onto the child (issue 1990: set `AETHER_ACTOR_TRACE_RING_SIZE`
+/// to observe the chassis-main resolution reaching the boot line).
+fn run_headless_capture_with_env(
+    args: &[&str],
+    extra_env: &[(&str, &str)],
+    wait: Duration,
+) -> Vec<String> {
     let bin = env!("CARGO_BIN_EXE_aether-substrate-headless");
     let mut cmd = Command::new(bin);
     cmd.args(args)
@@ -42,6 +53,9 @@ fn run_headless_capture(args: &[&str], wait: Duration) -> Vec<String> {
         .env("AETHER_LOG_FILTER", "info")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
     let mut child = cmd.spawn().expect("spawn aether-substrate-headless");
     let stderr = child.stderr.take().expect("captured stderr handle");
 
@@ -95,6 +109,14 @@ fn run_headless_capture(args: &[&str], wait: Duration) -> Vec<String> {
 /// strip ESC sequences before searching to keep the test robust
 /// against the CLI-color default.
 fn find_tick_hz(lines: &[String]) -> Option<u32> {
+    find_numeric_field(lines, "tick_hz").and_then(|n| u32::try_from(n).ok())
+}
+
+/// Pluck the first `<field>=NN` numeric value off any boot tracing line,
+/// stripping the ANSI escapes tracing's default formatter wraps field
+/// names in. Generalizes [`find_tick_hz`] so issue 1990 can grep
+/// `trace_ring_capacity` on the same boot line.
+fn find_numeric_field(lines: &[String], field: &str) -> Option<usize> {
     fn strip_ansi(s: &str) -> String {
         // ESC `[` ... letter — the common CSI shape `tracing-subscriber`
         // emits. A drop-in tiny stripper avoids pulling in an ANSI dep.
@@ -114,12 +136,13 @@ fn find_tick_hz(lines: &[String]) -> Option<u32> {
         }
         out
     }
+    let needle = format!("{field}=");
     for line in lines {
         let clean = strip_ansi(line);
-        if let Some(rest) = clean.split("tick_hz=").nth(1) {
+        if let Some(rest) = clean.split(&needle).nth(1) {
             let n: String = rest.chars().take_while(char::is_ascii_digit).collect();
-            if let Ok(hz) = n.parse::<u32>() {
-                return Some(hz);
+            if let Ok(value) = n.parse::<usize>() {
+                return Some(value);
             }
         }
     }
@@ -156,4 +179,27 @@ fn empty_argv_falls_through_to_env_default() {
     let hz = find_tick_hz(&lines)
         .unwrap_or_else(|| panic!("no tick_hz tracing line observed; stderr was:\n{lines:?}"));
     assert_eq!(hz, 60, "empty argv must fall through to default tick rate");
+}
+
+#[test]
+fn actor_trace_ring_size_env_reaches_chassis_boot() {
+    // Issue 1990 integration boot: a non-default `AETHER_ACTOR_TRACE_RING_SIZE`
+    // is resolved by the headless chassis main (`ActorRingConfig::from_env`)
+    // and reaches the boot — observable on the same `aether_substrate::boot`
+    // tracing line that already reports `tick_hz`. The freshly-spawned
+    // chassis actors seed their trace rings at this cap (the in-process
+    // `TestBench` tests assert the ring-level eviction behaviour); this
+    // test guards the env → chassis-main → builder edge.
+    let lines = run_headless_capture_with_env(
+        &[],
+        &[("AETHER_ACTOR_TRACE_RING_SIZE", "8191")],
+        Duration::from_secs(2),
+    );
+    let cap = find_numeric_field(&lines, "trace_ring_capacity").unwrap_or_else(|| {
+        panic!("no trace_ring_capacity tracing line observed; stderr was:\n{lines:?}")
+    });
+    assert_eq!(
+        cap, 8191,
+        "AETHER_ACTOR_TRACE_RING_SIZE must reach the chassis boot",
+    );
 }

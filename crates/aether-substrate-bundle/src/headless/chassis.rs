@@ -35,13 +35,13 @@ use aether_substrate::{Chassis, SubstrateBoot};
 use super::driver::{HeadlessTimerDriverCapability, parse_tick_hz_env};
 use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use crate::chassis_common::{
-    CommonBoot, PersistOverride, boot_manifest_from_env, chassis_known_keys,
+    ActorRingConfig, CommonBoot, PersistOverride, boot_manifest_from_env, chassis_known_keys,
     maybe_with_http_server, maybe_with_rpc_server, parse_workers_env, resolve_persist_state,
     tick_only_lifecycle_config, with_common_caps,
 };
 use crate::cli::{CommonOverlay, HeadlessCli};
 use crate::hub;
-use aether_substrate::config::{ConfigError, validate_env};
+use aether_substrate::config::{ConfigError, RingCapacities, validate_env};
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
@@ -111,6 +111,11 @@ pub struct HeadlessEnv {
     /// `AETHER_WORKERS`; `None` keeps `PoolConfig::default()` behavior
     /// (`available_parallelism() - 1`, min 1).
     pub workers: Option<usize>,
+    /// Issue 1990: per-actor ring capacities resolved from the
+    /// `ActorRingConfig` knob (`AETHER_ACTOR_LOG_RING_SIZE` /
+    /// `AETHER_ACTOR_TRACE_RING_SIZE`). Default is
+    /// [`RingCapacities::default`] (the `aether-actor` const caps).
+    pub ring_caps: RingCapacities,
     /// ADR-0090 unit d (issue 1258): chassis-bin verdict on handle-
     /// store persistence. [`PersistOverride::EnvOnly`] (the default,
     /// what `from_env()` builds) preserves the pre-d env-only path
@@ -209,6 +214,10 @@ impl HeadlessEnv {
             .or_else(hub::rpc_port_from_env)
             .map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p));
         let workers = cli_workers.or_else(parse_workers_env);
+        // Issue 1990: resolve the per-actor ring capacities from
+        // `AETHER_ACTOR_{LOG,TRACE}_RING_SIZE` (ADR-0090 §4 hard-error on
+        // an unparseable known value, surfaced as `ConfigError`).
+        let ring_caps = ActorRingConfig::try_from_env()?.to_ring_capacities();
         Ok(Self {
             namespace_roots,
             http,
@@ -218,6 +227,7 @@ impl HeadlessEnv {
             tick_period,
             rpc_addr,
             workers,
+            ring_caps,
             persist: persist_state,
             handle_store_max_bytes,
             autoload,
@@ -243,6 +253,7 @@ impl HeadlessChassis {
             tick_period,
             rpc_addr,
             workers,
+            ring_caps,
             persist,
             handle_store_max_bytes,
             autoload,
@@ -307,6 +318,8 @@ impl HeadlessChassis {
             target: "aether_substrate::boot",
             workers_override = ?workers,
             tick_hz = tick_hz,
+            log_ring_capacity = ring_caps.log,
+            trace_ring_capacity = ring_caps.trace,
             "componentless boot — load a component via aether.component.load",
         );
 
@@ -331,6 +344,7 @@ impl HeadlessChassis {
         let common = CommonBoot {
             aborter,
             workers,
+            ring_caps,
             input_config,
             component_host_config,
             namespace_roots,

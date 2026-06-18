@@ -166,6 +166,25 @@ mod native_impl {
             }
         }
 
+        /// Pre-insert a constructed `T` into the slot map so the first
+        /// `with`/`with_mut::<T>` finds this value instead of
+        /// lazily building `T::default()`. The chassis spawn path seeds
+        /// the two per-actor rings (`ActorLogRing` / `ActorTraceRing`)
+        /// with their configured capacities here right after
+        /// `ActorSlots::new()`; every other `Local<T>` keeps the
+        /// lazy-`Default` slot-construction path untouched.
+        ///
+        /// Overwrites any existing slot for `T` — seeding is a boot-time
+        /// op that runs before any handler dispatch, so there is never a
+        /// live value to clobber. Idempotent-overwrite (last seed wins)
+        /// rather than a debug-assert so a double-seed is harmless.
+        pub fn seed<T: Default + Send + 'static>(&self, value: T) {
+            self.by_type.borrow_mut().insert(
+                TypeId::of::<T>(),
+                Box::new(RefCell::new(value)) as Box<dyn Any + Send>,
+            );
+        }
+
         /// Resolve (or lazily insert) the per-type `RefCell<T>` slot
         /// and return a raw pointer to it.
         ///
@@ -429,6 +448,34 @@ mod tests {
 
         with_stamped(&slots_a, || Probe::with(|p| assert_eq!(p.0, 7)));
         with_stamped(&slots_b, || Probe::with(|p| assert_eq!(p.0, 11)));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_seed_pre_inserts_value_seen_by_with_and_with_mut() {
+        // Seeding a slot before first access makes `with` / `with_mut`
+        // observe the seeded value rather than `T::default()` — the
+        // mechanism the chassis spawn path uses to hand each actor a
+        // ring constructed at the configured capacity.
+        let slots = ActorSlots::new();
+        slots.seed(Probe(0x5EED));
+        with_stamped(&slots, || {
+            Probe::with(|p| assert_eq!(p.0, 0x5EED, "seeded value, not default"));
+            Probe::with_mut(|p| p.0 += 1);
+            Probe::with(|p| assert_eq!(p.0, 0x5EEE));
+        });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_unseeded_type_still_lazily_defaults() {
+        // Seeding one type leaves an unrelated type on the lazy-`Default`
+        // path — `slot_ptr_for` stays untouched for everything not seeded.
+        let slots = ActorSlots::new();
+        slots.seed(Probe(0x5EED));
+        with_stamped(&slots, || {
+            OtherProbe::with(|p| assert_eq!(p.0, 0, "unseeded type defaults"));
+        });
     }
 
     #[cfg(not(target_arch = "wasm32"))]

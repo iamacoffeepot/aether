@@ -26,7 +26,7 @@ Each actor owns its own bounded persistent log ring. Emits land in the ring dire
 
 ### 1. Per-actor ring replaces `LogBuffer` + central store
 
-`ActorLogRing` is a bounded `VecDeque<LogEvent>` held in each actor's `ActorSlots` (same `Local` primitive ADR-0077 §2 used for `LogBuffer`). Default capacity is 1024 entries; `AETHER_ACTOR_LOG_RING_SIZE` overrides for the whole substrate. Overflow drops oldest (FIFO eviction); ADR-0023's `truncated_before` cursor surfaces the gap to the query side.
+`ActorLogRing` is a bounded `VecDeque<LogEvent>` held in each actor's `ActorSlots` (same `Local` primitive ADR-0077 §2 used for `LogBuffer`). Default capacity is 1024 entries; `AETHER_ACTOR_LOG_RING_SIZE` overrides it for the whole substrate, resolved at chassis boot through the `ActorRingConfig` derive-`Config` knob (argv > env > default, ADR-0090) and seeded into each actor's ring as it spawns. The trace-side sibling (ADR-0086) carries the matching `AETHER_ACTOR_TRACE_RING_SIZE` knob. Overflow drops oldest (FIFO eviction); ADR-0023's `truncated_before` cursor surfaces the gap to the query side.
 
 The `ActorAwareLayer` from ADR-0077 §2 still differentiates in-actor vs host branch. The in-actor branch now pushes directly into `ActorLogRing` instead of staging into `LogBuffer` for later drain. The priority-flush-at-WARN path retires — there's no flush to fast-track, the entry is already where queries will find it.
 

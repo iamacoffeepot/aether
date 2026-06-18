@@ -87,9 +87,10 @@ when you're unsure what a build will do with a given variable.
 Over MCP there are three ways to set configuration, from coarsest to finest:
 
 - **The environment** is the workhorse, and it's what `CLAUDE.md` documents
-  knob by knob (`AETHER_TICK_HZ`, `AETHER_SAVE_DIR`, `AETHER_AUDIO_DISABLE`, and
-  the rest). It's fleet-wide and fixed at launch: set it before bringing the
-  tunnel up, and every engine the hub forks inherits it.
+  knob by knob (`AETHER_TICK_HZ`, `AETHER_SAVE_DIR`, `AETHER_AUDIO_DISABLE`,
+  `AETHER_ACTOR_TRACE_RING_SIZE`, and the rest). It's fleet-wide and fixed at
+  launch: set it before bringing the tunnel up, and every engine the hub forks
+  inherits it.
 - **Per-spawn arguments** are the per-engine override. `spawn_substrate` forwards
   its `args` to the substrate as command-line arguments, layered *above* the
   inherited environment — so you can spawn one engine with `--gemini-api-key …`

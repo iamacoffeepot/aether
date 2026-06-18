@@ -102,6 +102,23 @@ impl TraceHandle {
         }
     }
 
+    /// Issue 1990: set the chassis-host ring's capacity to `ring_cap`.
+    /// Called once at chassis boot from `boot_passives` with the resolved
+    /// trace-ring capacity so off-actor trace producers (chassis-root /
+    /// injected mail) lap at the same configured depth as the per-actor
+    /// rings. The ring is empty at boot, so replacing it loses nothing.
+    ///
+    /// # Panics
+    /// Panics if the chassis-host ring mutex is poisoned (fail-fast per
+    /// ADR-0063) — unreachable at boot before any producer runs.
+    pub fn set_chassis_host_ring_capacity(&self, ring_cap: usize) {
+        *self
+            .chassis_host_ring
+            .lock()
+            .expect("chassis-host trace ring mutex poisoned; fail-fast per ADR-0063") =
+            ActorTraceRing::with_capacity(ring_cap);
+    }
+
     /// Install the chassis [`SettlementRegistry`] so the emit-time counter
     /// can fire `Settled` on the zero-transition (ADR-0086 Phase 2).
     /// Called once at chassis boot, after the registry is constructed; a

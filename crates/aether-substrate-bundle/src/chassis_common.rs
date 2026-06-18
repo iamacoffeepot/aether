@@ -13,6 +13,7 @@
 
 use std::env;
 use std::net::SocketAddr;
+use std::num::ParseIntError;
 use std::sync::Arc;
 
 use aether_actor::Actor;
@@ -34,10 +35,14 @@ use aether_capabilities::{
 use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
 // The `aether.trajectory` recorder cap moved to `aether-labyrinth` (issue
 // 1908); the mailbox NAMESPACE (and so its hash-derived id) is unchanged.
+use aether_actor::log::DEFAULT_RING_CAP;
+use aether_actor::trace_ring::DEFAULT_TRACE_RING_CAP;
 use aether_labyrinth::TrajectoryRecorderCapability;
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
-use aether_substrate::config::{KnobKind, KnobRecord, KnownKeys, dump_config, known_keys};
+use aether_substrate::config::{
+    KnobKind, KnobRecord, KnownKeys, RingCapacities, dump_config, known_keys,
+};
 use aether_substrate::handle_store::{ENV_MAX_BYTES, PersistConfig, PersistConfigLayer};
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::scheduler::SCHEDULER_KNOBS;
@@ -103,6 +108,80 @@ pub const CHASSIS_KNOBS: &[KnobRecord] = &[
     },
 ];
 
+/// Per-actor ring-capacity knob (issue 1990, ADR-0081 / ADR-0086). The
+/// `#[derive(aether_substrate::Config)]` emits the env-shaped
+/// `ActorRingConfigLayer`, the clap-shaped `ActorRingOverlay`, the
+/// `FromArgvThenEnv` impl, and the inherent `from_env` /
+/// `from_argv_then_env` shims (ADR-0090 unit g). Resolved once at chassis
+/// boot and lowered via [`Self::to_ring_capacities`] to the `Copy`
+/// [`RingCapacities`] the chassis builder threads down the spawn path.
+///
+/// `env_prefix = "AETHER_ACTOR"` joins the two field env keys; the
+/// explicit `env =` overrides pin the historical names — the log key
+/// (`AETHER_ACTOR_LOG_RING_SIZE`) is the one ADR-0081 already documented
+/// (previously documented-but-dead; this is what wires it), and the trace
+/// key (`AETHER_ACTOR_TRACE_RING_SIZE`) is the new sibling.
+#[derive(Clone, Debug, aether_substrate::Config)]
+#[config(env_prefix = "AETHER_ACTOR", cli_prefix = "actor")]
+pub struct ActorRingConfig {
+    /// `AETHER_ACTOR_LOG_RING_SIZE=<entries>` per-actor log-ring capacity
+    /// (default [`DEFAULT_RING_CAP`]). Zero clamps to 1 inside
+    /// `ActorLogRing::with_capacity`.
+    #[config(
+        env = "AETHER_ACTOR_LOG_RING_SIZE",
+        default = 1024,
+        parse = parse_ring_capacity::<DEFAULT_RING_CAP>
+    )]
+    pub log_ring_capacity: usize,
+    /// `AETHER_ACTOR_TRACE_RING_SIZE=<entries>` per-actor (and
+    /// chassis-host) trace-ring capacity (default
+    /// [`DEFAULT_TRACE_RING_CAP`]). Zero clamps to 1 inside
+    /// `ActorTraceRing::with_capacity`.
+    #[config(
+        env = "AETHER_ACTOR_TRACE_RING_SIZE",
+        default = 4096,
+        parse = parse_ring_capacity::<DEFAULT_TRACE_RING_CAP>
+    )]
+    pub trace_ring_capacity: usize,
+}
+
+impl Default for ActorRingConfig {
+    fn default() -> Self {
+        Self {
+            log_ring_capacity: DEFAULT_RING_CAP,
+            trace_ring_capacity: DEFAULT_TRACE_RING_CAP,
+        }
+    }
+}
+
+impl ActorRingConfig {
+    /// Lower the resolved knob to the `Copy` [`RingCapacities`] the
+    /// chassis builder threads down the spawn path.
+    #[must_use]
+    pub fn to_ring_capacities(&self) -> RingCapacities {
+        RingCapacities {
+            log: self.log_ring_capacity,
+            trace: self.trace_ring_capacity,
+        }
+    }
+}
+
+/// Parse a ring-capacity env value (ADR-0090 §4 hard-error half): empty →
+/// unset, falling back to the const default `D`; a non-empty value that
+/// isn't a valid `usize` errors, which confique surfaces from `.load()`
+/// and the chassis env resolver turns into a `ConfigError`.
+///
+/// # Errors
+///
+/// Returns a [`ParseIntError`] for a non-empty value that isn't a valid
+/// `usize`.
+fn parse_ring_capacity<const D: usize>(s: &str) -> Result<usize, ParseIntError> {
+    if s.trim().is_empty() {
+        return Ok(D);
+    }
+    s.trim().parse::<usize>()
+}
+
 /// Assemble the chassis-wide [`KnownKeys`] set (ADR-0090 §4): every
 /// migrated `*Layer::META` (http / gemini / anthropic / audio / fs /
 /// persist) plus the hand-registered chassis knobs ([`CHASSIS_KNOBS`])
@@ -136,6 +215,7 @@ fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
         &AudioConfigLayer::META,
         &NamespaceRootsLayer::META,
         &PersistConfigLayer::META,
+        &ActorRingConfigLayer::META,
     ];
     let mut records: Vec<KnobRecord> = CHASSIS_KNOBS.to_vec();
     records.extend_from_slice(SCHEDULER_KNOBS);
@@ -289,6 +369,9 @@ pub fn frame_lifecycle_config() -> LifecycleConfig {
 pub struct CommonBoot {
     pub aborter: Arc<dyn FatalAborter>,
     pub workers: Option<usize>,
+    /// Issue 1990: per-actor ring capacities, resolved from the
+    /// `ActorRingConfig` derive-`Config` knob in the chassis main.
+    pub ring_caps: RingCapacities,
     pub input_config: InputConfig,
     pub component_host_config: ComponentHostConfig,
     pub namespace_roots: NamespaceRoots,
@@ -308,6 +391,7 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
     builder
         .with_aborter(boot.aborter)
         .with_workers(boot.workers)
+        .with_ring_caps(boot.ring_caps)
         .with_actor::<HandleCapability>(())
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<DagCapability>(())
@@ -458,11 +542,86 @@ pub fn parse_workers_env() -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use super::ActorRingConfig;
+    use super::ActorRingConfigLayer;
     use super::chassis_known_keys;
     use super::parse_workers_env;
+    use aether_actor::log::DEFAULT_RING_CAP;
+    use aether_actor::trace_ring::DEFAULT_TRACE_RING_CAP;
     use std::env;
     use std::sync::Mutex;
     use std::sync::PoisonError;
+
+    /// Process-wide guard around the `AETHER_ACTOR_*` ring env mutation,
+    /// distinct from `ENV_LOCK` so a ring test and a workers test don't
+    /// contend on one lock.
+    static RING_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn actor_ring_config_defaults_match() {
+        use confique::Config as _;
+        // No `.env()` source: literal defaults only — env-free. The
+        // layer's `default = 1024 / 4096` literals must equal the
+        // `aether-actor` const caps so an unset knob reproduces the
+        // const-`Default` ring behaviour.
+        let _guard = RING_ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let layer = ActorRingConfigLayer::builder()
+            .load()
+            .expect("defaults load");
+        assert_eq!(layer.log_ring_capacity, DEFAULT_RING_CAP);
+        assert_eq!(layer.trace_ring_capacity, DEFAULT_TRACE_RING_CAP);
+        let default = ActorRingConfig::default();
+        assert_eq!(default.log_ring_capacity, DEFAULT_RING_CAP);
+        assert_eq!(default.trace_ring_capacity, DEFAULT_TRACE_RING_CAP);
+    }
+
+    #[test]
+    fn actor_ring_config_env_overrides_default() {
+        let _guard = RING_ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        // SAFETY: serialised by `RING_ENV_LOCK`; set then removed in scope.
+        unsafe {
+            env::set_var("AETHER_ACTOR_LOG_RING_SIZE", "256");
+            env::set_var("AETHER_ACTOR_TRACE_RING_SIZE", "9000");
+        }
+        let resolved = ActorRingConfig::from_env().to_ring_capacities();
+        // SAFETY: same serialised scope.
+        unsafe {
+            env::remove_var("AETHER_ACTOR_LOG_RING_SIZE");
+            env::remove_var("AETHER_ACTOR_TRACE_RING_SIZE");
+        }
+        assert_eq!(resolved.log, 256);
+        assert_eq!(resolved.trace, 9000);
+    }
+
+    #[test]
+    fn actor_ring_config_argv_wins_over_env() {
+        use confique::Layer as _;
+        let _guard = RING_ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        // SAFETY: serialised by `RING_ENV_LOCK`.
+        unsafe {
+            env::set_var("AETHER_ACTOR_TRACE_RING_SIZE", "9000");
+        }
+        // Argv overlay sets only the trace field; the log field falls
+        // through to env (unset) → default. Argv > env > default.
+        let mut layer = <ActorRingConfigLayer as confique::Config>::Layer::empty();
+        layer.trace_ring_capacity = Some(7777);
+        let resolved = ActorRingConfig::from_argv_then_env(layer).to_ring_capacities();
+        // SAFETY: same serialised scope.
+        unsafe {
+            env::remove_var("AETHER_ACTOR_TRACE_RING_SIZE");
+        }
+        assert_eq!(resolved.trace, 7777, "argv overlay wins over env");
+        assert_eq!(resolved.log, DEFAULT_RING_CAP, "unset log falls to default");
+    }
+
+    #[test]
+    fn actor_ring_keys_are_known() {
+        // The two ring env keys join the chassis known-key set so the
+        // unknown-AETHER_* sweep (e1) doesn't warn on them.
+        let known = chassis_known_keys();
+        assert!(known.contains("AETHER_ACTOR_LOG_RING_SIZE"));
+        assert!(known.contains("AETHER_ACTOR_TRACE_RING_SIZE"));
+    }
 
     /// Process-wide guard around `AETHER_WORKERS` env mutation —
     /// `cargo test` parallelises within a binary, so each parser test

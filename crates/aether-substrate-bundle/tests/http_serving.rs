@@ -129,6 +129,7 @@ mod tests {
                 tick_period: Duration::from_millis(100),
                 rpc_addr: None,
                 workers: None,
+                ring_caps: aether_substrate_bundle::RingCapacities::default(),
                 persist: PersistOverride::Argv(None),
                 handle_store_max_bytes: None,
                 autoload: vec![AutoloadComponent {
