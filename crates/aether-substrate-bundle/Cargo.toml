@@ -105,7 +105,6 @@ plotters = { version = "0.3", default-features = false, features = [
     "ab_glyph",
     "line_series",
 ] }
-postcard = { workspace = true, default-features = false, features = ["alloc"] }
 # `rmcp` / `axum` / `base64` / `schemars` retired with the embedded MCP
 # server (issue 763 P5e) — the harness moved out-of-process into the
 # `aether-mcp` crate, which owns those deps now.
