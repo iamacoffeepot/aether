@@ -1,6 +1,6 @@
 # ADR-0110: Claude Role Model
 
-- **Status:** Accepted
+- **Status:** Superseded — the role model (per-session role binding, role directives, the role status line, and the role-deny guardrail) was removed pending a redesign. The per-session worktree binding and the don't-dirty-main boundary it introduced are kept, now keyed off the session's worktree rather than a role marker.
 - **Date:** 2026-06-13
 
 ## Context

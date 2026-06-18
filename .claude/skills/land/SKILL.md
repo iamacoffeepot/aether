@@ -5,7 +5,7 @@ description: Land a CI-green draft PR — un-draft, squash-merge, delete the clo
 
 # /land — PR landing skill
 
-The orchestrator's post-review action: take a draft PR that the user has approved, un-draft it, let native auto-merge squash it onto `main`, delete the closing issue's `phase:*` label (Done is label-absence), and sweep the merged worktree. This is the step ADR-0110 names as the `land` skill in the orchestrator role's loop — deliberately separate from `/implement`, which holds at draft and never merges.
+The post-review landing action: take a draft PR that the user has approved, un-draft it, let native auto-merge squash it onto `main`, delete the closing issue's `phase:*` label (Done is label-absence), and sweep the merged worktree. Deliberately separate from `/implement`, which holds at draft and never merges.
 
 Two entry shapes, one skill:
 

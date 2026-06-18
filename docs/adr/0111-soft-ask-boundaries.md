@@ -1,6 +1,6 @@
 # ADR-0111: Soft, ask-to-confirm role and worktree boundaries
 
-- **Status:** Accepted
+- **Status:** Superseded — follows ADR-0110. The role boundary was removed with the role model; the ask-to-confirm worktree boundary it describes is kept, now keyed off the session's worktree rather than a role marker.
 - **Date:** 2026-06-14
 
 ## Context
