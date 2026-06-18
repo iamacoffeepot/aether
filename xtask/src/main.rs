@@ -670,7 +670,7 @@ mod tests {
 
         // aether-actor's own example cdylibs are NOT components — the
         // crate does not depend on itself, so it fails the actor-dep gate.
-        for excluded in ["hello", "echoer", "caller", "input_logger"] {
+        for excluded in ["hello", "input_logger"] {
             assert!(
                 !stems.contains(excluded),
                 "discovery wrongly included aether-actor example {excluded}",

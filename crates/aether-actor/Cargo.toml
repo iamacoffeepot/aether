@@ -51,30 +51,11 @@ bytemuck = { workspace = true, features = ["derive"] }
 # Tests run native, so an unconditional dev-dep is fine.
 inventory = { workspace = true }
 
-# ADR-0017 (component-to-component reply) smoke pair: caller sends
-# `demo.request` to "echoer" and observes the reply.
-[[example]]
-name = "echoer"
-crate-type = ["cdylib"]
-
-[[example]]
-name = "caller"
-crate-type = ["cdylib"]
-
 # ADR-0021 input subscriptions smoke. Resolves all four substrate input
 # kinds and broadcasts a `demo.input_observed` per event so
 # `receive_mail` shows the dispatch landing.
 [[example]]
 name = "input_logger"
-crate-type = ["cdylib"]
-
-# Postcard receive smoke test (sibling of `echoer.rs`). Demonstrates
-# `#[handler]` dispatching through `Mail::decode_postcard` for kinds
-# whose schema isn't bytemuck-castable (here: `String` + `Vec<u8>`
-# fields). Closes the gap in ADR-0033's design intent that
-# `#[actor]` accepts any declared kind regardless of wire shape.
-[[example]]
-name = "postcard_echoer"
 crate-type = ["cdylib"]
 
 # First end-to-end component (formerly `aether-hello-component`):
