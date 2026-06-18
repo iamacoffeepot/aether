@@ -798,6 +798,7 @@ macro_rules! __export_internal {
             count: u32,
             sender: u32,
             recipient: u64,
+            source: u64,
         ) -> u32 {
             // ADR-0114 addressing amendment: the cluster self-identity is the
             // real folded id captured at `init` / `wire`, so the membrane and
@@ -834,11 +835,15 @@ macro_rules! __export_internal {
                 let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                     return 1;
                 };
-                // Top-level dispatch: the inbound source is `NONE` on the ctx, so
-                // `ctx.source_mailbox()` falls back to the host reply table via
-                // the dispatcher-stamped reply handle (issue 1987).
-                $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, 0, move |__aether_mail| {
-                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::ffi::NO_INBOUND_SOURCE);
+                // Top-level dispatch: the host threads the resolved inbound
+                // source on the `receive_p32` ABI (issue 2001), so the ctx
+                // carries it directly and `ctx.source_mailbox()` is a single
+                // field read — the same path the in-place drain takes. The
+                // membrane gets the same `source` so a mail routed straight to
+                // an inline-child alias (ADR-0114) hands the child its source
+                // too, not just the cluster root.
+                $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, source, move |__aether_mail| {
+                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, source);
                     instance.__aether_dispatch(&mut ctx, __aether_mail)
                 })
             };
@@ -1245,6 +1250,7 @@ macro_rules! __export_multi_internal {
             count: u32,
             sender: u32,
             recipient: u64,
+            source: u64,
         ) -> u32 {
             // ADR-0114 addressing amendment: the cluster self-identity is the
             // real folded id captured at init / wire (correct at any depth),
@@ -1277,11 +1283,15 @@ macro_rules! __export_multi_internal {
                 let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                     return 1;
                 };
-                // Top-level dispatch: `NONE` source on the ctx, so
-                // `ctx.source_mailbox()` falls back to the host reply table via
-                // the dispatcher-stamped reply handle (issue 1987).
-                $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, 0, move |__aether_mail| {
-                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::ffi::NO_INBOUND_SOURCE);
+                // Top-level dispatch: the host threads the resolved inbound
+                // source on the `receive_p32` ABI (issue 2001), so the ctx
+                // carries it directly and `ctx.source_mailbox()` is a single
+                // field read — the same path the in-place drain takes. The
+                // membrane gets the same `source` so a mail routed straight to
+                // an inline-child alias (ADR-0114) hands the child its source
+                // too, not just the cluster root.
+                $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, source, move |__aether_mail| {
+                    let mut ctx = $crate::FfiCtx::__new(mailbox_id, &__AETHER_INLINE, source);
                     instance.erased_dispatch(&mut ctx, __aether_mail)
                 })
             };

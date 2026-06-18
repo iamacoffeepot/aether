@@ -172,15 +172,16 @@ pub enum SpawnError {
 pub struct FfiCtx<'a, M: ReplyMode = Single> {
     mailbox: u64,
     sender: Option<u32>,
-    /// Issue 1987: the inbound source — the folded [`MailboxId`] raw value
-    /// of whoever sent the mail currently being dispatched, threaded onto
-    /// the ctx at construction. For an in-place (intra-cluster) dispatch
-    /// off the drain this is the enqueuing member's id (the in-place reply
-    /// table is empty, so the ctx is the only carrier); for a top-level
-    /// dispatch it is [`MailboxId::NONE`] (`0`) and
-    /// [`Self::source_mailbox`] falls back to the host reply table via the
-    /// `sender` handle. Replaces the registry's ambient `current_source`
-    /// cell.
+    /// The inbound source — the folded [`MailboxId`] raw value of whoever
+    /// sent the mail currently being dispatched, threaded onto the ctx at
+    /// construction (issues 1987 + 2001). For an in-place (intra-cluster)
+    /// dispatch off the drain this is the enqueuing member's id (the in-place
+    /// reply table is empty, so the ctx is the only carrier); for a top-level
+    /// dispatch the host resolves the source from the inbound's `SourceAddr`
+    /// and threads it as the trailing `receive_p32` ABI slot. So
+    /// [`Self::source_mailbox`] is a single read of this field on both paths.
+    /// [`MailboxId::NONE`] (`0`) means no peer-component origin — a session,
+    /// remote-engine, or broadcast mail, or a lifecycle hook with no inbound.
     source: u64,
     /// ADR-0114: the per-component inline-child registry the
     /// [`Self::spawn_inline_child`] / [`Self::despawn_inline_child`] verbs
@@ -197,11 +198,12 @@ pub struct FfiCtx<'a, M: ReplyMode = Single> {
     _mode: PhantomData<M>,
 }
 
-/// The `source` argument to [`FfiCtx::__new`] for a dispatch with no in-place
-/// sender — a top-level mail dispatch or a lifecycle hook, where
-/// [`FfiCtx::source_mailbox`] falls back to the host reply table. Equals
-/// [`MailboxId::NONE`]. (The drained-member path threads the enqueuing member's
-/// own id instead.) Named so the `__new` call sites read intent, not a bare `0`.
+/// The `source` argument to [`FfiCtx::__new`] for a dispatch that carries no
+/// inbound source — a lifecycle hook (`wire` / `unwire` / `on_rehydrate`),
+/// where [`FfiCtx::source_mailbox`] returns `None`. Equals [`MailboxId::NONE`].
+/// (A top-level mail dispatch threads the host-resolved source over the
+/// `receive_p32` ABI; the drained-member path threads the enqueuing member's
+/// own id.) Named so the `__new` call sites read intent, not a bare `0`.
 #[doc(hidden)]
 pub const NO_INBOUND_SOURCE: u64 = MailboxId::NONE.0;
 
@@ -211,10 +213,10 @@ impl<'a> FfiCtx<'a, Manual> {
     /// [`Manual`] view; the `#[actor]` dispatcher / lifecycle shims
     /// downgrade it per handler class with [`Self::as_single`].
     ///
-    /// `source` is the inbound source (issue 1987): the enqueuing member's
-    /// id for an in-place drained dispatch, or [`MailboxId::NONE`] (`0`)
-    /// for a top-level dispatch / lifecycle hook (where
-    /// [`Self::source_mailbox`] falls back to the host reply table).
+    /// `source` is the inbound source (issues 1987 + 2001): the enqueuing
+    /// member's id for an in-place drained dispatch, the host-resolved source
+    /// for a top-level mail dispatch (threaded over the `receive_p32` ABI), or
+    /// [`MailboxId::NONE`] (`0`) for a lifecycle hook with no inbound mail.
     #[doc(hidden)]
     #[must_use]
     pub fn __new(mailbox: u64, inline: &'a InlineRegistry, source: u64) -> Self {
@@ -727,20 +729,14 @@ impl OutboundReply for FfiCtx<'_, Manual> {
     }
 
     fn source_mailbox(&self) -> Option<MailboxId> {
-        // Issue 1987: an in-place (intra-cluster) dispatch carries its "from"
-        // half on the ctx's `source` field (threaded by the membrane / drain),
-        // because a drained item dispatches with `NO_REPLY_HANDLE` (the local
-        // fast path is fire-and-forget) so the host reply table holds nothing
-        // for it. For a top-level dispatch `source` is `0`, and the sender
-        // resolves from the host reply table via the `sender` handle as before.
-        // The two never collide: an in-place item has no reply handle, so
-        // `self.sender` is `None` exactly when `source` is set.
-        if self.source != MailboxId::NONE.0 {
-            return Some(MailboxId(self.source));
-        }
-        let handle = self.sender?;
-        let id = mail::source_of(handle);
-        (id != MailboxId::NONE.0).then_some(MailboxId(id))
+        // Issue 2001: the inbound source rides the ctx's `source` field on
+        // every dispatch — the in-place drain threads it (a drained item has
+        // no reply handle, since the local fast path is fire-and-forget), and
+        // the top-level `receive_p32` membrane threads the host-resolved source
+        // the same ABI slot delivers (issue 1987 completed the top-level half).
+        // So this is a single field read on both paths; `MailboxId::NONE` (0)
+        // means no peer-component origin (session / engine / broadcast mail).
+        (self.source != MailboxId::NONE.0).then_some(MailboxId(self.source))
     }
 
     fn reply<K: Kind>(&mut self, payload: &K) {
@@ -1041,6 +1037,32 @@ mod tests {
         assert!(
             matches!(result, Err(SpawnError::SubnameInvalid(_))),
             "a separator-bearing subname must return SubnameInvalid, got {result:?}",
+        );
+    }
+
+    /// Issue 2001: `source_mailbox()` is a single read of the ctx's
+    /// `source` field on the top-level path — the host threads the resolved
+    /// inbound source over the `receive_p32` ABI and the `export!` membrane
+    /// hands it to `__new` (the same field the in-place drain threads). A
+    /// non-`NONE` source yields `Some(id)`; `NONE` (the no-peer-origin
+    /// sentinel) yields `None`. No host round-trip is involved.
+    #[test]
+    fn source_mailbox_reads_the_threaded_source_field() {
+        let registry = InlineRegistry::new();
+
+        let source = MailboxId(0x9999_0000_1234_5678);
+        let ctx: FfiCtx<'_, Manual> = FfiCtx::__new(0x10, &registry, source.0);
+        assert_eq!(
+            ctx.source_mailbox(),
+            Some(source),
+            "a non-NONE threaded source must surface verbatim",
+        );
+
+        let none_ctx: FfiCtx<'_, Manual> = FfiCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+        assert_eq!(
+            none_ctx.source_mailbox(),
+            None,
+            "MailboxId::NONE means no peer-component origin",
         );
     }
 

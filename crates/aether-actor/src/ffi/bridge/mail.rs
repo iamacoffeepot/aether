@@ -126,20 +126,6 @@ pub fn prev_correlation() -> u64 {
     unsafe { raw::prev_correlation() }
 }
 
-/// Resolve the source mailbox of the mail bound to `handle` (issue 1958).
-/// Returns the sender's raw `MailboxId` value when the inbound mail
-/// originated from a peer component; returns `MailboxId::NONE.0` (0)
-/// for every other source kind, for `NO_REPLY_HANDLE`, and for unknown
-/// handles. Callers map `0 → None` to mirror `NativeCtx::source_mailbox`.
-#[must_use]
-pub fn source_of(handle: u32) -> u64 {
-    // SAFETY: `raw::source_of` takes a scalar handle and reads a
-    // host-side ReplyTable entry — no guest memory access, no ABI
-    // invariants beyond "we are the FFI guest", enforced by the
-    // `#[cfg(target_arch = "wasm32")]` import gate.
-    unsafe { raw::source_of(handle) }
-}
-
 /// ADR-0081 §7: re-emit one `tracing::*` event on the host side.
 /// Called by the wasm subscriber per event so the host's
 /// `ActorAwareLayer` lands the entry in the trampoline's

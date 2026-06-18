@@ -63,6 +63,8 @@ Length / count arguments stay `u32` regardless of target. Pointer-width is exact
 
 **Forward-compat property.** After Phase 1 ships, adding wasm64 in Phase 2 is purely additive: register `aether::send_mail_p64` next to `aether::send_mail_p32`, emit `receive_p64` next to `receive_p32`, no rename, no break. Existing components built against `_p32` keep loading exactly as they do today.
 
+This same additive property covers extending the `receive_p32` export signature: the in-place arity has grown from `(kind, ptr, count, sender)` through `byte_len` (postcard receive path), `recipient` (ADR-0114, the routed address), and `source` (issue 2001, the resolved inbound source `MailboxId`), reaching `receive_p32(kind, ptr, byte_len, count, sender, recipient, source) -> u32`. The host typed-func and every guest `export!` shim move together — a mismatched arity fails instantiation, so each addition ships atomically. The `source` addition let `source_mailbox` collapse to a single ctx-field read and retired the `source_of_p32` host import that previously resolved it lazily over the reply table.
+
 ### Phase 2 — dual registration, deferred
 
 Phase 2 is the originally-proposed design. It is bookmarked here, not implemented now. Trigger to revisit: wasm64 is promoted to Tier 2 (a Rust toolchain shift), or a real component approaches the 4 GiB ceiling, whichever comes first.

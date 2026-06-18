@@ -494,11 +494,13 @@ impl Default for InlineRegistry {
 /// short-circuit drop.
 ///
 /// `source` is the inbound source threaded onto the dispatched child's ctx
-/// (issue 1987): the enqueuing member's id when called off the drain, or
-/// [`MailboxId::NONE`] (`0`) for a top-level dispatch (where the child's
-/// `ctx.source_mailbox()` falls back to the host reply table). The own-id
-/// path's ctx is built by `dispatch_own`, which the caller has already bound
-/// to the same `source`.
+/// (issues 1987 + 2001): the enqueuing member's id when called off the drain,
+/// the host-resolved inbound source for a top-level dispatch (the `receive_p32`
+/// membrane threads the same value it received over the ABI), or
+/// [`MailboxId::NONE`] (`0`) when there is no peer-component origin. The child's
+/// `ctx.source_mailbox()` is a single read of this field. The own-id path's ctx
+/// is built by `dispatch_own`, which the caller has already bound to the same
+/// `source`.
 ///
 /// For a normal (non-inline) actor the routed recipient equals the
 /// parent's own id, so the membrane no-ops straight to `dispatch_own` —
@@ -1263,14 +1265,13 @@ mod tests {
         );
     }
 
-    /// Task 1: a top-level (non-drain) dispatch threads `MailboxId::NONE` as
-    /// the ctx source, so the child reads `source_mailbox() == None` — the
-    /// drain is the only thing that threads an in-place sender onto the ctx.
-    /// Here a child is dispatched directly through the membrane with no drain
-    /// framing and a `NONE` source, so its observed source is `None` (no host
-    /// reply handle either, on the host build).
+    /// A `membrane_dispatch` called with a `NONE` source threads it verbatim,
+    /// so the dispatched child reads `source_mailbox() == None`. (In
+    /// production the `receive_p32` shim threads the host-resolved inbound
+    /// source instead of `NONE`; this exercises the function's `NONE`
+    /// contract directly — there is no host reply-table fallback.)
     #[test]
-    fn top_level_dispatch_reads_no_source() {
+    fn membrane_dispatch_with_none_source_reads_no_source() {
         let registry = InlineRegistry::new();
         let own = 0x8000_u64;
         let child = 0x8001_u64;
