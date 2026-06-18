@@ -193,7 +193,6 @@ dependencies = [
  "aether-kinds",
  "aether-substrate",
  "bytemuck",
- "postcard",
  "serde",
 ]
 
@@ -257,7 +256,6 @@ dependencies = [
  "aether-mesh",
  "aether-substrate-bundle",
  "inventory",
- "postcard",
  "serde",
  "tracing",
 ]
@@ -323,7 +321,6 @@ dependencies = [
  "plotters",
  "png",
  "pollster",
- "postcard",
  "serde",
  "serde_json",
  "signal-hook",

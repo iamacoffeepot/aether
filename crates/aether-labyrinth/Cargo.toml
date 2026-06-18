@@ -51,11 +51,5 @@ bytemuck = { workspace = true, features = ["derive"] }
 # `native` so the transform-only consumer never pulls it.
 aether-substrate = { path = "../aether-substrate", optional = true }
 
-[dev-dependencies]
-# The recorder cap's tests round-trip `TrajectoryLog` / `RecordResult`
-# bytes and enqueue raw dispatches; postcard is the wire codec. Test-only,
-# so it stays out of the production graph.
-postcard = { workspace = true, features = ["alloc"] }
-
 [lints]
 workspace = true

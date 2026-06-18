@@ -61,11 +61,11 @@ proptest = "1"
 # workspace table so the single-version property is structural — members
 # inherit with `{ workspace = true }` and extend per-member `features` /
 # `optional` locally. The no_std/wasm members need defaults off
-# (postcard's `heapless-cas`, serde's / tracing's `std`), and edition
-# 2024 only lets a member disable defaults when the workspace entry does
-# — so these carry `default-features = false` and the native consumers
-# re-add the default features they rely on (`heapless-cas`, `std`,
-# `attributes`) on their own declaration, keeping Cargo.lock byte-stable.
+# (serde's / tracing's `std`), and edition 2024 only lets a member
+# disable defaults when the workspace entry does — so these carry
+# `default-features = false` and the native consumers re-add the default
+# features they rely on (`std`, `attributes`) on their own declaration,
+# keeping Cargo.lock byte-stable.
 anyhow = "1"
 base64 = "0.22"
 bytemuck = { version = "1.19", default-features = false }
@@ -74,7 +74,6 @@ cpal = "0.17"
 hound = "3"
 inventory = "0.3"
 png = "0.18"
-postcard = { version = "1.1", default-features = false }
 proc-macro2 = "1"
 quote = "1"
 serde = { version = "1", default-features = false }
