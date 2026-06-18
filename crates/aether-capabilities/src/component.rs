@@ -271,9 +271,12 @@ mod native {
         /// `NativeBinding`, which outlives the swap.
         ///
         /// # Agent
-        /// `ReplaceComponent { mailbox_id, wasm, drain_timeout_ms }`.
+        /// `ReplaceComponent { mailbox_id, wasm, drain_timeout_ms, config, export }`.
         /// `drain_timeout_ms` is accepted for wire compatibility but
         /// ignored under the trampoline's binding-stable replace.
+        /// `export` (ADR-0096) names which exported actor type of the
+        /// replacement module to instantiate; `None` reuses the type the
+        /// trampoline currently hosts.
         #[handler]
         fn on_replace_component(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
             self.forward_to_trampoline(ctx, payload.mailbox_id, ReplaceComponent::ID, &payload);

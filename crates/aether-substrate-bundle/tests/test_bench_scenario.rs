@@ -1106,6 +1106,7 @@ fn replace_component_preserves_mailbox_identity() {
                     wasm,
                     drain_timeout_ms: None,
                     config: Vec::new(),
+                    export: None,
                 },
             ),
         )])
@@ -1215,6 +1216,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
                     wasm,
                     drain_timeout_ms: None,
                     config: Vec::new(),
+                    export: None,
                 },
             ),
         )])
@@ -1321,6 +1323,7 @@ fn replace_preserves_state_via_typed_state_kind() {
                     wasm,
                     drain_timeout_ms: None,
                     config: Vec::new(),
+                    export: None,
                 },
             ),
         )])
@@ -1431,6 +1434,7 @@ fn typed_state_decode_miss_boots_fresh() {
                     wasm: reshaped_wasm,
                     drain_timeout_ms: None,
                     config: Vec::new(),
+                    export: None,
                 },
             ),
         )])
@@ -2367,6 +2371,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
                     wasm,
                     drain_timeout_ms: None,
                     config: Vec::new(),
+                    export: None,
                 },
             ),
         )])
@@ -2572,6 +2577,7 @@ fn childless_component_hot_reloads_unchanged() {
                     wasm,
                     drain_timeout_ms: None,
                     config: Vec::new(),
+                    export: None,
                 },
             ),
         )])

@@ -1694,6 +1694,15 @@ mod control_plane {
         /// the same way [`LoadComponent::config`] is on first load. An
         /// empty vec means "no config".
         pub config: Vec<u8>,
+        /// ADR-0096: which exported actor type to instantiate from the
+        /// replacement module, named by its `Actor::NAMESPACE`. `None`
+        /// reuses the trampoline's **current hosted type** (not
+        /// necessarily the entry), so a bare replace preserves
+        /// today's behaviour byte-for-byte. `Some(ns)` instantiates the
+        /// named export — mirroring [`LoadComponent::export`] — and an
+        /// export the replacement module doesn't declare is a clean
+        /// `ReplaceResult::Err`.
+        pub export: Option<String>,
     }
 
     /// Reply to `ReplaceComponent`. Carries the new component's
@@ -5903,12 +5912,14 @@ mod tests {
                 wasm: vec![0x00, 0x61, 0x73, 0x6d],
                 drain_timeout_ms: Some(2500),
                 config: vec![0x01, 0x02, 0x03],
+                export: Some("ui.panel".to_string()),
             };
             let bytes = replace.encode_into_bytes();
             let back = ReplaceComponent::decode_from_bytes(&bytes)
                 .expect("decode ReplaceComponent round-trip");
             assert_eq!(back.config, vec![0x01, 0x02, 0x03]);
             assert_eq!(back.mailbox_id, aether_data::MailboxId(7));
+            assert_eq!(back.export.as_deref(), Some("ui.panel"));
         }
 
         #[test]

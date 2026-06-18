@@ -395,8 +395,8 @@ impl FleetBench {
             namespace: None,
             handled_kind: None,
         });
-        let wasm = match resolved {
-            ResolveComponentResult::Ok { wasm, .. } => wasm,
+        let (wasm, export) = match resolved {
+            ResolveComponentResult::Ok { wasm, export, .. } => (wasm, export),
             ResolveComponentResult::Err { error } => {
                 panic!("resolve of selector {selector:?} failed: {error}")
             }
@@ -409,6 +409,10 @@ impl FleetBench {
                 wasm,
                 drain_timeout_ms: None,
                 config: Vec::new(),
+                // ADR-0096: thread the selector's `@actor` half, so a
+                // `module@actor` replace instantiates the named export
+                // instead of the trampoline's current hosted type.
+                export,
             },
         );
         let payload = single_reply(&replies, "ReplaceComponent");
@@ -548,12 +552,50 @@ impl FleetBench {
                 wasm,
                 drain_timeout_ms: None,
                 config: Vec::new(),
+                // Replace-by-stem reuses the trampoline's current hosted
+                // type — no export selector.
+                export: None,
             },
         );
         let payload = single_reply(&replies, "ReplaceComponent");
         match ReplaceResult::decode_from_bytes(&payload) {
             Some(ReplaceResult::Ok { capabilities }) => capabilities,
             Some(ReplaceResult::Err { error }) => panic!("replace with {stem:?} failed: {error}"),
+            None => panic!("undecodable ReplaceResult"),
+        }
+    }
+
+    /// Replace by stem like [`replace`](Self::replace), but select a
+    /// specific exported actor type from a multi-actor replacement
+    /// module via `export` (ADR-0096) — the `ReplaceComponent.export`
+    /// twin of [`load_full_export`](Self::load_full_export). The
+    /// `export` string is the target actor's `NAMESPACE`. Returns the
+    /// instantiated export's advertised capabilities.
+    pub fn replace_export(
+        &mut self,
+        engine: EngineId,
+        mailbox_id: MailboxId,
+        stem: &str,
+        export: &str,
+    ) -> ComponentCapabilities {
+        let wasm = read_component_wasm(stem);
+        let replies = self.call(
+            Some(engine),
+            "aether.component",
+            &ReplaceComponent {
+                mailbox_id,
+                wasm,
+                drain_timeout_ms: None,
+                config: Vec::new(),
+                export: Some(export.to_owned()),
+            },
+        );
+        let payload = single_reply(&replies, "ReplaceComponent");
+        match ReplaceResult::decode_from_bytes(&payload) {
+            Some(ReplaceResult::Ok { capabilities }) => capabilities,
+            Some(ReplaceResult::Err { error }) => {
+                panic!("replace with {stem:?}@{export:?} failed: {error}")
+            }
             None => panic!("undecodable ReplaceResult"),
         }
     }

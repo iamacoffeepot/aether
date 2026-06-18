@@ -69,6 +69,7 @@ mod tests {
                     wasm,
                     drain_timeout_ms: None,
                     config: Vec::new(),
+                    export: None,
                 },
             );
             assert!(
