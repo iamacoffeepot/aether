@@ -12,7 +12,6 @@ members = [
     "crates/aether-data-derive",
     "crates/aether-derive",
     "crates/aether-mesh",
-    "crates/aether-camera",
     "crates/aether-kit",
     "crates/aether-capabilities",
     "crates/aether-labyrinth",

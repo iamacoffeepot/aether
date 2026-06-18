@@ -52,7 +52,7 @@ use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability
 use aether_kinds::{Camera, Render, Tick, WindowSize};
 use aether_math::{Mat4, PI, Quat, TAU, Vec2, Vec3};
 
-use crate::{
+use crate::camera::{
     CameraCreate, CameraDestroy, CameraOrbitSet, CameraSetActive, CameraSetMode, CameraTopdownSet,
     ModeInit, OrbitParams, TopdownParams,
 };
@@ -351,7 +351,7 @@ impl FfiActor for CameraComponent {
     fn on_create(&mut self, _ctx: &mut FfiCtx<'_>, msg: CameraCreate) {
         if self.cameras.contains_key(&msg.name) {
             tracing::warn!(
-                target: "aether_camera",
+                target: "aether_kit",
                 name = %msg.name,
                 "camera.create rejected: name already bound; use set_mode to swap modes",
             );
@@ -386,7 +386,7 @@ impl FfiActor for CameraComponent {
             self.active = Some(msg.name);
         } else {
             tracing::warn!(
-                target: "aether_camera",
+                target: "aether_kit",
                 name = %msg.name,
                 "camera.set_active rejected: no camera bound under that name",
             );
@@ -403,7 +403,7 @@ impl FfiActor for CameraComponent {
             cam.mode = ModeState::from_init(&msg.mode);
         } else {
             tracing::warn!(
-                target: "aether_camera",
+                target: "aether_kit",
                 name = %msg.name,
                 "camera.set_mode rejected: no camera bound under that name",
             );
@@ -420,7 +420,7 @@ impl FfiActor for CameraComponent {
             match &mut cam.mode {
                 ModeState::Orbit(state) => state.apply(&msg.params),
                 other @ ModeState::Topdown(_) => tracing::warn!(
-                    target: "aether_camera",
+                    target: "aether_kit",
                     name = %msg.name,
                     actual = %other.name(),
                     "camera.orbit.set rejected: camera is in a different mode; switch with set_mode first",
@@ -428,7 +428,7 @@ impl FfiActor for CameraComponent {
             }
         } else {
             tracing::warn!(
-                target: "aether_camera",
+                target: "aether_kit",
                 name = %msg.name,
                 "camera.orbit.set rejected: no camera bound under that name",
             );
@@ -444,7 +444,7 @@ impl FfiActor for CameraComponent {
             match &mut cam.mode {
                 ModeState::Topdown(state) => state.apply(&msg.params),
                 other @ ModeState::Orbit(_) => tracing::warn!(
-                    target: "aether_camera",
+                    target: "aether_kit",
                     name = %msg.name,
                     actual = %other.name(),
                     "camera.topdown.set rejected: camera is in a different mode; switch with set_mode first",
@@ -452,15 +452,13 @@ impl FfiActor for CameraComponent {
             }
         } else {
             tracing::warn!(
-                target: "aether_camera",
+                target: "aether_kit",
                 name = %msg.name,
                 "camera.topdown.set rejected: no camera bound under that name",
             );
         }
     }
 }
-
-aether_actor::export!(CameraComponent);
 
 #[cfg(test)]
 mod tests {

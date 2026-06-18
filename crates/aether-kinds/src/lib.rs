@@ -3714,8 +3714,8 @@ mod control_plane {
 
     // ADR-0066: camera control kinds (`aether.camera.{create, destroy,
     // set_active, set_mode, orbit.set, topdown.set}` + `OrbitParams` /
-    // `TopdownParams` / `ModeInit`) moved to the `aether-camera` trunk
-    // crate. The `aether.camera` view_proj sink contract above stays
+    // `TopdownParams` / `ModeInit`) live in the `aether-kit::camera`
+    // trunk module. The `aether.camera` view_proj sink contract above stays
     // here — it's a chassis primitive consumed by the desktop chassis's
     // `aether.render` mailbox (the camera mailbox folded into
     // render per ADR-0074 §Decision 7; the kind name is unchanged).
@@ -4735,7 +4735,7 @@ mod tests {
         assert_eq!(Camera::NAME, "aether.camera");
         // ADR-0066: aether.camera.{create,destroy,set_active,set_mode,
         // orbit.set,topdown.set} kind-name asserts live in
-        // `aether-camera`'s tests; the `aether.mesh.load` *request*
+        // `aether-kit::camera`'s tests; the `aether.mesh.load` *request*
         // lives in `aether-mesh-viewer`'s tests. The view-proj sink
         // contract (`aether.camera`) stays here as a chassis primitive.
         // The structured load *reply* kinds (issue 964) live in this

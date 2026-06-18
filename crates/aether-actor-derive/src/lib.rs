@@ -1420,7 +1420,7 @@ pub fn derive_instanced(input: TokenStream) -> TokenStream {
 /// only string the author writes is `T`'s own `NAMESPACE` (ADR-0099 §5's
 /// read-from-owner rule). Because the emitted path is
 /// `::aether_capabilities::resolve_embedded`, a peer-addressable
-/// embeddable depends on `aether-capabilities` (as `aether-camera` already
+/// embeddable depends on `aether-capabilities` (as `aether-kit` already
 /// does). Use in place of `#[derive(Singleton)]`, not alongside it.
 #[proc_macro_derive(Embeddable)]
 pub fn derive_embeddable(input: TokenStream) -> TokenStream {

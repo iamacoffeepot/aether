@@ -159,7 +159,7 @@ Then handle each stage as its kind, like any other mail:
 fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _tick: Tick) { /* advance one frame */ }
 ```
 
-The reference `aether-camera` subscribes `Tick` and `Render` this way — it
+`aether-kit`'s `camera` export subscribes `Tick` and `Render` this way — it
 computes its camera matrix on `Tick` and publishes it to `aether.render` on
 `Render`; `aether-mesh-viewer` subscribes `Render` to replay its mesh each frame.
 

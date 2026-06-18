@@ -165,12 +165,14 @@ aether-test-fixtures = { path = "../aether-test-fixtures" }
 aether-math = { path = "../aether-math" }
 # iamacoffeepot/aether#1037: the cap-registry replace test swaps the
 # probe wasm for the camera wasm (a distinct handler set) and asserts
-# the registry reflects the new accept-set. `default-features = false`
-# pulls in only the camera kind types (`CameraCreate`, etc.) for their
-# `::ID`s — the `runtime` module's `export!()` FFI emission is wasm32-
-# only and inert in a host rlib anyway, but skipping it keeps the host
-# test build lean.
-aether-camera = { path = "../aether-camera", default-features = false }
+# the registry reflects the new accept-set. The camera folded into
+# `aether-kit` as a non-entry export (issue 1996), so the kind types
+# (`aether_kit::camera::CameraCreate`, etc.) come from kit.
+# `default-features = false` pulls in only the trunk kind types for
+# their `::ID`s — the `runtime` module's `export!()` FFI emission is
+# wasm32-only and inert in a host rlib anyway, but skipping it keeps
+# the host test build lean.
+aether-kit = { path = "../aether-kit", default-features = false }
 # iamacoffeepot/aether#1057: the mail-latency harness (`test_bench::mail_latency`)
 # subscribes to per-root `Settled` notifications to wait for injected
 # trace trees to drain; naming the settlement `Receiver<()>` returned by

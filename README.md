@@ -27,7 +27,7 @@ Actor SDK:
 
 - **`aether-actor`** — the guest SDK: the `Actor` / `FfiActor` traits, `Mailbox<K>`, `FfiCtx`, the `#[actor]` macro, and `export!`. Macros live in `aether-actor-derive`.
 
-Reference actors and tools: **`aether-camera`** and **`aether-mesh-viewer`** (components), **`aether-mesh`** (a mesh DSL + mesher), and **`aether-mcp`** (the out-of-process MCP harness Claude drives the engine through).
+Reference actors and tools: **`aether-mesh-viewer`** (a single-actor component) and **`aether-kit`** (the gameplay-systems layer — a multi-actor module whose `camera` export is the reference camera component), **`aether-mesh`** (a mesh DSL + mesher), and **`aether-mcp`** (the out-of-process MCP harness Claude drives the engine through).
 
 ## Building and running
 
@@ -61,7 +61,7 @@ A component lives in one crate that produces both outputs (`crate-type = ["cdyli
 - The crate's **rlib** is the public API for *talking to* the component — the kind types (mail shapes), parameter structs, and helpers that other components import to build the wire shapes they send it.
 - The crate's **cdylib** is the deployable wasm. The runtime (the `FfiActor` impl) lives in the crate's `runtime` module behind a default-on `runtime` feature; under `wasm32` the `export!()` invocation produces the component's FFI exports. The host-target rlib build leaves those exports inert, so integration tests link the same artifact. A consumer that only needs the kind types opts out with `default-features = false`.
 
-Reference components in-tree: `aether-camera` and `aether-mesh-viewer`. Third-party components follow the same shape — the convention is symmetric, not first-party-privileged. `aether-kinds` is reserved for the chassis primitives the substrate itself emits or consumes.
+Reference components in-tree: `aether-mesh-viewer` (single-actor) and `aether-kit`'s `camera` export (a multi-actor module, ADR-0096). Third-party components follow the same shape — the convention is symmetric, not first-party-privileged. `aether-kinds` is reserved for the chassis primitives the substrate itself emits or consumes.
 
 ## Testing and pre-flight
 
