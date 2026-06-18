@@ -9,7 +9,7 @@
 //! field are omitted. Enum selector positions agree between `SchemaType`
 //! and `SchemaShape` by construction (same arm order, same field
 //! declaration order), so hub-side decode via
-//! `wire::from_bytes_bare::<SchemaShape>` reads the canonical bytes
+//! `wire::from_bytes::<SchemaShape>` reads the canonical bytes
 //! cleanly.
 //!
 //! Only `SchemaCell::Static` / `LabelCell::Static` variants are
@@ -17,7 +17,7 @@
 //! `Static`; passing an `Owned` cell (or an `Owned` `Cow`) to these
 //! const fns is a compile-time panic. Runtime consumers (the hub)
 //! decode the produced bytes back into `Owned` cells via
-//! `wire::from_bytes_bare`.
+//! `wire::from_bytes`.
 //!
 //! Internal submodule layout — module-level re-exports preserve the
 //! `canonical::*` surface so no downstream caller needs an edit:
@@ -56,8 +56,8 @@ pub use schema::{
 #[cfg(test)]
 mod tests {
     //! The contract these tests pin: canonical bytes round-trip through
-    //! `wire::from_bytes_bare::<SchemaShape>` / `wire::from_bytes_bare::<KindLabels>`
-    //! / `wire::from_bytes_bare::<InputsRecord>`. That's what the hub
+    //! `wire::from_bytes::<SchemaShape>` / `wire::from_bytes::<KindLabels>`
+    //! / `wire::from_bytes::<InputsRecord>`. That's what the hub
     //! relies on after reading the `aether.kinds` /
     //! `aether.kinds.labels` / `aether.kinds.inputs` custom sections.
     //! If these diverge, the hub can't decode what derives produce.
@@ -65,7 +65,7 @@ mod tests {
     //! The `*_const_matches_wire_runtime` tests are the load-bearing
     //! silent-corruption guard ADR-0118 §Consequences calls out: the
     //! const-fn writers must emit the exact bytes the serde-driven
-    //! `wire::to_vec_bare` runtime produces for the same value, or a
+    //! `wire::to_vec` runtime produces for the same value, or a
     //! mis-hashed `KindId` would mis-route mail.
     //!
     //! Each test constructs a schema via `static` so `SchemaCell::Static`
@@ -191,7 +191,7 @@ mod tests {
     fn canonical_schema_primitive_round_trips_as_shape() {
         const N: usize = canonical_len_schema(&F32);
         const BYTES: [u8; N] = canonical_serialize_schema::<N>(&F32);
-        let shape: SchemaShape = wire::from_bytes_bare(&BYTES).expect("decode");
+        let shape: SchemaShape = wire::from_bytes(&BYTES).expect("decode");
         assert_eq!(shape, SchemaShape::Scalar(Primitive::F32));
     }
 
@@ -199,7 +199,7 @@ mod tests {
     fn canonical_schema_struct_round_trips_as_shape() {
         const N: usize = canonical_len_schema(&VERTEX);
         const BYTES: [u8; N] = canonical_serialize_schema::<N>(&VERTEX);
-        let shape: SchemaShape = wire::from_bytes_bare(&BYTES).expect("decode");
+        let shape: SchemaShape = wire::from_bytes(&BYTES).expect("decode");
         assert_eq!(shape, vertex_shape());
     }
 
@@ -207,7 +207,7 @@ mod tests {
     fn canonical_schema_nested_array_of_struct_round_trips() {
         const N: usize = canonical_len_schema(&TRIANGLE);
         const BYTES: [u8; N] = canonical_serialize_schema::<N>(&TRIANGLE);
-        let shape: SchemaShape = wire::from_bytes_bare(&BYTES).expect("decode");
+        let shape: SchemaShape = wire::from_bytes(&BYTES).expect("decode");
         let expected = SchemaShape::Struct {
             fields: vec![SchemaShape::Array {
                 element: Box::new(vertex_shape()),
@@ -222,7 +222,7 @@ mod tests {
     fn canonical_schema_enum_all_variants_round_trip() {
         const N: usize = canonical_len_schema(&RESULT);
         const BYTES: [u8; N] = canonical_serialize_schema::<N>(&RESULT);
-        let shape: SchemaShape = wire::from_bytes_bare(&BYTES).expect("decode");
+        let shape: SchemaShape = wire::from_bytes(&BYTES).expect("decode");
         assert_eq!(shape, result_enum_shape());
     }
 
@@ -231,7 +231,7 @@ mod tests {
         const NAME: &str = "test.triangle";
         const N: usize = canonical_len_kind(NAME, &TRIANGLE);
         const BYTES: [u8; N] = canonical_serialize_kind::<N>(NAME, &TRIANGLE);
-        let shape: KindShape = wire::from_bytes_bare(&BYTES).expect("decode");
+        let shape: KindShape = wire::from_bytes(&BYTES).expect("decode");
         assert_eq!(shape.name, "test.triangle");
         let SchemaShape::Struct { fields, repr_c } = &shape.schema else {
             panic!("expected Struct");
@@ -303,7 +303,7 @@ mod tests {
         // Selector 10 (SCHEMA_REF) as a `u32` LE — its low byte is at
         // BYTES[0] — followed by the inner Scalar(F32) shape.
         assert_eq!(BYTES[0], 10);
-        let shape: SchemaShape = wire::from_bytes_bare(&BYTES).expect("decode");
+        let shape: SchemaShape = wire::from_bytes(&BYTES).expect("decode");
         assert_eq!(
             shape,
             SchemaShape::Ref(Box::new(SchemaShape::Scalar(Primitive::F32)))
@@ -348,23 +348,23 @@ mod tests {
     fn canonical_labels_round_trip_via_wire() {
         const N: usize = canonical_len_labels(&TRIANGLE_LABELS);
         const BYTES: [u8; N] = canonical_serialize_labels::<N>(&TRIANGLE_LABELS);
-        let decoded: KindLabels = wire::from_bytes_bare(&BYTES).expect("decode");
+        let decoded: KindLabels = wire::from_bytes(&BYTES).expect("decode");
         assert_eq!(decoded, TRIANGLE_LABELS);
     }
 
     #[test]
     fn canonical_labels_const_matches_wire_runtime() {
         // The const-fn labels writer must emit byte-for-byte what the
-        // serde-driven `wire::to_vec_bare(KindLabels)` runtime produces —
+        // serde-driven `wire::to_vec(KindLabels)` runtime produces —
         // struct + nested array (TRIANGLE) and enum (RESULT) shapes.
         const TN: usize = canonical_len_labels(&TRIANGLE_LABELS);
         const TRIANGLE_CONST: [u8; TN] = canonical_serialize_labels::<TN>(&TRIANGLE_LABELS);
         const RN: usize = canonical_len_labels(&RESULT_LABELS);
         const RESULT_CONST: [u8; RN] = canonical_serialize_labels::<RN>(&RESULT_LABELS);
 
-        let triangle_runtime = wire::to_vec_bare(&TRIANGLE_LABELS).expect("encode");
+        let triangle_runtime = wire::to_vec(&TRIANGLE_LABELS).expect("encode");
         assert_eq!(&TRIANGLE_CONST[..], triangle_runtime.as_slice());
-        let result_runtime = wire::to_vec_bare(&RESULT_LABELS).expect("encode");
+        let result_runtime = wire::to_vec(&RESULT_LABELS).expect("encode");
         assert_eq!(&RESULT_CONST[..], result_runtime.as_slice());
     }
 
@@ -394,7 +394,7 @@ mod tests {
     fn canonical_labels_enum_round_trips() {
         const N: usize = canonical_len_labels(&RESULT_LABELS);
         const BYTES: [u8; N] = canonical_serialize_labels::<N>(&RESULT_LABELS);
-        let decoded: KindLabels = wire::from_bytes_bare(&BYTES).expect("decode");
+        let decoded: KindLabels = wire::from_bytes(&BYTES).expect("decode");
         assert_eq!(decoded, RESULT_LABELS);
     }
 
@@ -414,12 +414,12 @@ mod tests {
     fn canonical_labels_ref_round_trips() {
         const N: usize = canonical_len_labels(&REF_VERTEX_LABELS);
         const BYTES: [u8; N] = canonical_serialize_labels::<N>(&REF_VERTEX_LABELS);
-        let decoded: KindLabels = wire::from_bytes_bare(&BYTES).expect("decode");
+        let decoded: KindLabels = wire::from_bytes(&BYTES).expect("decode");
         assert_eq!(decoded, REF_VERTEX_LABELS);
     }
 
     // ADR-0033: handler/fallback/component record encoders. Round-trip
-    // through `wire::from_bytes_bare::<InputsRecord>` so the substrate
+    // through `wire::from_bytes::<InputsRecord>` so the substrate
     // reader sees exactly the enum shapes the macro emits.
     use crate::schema::InputsRecord;
 
@@ -435,7 +435,7 @@ mod tests {
         const REPLY_ID: u64 = 0x00c0_ffee_0bad_f00d;
         const N: usize = inputs_handler_len(ID, NAME, DOC, REPLY_TAG, REPLY_ID);
         const BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC, REPLY_TAG, REPLY_ID);
-        let decoded: InputsRecord = wire::from_bytes_bare(&BYTES).expect("decode");
+        let decoded: InputsRecord = wire::from_bytes(&BYTES).expect("decode");
         match decoded {
             InputsRecord::Handler {
                 id,
@@ -464,7 +464,7 @@ mod tests {
         const REPLY_ID: u64 = 0;
         const N: usize = inputs_handler_len(ID, NAME, DOC, REPLY_TAG, REPLY_ID);
         const BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC, REPLY_TAG, REPLY_ID);
-        let decoded: InputsRecord = wire::from_bytes_bare(&BYTES).expect("decode");
+        let decoded: InputsRecord = wire::from_bytes(&BYTES).expect("decode");
         assert_eq!(
             decoded,
             InputsRecord::Handler {
@@ -480,7 +480,7 @@ mod tests {
     fn reply_contract_wire_roundtrip() {
         use crate::schema::ReplyContract;
         // ADR-0112 / ADR-0118: the const-fn `(tag, id)` encoder matches
-        // `wire::to_vec_bare(ReplyContract)` byte-for-byte. The selector is
+        // `wire::to_vec(ReplyContract)` byte-for-byte. The selector is
         // a `u32` LE, so its low byte (buf[0]) is the variant index —
         // `None` = 0, `One` = 1, `Stream` = 2, `Manual` = 3.
         fn check(tag: u8, id: u64, expect: ReplyContract, expect_disc: u8) {
@@ -493,9 +493,9 @@ mod tests {
                 buf[0], expect_disc,
                 "selector's low byte is the variant index"
             );
-            let from_wire = wire::to_vec_bare(&expect).expect("encode");
+            let from_wire = wire::to_vec(&expect).expect("encode");
             assert_eq!(&buf[..len], from_wire.as_slice(), "matches wire runtime");
-            let decoded: ReplyContract = wire::from_bytes_bare(&buf[..len]).expect("decode");
+            let decoded: ReplyContract = wire::from_bytes(&buf[..len]).expect("decode");
             assert_eq!(decoded, expect);
         }
         check(0, 0, ReplyContract::None, 0);
@@ -509,7 +509,7 @@ mod tests {
         const DOC: Option<&str> = Some("Forwards anything unrecognized.");
         const N: usize = inputs_fallback_len(DOC);
         const BYTES: [u8; N] = write_inputs_fallback::<N>(DOC);
-        let decoded: InputsRecord = wire::from_bytes_bare(&BYTES).expect("decode");
+        let decoded: InputsRecord = wire::from_bytes(&BYTES).expect("decode");
         assert_eq!(
             decoded,
             InputsRecord::Fallback {
@@ -523,7 +523,7 @@ mod tests {
         const DOC: &str = "Logs every input event to the broadcast sink.";
         const N: usize = inputs_component_len(DOC);
         const BYTES: [u8; N] = write_inputs_component::<N>(DOC);
-        let decoded: InputsRecord = wire::from_bytes_bare(&BYTES).expect("decode");
+        let decoded: InputsRecord = wire::from_bytes(&BYTES).expect("decode");
         assert_eq!(decoded, InputsRecord::Component { doc: DOC.into() });
     }
 
@@ -536,7 +536,7 @@ mod tests {
         const NAME: &str = "aether.test_fixtures.probe_config";
         const N: usize = inputs_config_len(ID, NAME);
         const BYTES: [u8; N] = write_inputs_config::<N>(ID, NAME);
-        let decoded: InputsRecord = wire::from_bytes_bare(&BYTES).expect("decode");
+        let decoded: InputsRecord = wire::from_bytes(&BYTES).expect("decode");
         assert_eq!(
             decoded,
             InputsRecord::Config {
@@ -555,7 +555,7 @@ mod tests {
         const NS: &str = "ui.panel";
         const N: usize = inputs_actor_boundary_len(NS);
         const BYTES: [u8; N] = write_inputs_actor_boundary::<N>(NS);
-        let decoded: InputsRecord = wire::from_bytes_bare(&BYTES).expect("decode");
+        let decoded: InputsRecord = wire::from_bytes(&BYTES).expect("decode");
         assert_eq!(
             decoded,
             InputsRecord::ActorBoundary {
@@ -570,7 +570,7 @@ mod tests {
         use alloc::borrow::Cow;
         // The strongest inputs guard: the const-fn handler encoder must
         // produce byte-identical output to the serde-driven
-        // `wire::to_vec_bare` over the equivalent `InputsRecord::Handler`.
+        // `wire::to_vec` over the equivalent `InputsRecord::Handler`.
         // It exercises every wire primitive a record uses — `u32` selector,
         // bare `u64` id, length-prefixed name, option-presence doc, and the
         // nested `ReplyContract` enum.
@@ -587,7 +587,7 @@ mod tests {
             doc: DOC.map(Cow::Borrowed),
             reply: ReplyContract::One(KindId(REPLY_ID)),
         };
-        let runtime = wire::to_vec_bare(&record).expect("encode");
+        let runtime = wire::to_vec(&record).expect("encode");
         assert_eq!(&CONST_BYTES[..], runtime.as_slice());
     }
 }

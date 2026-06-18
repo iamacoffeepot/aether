@@ -19,14 +19,12 @@
 //! and substitutes the inline bytes before delivering the mail.
 //!
 //! Wire format (ADR-0045 §1, inline arm revised by ADR-0100,
-//! re-laid-out onto `aether_data::wire` by ADR-0118): the payload is a
-//! versioned kind image — a leading `WIRE_VERSION` byte the walker
-//! strips on entry (and again at each inline-arm descent), then bare
-//! interior values. A `Ref` is:
+//! re-laid-out onto `aether_data::wire` by ADR-0118): the payload is an
+//! unversioned kind image (ADR-0118 §Envelope) the walker reads from the
+//! front, with bare interior values. A `Ref` is:
 //! - Inline arm: `u32` selector 0 + `u32` length + `K::encode_into_bytes`
-//!   (`len` bytes) — the kind's own codec image (cast or wire, itself
-//!   versioned for a wire kind), an opaque length-delimited blob the
-//!   walker skips by length.
+//!   (`len` bytes) — the kind's own codec image (cast or wire), an opaque
+//!   length-delimited blob the walker skips by length.
 //! - Handle arm: `u32` selector 1 + `id` (8 LE) + `kind_id` (8 LE).
 //!
 //! Resolution is structural: the walker reads the schema and skips
@@ -66,7 +64,7 @@ use crate::config::ConfigError;
 use crate::mail::Mail;
 use crate::mail::registry::Registry;
 use crate::pid_lock::{LockAcquisition, LockGuard, acquire_lock_pid};
-use aether_data::wire::{self, WIRE_VERSION};
+use aether_data::wire;
 use aether_data::{EnumVariant, Primitive, SchemaType};
 use aether_data::{HandleId, KindId};
 use std::env;
@@ -604,8 +602,6 @@ pub enum WalkError {
     Truncated,
     InvalidBool,
     UnknownEnumDiscriminant,
-    /// The payload did not open with [`WIRE_VERSION`] (ADR-0118).
-    BadVersion(u8),
     /// A spliced inline body exceeded the `u32` length ceiling.
     Length,
     UnknownRefDiscriminant,
@@ -2063,18 +2059,12 @@ pub fn walk_and_resolve<'a>(
             payload: Cow::Borrowed(payload),
         });
     }
-    // The payload is a versioned wire kind image (ADR-0118). Strip the
-    // leading version byte for reading, but leave it in the output:
-    // `pos` starts after it while `prefix_end` stays at 0, so the first
-    // splice's `flush_up_to` copies the version byte into the resolved
-    // image (and the no-splice path returns the whole input verbatim).
-    let version = *payload.first().ok_or(WalkError::Truncated)?;
-    if version != WIRE_VERSION {
-        return Err(WalkError::BadVersion(version));
-    }
+    // The payload is an unversioned wire kind image (ADR-0118 §Envelope):
+    // the walker reads from the front, and the no-splice path returns the
+    // whole input verbatim.
     let mut state = State {
         input: payload,
-        pos: 1,
+        pos: 0,
         out: Vec::new(),
         prefix_end: 0,
         out_initialised: false,
@@ -3007,21 +2997,19 @@ mod tests {
     }
 
     /// ADR-0118 nested-inline case: the bytes a handle stores are
-    /// themselves a versioned wire image (`HeldNote` whose inner ref is
-    /// already `Inline`). Resolving the outer handle recurses into those
-    /// stored bytes — the walker must strip the *inner* version byte on
-    /// descent to read the ref-bearing struct, yet splice the stored
-    /// image back verbatim (version byte and all). Decoding the result
-    /// proves the inner version byte survived the round-trip.
+    /// themselves a wire image (`HeldNote` whose inner ref is already
+    /// `Inline`). Resolving the outer handle recurses into those stored
+    /// bytes — the walker reads the ref-bearing struct and splices the
+    /// stored image back verbatim. Decoding the result proves the nested
+    /// inline ref survived the round-trip.
     #[test]
-    fn walk_nested_inline_ref_preserves_inner_version_byte() {
+    fn walk_nested_inline_ref_resolves() {
         let outer_schema = SchemaType::Ref(SchemaCell::owned(held_note_schema()));
         let store = HandleStore::new(4096);
 
         // Stored value: a HeldNote that already holds an INLINE Note —
         // no further handle to resolve, but it is ref-bearing, so the
-        // recursive walk_and_resolve does walk (and strips its version
-        // byte on entry).
+        // recursive walk_and_resolve does walk it.
         let stored = HeldNote {
             held: Ref::Inline(Note {
                 body: "inner".to_string(),
@@ -3030,7 +3018,6 @@ mod tests {
             seq: 5,
         };
         let stored_bytes = wire::to_vec(&stored).unwrap();
-        assert_eq!(stored_bytes[0], WIRE_VERSION, "stored image is versioned");
         store
             .put(HandleId(70), KindId(0xBEEF), stored_bytes)
             .unwrap();
@@ -3046,7 +3033,7 @@ mod tests {
             WalkOutcome::Parked { .. } => panic!("expected resolved"),
         };
         // The spliced inline body is a pure byte-copy of the stored
-        // versioned image, so decoding the whole thing reconstructs it.
+        // image, so decoding the whole thing reconstructs it.
         let decoded: Ref<HeldNote> = wire::from_bytes(&resolved).unwrap();
         match decoded {
             Ref::Inline(held) => {
@@ -3087,21 +3074,19 @@ mod tests {
             WalkOutcome::Parked { .. } => panic!("expected resolved"),
         };
 
-        // The resolved image keeps the top-level version byte, then the
-        // spliced inline arm: u32 selector 0 + u32 length 4 + the 4-byte
-        // cast image (the cast image is itself bare — no nested version).
-        assert_eq!(resolved[0], WIRE_VERSION, "top-level version byte");
+        // The resolved image is the spliced inline arm: u32 selector 0 +
+        // u32 length 4 + the 4-byte cast image (the cast image is bare).
         assert_eq!(
-            &resolved[1..5],
+            &resolved[0..4],
             &0u32.to_le_bytes(),
             "spliced Inline selector"
         );
         assert_eq!(
-            &resolved[5..9],
+            &resolved[4..8],
             &4u32.to_le_bytes(),
             "u32 length of the cast image"
         );
-        assert_eq!(&resolved[9..], bytemuck::bytes_of(&pt));
+        assert_eq!(&resolved[8..], bytemuck::bytes_of(&pt));
 
         let back: Ref<Coord> = wire::from_bytes(&resolved).unwrap();
         match back {
@@ -3353,12 +3338,12 @@ mod tests {
             }
             store.snapshot_index();
         }
-        // Flip the schema_version byte; the wire envelope owns byte 0, so
-        // schema_version is at index 1. The rest stays valid, so it
-        // decodes but trips the version gate.
+        // Flip the schema_version byte; the wire image is unversioned
+        // (ADR-0118), so schema_version is the first field at index 0. The
+        // rest stays valid, so it decodes but trips the version gate.
         let path = cfg.index_path();
         let mut raw = fs::read(&path).unwrap();
-        raw[1] = INDEX_FORMAT_VERSION.wrapping_add(1);
+        raw[0] = INDEX_FORMAT_VERSION.wrapping_add(1);
         fs::write(&path, &raw).unwrap();
 
         let restored = HandleStore::with_persist(64 * 1024 * 1024, Some(cfg));

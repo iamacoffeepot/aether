@@ -160,7 +160,7 @@ fn decode_kinds_records(data: &[u8], out: &mut Vec<KindShape>) -> Result<(), Str
             ));
         }
         let body = &cursor[1..];
-        match wire::take_from_bytes_bare::<KindShape>(body) {
+        match wire::take_from_bytes::<KindShape>(body) {
             Ok((shape, rest)) => {
                 out.push(shape);
                 cursor = rest;
@@ -391,7 +391,7 @@ fn decode_inputs_records(data: &[u8], out: &mut Vec<InputsRecord>) -> Result<(),
             ));
         }
         let body = &cursor[1..];
-        match wire::take_from_bytes_bare::<InputsRecord>(body) {
+        match wire::take_from_bytes::<InputsRecord>(body) {
             Ok((record, rest)) => {
                 out.push(record);
                 cursor = rest;
@@ -426,7 +426,7 @@ fn decode_records<T: DeserializeOwned>(
             ));
         }
         let body = &cursor[1..];
-        match wire::take_from_bytes_bare::<T>(body) {
+        match wire::take_from_bytes::<T>(body) {
             Ok((record, rest)) => {
                 out.push(record);
                 cursor = rest;
@@ -666,7 +666,7 @@ mod tests {
     /// the canonical body is the owned aether-wire encoding).
     fn push_shape(canonical: &mut Vec<u8>, shape: &KindShape) {
         canonical.push(0x05);
-        canonical.extend(wire::to_vec_bare(shape).unwrap());
+        canonical.extend(wire::to_vec(shape).unwrap());
     }
 
     /// Append `[0x04][wire(KindLabels)]` to `labels_bytes`, and stamp
@@ -677,7 +677,7 @@ mod tests {
     fn push_labels(labels_bytes: &mut Vec<u8>, shape: &KindShape, labels: &mut KindLabels) {
         labels.kind_id = aether_data::KindId(kind_id_from_shape(shape));
         labels_bytes.push(0x04);
-        labels_bytes.extend(wire::to_vec_bare(labels).unwrap());
+        labels_bytes.extend(wire::to_vec(labels).unwrap());
     }
 
     #[test]
@@ -776,7 +776,7 @@ mod tests {
             },
         };
         let mut canonical = vec![0x05u8];
-        canonical.extend(wire::to_vec_bare(&shape).unwrap());
+        canonical.extend(wire::to_vec(&shape).unwrap());
         let wasm = wasm_with_section(MANIFEST_SECTION, &canonical);
         let descs = read_from_bytes(&wasm).unwrap();
         assert_eq!(descs.len(), 1);
@@ -874,7 +874,7 @@ mod tests {
         push_shape(&mut canonical, &shape);
         let mut labels_bytes = Vec::new();
         labels_bytes.push(0x04);
-        labels_bytes.extend(wire::to_vec_bare(&orphan).unwrap());
+        labels_bytes.extend(wire::to_vec(&orphan).unwrap());
         let wasm = wasm_with_two_sections(&canonical, &labels_bytes);
         let descs = read_from_bytes(&wasm).unwrap();
         assert_eq!(descs.len(), 1);
@@ -1020,7 +1020,7 @@ mod tests {
         let mut out = Vec::new();
         for rec in records {
             out.push(INPUTS_SECTION_VERSION);
-            out.extend(wire::to_vec_bare(rec).unwrap());
+            out.extend(wire::to_vec(rec).unwrap());
         }
         out
     }

@@ -19,9 +19,8 @@
 //    — the cast image is its own codec, like `<() as Kind>`.
 //
 // 2. Wire (everything else): the ADR-0118 `aether_data::wire` format,
-//    a fixed-width, schema-driven layout written directly. A leading
-//    `WIRE_VERSION` byte prefixes the top-level kind image; interior
-//    values are bare:
+//    a fixed-width, schema-driven layout written directly. The image is
+//    unversioned (ADR-0118 §Envelope):
 //      - bool / option-presence: 1 byte (0 or 1)
 //      - u8..u128 / i8..i128: fixed little-endian of the declared width
 //      - f32/f64: bit-faithful little-endian
@@ -32,7 +31,7 @@
 //      - enum / Ref selector: `u32` little-endian (the variant index)
 //      - struct: concatenated field bytes in declaration order
 //      - Ref handle arm: `id` (8 LE) + `kind_id` (8 LE)
-//      - Ref inline arm: `u32` length + a nested versioned kind image
+//      - Ref inline arm: `u32` length + a nested kind image
 //
 // We write the bytes directly rather than going through a serde
 // serializer because the JSON-driven encoding is structural — matching
@@ -41,7 +40,6 @@
 
 use std::fmt;
 
-use aether_data::wire::WIRE_VERSION;
 use aether_data::{EnumVariant, NamedField, Primitive, SchemaType, tagged_id};
 use serde_json::Value;
 
@@ -112,8 +110,8 @@ impl error::Error for EncodeError {}
 ///   under it) → `#[repr(C)]` byte layout, decodable by
 ///   `bytemuck::cast` on the substrate side. No version byte.
 /// - Everything else → the `aether_data::wire` format, written
-///   directly per the layout described at the top of this file, with a
-///   leading `WIRE_VERSION` byte on the top-level image.
+///   directly per the layout described at the top of this file. The
+///   image is unversioned (ADR-0118 §Envelope).
 pub fn encode_schema(params: &Value, schema: &SchemaType) -> Result<Vec<u8>, EncodeError> {
     match schema {
         SchemaType::Unit => {
@@ -147,10 +145,9 @@ pub fn encode_schema(params: &Value, schema: &SchemaType) -> Result<Vec<u8>, Enc
         }
         // Wire path: every non-cast, non-unit schema. The walker
         // handles top-level scalars / strings / vecs / enums uniformly
-        // with their nested counterparts. The version byte sits at this
-        // top-level kind-image boundary only; interior values are bare.
+        // with their nested counterparts. The image is unversioned.
         _ => {
-            let mut out = vec![WIRE_VERSION];
+            let mut out = Vec::new();
             encode_wire_value(params, schema, "$", &mut out)?;
             Ok(out)
         }
@@ -158,9 +155,9 @@ pub fn encode_schema(params: &Value, schema: &SchemaType) -> Result<Vec<u8>, Enc
 }
 
 /// Recursively encode `value` into the `aether_data::wire` format under
-/// `schema`. Interior values are bare — the caller (`encode_schema`)
-/// owns the single leading `WIRE_VERSION` byte, and the `Ref` inline
-/// arm recurses through `encode_schema` to nest a fresh versioned image.
+/// `schema`. The `Ref` inline arm recurses through `encode_schema` to
+/// nest a fresh kind image (length-prefixed). The encoding is
+/// unversioned (ADR-0118 §Envelope).
 /// `path` is a dotted breadcrumb (`$.field.subfield[2]`) used to make
 /// error messages locate the offending field in deeply-nested params.
 // One match arm per `SchemaType`; each arm is short but they sum up.
@@ -331,18 +328,17 @@ fn encode_wire_value(
             // `{"Handle": {"id": u64, "kind_id": u64}}` chooses the
             // handle arm. Wire is a `u32` little-endian selector + body.
             // The inline body is the inner kind's own codec image (cast
-            // or wire, dispatched on `inner` via `encode_schema`, so a
-            // wire inner carries its own `WIRE_VERSION`) length-prefixed
-            // with a `u32`; the handle body is `id` (8 LE) + `kind_id`
-            // (8 LE).
+            // or wire, dispatched on `inner` via `encode_schema`)
+            // length-prefixed with a `u32`; the handle body is `id`
+            // (8 LE) + `kind_id` (8 LE).
             let (tag, body) = decode_enum_tag(value, path)?;
             match tag {
                 "Inline" => {
                     out.extend_from_slice(&0u32.to_le_bytes());
                     // The inner image is the same bytes `Kind::encode_into_bytes`
                     // produces for the inner kind — `encode_schema` picks
-                    // cast for a `repr_c: true` struct, a versioned wire
-                    // image otherwise.
+                    // cast for a `repr_c: true` struct, a wire image
+                    // otherwise.
                     let body_bytes = encode_schema(body, inner)?;
                     write_count(out, body_bytes.len(), path)?;
                     out.extend_from_slice(&body_bytes);
@@ -1423,7 +1419,7 @@ mod tests {
             .expect("test setup: encode map<u32,u8> field");
         assert_eq!(bytes, expected);
         // The 256 entry (`[0,1,0,0]`) precedes the 1 entry (`[1,0,0,0]`).
-        let mut hand = vec![WIRE_VERSION];
+        let mut hand: Vec<u8> = Vec::new();
         hand.extend_from_slice(&2u32.to_le_bytes()); // count
         hand.extend_from_slice(&256u32.to_le_bytes()); // key 256
         hand.push(20); // value
@@ -1493,7 +1489,7 @@ mod tests {
     fn type_id_wire_accepts_tagged_string() {
         // `mailbox` field carrying a tagged `mbx-...` string lands as
         // a fixed `u64` little-endian — wire-identical to a raw `u64`
-        // field, behind the leading version byte.
+        // field.
         let schema = postcard_struct(vec![NamedField {
             name: "mailbox".into(),
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
@@ -1502,7 +1498,7 @@ mod tests {
         let s = tagged_id::encode(mailbox.0).expect("test setup: encode tagged mailbox id");
         let bytes = encode_schema(&json!({ "mailbox": s }), &schema)
             .expect("test setup: encode typed-id wire field");
-        let mut expected = vec![WIRE_VERSION];
+        let mut expected: Vec<u8> = Vec::new();
         expected.extend_from_slice(&mailbox.0.to_le_bytes());
         assert_eq!(bytes, expected);
     }
@@ -1518,7 +1514,7 @@ mod tests {
         let mailbox = aether_data::MailboxId::from_name("aether.component");
         let bytes = encode_schema(&json!({ "mailbox": mailbox.0 }), &schema)
             .expect("test setup: encode typed-id from raw number");
-        let mut expected = vec![WIRE_VERSION];
+        let mut expected: Vec<u8> = Vec::new();
         expected.extend_from_slice(&mailbox.0.to_le_bytes());
         assert_eq!(bytes, expected);
     }

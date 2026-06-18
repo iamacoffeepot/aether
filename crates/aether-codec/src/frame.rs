@@ -220,13 +220,14 @@ mod tests {
     }
 
     #[test]
-    fn unit_variant_is_nine_bytes() {
-        // 4 byte prefix + 5 byte wire body (1 version byte + 4 byte variant index u32).
+    fn unit_variant_is_eight_bytes() {
+        // 4 byte prefix + 4 byte wire body (the variant index u32; the
+        // image is unversioned, ADR-0118 §Envelope).
         assert_eq!(
             encode_frame(&Msg::Tick)
                 .expect("test setup: encode unit variant")
                 .len(),
-            9,
+            8,
         );
     }
 

@@ -902,7 +902,7 @@ mod tests {
     use crate::mail::MailboxId;
     use crate::mail::outbound::EgressEvent;
     use crate::mail::registry::{InboxHandler, InlineHandler};
-    use aether_data::wire::{self, WIRE_VERSION};
+    use aether_data::wire;
     use aether_data::{Kind, Ref};
     use aether_data::{KindDescriptor, NamedField, Primitive, SchemaCell, SchemaType};
 
@@ -1468,9 +1468,10 @@ mod tests {
         let sink = CapturingSink::new();
         let sink_id = registry.register_inbox("test.sink", sink.inbox_handler());
 
-        // Truncated payload — a valid version byte then a lone body byte,
-        // so the walker bails Truncated mid-walk reading the first field.
-        mailer.push(Mail::new(sink_id, kind_id, vec![WIRE_VERSION, 0u8], 1));
+        // Truncated payload — a lone body byte (the image is unversioned,
+        // ADR-0118), so the walker bails Truncated mid-walk reading the
+        // first field.
+        mailer.push(Mail::new(sink_id, kind_id, vec![0u8], 1));
         assert_eq!(sink.delivery_count.load(Ordering::SeqCst), 0);
     }
 

@@ -37,12 +37,6 @@ mod ser;
 #[cfg(test)]
 mod tests;
 
-/// Format-version byte prefixing every top-level payload (ADR-0118 §Envelope).
-/// It versions the *encoding*, independent of `KindId` which versions the
-/// *schema*. Nested values carry no version byte — only the top-level
-/// [`to_vec`] / [`from_bytes`] / [`take_from_bytes`] boundary does.
-pub const WIRE_VERSION: u8 = 1;
-
 /// A wire encode or decode failure. Encoding fails only when a length exceeds
 /// the `u32` ceiling; everything else is a decode-side fault.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,8 +45,6 @@ pub enum Error {
     UnexpectedEof,
     /// A `bool` or option-presence byte was neither `0` nor `1`.
     InvalidBool(u8),
-    /// The top-level payload did not begin with [`WIRE_VERSION`].
-    BadVersion(u8),
     /// A length or count exceeded the `u32` ceiling on encode, or the remaining
     /// input on decode.
     Length,
@@ -73,7 +65,6 @@ impl fmt::Display for Error {
         match self {
             Self::UnexpectedEof => f.write_str("aether wire: unexpected end of input"),
             Self::InvalidBool(b) => write!(f, "aether wire: invalid bool/presence byte {b}"),
-            Self::BadVersion(v) => write!(f, "aether wire: bad format version byte {v}"),
             Self::Length => f.write_str("aether wire: length exceeds the u32 ceiling"),
             Self::Utf8 => f.write_str("aether wire: string is not valid UTF-8"),
             Self::InvalidChar(c) => write!(f, "aether wire: invalid char code point {c}"),
@@ -100,31 +91,19 @@ impl DeError for Error {
     }
 }
 
-/// Encode a value to a versioned wire payload: [`WIRE_VERSION`] followed by the
-/// value's encoding.
+/// Encode a value to wire bytes. The encoding is unversioned: format agreement
+/// is the transport's job (the RPC handshake negotiates a `wire_version` between
+/// binaries) and is compile-time-fixed within one binary, so the bytes carry no
+/// per-payload version (ADR-0118 §Envelope).
 pub fn to_vec<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, Error> {
-    let body = to_vec_bare(value)?;
-    let mut out = Vec::with_capacity(body.len() + 1);
-    out.push(WIRE_VERSION);
-    out.extend_from_slice(&body);
-    Ok(out)
-}
-
-/// Encode a value to **bare** wire bytes with no leading [`WIRE_VERSION`]. The
-/// bytes are an interior value, not a self-describing kind image — for
-/// hand-assembly sites (e.g. the DAG executor) that concatenate interior values
-/// into one kind image and prepend the single version byte themselves. Most
-/// callers want [`to_vec`].
-pub fn to_vec_bare<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, Error> {
     let mut serializer = ser::Serializer::new();
     value.serialize(&mut serializer)?;
     Ok(serializer.into_output())
 }
 
-/// Decode a value from a versioned wire payload, requiring every byte consumed.
+/// Decode a value from a wire payload, requiring every byte consumed.
 pub fn from_bytes<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, Error> {
-    let body = strip_version(bytes)?;
-    let mut deserializer = de::Deserializer::new(body);
+    let mut deserializer = de::Deserializer::new(bytes);
     let value = T::deserialize(&mut deserializer)?;
     if deserializer.is_empty() {
         Ok(value)
@@ -133,48 +112,10 @@ pub fn from_bytes<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, Error> {
     }
 }
 
-/// Decode a value from the front of a versioned wire payload, returning the
-/// value and the unconsumed remainder (after the value, not the version byte).
+/// Decode a value from the front of a wire payload, returning the value and the
+/// unconsumed remainder — for walking back-to-back records in one buffer.
 pub fn take_from_bytes<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<(T, &'a [u8]), Error> {
-    let body = strip_version(bytes)?;
-    let mut deserializer = de::Deserializer::new(body);
-    let value = T::deserialize(&mut deserializer)?;
-    Ok((value, deserializer.remaining()))
-}
-
-/// Decode a value from **bare** wire bytes carrying no leading [`WIRE_VERSION`],
-/// requiring every byte consumed. The symmetric counterpart to [`to_vec_bare`]:
-/// for sites that frame the bare structural body themselves and version the
-/// frame independently of [`WIRE_VERSION`] — e.g. the `aether.kinds` manifest,
-/// whose per-section version byte versions the encoding and whose bare body is
-/// the `Kind::ID` hash input. Most callers want [`from_bytes`].
-pub fn from_bytes_bare<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, Error> {
-    let mut deserializer = de::Deserializer::new(bytes);
-    let value = T::deserialize(&mut deserializer)?;
-    if deserializer.is_empty() {
-        Ok(value)
-    } else {
-        Err(Error::TrailingBytes)
-    }
-}
-
-/// Decode a value from the front of **bare** wire bytes (no leading
-/// [`WIRE_VERSION`]), returning the value and the unconsumed remainder. The
-/// symmetric counterpart to [`to_vec_bare`] for walking back-to-back bare
-/// records (e.g. the manifest reader stepping `[version][bare body]` records,
-/// where the version byte is the frame's, not [`WIRE_VERSION`]).
-pub fn take_from_bytes_bare<'a, T: Deserialize<'a>>(
-    bytes: &'a [u8],
-) -> Result<(T, &'a [u8]), Error> {
     let mut deserializer = de::Deserializer::new(bytes);
     let value = T::deserialize(&mut deserializer)?;
     Ok((value, deserializer.remaining()))
-}
-
-fn strip_version(bytes: &[u8]) -> Result<&[u8], Error> {
-    match bytes.split_first() {
-        Some((&v, rest)) if v == WIRE_VERSION => Ok(rest),
-        Some((&v, _)) => Err(Error::BadVersion(v)),
-        None => Err(Error::UnexpectedEof),
-    }
 }

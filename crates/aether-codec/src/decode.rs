@@ -15,10 +15,10 @@
 //    the same skips. No version byte (the cast image is its own codec).
 //
 // 2. Wire (everything else): consume the ADR-0118 `aether_data::wire`
-//    format directly — a leading `WIRE_VERSION` byte stripped on entry,
-//    then fixed-width little-endian scalars, `u32` lengths/selectors,
-//    presence bytes, length-prefixed strings/vecs/bytes, externally-
-//    tagged enums, encoded-key-sorted maps, and the `Ref` arms.
+//    format directly — fixed-width little-endian scalars, `u32`
+//    lengths/selectors, presence bytes, length-prefixed
+//    strings/vecs/bytes, externally-tagged enums, encoded-key-sorted
+//    maps, and the `Ref` arms. The image is unversioned.
 //
 // We decode the bytes directly rather than going through serde's
 // deserializer because the descriptor is structural (not a typed
@@ -28,7 +28,6 @@
 
 use std::fmt;
 
-use aether_data::wire::WIRE_VERSION;
 use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
 use serde_json::{Map, Value};
 
@@ -54,13 +53,6 @@ pub enum DecodeError {
     },
     InvalidUtf8 {
         path: String,
-    },
-    /// The top-level wire payload did not begin with [`WIRE_VERSION`]
-    /// (ADR-0118 §Envelope). A reader that strips the version byte on
-    /// entry rejects a bare or wrong-version image rather than
-    /// misparsing it.
-    BadVersion {
-        byte: u8,
     },
     UnknownEnumDiscriminant {
         path: String,
@@ -98,12 +90,6 @@ impl fmt::Display for DecodeError {
                 write!(f, "invalid bool at {path}: 0x{byte:02x} not 0 or 1")
             }
             Self::InvalidUtf8 { path } => write!(f, "invalid utf-8 in string at {path}"),
-            Self::BadVersion { byte } => {
-                write!(
-                    f,
-                    "bad wire format version byte: 0x{byte:02x} (expected {WIRE_VERSION})"
-                )
-            }
             Self::ValueBudgetExceeded { path, budget } => write!(
                 f,
                 "decode value budget exceeded at {path}: more than {budget} values for the input length"
@@ -149,26 +135,18 @@ const VALUES_PER_INPUT_BYTE: usize = 4;
 /// would accept. Dispatches on the schema's wire shape (same split as
 /// the encoder):
 ///
-/// - `Unit` → `null` (bare empty payload, no version byte).
+/// - `Unit` → `null` (bare empty payload).
 /// - `Struct { repr_c: true }` (and the recursive cast-shaped tree
-///   under it) → walk the `#[repr(C)]` byte layout, no version byte.
-/// - Everything else → strip the leading `WIRE_VERSION` byte, then
-///   consume the `aether_data::wire` format.
+///   under it) → walk the `#[repr(C)]` byte layout.
+/// - Everything else → consume the `aether_data::wire` format directly.
+///
+/// The encoding is unversioned (ADR-0118 §Envelope).
 ///
 /// Trailing bytes are an error (the encoder writes exactly the right
 /// number of bytes; extras mean schema/payload drift the agent should
 /// see).
 pub fn decode_schema(bytes: &[u8], schema: &SchemaType) -> Result<Value, DecodeError> {
-    // The cast image and the unit kind are bare; every other (wire)
-    // schema carries the leading version byte at this top-level
-    // kind-image boundary. Interior values are bare, so the recursive
-    // walk never strips again — except the `Ref` inline arm, which
-    // re-enters `decode_schema` on a nested versioned image.
-    let body = match schema {
-        SchemaType::Unit | SchemaType::Struct { repr_c: true, .. } => bytes,
-        _ => strip_version(bytes)?,
-    };
-    let mut cur = Cursor::new(body);
+    let mut cur = Cursor::new(bytes);
     let value = decode_value(&mut cur, schema, "$")?;
     if cur.remaining() != 0 {
         return Err(DecodeError::TrailingBytes {
@@ -177,20 +155,6 @@ pub fn decode_schema(bytes: &[u8], schema: &SchemaType) -> Result<Value, DecodeE
         });
     }
     Ok(value)
-}
-
-/// Strip and validate the leading [`WIRE_VERSION`] byte (ADR-0118
-/// §Envelope) from a top-level or nested kind image.
-fn strip_version(bytes: &[u8]) -> Result<&[u8], DecodeError> {
-    match bytes.split_first() {
-        Some((&v, rest)) if v == WIRE_VERSION => Ok(rest),
-        Some((&v, _)) => Err(DecodeError::BadVersion { byte: v }),
-        None => Err(DecodeError::Truncated {
-            path: "$".into(),
-            needed: 1,
-            had: 0,
-        }),
-    }
 }
 
 fn decode_value(
@@ -877,23 +841,8 @@ mod tests {
             name: "flag".into(),
             ty: SchemaType::Bool,
         }]);
-        let err =
-            decode_schema(&[WIRE_VERSION, 2], &schema).expect_err("non-0/1 bool byte must error");
+        let err = decode_schema(&[2], &schema).expect_err("non-0/1 bool byte must error");
         assert!(matches!(err, DecodeError::InvalidBool { .. }));
-    }
-
-    #[test]
-    fn bare_or_wrong_version_byte_errors() {
-        // A wire-shaped payload that doesn't open with WIRE_VERSION is
-        // rejected on entry (ADR-0118 §Envelope) rather than misparsed.
-        let schema = pc_struct(vec![NamedField {
-            name: "flag".into(),
-            ty: SchemaType::Bool,
-        }]);
-        let err = decode_schema(&[0xEE, 1], &schema).expect_err("wrong version byte must error");
-        assert!(matches!(err, DecodeError::BadVersion { byte: 0xEE }));
-        let err = decode_schema(&[], &schema).expect_err("empty wire payload must error");
-        assert!(matches!(err, DecodeError::Truncated { .. }));
     }
 
     #[test]
@@ -913,8 +862,8 @@ mod tests {
             name: "body".into(),
             ty: SchemaType::String,
         }]);
-        // version byte, u32 length 2, then two invalid utf-8 bytes.
-        let err = decode_schema(&[WIRE_VERSION, 2, 0, 0, 0, 0xff, 0xfe], &schema)
+        // u32 length 2, then two invalid utf-8 bytes.
+        let err = decode_schema(&[2, 0, 0, 0, 0xff, 0xfe], &schema)
             .expect_err("invalid utf-8 string body must error");
         assert!(matches!(err, DecodeError::InvalidUtf8 { .. }));
     }
@@ -989,9 +938,9 @@ mod tests {
     #[test]
     fn postcard_enum_unknown_discriminant_errors() {
         // discriminant 99 isn't in the schema; the u32 selector is
-        // little-endian behind the version byte.
+        // little-endian.
         let schema = sum_schema();
-        let err = decode_schema(&[WIRE_VERSION, 99, 0, 0, 0], &schema)
+        let err = decode_schema(&[99, 0, 0, 0], &schema)
             .expect_err("unknown enum discriminant must error");
         assert!(matches!(err, DecodeError::UnknownEnumDiscriminant { .. }));
     }
@@ -1014,12 +963,12 @@ mod tests {
         // Encoder writes raw f64 bytes; decoder coerces non-finite to
         // null so the JSON value is always valid.
         let schema = pc_struct(vec![scalar("x", Primitive::F64)]);
-        let mut bytes = vec![WIRE_VERSION];
+        let mut bytes: Vec<u8> = Vec::new();
         bytes.extend_from_slice(&f64::NAN.to_le_bytes());
         let v = decode_schema(&bytes, &schema).expect("test setup: decode NaN f64");
         assert_eq!(v, json!({"x": null}));
 
-        let mut bytes = vec![WIRE_VERSION];
+        let mut bytes: Vec<u8> = Vec::new();
         bytes.extend_from_slice(&f64::INFINITY.to_le_bytes());
         let v = decode_schema(&bytes, &schema).expect("test setup: decode infinity f64");
         assert_eq!(v, json!({"x": null}));
@@ -1214,14 +1163,14 @@ mod tests {
         // inner kind standalone (the cast image, no version byte).
         let body = encode_schema(&json!({ "code": 0x0102_0304u32 }), &inner).expect("encode inner");
         assert_eq!(body.len(), 4, "u32 cast image is 4 raw bytes");
-        // Top-level version byte + u32 inline selector + u32 length + body.
-        let mut expected = vec![WIRE_VERSION];
+        // u32 inline selector + u32 length + body.
+        let mut expected: Vec<u8> = Vec::new();
         expected.extend_from_slice(&0u32.to_le_bytes());
         expected.extend_from_slice(&4u32.to_le_bytes());
         expected.extend_from_slice(&body);
         assert_eq!(
             bytes, expected,
-            "inline wire is version + u32 sel 0 + u32 len + cast image"
+            "inline wire is u32 sel 0 + u32 len + cast image"
         );
 
         // JSON descriptor round-trips through wire and back.
@@ -1240,8 +1189,8 @@ mod tests {
     /// reading the first absent element rather than aborting the process.
     #[test]
     fn oversized_collection_length_errors_without_allocating() {
-        // Version byte + a `u32` count of `u32::MAX`, no elements.
-        let mut len_bytes = vec![WIRE_VERSION];
+        // A `u32` count of `u32::MAX`, no elements.
+        let mut len_bytes: Vec<u8> = Vec::new();
         len_bytes.extend_from_slice(&u32::MAX.to_le_bytes());
 
         let vec_schema = SchemaType::Vec(SchemaCell::owned(SchemaType::Scalar(Primitive::U32)));
@@ -1265,8 +1214,8 @@ mod tests {
     /// stops it with `ValueBudgetExceeded`.
     #[test]
     fn zero_byte_element_bomb_exceeds_value_budget() {
-        // Version byte + a `u32` count of `u32::MAX`.
-        let mut count_bytes = vec![WIRE_VERSION];
+        // A `u32` count of `u32::MAX`.
+        let mut count_bytes: Vec<u8> = Vec::new();
         count_bytes.extend_from_slice(&u32::MAX.to_le_bytes());
 
         let unit_vec = SchemaType::Vec(SchemaCell::owned(SchemaType::Unit));
@@ -1305,8 +1254,8 @@ mod tests {
         let value = json!({ "Handle": { "id": 7u64, "kind_id": 42u64 } });
 
         let bytes = encode_schema(&value, &schema).expect("encode Handle Ref");
-        // version + u32 selector 1 + id (8 LE) + kind_id (8 LE).
-        let mut expected = vec![WIRE_VERSION];
+        // u32 selector 1 + id (8 LE) + kind_id (8 LE).
+        let mut expected: Vec<u8> = Vec::new();
         expected.extend_from_slice(&1u32.to_le_bytes());
         expected.extend_from_slice(&7u64.to_le_bytes());
         expected.extend_from_slice(&42u64.to_le_bytes());

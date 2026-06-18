@@ -123,10 +123,9 @@ mod listener_native {
                             // Wake the dispatcher: the actual
                             // stream is in the mpsc; this mail just
                             // signals "drain me". The payload is the
-                            // wake kind's own wire image (a single
-                            // `WIRE_VERSION` byte for a fieldless wire
-                            // kind, ADR-0118) so the typed handler
-                            // decodes it.
+                            // wake kind's own wire image (an empty image
+                            // for a fieldless wire kind, ADR-0118) so the
+                            // typed handler decodes it.
                             mailer.push(Mail::new(
                                 self_id,
                                 connection_ready_kind,

@@ -105,7 +105,7 @@ fn parse_section(bytes: &[u8]) -> Vec<InputsRecord> {
             "every record must start with the section version byte"
         );
         cursor = &cursor[1..];
-        let (rec, rest) = wire::take_from_bytes_bare::<InputsRecord>(cursor)
+        let (rec, rest) = wire::take_from_bytes::<InputsRecord>(cursor)
             .expect("wire decode of InputsRecord failed");
         out.push(rec);
         cursor = rest;

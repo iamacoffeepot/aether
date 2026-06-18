@@ -4,9 +4,9 @@
 //! version tag, and drops the bytes into the `aether.kinds.inputs`
 //! custom section. Writing at const-eval time keeps everything in
 //! `#[link_section]` statics with no runtime serializer on the
-//! guest — the wire shape matches `wire::to_vec_bare(InputsRecord)`
+//! guest — the wire shape matches `wire::to_vec(InputsRecord)`
 //! byte-for-byte so the substrate/hub reader decodes via
-//! `wire::take_from_bytes_bare` symmetrically.
+//! `wire::take_from_bytes` symmetrically.
 
 use super::primitives::{
     U32_WIDTH, U64_WIDTH, option_borrowed_str_len, str_len, write_option_borrowed_str, write_str,
@@ -31,7 +31,7 @@ pub const fn reply_contract_len(reply_tag: u8, _reply_id: u64) -> usize {
 
 /// Serialize a [`ReplyContract`](crate::ReplyContract) into `out` at
 /// `pos` from its `(tag, id)` pair, returning the new cursor. Exact
-/// `wire::to_vec_bare(ReplyContract)` shape: a `u32` LE selector then, for
+/// `wire::to_vec(ReplyContract)` shape: a `u32` LE selector then, for
 /// `One` / `Stream`, the `KindId` as a bare `u64` LE.
 #[must_use]
 pub const fn write_reply_contract(
