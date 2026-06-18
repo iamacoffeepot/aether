@@ -24,7 +24,7 @@ mod tests {
         use aether_capabilities::WasmTrampoline;
         use aether_data::Kind;
         use aether_kinds::{
-            ComponentSelector, ListComponents, LogTailResult, ResolveComponentResult, Tick,
+            ComponentSelector, ListComponentBinaries, LogTailResult, ResolveComponentResult, Tick,
             UploadComponentResult,
         };
 
@@ -69,7 +69,7 @@ mod tests {
                 UploadComponentResult::Err { error } => panic!("upload_component failed: {error}"),
             };
 
-            let all = bench.list_components(&ListComponents::default());
+            let all = bench.list_component_binaries(&ListComponentBinaries::default());
             let entry = all
                 .iter()
                 .find(|e| e.hash == hash)
@@ -96,7 +96,7 @@ mod tests {
             // Attribute filters: namespace + handled-kind keep it, a miss drops it.
             assert!(
                 bench
-                    .list_components(&ListComponents {
+                    .list_component_binaries(&ListComponentBinaries {
                         namespace: Some(PROBE_NAMESPACE.to_owned()),
                         handled_kind: None,
                     })
@@ -106,7 +106,7 @@ mod tests {
             );
             assert!(
                 bench
-                    .list_components(&ListComponents {
+                    .list_component_binaries(&ListComponentBinaries {
                         namespace: None,
                         handled_kind: Some(Tick::ID),
                     })
@@ -116,7 +116,7 @@ mod tests {
             );
             assert!(
                 !bench
-                    .list_components(&ListComponents {
+                    .list_component_binaries(&ListComponentBinaries {
                         namespace: Some("not_a_namespace".to_owned()),
                         handled_kind: None,
                     })
@@ -225,12 +225,6 @@ mod tests {
         /// substrate reads at boot (ADR-0116). `FleetBench` mirrors that
         /// pre-resolution (it speaks raw frames, not aether-mcp): upload,
         /// resolve hub-local, stage the bytes, and spawn with the manifest.
-        // Flaky: the boot-manifest autoload path emits no readiness signal, so
-        // this races a fixed 3s liveness poll (`LogTail` as a registration
-        // probe) against a cold-forked substrate's async boot + autoload, which
-        // intermittently overruns the budget under CI load. Re-enabled by the
-        // engine-local loaded-components query tracked in #2020.
-        #[ignore = "flaky pending the boot-autoload readiness query (#2020)"]
         #[test]
         fn fleetbench_boots_a_component_set_from_a_selector_manifest() {
             if !dist_manifest_present() {
@@ -281,23 +275,24 @@ mod tests {
             // Spawn with the boot manifest; the substrate reads it at boot.
             let engine = bench.spawn_headless_with_boot_manifest(&manifest_path);
 
-            // The autoloaded probe answers LogTail at its lineage address. The
-            // autoload is async at boot, so poll briefly for it.
+            // The boot autoload is async, so poll the engine's loaded-components
+            // query (issue 2020) until the probe's lineage address appears. This
+            // is the deterministic registration edge: `aether.component.list`
+            // reflects the live trampoline set, so the probe's name is present
+            // exactly when it is loaded and registered — no log-ring side channel
+            // and no racing a fixed liveness budget.
             let expected = probe_lineage_addr();
-            let mut answered = false;
+            let mut registered = false;
             for _ in 0..30 {
-                if matches!(
-                    bench.log_tail(engine, &expected, None),
-                    LogTailResult::Ok { .. }
-                ) {
-                    answered = true;
+                if bench.list_components(engine).iter().any(|n| n == &expected) {
+                    registered = true;
                     break;
                 }
                 thread::sleep(Duration::from_millis(100));
             }
             assert!(
-                answered,
-                "the boot-manifest probe should come up and answer LogTail at {expected}",
+                registered,
+                "the boot-manifest probe should come up and register at {expected}",
             );
 
             // Best-effort: clean up the staged temp files.

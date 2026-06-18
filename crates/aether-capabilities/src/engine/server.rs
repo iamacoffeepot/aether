@@ -38,8 +38,8 @@
 // `#[bridge]` macro emits `impl HandlesKind<K>` markers as siblings of
 // the mod.
 use aether_kinds::{
-    EngineAlive, EngineDied, ListBinaries, ListComponents, ListEngines, ResolveComponent,
-    RouteEnvelope, SpawnEngine, TerminateEngine, UploadBinary, UploadComponent,
+    EngineAlive, EngineDied, ListComponentBinaries, ListEngineBinaries, ListEngines,
+    ResolveComponent, RouteEnvelope, SpawnEngine, TerminateEngine, UploadBinary, UploadComponent,
 };
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
@@ -55,8 +55,9 @@ pub use server_native::{EngineConfig, EngineOverlay};
 #[aether_actor::bridge(singleton)]
 mod server_native {
     use super::{
-        EngineAlive, EngineDied, ListBinaries, ListComponents, ListEngines, ResolveComponent,
-        RouteEnvelope, SpawnEngine, TerminateEngine, UploadBinary, UploadComponent,
+        EngineAlive, EngineDied, ListComponentBinaries, ListEngineBinaries, ListEngines,
+        ResolveComponent, RouteEnvelope, SpawnEngine, TerminateEngine, UploadBinary,
+        UploadComponent,
     };
     use crate::engine::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams};
     use crate::store::{
@@ -67,9 +68,9 @@ mod server_native {
     use aether_data::{EngineId, Kind, MailboxId, Uuid};
     use aether_kinds::{
         BinaryManifest, BinarySelector, CallSettled, ComponentSelector, DeadEngineDescriptor,
-        DeathReason, EngineDescriptor, ForwardEnvelope, ListBinariesResult, ListComponentsResult,
-        ListEnginesResult, ResolveComponentResult, SpawnEngineResult, TerminateEngineResult,
-        UploadBinaryResult, UploadComponentResult,
+        DeathReason, EngineDescriptor, ForwardEnvelope, ListComponentBinariesResult,
+        ListEngineBinariesResult, ListEnginesResult, ResolveComponentResult, SpawnEngineResult,
+        TerminateEngineResult, UploadBinaryResult, UploadComponentResult,
     };
     use aether_substrate::Mail;
     use aether_substrate::Subname;
@@ -312,7 +313,7 @@ mod server_native {
         /// Hub-scoped content-addressed binary store (ADR-0115, issue
         /// 1953) — the storage half of the artifact registry.
         /// `on_upload_binary` ingests a staged binary content-addressed;
-        /// `on_list_binaries` enumerates the stored entries. Built from
+        /// `on_list_engine_binaries` enumerates the stored entries. Built from
         /// `EngineConfig` (the layout dir + disk budget) at init so it
         /// persists across a `restart-hub` (the layout root outlives the
         /// hub child); the spawn cutover (#1954) reads it back through the
@@ -735,20 +736,20 @@ mod server_native {
             }
         }
 
-        /// Enumerate the hub's stored binaries.
+        /// Enumerate the hub's stored engine binaries.
         ///
         /// # Agent
-        /// Send `ListBinaries { chassis?, caps, target? }` (each filter
+        /// Send `ListEngineBinaries { chassis?, caps, target? }` (each filter
         /// field AND-combined; an absent / empty field is no constraint).
-        /// Reply: `ListBinariesResult { binaries: [{ hash, name,
+        /// Reply: `ListEngineBinariesResult { binaries: [{ hash, name,
         /// manifest: { chassis, caps, git_sha, profile, target } }] }`.
         #[handler]
-        fn on_list_binaries(
+        fn on_list_engine_binaries(
             &mut self,
             _ctx: &mut NativeCtx<'_>,
-            mail: ListBinaries,
-        ) -> ListBinariesResult {
-            ListBinariesResult {
+            mail: ListEngineBinaries,
+        ) -> ListEngineBinariesResult {
+            ListEngineBinariesResult {
                 binaries: self.store.list_binaries(&mail),
             }
         }
@@ -799,19 +800,19 @@ mod server_native {
             resolve_component(&mut self.store, &mail.selector)
         }
 
-        /// Enumerate the hub's stored components.
+        /// Enumerate the hub's stored component binaries.
         ///
         /// # Agent
-        /// Send `ListComponents { namespace?, handled_kind? }` (each filter
-        /// AND-combined; an absent field is no constraint). Reply:
-        /// `ListComponentsResult { components: [{ hash, name, manifest }] }`.
+        /// Send `ListComponentBinaries { namespace?, handled_kind? }` (each
+        /// filter AND-combined; an absent field is no constraint). Reply:
+        /// `ListComponentBinariesResult { components: [{ hash, name, manifest }] }`.
         #[handler]
-        fn on_list_components(
+        fn on_list_component_binaries(
             &mut self,
             _ctx: &mut NativeCtx<'_>,
-            mail: ListComponents,
-        ) -> ListComponentsResult {
-            ListComponentsResult {
+            mail: ListComponentBinaries,
+        ) -> ListComponentBinariesResult {
+            ListComponentBinariesResult {
                 components: self.store.list_components(&mail),
             }
         }
@@ -937,7 +938,7 @@ mod server_native {
         }
         // No exact token: a namespace / handled-kind attribute query. A
         // match-more-than-one is a clean ambiguity error.
-        let mut matches = store.list_components(&ListComponents {
+        let mut matches = store.list_components(&ListComponentBinaries {
             namespace: selector.namespace.clone(),
             handled_kind: selector.handled_kind,
         });
@@ -1075,15 +1076,15 @@ mod server_native {
     /// `chassis` / `caps` / `target` attribute query, or — when none is
     /// set — the `default` filter selecting the [`DEFAULT_CHASSIS`]
     /// chassis.
-    fn attribute_filter(selector: &BinarySelector) -> ListBinaries {
+    fn attribute_filter(selector: &BinarySelector) -> ListEngineBinaries {
         if selector.chassis.is_none() && selector.caps.is_empty() && selector.target.is_none() {
-            ListBinaries {
+            ListEngineBinaries {
                 chassis: Some(DEFAULT_CHASSIS.to_owned()),
                 caps: Vec::new(),
                 target: None,
             }
         } else {
-            ListBinaries {
+            ListEngineBinaries {
                 chassis: selector.chassis.clone(),
                 caps: selector.caps.clone(),
                 target: selector.target.clone(),
@@ -1096,7 +1097,7 @@ mod server_native {
     /// `None` when no current entry matches both.
     fn pick_versioned(store: &ArtifactStore, name: &str, version: &str) -> Option<String> {
         store
-            .list_binaries(&ListBinaries::default())
+            .list_binaries(&ListEngineBinaries::default())
             .into_iter()
             .find(|entry| entry.name.as_deref() == Some(name) && entry.manifest.git_sha == version)
             .map(|entry| entry.hash)

@@ -1105,7 +1105,7 @@ mod engine {
     ///   stored manifests, consulted when `query` is `None`: keep only
     ///   binaries whose `chassis` matches, whose linked `caps` are a
     ///   superset of every listed cap, and whose `target` triple matches.
-    ///   They mirror [`ListBinaries`]' filter shape.
+    ///   They mirror [`ListEngineBinaries`]' filter shape.
     ///
     /// An exact `query` wins first; absent one, the attribute query
     /// resolves, then `default`. A selector that resolves to no stored
@@ -1278,7 +1278,7 @@ mod engine {
     /// What a stored binary *is*, captured once at upload time by forking
     /// the binary with `--describe` (ADR-0115, issue 1953). The
     /// content-addressed store sidecars one of these next to each entry's
-    /// bytes, and [`ListBinariesResult`] returns it per entry so an
+    /// bytes, and [`ListEngineBinariesResult`] returns it per entry so an
     /// observer (and the spawn cutover, #1954) can tell a `headless` from
     /// a `desktop` binary, see which capabilities it links, and read its
     /// build provenance — all without re-running the binary.
@@ -1300,7 +1300,7 @@ mod engine {
         pub target: String,
     }
 
-    /// One stored binary in a [`ListBinariesResult`] (ADR-0115, issue
+    /// One stored binary in a [`ListEngineBinariesResult`] (ADR-0115, issue
     /// 1953). `hash` is the sha256 hex over the binary's raw bytes — the
     /// content-address key. `name` is the optional human-readable name an
     /// upload pointed at this hash (the latest upload that named it wins).
@@ -1346,23 +1346,23 @@ mod engine {
     /// `manifest.chassis` matches, `caps` keeps only entries whose
     /// `manifest.caps` is a superset of every listed cap, `target` keeps
     /// only entries whose `manifest.target` matches. Reply:
-    /// [`ListBinariesResult`].
+    /// [`ListEngineBinariesResult`].
     #[derive(
         aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
     )]
     #[kind(name = "aether.engine.list_binaries")]
-    pub struct ListBinaries {
+    pub struct ListEngineBinaries {
         pub chassis: Option<String>,
         pub caps: Vec<String>,
         pub target: Option<String>,
     }
 
-    /// Reply to [`ListBinaries`] (ADR-0115, issue 1953): every stored
+    /// Reply to [`ListEngineBinaries`] (ADR-0115, issue 1953): every stored
     /// binary matching the filter, each as a [`BinaryEntry`] carrying its
     /// hash, optional name, and `--describe` manifest.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.engine.list_binaries_result")]
-    pub struct ListBinariesResult {
+    pub struct ListEngineBinariesResult {
         pub binaries: Vec<BinaryEntry>,
     }
 
@@ -1372,8 +1372,8 @@ mod engine {
     /// `aether.namespace` custom sections (ADR-0028 / ADR-0033 / ADR-0096),
     /// so the hub reads it with `wasmparser`, the same reader the substrate
     /// uses at load. The store sidecars one of these next to each
-    /// component entry's bytes, and [`ListComponentsResult`] returns it per
-    /// entry so an observer (and the resolve query) can select a component
+    /// component entry's bytes, and [`ListComponentBinariesResult`] returns
+    /// it per entry so an observer (and the resolve query) can select a component
     /// by what it is.
     ///
     /// - `namespaces` — every exported actor's `Actor::NAMESPACE`. A
@@ -1409,8 +1409,8 @@ mod engine {
         pub fallback: bool,
     }
 
-    /// One stored component in a [`ListComponentsResult`] (ADR-0116, issue
-    /// 1956). `hash` is the sha256 hex over the wasm's raw bytes — the
+    /// One stored component in a [`ListComponentBinariesResult`] (ADR-0116,
+    /// issue 1956). `hash` is the sha256 hex over the wasm's raw bytes — the
     /// content-address key. `name` is the optional human-readable name the
     /// latest upload pointed at this hash (`Actor::NAMESPACE` is the
     /// natural one). `manifest` is what the wasm self-reported.
@@ -1515,22 +1515,23 @@ mod engine {
     /// components (ADR-0116, issue 1956). The filter fields are
     /// AND-combined and each defaults to "no constraint": `namespace` keeps
     /// only entries exporting that actor namespace, `handled_kind` keeps
-    /// only entries handling that `KindId`. Reply: [`ListComponentsResult`].
+    /// only entries handling that `KindId`. Reply:
+    /// [`ListComponentBinariesResult`].
     #[derive(
         aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
     )]
     #[kind(name = "aether.engine.list_components")]
-    pub struct ListComponents {
+    pub struct ListComponentBinaries {
         pub namespace: Option<String>,
         pub handled_kind: Option<aether_data::KindId>,
     }
 
-    /// Reply to [`ListComponents`] (ADR-0116, issue 1956): every stored
-    /// component matching the filter, each as a [`ComponentEntry`] carrying
-    /// its hash, optional name, and the manifest read from the wasm.
+    /// Reply to [`ListComponentBinaries`] (ADR-0116, issue 1956): every
+    /// stored component matching the filter, each as a [`ComponentEntry`]
+    /// carrying its hash, optional name, and the manifest read from the wasm.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.engine.list_components_result")]
-    pub struct ListComponentsResult {
+    pub struct ListComponentBinariesResult {
         pub components: Vec<ComponentEntry>,
     }
 }
@@ -1713,6 +1714,34 @@ mod control_plane {
     pub enum ReplaceResult {
         Ok { capabilities: ComponentCapabilities },
         Err { error: String },
+    }
+
+    /// `aether.component.list` — enumerate the components an engine has
+    /// actually loaded and registered, addressed to its `aether.component`
+    /// mailbox (issue 2020). Fieldless: the query is a definitive snapshot
+    /// of the live trampoline set, the only part of the registry whose
+    /// membership varies (chassis caps are boot-present and static). A
+    /// consumer that spawned an engine with a boot-manifest autoload
+    /// (ADR-0116) polls this to learn deterministically when a requested
+    /// component is loaded and registered at its lineage address, instead
+    /// of inferring liveness by proxy. Reply: `ListComponentsResult`.
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
+    )]
+    #[kind(name = "aether.component.list")]
+    pub struct ListComponents {}
+
+    /// Reply to `ListComponents` (issue 2020): the ADR-0099 lineage name of
+    /// every currently-loaded component (each registered at
+    /// `aether.component/<name>`). `names` only — no mailbox id: the id is a
+    /// deterministic hash-chain over the lineage the `name` already renders
+    /// (ADR-0099), and routing is the substrate's job (a caller addresses by
+    /// `recipient_name` and the substrate resolves it), so the handle has no
+    /// use at the caller.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.component.list_result")]
+    pub struct ListComponentsResult {
+        pub names: Vec<String>,
     }
 
     // ADR-0021 publish/subscribe routing for substrate input streams,
@@ -4430,27 +4459,27 @@ mod tests {
             profile: "debug".to_string(),
             target: "aarch64-apple-darwin".to_string(),
         };
-        let listed = ListBinariesResult {
+        let listed = ListEngineBinariesResult {
             binaries: vec![BinaryEntry {
                 hash: "abc123".to_string(),
                 name: Some("headless".to_string()),
                 manifest: manifest.clone(),
             }],
         };
-        let back = ListBinariesResult::decode_from_bytes(&listed.encode_into_bytes())
-            .expect("test setup: ListBinariesResult decodes");
+        let back = ListEngineBinariesResult::decode_from_bytes(&listed.encode_into_bytes())
+            .expect("test setup: ListEngineBinariesResult decodes");
         assert_eq!(back.binaries.len(), 1);
         assert_eq!(back.binaries[0].hash, "abc123");
         assert_eq!(back.binaries[0].name.as_deref(), Some("headless"));
         assert_eq!(back.binaries[0].manifest, manifest);
 
-        let filter = ListBinaries {
+        let filter = ListEngineBinaries {
             chassis: Some("headless".to_string()),
             caps: vec!["aether.fs".to_string()],
             target: None,
         };
-        let back = ListBinaries::decode_from_bytes(&filter.encode_into_bytes())
-            .expect("test setup: ListBinaries decodes");
+        let back = ListEngineBinaries::decode_from_bytes(&filter.encode_into_bytes())
+            .expect("test setup: ListEngineBinaries decodes");
         assert_eq!(back.chassis.as_deref(), Some("headless"));
         assert_eq!(back.caps, vec!["aether.fs".to_string()]);
         assert_eq!(back.target, None);
@@ -4528,15 +4557,15 @@ mod tests {
             ResolveComponentResult::Err { error } => panic!("expected Ok, got Err {error}"),
         }
 
-        let listed = ListComponentsResult {
+        let listed = ListComponentBinariesResult {
             components: vec![ComponentEntry {
                 hash: "abc123".to_string(),
                 name: Some("probe".to_string()),
                 manifest: manifest.clone(),
             }],
         };
-        let back = ListComponentsResult::decode_from_bytes(&listed.encode_into_bytes())
-            .expect("test setup: ListComponentsResult decodes");
+        let back = ListComponentBinariesResult::decode_from_bytes(&listed.encode_into_bytes())
+            .expect("test setup: ListComponentBinariesResult decodes");
         assert_eq!(back.components.len(), 1);
         assert_eq!(back.components[0].hash, "abc123");
         assert_eq!(back.components[0].manifest, manifest);
@@ -5920,6 +5949,49 @@ mod tests {
             assert_eq!(back.config, vec![0x01, 0x02, 0x03]);
             assert_eq!(back.mailbox_id, aether_data::MailboxId(7));
             assert_eq!(back.export.as_deref(), Some("ui.panel"));
+        }
+
+        #[test]
+        fn list_components_query_registers_and_roundtrips() {
+            // Issue 2020: the engine-local loaded-components query is a
+            // fieldless request and a `names: Vec<String>` reply, both on the
+            // `aether.component.list` family. They must register in the
+            // descriptor inventory (so `describe_kinds(prefix="aether.component")`
+            // surfaces them) and survive the postcard wire path.
+            assert_eq!(ListComponents::NAME, "aether.component.list");
+            assert_eq!(ListComponentsResult::NAME, "aether.component.list_result");
+
+            let descriptors = descriptors::all();
+            assert!(
+                descriptors.iter().any(|d| d.name == ListComponents::NAME),
+                "ListComponents registers in the descriptor inventory",
+            );
+            assert!(
+                descriptors
+                    .iter()
+                    .any(|d| d.name == ListComponentsResult::NAME),
+                "ListComponentsResult registers in the descriptor inventory",
+            );
+
+            let req = ListComponents {};
+            ListComponents::decode_from_bytes(&req.encode_into_bytes())
+                .expect("decode ListComponents round-trip");
+
+            let reply = ListComponentsResult {
+                names: vec![
+                    "aether.embedded:probe".to_string(),
+                    "aether.embedded:camera".to_string(),
+                ],
+            };
+            let back = ListComponentsResult::decode_from_bytes(&reply.encode_into_bytes())
+                .expect("decode ListComponentsResult round-trip");
+            assert_eq!(
+                back.names,
+                vec![
+                    "aether.embedded:probe".to_string(),
+                    "aether.embedded:camera".to_string(),
+                ]
+            );
         }
 
         #[test]

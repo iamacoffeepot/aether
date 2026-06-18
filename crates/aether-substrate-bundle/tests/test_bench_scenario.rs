@@ -37,9 +37,10 @@ use aether_kinds::{
     CachedFontMetrics, Camera, CaptureFrame, CaptureFrameResult, CreateTexture,
     CreateTextureResult, Delete, DeleteResult, DrawSolidQuads, DrawText, DrawTexturedQuads,
     DropComponent, DropResult, FontMetricsRequest, FontMetricsResult, FontRef, FrameCheck,
-    FrameCheckResult, FrameReduction, FsError, List, ListResult, LoadComponent, LoadFont,
-    LoadFontResult, LoadResult, MailEnvelope, Ping, QuadScale, QuadSpace, Read, ReadResult,
-    ReplaceComponent, ReplaceResult, SolidQuad, TexturedQuad, UiBar, UiPanel, Write, WriteResult,
+    FrameCheckResult, FrameReduction, FsError, List, ListComponents, ListComponentsResult,
+    ListResult, LoadComponent, LoadFont, LoadFontResult, LoadResult, MailEnvelope, Ping, QuadScale,
+    QuadSpace, Read, ReadResult, ReplaceComponent, ReplaceResult, SolidQuad, TexturedQuad, UiBar,
+    UiPanel, Write, WriteResult,
 };
 use aether_math::{Mat4, Vec3};
 use aether_substrate_bundle::test_bench::{
@@ -156,6 +157,37 @@ fn load_cube(bench: &mut TestBench, wasm_path: &Path) {
         LoadResult::Ok { .. } => {}
         LoadResult::Err { error } => panic!("load_component(cube): {error}"),
     }
+}
+
+/// The engine-local loaded-components query (issue 2020) lists a
+/// loaded component by its ADR-0099 lineage address. After loading the
+/// probe, a fieldless `ListComponents` to the `aether.component` mailbox
+/// replies with the probe's full trampoline address — the deterministic
+/// registration snapshot a readiness poll consumes instead of inferring
+/// liveness from a log-ring side channel.
+#[test]
+fn list_components_reports_loaded_probe_lineage() {
+    let Some(wasm_path) = require_runtime("probe") else {
+        return;
+    };
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    load_probe(&mut bench, &wasm_path);
+
+    let listed = bench
+        .execute(vec![(
+            "list",
+            BenchOp::send_and_await("aether.component", &ListComponents {}),
+        )])
+        .expect("list sequence");
+    let result = listed
+        .reply::<ListComponentsResult>("list")
+        .expect("decode ListComponentsResult");
+    assert!(
+        result.names.contains(&probe_address()),
+        "the loaded probe should be listed at its lineage address {}, got {:?}",
+        probe_address(),
+        result.names,
+    );
 }
 
 /// Subscribing the fixture to Tick yields exactly one

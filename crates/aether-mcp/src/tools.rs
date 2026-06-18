@@ -37,12 +37,13 @@ use aether_kinds::dag::{DagDescriptor, Edge, Node, NodeId};
 use aether_kinds::{
     BinarySelector, Cancel, CancelResult, CaptureFrame, CaptureFrameResult, ComponentCapabilities,
     ComponentSelector, CostTail, CostTailResult, DeathReason, FrameCheck, FrameReduction,
-    ListBinaries, ListBinariesResult, ListComponents, ListComponentsResult, ListEngines,
-    ListEnginesResult, ListKinds, ListKindsResult, LoadComponent, LoadResult,
-    MailEnvelope as KindMailEnvelope, ReplaceComponent, ReplaceResult, ResolveComponent,
-    ResolveComponentResult, SimilarityCheck, SpawnEngine, SpawnEngineResult, Status, StatusResult,
-    Submit, SubmitResult, TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult,
-    UploadComponent, UploadComponentResult,
+    ListComponentBinaries, ListComponentBinariesResult, ListComponents, ListComponentsResult,
+    ListEngineBinaries, ListEngineBinariesResult, ListEngines, ListEnginesResult, ListKinds,
+    ListKindsResult, LoadComponent, LoadResult, MailEnvelope as KindMailEnvelope, ReplaceComponent,
+    ReplaceResult, ResolveComponent, ResolveComponentResult, SimilarityCheck, SpawnEngine,
+    SpawnEngineResult, Status, StatusResult, Submit, SubmitResult, TerminateEngine,
+    TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent,
+    UploadComponentResult,
     trace::{
         DescribeTreeResult, DispatchTraced, DispatchTracedAck, MailNodeWire, TRACE_MAILBOX_NAME,
         TraceTail, TraceTailResult,
@@ -281,18 +282,79 @@ impl Mcp {
             staged.cleanup().await;
         }
         let reply = reply.map_err(internal)?;
-        match SpawnEngineResult::decode_from_bytes(&reply.payload) {
+        let info = match SpawnEngineResult::decode_from_bytes(&reply.payload) {
             Some(SpawnEngineResult::Ok {
                 engine_id,
                 rpc_port,
-            }) => json(&EngineInfo {
+            }) => EngineInfo {
                 engine_id,
                 rpc_port,
                 // A just-spawned engine is alive as of now.
                 last_heartbeat_age_millis: 0,
-            }),
-            Some(SpawnEngineResult::Err { error }) => Err(internal_msg(&error)),
-            None => Err(internal_msg("undecodable SpawnEngineResult")),
+            },
+            Some(SpawnEngineResult::Err { error }) => return Err(internal_msg(&error)),
+            None => return Err(internal_msg("undecodable SpawnEngineResult")),
+        };
+
+        // The spawn reply returns once the proxy connects, before any
+        // boot-manifest autoload (ADR-0116) settles — those loads are
+        // fire-and-forget and emit no completion signal. When components
+        // were requested, poll the engine's loaded-components query (issue
+        // 2020) until all of them register, so the tool hands back a
+        // genuinely-ready engine rather than one mid-boot. The query is a
+        // definitive snapshot of the live trampoline set, so readiness is
+        // the count reaching the requested total — name-agnostic, robust
+        // against the substrate's name derivation.
+        let want = args.components.len();
+        if want > 0 {
+            self.wait_for_loaded_components(&info.engine_id, want)
+                .await?;
+        }
+
+        json(&info)
+    }
+
+    /// Poll the spawned engine's `aether.component.list` query (issue 2020)
+    /// until at least `want` components are loaded and registered, or the
+    /// bounded budget elapses. The boot autoload is async and signalless, so
+    /// this turns the readiness wait into a deterministic poll of the live
+    /// trampoline set rather than a fixed post-spawn sleep. A timeout is a
+    /// clear tool error naming how many of the requested components came up.
+    async fn wait_for_loaded_components(
+        &self,
+        engine_id: &str,
+        want: usize,
+    ) -> Result<(), McpError> {
+        const POLL_INTERVAL: Duration = Duration::from_millis(100);
+        const BUDGET: Duration = Duration::from_secs(30);
+
+        let engine = parse_engine_id(engine_id)?;
+        let deadline = time::Instant::now() + BUDGET;
+        loop {
+            let reply = self
+                .session
+                .call_one(engine_envelope(
+                    engine,
+                    "aether.component",
+                    &ListComponents {},
+                ))
+                .await
+                .map_err(internal)?;
+            let loaded = match ListComponentsResult::decode_from_bytes(&reply.payload) {
+                Some(result) => result.names.len(),
+                None => return Err(internal_msg("undecodable ListComponentsResult")),
+            };
+            if loaded >= want {
+                return Ok(());
+            }
+            if time::Instant::now() >= deadline {
+                return Err(internal_msg(&format!(
+                    "spawned engine did not load all boot components within {}s: \
+                     {loaded} of {want} registered",
+                    BUDGET.as_secs(),
+                )));
+            }
+            time::sleep(POLL_INTERVAL).await;
         }
     }
 
@@ -360,7 +422,7 @@ impl Mcp {
             .session
             .call_one(local_envelope(
                 ENGINE_CAP,
-                &ListBinaries {
+                &ListEngineBinaries {
                     chassis: args.chassis,
                     caps: args.caps,
                     target: args.target,
@@ -368,9 +430,9 @@ impl Mcp {
             ))
             .await
             .map_err(internal)?;
-        match ListBinariesResult::decode_from_bytes(&reply.payload) {
+        match ListEngineBinariesResult::decode_from_bytes(&reply.payload) {
             Some(result) => json(&result.binaries),
-            None => Err(internal_msg("undecodable ListBinariesResult")),
+            None => Err(internal_msg("undecodable ListEngineBinariesResult")),
         }
     }
 
@@ -419,16 +481,16 @@ impl Mcp {
             .session
             .call_one(local_envelope(
                 ENGINE_CAP,
-                &ListComponents {
+                &ListComponentBinaries {
                     namespace: args.namespace,
                     handled_kind,
                 },
             ))
             .await
             .map_err(internal)?;
-        match ListComponentsResult::decode_from_bytes(&reply.payload) {
+        match ListComponentBinariesResult::decode_from_bytes(&reply.payload) {
             Some(result) => json(&result.components),
-            None => Err(internal_msg("undecodable ListComponentsResult")),
+            None => Err(internal_msg("undecodable ListComponentBinariesResult")),
         }
     }
 
