@@ -26,13 +26,13 @@
 use std::path::Path;
 
 use aether_actor::Actor;
-use aether_camera::CameraCreate;
 use aether_capabilities::{ComponentHostCapability, FsCapability};
 use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
 use aether_kinds::{
     DropComponent, DropResult, LoadComponent, LoadResult, Ping, ReplaceComponent, ReplaceResult,
     Tick, Write,
 };
+use aether_kit::camera::CameraCreate;
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
     test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
@@ -134,17 +134,19 @@ fn cap_registry_reports_fallback() {
     assert!(!caps.accepts(mbox, Ping::ID));
 }
 
-/// `aether.component.replace` swaps the probe wasm for the camera wasm
-/// (a distinct handler set). The registry reflects the post-replace
-/// accept-set at the same mailbox id (stable across replace per
-/// ADR-0022): `SetRender` flips accepted→rejected, `CameraCreate` flips
-/// rejected→accepted.
+/// `aether.component.replace` swaps the probe wasm for `aether-kit`'s
+/// non-entry `camera` export (a distinct handler set), exercising
+/// `ReplaceComponent.export` (#2027) — the trampoline's hosted type is
+/// `probe`, so reaching the camera handler set requires naming the
+/// export. The registry reflects the post-replace accept-set at the
+/// same mailbox id (stable across replace per ADR-0022): `SetRender`
+/// flips accepted→rejected, `CameraCreate` flips rejected→accepted.
 #[test]
 fn cap_registry_updates_on_replace() {
     let Some(probe_path) = require_runtime("probe") else {
         return;
     };
-    let Some(camera_path) = require_runtime("aether_camera") else {
+    let Some(kit_path) = require_runtime("aether_kit") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -157,7 +159,7 @@ fn cap_registry_updates_on_replace() {
         assert!(!caps.accepts(mbox, CameraCreate::ID));
     }
 
-    let camera_wasm = fs::read(&camera_path).expect("read camera wasm");
+    let kit_wasm = fs::read(&kit_path).expect("read kit wasm");
     let swapped = bench
         .execute(vec![(
             "swap",
@@ -165,10 +167,13 @@ fn cap_registry_updates_on_replace() {
                 ComponentHostCapability::NAMESPACE,
                 &ReplaceComponent {
                     mailbox_id: mbox,
-                    wasm: camera_wasm,
+                    wasm: kit_wasm,
                     drain_timeout_ms: None,
                     config: Vec::new(),
-                    export: None,
+                    // ADR-0096 / #2027: select the non-entry `camera`
+                    // export from the multi-actor kit module; a bare
+                    // replace would reuse the trampoline's probe tag.
+                    export: Some("camera".to_owned()),
                 },
             ),
         )])

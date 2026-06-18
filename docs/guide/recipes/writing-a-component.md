@@ -17,7 +17,7 @@ machinery; this recipe is the end-to-end loop those two pages describe in parts.
 
 > **Verify against current code.** This recipe carries symbol names and file paths,
 > so confirm them before you follow it: the SDK surface is `crates/aether-actor`, the
-> worked exemplar is `crates/aether-camera`, and the minimal smoke component is
+> worked exemplar is `crates/aether-mesh-viewer`, and the minimal smoke component is
 > `crates/aether-actor/examples/hello.rs`. If a name below has moved, the fix is part
 > of the work.
 
@@ -60,10 +60,11 @@ inventory = { workspace = true }
 ```
 
 A component and the peers that talk to it share the kind crate, so put any kinds you
-invent in a sibling crate both sides depend on. `aether-camera`'s manifest
-(`crates/aether-camera/Cargo.toml`) is the worked version of all of this, including
+invent in a sibling crate both sides depend on. `aether-mesh-viewer`'s manifest
+(`crates/aether-mesh-viewer/Cargo.toml`) is the worked version of all of this, including
 the dual-output `["cdylib", "rlib"]` shape a crate uses when host integration tests
-link the same source.
+link the same source. `aether-kit` packs several actors into one cdylib with
+`export!(A, B, …)` (ADR-0096) — its `camera` export is the worked multi-actor example.
 
 ## 2. Write the actor block
 
@@ -118,7 +119,7 @@ Two parts earn attention:
   receiver.
 
 `crates/aether-actor/examples/hello.rs` is this skeleton fleshed out (a static
-triangle plus a ping/pong reply); `crates/aether-camera/src/runtime.rs` is the
+triangle plus a ping/pong reply); `crates/aether-mesh-viewer/src/runtime.rs` is the
 full-scale version with a mail family of handlers.
 
 ## 3. Add `export!`

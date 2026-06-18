@@ -62,21 +62,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-camera"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-capabilities",
- "aether-data",
- "aether-kinds",
- "aether-math",
- "aether-substrate-bundle",
- "inventory",
- "serde",
- "tracing",
-]
-
-[[package]]
 name = "aether-capabilities"
 version = "0.3.0-alpha"
 dependencies = [
@@ -179,6 +164,7 @@ dependencies = [
  "aether-data",
  "aether-kinds",
  "aether-math",
+ "aether-substrate-bundle",
  "inventory",
  "serde",
  "tracing",
@@ -302,11 +288,11 @@ name = "aether-substrate-bundle"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-camera",
  "aether-capabilities",
  "aether-codec",
  "aether-data",
  "aether-kinds",
+ "aether-kit",
  "aether-labyrinth",
  "aether-math",
  "aether-substrate",

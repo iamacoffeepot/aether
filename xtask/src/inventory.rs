@@ -39,7 +39,7 @@ pub struct Component {
     pub from_example: bool,
     /// Wasm output filename stem — the lib or example target name. This
     /// is the same string `locate_component_wasm` keys on (e.g.
-    /// `aether_camera`, `probe`, `aether_mesh_viewer`).
+    /// `aether_kit`, `probe`, `aether_mesh_viewer`).
     pub stem: String,
 }
 

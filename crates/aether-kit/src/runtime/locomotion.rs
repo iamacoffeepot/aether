@@ -1495,5 +1495,3 @@ mod tests {
         assert_eq!(snap_rest(off_center, OCTIMETERS_PER_TILE), center);
     }
 }
-
-aether_actor::export!(Locomotion);

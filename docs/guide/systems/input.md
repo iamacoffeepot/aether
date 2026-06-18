@@ -117,7 +117,7 @@ Then handle each stream as its kind, like any other mail:
 fn on_key(&mut self, ctx: &mut FfiCtx<'_>, key: Key) { /* react to a keystroke */ }
 ```
 
-The reference `aether-camera` subscribes `WindowSize` this way to track the
+`aether-kit`'s `camera` export subscribes `WindowSize` this way to track the
 viewport, and subscribes the `Tick` and `Render` lifecycle stages on
 `aether.lifecycle` to advance and submit each frame. You don't unsubscribe on the
 way out — the host clears your subscriptions when the component drops.

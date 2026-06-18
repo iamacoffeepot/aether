@@ -656,12 +656,7 @@ mod tests {
 
         // Parity with the structural sweep preflight / CI ran before this
         // xtask: a drop here surfaces as an AETHER_REQUIRE_RUNTIME panic.
-        for expected in [
-            "probe",
-            "multi_actor",
-            "aether_camera",
-            "aether_mesh_viewer",
-        ] {
+        for expected in ["probe", "multi_actor", "aether_kit", "aether_mesh_viewer"] {
             assert!(
                 stems.contains(expected),
                 "discovery dropped component {expected}; found {stems:?}",

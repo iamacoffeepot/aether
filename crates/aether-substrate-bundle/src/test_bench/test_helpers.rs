@@ -80,7 +80,7 @@ pub fn has_wgpu_adapter() -> bool {
 /// exists.
 ///
 /// `crate_name` is the underscore-cased crate name (for top-level
-/// cdylib crates, e.g. `"aether_camera"`) or the example name (for
+/// cdylib crates, e.g. `"aether_kit"`) or the example name (for
 /// `[[example]]` cdylibs, e.g. `"probe"` / `"inline_child"`). The
 /// workspace target dir is resolved via
 /// `CARGO_MANIFEST_DIR` of the calling integration test

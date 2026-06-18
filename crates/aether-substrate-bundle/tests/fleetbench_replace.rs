@@ -1,8 +1,9 @@
 //! `FleetBench` `replace_component` proof (issue 1459, Tier-A): load the
 //! `probe` fixture into a forked substrate, then atomically swap it for
-//! the `aether_camera` wasm at the same trampoline mailbox id (ADR-0022)
-//! and assert the returned capability set reflects the new binary while
-//! the lineage address stays put.
+//! `aether-kit`'s `camera` export (selector `aether_kit@camera`) at the
+//! same trampoline mailbox id (ADR-0022) and assert the returned
+//! capability set reflects the new binary while the lineage address
+//! stays put.
 //!
 //! Heavy by construction (fork+exec + cross-process settle) — the test
 //! lives in `mod tests::heavy` so nextest's `test(/::heavy::/)` selector
@@ -13,22 +14,25 @@ mod fleetbench;
 mod tests {
     mod heavy {
         use aether_actor::Actor;
-        use aether_camera::CameraCreate;
         use aether_capabilities::WasmTrampoline;
         use aether_data::Kind;
         use aether_kinds::{ComponentCapabilities, LogTailResult, Ping, Tick};
+        use aether_kit::camera::CameraCreate;
         use aether_test_fixtures::SetRender;
 
         use crate::fleetbench::{FleetBench, dist_manifest_present};
 
         /// Load `probe` (handlers `SetRender` + `Tick`), then `replace`
-        /// it with `aether_camera` (handlers `CameraCreate` + `Tick` +
-        /// the camera-driver kinds) targeting the captured trampoline
-        /// `mailbox_id`. The returned `ReplaceResult::Ok.capabilities`
-        /// must carry the camera handler set and not the probe's, with
-        /// `Tick` surviving the swap; the lineage address — unchanged by
-        /// construction, since the trampoline keeps its load-time name —
-        /// must still route to the live mailbox afterward.
+        /// it with `aether-kit`'s non-entry `camera` export (selector
+        /// `aether_kit@camera`; handlers `CameraCreate` + `Tick` + the
+        /// camera-driver kinds) targeting the captured trampoline
+        /// `mailbox_id` — exercising `ReplaceComponent.export` (#2027)
+        /// end-to-end over the wire. The returned
+        /// `ReplaceResult::Ok.capabilities` must carry the camera
+        /// handler set and not the probe's, with `Tick` surviving the
+        /// swap; the lineage address — unchanged by construction, since
+        /// the trampoline keeps its load-time name — must still route to
+        /// the live mailbox afterward.
         #[test]
         fn fleetbench_replaces_probe_with_camera_at_a_stable_address() {
             if !dist_manifest_present() {
@@ -62,7 +66,7 @@ mod tests {
                 "probe should load at its ADR-0099 lineage address",
             );
 
-            let caps = bench.replace(engine, loaded.mailbox_id, "aether_camera");
+            let caps = bench.replace_export(engine, loaded.mailbox_id, "aether_kit", "camera");
 
             // Post-replace: the camera handler set is active, the probe's
             // is gone, and Tick (declared by both) survives the swap.

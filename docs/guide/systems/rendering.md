@@ -141,15 +141,15 @@ frame.
 
 ## How to extend or reuse it
 
-- **A new camera mode** is component work, not substrate work. The reference
-  `aether-camera` is the worked example: it hosts N named cameras, advances each
+- **A new camera mode** is component work, not substrate work. `aether-kit`'s
+  `camera` export is the worked example: it hosts N named cameras, advances each
   on `Tick`, and publishes the active one's `view_proj` on `Render`. It boots a
   default `"main"` camera in orbit mode and exposes driver kinds —
   `aether.camera.{create, destroy, set_active, set_mode, orbit.set, topdown.set}`
   — for adding cameras and poking their parameters live. A new mode (follow,
   cinematic, free-fly) is a new `view_proj` computation in a camera component;
   the renderer needs no change because it only ever applies the matrix it's
-  handed. Loaded, the camera answers at
+  handed. Loaded by the `aether_kit@camera` selector, the camera answers at
   `aether.component/aether.embedded:camera` — the address `LoadResult.name` hands
   back.
 - **A new drawing component** subscribes the `Render` stage and emits

@@ -6,7 +6,7 @@
 > (in-place hot-swap), [ADR-0096](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0096-multi-actor-wasm-modules.md) (several actor types per module,
 > selected at load) and [ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md) (a component spawns its
 > siblings). The authoring and loading surface here is **stable** — it's
-> what every reference component (`aether-camera`, `aether-mesh-viewer`) is built
+> what every reference component (`aether-mesh-viewer`, `aether-kit`) is built
 > on, and the signatures were read from the current SDK.
 
 A **component** is the wasm host of an actor. The shared model — the `#[actor]`

@@ -1,6 +1,7 @@
-//! Camera scenario tests. Each test boots a `TestBench`, loads this
-//! crate's own wasm artifact (built separately for
-//! `wasm32-unknown-unknown`), drives the component through its
+//! Camera scenario tests. Each test boots a `TestBench`, loads
+//! `aether-kit`'s wasm artifact (built separately for
+//! `wasm32-unknown-unknown`) selecting the non-entry `camera` export
+//! (ADR-0096), drives the `CameraComponent` through its
 //! `aether.camera.*` mail surface, and asserts mail-flow / render
 //! survivability via direct `TestBench` assertions (post-issue-821:
 //! the `aether-scenario` Script/Step vocabulary retired in favour of
@@ -10,7 +11,7 @@
 //! - No wgpu adapter is available (driverless Linux runners without
 //!   `mesa-vulkan-drivers`).
 //! - The component's wasm hasn't been built — tests read
-//!   `target/wasm32-unknown-unknown/{debug,release}/aether_camera.wasm`
+//!   `target/wasm32-unknown-unknown/{debug,release}/aether_kit.wasm`
 //!   and skip with an `eprintln!` when both paths are absent. CI
 //!   builds the wasm before invoking `cargo test`.
 //!
@@ -18,12 +19,12 @@
 //! gate) live in `aether_substrate_bundle::test_bench::test_helpers`
 //! (issues 460 + 821).
 
-use aether_camera::CameraDestroy;
 use aether_kinds::{LoadComponent, LoadResult};
+use aether_kit::camera::CameraDestroy;
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{decode_png, not_all_black};
 
-// Force linkage of `aether-camera`'s `inventory::submit!` `KindDescriptor`
+// Force linkage of `aether-kit`'s `inventory::submit!` `KindDescriptor`
 // entries into this test binary. Cargo treats integration tests as
 // separate crates that link against the test target's host rlib, but
 // the linker strips inventory submits for kinds the test code doesn't
@@ -32,7 +33,7 @@ use aether_substrate_bundle::visual::{decode_png, not_all_black};
 // still resolve, but other inventory-collected metadata wouldn't —
 // keep the anchor for parity with the other component scenario files.
 #[allow(unused_imports)]
-use aether_camera as _;
+use aether_kit as _;
 use std::fs;
 use std::path::Path;
 
@@ -55,11 +56,13 @@ fn component_address() -> String {
     )
 }
 
-/// Load this crate's pre-built wasm into the bench and await
-/// `LoadResult`. Panics on load failure so the calling test surfaces
-/// the error message rather than wedging on a missing subscription.
+/// Load `aether-kit`'s pre-built wasm into the bench, selecting the
+/// non-entry `camera` export (ADR-0096; the bare entry is
+/// `Locomotion`), and await `LoadResult`. Panics on load failure so
+/// the calling test surfaces the error message rather than wedging on
+/// a missing subscription.
 fn load_camera(bench: &mut TestBench, wasm_path: &Path) {
-    let wasm = fs::read(wasm_path).expect("read camera wasm");
+    let wasm = fs::read(wasm_path).expect("read kit wasm");
     let loaded = bench
         .execute(vec![(
             "load",
@@ -69,7 +72,7 @@ fn load_camera(bench: &mut TestBench, wasm_path: &Path) {
                     wasm,
                     name: Some(COMPONENT_NAME.to_owned()),
                     config: Vec::new(),
-                    export: None,
+                    export: Some("camera".to_owned()),
                 },
             ),
         )])
@@ -85,7 +88,7 @@ fn load_camera(bench: &mut TestBench, wasm_path: &Path) {
 
 #[test]
 fn camera_component_lifecycle() {
-    let Some(wasm_path) = require_runtime("aether_camera") else {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
 
@@ -114,7 +117,7 @@ fn camera_component_lifecycle() {
 /// the kind name.
 #[test]
 fn camera_default_static_publishes_view_proj() {
-    let Some(wasm_path) = require_runtime("aether_camera") else {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
 
@@ -146,7 +149,7 @@ fn camera_default_static_publishes_view_proj() {
 /// shouldn't take down the chassis.
 #[test]
 fn camera_destroy_main_keeps_substrate_alive() {
-    let Some(wasm_path) = require_runtime("aether_camera") else {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
 

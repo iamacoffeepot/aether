@@ -6,7 +6,7 @@
 //! `aether.embedded` namespace, landing on the mailbox the host registered
 //! it under instead of the bare `hash(NAMESPACE)` that misses. This drives
 //! the mechanism through a fixture; wiring real shipped components (e.g.
-//! `aether-camera`) to expose a peer-nameable marker is follow-up.
+//! `aether-kit`) to expose a peer-nameable marker is follow-up.
 
 // Asserts the host-class fold differs from the bare-NAMESPACE hash — the
 // primitive yields the reference id under test, not a sibling-cap address.
