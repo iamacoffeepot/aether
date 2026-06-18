@@ -1,12 +1,13 @@
 name: fuzz-nightly
 
-# Coverage-guided fuzz of `aether_codec::decode_schema`, off the merge
-# critical path (issue 1562). cargo-fuzz needs nightly and is unbounded
-# by design, so it runs on a schedule, never as a `ci-pass` gate. A
-# crash uploads its reproducer and files (or comments on) a triage
-# issue. `workflow_dispatch` runs it on demand without waiting for the
-# nightly tick. Scheduled workflows fire only from the file on `main`,
-# run in UTC, and can be delayed under load — all fine for a nightly.
+# Coverage-guided fuzz of `aether_codec::decode_schema` and the
+# `aether_data::wire` roundtrip / panic-freedom targets, off the merge
+# critical path (issue 1562, issue 1982). cargo-fuzz needs nightly and is
+# unbounded by design, so it runs on a schedule, never as a `ci-pass` gate.
+# A crash uploads its reproducer and files (or comments on) a triage issue.
+# `workflow_dispatch` runs it on demand without waiting for the nightly tick.
+# Scheduled workflows fire only from the file on `main`, run in UTC, and can
+# be delayed under load — all fine for a nightly.
 
 on:
   schedule:
@@ -17,14 +18,18 @@ permissions:
   contents: read
 
 jobs:
-  decode_schema:
-    name: fuzz decode_schema
+  fuzz:
+    name: fuzz ${{ matrix.target }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [decode_schema, wire_roundtrip, wire_decode_str, wire_decode_seq, wire_decode_enum]
     env:
-      FUZZ_TARGET: decode_schema
+      FUZZ_TARGET: ${{ matrix.target }}
       # Per-run time box. 300s warm accretes coverage on top of the
       # persisted corpus rather than restarting cold each night.
       MAX_TOTAL_TIME: "300"
@@ -56,10 +61,10 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             fuzz/target
-            fuzz/corpus/decode_schema
-          key: fuzz-decode_schema-${{ runner.os }}-${{ github.run_id }}
+            fuzz/corpus/${{ matrix.target }}
+          key: fuzz-${{ matrix.target }}-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
-            fuzz-decode_schema-${{ runner.os }}-
+            fuzz-${{ matrix.target }}-${{ runner.os }}-
 
       - name: Install cargo-fuzz
         run: cargo fuzz --version || cargo install cargo-fuzz
@@ -71,7 +76,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-artifacts-decode_schema
+          name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts/
           if-no-files-found: ignore
 
@@ -96,7 +101,7 @@ jobs:
             echo "The \`${FUZZ_TARGET}\` nightly fuzz run crashed."
             echo
             echo "- Run: ${RUN_URL}"
-            echo "- Reproducers (also attached as the \`fuzz-artifacts-decode_schema\` artifact):"
+            echo "- Reproducers (also attached as the \`fuzz-artifacts-${FUZZ_TARGET}\` artifact):"
             echo
             for f in $repros; do
               echo "  - \`$(basename "$f")\`"
