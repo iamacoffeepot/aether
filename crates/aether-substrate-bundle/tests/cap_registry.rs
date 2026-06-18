@@ -168,6 +168,7 @@ fn cap_registry_updates_on_replace() {
                     wasm: camera_wasm,
                     drain_timeout_ms: None,
                     config: Vec::new(),
+                    export: None,
                 },
             ),
         )])

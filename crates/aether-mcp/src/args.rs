@@ -341,6 +341,15 @@ pub struct ReplaceComponentArgs {
     /// on first load.
     #[serde(default)]
     pub config_path: Option<String>,
+    /// ADR-0096: which exported actor type to instantiate from the
+    /// replacement module, named by its `Actor::NAMESPACE` (e.g.
+    /// `"ui.panel"`). Omit to reuse the actor type the trampoline
+    /// currently hosts — not necessarily the entry — preserving today's
+    /// replace behaviour. A `module@actor` selector populates this from
+    /// its `@actor` half. An export the replacement module doesn't
+    /// declare comes back as a `ReplaceResult::Err`.
+    #[serde(default)]
+    pub export: Option<String>,
 }
 
 /// `describe_component` arguments.

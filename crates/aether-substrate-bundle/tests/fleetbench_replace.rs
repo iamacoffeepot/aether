@@ -16,7 +16,7 @@ mod tests {
         use aether_camera::CameraCreate;
         use aether_capabilities::WasmTrampoline;
         use aether_data::Kind;
-        use aether_kinds::{ComponentCapabilities, LogTailResult, Tick};
+        use aether_kinds::{ComponentCapabilities, LogTailResult, Ping, Tick};
         use aether_test_fixtures::SetRender;
 
         use crate::fleetbench::{FleetBench, dist_manifest_present};
@@ -91,6 +91,78 @@ mod tests {
                     LogTailResult::Ok { .. },
                 ),
                 "the lineage address should still route to the live mailbox after replace",
+            );
+        }
+
+        /// ADR-0096 wire regression for `ReplaceComponent.export`: load
+        /// the `multi_actor` module's **entry** actor (`RootManager`, a
+        /// strict receiver — no `#[fallback]`), then replace it with the
+        /// non-entry export `ui.panel` (`Panel`, which carries a
+        /// `#[fallback]`) at the same trampoline `mailbox_id`. The
+        /// post-replace capabilities must be `Panel`'s — `fallback`
+        /// flips from `None` to `Some` — proving the new `export` field
+        /// survived the real `Call` wire and drove the trampoline's
+        /// effective-tag selection to a non-entry actor (which a bare
+        /// replace, reusing the hosted entry tag, could never reach).
+        /// `FleetBench` is the right harness: the field must round-trip the
+        /// wire, not just the in-process path.
+        #[test]
+        fn fleetbench_replace_targets_a_non_entry_export() {
+            if !dist_manifest_present() {
+                return;
+            }
+            let mut bench = FleetBench::start();
+            let engine = bench.spawn_headless();
+
+            // Load the entry export (RootManager). `export: None` on load
+            // instantiates the first type in the `export!` list.
+            let loaded = bench.load_full(engine, "multi_actor");
+
+            // Pre-replace: the entry is a strict receiver — it declares a
+            // Ping handler and no fallback.
+            assert!(
+                loaded
+                    .capabilities
+                    .handlers
+                    .iter()
+                    .any(|h| h.id == Ping::ID),
+                "the entry RootManager should declare a Ping handler: {:?}",
+                loaded.capabilities.handlers,
+            );
+            assert!(
+                loaded.capabilities.fallback.is_none(),
+                "the entry RootManager is a strict receiver — no fallback: {:?}",
+                loaded.capabilities.fallback,
+            );
+
+            // Replace into the non-entry export `ui.panel`, at the same
+            // mailbox id, carrying the export over the wire.
+            let caps = bench.replace_export(engine, loaded.mailbox_id, "multi_actor", "ui.panel");
+
+            // Post-replace: Panel's capability group is active — still a
+            // Ping handler, but now with a fallback, the observable
+            // distinction the fixture is built to expose.
+            assert!(
+                caps.handlers.iter().any(|h| h.id == Ping::ID),
+                "Panel should declare a Ping handler: {:?}",
+                caps.handlers,
+            );
+            assert!(
+                caps.fallback.is_some(),
+                "the non-entry Panel carries a #[fallback]; the export-targeted \
+                 replace should surface it: {:?}",
+                caps.fallback,
+            );
+
+            // The lineage address still routes to the live mailbox: the
+            // same trampoline was swapped in place, now hosting Panel.
+            assert!(
+                matches!(
+                    bench.log_tail(engine, &loaded.addr, None),
+                    LogTailResult::Ok { .. },
+                ),
+                "the lineage address should still route to the live mailbox after an \
+                 export-targeted replace",
             );
         }
     }

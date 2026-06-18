@@ -711,7 +711,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Atomically replace a live component's WASM with a build resolved from a registry selector (ADR-0022 structural splice; ADR-0116 selector). Pass `selector` (hash-primary — a hash pins or rolls the component to an exact build; a name or module@actor resolves too); the host wasm path is gone, surviving only as the upload_component input. aether-mcp resolves the selector hub-local to the wasm bytes and forwards aether.component.replace to the engine's aether.component mailbox. drain_timeout_ms is accepted for wire compatibility but currently ignored. Returns the replaced component's advertised capabilities. Very large wasm payloads (debug builds at 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
+        description = "Atomically replace a live component's WASM with a build resolved from a registry selector (ADR-0022 structural splice; ADR-0116 selector). Pass `selector` (hash-primary — a hash pins or rolls the component to an exact build; a name or module@actor resolves too); the host wasm path is gone, surviving only as the upload_component input. aether-mcp resolves the selector hub-local to the wasm bytes and forwards aether.component.replace to the engine's aether.component mailbox. drain_timeout_ms is accepted for wire compatibility but currently ignored. Pass export to instantiate a specific exported actor type from a multi-actor replacement module (ADR-0096), named by its Actor::NAMESPACE; a module@actor selector populates it from its @actor half. Omit export to reuse the actor type the trampoline currently hosts — not necessarily the module entry — preserving today's replace behaviour; an export the replacement module doesn't declare comes back as an error. Returns the replaced component's advertised capabilities. Very large wasm payloads (debug builds at 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
     )]
     pub async fn replace_component(
         &self,
@@ -731,6 +731,10 @@ impl Mcp {
             })?,
             None => Vec::new(),
         };
+        // ADR-0096: an explicit `export` arg wins over the selector's
+        // `@actor` half; `None` reuses the actor type the trampoline
+        // currently hosts.
+        let export = args.export.or(resolved.export);
         let reply = self
             .session
             .call_one(engine_envelope(
@@ -741,6 +745,7 @@ impl Mcp {
                     wasm: resolved.wasm,
                     drain_timeout_ms: args.drain_timeout_ms,
                     config,
+                    export,
                 },
             ))
             .await
@@ -3299,6 +3304,7 @@ mod tests {
                 selector: "any-selector".to_owned(),
                 drain_timeout_ms: None,
                 config_path: None,
+                export: None,
             }))
             .await;
         assert!(
