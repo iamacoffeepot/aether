@@ -124,6 +124,8 @@ Worktree path is `.claude/worktrees/issue-<N>` (gitignored per CLAUDE.md §Workf
 
 Before the `git worktree add`, run the same [stale-worktree probe](#sweep-dispatch) §Sweep dispatch uses, for this one issue: if `.claude/worktrees/issue-<N>` already exists from a prior aborted or bounced attempt, check its uncommitted-file count, whether its branch is ahead of `origin/main`, and whether an open PR is attached (the REST `pulls?head=` form). Auto-clear when safe — clean worktree, branch not ahead, no open PR — with `git worktree remove` plus `git branch -D`, then proceed with the add. Surface and stop when the worktree is dirty, ahead, or PR-attached: clearing would discard uncommitted bounce context or unpushed work, so report the state and let the user decide rather than forcing the add.
 
+Ground every read against the current ref per `/scope`'s canonical [Grounding against `origin/main`](../scope/SKILL.md#grounding-against-originmain) section — fast-forward to `origin/main` before reading, verify `HEAD == origin/main`, and treat a surprise call site as a staleness smell to diff before escalating. The worktree this skill cuts is branched from `main`, and a per-agent tree can be cut before a sibling PR lands, so without this an implement run grounds its work against code that has already changed on main.
+
 Type comes from the issue's `type:*` label. Slug is the issue title sanitized: lowercased, alnum + dashes, max 30 chars.
 
 ## Execute phase

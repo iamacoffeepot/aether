@@ -63,6 +63,18 @@ Two things differ from `/implement --sweep`:
 
 The sweep never auto-confirms. A scoper agent that hits a tied design decision or an unframable body self-bounces its own issue (the single-issue Bounce mechanics), and the parent surfaces that bounce in the roll-up rather than guessing. `--sweep` takes no `--phase` (that is a single-issue resume control).
 
+## Grounding against `origin/main`
+
+This section is the canonical grounding rule for the whole pipeline — `/implement` routes its reads by it. Every `/scope` and `/implement` run reads code from a working filesystem, but that filesystem can lag `origin/main`: a role-bound session worktree (ADR-0110) is branched at session start and never auto-synced, so it drifts behind as sibling PRs land, and a dispatched per-agent worktree can be cut before a sibling PR merges. Either way an agent that reads the lagging tree grounds its plan against code that has already changed on `origin/main`, producing a wrong scope or a wrong plan. Ground every read against `origin/main`, by these three rules:
+
+1. **Sync before reading.** Whoever holds the worktree — the session for an in-place run, or the parent before it dispatches agents — fetches and fast-forwards the clean tree first: `git fetch origin main` then `git merge --ff-only origin/main`. A dirty or diverged tree that cannot fast-forward is surfaced, not forced — report it and stop rather than papering over real divergence.
+
+2. **Verify, then ground claims against the ref.** As step 1 of any scope or implement read, verify the tree is current — `git rev-parse HEAD` equals `git rev-parse origin/main`. Ground every `file:line` claim against the `origin/main` ref directly (`git grep <pat> origin/main -- <path>`, `git show origin/main:<path>`), authoritative whatever the worktree HEAD happens to be.
+
+3. **A surprise is staleness first.** An "extra" call site, an "untracked surface", or a site the issue body never listed is a staleness signal before it is a defect. Diff that path against the ref (`git diff --name-only HEAD origin/main` over it) to confirm the tree is current, and only then escalate the finding as a real defect or a §Side finding.
+
+Both execution contexts ground by these rules: the role-bound session worktree (the common path for a scoper) and the dispatched per-agent worktree (the common path under `--sweep`). The worked example is the case that motivated the rule — a session worktree one commit behind `origin/main`, where that one commit had deleted the exact call sites a child issue targeted, so a scoper reading the lagging tree produced a false "untracked surface" finding and a wrong plan grounded on code that no longer existed on main.
+
 ## Phase walk
 
 For each sub-phase: read inputs, write the corresponding body section, and reconcile the issue's `phase:*` label (see [Phase label reconcile](#phase-label-reconcile)). If a sub-phase has nothing to do (already complete on a resumed run), skip it.
