@@ -1,0 +1,36 @@
+[package]
+name = "aether-test-fixtures-bundle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The main fixture bundle: a single cdylib that consolidates the bulk of
+# the workspace's wasm test fixtures as one ADR-0096 multi-actor module
+# (`export!(Probe, …)`, `Probe` the entry). One `src/<name>.rs` module per
+# former fixture; the integration tests load this one wasm and select an
+# in-bundle actor with `export: Some("<NAMESPACE>")`. The typed↔reshaped
+# replace pair lives in standalone satellite crates — a cross-module
+# replace needs two distinct binaries.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-actor = { path = "../../aether-actor" }
+# `default-features = false` exercises the wasm-header-only build of
+# aether-capabilities — the cap markers (Actor / Singleton / HandlesKind)
+# compile for wasm without dragging the native runtime in. `render` opts
+# into the marker layer for `RenderCapability`; `audio` is unused here.
+aether-capabilities = { path = "../../aether-capabilities", default-features = false, features = ["render"] }
+aether-data = { path = "../../aether-data", features = ["derive"] }
+aether-kinds = { path = "../../aether-kinds" }
+aether-math = { path = "../../aether-math" }
+aether-test-fixtures-kinds = { path = "../kinds" }
+bytemuck = { workspace = true, default-features = false, features = ["derive"] }
+serde = { workspace = true, default-features = false, features = ["derive"] }
+# Issue #581: the probe emits `tracing::info!` on the first tick; the
+# actor-aware subscriber installed by `export!()` buffers + drains it to
+# LogCapability. The source-observer fixture logs the same way.
+tracing = { workspace = true, default-features = false }
+
+[lints]
+workspace = true

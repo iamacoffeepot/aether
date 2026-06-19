@@ -54,7 +54,7 @@ mod tests {
             DagDescriptor, Edge, Node, NodeId, Read, ReadResult, StatusResult, SubmitResult,
         };
         use aether_math::Vec4;
-        use aether_test_fixtures::{Mat4SourceTrigger, Vec4Observed};
+        use aether_test_fixtures_kinds::{Mat4SourceTrigger, Vec4Observed};
 
         use crate::fleetbench::{FleetBench, dist_manifest_present};
 
@@ -82,8 +82,10 @@ mod tests {
             // id the load actually registered, so the descriptor's
             // `Source.mailbox` / `Observer.recipient` route to exactly the
             // mailboxes the components occupy.
-            let source = bench.load_full(engine, "mat4_source");
-            let observer = bench.load_full_export(engine, "mat4_source", "vec4_observer");
+            let source =
+                bench.load_full_export(engine, "aether_test_fixtures_bundle", "mat4_source");
+            let observer =
+                bench.load_full_export(engine, "aether_test_fixtures_bundle", "vec4_observer");
 
             // Resolve `mat4_apply`'s TransformId from the link-time
             // inventory linked into this test binary (via the bundle's

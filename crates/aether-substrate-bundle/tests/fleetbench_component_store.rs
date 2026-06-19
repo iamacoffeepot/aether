@@ -146,7 +146,9 @@ mod tests {
             if !dist_manifest_present() {
                 return;
             }
-            let probe_path = component_wasm_path("probe").to_string_lossy().into_owned();
+            let probe_path = component_wasm_path("aether_test_fixtures_bundle")
+                .to_string_lossy()
+                .into_owned();
             let mut bench = FleetBench::start();
 
             let hash = upload_and_assert_manifest(&mut bench, &probe_path);
@@ -230,7 +232,9 @@ mod tests {
             if !dist_manifest_present() {
                 return;
             }
-            let probe_path = component_wasm_path("probe").to_string_lossy().into_owned();
+            let probe_path = component_wasm_path("aether_test_fixtures_bundle")
+                .to_string_lossy()
+                .into_owned();
             let mut bench = FleetBench::start();
 
             let hash = match bench.upload_component(&probe_path, Some("probe")) {

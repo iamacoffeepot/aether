@@ -73,15 +73,14 @@ pub fn has_wgpu_adapter() -> bool {
 
 /// Locate `<crate_name>.wasm` under the workspace target dir. Tries
 /// `release` first, then `debug` so either build profile works. Also
-/// probes `examples/<crate_name>.wasm` so callers can name an
-/// `[[example]] crate-type = ["cdylib"]` artifact (ADR-0090 c1 moved
-/// the test-fixture probes to per-example cdylibs under
-/// `aether-test-fixtures`). Returns `None` if no candidate path
-/// exists.
+/// probes `examples/<crate_name>.wasm` so a caller can name an
+/// `[[example]] crate-type = ["cdylib"]` artifact, should one exist.
+/// Returns `None` if no candidate path exists.
 ///
-/// `crate_name` is the underscore-cased crate name (for top-level
-/// cdylib crates, e.g. `"aether_kit"`) or the example name (for
-/// `[[example]]` cdylibs, e.g. `"probe"` / `"inline_child"`). The
+/// `crate_name` is the underscore-cased crate name of a top-level
+/// cdylib component (e.g. `"aether_kit"`,
+/// `"aether_test_fixtures_bundle"`), or an example name for an
+/// `[[example]]` cdylib. The
 /// workspace target dir is resolved via
 /// `CARGO_MANIFEST_DIR` of the calling integration test
 /// (`crates/<crate>` → workspace root two levels up); helper's own

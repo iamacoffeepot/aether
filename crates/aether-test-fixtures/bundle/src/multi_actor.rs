@@ -23,7 +23,7 @@ use aether_actor::{
     BootError, FfiActor, FfiCtx, FfiInitCtx, Instanced, Mail, MailSender, Subname, actor,
 };
 use aether_kinds::Ping;
-use aether_test_fixtures::{TEST_BENCH_OBSERVER_MAILBOX_NAME, TickObserved};
+use aether_test_fixtures_kinds::{TEST_BENCH_OBSERVER_MAILBOX_NAME, TickObserved};
 
 /// Entry export — the first type in the `export!` list. An unmodified
 /// host instantiates this one. Strict receiver: no `#[fallback]`.
@@ -78,5 +78,3 @@ impl FfiActor for Panel {
     #[fallback]
     fn on_other(&mut self, _ctx: &mut FfiCtx<'_>, _mail: Mail<'_>) {}
 }
-
-aether_actor::export!(RootManager, Panel);

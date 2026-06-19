@@ -39,7 +39,7 @@ use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, MailSender, actor};
 use aether_data::Ref;
 use aether_kinds::{Mat4Apply, Write};
 use aether_math::{Mat4, Vec4};
-use aether_test_fixtures::{Mat4SourceTrigger, Vec4Observed};
+use aether_test_fixtures_kinds::{Mat4SourceTrigger, Vec4Observed};
 
 /// Issue 1472 DAG `Source` fixture. Replies the fixed `Mat4Apply` operand
 /// when triggered as a DAG source node.
@@ -117,5 +117,3 @@ impl FfiActor for Vec4Observer {
         }
     }
 }
-
-aether_actor::export!(MatSource, Vec4Observer);

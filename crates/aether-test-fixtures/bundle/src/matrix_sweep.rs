@@ -10,13 +10,13 @@
 //!
 //! Matrix cells (each asserts delivery AND the source the recipient read):
 //!
-//! - parent → child[a] (in place): child[a]'s source is the parent's id.
-//! - child[a] → parent (in place): the parent's source is child[a]'s id.
-//! - child[a] → sibling child[b] (in place): child[b]'s source is child[a]'s id.
-//! - child[a] → self (in place): child[a]'s source is its own id.
-//! - cross-cluster (child[a] → a second loaded component, *during the drain*):
+//! - parent → child\[a\] (in place): child\[a\]'s source is the parent's id.
+//! - child\[a\] → parent (in place): the parent's source is child\[a\]'s id.
+//! - child\[a\] → sibling child\[b\] (in place): child\[b\]'s source is child\[a\]'s id.
+//! - child\[a\] → self (in place): child\[a\]'s source is its own id.
+//! - cross-cluster (child\[a\] → a second loaded component, *during the drain*):
 //!   observed out-of-band by the observer (read via `log_tail`). The observer
-//!   reads child[a]'s id: the member's ctx-mediated `send_to` threads its own
+//!   reads child\[a\]'s id: the member's ctx-mediated `send_to` threads its own
 //!   id as the send's `from`, so the host stamps the member as origin
 //!   (validated host-side to the cluster), not the cluster's inbound parent.
 //!
@@ -33,15 +33,13 @@
 // reads only the shared log, not the actor's own fields.
 #![allow(clippy::unused_self)]
 
-extern crate alloc;
-
 use core::cell::UnsafeCell;
 
 use aether_actor::{
     BootError, FfiActor, FfiCtx, FfiInitCtx, Instanced, MailboxId, Manual, OutboundReply, Subname,
     actor,
 };
-use aether_test_fixtures::{
+use aether_test_fixtures_kinds::{
     CollectMatrix, MATRIX_CELL_CHILD_TO_PARENT, MATRIX_CELL_CHILD_TO_SELF,
     MATRIX_CELL_CHILD_TO_SIBLING, MATRIX_CELL_PARENT_TO_CHILD, MatrixPing, MatrixReport, RunMatrix,
     SourceQuery,
@@ -56,7 +54,7 @@ struct Cell {
 }
 
 /// The cluster-shared observation log. Indexed by the `MATRIX_CELL_*`
-/// markers (1-based; index 0 is unused), plus the resolved parent / child[a]
+/// markers (1-based; index 0 is unused), plus the resolved parent / child\[a\]
 /// ids the parent records so the test can assert the sources against the
 /// actual folded addresses.
 struct MatrixLog {
@@ -102,7 +100,7 @@ fn record_cell(cell: u32, source: u64) {
     }
 }
 
-/// Record the resolved parent / child[a] ids the parent learned at sweep
+/// Record the resolved parent / child\[a\] ids the parent learned at sweep
 /// start, so the test can assert each source against the real folded address.
 fn record_ids(parent_id: u64, child_a_id: u64) {
     // SAFETY: see `LogSlot`'s `Sync` impl.
@@ -137,7 +135,7 @@ fn snapshot_report() -> MatrixReport {
 
 /// Entry export — the loaded component and cluster root. Spawns the two
 /// inline children in `wire`, drives the sweep on `RunMatrix`, records the
-/// child[a] → parent cell when it arrives, and answers `CollectMatrix`.
+/// child\[a\] → parent cell when it arrives, and answers `CollectMatrix`.
 pub struct MatrixParent;
 
 #[actor]
@@ -155,8 +153,8 @@ impl FfiActor for MatrixParent {
         let _ = ctx.spawn_inline_child::<MatrixChild>(Subname::Named("b"), &());
     }
 
-    /// Drive the sweep: record the parent / child[a] ids, then send the
-    /// fan-out ping to child[a] in place. Child[a]'s handler drives the
+    /// Drive the sweep: record the parent / child\[a\] ids, then send the
+    /// fan-out ping to child\[a\] in place. Child\[a\]'s handler drives the
     /// child-origin cells (child → parent / sibling / self) and the
     /// cross-cluster send. Everything settles in this one receive's drain.
     #[handler]
@@ -171,7 +169,7 @@ impl FfiActor for MatrixParent {
         });
     }
 
-    /// child[a] → parent: a ping addressed to the parent's own id. Record the
+    /// child\[a\] → parent: a ping addressed to the parent's own id. Record the
     /// cell with the source the parent read (the membrane's own-id path).
     #[handler::manual]
     fn on_matrix_ping(&mut self, ctx: &mut FfiCtx<'_, Manual>, ping: MatrixPing) {
@@ -204,7 +202,7 @@ impl FfiActor for MatrixChild {
     }
 
     /// Record the ping's cell with the source the child read, then — when the
-    /// ping is the fan-out ping (parent → child[a]) — drive the child-origin
+    /// ping is the fan-out ping (parent → child\[a\]) — drive the child-origin
     /// cells and the cross-cluster send, all in place.
     #[handler::manual]
     fn on_matrix_ping(&mut self, ctx: &mut FfiCtx<'_, Manual>, ping: MatrixPing) {
@@ -254,5 +252,3 @@ impl FfiActor for MatrixChild {
         }
     }
 }
-
-aether_actor::export!(MatrixParent, MatrixChild);

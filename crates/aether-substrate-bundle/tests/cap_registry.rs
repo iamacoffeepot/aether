@@ -37,14 +37,14 @@ use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
     test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
 };
-use aether_test_fixtures::SetRender;
+use aether_test_fixtures_kinds::SetRender;
 use std::env;
 use std::fs;
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries
 // land in this test binary (mirrors `test_bench_scenario.rs`).
 #[allow(unused_imports)]
-use aether_test_fixtures as _;
+use aether_test_fixtures_kinds as _;
 
 fn load_named(bench: &mut TestBench, wasm_path: &Path, name: &str) -> MailboxId {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
@@ -92,7 +92,7 @@ fn require_wgpu_only() -> bool {
 /// rejects kinds it doesn't (`Ping`).
 #[test]
 fn cap_registry_reports_accepted_kinds() {
-    let Some(wasm_path) = require_runtime("probe") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -119,7 +119,7 @@ fn cap_registry_reports_accepted_kinds() {
 /// tested in `aether_substrate::mail::capability`.)
 #[test]
 fn cap_registry_reports_fallback() {
-    let Some(wasm_path) = require_runtime("probe") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -143,7 +143,7 @@ fn cap_registry_reports_fallback() {
 /// flips accepted→rejected, `CameraCreate` flips rejected→accepted.
 #[test]
 fn cap_registry_updates_on_replace() {
-    let Some(probe_path) = require_runtime("probe") else {
+    let Some(probe_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let Some(kit_path) = require_runtime("aether_kit") else {
@@ -204,7 +204,7 @@ fn cap_registry_updates_on_replace() {
 /// the wasm is unloaded the mailbox accepts nothing.
 #[test]
 fn cap_registry_clears_on_drop() {
-    let Some(wasm_path) = require_runtime("probe") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");

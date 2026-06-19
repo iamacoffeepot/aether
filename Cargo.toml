@@ -18,7 +18,15 @@ members = [
     "crates/aether-rpc",
     "crates/aether-mcp",
     "crates/aether-mesh-viewer",
-    "crates/aether-test-fixtures",
+    # Test fixtures — a container dir of single-output crates: one shared
+    # `kinds` rlib plus three component cdylibs (the main bundle and the
+    # typed↔reshaped replace-pair satellites). Listed explicitly (not a
+    # `crates/aether-test-fixtures/*` glob) because Qodana's TOML inspector
+    # can't resolve workspace globs.
+    "crates/aether-test-fixtures/kinds",
+    "crates/aether-test-fixtures/bundle",
+    "crates/aether-test-fixtures/stateful-typed",
+    "crates/aether-test-fixtures/stateful-reshaped",
     "xtask",
 ]
 # Reference artefacts under spikes/ are standalone Cargo workspaces

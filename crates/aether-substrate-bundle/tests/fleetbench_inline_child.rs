@@ -22,7 +22,9 @@ mod fleetbench;
 mod tests {
     mod heavy {
         use aether_data::Kind;
-        use aether_test_fixtures::{INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho, InlineProbe};
+        use aether_test_fixtures_kinds::{
+            INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho, InlineProbe,
+        };
 
         use crate::fleetbench::{FleetBench, dist_manifest_present};
 
@@ -40,7 +42,9 @@ mod tests {
             }
             let mut bench = FleetBench::start();
             let engine = bench.spawn_headless();
-            let parent_addr = bench.load(engine, "inline_child");
+            let parent_addr = bench
+                .load_full_export(engine, "aether_test_fixtures_bundle", "test.inline.parent")
+                .addr;
 
             // The child's first-class lineage address: the parent's
             // rendered name plus the inline-child node (ADR-0114).

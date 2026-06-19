@@ -22,7 +22,7 @@ use aether_capabilities::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
-use aether_test_fixtures::TickObserved;
+use aether_test_fixtures_kinds::TickObserved;
 use std::fs;
 
 const PROBE_NAME: &str = "probe";
@@ -60,7 +60,7 @@ fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
 /// outbound mail routing.
 #[test]
 fn tick_roundtrip_component_to_sink() {
-    let Some(wasm_path) = require_runtime("probe") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -90,7 +90,7 @@ fn tick_roundtrip_component_to_sink() {
 fn batched_ticks_preserve_per_mailbox_count() {
     const N: u32 = 200;
 
-    let Some(wasm_path) = require_runtime("probe") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");

@@ -52,7 +52,7 @@ use aether_actor::{
     BootError, FfiActor, FfiCtx, FfiInitCtx, Instanced, Mail, Manual, OutboundReply, Subname, actor,
 };
 use aether_data::MailboxId;
-use aether_test_fixtures::{
+use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
     InlineProbe,
 };
@@ -286,10 +286,3 @@ impl FfiActor for InlineDespawnChild {
         let _ = ctx.despawn_inline_child(MailboxId(ctx.mailbox_id()));
     }
 }
-
-aether_actor::export!(
-    InlineParent,
-    InlineStatefulParent,
-    InlineStatefulChild,
-    InlineDespawnParent
-);

@@ -34,7 +34,7 @@ mod tests {
             }
             let mut bench = FleetBench::start();
             let engine = bench.spawn_headless();
-            let addr = bench.load(engine, "probe");
+            let addr = bench.load(engine, "aether_test_fixtures_bundle");
 
             let expected = format!(
                 "aether.component/{}:test_fixture_probe",

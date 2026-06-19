@@ -1,0 +1,23 @@
+[package]
+name = "aether-test-fixtures-stateful-typed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ADR-0113 declarative-state replace SOURCE: a single-actor `Counter`
+# (`NAMESPACE = "stateful.typed"`) that declares `type State = CounterState`
+# plus the dehydrate / rehydrate accessors, so `#[actor]` generates the
+# hot-swap hooks. Standalone (not in the bundle) because the decode-miss
+# test entry-loads it and replaces it with the reshaped satellite — a
+# cross-module replace needs two distinct binaries.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-actor = { path = "../../aether-actor" }
+aether-data = { path = "../../aether-data", features = ["derive"] }
+aether-test-fixtures-kinds = { path = "../kinds" }
+serde = { workspace = true, default-features = false, features = ["derive"] }
+
+[lints]
+workspace = true

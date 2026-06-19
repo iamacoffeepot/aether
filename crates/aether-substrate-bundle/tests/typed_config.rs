@@ -24,13 +24,13 @@ use aether_capabilities::ComponentHostCapability;
 use aether_data::Kind;
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
-use aether_test_fixtures::{ConfigEcho, ConfigQuery, ProbeConfig};
+use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 use std::fs;
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary.
 #[allow(unused_imports)]
-use aether_test_fixtures as _;
+use aether_test_fixtures_kinds as _;
 
 /// Until c2 threads config bytes through the load mail, a load against
 /// a typed-config fixture (`Config = ProbeConfig`) MUST surface a
@@ -40,7 +40,7 @@ use aether_test_fixtures as _;
 /// config.
 #[test]
 fn typed_config_guest_without_config_bytes_surfaces_decode_error() {
-    let Some(wasm_path) = require_runtime("probe") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -89,7 +89,7 @@ fn typed_config_guest_without_config_bytes_surfaces_decode_error() {
 /// hardcoded `&[]`; c2 wires it, so the test runs unconditionally now.
 #[test]
 fn typed_config_guest_with_config_bytes_round_trips() {
-    let Some(wasm_path) = require_runtime("probe") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");

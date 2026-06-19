@@ -95,7 +95,7 @@ mod tests {
         #[test]
         fn wasm_handler_serves_http_requests() {
             let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-            let Some(wasm_path) = locate_component_wasm("http_handler") else {
+            let Some(wasm_path) = locate_component_wasm("aether_test_fixtures_bundle") else {
                 assert!(
                     !strict,
                     "AETHER_REQUIRE_RUNTIME set but http_handler.wasm not pre-built; \
@@ -136,7 +136,8 @@ mod tests {
                     wasm,
                     config: Vec::new(),
                     name: Some(HANDLER_NAMESPACE.to_owned()),
-                    export: None,
+                    // `HttpHandler` is a non-entry actor in the bundle.
+                    export: Some(HANDLER_NAMESPACE.to_owned()),
                 }],
             };
 

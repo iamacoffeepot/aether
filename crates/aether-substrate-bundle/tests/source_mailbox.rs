@@ -30,7 +30,7 @@
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary.
 #[allow(unused_imports)]
-use aether_test_fixtures as _;
+use aether_test_fixtures_kinds as _;
 
 use std::fs;
 
@@ -39,9 +39,9 @@ use aether_capabilities::ComponentHostCapability;
 use aether_data::MailboxId;
 use aether_kinds::{LoadComponent, LoadResult, LogTailResult};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
-use aether_test_fixtures::{SendSourceQuery, SourceQuery, SourceReport};
+use aether_test_fixtures_kinds::{SendSourceQuery, SourceQuery, SourceReport};
 
-const SOURCE_OBSERVER: &str = "source_observer";
+const SOURCE_OBSERVER: &str = "aether_test_fixtures_bundle";
 
 fn load_source_observer(bench: &mut TestBench, wasm: Vec<u8>, name: &str) -> (MailboxId, String) {
     let loaded = bench
@@ -53,7 +53,8 @@ fn load_source_observer(bench: &mut TestBench, wasm: Vec<u8>, name: &str) -> (Ma
                     wasm,
                     name: Some(name.to_owned()),
                     config: Vec::new(),
-                    export: None,
+                    // `SourceObserver` is a non-entry actor in the bundle.
+                    export: Some("test.source_observer".to_owned()),
                 },
             ),
         )])

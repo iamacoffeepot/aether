@@ -29,7 +29,7 @@
 use aether_actor::{
     BootError, FfiActor, FfiCtx, FfiInitCtx, MailSender, MailboxId, Manual, OutboundReply, actor,
 };
-use aether_test_fixtures::{
+use aether_test_fixtures_kinds::{
     SendSourceQuery, SourceQuery, SourceReport, TEST_BENCH_OBSERVER_MAILBOX_NAME,
 };
 
@@ -73,5 +73,3 @@ impl FfiActor for SourceObserver {
         ctx.reply(&SourceReport { mailbox_id });
     }
 }
-
-aether_actor::export!(SourceObserver);
