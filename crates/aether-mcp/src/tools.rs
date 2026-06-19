@@ -300,14 +300,16 @@ impl Mcp {
         // boot-manifest autoload (ADR-0116) settles — those loads are
         // fire-and-forget and emit no completion signal. When components
         // were requested, poll the engine's loaded-components query (issue
-        // 2020) until all of them register, so the tool hands back a
-        // genuinely-ready engine rather than one mid-boot. The query is a
-        // definitive snapshot of the live trampoline set, so readiness is
-        // the count reaching the requested total — name-agnostic, robust
-        // against the substrate's name derivation.
-        let want = args.components.len();
-        if want > 0 {
-            self.wait_for_loaded_components(&info.engine_id, want)
+        // 2020) until every requested component's lineage name is present in
+        // the live trampoline set, so the tool hands back a genuinely-ready
+        // engine rather than one mid-boot. Identity-based polling catches both
+        // baseline contamination (a pre-existing trampoline satisfying a count)
+        // and wrong-set false positives (a different component registering while
+        // a requested one stalls).
+        if let Some(ref staged) = staged
+            && !staged.expected_names.is_empty()
+        {
+            self.wait_for_loaded_components(&info.engine_id, &staged.expected_names)
                 .await?;
         }
 
@@ -315,15 +317,15 @@ impl Mcp {
     }
 
     /// Poll the spawned engine's `aether.component.list` query (issue 2020)
-    /// until at least `want` components are loaded and registered, or the
+    /// until every name in `want_names` appears in `result.names`, or the
     /// bounded budget elapses. The boot autoload is async and signalless, so
-    /// this turns the readiness wait into a deterministic poll of the live
-    /// trampoline set rather than a fixed post-spawn sleep. A timeout is a
-    /// clear tool error naming how many of the requested components came up.
+    /// this turns the readiness wait into a deterministic identity-poll of the
+    /// live trampoline set rather than a fixed post-spawn sleep. A timeout is a
+    /// clear tool error naming the specific components still missing.
     async fn wait_for_loaded_components(
         &self,
         engine_id: &str,
-        want: usize,
+        want_names: &[String],
     ) -> Result<(), McpError> {
         const POLL_INTERVAL: Duration = Duration::from_millis(100);
         const BUDGET: Duration = Duration::from_secs(30);
@@ -340,17 +342,21 @@ impl Mcp {
                 ))
                 .await
                 .map_err(internal)?;
-            let loaded = match ListComponentsResult::decode_from_bytes(&reply.payload) {
-                Some(result) => result.names.len(),
-                None => return Err(internal_msg("undecodable ListComponentsResult")),
+            let Some(result) = ListComponentsResult::decode_from_bytes(&reply.payload) else {
+                return Err(internal_msg("undecodable ListComponentsResult"));
             };
-            if loaded >= want {
+            if components_all_loaded(want_names, &result.names) {
                 return Ok(());
             }
             if time::Instant::now() >= deadline {
+                let missing: Vec<&str> = want_names
+                    .iter()
+                    .filter(|w| !result.names.iter().any(|n| n == *w))
+                    .map(String::as_str)
+                    .collect();
                 return Err(internal_msg(&format!(
                     "spawned engine did not load all boot components within {}s: \
-                     {loaded} of {want} registered",
+                     still missing: {missing:?}",
                     BUDGET.as_secs(),
                 )));
             }
@@ -1398,8 +1404,18 @@ impl Mcp {
             .await
             .map_err(|e| frame_size_aware_error(&format!("resolve_component {selector:?}"), e))?;
         match ResolveComponentResult::decode_from_bytes(&reply.payload) {
-            Some(ResolveComponentResult::Ok { wasm, export, .. }) => {
-                Ok(ResolvedComponent { wasm, export })
+            Some(ResolveComponentResult::Ok {
+                wasm,
+                export,
+                manifest,
+                ..
+            }) => {
+                let entry_namespace = manifest.actors.into_iter().next().map(|a| a.namespace);
+                Ok(ResolvedComponent {
+                    wasm,
+                    export,
+                    entry_namespace,
+                })
             }
             Some(ResolveComponentResult::Err { error }) => Err(internal_msg(&error)),
             None => Err(internal_msg("undecodable ResolveComponentResult")),
@@ -1428,6 +1444,7 @@ impl Mcp {
 
         let mut wasm_paths: Vec<PathBuf> = Vec::with_capacity(components.len());
         let mut entries: Vec<serde_json::Value> = Vec::with_capacity(components.len());
+        let mut expected_names: Vec<String> = Vec::with_capacity(components.len());
         for spec in components {
             let resolved = self.resolve_component(&spec.selector).await?;
             let seq = SEQ.fetch_add(1, Ordering::Relaxed);
@@ -1447,9 +1464,28 @@ impl Mcp {
                 entry["config"] = serde_json::json!(config);
             }
             // An explicit `export` wins over the selector's `@actor` half.
-            if let Some(export) = spec.export.clone().or(resolved.export) {
-                entry["export"] = serde_json::json!(export);
+            let export = spec.export.clone().or_else(|| resolved.export.clone());
+            if let Some(ref e) = export {
+                entry["export"] = serde_json::json!(e);
             }
+            // Derive the expected registered name in the same precedence order the
+            // engine applies: caller-supplied name > export namespace > entry actor
+            // namespace. Fail loud if none is determinable: a spawn that can't name
+            // what it's waiting for is a bug to surface at stage time.
+            let ns = spec
+                .name
+                .clone()
+                .or_else(|| export.clone())
+                .or_else(|| resolved.entry_namespace.clone())
+                .ok_or_else(|| {
+                    internal_msg(&format!(
+                        "component {:?}: cannot determine expected registered name \
+                         (no `name`, `export`, or entry actor namespace in the wasm manifest); \
+                         set `name` or `export` on the ComponentSpec",
+                        spec.selector,
+                    ))
+                })?;
+            expected_names.push(format!("aether.component/aether.embedded:{ns}"));
             entries.push(entry);
             wasm_paths.push(wasm_path);
         }
@@ -1465,6 +1501,7 @@ impl Mcp {
         Ok(StagedBootManifest {
             manifest_path,
             wasm_paths,
+            expected_names,
         })
     }
 
@@ -1930,9 +1967,13 @@ fn validate_recipient_scope(recipient_name: &str) -> anyhow::Result<()> {
 /// (ADR-0116) — the front half of `load_component` / `replace_component` /
 /// the boot-manifest pre-resolution. `export` is the `module@actor`
 /// selector's actor half, threaded into the forwarded `LoadComponent.export`.
+/// `entry_namespace` is the first actor's `Actor::NAMESPACE` from the wasm
+/// manifest (per `export!` order), used by `stage_boot_manifest` to derive the
+/// expected registered name when neither `spec.name` nor an export is set.
 struct ResolvedComponent {
     wasm: Vec<u8>,
     export: Option<String>,
+    entry_namespace: Option<String>,
 }
 
 /// The temp files a `stage_boot_manifest` wrote (ADR-0116): the
@@ -1940,9 +1981,13 @@ struct ResolvedComponent {
 /// staged component `.wasm` files it points at. The substrate reads them
 /// at boot, before the spawn reply returns; the spawn caller
 /// [`cleanup`](StagedBootManifest::cleanup)s them once it has.
+/// `expected_names` carries the full `aether.component/aether.embedded:{ns}`
+/// lineage address computed for each spec, used by `spawn_substrate` to poll
+/// readiness by identity rather than count.
 struct StagedBootManifest {
     manifest_path: PathBuf,
     wasm_paths: Vec<PathBuf>,
+    expected_names: Vec<String>,
 }
 
 impl StagedBootManifest {
@@ -1955,6 +2000,15 @@ impl StagedBootManifest {
             let _ = fs::remove_file(path).await;
         }
     }
+}
+
+/// Return `true` once every name in `want` is present in `actual`.
+/// Used by `wait_for_loaded_components` to drive identity-based readiness
+/// polling: the count variant (`actual.len() >= want.len()`) is insufficient
+/// because a baseline trampoline or an unrequested component can satisfy a
+/// count while a requested component is still absent.
+fn components_all_loaded(want: &[String], actual: &[String]) -> bool {
+    want.iter().all(|w| actual.iter().any(|a| a == w))
 }
 
 /// Build a `MailEnvelope` addressed at a hub-local mailbox
@@ -3155,6 +3209,65 @@ mod tests {
         assert!(
             result.is_err(),
             "an unresolvable component selector should abort the spawn as a tool error",
+        );
+    }
+
+    /// `components_all_loaded` checks membership, not count. The wrong-set
+    /// false positive: `actual` has one name (satisfying a count-`>= 1` check)
+    /// but it is NOT the name in `want` — membership returns false. This is the
+    /// regression the count-based `wait_for_loaded_components` would silently
+    /// pass: a non-requested trampoline (B) registers while the requested
+    /// component (A) stalls, and the count hits the threshold before A is up.
+    /// After the identity-based fix, only A's presence in `actual` satisfies
+    /// the check.
+    #[test]
+    fn components_all_loaded_wrong_set_is_not_ready() {
+        let want = vec!["aether.component/aether.embedded:wanted".to_owned()];
+        let actual = vec!["aether.component/aether.embedded:other".to_owned()];
+        assert!(
+            !components_all_loaded(&want, &actual),
+            "a non-requested trampoline present while the requested one is absent \
+             must not satisfy the identity check (count-based would pass)",
+        );
+    }
+
+    /// `components_all_loaded` returns true once every wanted name is present,
+    /// and handles the empty-want case (no components requested → trivially
+    /// ready).
+    #[test]
+    fn components_all_loaded_exact_match_is_ready() {
+        let want = vec![
+            "aether.component/aether.embedded:alpha".to_owned(),
+            "aether.component/aether.embedded:beta".to_owned(),
+        ];
+        let actual = vec![
+            "aether.component/aether.embedded:baseline".to_owned(),
+            "aether.component/aether.embedded:alpha".to_owned(),
+            "aether.component/aether.embedded:beta".to_owned(),
+        ];
+        assert!(
+            components_all_loaded(&want, &actual),
+            "both wanted names present (alongside an extra baseline) should be ready",
+        );
+        assert!(
+            components_all_loaded(&[], &[]),
+            "empty want is trivially ready",
+        );
+    }
+
+    /// `components_all_loaded` is false when only a subset of the wanted names
+    /// is present — a stalled-requested case where one component comes up but
+    /// another does not.
+    #[test]
+    fn components_all_loaded_partial_match_is_not_ready() {
+        let want = vec![
+            "aether.component/aether.embedded:alpha".to_owned(),
+            "aether.component/aether.embedded:stalled".to_owned(),
+        ];
+        let actual = vec!["aether.component/aether.embedded:alpha".to_owned()];
+        assert!(
+            !components_all_loaded(&want, &actual),
+            "only one of two wanted names present means the engine is not yet ready",
         );
     }
 
