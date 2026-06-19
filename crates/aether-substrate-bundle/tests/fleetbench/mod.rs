@@ -33,6 +33,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+use std::io::ErrorKind;
 use std::mem;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -71,10 +72,85 @@ use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
 use serde::Serialize;
 
-/// Forking a real substrate (cold debug-build start) and waiting for it
-/// to bind its RPC port dominates the per-call deadline; matches the
-/// seed (`rpc_engine_routing`).
-const CALL_DEADLINE: Duration = Duration::from_secs(30);
+/// Re-arm interval for the client→hub socket read: how often a blocked
+/// `read_frame` wakes to log a slow-gate line and re-check its cumulative
+/// backstop (issue 2064). This is *not* a correctness gate — the per-call
+/// backstop ([`reply_cap`] / [`spawn_cap`]) is. Short enough that a
+/// genuine wedge surfaces promptly, long enough not to busy-spin while a
+/// healthy reply chain settles.
+const READ_REARM: Duration = Duration::from_secs(2);
+
+/// Default cold-start backstop (seconds): the budget the `spawn_headless`
+/// `SpawnEngine` call allows for the hub to fork the substrate, dial it
+/// (the hub retries the refused connection up to its own
+/// `PROXY_CONNECT_RETRY_BUDGET`), and reply once the proxy connects — so
+/// the `SpawnEngineResult::Ok` reply *is* the explicit port-readiness
+/// signal. Generous over a debug-build cold start under CPU pressure;
+/// overridable via `AETHER_FLEETBENCH_SPAWN_CAP_SECS`.
+const DEFAULT_SPAWN_CAP_SECS: u64 = 60;
+
+/// Default reply backstop (seconds): the deadlock/livelock cap a settled
+/// mail chain never reaches, so a slow-but-healthy reply under a saturated
+/// `nextest --workspace` run isn't called dead (issue 2064, mirroring
+/// #2062's 300 s settlement default). Overridable via
+/// `AETHER_FLEETBENCH_REPLY_CAP_SECS`.
+const DEFAULT_REPLY_CAP_SECS: u64 = 300;
+
+/// Lower a seconds budget to a `Duration`, mapping `0` to the
+/// "wait forever" sentinel [`Duration::MAX`] — the gate's `elapsed >= cap`
+/// test never trips, so the read blocks on the signal indefinitely (for
+/// attaching a debugger to a suspected wedge; the per-interval re-arm line
+/// stays the live heartbeat). Mirrors #2062's `AETHER_SETTLEMENT_CAP_SECS`
+/// sentinel.
+pub fn cap_from_secs(secs: u64) -> Duration {
+    if secs == 0 {
+        Duration::MAX
+    } else {
+        Duration::from_secs(secs)
+    }
+}
+
+/// Resolve the steady-state reply backstop from
+/// `AETHER_FLEETBENCH_REPLY_CAP_SECS` (default [`DEFAULT_REPLY_CAP_SECS`];
+/// `0` → wait forever).
+fn reply_cap() -> Duration {
+    cap_from_secs(env_secs(
+        "AETHER_FLEETBENCH_REPLY_CAP_SECS",
+        DEFAULT_REPLY_CAP_SECS,
+    ))
+}
+
+/// Resolve the cold-start backstop from `AETHER_FLEETBENCH_SPAWN_CAP_SECS`
+/// (default [`DEFAULT_SPAWN_CAP_SECS`]; `0` → wait forever).
+fn spawn_cap() -> Duration {
+    cap_from_secs(env_secs(
+        "AETHER_FLEETBENCH_SPAWN_CAP_SECS",
+        DEFAULT_SPAWN_CAP_SECS,
+    ))
+}
+
+/// Read a `u64` seconds knob from the environment, falling back to
+/// `default` when unset or unparseable — a test harness tolerates a
+/// typo'd override rather than aborting the run.
+fn env_secs(key: &str, default: u64) -> u64 {
+    env::var(key)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+/// Whether a `read_frame` error is a socket read-timeout — the re-arm
+/// signal — rather than a real failure (the substrate closed the
+/// connection, a decode error). A timed-out blocking read surfaces as
+/// `WouldBlock` or `TimedOut` depending on platform; both mean "no frame
+/// yet", so the call re-arms and re-reads until its cumulative backstop.
+/// Any other error propagates as a genuine failure.
+pub fn is_rearm_timeout(err: &FrameError) -> bool {
+    matches!(
+        err,
+        FrameError::Io(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+    )
+}
 
 /// Minimal `Chassis` so `Builder::new` can stand a passive cap set up
 /// in-process. Never built through `Chassis::build` — `Builder::new`
@@ -157,8 +233,12 @@ impl FleetBench {
         let (chassis, port) = boot_hub(&store_root.join("binaries"));
         let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
             .expect("test setup: connecting to the hub's bound RPC port succeeds");
+        // The read timeout is the re-arm *interval*, not a deadline: every
+        // `read_frame` in `call_with_budget` wakes on it to re-check the
+        // call's cumulative backstop, then re-arms (issue 2064). The
+        // backstop, not this interval, decides a wedge.
         stream
-            .set_read_timeout(Some(CALL_DEADLINE))
+            .set_read_timeout(Some(READ_REARM))
             .expect("test setup: setting a read timeout on a connected stream succeeds");
 
         let mut bench = Self {
@@ -207,7 +287,11 @@ impl FleetBench {
             UploadBinaryResult::Ok { hash, .. } => hash,
             UploadBinaryResult::Err { error } => panic!("spawn_headless upload failed: {error}"),
         };
-        let replies = self.call(
+        // The cold fork+bind+connect rides this call's reply (the hub holds
+        // `SpawnEngineResult::Ok` until its proxy connects to the freshly
+        // bound substrate), so it waits under the generous cold-start
+        // backstop, not the steady-state reply cap (issue 2064).
+        let replies = self.call_with_budget(
             None,
             "aether.engine",
             &SpawnEngine {
@@ -220,6 +304,8 @@ impl FleetBench {
                 args: vec![],
                 boot_manifest,
             },
+            spawn_cap(),
+            "cold-start",
         );
         let payload = single_reply(&replies, "SpawnEngine");
         let engine_id = match SpawnEngineResult::decode_from_bytes(&payload) {
@@ -659,7 +745,33 @@ impl FleetBench {
     /// into [`calls`](Self::calls). Panics on a `ReplyEnd::Err` or a
     /// mismatched cid — the seed's `call_round_trip`, generalised to N
     /// reply events and a recorded trace.
+    /// Steady-state call: waits on the reply chain's `ReplyEnd` under the
+    /// [`reply_cap`] backstop. The reply-wait is settlement-driven — a
+    /// slow-but-healthy chain re-arms rather than dying on a wall-clock
+    /// gate (issue 2064).
     fn call<K>(&mut self, engine: Option<EngineId>, mailbox: &str, request: &K) -> Vec<MailEnvelope>
+    where
+        K: Kind + Serialize,
+    {
+        self.call_with_budget(engine, mailbox, request, reply_cap(), "reply")
+    }
+
+    /// Write one `Call` frame and read until its `ReplyEnd`, returning the
+    /// `ReplyEvent` envelopes seen in between and recording the call into
+    /// [`calls`](Self::calls). Blocks on the reply, re-arming on each
+    /// `READ_REARM` socket-timeout, until `budget` is exhausted — a
+    /// genuine wedge, panicked with `gate` naming the latency class
+    /// (cold-start vs reply), the cid, the mailbox, and the budget (issue
+    /// 2064). A non-timeout read error (the connection genuinely failed) or
+    /// a `ReplyEnd::Err` panics immediately, distinct from a wedge.
+    fn call_with_budget<K>(
+        &mut self,
+        engine: Option<EngineId>,
+        mailbox: &str,
+        request: &K,
+        budget: Duration,
+        gate: &str,
+    ) -> Vec<MailEnvelope>
     where
         K: Kind + Serialize,
     {
@@ -670,20 +782,20 @@ impl FleetBench {
             .expect("test setup: writing a Call frame to the hub succeeds");
 
         let mut events: Vec<MailEnvelope> = Vec::new();
+        let start = Instant::now();
         loop {
-            match read_frame(&mut self.stream).expect("test setup: reading a reply frame succeeds")
-            {
-                WireFrame::ReplyEvent {
+            match read_frame(&mut self.stream) {
+                Ok(WireFrame::ReplyEvent {
                     cid: got_cid,
                     envelope,
-                } => {
+                }) => {
                     assert_eq!(got_cid, cid, "ReplyEvent cid mismatch");
                     events.push(envelope);
                 }
-                WireFrame::ReplyEnd {
+                Ok(WireFrame::ReplyEnd {
                     cid: got_cid,
                     result,
-                } => {
+                }) => {
                     assert_eq!(got_cid, cid, "ReplyEnd cid mismatch");
                     result.unwrap_or_else(|e| panic!("call {cid} ended with error: {e:?}"));
                     self.calls.push(CallRecord {
@@ -695,7 +807,25 @@ impl FleetBench {
                     });
                     return events;
                 }
-                other => panic!("unexpected frame for call {cid}: {other:?}"),
+                Ok(other) => panic!("unexpected frame for call {cid}: {other:?}"),
+                // Socket read-timeout: no frame yet. Re-arm until the
+                // cumulative backstop is exhausted; a healthy chain settles
+                // first, a genuine wedge trips the assert below.
+                Err(e) if is_rearm_timeout(&e) => {
+                    let waited = start.elapsed();
+                    assert!(
+                        waited < budget,
+                        "fleetbench {gate} gate wedged: call {cid} to {mailbox:?} did not settle \
+                         within the {budget:?} backstop — a healthy chain never reaches this cap, \
+                         so this is a genuine deadlock/livelock",
+                    );
+                    eprintln!(
+                        "fleetbench: {gate} call {cid} to {mailbox:?} slow: waited {waited:?}, extending",
+                    );
+                }
+                // Any other read error is a real failure (connection closed,
+                // decode), not a slow chain.
+                Err(e) => panic!("test setup: reading a reply frame for call {cid} failed: {e}"),
             }
         }
     }
@@ -941,8 +1071,9 @@ impl FleetBench {
     /// terminal status (`Complete` / `Failed`), sleeping between polls.
     /// Panics past `deadline` — a DAG that never settles is a test bug,
     /// not a pass. The forked `FsCapability` inbox poll adds ~100ms of
-    /// source latency, so callers pass a generous `deadline` (the
-    /// `CALL_DEADLINE` mirror).
+    /// source latency, so callers pass a generous `deadline` (a wall-clock
+    /// budget on DAG terminal status, distinct from the wire reply
+    /// backstop [`reply_cap`] that bounds an individual `call`).
     pub fn poll_dag(
         &mut self,
         engine: EngineId,
