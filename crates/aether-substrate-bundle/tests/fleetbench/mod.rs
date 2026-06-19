@@ -82,11 +82,13 @@ const READ_REARM: Duration = Duration::from_secs(2);
 
 /// Default cold-start backstop (seconds): the budget the `spawn_headless`
 /// `SpawnEngine` call allows for the hub to fork the substrate, dial it
-/// (the hub retries the refused connection up to its own
-/// `PROXY_CONNECT_RETRY_BUDGET`), and reply once the proxy connects — so
-/// the `SpawnEngineResult::Ok` reply *is* the explicit port-readiness
-/// signal. Generous over a debug-build cold start under CPU pressure;
-/// overridable via `AETHER_FLEETBENCH_SPAWN_CAP_SECS`.
+/// (the hub retries the refused connection up to its own configurable
+/// `AETHER_HUB_PROXY_CONNECT_BUDGET_SECS`), and reply once the proxy
+/// connects — so the `SpawnEngineResult::Ok` reply *is* the explicit
+/// port-readiness signal. Kept comfortably above the hub's connect budget
+/// so the hub returns a clean `Err` first rather than the client tripping
+/// this backstop. Generous over a debug-build cold start under CPU
+/// pressure; overridable via `AETHER_FLEETBENCH_SPAWN_CAP_SECS`.
 const DEFAULT_SPAWN_CAP_SECS: u64 = 60;
 
 /// Default reply backstop (seconds): the deadlock/livelock cap a settled

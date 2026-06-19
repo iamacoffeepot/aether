@@ -82,12 +82,7 @@ mod proxy_native {
         mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE)
     }
 
-    /// Total time [`connect_proxy`] keeps retrying a refused dial when
-    /// the proxy just forked the substrate and it may still be coming
-    /// up. Picked to comfortably cover a debug-build headless cold
-    /// start; far longer than a healthy localhost dial needs.
-    const PROXY_CONNECT_RETRY_BUDGET: Duration = Duration::from_secs(5);
-    /// Pause between dial attempts within [`PROXY_CONNECT_RETRY_BUDGET`].
+    /// Pause between dial attempts within the connect budget.
     const PROXY_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
     /// Init config for [`EngineProxy`]. `engine_id` is the proxy's
@@ -109,11 +104,20 @@ mod proxy_native {
     /// disables the heartbeat (the engine is then only evicted on a
     /// connection-close `Bye`, never on a wedge); `Some` arms the
     /// timer sidecar.
+    ///
+    /// `connect_budget` is the total time the startup dial keeps
+    /// retrying a refused connection while a freshly-forked substrate
+    /// comes up, resolved from the cap's `EngineConfig`. `Some(d)` caps
+    /// the retry at `d`; `None` is the wait-forever sentinel (retry
+    /// until the dial succeeds or hits a terminal error). Only consulted
+    /// when the proxy forked the substrate (`spawned.is_some()`) — an
+    /// adopted substrate is dialed once.
     pub struct EngineProxyConfig {
         pub engine_id: EngineId,
         pub rpc_addr: String,
         pub spawned: Option<Child>,
         pub heartbeat: Option<HeartbeatParams>,
+        pub connect_budget: Option<Duration>,
     }
 
     /// Resolved liveness-heartbeat tuning for one proxy (issue 1339).
@@ -210,19 +214,25 @@ mod proxy_native {
             // (`spawned.is_none()`) is dialed once — a refused
             // connection there is a real error, not a startup race.
             let retry = config.spawned.is_some();
-            let conn =
-                match connect_proxy(&config.rpc_addr, &mailer, self_mailbox, wake_kind, retry) {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        // The proxy owns the child it was handed — a
-                        // failed boot must not orphan the substrate.
-                        if let Some(mut child) = config.spawned.take() {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                        }
-                        return Err(BootError::Other(Box::new(e)));
+            let conn = match connect_proxy(
+                &config.rpc_addr,
+                &mailer,
+                self_mailbox,
+                wake_kind,
+                retry,
+                config.connect_budget,
+            ) {
+                Ok(conn) => conn,
+                Err(e) => {
+                    // The proxy owns the child it was handed — a
+                    // failed boot must not orphan the substrate.
+                    if let Some(mut child) = config.spawned.take() {
+                        let _ = child.kill();
+                        let _ = child.wait();
                     }
-                };
+                    return Err(BootError::Other(Box::new(e)));
+                }
+            };
 
             tracing::info!(
                 target: "aether_substrate::engine_proxy",
@@ -463,18 +473,22 @@ mod proxy_native {
     /// Dial the substrate's `RpcServerCapability`, building a fresh
     /// `on_frame` wake closure per attempt. When `retry` is set, a
     /// connection-refused / reset error is retried (after a short
-    /// pause) until [`PROXY_CONNECT_RETRY_BUDGET`] elapses — a
-    /// freshly-forked substrate may not have bound its port yet.
-    /// Handshake / frame errors are always terminal: the peer
-    /// answered, just wrongly.
+    /// pause) until the connect `budget` elapses — a freshly-forked
+    /// substrate may not have bound its port yet. `budget` of `None` is
+    /// the wait-forever sentinel: retry until the dial succeeds or hits
+    /// a terminal error. Handshake / frame errors are always terminal:
+    /// the peer answered, just wrongly.
     fn connect_proxy(
         addr: &str,
         mailer: &Arc<Mailer>,
         self_mailbox: MailboxId,
         wake_kind: KindId,
         retry: bool,
+        budget: Option<Duration>,
     ) -> Result<RpcConnection, RpcClientError> {
-        let deadline = Instant::now() + PROXY_CONNECT_RETRY_BUDGET;
+        // `None` budget → no deadline (wait forever); `Some(d)` → stop
+        // retrying once `d` has elapsed.
+        let deadline = budget.map(|d| Instant::now() + d);
         loop {
             // The reader sidecar fires `RpcInboundReady` at the proxy's
             // own mailbox after every inbound frame so
@@ -500,7 +514,8 @@ mod proxy_native {
             ) {
                 Ok(conn) => Ok(conn),
                 Err(e) => {
-                    if retry && is_transient_connect_error(&e) && Instant::now() < deadline {
+                    let within_budget = deadline.is_none_or(|d| Instant::now() < d);
+                    if retry && is_transient_connect_error(&e) && within_budget {
                         thread::sleep(PROXY_CONNECT_RETRY_INTERVAL);
                         continue;
                     }
@@ -830,6 +845,9 @@ mod tests {
                     rpc_addr: format!("127.0.0.1:{port}"),
                     spawned: None,
                     heartbeat: None,
+                    // Adopted substrate (`spawned: None`) is dialed once,
+                    // so the connect budget is inert here.
+                    connect_budget: None,
                 },
             )
             .finish()
@@ -905,6 +923,7 @@ mod tests {
                     rpc_addr: format!("127.0.0.1:{port}"),
                     spawned: None,
                     heartbeat: None,
+                    connect_budget: None,
                 },
             )
             .finish();
@@ -990,6 +1009,7 @@ mod tests {
                     rpc_addr: format!("127.0.0.1:{port}"),
                     spawned: None,
                     heartbeat,
+                    connect_budget: None,
                 },
             )
             .finish()

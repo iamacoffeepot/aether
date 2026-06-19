@@ -110,6 +110,17 @@ mod server_native {
     /// dead. Small N tolerates a transient hiccup / GC pause.
     const DEFAULT_HEARTBEAT_MISS_LIMIT: u32 = 3;
 
+    /// Default total time a freshly-forked substrate's proxy keeps
+    /// retrying its startup dial before giving up (issue 2072). A debug
+    /// cold start fork+exec+bind can stretch well past a healthy
+    /// localhost dial when many substrates come up at once and
+    /// oversubscribe the cores (e.g. a concurrent `FleetBench` fleet), so
+    /// the budget is generous — far longer than a single cold start
+    /// needs, comfortably under the `FleetBench` client's own spawn cap so
+    /// the hub returns a clean `Err` first rather than the client
+    /// tripping its backstop. `0` is the wait-forever sentinel.
+    const DEFAULT_PROXY_CONNECT_BUDGET_SECS: u64 = 30;
+
     /// Resolved engines-cap configuration (ADR-0090, issue 1339): the
     /// liveness-heartbeat tuning plus the hub binary store's layout dir,
     /// disk budget, and bootstrap list (ADR-0115, #1954 — these last three
@@ -149,6 +160,15 @@ mod server_native {
         /// `miss_limit × interval_secs`.
         #[config(default = 3, parse = parse_heartbeat_miss_limit)]
         pub heartbeat_miss_limit: u32,
+        /// Total seconds a freshly-forked substrate's proxy keeps
+        /// retrying its startup dial before the spawn fails
+        /// (`AETHER_HUB_PROXY_CONNECT_BUDGET_SECS` /
+        /// `--hub-proxy-connect-budget-secs`, issue 2072). Generous by
+        /// default so a debug cold start under fork contention isn't
+        /// called dead prematurely; `0` is the wait-forever sentinel
+        /// (retry until the dial succeeds or hits a terminal error).
+        #[config(default = 30, parse = parse_proxy_connect_budget_secs)]
+        pub proxy_connect_budget_secs: u64,
         /// Layout-root override for the hub's content-addressed binary
         /// store (`AETHER_BINARY_STORE_DIR`, unprefixed — the ops escape
         /// hatch and the fleet tests' per-process isolation knob). Unset
@@ -194,6 +214,11 @@ mod server_native {
             Self {
                 heartbeat_interval_secs: 0,
                 heartbeat_miss_limit: 0,
+                // A real budget (not the heartbeat's inert `0`): tests fork
+                // real substrates, so the proxy needs a generous-but-finite
+                // startup-dial budget — `0` would mean wait-forever and
+                // hang on a genuinely dead substrate.
+                proxy_connect_budget_secs: DEFAULT_PROXY_CONNECT_BUDGET_SECS,
                 binary_store_dir: None,
                 binary_disk_budget_bytes: DEFAULT_DISK_BUDGET_BYTES,
                 binary_bootstrap: HashSet::new(),
@@ -213,6 +238,14 @@ mod server_native {
                     miss_limit: self.heartbeat_miss_limit,
                 })
             }
+        }
+
+        /// The startup-dial connect budget to arm each spawned proxy
+        /// with (issue 2072). `Some(d)` caps the retry; `None` (the `0`
+        /// sentinel) means wait forever.
+        fn connect_budget(&self) -> Option<Duration> {
+            (self.proxy_connect_budget_secs != 0)
+                .then(|| Duration::from_secs(self.proxy_connect_budget_secs))
         }
     }
 
@@ -234,6 +267,14 @@ mod server_native {
         Ok(s.trim().parse().unwrap_or(DEFAULT_HEARTBEAT_MISS_LIMIT))
     }
 
+    /// Parse the proxy connect budget seconds; unparseable → the default.
+    #[allow(clippy::unnecessary_wraps)]
+    fn parse_proxy_connect_budget_secs(s: &str) -> Result<u64, Infallible> {
+        Ok(s.trim()
+            .parse()
+            .unwrap_or(DEFAULT_PROXY_CONNECT_BUDGET_SECS))
+    }
+
     /// Parse the binary-store disk budget; unparseable → the default
     /// `DEFAULT_DISK_BUDGET_BYTES` (mirrors the heartbeat parsers).
     #[allow(clippy::unnecessary_wraps)]
@@ -251,6 +292,43 @@ mod server_native {
             .filter(|p| !p.is_empty())
             .map(str::to_string)
             .collect())
+    }
+
+    #[cfg(test)]
+    mod config_tests {
+        use super::*;
+
+        /// The connect budget resolves a non-zero seconds value to a
+        /// finite `Duration`, and `0` to the wait-forever sentinel `None`.
+        #[test]
+        fn connect_budget_maps_zero_to_wait_forever() {
+            let finite = EngineConfig {
+                proxy_connect_budget_secs: 12,
+                ..EngineConfig::default()
+            };
+            assert_eq!(finite.connect_budget(), Some(Duration::from_secs(12)));
+            let forever = EngineConfig {
+                proxy_connect_budget_secs: 0,
+                ..EngineConfig::default()
+            };
+            assert_eq!(forever.connect_budget(), None);
+        }
+
+        /// The default budget is generous and finite — never the
+        /// wait-forever sentinel — so a debug cold start under fork
+        /// contention isn't called dead prematurely, while a genuinely
+        /// dead substrate still fails the spawn rather than hanging.
+        #[test]
+        fn default_connect_budget_is_generous_and_finite() {
+            let budget = EngineConfig::default()
+                .connect_budget()
+                .expect("default budget is finite, not wait-forever");
+            assert_eq!(
+                budget,
+                Duration::from_secs(DEFAULT_PROXY_CONNECT_BUDGET_SECS)
+            );
+            assert!(budget >= Duration::from_secs(30), "default stays generous");
+        }
     }
 
     /// How many recently-died engines [`EngineServer`] retains for
@@ -303,6 +381,10 @@ mod server_native {
         /// (issue 1339), resolved once from [`EngineConfig`] at init.
         /// `None` disables the heartbeat fleet-wide.
         heartbeat: Option<HeartbeatParams>,
+        /// Startup-dial connect budget each spawned proxy is armed with
+        /// (issue 2072), resolved once from [`EngineConfig`] at init.
+        /// `Some(d)` caps the retry; `None` is the wait-forever sentinel.
+        connect_budget: Option<Duration>,
         /// Bounded ring of the last [`RECENTLY_DIED_CAP`] engines that
         /// left the table and why (issue 1906). `on_terminate` /
         /// `on_engine_died` push a [`DeadRecord`] at the removal site;
@@ -349,6 +431,7 @@ mod server_native {
                 next_engine_seq: 1,
                 mailer: ctx.mailer(),
                 heartbeat: config.heartbeat_params(),
+                connect_budget: config.connect_budget(),
                 recently_died: VecDeque::new(),
                 store,
             })
@@ -505,6 +588,7 @@ mod server_native {
                         rpc_addr,
                         spawned: Some(child),
                         heartbeat: self.heartbeat,
+                        connect_budget: self.connect_budget,
                     },
                 )
                 .finish();
