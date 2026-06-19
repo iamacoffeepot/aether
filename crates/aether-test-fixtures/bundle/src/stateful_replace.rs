@@ -21,8 +21,8 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, FfiDropCtx, FfiInitCtx, Instanced, Mail, Manual, OutboundReply,
-    PriorState, actor,
+    BootError, FfiActor, FfiCtx, FfiDropCtx, FfiInitCtx, Mail, Manual, OutboundReply, PriorState,
+    actor,
 };
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
@@ -77,9 +77,7 @@ impl FfiActor for Counter {
 /// `#[fallback]` so its capability group is observably distinct.
 pub struct Sidecar;
 
-impl Instanced for Sidecar {}
-
-#[actor]
+#[actor(instanced)]
 impl FfiActor for Sidecar {
     const NAMESPACE: &'static str = "stateful.sidecar";
 

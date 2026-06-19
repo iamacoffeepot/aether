@@ -104,7 +104,7 @@ macro_rules! native_sender_methods {
         pub fn actor<R: Singleton>(&self) -> NativeActorMailbox<'_, R> {
             let (parent, root) = self.outbound_lineage();
             NativeActorMailbox::__new_in_flight(
-                R::resolve(self.binding.carry()).0,
+                R::resolve(self.binding.carry(), ()).0,
                 self.binding,
                 parent,
                 root,
@@ -333,7 +333,11 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// lifetime today.
     pub fn spawn_inherit<A, F>(&self, f: F) -> JoinHandle<()>
     where
-        A: Addressable + Singleton + 'static,
+        // ADR-0119: `A` only supplies `A::NAMESPACE` (thread name) and
+        // parameterizes `InheritCtx<A>` (Addressable-only). The former
+        // `Singleton` bound was incidental, and single-cardinality
+        // enforcement made it block instanced workers — relaxed to Addressable.
+        A: Addressable + 'static,
         F: FnOnce(InheritCtx<A>) + Send + 'static,
     {
         spawn_thread::spawn_inherit::<A, F>(
@@ -1040,7 +1044,7 @@ impl<M: ReplyMode> MailSender for NativeCtx<'_, M> {
     {
         let bytes = payload.encode_into_bytes();
         self.binding.push_envelope_buffered(
-            R::resolve(self.binding.carry()).0,
+            R::resolve(self.binding.carry(), ()).0,
             K::ID.0,
             &bytes,
             1,
@@ -1061,7 +1065,7 @@ impl<M: ReplyMode> MailSender for NativeCtx<'_, M> {
         #[allow(clippy::cast_possible_truncation)]
         let count = payloads.len() as u32;
         self.binding.push_envelope_buffered(
-            R::resolve(self.binding.carry()).0,
+            R::resolve(self.binding.carry(), ()).0,
             K::ID.0,
             bytes,
             count,
@@ -1100,7 +1104,7 @@ impl<M: ReplyMode> MailSender for NativeCtx<'_, M> {
         // ADR-0080 §7: suppress the in-flight lineage so the recipient
         // starts a fresh causal chain (the trait default would inherit).
         self.binding.push_envelope_buffered(
-            R::resolve(self.binding.carry()).0,
+            R::resolve(self.binding.carry(), ()).0,
             K::ID.0,
             &bytes,
             1,
@@ -1245,9 +1249,8 @@ mod tests {
 
     impl Addressable for StubActor {
         const NAMESPACE: &'static str = "test.stub";
+        type Resolver = aether_actor::One;
     }
-
-    impl Singleton for StubActor {}
 
     impl aether_actor::Lifecycle for StubActor {
         type Config = ();

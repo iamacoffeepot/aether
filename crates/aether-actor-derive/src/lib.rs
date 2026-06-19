@@ -750,13 +750,20 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Parsed `#[actor(...)]` attribute arguments. Only `skip_markers` is
-/// recognised today (issue 565: tells the expander not to emit
-/// `Addressable` + `HandlesKind` impls because a wrapping `#[bridge]`
-/// already emitted them as siblings of a cfg-gated module).
+/// Parsed `#[actor(...)]` attribute arguments. `skip_markers` (issue 565)
+/// tells the expander not to emit `Addressable` + `HandlesKind` impls because
+/// a wrapping `#[bridge]` already emitted them as siblings of a cfg-gated
+/// module. `singleton` / `instanced` (ADR-0119) declare cardinality, mapped to
+/// the `Addressable::Resolver` per transport.
 #[derive(Default, Clone, Copy)]
 struct ActorOpts {
     skip_markers: bool,
+    /// ADR-0119 cardinality from `#[actor(singleton|instanced)]`, mapped to
+    /// the resolver per transport — native: `One` / `Many`; FFI: `Embedded`
+    /// (default) / `EmbeddedMany`. `None` on a `skip_markers` block (the
+    /// wrapping `#[bridge]` owns the resolver) or where the transport supplies
+    /// a default (FFI ⇒ `Embedded`).
+    cardinality: Option<BridgeCardinality>,
 }
 
 fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
@@ -768,8 +775,26 @@ fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
         if meta.path.is_ident("skip_markers") {
             opts.skip_markers = true;
             Ok(())
+        } else if meta.path.is_ident("singleton") {
+            if matches!(opts.cardinality, Some(BridgeCardinality::Instanced)) {
+                return Err(
+                    meta.error("`singleton` and `instanced` are mutually exclusive (ADR-0079)")
+                );
+            }
+            opts.cardinality = Some(BridgeCardinality::Singleton);
+            Ok(())
+        } else if meta.path.is_ident("instanced") {
+            if matches!(opts.cardinality, Some(BridgeCardinality::Singleton)) {
+                return Err(
+                    meta.error("`singleton` and `instanced` are mutually exclusive (ADR-0079)")
+                );
+            }
+            opts.cardinality = Some(BridgeCardinality::Instanced);
+            Ok(())
         } else {
-            Err(meta.error("unrecognised #[actor] argument; only `skip_markers` is supported"))
+            Err(meta.error(
+                "unrecognised #[actor] argument; expected `singleton`, `instanced`, or `skip_markers`",
+            ))
         }
     });
     Parser::parse2(parser, attr)?;
@@ -1131,16 +1156,22 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
         #native_cfg
         pub use #mod_ident::#type_ident;
     };
-    // Issue 625: cardinality is an explicit declaration on the bridge
-    // attribute per ADR-0079. The bridge sits over two struct
-    // definition sites — the wasm stub at file root and the native
-    // struct inside `mod native` — and the cardinality marker impl
-    // must land at file root to cover both. The author writes
-    // `#[bridge(singleton)]` or `#[bridge(instanced)]`; absence is
-    // hand-rolled (test fixtures, future cases that don't fit either).
+    // Issue 625 / ADR-0119: cardinality is an explicit declaration on the
+    // bridge attribute (`#[bridge(singleton|instanced)]`), mapped to the
+    // `Addressable::Resolver` — `One` (default / `singleton`) or `Many`
+    // (`instanced`). `Singleton` / `Instanced` are derived from the resolver
+    // via blanket impls, so nothing emits a separate marker impl. The
+    // Addressable impl lands at file root so the wasm stub and the native
+    // struct both carry it.
+    let resolver_ty = if matches!(cardinality, Some(BridgeCardinality::Instanced)) {
+        quote! { ::aether_actor::Many }
+    } else {
+        quote! { ::aether_actor::One }
+    };
     let actor_marker = quote! {
         impl #impl_generics ::aether_actor::Addressable for #self_ty #where_clause {
             const NAMESPACE: &'static str = #namespace_expr;
+            type Resolver = #resolver_ty;
         }
     };
     // The cardinality marker (issue 625 / ADR-0079) plus its ADR-0088
@@ -1169,9 +1200,12 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
     } else {
         quote! { ::aether_data::name_inventory::Cardinality::Unbounded }
     };
+    // ADR-0119: the marker impls are gone (derived from the resolver); this
+    // is now purely the ADR-0088 §3/§4 name-inventory submission, keyed by
+    // cardinality. `None` submits nothing (the Addressable still resolves via
+    // the default `One`).
     let cardinality_marker = match cardinality {
         Some(BridgeCardinality::Singleton) => quote! {
-            impl #impl_generics ::aether_actor::Singleton for #self_ty #where_clause {}
             #native_cfg
             ::aether_data::name_inventory::inventory::submit! {
                 ::aether_data::name_inventory::NameEntry {
@@ -1181,14 +1215,13 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
             }
         },
         Some(BridgeCardinality::Instanced) => quote! {
-            impl #impl_generics ::aether_actor::Instanced for #self_ty #where_clause {}
             #native_cfg
             ::aether_data::name_inventory::inventory::submit! {
                 ::aether_data::name_inventory::TemplateEntry {
                     domain: ::aether_data::MAILBOX_DOMAIN,
                     // Split the namespace (prefix) from the structural
                     // `:{subname}` suffix so a forward-fed const NAMESPACE
-                    // (e.g. `EmbeddedHost::NAMESPACE`, ADR-0099 §5/§6) works —
+                    // (e.g. `EMBEDDED_SCOPE`, ADR-0099 §5/§6) works —
                     // `concat!` would reject a non-literal namespace.
                     prefix: #namespace_expr,
                     template: ":{subname}",
@@ -1350,94 +1383,13 @@ pub fn local(_attr: TokenStream, item: TokenStream) -> TokenStream {
     .into()
 }
 
-/// `#[derive(Singleton)]` — emits `impl ::aether_actor::Singleton for T {}`.
-///
-/// Per ADR-0079 (issue 607) cardinality is first-class:
-/// [`Singleton`] and [`Instanced`] are mutually exclusive at the type
-/// level. Issue 625 made the choice explicit at the struct
-/// definition rather than auto-emitted by `#[bridge]` — `Singleton`
-/// is a property of the type, not of any one trait it implements.
-/// Authors place `#[derive(Singleton)]` on the cap struct alongside
-/// `pub struct X` inside the bridge mod; absence selects the other
-/// cardinality (and the type-system catches mistakes — `Builder::with_actor`
-/// requires `Singleton`, `ctx.spawn_child` requires `Instanced`).
-#[proc_macro_derive(Singleton)]
-pub fn derive_singleton(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    let name = &input.ident;
-    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    quote! {
-        impl #impl_generics ::aether_actor::Singleton for #name #ty_generics #where_clause {}
-    }
-    .into()
-}
-
-/// `#[derive(Instanced)]` — emits `impl ::aether_actor::Instanced for T {}`.
-///
-/// The instanced counterpart of [`derive_singleton`]. Per ADR-0079
-/// (issue 607), instanced actors carry a runtime subname under their
-/// `NAMESPACE` prefix — full names hash to `"{NAMESPACE}:{subname}"`
-/// (e.g. `aether.tcp.listener:8080`). Authors place
-/// `#[derive(Instanced)]` on the cap struct inside the bridge mod;
-/// `Builder::with_actor` rejects instanced types at compile time
-/// (the chassis-builder boots singletons only), and
-/// `ctx.spawn_child` requires the `Instanced` bound.
-#[proc_macro_derive(Instanced)]
-pub fn derive_instanced(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    let name = &input.ident;
-    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    quote! {
-        impl #impl_generics ::aether_actor::Instanced for #name #ty_generics #where_clause {}
-    }
-    .into()
-}
-
-/// `#[derive(Embeddable)]` — marks an **embeddable** actor: an FFI/wasm
-/// component reached by peers as `ctx.actor::<T>()`. Emits the `Singleton`
-/// marker with a `resolve` override that **delegates to the embedding-host
-/// class** (ADR-0099 §5/§6) instead of the depth-1 default:
-///
-/// ```ignore
-/// impl Singleton for T {
-///     fn resolve(_caller_carry: u64) -> MailboxId {
-///         ::aether_capabilities::resolve_embedded(<T as Addressable>::NAMESPACE)
-///     }
-/// }
-/// ```
-///
-/// The override ignores the caller's carry — an embeddable component's
-/// address is absolute, rooted at the component host, not relative to the
-/// caller. It folds the component's own `NAMESPACE` as an instance under
-/// the reserved `aether.embedded` class namespace onto the host cap's
-/// carry, landing on the registered mailbox a bare-`NAMESPACE` hash would
-/// miss (iamacoffeepot/aether#1364).
-///
-/// The macro writes **no namespace literal** — it emits a *call* to
-/// `resolve_embedded`, which reads `aether.embedded` only inside its
-/// owner (`aether_actor::EmbeddedHost`) and the `aether.component` host
-/// carry only from `ComponentHostCapability`. The
-/// only string the author writes is `T`'s own `NAMESPACE` (ADR-0099 §5's
-/// read-from-owner rule). Because the emitted path is
-/// `::aether_capabilities::resolve_embedded`, a peer-addressable
-/// embeddable depends on `aether-capabilities` (as `aether-kit` already
-/// does). Use in place of `#[derive(Singleton)]`, not alongside it.
-#[proc_macro_derive(Embeddable)]
-pub fn derive_embeddable(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    let name = &input.ident;
-    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    quote! {
-        impl #impl_generics ::aether_actor::Singleton for #name #ty_generics #where_clause {
-            fn resolve(_caller_carry: u64) -> ::aether_data::MailboxId {
-                ::aether_capabilities::resolve_embedded(
-                    <#name #ty_generics as ::aether_actor::Addressable>::NAMESPACE,
-                )
-            }
-        }
-    }
-    .into()
-}
+// ADR-0119: `#[derive(Singleton)]` / `#[derive(Instanced)]` /
+// `#[derive(Embeddable)]` are retired. Cardinality is now the
+// `Addressable::Resolver` (`One` / `Many` / `Embedded` / `EmbeddedMany`); the
+// `Singleton` / `Instanced` markers derive from it by blanket impl, so a
+// hand-emitted marker would conflict. `#[actor]` / `#[bridge]` emit the
+// resolver from their `singleton` / `instanced` arg; a hand-written actor sets
+// `type Resolver` directly.
 
 /// `#[capability]` — attribute macro for native chassis capability
 /// structs. Cfg-gates every field with `#[cfg(feature = "native")]`
@@ -1547,7 +1499,7 @@ fn expand_handlers(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream2>
                          `impl NativeActor for X` blocks wrapped by `#[bridge]`",
                     ));
                 }
-                expand_wasm_actor(item)
+                expand_wasm_actor(item, opts)
             }
             other => Err(syn::Error::new_spanned(
                 trait_path,
@@ -1856,7 +1808,7 @@ fn classify_task_reply_mode(sig: &Signature, is_borrow: bool) -> syn::Result<Tas
 /// statics, plus the `HandlesKind<K>` and `Addressable` impls common to both
 /// shapes.
 #[allow(clippy::too_many_lines)] // emits the full wasm-actor surface in one go
-fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
+fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream2> {
     let self_ty = &item.self_ty;
     let generics = &item.generics;
     let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
@@ -2205,12 +2157,23 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
         ));
     }
     let const_tokens = consts.iter();
+    // ADR-0119: an FFI/wasm component is embedded — it resolves under the
+    // reserved `aether.embedded` scope. Default `Embedded` (keyless ⇒
+    // `Singleton`, reached by `ctx.actor::<R>()`); `#[actor(instanced)]`
+    // selects `EmbeddedMany` for a spawn-sibling child (ADR-0097). Cardinality
+    // is derived from the resolver; nothing emits `impl Singleton` here.
+    let resolver_ty = if matches!(opts.cardinality, Some(BridgeCardinality::Instanced)) {
+        quote! { ::aether_actor::EmbeddedMany }
+    } else {
+        quote! { ::aether_actor::Embedded }
+    };
     let actor_impl = if consts.is_empty() {
         quote! {}
     } else {
         quote! {
             impl #impl_generics ::aether_actor::Addressable for #self_ty #where_clause {
                 #(#const_tokens)*
+                type Resolver = #resolver_ty;
             }
         }
     };
@@ -2681,12 +2644,22 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     // NAMESPACE passes through unchanged because its RHS is a
     // primitive that doesn't require resolution.
     let const_tokens: Vec<TokenStream2> = consts.iter().map(|c| quote! { #c }).collect();
+    // ADR-0119: a native actor's cardinality picks its resolver — `One`
+    // (default, or `#[actor(singleton)]`) or `Many` (`#[actor(instanced)]`).
+    // `Singleton` / `Instanced` are derived from it; the old hand-written
+    // `impl Singleton/Instanced for X {}` next to `#[actor]` is retired.
+    let resolver_ty = if matches!(opts.cardinality, Some(BridgeCardinality::Instanced)) {
+        quote! { ::aether_actor::Many }
+    } else {
+        quote! { ::aether_actor::One }
+    };
     let actor_impl = if opts.skip_markers || consts.is_empty() {
         quote! {}
     } else {
         quote! {
             impl #impl_generics ::aether_actor::Addressable for #self_ty #where_clause {
                 #(#const_tokens)*
+                type Resolver = #resolver_ty;
             }
         }
     };

@@ -19,9 +19,7 @@
 // dispatch ABI even when stateless.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{
-    BootError, FfiActor, FfiCtx, FfiInitCtx, Instanced, Mail, MailSender, Subname, actor,
-};
+use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, Mail, MailSender, Subname, actor};
 use aether_kinds::Ping;
 use aether_test_fixtures_kinds::{TEST_BENCH_OBSERVER_MAILBOX_NAME, TickObserved};
 
@@ -54,9 +52,7 @@ impl FfiActor for RootManager {
 /// entry type's strict receiver.
 pub struct Panel;
 
-impl Instanced for Panel {}
-
-#[actor]
+#[actor(instanced)]
 impl FfiActor for Panel {
     const NAMESPACE: &'static str = "ui.panel";
 

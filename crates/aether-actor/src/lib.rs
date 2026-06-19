@@ -65,8 +65,9 @@ pub mod trace_ring;
 pub use actor::ctx::{MailSender, Manual, OutboundReply, Persistence, ReplyMode, Single, Stream};
 pub use actor::slot::Slot;
 pub use actor::{
-    Actor, Addressable, EmbeddedHost, HandlesKind, Instanced, Lifecycle, NAMESPACE_SEGMENT_MAX_LEN,
-    NamespaceError, Singleton, Subname, validate_namespace_segment,
+    Actor, Addressable, EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced, Lifecycle,
+    Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Resolve, Singleton, Subname,
+    validate_namespace_segment,
 };
 pub use local::Local;
 // Issue 665: `Mailbox<K, T>` and `ActorMailbox<'_, R, T>` retired; the
@@ -134,32 +135,18 @@ pub mod __macro_internals {
 /// `aether-actor-derive`; we forward through `aether-data` so the
 /// derive paths the macro emits (`::aether_data::Kind`, etc.)
 /// continue to resolve through the established re-export chain. The
-/// stage-0 additions `#[capability]` (cfg-gates native cap fields)
-/// and `#[derive(Singleton)]` (emits the `Singleton` marker) sit
+/// stage-0 addition `#[capability]` (cfg-gates native cap fields) sits
 /// alongside the existing actor derives so component / capability
 /// authors only need `aether-actor` in their dep list.
 pub use aether_data::{
     Kind, KindId as DataKindId, MailboxId, Schema, actor, bridge, capability, fallback, handler,
     local,
 };
-// `Singleton` and `Instanced` each live in two namespaces:
-//   - the type namespace for the marker trait (`Addressable` super-trait),
-//     re-exported above as part of `actor::*`.
-//   - the macro namespace for the `#[derive(Singleton)]` /
-//     `#[derive(Instanced)]` proc-macros, forwarded through
-//     `aether-data` (which itself re-exports them from
-//     `aether-actor-derive` behind the `derive` feature).
-// Rust resolves derive names from the macro namespace and type names
-// from the type namespace, so the same identifier covers both
-// `impl Singleton for X` / `impl Instanced for X` and the
-// `#[derive(...)]` form without ambiguity at the user's call site.
-// The `#[doc(inline)]` flattens the rustdoc page so the derives show
-// up at `aether_actor::{Singleton, Instanced}` rather than under
-// synthetic re-export shims. Issue 625 (ADR-0079) made the cardinality
-// derives the explicit author-side surface — `#[bridge]` no longer
-// auto-emits either.
-#[doc(inline)]
-pub use aether_data::{Embeddable, Instanced, Singleton};
+// ADR-0119: the `#[derive(Singleton)]` / `#[derive(Instanced)]` /
+// `#[derive(Embeddable)]` proc-macros are retired. Cardinality is the
+// `Addressable::Resolver`, and the `Singleton` / `Instanced` marker traits
+// derive from it by blanket impl — so the only `aether_actor::{Singleton,
+// Instanced}` surface now is the trait (re-exported via `actor::*` above).
 
 /// Wrap one-or-more items in `#[cfg(not(target_arch = "wasm32"))]`.
 /// Issue 552 stage 4's wasm-header-only build of `aether-capabilities`

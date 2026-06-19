@@ -49,7 +49,7 @@
 #![allow(clippy::unused_self, clippy::needless_pass_by_value)]
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, FfiInitCtx, Instanced, Mail, Manual, OutboundReply, Subname, actor,
+    BootError, FfiActor, FfiCtx, FfiInitCtx, Mail, Manual, OutboundReply, Subname, actor,
 };
 use aether_data::MailboxId;
 use aether_test_fixtures_kinds::{
@@ -109,9 +109,7 @@ impl FfiActor for InlineParent {
 /// constructs it in-process).
 pub struct InlineChild;
 
-impl Instanced for InlineChild {}
-
-#[actor]
+#[actor(instanced)]
 impl FfiActor for InlineChild {
     const NAMESPACE: &'static str = "test.inline.child";
 
@@ -164,9 +162,7 @@ pub struct InlineStatefulChild {
     count: u32,
 }
 
-impl Instanced for InlineStatefulChild {}
-
-#[actor]
+#[actor(instanced)]
 impl FfiActor for InlineStatefulChild {
     const NAMESPACE: &'static str = "test.inline.stateful_child";
 
@@ -262,9 +258,7 @@ impl FfiActor for InlineDespawnParent {
 /// not exported (the parent constructs it in-process).
 pub struct InlineDespawnChild;
 
-impl Instanced for InlineDespawnChild {}
-
-#[actor]
+#[actor(instanced)]
 impl FfiActor for InlineDespawnChild {
     const NAMESPACE: &'static str = "test.inline.despawn_child";
 

@@ -1492,7 +1492,7 @@ mod tests {
         /// dispatch.
         #[test]
         fn spawn_instanced_actor_smoke() {
-            use aether_actor::{Addressable as ActorTrait, HandlesKind, Instanced};
+            use aether_actor::{Addressable as ActorTrait, HandlesKind};
             use aether_data::{Kind as DataKind, KindId as DataKindId, mailbox_id_from_name};
             use aether_substrate::{
                 BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, SpawnError,
@@ -1516,8 +1516,8 @@ mod tests {
             }
             impl ActorTrait for Child {
                 const NAMESPACE: &'static str = "test.spawn.child";
+                type Resolver = aether_actor::Many;
             }
-            impl Instanced for Child {}
             impl HandlesKind<Bump> for Child {}
             impl aether_actor::Lifecycle for Child {
                 type Config = Arc<AtomicU32>;

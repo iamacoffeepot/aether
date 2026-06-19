@@ -59,8 +59,8 @@ struct RingRelay {
 
 impl aether_actor::Addressable for RingRelay {
     const NAMESPACE: &'static str = "mlat.ring";
+    type Resolver = aether_actor::Many;
 }
-impl aether_actor::Instanced for RingRelay {}
 impl aether_actor::HandlesKind<Ping> for RingRelay {}
 impl aether_actor::Lifecycle for RingRelay {
     type Config = MailboxId;
@@ -111,13 +111,12 @@ struct HoldRelay;
 
 impl aether_actor::Addressable for HoldRelay {
     const NAMESPACE: &'static str = "mlat.hold";
+    // ADR-0119: `Many` (Instanced) lets the bench's `spawn_actor` place it.
+    // `spawn_inherit` no longer requires its worker actor type to be a
+    // Singleton, so the old dual-marker hack is retired — cardinality is now
+    // exactly one resolver.
+    type Resolver = aether_actor::Many;
 }
-// Both markers: `Instanced` lets the bench's `spawn_actor` place it,
-// `Singleton` satisfies `spawn_inherit`'s bound (the worker-thread hold
-// primitive is singleton-oriented). A test fixture only — production
-// actors pick one role.
-impl aether_actor::Instanced for HoldRelay {}
-impl aether_actor::Singleton for HoldRelay {}
 impl aether_actor::HandlesKind<Ping> for HoldRelay {}
 impl aether_actor::Lifecycle for HoldRelay {
     type Config = ();
