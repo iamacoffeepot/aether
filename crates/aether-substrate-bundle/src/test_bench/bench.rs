@@ -1317,466 +1317,455 @@ mod tests {
         assert_eq!(format_pending_roots(&[]), "<none>");
     }
 
-    /// Every `TestBench` test boots a full multi-worker chassis (offscreen
-    /// wgpu), so they live in `mod heavy` for the `serial-heavy` nextest
-    /// group (issue 1522). Driverless boxes still skip on boot error.
-    mod heavy {
-        use super::*;
-        use crate::test_bench::BenchOp;
-        use std::thread;
-        use std::time::Instant;
+    use crate::test_bench::BenchOp;
+    use std::thread;
+    use std::time::Instant;
 
-        /// Issue 2062: a wedged settlement gate names the stuck root and its
-        /// `(in_flight, held_open)` counts instead of a bare timeout. Drive
-        /// the dump path directly against a deliberately-stuck root recorded
-        /// on the live settlement table — `record_sent` with no matching
-        /// `Finished` leaves a root at `in_flight=1` forever — and assert the
-        /// surfaced `SettlementTimeout` enumerates it. No timing wait: the
-        /// gate's *wedge detection* is covered by `await_internal_signal`'s
-        /// own tests; this covers the *diagnostic content*.
-        #[test]
-        fn settlement_wedge_dump_names_stuck_root() {
-            let tb = match TestBench::start_with_size(64, 48) {
-                Ok(tb) => tb,
-                Err(e) => {
-                    eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
-                    return;
-                }
-            };
-            // A synthetic root that never settles: one `Sent`, no `Finished`.
-            let stuck = MailId {
-                sender: MailboxId(0xDEAD),
-                correlation_id: 0xBEEF,
-            };
-            tb.queue
-                .trace_handle()
-                .settlement_counter()
-                .record_sent(stuck);
+    /// Issue 2062: a wedged settlement gate names the stuck root and its
+    /// `(in_flight, held_open)` counts instead of a bare timeout. Drive
+    /// the dump path directly against a deliberately-stuck root recorded
+    /// on the live settlement table — `record_sent` with no matching
+    /// `Finished` leaves a root at `in_flight=1` forever — and assert the
+    /// surfaced `SettlementTimeout` enumerates it. No timing wait: the
+    /// gate's *wedge detection* is covered by `await_internal_signal`'s
+    /// own tests; this covers the *diagnostic content*.
+    #[test]
+    fn settlement_wedge_dump_names_stuck_root() {
+        let tb = match TestBench::start_with_size(64, 48) {
+            Ok(tb) => tb,
+            Err(e) => {
+                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                return;
+            }
+        };
+        // A synthetic root that never settles: one `Sent`, no `Finished`.
+        let stuck = MailId {
+            sender: MailboxId(0xDEAD),
+            correlation_id: 0xBEEF,
+        };
+        tb.queue
+            .trace_handle()
+            .settlement_counter()
+            .record_sent(stuck);
 
-            let err =
-                tb.settlement_timeout("stuck.recipient".to_owned(), "StuckKind", "test.wedge");
-            let TestBenchError::SettlementTimeout { pending, .. } = &err else {
-                panic!("expected SettlementTimeout, got {err:?}");
-            };
-            assert!(
-                pending.contains("in_flight=1"),
-                "dump should name the stuck root with in_flight=1: {pending}",
-            );
-            // The rendered error string carries the dump too.
-            assert!(
-                err.to_string().contains("in_flight=1"),
-                "Display should surface the pending dump: {err}",
-            );
-        }
+        let err = tb.settlement_timeout("stuck.recipient".to_owned(), "StuckKind", "test.wedge");
+        let TestBenchError::SettlementTimeout { pending, .. } = &err else {
+            panic!("expected SettlementTimeout, got {err:?}");
+        };
+        assert!(
+            pending.contains("in_flight=1"),
+            "dump should name the stuck root with in_flight=1: {pending}",
+        );
+        // The rendered error string carries the dump too.
+        assert!(
+            err.to_string().contains("in_flight=1"),
+            "Display should surface the pending dump: {err}",
+        );
+    }
 
-        /// Boot, advance one tick, capture, sanity-check the PNG.
-        /// The default scene is empty so the captured frame is the
-        /// background-clear color uniformly. The test asserts the PNG
-        /// is well-formed; deeper visual assertions land in the scenario
-        /// library.
-        ///
-        /// The unit test lets `TestBench::start_with_size` fail naturally
-        /// on driverless runners and skips on any boot error, rather than
-        /// pulling in the `test_helpers` wgpu probe — keeping the lib
-        /// unit test self-contained (the same skip semantics, keyed off
-        /// the boot result rather than a separate adapter probe).
-        #[test]
-        fn boot_advance_capture_round_trip() {
-            let mut tb = match TestBench::start_with_size(64, 48) {
-                Ok(tb) => tb,
-                Err(e) => {
-                    eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
-                    return;
-                }
-            };
-            let result = tb
-                .execute(vec![
-                    ("tick", BenchOp::advance(1)),
-                    ("snap", BenchOp::capture()),
-                ])
-                .expect("advance + capture");
-            let png = result.captured("snap").expect("snap step ran");
-            assert!(
-                png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
-                "captured bytes are not a PNG: first 8 bytes={:?}",
-                &png.iter().take(8).copied().collect::<Vec<u8>>(),
-            );
-        }
+    /// Boot, advance one tick, capture, sanity-check the PNG.
+    /// The default scene is empty so the captured frame is the
+    /// background-clear color uniformly. The test asserts the PNG
+    /// is well-formed; deeper visual assertions land in the scenario
+    /// library.
+    ///
+    /// The unit test lets `TestBench::start_with_size` fail naturally
+    /// on driverless runners and skips on any boot error, rather than
+    /// pulling in the `test_helpers` wgpu probe — keeping the lib
+    /// unit test self-contained (the same skip semantics, keyed off
+    /// the boot result rather than a separate adapter probe).
+    #[test]
+    fn boot_advance_capture_round_trip() {
+        let mut tb = match TestBench::start_with_size(64, 48) {
+            Ok(tb) => tb,
+            Err(e) => {
+                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                return;
+            }
+        };
+        let result = tb
+            .execute(vec![
+                ("tick", BenchOp::advance(1)),
+                ("snap", BenchOp::capture()),
+            ])
+            .expect("advance + capture");
+        let png = result.captured("snap").expect("snap step ran");
+        assert!(
+            png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
+            "captured bytes are not a PNG: first 8 bytes={:?}",
+            &png.iter().take(8).copied().collect::<Vec<u8>>(),
+        );
+    }
 
-        /// iamacoffeepot/aether#1273: `on_capture_frame` parks the request
-        /// on the capture queue and returns immediately — the reply happens
-        /// later on the chassis main thread. ADR-0086 §12 says deferred
-        /// replies MUST hold-open against the trace root; without that hold
-        /// `Settled{root}` fires before the reply lands and the wire `Call`
-        /// driving the MCP tool ends with zero collected reply events.
-        ///
-        /// This test sends `CaptureFrame` via `BenchOp::send_and_await` (the
-        /// shape the issue's regression test calls for) and asserts the
-        /// reply decodes to `CaptureFrameResult::Ok { png: <non-empty> }`.
-        /// The PNG comes back through the loopback's `EgressEvent::ToSession`
-        /// — same correlation-id round-trip the MCP harness uses, but
-        /// in-process.
-        #[test]
-        fn capture_frame_send_and_await_returns_png() {
-            let mut tb = match TestBench::start_with_size(64, 48) {
-                Ok(tb) => tb,
-                Err(e) => {
-                    eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
-                    return;
-                }
-            };
-            let result = tb
-                .execute(vec![
-                    ("tick", BenchOp::advance(1)),
-                    (
-                        "capture",
-                        BenchOp::send_and_await(
-                            RenderCapability::NAMESPACE,
-                            &CaptureFrame {
-                                mails: Vec::new(),
-                                after_mails: Vec::new(),
-                                checks: Vec::new(),
-                                similarity: None,
-                            },
-                        ),
+    /// iamacoffeepot/aether#1273: `on_capture_frame` parks the request
+    /// on the capture queue and returns immediately — the reply happens
+    /// later on the chassis main thread. ADR-0086 §12 says deferred
+    /// replies MUST hold-open against the trace root; without that hold
+    /// `Settled{root}` fires before the reply lands and the wire `Call`
+    /// driving the MCP tool ends with zero collected reply events.
+    ///
+    /// This test sends `CaptureFrame` via `BenchOp::send_and_await` (the
+    /// shape the issue's regression test calls for) and asserts the
+    /// reply decodes to `CaptureFrameResult::Ok { png: <non-empty> }`.
+    /// The PNG comes back through the loopback's `EgressEvent::ToSession`
+    /// — same correlation-id round-trip the MCP harness uses, but
+    /// in-process.
+    #[test]
+    fn capture_frame_send_and_await_returns_png() {
+        let mut tb = match TestBench::start_with_size(64, 48) {
+            Ok(tb) => tb,
+            Err(e) => {
+                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                return;
+            }
+        };
+        let result = tb
+            .execute(vec![
+                ("tick", BenchOp::advance(1)),
+                (
+                    "capture",
+                    BenchOp::send_and_await(
+                        RenderCapability::NAMESPACE,
+                        &CaptureFrame {
+                            mails: Vec::new(),
+                            after_mails: Vec::new(),
+                            checks: Vec::new(),
+                            similarity: None,
+                        },
                     ),
-                ])
-                .expect("advance + send_and_await(CaptureFrame)");
-            let reply: CaptureFrameResult = result
-                .reply("capture")
-                .expect("capture step replied with CaptureFrameResult");
-            match reply {
-                CaptureFrameResult::Ok { png, verdict, .. } => {
-                    assert!(
-                        verdict.is_none(),
-                        "no checks were requested, so the verdict must be absent",
-                    );
-                    assert!(
-                        png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
-                        "captured bytes are not a PNG: first 8 bytes={:?}",
-                        &png.iter().take(8).copied().collect::<Vec<u8>>(),
-                    );
-                }
-                CaptureFrameResult::Err { error } => {
-                    panic!("capture_frame replied Err: {error}");
-                }
+                ),
+            ])
+            .expect("advance + send_and_await(CaptureFrame)");
+        let reply: CaptureFrameResult = result
+            .reply("capture")
+            .expect("capture step replied with CaptureFrameResult");
+        match reply {
+            CaptureFrameResult::Ok { png, verdict, .. } => {
+                assert!(
+                    verdict.is_none(),
+                    "no checks were requested, so the verdict must be absent",
+                );
+                assert!(
+                    png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
+                    "captured bytes are not a PNG: first 8 bytes={:?}",
+                    &png.iter().take(8).copied().collect::<Vec<u8>>(),
+                );
+            }
+            CaptureFrameResult::Err { error } => {
+                panic!("capture_frame replied Err: {error}");
             }
         }
+    }
 
-        /// Issue iamacoffeepot/aether#723: chassis-source ticks are minted
-        /// via `push_chassis_root_mail`, and the input cap fanout
-        /// propagates `(root, parent_mail)` from the inbound through
-        /// `NativeCtx::fanout` so each subscriber-bound copy lands in the
-        /// same causal chain. Verified by registering a closure-bound
-        /// mailbox, subscribing it to ticks, advancing one tick, and
-        /// asserting the captured `MailDispatch` carries non-default root +
-        /// parent.
-        #[test]
-        fn tick_fanout_propagates_chassis_root_lineage() {
-            use aether_data::{Kind as DataKind, MailId};
-            use aether_kinds::LifecycleSubscribe;
-            use aether_substrate::mail::registry::MailDispatch;
-            use std::sync::Mutex;
+    /// Issue iamacoffeepot/aether#723: chassis-source ticks are minted
+    /// via `push_chassis_root_mail`, and the input cap fanout
+    /// propagates `(root, parent_mail)` from the inbound through
+    /// `NativeCtx::fanout` so each subscriber-bound copy lands in the
+    /// same causal chain. Verified by registering a closure-bound
+    /// mailbox, subscribing it to ticks, advancing one tick, and
+    /// asserting the captured `MailDispatch` carries non-default root +
+    /// parent.
+    #[test]
+    fn tick_fanout_propagates_chassis_root_lineage() {
+        use aether_data::{Kind as DataKind, MailId};
+        use aether_kinds::LifecycleSubscribe;
+        use aether_substrate::mail::registry::MailDispatch;
+        use std::sync::Mutex;
 
-            type CapturedRow = (MailId, MailId, Option<MailId>);
+        type CapturedRow = (MailId, MailId, Option<MailId>);
 
-            let mut tb = match TestBench::start_with_size(64, 48) {
-                Ok(tb) => tb,
-                Err(e) => {
-                    eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
-                    return;
-                }
-            };
+        let mut tb = match TestBench::start_with_size(64, 48) {
+            Ok(tb) => tb,
+            Err(e) => {
+                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                return;
+            }
+        };
 
-            // Register a synchronous closure mailbox that captures the
-            // lineage of every mail it receives. `register_inline` is the
-            // correct variant: the handler does immediate work (push into
-            // a captured Vec) rather than enqueueing onto a downstream
-            // inbox, so the producer-side `Received`/`Finished` bracket
-            // belongs on the call site. `validate_subscriber_mailbox`
-            // accepts both `Inbox` and `Inline` so the input cap's
-            // subscribe path still admits this mailbox. Pre-#845 this
-            // used `register_inbox` and the substrate's `run_frame`
-            // silently swallowed the resulting in_flight leak; strict
-            // propagation surfaces the variant mismatch as a
-            // `SettlementTimeout`, which is the right shape — the
-            // handler that owns the bracket gets to advertise its
-            // contract via the variant choice.
-            let captured: Arc<Mutex<Vec<CapturedRow>>> = Arc::new(Mutex::new(Vec::new()));
-            let captured_for_handler = Arc::clone(&captured);
-            let subscriber_mbox = tb.registry.register_inline(
-                "issue_723_test_subscriber",
-                Arc::new(move |dispatch: MailDispatch<'_>| {
-                    captured_for_handler
-                        .lock()
-                        .expect("test setup: captured mutex is never poisoned")
-                        .push((dispatch.mail_id, dispatch.root, dispatch.parent_mail));
-                }),
-            );
+        // Register a synchronous closure mailbox that captures the
+        // lineage of every mail it receives. `register_inline` is the
+        // correct variant: the handler does immediate work (push into
+        // a captured Vec) rather than enqueueing onto a downstream
+        // inbox, so the producer-side `Received`/`Finished` bracket
+        // belongs on the call site. `validate_subscriber_mailbox`
+        // accepts both `Inbox` and `Inline` so the input cap's
+        // subscribe path still admits this mailbox. Pre-#845 this
+        // used `register_inbox` and the substrate's `run_frame`
+        // silently swallowed the resulting in_flight leak; strict
+        // propagation surfaces the variant mismatch as a
+        // `SettlementTimeout`, which is the right shape — the
+        // handler that owns the bracket gets to advertise its
+        // contract via the variant choice.
+        let captured: Arc<Mutex<Vec<CapturedRow>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_handler = Arc::clone(&captured);
+        let subscriber_mbox = tb.registry.register_inline(
+            "issue_723_test_subscriber",
+            Arc::new(move |dispatch: MailDispatch<'_>| {
+                captured_for_handler
+                    .lock()
+                    .expect("test setup: captured mutex is never poisoned")
+                    .push((dispatch.mail_id, dispatch.root, dispatch.parent_mail));
+            }),
+        );
 
-            // Subscribe the closure mailbox to the `Tick` lifecycle stage
-            // (goes through the lifecycle cap's on_subscribe handler), then
-            // advance one tick. The advance issues a `LifecycleAdvance` whose
-            // chain root the lifecycle cap threads through
-            // `broadcast_to_subscribers` (`send_envelope_traced`) to every
-            // stage subscriber (issue 723 lineage, ADR-0082 §6). Sequencing
-            // both through `execute` settles the subscribe before the tick
-            // fires.
-            tb.execute(vec![
-                (
-                    "subscribe",
-                    BenchOp::send_mail(
-                        "aether.lifecycle",
-                        &LifecycleSubscribe {
-                            stage: Tick::ID.0,
-                            mailbox: subscriber_mbox.0,
-                        },
-                    ),
+        // Subscribe the closure mailbox to the `Tick` lifecycle stage
+        // (goes through the lifecycle cap's on_subscribe handler), then
+        // advance one tick. The advance issues a `LifecycleAdvance` whose
+        // chain root the lifecycle cap threads through
+        // `broadcast_to_subscribers` (`send_envelope_traced`) to every
+        // stage subscriber (issue 723 lineage, ADR-0082 §6). Sequencing
+        // both through `execute` settles the subscribe before the tick
+        // fires.
+        tb.execute(vec![
+            (
+                "subscribe",
+                BenchOp::send_mail(
+                    "aether.lifecycle",
+                    &LifecycleSubscribe {
+                        stage: Tick::ID.0,
+                        mailbox: subscriber_mbox.0,
+                    },
                 ),
-                ("advance", BenchOp::advance(1)),
-            ])
-            .expect("subscribe + advance");
+            ),
+            ("advance", BenchOp::advance(1)),
+        ])
+        .expect("subscribe + advance");
 
-            let captured = captured
-                .lock()
-                .expect("test setup: captured mutex is never poisoned");
-            assert!(
-                !captured.is_empty(),
-                "subscriber received no mail — fanout never reached it",
-            );
-            let (mail_id, root, parent) = captured[0];
-            // Issue 723 fix: each fanned-out copy gets its own MailId, but
-            // the root is inherited from the chassis-root tick and the
-            // parent_mail points at it. Pre-fix both would be MailId::NONE
-            // (orphaned: ctx.in_flight was NONE because the tick used
-            // bare push, AND the fanout used bare push too).
-            assert_ne!(
-                root,
-                MailId::NONE,
-                "fanned-out copy should inherit a non-default root"
-            );
-            assert!(
-                parent.is_some_and(|p| p != MailId::NONE),
-                "fanned-out copy should carry a non-default parent_mail (got {parent:?})",
-            );
-            // The fanned-out copy's own mail_id must be distinct from its
-            // parent — it's a child node in the trace tree.
-            assert_ne!(
-                mail_id,
-                parent.expect("test setup: parent was asserted non-None above"),
-                "fanned-out mail_id should differ from parent (each fanout copy gets a fresh id)"
-            );
-        }
+        let captured = captured
+            .lock()
+            .expect("test setup: captured mutex is never poisoned");
+        assert!(
+            !captured.is_empty(),
+            "subscriber received no mail — fanout never reached it",
+        );
+        let (mail_id, root, parent) = captured[0];
+        // Issue 723 fix: each fanned-out copy gets its own MailId, but
+        // the root is inherited from the chassis-root tick and the
+        // parent_mail points at it. Pre-fix both would be MailId::NONE
+        // (orphaned: ctx.in_flight was NONE because the tick used
+        // bare push, AND the fanout used bare push too).
+        assert_ne!(
+            root,
+            MailId::NONE,
+            "fanned-out copy should inherit a non-default root"
+        );
+        assert!(
+            parent.is_some_and(|p| p != MailId::NONE),
+            "fanned-out copy should carry a non-default parent_mail (got {parent:?})",
+        );
+        // The fanned-out copy's own mail_id must be distinct from its
+        // parent — it's a child node in the trace tree.
+        assert_ne!(
+            mail_id,
+            parent.expect("test setup: parent was asserted non-None above"),
+            "fanned-out mail_id should differ from parent (each fanout copy gets a fresh id)"
+        );
+    }
 
-        /// iamacoffeepot/aether#1489: a `Quit` mail drives the frame
-        /// lifecycle to its `Shutdown` terminal, finishing the in-flight
-        /// `Tick → Render → Present` frame first because the quit edge lives
-        /// on `Present` (ADR-0082 §3). This is the CI-runnable coverage for
-        /// the drain — the desktop winit `CloseRequested` / ctrlc bridges
-        /// that push the `Quit` are MCP-smoke territory, but the `Quit →
-        /// Present → Shutdown` graph behaviour they depend on is exercised
-        /// here without a live window (the bench shares the same
-        /// `frame_lifecycle_config` graph desktop uses).
-        ///
-        /// Registers an inline mailbox subscribed to the `Shutdown` stage,
-        /// sends `Quit` to `aether.lifecycle`, then advances one frame. The
-        /// run-frame loop drives the whole `Tick → Render → Present →
-        /// Shutdown` chain in that single advance once `quit_pending` is set
-        /// (each stage breaks the loop only at `Tick` cycle-complete or the
-        /// `next == 0` terminal), so observing the `Shutdown` broadcast at the
-        /// subscriber proves the quit was consumed at `Present` and that
-        /// `Shutdown` fired + settled.
-        #[test]
-        fn quit_drains_frame_then_broadcasts_shutdown() {
-            use aether_data::Kind as DataKind;
-            use aether_kinds::{LifecycleSubscribe, Quit, Shutdown};
-            use aether_substrate::mail::registry::MailDispatch;
-            use std::sync::Mutex;
+    /// iamacoffeepot/aether#1489: a `Quit` mail drives the frame
+    /// lifecycle to its `Shutdown` terminal, finishing the in-flight
+    /// `Tick → Render → Present` frame first because the quit edge lives
+    /// on `Present` (ADR-0082 §3). This is the CI-runnable coverage for
+    /// the drain — the desktop winit `CloseRequested` / ctrlc bridges
+    /// that push the `Quit` are MCP-smoke territory, but the `Quit →
+    /// Present → Shutdown` graph behaviour they depend on is exercised
+    /// here without a live window (the bench shares the same
+    /// `frame_lifecycle_config` graph desktop uses).
+    ///
+    /// Registers an inline mailbox subscribed to the `Shutdown` stage,
+    /// sends `Quit` to `aether.lifecycle`, then advances one frame. The
+    /// run-frame loop drives the whole `Tick → Render → Present →
+    /// Shutdown` chain in that single advance once `quit_pending` is set
+    /// (each stage breaks the loop only at `Tick` cycle-complete or the
+    /// `next == 0` terminal), so observing the `Shutdown` broadcast at the
+    /// subscriber proves the quit was consumed at `Present` and that
+    /// `Shutdown` fired + settled.
+    #[test]
+    fn quit_drains_frame_then_broadcasts_shutdown() {
+        use aether_data::Kind as DataKind;
+        use aether_kinds::{LifecycleSubscribe, Quit, Shutdown};
+        use aether_substrate::mail::registry::MailDispatch;
+        use std::sync::Mutex;
 
-            let mut tb = match TestBench::start_with_size(64, 48) {
-                Ok(tb) => tb,
-                Err(e) => {
-                    eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
-                    return;
-                }
-            };
+        let mut tb = match TestBench::start_with_size(64, 48) {
+            Ok(tb) => tb,
+            Err(e) => {
+                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                return;
+            }
+        };
 
-            // Record the kind id of every mail the observer receives. The
-            // lifecycle cap broadcasts the `Shutdown` stage to its
-            // subscribers when it reaches the terminal; `register_inline` is
-            // the right variant (immediate work, no downstream enqueue) so
-            // the producer-side settlement bracket stays on the broadcast
-            // call site — the same shape the Tick-fanout test above relies on.
-            let observed: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
-            let observed_for_handler = Arc::clone(&observed);
-            let observer_mailbox = tb.registry.register_inline(
-                "issue_1489_shutdown_observer",
-                Arc::new(move |dispatch: MailDispatch<'_>| {
-                    observed_for_handler
-                        .lock()
-                        .expect("test setup: observed mutex is never poisoned")
-                        .push(dispatch.kind.0);
-                }),
-            );
+        // Record the kind id of every mail the observer receives. The
+        // lifecycle cap broadcasts the `Shutdown` stage to its
+        // subscribers when it reaches the terminal; `register_inline` is
+        // the right variant (immediate work, no downstream enqueue) so
+        // the producer-side settlement bracket stays on the broadcast
+        // call site — the same shape the Tick-fanout test above relies on.
+        let observed: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_handler = Arc::clone(&observed);
+        let observer_mailbox = tb.registry.register_inline(
+            "issue_1489_shutdown_observer",
+            Arc::new(move |dispatch: MailDispatch<'_>| {
+                observed_for_handler
+                    .lock()
+                    .expect("test setup: observed mutex is never poisoned")
+                    .push(dispatch.kind.0);
+            }),
+        );
 
-            // Subscribe to Shutdown, set the quit flag, then advance one
-            // frame — `execute` settles each step before the next, so the
-            // subscription and `quit_pending` are both in place when the
-            // advance fires.
-            tb.execute(vec![
-                (
-                    "subscribe_shutdown",
-                    BenchOp::send_mail(
-                        "aether.lifecycle",
-                        &LifecycleSubscribe {
-                            stage: <Shutdown as DataKind>::ID.0,
-                            mailbox: observer_mailbox.0,
-                        },
-                    ),
+        // Subscribe to Shutdown, set the quit flag, then advance one
+        // frame — `execute` settles each step before the next, so the
+        // subscription and `quit_pending` are both in place when the
+        // advance fires.
+        tb.execute(vec![
+            (
+                "subscribe_shutdown",
+                BenchOp::send_mail(
+                    "aether.lifecycle",
+                    &LifecycleSubscribe {
+                        stage: <Shutdown as DataKind>::ID.0,
+                        mailbox: observer_mailbox.0,
+                    },
                 ),
-                ("quit", BenchOp::send_mail("aether.lifecycle", &Quit {})),
-                ("advance", BenchOp::advance(1)),
-            ])
-            .expect("subscribe + quit + advance");
+            ),
+            ("quit", BenchOp::send_mail("aether.lifecycle", &Quit {})),
+            ("advance", BenchOp::advance(1)),
+        ])
+        .expect("subscribe + quit + advance");
 
-            let observed = observed
-                .lock()
-                .expect("test setup: observed mutex is never poisoned");
-            assert!(
-                observed.contains(&<Shutdown as DataKind>::ID.0),
-                "Shutdown broadcast never reached the subscriber — quit was not drained to the \
+        let observed = observed
+            .lock()
+            .expect("test setup: observed mutex is never poisoned");
+        assert!(
+            observed.contains(&<Shutdown as DataKind>::ID.0),
+            "Shutdown broadcast never reached the subscriber — quit was not drained to the \
              terminal; observed kind ids: {observed:?}",
-            );
+        );
+    }
+
+    /// Issue 607 Phase 3 verify: spawn an instanced actor through
+    /// `TestBench::spawn_actor`, exercise `Subname::Counter` +
+    /// `Subname::Named`, assert returned `MailboxId` matches the
+    /// deterministic full-name hash, confirm reused subnames fail,
+    /// and confirm `after_init` mail lands as the actor's first
+    /// dispatch.
+    #[test]
+    fn spawn_instanced_actor_smoke() {
+        use aether_actor::{Addressable as ActorTrait, HandlesKind};
+        use aether_data::{Kind as DataKind, KindId as DataKindId, mailbox_id_from_name};
+        use aether_substrate::{
+            BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, SpawnError, Subname,
+        };
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Bump {
+            tag: u32,
+        }
+        impl DataKind for Bump {
+            const NAME: &'static str = "test.spawn.bump";
+            const ID: DataKindId = DataKindId(0xB0B1_B2B3_B4B5_B6B7);
+            aether_data::pod_kind_codec!();
         }
 
-        /// Issue 607 Phase 3 verify: spawn an instanced actor through
-        /// `TestBench::spawn_actor`, exercise `Subname::Counter` +
-        /// `Subname::Named`, assert returned `MailboxId` matches the
-        /// deterministic full-name hash, confirm reused subnames fail,
-        /// and confirm `after_init` mail lands as the actor's first
-        /// dispatch.
-        #[test]
-        fn spawn_instanced_actor_smoke() {
-            use aether_actor::{Addressable as ActorTrait, HandlesKind};
-            use aether_data::{Kind as DataKind, KindId as DataKindId, mailbox_id_from_name};
-            use aether_substrate::{
-                BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, SpawnError,
-                Subname,
-            };
-            use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-
-            #[repr(C)]
-            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-            struct Bump {
-                tag: u32,
-            }
-            impl DataKind for Bump {
-                const NAME: &'static str = "test.spawn.bump";
-                const ID: DataKindId = DataKindId(0xB0B1_B2B3_B4B5_B6B7);
-                aether_data::pod_kind_codec!();
-            }
-
-            struct Child {
-                received: Arc<AtomicU32>,
-            }
-            impl ActorTrait for Child {
-                const NAMESPACE: &'static str = "test.spawn.child";
-                type Resolver = aether_actor::Many;
-            }
-            impl HandlesKind<Bump> for Child {}
-            impl aether_actor::Lifecycle for Child {
-                type Config = Arc<AtomicU32>;
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init(
-                    config: Self::Config,
-                    _ctx: &mut NativeInitCtx<'_>,
-                ) -> Result<Self, BootError> {
-                    Ok(Self { received: config })
-                }
-            }
-            impl NativeActor for Child {}
-            impl NativeDispatch for Child {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    _ctx: &mut NativeCtx<'_, aether_substrate::Manual>,
-                    kind: KindId,
-                    payload: &[u8],
-                ) -> Option<()> {
-                    if kind.0 == Bump::ID.0 {
-                        let _ = Bump::decode_from_bytes(payload)?;
-                        self.received.fetch_add(1, AtomicOrdering::SeqCst);
-                        return Some(());
-                    }
-                    None
-                }
-            }
-
-            let tb = match TestBench::start_with_size(64, 48) {
-                Ok(tb) => tb,
-                Err(e) => {
-                    eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
-                    return;
-                }
-            };
-
-            let received = Arc::new(AtomicU32::new(0));
-
-            // Subname::Counter — first instance, full name "test.spawn.child:0".
-            let id_a = tb
-                .spawn_actor::<Child>(Subname::Counter, Arc::clone(&received))
-                .after_init(Bump { tag: 1 })
-                .after_init(Bump { tag: 2 })
-                .finish()
-                .expect("first counter spawn");
-            assert_eq!(
-                id_a,
-                MailboxId(mailbox_id_from_name("test.spawn.child:0").0),
-                "Counter subname allocates from a per-Spawner counter starting at 0"
-            );
-
-            // Subname::Named — second instance, full name "test.spawn.child:alpha".
-            let id_b = tb
-                .spawn_actor::<Child>(Subname::Named("alpha"), Arc::clone(&received))
-                .finish()
-                .expect("named spawn");
-            assert_eq!(
-                id_b,
-                MailboxId(mailbox_id_from_name("test.spawn.child:alpha").0),
-            );
-
-            // Reused subname → SubnameInUse.
-            let err = tb
-                .spawn_actor::<Child>(Subname::Named("alpha"), Arc::clone(&received))
-                .finish()
-                .expect_err("reused subname must fail");
-            assert!(
-                matches!(err, SpawnError::SubnameInUse { .. }),
-                "expected SubnameInUse, got {err:?}"
-            );
-
-            // Wait briefly for the two pre-loaded `Bump` mails to land in
-            // the first instance's dispatcher.
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while received.load(AtomicOrdering::SeqCst) < 2 && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(5));
-            }
-            assert_eq!(
-                received.load(AtomicOrdering::SeqCst),
-                2,
-                "both pre-loaded after_init mails should dispatch to the first instance"
-            );
-
-            // Live registry slots are populated by id.
-            assert!(
-                tb.actor_registry().is_live(id_a),
-                "first instance should be Live in the actor registry"
-            );
-            assert!(
-                tb.actor_registry().is_live(id_b),
-                "second instance should be Live in the actor registry"
-            );
+        struct Child {
+            received: Arc<AtomicU32>,
         }
+        impl ActorTrait for Child {
+            const NAMESPACE: &'static str = "test.spawn.child";
+            type Resolver = aether_actor::Many;
+        }
+        impl HandlesKind<Bump> for Child {}
+        impl aether_actor::Lifecycle for Child {
+            type Config = Arc<AtomicU32>;
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self { received: config })
+            }
+        }
+        impl NativeActor for Child {}
+        impl NativeDispatch for Child {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut NativeCtx<'_, aether_substrate::Manual>,
+                kind: KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Bump::ID.0 {
+                    let _ = Bump::decode_from_bytes(payload)?;
+                    self.received.fetch_add(1, AtomicOrdering::SeqCst);
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        let tb = match TestBench::start_with_size(64, 48) {
+            Ok(tb) => tb,
+            Err(e) => {
+                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                return;
+            }
+        };
+
+        let received = Arc::new(AtomicU32::new(0));
+
+        // Subname::Counter — first instance, full name "test.spawn.child:0".
+        let id_a = tb
+            .spawn_actor::<Child>(Subname::Counter, Arc::clone(&received))
+            .after_init(Bump { tag: 1 })
+            .after_init(Bump { tag: 2 })
+            .finish()
+            .expect("first counter spawn");
+        assert_eq!(
+            id_a,
+            MailboxId(mailbox_id_from_name("test.spawn.child:0").0),
+            "Counter subname allocates from a per-Spawner counter starting at 0"
+        );
+
+        // Subname::Named — second instance, full name "test.spawn.child:alpha".
+        let id_b = tb
+            .spawn_actor::<Child>(Subname::Named("alpha"), Arc::clone(&received))
+            .finish()
+            .expect("named spawn");
+        assert_eq!(
+            id_b,
+            MailboxId(mailbox_id_from_name("test.spawn.child:alpha").0),
+        );
+
+        // Reused subname → SubnameInUse.
+        let err = tb
+            .spawn_actor::<Child>(Subname::Named("alpha"), Arc::clone(&received))
+            .finish()
+            .expect_err("reused subname must fail");
+        assert!(
+            matches!(err, SpawnError::SubnameInUse { .. }),
+            "expected SubnameInUse, got {err:?}"
+        );
+
+        // Wait briefly for the two pre-loaded `Bump` mails to land in
+        // the first instance's dispatcher.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while received.load(AtomicOrdering::SeqCst) < 2 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            received.load(AtomicOrdering::SeqCst),
+            2,
+            "both pre-loaded after_init mails should dispatch to the first instance"
+        );
+
+        // Live registry slots are populated by id.
+        assert!(
+            tb.actor_registry().is_live(id_a),
+            "first instance should be Live in the actor registry"
+        );
+        assert!(
+            tb.actor_registry().is_live(id_b),
+            "second instance should be Live in the actor registry"
+        );
     }
 }

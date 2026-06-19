@@ -38,151 +38,145 @@ use aether_substrate_bundle::test_bench::test_helpers::{
     init_save_sandbox, locate_component_wasm, test_namespace_roots,
 };
 
-// Nested under `mod tests` so the nextest test name is
-// `tests::heavy::…` and the `test(/::heavy::/)` serial-heavy filter
-// matches it — a top-level `mod heavy` yields `heavy::…` (no leading
-// `::`) and silently leaks into the parallel pool (#1564).
 mod tests {
-    mod heavy {
-        use super::super::*;
-        use std::time::Instant;
+    use super::*;
+    use std::time::Instant;
 
-        #[test]
-        fn autoloaded_component_comes_up_with_no_hub() {
-            let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-            let Some(wasm_path) = locate_component_wasm("aether_test_fixtures_bundle") else {
-                assert!(
-                    !strict,
-                    "AETHER_REQUIRE_RUNTIME set but probe.wasm not pre-built; \
+    #[test]
+    fn autoloaded_component_comes_up_with_no_hub() {
+        let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
+        let Some(wasm_path) = locate_component_wasm("aether_test_fixtures_bundle") else {
+            assert!(
+                !strict,
+                "AETHER_REQUIRE_RUNTIME set but probe.wasm not pre-built; \
                  CI's `Pre-build component wasm for scenario tests` step is missing it",
-                );
-                eprintln!(
-                    "skipping: probe.wasm not built; \
+            );
+            eprintln!(
+                "skipping: probe.wasm not built; \
                  run `cargo build --target wasm32-unknown-unknown -p aether-test-fixtures --examples`",
-                );
-                return;
-            };
-            let wasm = fs::read(&wasm_path).expect("read probe wasm");
+            );
+            return;
+        };
+        let wasm = fs::read(&wasm_path).expect("read probe wasm");
 
-            // Round-trip the component through the pack format — the same
-            // bytes the bundle bin would embed and decode at boot.
-            let pack = Pack {
-                chassis: ChassisSettings::default(),
-                components: vec![PackedComponent {
-                    wasm,
-                    config: Vec::new(),
-                    name: Some("probe".to_owned()),
-                    export: None,
-                }],
-            };
-            let decoded = decode_pack(&encode_pack(&pack)).expect("pack round trip");
+        // Round-trip the component through the pack format — the same
+        // bytes the bundle bin would embed and decode at boot.
+        let pack = Pack {
+            chassis: ChassisSettings::default(),
+            components: vec![PackedComponent {
+                wasm,
+                config: Vec::new(),
+                name: Some("probe".to_owned()),
+                export: None,
+            }],
+        };
+        let decoded = decode_pack(&encode_pack(&pack)).expect("pack round trip");
 
-            // A hub-less headless env: no `rpc_addr`, no hub connection, and
-            // persistence off so the boot touches no shared on-disk state.
-            let env = HeadlessEnv {
-                namespace_roots: test_namespace_roots(init_save_sandbox("headless-autoload")),
-                http: HttpConfig::default(),
-                http_server: None,
-                anthropic: AnthropicConfig::default(),
-                gemini: GeminiConfig::default(),
-                tick_period: Duration::from_millis(16),
-                rpc_addr: None,
-                workers: None,
-                ring_caps: aether_substrate_bundle::RingCapacities::default(),
-                persist: PersistOverride::Argv(None),
-                handle_store_max_bytes: None,
-                autoload: decoded
-                    .components
-                    .into_iter()
-                    .map(AutoloadComponent::from)
-                    .collect(),
-            };
+        // A hub-less headless env: no `rpc_addr`, no hub connection, and
+        // persistence off so the boot touches no shared on-disk state.
+        let env = HeadlessEnv {
+            namespace_roots: test_namespace_roots(init_save_sandbox("headless-autoload")),
+            http: HttpConfig::default(),
+            http_server: None,
+            anthropic: AnthropicConfig::default(),
+            gemini: GeminiConfig::default(),
+            tick_period: Duration::from_millis(16),
+            rpc_addr: None,
+            workers: None,
+            ring_caps: aether_substrate_bundle::RingCapacities::default(),
+            persist: PersistOverride::Argv(None),
+            handle_store_max_bytes: None,
+            autoload: decoded
+                .components
+                .into_iter()
+                .map(AutoloadComponent::from)
+                .collect(),
+        };
 
-            // `build` queues the autoload mail; the worker pool (up after
-            // build) dispatches the load without the driver loop running,
-            // so the trampoline appears without ever calling `run()`.
-            let built = HeadlessChassis::build(env).expect("build headless chassis");
-            let deadline = Instant::now() + Duration::from_secs(30);
-            loop {
-                if built.resolve_actor::<WasmTrampoline>("probe").is_some() {
-                    break;
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "autoloaded probe trampoline did not come up within 30s; live instances: {:?}",
-                    built.resolve_actors::<WasmTrampoline>(),
-                );
-                thread::sleep(Duration::from_millis(25));
+        // `build` queues the autoload mail; the worker pool (up after
+        // build) dispatches the load without the driver loop running,
+        // so the trampoline appears without ever calling `run()`.
+        let built = HeadlessChassis::build(env).expect("build headless chassis");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if built.resolve_actor::<WasmTrampoline>("probe").is_some() {
+                break;
             }
-            // Dropping `built` shuts the passives down in reverse boot order.
+            assert!(
+                Instant::now() < deadline,
+                "autoloaded probe trampoline did not come up within 30s; live instances: {:?}",
+                built.resolve_actors::<WasmTrampoline>(),
+            );
+            thread::sleep(Duration::from_millis(25));
         }
+        // Dropping `built` shuts the passives down in reverse boot order.
+    }
 
-        #[test]
-        fn autoloaded_component_from_runtime_manifest_comes_up() {
-            // The runtime-manifest twin of the embed test above: a real
-            // `BundleManifest` JSON of *paths* is read by
-            // `boot_manifest_autoload` — the same reader the chassis runs
-            // for `AETHER_BOOT_MANIFEST`, the path a `spawn_substrate`
-            // carrying a component list drives — and the resolved autoload
-            // brings the probe up with no hub.
-            let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-            let Some(wasm_path) = locate_component_wasm("aether_test_fixtures_bundle") else {
-                assert!(
-                    !strict,
-                    "AETHER_REQUIRE_RUNTIME set but probe.wasm not pre-built; \
+    #[test]
+    fn autoloaded_component_from_runtime_manifest_comes_up() {
+        // The runtime-manifest twin of the embed test above: a real
+        // `BundleManifest` JSON of *paths* is read by
+        // `boot_manifest_autoload` — the same reader the chassis runs
+        // for `AETHER_BOOT_MANIFEST`, the path a `spawn_substrate`
+        // carrying a component list drives — and the resolved autoload
+        // brings the probe up with no hub.
+        let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
+        let Some(wasm_path) = locate_component_wasm("aether_test_fixtures_bundle") else {
+            assert!(
+                !strict,
+                "AETHER_REQUIRE_RUNTIME set but probe.wasm not pre-built; \
                  CI's `Pre-build component wasm for scenario tests` step is missing it",
-                );
-                eprintln!(
-                    "skipping: probe.wasm not built; \
+            );
+            eprintln!(
+                "skipping: probe.wasm not built; \
                  run `cargo build --target wasm32-unknown-unknown -p aether-test-fixtures --examples`",
-                );
-                return;
-            };
+            );
+            return;
+        };
 
-            // Write a boot manifest of paths next to the test sandbox; the
-            // reader resolves the wasm bytes itself.
-            let sandbox = init_save_sandbox("headless-runtime-manifest");
-            let manifest_path = sandbox.join("boot-manifest.json");
-            let manifest_json = serde_json::json!({
-                "components": [{ "wasm": wasm_path, "name": "probe" }],
-            });
-            fs::write(
-                &manifest_path,
-                serde_json::to_vec(&manifest_json).expect("serialize boot manifest"),
-            )
-            .expect("write boot manifest");
+        // Write a boot manifest of paths next to the test sandbox; the
+        // reader resolves the wasm bytes itself.
+        let sandbox = init_save_sandbox("headless-runtime-manifest");
+        let manifest_path = sandbox.join("boot-manifest.json");
+        let manifest_json = serde_json::json!({
+            "components": [{ "wasm": wasm_path, "name": "probe" }],
+        });
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest_json).expect("serialize boot manifest"),
+        )
+        .expect("write boot manifest");
 
-            let autoload = boot_manifest_autoload(&manifest_path).expect("read boot manifest");
-            assert_eq!(autoload.len(), 1, "one component listed in the manifest");
+        let autoload = boot_manifest_autoload(&manifest_path).expect("read boot manifest");
+        assert_eq!(autoload.len(), 1, "one component listed in the manifest");
 
-            let env = HeadlessEnv {
-                namespace_roots: test_namespace_roots(sandbox),
-                http: HttpConfig::default(),
-                http_server: None,
-                anthropic: AnthropicConfig::default(),
-                gemini: GeminiConfig::default(),
-                tick_period: Duration::from_millis(16),
-                rpc_addr: None,
-                workers: None,
-                ring_caps: aether_substrate_bundle::RingCapacities::default(),
-                persist: PersistOverride::Argv(None),
-                handle_store_max_bytes: None,
-                autoload,
-            };
+        let env = HeadlessEnv {
+            namespace_roots: test_namespace_roots(sandbox),
+            http: HttpConfig::default(),
+            http_server: None,
+            anthropic: AnthropicConfig::default(),
+            gemini: GeminiConfig::default(),
+            tick_period: Duration::from_millis(16),
+            rpc_addr: None,
+            workers: None,
+            ring_caps: aether_substrate_bundle::RingCapacities::default(),
+            persist: PersistOverride::Argv(None),
+            handle_store_max_bytes: None,
+            autoload,
+        };
 
-            let built = HeadlessChassis::build(env).expect("build headless chassis");
-            let deadline = Instant::now() + Duration::from_secs(30);
-            loop {
-                if built.resolve_actor::<WasmTrampoline>("probe").is_some() {
-                    break;
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "runtime-manifest probe trampoline did not come up within 30s; live instances: {:?}",
-                    built.resolve_actors::<WasmTrampoline>(),
-                );
-                thread::sleep(Duration::from_millis(25));
+        let built = HeadlessChassis::build(env).expect("build headless chassis");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if built.resolve_actor::<WasmTrampoline>("probe").is_some() {
+                break;
             }
+            assert!(
+                Instant::now() < deadline,
+                "runtime-manifest probe trampoline did not come up within 30s; live instances: {:?}",
+                built.resolve_actors::<WasmTrampoline>(),
+            );
+            thread::sleep(Duration::from_millis(25));
         }
     }
 }

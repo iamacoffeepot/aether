@@ -705,194 +705,184 @@ mod cap_native {
             R::decode_from_bytes(&payload).expect("decode reply")
         }
 
-        /// Contention-sensitive driver tests: each boots a
-        /// `PassiveChassis` whose dispatcher thread must make timely
-        /// cross-thread progress for the poll-until deadline to pass, so
-        /// they serialize under `serial-heavy` (the `::heavy::` path is
-        /// the marker).
-        mod heavy {
-            use super::*;
+        /// Issue 607 Phase 6a: bind → list → unbind round-trip on a
+        /// loopback port. Asserts the cap-local supervisor map
+        /// reflects every step (bound, listed, unbound).
+        #[test]
+        fn bind_then_list_then_unbind_roundtrip() {
+            let (registry, rx, _chassis) = boot_tcp_substrate();
 
-            /// Issue 607 Phase 6a: bind → list → unbind round-trip on a
-            /// loopback port. Asserts the cap-local supervisor map
-            /// reflects every step (bound, listed, unbound).
-            #[test]
-            fn bind_then_list_then_unbind_roundtrip() {
-                let (registry, rx, _chassis) = boot_tcp_substrate();
-
-                // Bind to port 0 — let the OS pick a free port.
-                let bind_reply: BindListenerResult = drive_and_decode(
-                    &registry,
-                    &rx,
-                    TcpCapability::NAMESPACE,
-                    &BindListener {
-                        addr: "127.0.0.1:0".into(),
-                        name: None,
-                    },
-                );
-                let (listener_name, local_port) = match bind_reply {
-                    BindListenerResult::Ok {
-                        listener_name,
-                        local_port,
-                        ..
-                    } => (listener_name, local_port),
-                    BindListenerResult::Err { reason, .. } => panic!("bind failed: {reason}"),
-                };
-                assert_eq!(
+            // Bind to port 0 — let the OS pick a free port.
+            let bind_reply: BindListenerResult = drive_and_decode(
+                &registry,
+                &rx,
+                TcpCapability::NAMESPACE,
+                &BindListener {
+                    addr: "127.0.0.1:0".into(),
+                    name: None,
+                },
+            );
+            let (listener_name, local_port) = match bind_reply {
+                BindListenerResult::Ok {
                     listener_name,
-                    local_port.to_string(),
-                    "default subname should be the bound port",
-                );
-                assert!(local_port > 0, "OS-picked port should be non-zero");
+                    local_port,
+                    ..
+                } => (listener_name, local_port),
+                BindListenerResult::Err { reason, .. } => panic!("bind failed: {reason}"),
+            };
+            assert_eq!(
+                listener_name,
+                local_port.to_string(),
+                "default subname should be the bound port",
+            );
+            assert!(local_port > 0, "OS-picked port should be non-zero");
 
-                // List enumerates the one listener.
-                let list_reply: ListListenersResult = drive_and_decode(
-                    &registry,
-                    &rx,
-                    TcpCapability::NAMESPACE,
-                    &ListListeners::default(),
-                );
-                assert_eq!(list_reply.listeners.len(), 1, "exactly one listener");
-                let entry = &list_reply.listeners[0];
-                assert_eq!(entry.name, listener_name);
-                assert_eq!(entry.port, local_port);
-                assert_eq!(entry.addr, "127.0.0.1:0");
+            // List enumerates the one listener.
+            let list_reply: ListListenersResult = drive_and_decode(
+                &registry,
+                &rx,
+                TcpCapability::NAMESPACE,
+                &ListListeners::default(),
+            );
+            assert_eq!(list_reply.listeners.len(), 1, "exactly one listener");
+            let entry = &list_reply.listeners[0];
+            assert_eq!(entry.name, listener_name);
+            assert_eq!(entry.port, local_port);
+            assert_eq!(entry.addr, "127.0.0.1:0");
 
-                // Unbind — asynchronous reply via MonitorNotice.
-                let unbind_reply: UnbindListenerResult = drive_and_decode(
-                    &registry,
-                    &rx,
-                    TcpCapability::NAMESPACE,
-                    &UnbindListener {
-                        listener_name: listener_name.clone(),
-                    },
-                );
-                match unbind_reply {
-                    UnbindListenerResult::Ok { listener_name: ln } => assert_eq!(ln, listener_name),
-                    UnbindListenerResult::Err { reason, .. } => panic!("unbind failed: {reason}"),
-                }
-
-                // List should now be empty — cap-local supervisor map
-                // dropped the entry on MonitorNotice.
-                let list_reply: ListListenersResult = drive_and_decode(
-                    &registry,
-                    &rx,
-                    TcpCapability::NAMESPACE,
-                    &ListListeners::default(),
-                );
-                assert!(
-                    list_reply.listeners.is_empty(),
-                    "list should drop the unbound listener",
-                );
+            // Unbind — asynchronous reply via MonitorNotice.
+            let unbind_reply: UnbindListenerResult = drive_and_decode(
+                &registry,
+                &rx,
+                TcpCapability::NAMESPACE,
+                &UnbindListener {
+                    listener_name: listener_name.clone(),
+                },
+            );
+            match unbind_reply {
+                UnbindListenerResult::Ok { listener_name: ln } => assert_eq!(ln, listener_name),
+                UnbindListenerResult::Err { reason, .. } => panic!("unbind failed: {reason}"),
             }
 
-            /// Binding the same port twice fails the second bind. Uses
-            /// the first bind's actually-bound port to drive the second.
-            #[test]
-            fn bind_port_in_use_returns_err() {
-                let (registry, rx, _chassis) = boot_tcp_substrate();
+            // List should now be empty — cap-local supervisor map
+            // dropped the entry on MonitorNotice.
+            let list_reply: ListListenersResult = drive_and_decode(
+                &registry,
+                &rx,
+                TcpCapability::NAMESPACE,
+                &ListListeners::default(),
+            );
+            assert!(
+                list_reply.listeners.is_empty(),
+                "list should drop the unbound listener",
+            );
+        }
 
-                let first: BindListenerResult = drive_and_decode(
-                    &registry,
-                    &rx,
-                    TcpCapability::NAMESPACE,
-                    &BindListener {
-                        addr: "127.0.0.1:0".into(),
-                        name: Some("first".into()),
-                    },
-                );
-                let local_port = match first {
-                    BindListenerResult::Ok { local_port, .. } => local_port,
-                    BindListenerResult::Err { reason, .. } => panic!("first bind failed: {reason}"),
-                };
+        /// Binding the same port twice fails the second bind. Uses
+        /// the first bind's actually-bound port to drive the second.
+        #[test]
+        fn bind_port_in_use_returns_err() {
+            let (registry, rx, _chassis) = boot_tcp_substrate();
 
-                // Second bind on the same port — must fail.
-                let second: BindListenerResult = drive_and_decode(
-                    &registry,
-                    &rx,
-                    TcpCapability::NAMESPACE,
-                    &BindListener {
-                        addr: format!("127.0.0.1:{local_port}"),
-                        name: Some("second".into()),
-                    },
-                );
-                match second {
-                    BindListenerResult::Ok { .. } => panic!("expected port-in-use Err"),
-                    BindListenerResult::Err { reason, addr } => {
-                        assert_eq!(addr, format!("127.0.0.1:{local_port}"));
-                        assert!(
-                            reason.starts_with("bind failed:"),
-                            "expected bind-fail reason, got: {reason}",
-                        );
-                    }
-                }
-            }
+            let first: BindListenerResult = drive_and_decode(
+                &registry,
+                &rx,
+                TcpCapability::NAMESPACE,
+                &BindListener {
+                    addr: "127.0.0.1:0".into(),
+                    name: Some("first".into()),
+                },
+            );
+            let local_port = match first {
+                BindListenerResult::Ok { local_port, .. } => local_port,
+                BindListenerResult::Err { reason, .. } => panic!("first bind failed: {reason}"),
+            };
 
-            /// Unbind on an unknown name surfaces an Err with the name
-            /// echoed back.
-            #[test]
-            fn unbind_unknown_listener_errors() {
-                let (registry, rx, _chassis) = boot_tcp_substrate();
-
-                let reply: UnbindListenerResult = drive_and_decode(
-                    &registry,
-                    &rx,
-                    TcpCapability::NAMESPACE,
-                    &UnbindListener {
-                        listener_name: "nope".into(),
-                    },
-                );
-                match reply {
-                    UnbindListenerResult::Err { listener_name, .. } => {
-                        assert_eq!(listener_name, "nope");
-                    }
-                    UnbindListenerResult::Ok { .. } => panic!("expected Err for unknown listener"),
+            // Second bind on the same port — must fail.
+            let second: BindListenerResult = drive_and_decode(
+                &registry,
+                &rx,
+                TcpCapability::NAMESPACE,
+                &BindListener {
+                    addr: format!("127.0.0.1:{local_port}"),
+                    name: Some("second".into()),
+                },
+            );
+            match second {
+                BindListenerResult::Ok { .. } => panic!("expected port-in-use Err"),
+                BindListenerResult::Err { reason, addr } => {
+                    assert_eq!(addr, format!("127.0.0.1:{local_port}"));
+                    assert!(
+                        reason.starts_with("bind failed:"),
+                        "expected bind-fail reason, got: {reason}",
+                    );
                 }
             }
+        }
 
-            // Pre-#775 the session round-trip test asserted that
-            // SessionData / SessionClosed broadcasts arrived at the egress
-            // after a real TCP client wrote then dropped. Issue 775 retired
-            // the BroadcastCapability + observation fan-out, so the
-            // session actor no longer publishes those kinds — the test was
-            // deleted with the broadcasts.
+        /// Unbind on an unknown name surfaces an Err with the name
+        /// echoed back.
+        #[test]
+        fn unbind_unknown_listener_errors() {
+            let (registry, rx, _chassis) = boot_tcp_substrate();
 
-            /// Two concurrent binds on different ports both surface in
-            /// `ListListeners`.
-            #[test]
-            fn list_enumerates_two_concurrent_listeners() {
-                let (registry, rx, _chassis) = boot_tcp_substrate();
-
-                let _: BindListenerResult = drive_and_decode(
-                    &registry,
-                    &rx,
-                    TcpCapability::NAMESPACE,
-                    &BindListener {
-                        addr: "127.0.0.1:0".into(),
-                        name: Some("admin".into()),
-                    },
-                );
-                let _: BindListenerResult = drive_and_decode(
-                    &registry,
-                    &rx,
-                    TcpCapability::NAMESPACE,
-                    &BindListener {
-                        addr: "127.0.0.1:0".into(),
-                        name: Some("game".into()),
-                    },
-                );
-
-                let list: ListListenersResult = drive_and_decode(
-                    &registry,
-                    &rx,
-                    TcpCapability::NAMESPACE,
-                    &ListListeners::default(),
-                );
-                let mut names: Vec<String> =
-                    list.listeners.iter().map(|l| l.name.clone()).collect();
-                names.sort();
-                assert_eq!(names, vec!["admin".to_string(), "game".to_string()]);
+            let reply: UnbindListenerResult = drive_and_decode(
+                &registry,
+                &rx,
+                TcpCapability::NAMESPACE,
+                &UnbindListener {
+                    listener_name: "nope".into(),
+                },
+            );
+            match reply {
+                UnbindListenerResult::Err { listener_name, .. } => {
+                    assert_eq!(listener_name, "nope");
+                }
+                UnbindListenerResult::Ok { .. } => panic!("expected Err for unknown listener"),
             }
+        }
+
+        // Pre-#775 the session round-trip test asserted that
+        // SessionData / SessionClosed broadcasts arrived at the egress
+        // after a real TCP client wrote then dropped. Issue 775 retired
+        // the BroadcastCapability + observation fan-out, so the
+        // session actor no longer publishes those kinds — the test was
+        // deleted with the broadcasts.
+
+        /// Two concurrent binds on different ports both surface in
+        /// `ListListeners`.
+        #[test]
+        fn list_enumerates_two_concurrent_listeners() {
+            let (registry, rx, _chassis) = boot_tcp_substrate();
+
+            let _: BindListenerResult = drive_and_decode(
+                &registry,
+                &rx,
+                TcpCapability::NAMESPACE,
+                &BindListener {
+                    addr: "127.0.0.1:0".into(),
+                    name: Some("admin".into()),
+                },
+            );
+            let _: BindListenerResult = drive_and_decode(
+                &registry,
+                &rx,
+                TcpCapability::NAMESPACE,
+                &BindListener {
+                    addr: "127.0.0.1:0".into(),
+                    name: Some("game".into()),
+                },
+            );
+
+            let list: ListListenersResult = drive_and_decode(
+                &registry,
+                &rx,
+                TcpCapability::NAMESPACE,
+                &ListListeners::default(),
+            );
+            let mut names: Vec<String> = list.listeners.iter().map(|l| l.name.clone()).collect();
+            names.sort();
+            assert_eq!(names, vec!["admin".to_string(), "game".to_string()]);
         }
     }
 }

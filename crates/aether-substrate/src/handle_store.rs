@@ -3095,89 +3095,84 @@ mod tests {
         }
     }
 
-    /// Contention-sensitive `get()` concurrency checks (issue #1447).
-    /// In `mod heavy` per the repo's heavy-test convention so nextest
-    /// serializes them (the `::heavy::` path → `serial-heavy` group).
-    /// These are an interim
-    /// stand-in: #1439's handle-store stress harness supersedes them
-    /// with measured before/after concurrent-`get()` throughput.
+    // Contention-sensitive `get()` concurrency checks (issue #1447). An
+    // interim stand-in: #1439's handle-store stress harness supersedes them
+    // with measured before/after concurrent-`get()` throughput.
+    use std::sync::Barrier;
+    use std::sync::mpsc;
+
+    /// Many threads hammering cache-hit `get()` on one shared
+    /// `Arc<HandleStore>` must all observe the correct kind +
+    /// bytes with no deadlock or panic. The cache-hit path now
+    /// takes only the read lock, so these run concurrently rather
+    /// than serializing through a write lock.
     #[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
-    mod heavy {
-        use super::*;
-        use std::sync::Barrier;
-        use std::sync::mpsc;
+    #[test]
+    fn concurrent_cache_hit_gets_return_correct_bytes() {
+        const THREADS: usize = 16;
+        const GETS_PER_THREAD: usize = 2_000;
 
-        /// Many threads hammering cache-hit `get()` on one shared
-        /// `Arc<HandleStore>` must all observe the correct kind +
-        /// bytes with no deadlock or panic. The cache-hit path now
-        /// takes only the read lock, so these run concurrently rather
-        /// than serializing through a write lock.
-        #[test]
-        fn concurrent_cache_hit_gets_return_correct_bytes() {
-            const THREADS: usize = 16;
-            const GETS_PER_THREAD: usize = 2_000;
+        let store = Arc::new(HandleStore::new(4096));
+        store
+            .put(HandleId(1), KindId(100), b"payload".to_vec())
+            .unwrap();
 
-            let store = Arc::new(HandleStore::new(4096));
-            store
-                .put(HandleId(1), KindId(100), b"payload".to_vec())
-                .unwrap();
-
-            // Release all workers at once to maximize overlap on the
-            // shared read lock.
-            let barrier = Arc::new(Barrier::new(THREADS));
-            let workers: Vec<_> = (0..THREADS)
-                .map(|_| {
-                    let store = Arc::clone(&store);
-                    let barrier = Arc::clone(&barrier);
-                    thread::spawn(move || {
-                        barrier.wait();
-                        for _ in 0..GETS_PER_THREAD {
-                            let (kind, bytes) = store.get(HandleId(1)).expect("entry present");
-                            assert_eq!(kind, KindId(100));
-                            assert_eq!(&bytes, b"payload");
-                        }
-                    })
+        // Release all workers at once to maximize overlap on the
+        // shared read lock.
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let workers: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..GETS_PER_THREAD {
+                        let (kind, bytes) = store.get(HandleId(1)).expect("entry present");
+                        assert_eq!(kind, KindId(100));
+                        assert_eq!(&bytes, b"payload");
+                    }
                 })
-                .collect();
+            })
+            .collect();
 
-            for w in workers {
-                w.join().expect("worker thread panicked");
-            }
+        for w in workers {
+            w.join().expect("worker thread panicked");
         }
+    }
 
-        /// A cache-hit `get()` must complete while another thread holds
-        /// the store's read lock — direct proof it takes only the read
-        /// lock (issue #1447). A write-locked `get` would block on the
-        /// outstanding read guard and trip the timeout.
-        #[test]
-        fn cache_hit_get_proceeds_while_read_lock_held() {
-            let store = Arc::new(HandleStore::new(1024));
-            store
-                .put(HandleId(1), KindId(100), b"payload".to_vec())
-                .unwrap();
+    /// A cache-hit `get()` must complete while another thread holds
+    /// the store's read lock — direct proof it takes only the read
+    /// lock (issue #1447). A write-locked `get` would block on the
+    /// outstanding read guard and trip the timeout.
+    #[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
+    #[test]
+    fn cache_hit_get_proceeds_while_read_lock_held() {
+        let store = Arc::new(HandleStore::new(1024));
+        store
+            .put(HandleId(1), KindId(100), b"payload".to_vec())
+            .unwrap();
 
-            // Hold the store's read lock for the duration of the
-            // spawned get. Two concurrent readers are fine; a writer
-            // would block here.
-            let guard = store.inner.read().expect("handle store lock poisoned");
+        // Hold the store's read lock for the duration of the
+        // spawned get. Two concurrent readers are fine; a writer
+        // would block here.
+        let guard = store.inner.read().expect("handle store lock poisoned");
 
-            let (tx, rx) = mpsc::channel();
-            let worker_store = Arc::clone(&store);
-            let worker = thread::spawn(move || {
-                let got = worker_store.get(HandleId(1));
-                tx.send(got).expect("send get result");
-            });
+        let (tx, rx) = mpsc::channel();
+        let worker_store = Arc::clone(&store);
+        let worker = thread::spawn(move || {
+            let got = worker_store.get(HandleId(1));
+            tx.send(got).expect("send get result");
+        });
 
-            let got = rx.recv_timeout(Duration::from_secs(10)).expect(
-                "cache-hit get serialized behind the held read lock — write lock on the hot path?",
-            );
-            drop(guard);
-            worker.join().expect("worker thread panicked");
+        let got = rx.recv_timeout(Duration::from_secs(10)).expect(
+            "cache-hit get serialized behind the held read lock — write lock on the hot path?",
+        );
+        drop(guard);
+        worker.join().expect("worker thread panicked");
 
-            let (kind, bytes) = got.expect("entry present");
-            assert_eq!(kind, KindId(100));
-            assert_eq!(&bytes, b"payload");
-        }
+        let (kind, bytes) = got.expect("entry present");
+        assert_eq!(kind, KindId(100));
+        assert_eq!(&bytes, b"payload");
     }
 
     // index.bin boot fast-path tests (issue #1446 / ADR-0049 §3).

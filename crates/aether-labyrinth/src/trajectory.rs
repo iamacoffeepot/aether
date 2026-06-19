@@ -434,80 +434,50 @@ mod native {
             );
         }
 
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        use aether_data::{SessionToken, Uuid};
+        use aether_substrate::mail::registry::MailboxEntry;
+
         /// End-to-end through the dispatcher thread: boot the cap via
         /// `boot_test_chassis_with`, enqueue `TrajectorySample`s then a
         /// `TrajectoryEnd`, assert `RecordResult::Ok` arrives on the
         /// loopback channel, and verify the store holds a decodable
-        /// `TrajectoryLog`. Sleep-polls under a multi-second deadline →
-        /// `mod heavy` for the `serial-heavy` nextest group (issue 1522).
-        mod heavy {
-            use std::thread;
-            use std::time::{Duration, Instant};
+        /// `TrajectoryLog`. Sleep-polls under a multi-second deadline.
+        #[test]
+        fn capability_routes_end_through_dispatcher_thread() {
+            let (store, mailer, registry, rx) = fresh_substrate();
 
-            use aether_data::{SessionToken, Uuid};
-            use aether_substrate::mail::registry::MailboxEntry;
+            let chassis =
+                boot_test_chassis_with::<TrajectoryRecorderCapability>(&registry, &mailer, ());
 
-            use super::*;
+            let mbx_id = registry
+                .lookup(TrajectoryRecorderCapability::NAMESPACE)
+                .expect("aether.trajectory registered");
 
-            #[test]
-            fn capability_routes_end_through_dispatcher_thread() {
-                let (store, mailer, registry, rx) = fresh_substrate();
+            let MailboxEntry::Inbox { handler, .. } = registry.entry(mbx_id).expect("entry exists")
+            else {
+                panic!("expected Inbox entry");
+            };
 
-                let chassis =
-                    boot_test_chassis_with::<TrajectoryRecorderCapability>(&registry, &mailer, ());
+            let seed = 1234u64;
 
-                let mbx_id = registry
-                    .lookup(TrajectoryRecorderCapability::NAMESPACE)
-                    .expect("aether.trajectory registered");
-
-                let MailboxEntry::Inbox { handler, .. } =
-                    registry.entry(mbx_id).expect("entry exists")
-                else {
-                    panic!("expected Inbox entry");
-                };
-
-                let seed = 1234u64;
-
-                // Send two samples.
-                for (tick, x, y, value) in [(1u32, 2u32, 3u32, 10u32), (2, 4, 5, 20)] {
-                    let s = TrajectorySample {
-                        seed,
-                        tick,
-                        x,
-                        y,
-                        value,
-                    };
-                    let bytes = s.encode_into_bytes();
-                    handler.enqueue(OwnedDispatch::disarmed(
-                        <TrajectorySample as Kind>::ID,
-                        "aether.trajectory.sample".to_owned(),
-                        None,
-                        Source::NONE,
-                        MailRef::from(bytes),
-                        1,
-                        MailId::NONE,
-                        MailId::NONE,
-                        None,
-                        Nanos(0),
-                        0,
-                        MailboxId(0),
-                    ));
-                }
-
-                // Send the terminal event with a session reply target so
-                // the dispatcher can route the RecordResult reply.
-                let reply_to =
-                    Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0x1862))));
-                let end = TrajectoryEnd {
+            // Send two samples.
+            for (tick, x, y, value) in [(1u32, 2u32, 3u32, 10u32), (2, 4, 5, 20)] {
+                let s = TrajectorySample {
                     seed,
-                    reason: TrajectoryEndReason::Completed,
+                    tick,
+                    x,
+                    y,
+                    value,
                 };
-                let bytes = end.encode_into_bytes();
+                let bytes = s.encode_into_bytes();
                 handler.enqueue(OwnedDispatch::disarmed(
-                    <TrajectoryEnd as Kind>::ID,
-                    "aether.trajectory.end".to_owned(),
+                    <TrajectorySample as Kind>::ID,
+                    "aether.trajectory.sample".to_owned(),
                     None,
-                    reply_to,
+                    Source::NONE,
                     MailRef::from(bytes),
                     1,
                     MailId::NONE,
@@ -517,47 +487,68 @@ mod native {
                     0,
                     MailboxId(0),
                 ));
-
-                // Poll the outbound channel for the RecordResult reply.
-                let deadline = Instant::now() + Duration::from_secs(5);
-                let payload = loop {
-                    if let Ok(EgressEvent::ToSession { payload, .. }) = rx.try_recv() {
-                        break payload;
-                    }
-                    assert!(
-                        Instant::now() < deadline,
-                        "RecordResult reply did not arrive within deadline"
-                    );
-                    thread::sleep(Duration::from_millis(5));
-                };
-
-                let result =
-                    RecordResult::decode_from_bytes(&payload).expect("RecordResult decodes");
-                let RecordResult::Ok {
-                    seed: out_seed,
-                    handle_id,
-                    kind_id,
-                } = result
-                else {
-                    panic!("expected RecordResult::Ok, got {result:?}");
-                };
-
-                assert_eq!(out_seed, seed, "seed echoed");
-                assert_ne!(handle_id, HandleId(0), "handle id is non-zero");
-                assert_eq!(kind_id, TrajectoryLog::ID, "kind id matches TrajectoryLog");
-
-                // Verify the handle store holds a decodable log.
-                let (stored_kind, stored_bytes) =
-                    store.get(handle_id).expect("handle exists in store");
-                assert_eq!(stored_kind, TrajectoryLog::ID);
-                let log = TrajectoryLog::decode_from_bytes(&stored_bytes)
-                    .expect("stored bytes decode to TrajectoryLog");
-                assert_eq!(log.seed, seed);
-                assert_eq!(log.end_reason, TrajectoryEndReason::Completed);
-                assert_eq!(log.samples.len(), 2);
-
-                drop(chassis);
             }
+
+            // Send the terminal event with a session reply target so
+            // the dispatcher can route the RecordResult reply.
+            let reply_to = Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0x1862))));
+            let end = TrajectoryEnd {
+                seed,
+                reason: TrajectoryEndReason::Completed,
+            };
+            let bytes = end.encode_into_bytes();
+            handler.enqueue(OwnedDispatch::disarmed(
+                <TrajectoryEnd as Kind>::ID,
+                "aether.trajectory.end".to_owned(),
+                None,
+                reply_to,
+                MailRef::from(bytes),
+                1,
+                MailId::NONE,
+                MailId::NONE,
+                None,
+                Nanos(0),
+                0,
+                MailboxId(0),
+            ));
+
+            // Poll the outbound channel for the RecordResult reply.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let payload = loop {
+                if let Ok(EgressEvent::ToSession { payload, .. }) = rx.try_recv() {
+                    break payload;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "RecordResult reply did not arrive within deadline"
+                );
+                thread::sleep(Duration::from_millis(5));
+            };
+
+            let result = RecordResult::decode_from_bytes(&payload).expect("RecordResult decodes");
+            let RecordResult::Ok {
+                seed: out_seed,
+                handle_id,
+                kind_id,
+            } = result
+            else {
+                panic!("expected RecordResult::Ok, got {result:?}");
+            };
+
+            assert_eq!(out_seed, seed, "seed echoed");
+            assert_ne!(handle_id, HandleId(0), "handle id is non-zero");
+            assert_eq!(kind_id, TrajectoryLog::ID, "kind id matches TrajectoryLog");
+
+            // Verify the handle store holds a decodable log.
+            let (stored_kind, stored_bytes) = store.get(handle_id).expect("handle exists in store");
+            assert_eq!(stored_kind, TrajectoryLog::ID);
+            let log = TrajectoryLog::decode_from_bytes(&stored_bytes)
+                .expect("stored bytes decode to TrajectoryLog");
+            assert_eq!(log.seed, seed);
+            assert_eq!(log.end_reason, TrajectoryEndReason::Completed);
+            assert_eq!(log.samples.len(), 2);
+
+            drop(chassis);
         }
 
         /// Builder rejects a duplicate claim on `aether.trajectory`.

@@ -157,20 +157,15 @@ run_step "cargo doc --workspace --no-deps (rustdoc lints denied)" \
 run_step "cargo xtask dist --no-bins (component wasm cross-build)" \
     cargo xtask dist --no-bins
 
-# Slowest Rust step, split into two passes (iamacoffeepot/aether#1511).
-# Pass 1 runs everything except the `::heavy::` contention tests at full
-# parallelism; pass 2 runs the heavy set alone (`--test-threads 1`) on the
-# now-idle machine, so each heavy test's teardown park/wake path isn't
-# fighting the rest of the suite for cores. `set -e` aborts on the first
-# failing pass. AETHER_REQUIRE_RUNTIME=1 mirrors CI so a missing wasm
-# artifact fails loudly rather than skipping silently.
-run_step "cargo nextest run (lightweight, parallel)" \
+# Slowest Rust step. The whole suite runs at full parallelism — the
+# `aether-substrate-bundle` integration tests that fork real substrates carry
+# a generous per-test slow-timeout in `.config/nextest.toml`, so concurrent
+# fork contention stretches their wall-clock without tripping the steady-state
+# cap. AETHER_REQUIRE_RUNTIME=1 mirrors CI so a missing wasm artifact fails
+# loudly rather than skipping silently.
+run_step "cargo nextest run (workspace, parallel)" \
     env AETHER_REQUIRE_RUNTIME=1 \
-    cargo nextest run --workspace --all-features --profile ci -E 'not test(/::heavy::/)'
-
-run_step "cargo nextest run (heavy, serial on a quiet machine)" \
-    env AETHER_REQUIRE_RUNTIME=1 \
-    cargo nextest run --workspace --all-features --profile ci -E 'test(/::heavy::/)' --test-threads 1
+    cargo nextest run --workspace --all-features --profile ci
 
 stamp_pass
 echo "[preflight] OK."

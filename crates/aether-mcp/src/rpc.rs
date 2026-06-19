@@ -819,21 +819,15 @@ mod tests {
         }
     }
 
-    /// Contention/backoff-sensitive tests live in `mod heavy`: the restart
-    /// path races a socket close + same-port re-bind, so it is timing
-    /// sensitive — serialized into the `serial-heavy` nextest group
-    /// (`.config/nextest.toml`).
-    mod heavy {
-        /// The load-bearing fix (iamacoffeepot/aether#1212): a hub restart
-        /// under a live `RpcSession` is healed in place. A first call
-        /// round-trips; the hub then dies (the reader sidecar surfaces the
-        /// synthetic `Bye`, draining `pending` so the in-flight call fails
-        /// on the dead socket); the hub comes back on the same port; and
-        /// the next call re-dials and succeeds rather than erroring forever.
-        #[tokio::test]
-        async fn call_redials_after_hub_restart() {
-            super::run_redial_after_hub_restart().await;
-        }
+    /// The load-bearing fix (iamacoffeepot/aether#1212): a hub restart
+    /// under a live `RpcSession` is healed in place. A first call
+    /// round-trips; the hub then dies (the reader sidecar surfaces the
+    /// synthetic `Bye`, draining `pending` so the in-flight call fails
+    /// on the dead socket); the hub comes back on the same port; and
+    /// the next call re-dials and succeeds rather than erroring forever.
+    #[tokio::test]
+    async fn call_redials_after_hub_restart() {
+        run_redial_after_hub_restart().await;
     }
 
     async fn run_redial_after_hub_restart() {

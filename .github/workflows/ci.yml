@@ -193,22 +193,16 @@ jobs:
       # changed-crate filter the prior step had is gone — nextest's
       # process-per-test isolation surfaces cross-test contamination
       # that the per-crate filter could mask, and the CI profile's
-      # `slow-timeout` bounds runaway tests cleanly. The run is split
-      # into two passes (iamacoffeepot/aether#1511): the lightweight set
-      # at full parallelism, then the `::heavy::` contention tests alone
-      # (`--test-threads 1`) on the now-idle runner, so a heavy test's
-      # teardown park/wake path isn't starved for cores by the rest of
-      # the suite. The heavy step runs only if the lightweight pass
-      # passed (default fail-fast) — a lightweight failure is the
-      # actionable signal.
+      # `slow-timeout` bounds runaway tests cleanly. The whole suite runs
+      # at full parallelism; the `aether-substrate-bundle` integration
+      # tests that fork real substrates carry a generous per-test
+      # slow-timeout in `.config/nextest.toml` so concurrent fork
+      # contention stretches their wall-clock without tripping the
+      # steady-state cap.
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
-      - name: Run tests (lightweight, parallel)
-        run: cargo nextest run --all-features --profile ci -E 'not test(/::heavy::/)'
-        env:
-          AETHER_REQUIRE_RUNTIME: "1"
-      - name: Run tests (heavy, serial on a quiet runner)
-        run: cargo nextest run --all-features --profile ci -E 'test(/::heavy::/)' --test-threads 1
+      - name: Run tests (workspace, parallel)
+        run: cargo nextest run --all-features --profile ci
         env:
           AETHER_REQUIRE_RUNTIME: "1"
 

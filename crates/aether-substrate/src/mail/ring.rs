@@ -1303,257 +1303,249 @@ mod tests {
     /// - releases never underflow a lock;
     /// - reclaim's freed-byte count matches the live-counter drop, and a
     ///   zero-lock blob at the head always reclaims.
-    ///
-    /// Lives in `mod heavy`: 256 randomized cases of ring churn is the
-    /// CPU-heavy profile the `serial-heavy` nextest group serializes
-    /// (the marker is the `::heavy::` path segment).
-    mod heavy {
-        use std::collections::VecDeque;
+    use std::collections::VecDeque;
 
-        use proptest::prelude::*;
+    use proptest::prelude::*;
 
-        use super::super::{MailLoc, MailRing, OutMail};
+    /// Small ring so wraps, fillers, and `RingFull` all fire within a
+    /// short op sequence.
+    const RING_CAP: usize = 256;
+    const MAX_PAYLOAD: usize = 40;
+    const MAX_MAILS: usize = 4;
 
-        /// Small ring so wraps, fillers, and `RingFull` all fire within a
-        /// short op sequence.
-        const RING_CAP: usize = 256;
-        const MAX_PAYLOAD: usize = 40;
-        const MAX_MAILS: usize = 4;
+    /// One driver op. `Release(idx)` picks a held blob by index modulo
+    /// the live count at apply time (the upfront `Vec<Op>` can't name a
+    /// runtime `header_off`); `Reclaim` takes no parameter.
+    #[derive(Debug, Clone)]
+    enum Op {
+        PushBlob(Vec<Vec<u8>>),
+        OpenAppendSeal(Vec<Vec<u8>>),
+        Release(usize),
+        Reclaim,
+    }
 
-        /// One driver op. `Release(idx)` picks a held blob by index modulo
-        /// the live count at apply time (the upfront `Vec<Op>` can't name a
-        /// runtime `header_off`); `Reclaim` takes no parameter.
-        #[derive(Debug, Clone)]
-        enum Op {
-            PushBlob(Vec<Vec<u8>>),
-            OpenAppendSeal(Vec<Vec<u8>>),
-            Release(usize),
-            Reclaim,
-        }
+    fn arb_payload() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(any::<u8>(), 0..=MAX_PAYLOAD)
+    }
 
-        fn arb_payload() -> impl Strategy<Value = Vec<u8>> {
-            prop::collection::vec(any::<u8>(), 0..=MAX_PAYLOAD)
-        }
+    fn arb_op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            prop::collection::vec(arb_payload(), 1..=MAX_MAILS).prop_map(Op::PushBlob),
+            prop::collection::vec(arb_payload(), 0..=MAX_MAILS).prop_map(Op::OpenAppendSeal),
+            any::<usize>().prop_map(Op::Release),
+            Just(Op::Reclaim),
+        ]
+    }
 
-        fn arb_op() -> impl Strategy<Value = Op> {
-            prop_oneof![
-                prop::collection::vec(arb_payload(), 1..=MAX_MAILS).prop_map(Op::PushBlob),
-                prop::collection::vec(arb_payload(), 0..=MAX_MAILS).prop_map(Op::OpenAppendSeal),
-                any::<usize>().prop_map(Op::Release),
-                Just(Op::Reclaim),
-            ]
-        }
+    /// One held mail ref: where to read and the bytes that must be
+    /// there.
+    struct ModelRef {
+        payload_off: u32,
+        len: u32,
+        bytes: Vec<u8>,
+    }
 
-        /// One held mail ref: where to read and the bytes that must be
-        /// there.
-        struct ModelRef {
-            payload_off: u32,
-            len: u32,
-            bytes: Vec<u8>,
-        }
+    /// One live blob in the shadow model. `outstanding` mirrors the
+    /// blob's atomic lock (init = mail count, decremented per release).
+    struct ModelBlob {
+        header_off: u32,
+        outstanding: u32,
+        refs: Vec<ModelRef>,
+    }
 
-        /// One live blob in the shadow model. `outstanding` mirrors the
-        /// blob's atomic lock (init = mail count, decremented per release).
-        struct ModelBlob {
-            header_off: u32,
-            outstanding: u32,
-            refs: Vec<ModelRef>,
-        }
-
-        /// Pop the front-contiguous run of fully-released (`outstanding == 0`)
-        /// blobs, mirroring the ring's FIFO reclaim. Returns how many were
-        /// popped.
-        fn model_reclaim_front(fifo: &mut VecDeque<ModelBlob>) -> usize {
-            let mut popped = 0;
-            while let Some(front) = fifo.front() {
-                if front.outstanding == 0 {
-                    fifo.pop_front();
-                    popped += 1;
-                } else {
-                    break;
-                }
-            }
-            popped
-        }
-
-        /// Assert the per-op invariants against the live model.
-        fn check_invariants(ring: &MailRing, fifo: &VecDeque<ModelBlob>) {
-            assert!(
-                ring.live_bytes() <= ring.capacity(),
-                "live_bytes {} exceeds capacity {}",
-                ring.live_bytes(),
-                ring.capacity()
-            );
-            for blob in fifo {
-                if blob.outstanding == 0 {
-                    // Released-but-not-yet-reclaimed: the region is
-                    // reclaimable, so the lock-held read contract no longer
-                    // applies — skip it.
-                    continue;
-                }
-                for r in &blob.refs {
-                    // SAFETY: outstanding > 0 means this blob's lock is held,
-                    // so the producer cannot have reclaimed or overwritten the
-                    // region — the read is sound.
-                    let bytes = unsafe { ring.payload(r.payload_off, r.len) };
-                    assert_eq!(
-                        bytes,
-                        &r.bytes[..],
-                        "payload read-back mismatch at offset {} (region reused under a live lock)",
-                        r.payload_off
-                    );
-                }
+    /// Pop the front-contiguous run of fully-released (`outstanding == 0`)
+    /// blobs, mirroring the ring's FIFO reclaim. Returns how many were
+    /// popped.
+    fn model_reclaim_front(fifo: &mut VecDeque<ModelBlob>) -> usize {
+        let mut popped = 0;
+        while let Some(front) = fifo.front() {
+            if front.outstanding == 0 {
+                fifo.pop_front();
+                popped += 1;
+            } else {
+                break;
             }
         }
+        popped
+    }
 
-        /// Group consecutively-appended mails into model blobs by their
-        /// `header_off` — a tail-spanning fan-out seals early and reopens at
-        /// 0, so one `open/append/seal` cycle can produce two physical
-        /// blobs, each with its own lock.
-        fn record_appended(fifo: &mut VecDeque<ModelBlob>, appended: &[(MailLoc, Vec<u8>)]) {
-            let mut i = 0;
-            while i < appended.len() {
-                let header_off = appended[i].0.header_off;
-                let mut refs = Vec::new();
-                while i < appended.len() && appended[i].0.header_off == header_off {
-                    let (loc, bytes) = &appended[i];
-                    refs.push(ModelRef {
-                        payload_off: loc.payload_off,
-                        len: loc.len,
-                        bytes: bytes.clone(),
-                    });
-                    i += 1;
-                }
-                let outstanding = refs.len() as u32;
-                fifo.push_back(ModelBlob {
-                    header_off,
-                    outstanding,
-                    refs,
+    /// Assert the per-op invariants against the live model.
+    fn check_invariants(ring: &MailRing, fifo: &VecDeque<ModelBlob>) {
+        assert!(
+            ring.live_bytes() <= ring.capacity(),
+            "live_bytes {} exceeds capacity {}",
+            ring.live_bytes(),
+            ring.capacity()
+        );
+        for blob in fifo {
+            if blob.outstanding == 0 {
+                // Released-but-not-yet-reclaimed: the region is
+                // reclaimable, so the lock-held read contract no longer
+                // applies — skip it.
+                continue;
+            }
+            for r in &blob.refs {
+                // SAFETY: outstanding > 0 means this blob's lock is held,
+                // so the producer cannot have reclaimed or overwritten the
+                // region — the read is sound.
+                let bytes = unsafe { ring.payload(r.payload_off, r.len) };
+                assert_eq!(
+                    bytes,
+                    &r.bytes[..],
+                    "payload read-back mismatch at offset {} (region reused under a live lock)",
+                    r.payload_off
+                );
+            }
+        }
+    }
+
+    /// Group consecutively-appended mails into model blobs by their
+    /// `header_off` — a tail-spanning fan-out seals early and reopens at
+    /// 0, so one `open/append/seal` cycle can produce two physical
+    /// blobs, each with its own lock.
+    fn record_appended(fifo: &mut VecDeque<ModelBlob>, appended: &[(MailLoc, Vec<u8>)]) {
+        let mut i = 0;
+        while i < appended.len() {
+            let header_off = appended[i].0.header_off;
+            let mut refs = Vec::new();
+            while i < appended.len() && appended[i].0.header_off == header_off {
+                let (loc, bytes) = &appended[i];
+                refs.push(ModelRef {
+                    payload_off: loc.payload_off,
+                    len: loc.len,
+                    bytes: bytes.clone(),
                 });
+                i += 1;
             }
+            let outstanding = refs.len() as u32;
+            fifo.push_back(ModelBlob {
+                header_off,
+                outstanding,
+                refs,
+            });
         }
+    }
 
-        /// Replay an op sequence against a fresh ring + shadow model.
-        fn apply(ops: Vec<Op>) {
-            let ring = MailRing::with_capacity(RING_CAP);
-            let mut fifo: VecDeque<ModelBlob> = VecDeque::new();
+    /// Replay an op sequence against a fresh ring + shadow model.
+    fn apply(ops: Vec<Op>) {
+        let ring = MailRing::with_capacity(RING_CAP);
+        let mut fifo: VecDeque<ModelBlob> = VecDeque::new();
 
-            for op in ops {
-                match op {
-                    Op::PushBlob(payloads) => {
-                        let mails: Vec<OutMail<'_>> = payloads
+        for op in ops {
+            match op {
+                Op::PushBlob(payloads) => {
+                    let mails: Vec<OutMail<'_>> = payloads
+                        .iter()
+                        .enumerate()
+                        .map(|(k, p)| OutMail {
+                            recipient: k as u64,
+                            kind: k as u64,
+                            payload: p,
+                        })
+                        .collect();
+                    if let Ok(locs) = ring.push_blob(&mails) {
+                        let header_off = locs[0].header_off;
+                        let refs = locs
                             .iter()
-                            .enumerate()
-                            .map(|(k, p)| OutMail {
-                                recipient: k as u64,
-                                kind: k as u64,
-                                payload: p,
+                            .zip(&payloads)
+                            .map(|(l, p)| ModelRef {
+                                payload_off: l.payload_off,
+                                len: l.len,
+                                bytes: p.clone(),
                             })
                             .collect();
-                        if let Ok(locs) = ring.push_blob(&mails) {
-                            let header_off = locs[0].header_off;
-                            let refs = locs
-                                .iter()
-                                .zip(&payloads)
-                                .map(|(l, p)| ModelRef {
-                                    payload_off: l.payload_off,
-                                    len: l.len,
-                                    bytes: p.clone(),
-                                })
-                                .collect();
-                            fifo.push_back(ModelBlob {
-                                header_off,
-                                outstanding: locs.len() as u32,
-                                refs,
-                            });
-                        }
-                        // RingFull leaves the ring untouched — no model change.
+                        fifo.push_back(ModelBlob {
+                            header_off,
+                            outstanding: locs.len() as u32,
+                            refs,
+                        });
                     }
-                    Op::OpenAppendSeal(payloads) => {
-                        // open_blob reclaims internally; mirror that in the
-                        // model so the FIFO front stays in lockstep.
-                        ring.open_blob();
-                        model_reclaim_front(&mut fifo);
-                        let mut appended = Vec::new();
-                        for (k, p) in payloads.iter().enumerate() {
-                            if let Ok(loc) = ring.append(k as u64, k as u64, p) {
-                                appended.push((loc, p.clone()));
-                            }
-                            // RingFull spills this mail; the open blob stays
-                            // intact and later appends may still land.
+                    // RingFull leaves the ring untouched — no model change.
+                }
+                Op::OpenAppendSeal(payloads) => {
+                    // open_blob reclaims internally; mirror that in the
+                    // model so the FIFO front stays in lockstep.
+                    ring.open_blob();
+                    model_reclaim_front(&mut fifo);
+                    let mut appended = Vec::new();
+                    for (k, p) in payloads.iter().enumerate() {
+                        if let Ok(loc) = ring.append(k as u64, k as u64, p) {
+                            appended.push((loc, p.clone()));
                         }
-                        ring.seal();
-                        record_appended(&mut fifo, &appended);
+                        // RingFull spills this mail; the open blob stays
+                        // intact and later appends may still land.
                     }
-                    Op::Release(idx) => {
-                        let releasable: Vec<usize> = fifo
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, b)| b.outstanding > 0)
-                            .map(|(i, _)| i)
-                            .collect();
-                        if !releasable.is_empty() {
-                            let chosen = releasable[idx % releasable.len()];
-                            assert!(
-                                fifo[chosen].outstanding > 0,
-                                "release must never underflow a lock"
-                            );
-                            // SAFETY: the model holds exactly one count of this
-                            // blob's lock per outstanding ref; releasing it once
-                            // matches that held count.
-                            unsafe { ring.release(fifo[chosen].header_off) };
-                            fifo[chosen].outstanding -= 1;
-                        }
-                    }
-                    Op::Reclaim => {
-                        let live_before = ring.live_bytes();
-                        let reclaimed = ring.reclaim();
-                        assert_eq!(
-                            live_before - reclaimed,
-                            ring.live_bytes(),
-                            "reclaim's freed-byte count must match the live-counter drop"
+                    ring.seal();
+                    record_appended(&mut fifo, &appended);
+                }
+                Op::Release(idx) => {
+                    let releasable: Vec<usize> = fifo
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, b)| b.outstanding > 0)
+                        .map(|(i, _)| i)
+                        .collect();
+                    if !releasable.is_empty() {
+                        let chosen = releasable[idx % releasable.len()];
+                        assert!(
+                            fifo[chosen].outstanding > 0,
+                            "release must never underflow a lock"
                         );
-                        let popped = model_reclaim_front(&mut fifo);
-                        if popped > 0 {
-                            // A zero-lock blob sat at the head, so reclaim must
-                            // have advanced past it. (The converse isn't
-                            // asserted: a tail filler can free bytes ahead of a
-                            // still-locked blob.)
-                            assert!(
-                                reclaimed > 0,
-                                "front had {popped} zero-lock blob(s) but reclaim freed nothing"
-                            );
-                        }
+                        // SAFETY: the model holds exactly one count of this
+                        // blob's lock per outstanding ref; releasing it once
+                        // matches that held count.
+                        unsafe { ring.release(fifo[chosen].header_off) };
+                        fifo[chosen].outstanding -= 1;
                     }
                 }
-                check_invariants(&ring, &fifo);
-            }
-
-            // Drain: release every held ref, reclaim to a fixpoint, and the
-            // ring must report zero live bytes.
-            for blob in &mut fifo {
-                while blob.outstanding > 0 {
-                    // SAFETY: one release per remaining held count.
-                    unsafe { ring.release(blob.header_off) };
-                    blob.outstanding -= 1;
+                Op::Reclaim => {
+                    let live_before = ring.live_bytes();
+                    let reclaimed = ring.reclaim();
+                    assert_eq!(
+                        live_before - reclaimed,
+                        ring.live_bytes(),
+                        "reclaim's freed-byte count must match the live-counter drop"
+                    );
+                    let popped = model_reclaim_front(&mut fifo);
+                    if popped > 0 {
+                        // A zero-lock blob sat at the head, so reclaim must
+                        // have advanced past it. (The converse isn't
+                        // asserted: a tail filler can free bytes ahead of a
+                        // still-locked blob.)
+                        assert!(
+                            reclaimed > 0,
+                            "front had {popped} zero-lock blob(s) but reclaim freed nothing"
+                        );
+                    }
                 }
             }
-            while ring.reclaim() > 0 {}
-            assert_eq!(
-                ring.live_bytes(),
-                0,
-                "every blob reclaims once fully released"
-            );
+            check_invariants(&ring, &fifo);
         }
 
-        proptest! {
-            /// Default 256 cases of up-to-64-op sequences.
-            #[test]
-            fn ring_op_sequence_preserves_invariants(
-                ops in prop::collection::vec(arb_op(), 0..=64)
-            ) {
-                apply(ops);
+        // Drain: release every held ref, reclaim to a fixpoint, and the
+        // ring must report zero live bytes.
+        for blob in &mut fifo {
+            while blob.outstanding > 0 {
+                // SAFETY: one release per remaining held count.
+                unsafe { ring.release(blob.header_off) };
+                blob.outstanding -= 1;
             }
+        }
+        while ring.reclaim() > 0 {}
+        assert_eq!(
+            ring.live_bytes(),
+            0,
+            "every blob reclaims once fully released"
+        );
+    }
+
+    proptest! {
+        /// Default 256 cases of up-to-64-op sequences.
+        #[test]
+        fn ring_op_sequence_preserves_invariants(
+            ops in prop::collection::vec(arb_op(), 0..=64)
+        ) {
+            apply(ops);
         }
     }
 }

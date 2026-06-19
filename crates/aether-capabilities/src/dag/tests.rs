@@ -522,6 +522,7 @@ fn dag_executor_cancels_running_dag() {
 /// A DAG polled mid-flight reports `Running` (with a per-node progress
 /// list naming both nodes), `Pending`, or `Complete`; it always reaches
 /// `Complete`.
+#[test]
 fn dag_executor_status_reports_running() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder: Recorder<TestObserved> = Arc::new(Mutex::new(Vec::new()));
@@ -581,6 +582,7 @@ fn dag_executor_status_reports_running() {
 /// With tiny retention windows, a completed DAG is observable as
 /// `Complete`, then reaped — after which `status` reports the unknown-dag
 /// shape (`Failed { error: "unknown dag .." }`).
+#[test]
 fn dag_executor_status_reports_complete_then_reaps() {
     // SAFETY: nextest runs each test in its own process, so the env set
     // here doesn't race sibling tests.
@@ -726,6 +728,7 @@ fn dag_executor_call_inherited_worker_counts_toward_settlement() {
 /// Call to a cap that never settles (holds the chain open forever): with
 /// a tiny per-`Call` timeout the node fails rather than buffering forever
 /// or truncating to a partial bundle.
+#[test]
 fn dag_executor_call_times_out_nonsettling_cap() {
     // SAFETY: nextest runs each test in its own process.
     unsafe {
@@ -919,6 +922,7 @@ fn number_transform_dag(tx: aether_data::TransformId, value: u64) -> DagDescript
 /// source → `double` transform → observer. The observer receives the
 /// doubled value resolved inline; the DAG reaches `Complete` (ADR-0048
 /// §3 invocation path).
+#[test]
 fn transform_invoke_resolves_handle() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder: Recorder<TestNumberObserved> = Arc::new(Mutex::new(Vec::new()));
@@ -952,6 +956,7 @@ fn transform_invoke_resolves_handle() {
 
 /// A panicking transform maps to `Failed` with the panic message in the
 /// diagnostic; the executor + sibling branches survive (ADR-0048 §6).
+#[test]
 fn transform_panic_fails_node() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder: Recorder<TestNumberObserved> = Arc::new(Mutex::new(Vec::new()));
@@ -998,6 +1003,7 @@ fn transform_panic_fails_node() {
 /// { error: "timeout: ..." }`; the thread orphans (the executor
 /// continues). The fixture releases the gate afterward so the pool
 /// joins cleanly (ADR-0048 §6).
+#[test]
 fn transform_timeout_fails_node() {
     SLOW_TRANSFORM_GATE.store(false, Ordering::Release);
     // SAFETY: nextest runs each test in its own process.
@@ -1093,6 +1099,7 @@ fn transform_output_overflow_fails_node() {
 /// identical across DAGs) skips the invoke entirely — the cache hit
 /// resolves the node. The pool's invoke count reports 1, not 2
 /// (ADR-0048 §4, iamacoffeepot/aether#982).
+#[test]
 fn transform_skips_invoke_on_cache_hit() {
     super::test_support::SEED_INVOKE_COUNT.store(0, Ordering::Release);
     let (registry, mailer, rx) = fresh_substrate_with_rx();
@@ -1164,57 +1171,11 @@ fn transform_skips_invoke_on_cache_hit() {
     drop(chassis);
 }
 
-/// Contention/backoff-sensitive tests live in `mod heavy`: they drive the
-/// live actor dispatch / parking / settlement path through a multi-worker
-/// pool, so they are serialized into the `serial-heavy` nextest group
-/// (`.config/nextest.toml`). Each delegates to the scenario body
-/// declared at module scope.
-mod heavy {
-    #[test]
-    fn dag_executor_status_reports_running() {
-        super::dag_executor_status_reports_running();
-    }
-
-    #[test]
-    fn transform_runs_off_executor_thread() {
-        super::transform_runs_off_executor_thread();
-    }
-
-    #[test]
-    fn transform_panic_fails_node() {
-        super::transform_panic_fails_node();
-    }
-
-    #[test]
-    fn transform_skips_invoke_on_cache_hit() {
-        super::transform_skips_invoke_on_cache_hit();
-    }
-
-    #[test]
-    fn dag_executor_status_reports_complete_then_reaps() {
-        super::dag_executor_status_reports_complete_then_reaps();
-    }
-
-    #[test]
-    fn dag_executor_call_times_out_nonsettling_cap() {
-        super::dag_executor_call_times_out_nonsettling_cap();
-    }
-
-    #[test]
-    fn transform_invoke_resolves_handle() {
-        super::transform_invoke_resolves_handle();
-    }
-
-    #[test]
-    fn transform_timeout_fails_node() {
-        super::transform_timeout_fails_node();
-    }
-}
-
 /// A transform that blocks briefly does not stall the executor's
 /// parking / reaping of other DAG branches: a sibling DAG's pure
 /// `double` resolves while the `slow` transform spins (ADR-0048 §3 off
 /// the executor thread).
+#[test]
 fn transform_runs_off_executor_thread() {
     SLOW_TRANSFORM_GATE.store(false, Ordering::Release);
     let (registry, mailer, rx) = fresh_substrate_with_rx();

@@ -758,92 +758,88 @@ mod tests {
         drop(ctx);
     }
 
-    mod heavy {
-        use super::*;
-        use std::thread;
+    use std::thread;
 
-        /// #1757: the headline gate. A handler defers its reply by
-        /// retaining the inbound guard (`take_inbound`), the dispatcher's
-        /// tail sees `None` and does not settle, and the reply is sent
-        /// across a worker thread. The chain settles **exactly once** —
-        /// not prematurely (the retained guard holds the inbound's
-        /// `Finished` until after the reply's `Sent`, ADR-0080 §6) and not
-        /// twice (single ownership: only the retained guard ever settles
-        /// this inbound). `mod heavy` because the cross-thread settlement
-        /// needs timely progress.
-        #[test]
-        fn deferred_reply_across_thread_settles_exactly_once() {
-            let (registry, mailer, settlement) = test_env();
-            let id = MailboxId(0x1757_0010);
-            let reply_target = MailboxId(0x1757_0011);
+    /// #1757: the headline gate. A handler defers its reply by
+    /// retaining the inbound guard (`take_inbound`), the dispatcher's
+    /// tail sees `None` and does not settle, and the reply is sent
+    /// across a worker thread. The chain settles **exactly once** —
+    /// not prematurely (the retained guard holds the inbound's
+    /// `Finished` until after the reply's `Sent`, ADR-0080 §6) and not
+    /// twice (single ownership: only the retained guard ever settles
+    /// this inbound).
+    #[test]
+    fn deferred_reply_across_thread_settles_exactly_once() {
+        let (registry, mailer, settlement) = test_env();
+        let id = MailboxId(0x1757_0010);
+        let reply_target = MailboxId(0x1757_0011);
 
-            // Register a reply target so the deferred reply routes
-            // somewhere we can pick it up and finish it.
-            let (rtx, rrx) = mpsc::channel::<Envelope>();
-            let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
-                let _ = rtx.send(d);
-            });
-            let reply_target = registry
-                .try_register_inbox_with_id(reply_target, "test.inbox.deferred_target", handler)
-                .expect("register reply target");
+        // Register a reply target so the deferred reply routes
+        // somewhere we can pick it up and finish it.
+        let (rtx, rrx) = mpsc::channel::<Envelope>();
+        let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
+            let _ = rtx.send(d);
+        });
+        let reply_target = registry
+            .try_register_inbox_with_id(reply_target, "test.inbox.deferred_target", handler)
+            .expect("register reply target");
 
-            let root = MailId::new(id, 1);
-            mailer.record_sent_inflight(root);
-            let settle = settlement.subscribe_settlement(root);
+        let root = MailId::new(id, 1);
+        mailer.record_sent_inflight(root);
+        let settle = settlement.subscribe_settlement(root);
 
-            let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), id));
-            let sender = Source::with_correlation(SourceAddr::Component(reply_target), 7);
-            let env = armed_env(id, MailId::new(id, 21), root, sender);
-            let mut ctx = NativeCtx::with_inbound(&binding, sender, MailId::new(id, 21), root, env);
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), id));
+        let sender = Source::with_correlation(SourceAddr::Component(reply_target), 7);
+        let env = armed_env(id, MailId::new(id, 21), root, sender);
+        let mut ctx = NativeCtx::with_inbound(&binding, sender, MailId::new(id, 21), root, env);
 
-            // Handler defers: retain the guard, then the dispatcher tail
-            // observes the inbound was taken (single ownership).
-            let guard = ctx.take_inbound();
+        // Handler defers: retain the guard, then the dispatcher tail
+        // observes the inbound was taken (single ownership).
+        let guard = ctx.take_inbound();
+        assert!(
+            ctx.take_raw_inbound().is_none(),
+            "the handler retained the single envelope — the tail must not also settle it",
+        );
+        drop(ctx);
+
+        // Reply + settle the inbound from a worker thread (the capture
+        // readback shape). `InboundMail: Send`, so the guard crosses.
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test infra thread below the actor/mail layer — models the off-thread deferred reply"
+        )]
+        let worker = thread::spawn(move || {
             assert!(
-                ctx.take_raw_inbound().is_none(),
-                "the handler retained the single envelope — the tail must not also settle it",
+                guard.reply(&LifecycleAdvanceComplete {
+                    completed: 1,
+                    next: 42,
+                }),
+                "deferred reply routed to the component target",
             );
-            drop(ctx);
+            // Dropping the guard records the inbound's `Finished`
+            // (after the reply's `Sent`) — the chain stays open until
+            // the reply itself finishes.
+            drop(guard);
+        });
+        worker.join().expect("worker thread");
 
-            // Reply + settle the inbound from a worker thread (the capture
-            // readback shape). `InboundMail: Send`, so the guard crosses.
-            #[allow(
-                clippy::disallowed_methods,
-                reason = "test infra thread below the actor/mail layer — models the off-thread deferred reply"
-            )]
-            let worker = thread::spawn(move || {
-                assert!(
-                    guard.reply(&LifecycleAdvanceComplete {
-                        completed: 1,
-                        next: 42,
-                    }),
-                    "deferred reply routed to the component target",
-                );
-                // Dropping the guard records the inbound's `Finished`
-                // (after the reply's `Sent`) — the chain stays open until
-                // the reply itself finishes.
-                drop(guard);
-            });
-            worker.join().expect("worker thread");
+        assert!(
+            settle.try_recv().is_err(),
+            "the reply's Sent holds the chain open — no premature settle",
+        );
 
-            assert!(
-                settle.try_recv().is_err(),
-                "the reply's Sent holds the chain open — no premature settle",
-            );
-
-            // Finish the reply the way its eventual recipient's dispatcher
-            // would; only now does the root settle — exactly once.
-            let reply_env = rrx.recv().expect("reply routed to the target inbox");
-            let reply_id = reply_env.mail_id;
-            reply_env.discharge();
-            mailer.record_finished(reply_id, root);
-            settle
-                .recv()
-                .expect("root settles once the deferred reply finishes");
-            assert!(
-                settle.try_recv().is_err(),
-                "the chain settles exactly once — no double-settle",
-            );
-        }
+        // Finish the reply the way its eventual recipient's dispatcher
+        // would; only now does the root settle — exactly once.
+        let reply_env = rrx.recv().expect("reply routed to the target inbox");
+        let reply_id = reply_env.mail_id;
+        reply_env.discharge();
+        mailer.record_finished(reply_id, root);
+        settle
+            .recv()
+            .expect("root settles once the deferred reply finishes");
+        assert!(
+            settle.try_recv().is_err(),
+            "the chain settles exactly once — no double-settle",
+        );
     }
 }

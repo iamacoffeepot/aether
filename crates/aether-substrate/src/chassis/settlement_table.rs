@@ -669,131 +669,122 @@ mod tests {
         assert_eq!(t.live_roots(), 0);
     }
 
-    /// Contention/backoff-sensitive tests live in `mod heavy`: these lock-free
-    /// settlement-table races are timing-sensitive under load, so they are
-    /// serialized into the `serial-heavy` nextest group
-    /// (`.config/nextest.toml`) to avoid oversubscribing cores against one
-    /// another.
-    mod heavy {
-        use super::*;
-
-        /// The kernel's riskiest property through the full table path: seed
-        /// exactly `racers` `in_flight` on one root, then race `racers` threads
-        /// each doing one `record_finished`. Exactly one must observe the
-        /// zero-arrival, and the slot must reclaim. Repeated to shake out
-        /// interleavings.
-        #[test]
-        fn final_decrement_race_fires_once() {
-            for _ in 0..2_000 {
-                let t = Arc::new(SettlementTable::new());
-                let racers = 4u32;
-                let r = root(11, 3);
-                for _ in 0..racers {
-                    t.record_sent(r);
-                }
-                let fires = Arc::new(AtomicU32::new(0));
-                let start = Arc::new(Barrier::new(racers as usize));
-                let mut handles = Vec::new();
-                for _ in 0..racers {
-                    let t = Arc::clone(&t);
-                    let fires = Arc::clone(&fires);
-                    let start = Arc::clone(&start);
-                    handles.push(thread::spawn(move || {
-                        start.wait();
-                        if t.record_finished(r) {
-                            fires.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }));
-                }
-                for h in handles {
-                    h.join().unwrap();
-                }
-                assert_eq!(fires.load(Ordering::Relaxed), 1);
-                assert_eq!(t.live_roots(), 0);
-            }
-        }
-
-        /// Concurrent inc/dec on a *shared* set of roots, modelling fan-out
-        /// under live chains: a keepalive unit per root is pre-loaded so
-        /// `in_flight` stays at least 1 throughout the concurrent phase (the real
-        /// workload never lets a root settle while a send under it can still
-        /// race — see the module Contract). No settle/tombstone fires during
-        /// the churn; the final drain settles each root exactly once. Tests
-        /// concurrent `find` + atomic mutation against the same `OCCUPIED`
-        /// slots from many threads.
-        #[test]
-        fn concurrent_shared_roots_inc_dec_then_drain() {
+    /// The kernel's riskiest property through the full table path: seed
+    /// exactly `racers` `in_flight` on one root, then race `racers` threads
+    /// each doing one `record_finished`. Exactly one must observe the
+    /// zero-arrival, and the slot must reclaim. Repeated to shake out
+    /// interleavings.
+    #[test]
+    fn final_decrement_race_fires_once() {
+        for _ in 0..2_000 {
             let t = Arc::new(SettlementTable::new());
-            let roots = 256u64;
-            let threads = 8u64;
-            let per_root_per_thread = 64u32;
-
-            // Keepalive floor: in_flight >= 1 for every root during the phase.
-            for i in 0..roots {
-                t.record_sent(root(1, i));
+            let racers = 4u32;
+            let r = root(11, 3);
+            for _ in 0..racers {
+                t.record_sent(r);
             }
-
-            run_threads(threads, {
+            let fires = Arc::new(AtomicU32::new(0));
+            let start = Arc::new(Barrier::new(racers as usize));
+            let mut handles = Vec::new();
+            for _ in 0..racers {
                 let t = Arc::clone(&t);
-                move |tid| {
-                    for i in 0..roots {
-                        let r = root(1, (i + tid) % roots);
-                        for _ in 0..per_root_per_thread {
-                            t.record_sent(r);
-                            // Never settles: the keepalive holds the floor.
-                            assert!(!t.record_finished(r));
-                        }
+                let fires = Arc::clone(&fires);
+                let start = Arc::clone(&start);
+                handles.push(thread::spawn(move || {
+                    start.wait();
+                    if t.record_finished(r) {
+                        fires.fetch_add(1, Ordering::Relaxed);
                     }
-                }
-            });
-
-            // Drain the keepalive: each root settles exactly once.
-            let mut fires = 0u64;
-            for i in 0..roots {
-                if t.record_finished(root(1, i)) {
-                    fires += 1;
-                }
+                }));
             }
-            assert_eq!(fires, roots, "each root settles exactly once on drain");
+            for h in handles {
+                h.join().unwrap();
+            }
+            assert_eq!(fires.load(Ordering::Relaxed), 1);
             assert_eq!(t.live_roots(), 0);
         }
+    }
 
-        /// Concurrent chain births *and* settles across threads, each thread
-        /// owning a private stream of distinct roots (so no same-root re-open
-        /// — the contract). Thousands of depth-2 chains per thread drive
-        /// concurrent claim + tombstone (and probe-chain collisions) on the
-        /// shared table. Every chain must settle exactly once and the table
-        /// must fully reclaim.
-        #[test]
-        fn concurrent_distinct_chains_claim_and_reclaim() {
-            let t = Arc::new(SettlementTable::new());
-            let threads = 8u64;
-            let chains_per_thread = 4_000u64;
-            let total_fires = Arc::new(AtomicU32::new(0));
+    /// Concurrent inc/dec on a *shared* set of roots, modelling fan-out
+    /// under live chains: a keepalive unit per root is pre-loaded so
+    /// `in_flight` stays at least 1 throughout the concurrent phase (the real
+    /// workload never lets a root settle while a send under it can still
+    /// race — see the module Contract). No settle/tombstone fires during
+    /// the churn; the final drain settles each root exactly once. Tests
+    /// concurrent `find` + atomic mutation against the same `OCCUPIED`
+    /// slots from many threads.
+    #[test]
+    fn concurrent_shared_roots_inc_dec_then_drain() {
+        let t = Arc::new(SettlementTable::new());
+        let roots = 256u64;
+        let threads = 8u64;
+        let per_root_per_thread = 64u32;
 
-            run_threads(threads, {
-                let t = Arc::clone(&t);
-                let total_fires = Arc::clone(&total_fires);
-                move |tid| {
-                    for c in 0..chains_per_thread {
-                        let r = root(tid + 1, c); // private to this thread
-                        t.record_sent(r); // born (1)
-                        t.record_sent(r); // child (2)
-                        assert!(!t.record_finished(r)); // (1)
-                        if t.record_finished(r) {
-                            // (0) → settle
-                            total_fires.fetch_add(1, Ordering::Relaxed);
-                        }
+        // Keepalive floor: in_flight >= 1 for every root during the phase.
+        for i in 0..roots {
+            t.record_sent(root(1, i));
+        }
+
+        run_threads(threads, {
+            let t = Arc::clone(&t);
+            move |tid| {
+                for i in 0..roots {
+                    let r = root(1, (i + tid) % roots);
+                    for _ in 0..per_root_per_thread {
+                        t.record_sent(r);
+                        // Never settles: the keepalive holds the floor.
+                        assert!(!t.record_finished(r));
                     }
                 }
-            });
+            }
+        });
 
-            assert_eq!(
-                u64::from(total_fires.load(Ordering::Relaxed)),
-                threads * chains_per_thread,
-                "every chain settles exactly once"
-            );
-            assert_eq!(t.live_roots(), 0, "table fully reclaimed");
+        // Drain the keepalive: each root settles exactly once.
+        let mut fires = 0u64;
+        for i in 0..roots {
+            if t.record_finished(root(1, i)) {
+                fires += 1;
+            }
         }
+        assert_eq!(fires, roots, "each root settles exactly once on drain");
+        assert_eq!(t.live_roots(), 0);
+    }
+
+    /// Concurrent chain births *and* settles across threads, each thread
+    /// owning a private stream of distinct roots (so no same-root re-open
+    /// — the contract). Thousands of depth-2 chains per thread drive
+    /// concurrent claim + tombstone (and probe-chain collisions) on the
+    /// shared table. Every chain must settle exactly once and the table
+    /// must fully reclaim.
+    #[test]
+    fn concurrent_distinct_chains_claim_and_reclaim() {
+        let t = Arc::new(SettlementTable::new());
+        let threads = 8u64;
+        let chains_per_thread = 4_000u64;
+        let total_fires = Arc::new(AtomicU32::new(0));
+
+        run_threads(threads, {
+            let t = Arc::clone(&t);
+            let total_fires = Arc::clone(&total_fires);
+            move |tid| {
+                for c in 0..chains_per_thread {
+                    let r = root(tid + 1, c); // private to this thread
+                    t.record_sent(r); // born (1)
+                    t.record_sent(r); // child (2)
+                    assert!(!t.record_finished(r)); // (1)
+                    if t.record_finished(r) {
+                        // (0) → settle
+                        total_fires.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+
+        assert_eq!(
+            u64::from(total_fires.load(Ordering::Relaxed)),
+            threads * chains_per_thread,
+            "every chain settles exactly once"
+        );
+        assert_eq!(t.live_roots(), 0, "table fully reclaimed");
     }
 }

@@ -222,13 +222,12 @@ in-crate pattern, in the cap's `#[cfg(test)] mod tests`:
    (`HubOutbound::attached_loopback` gives you the receiver).
 
 The cap dispatches on a real pool thread, so a round-trip test that
-sleep-polls the loopback channel under a deadline is timing-sensitive —
-declare it inside a `mod heavy` submodule so the `serial-heavy` nextest
-group serializes it. `HandleCapability`'s
-`capability_routes_publish_through_dispatcher_thread` shows the full
-round trip; its `duplicate_claim_rejects_with_typed_error` (a plain,
-non-heavy test) asserts the one-claimant guarantee by pre-registering the
-name and expecting `BootError::MailboxAlreadyClaimed`.
+sleep-polls the loopback channel under a deadline is timing-sensitive;
+keep that deadline generous so it tolerates a busy machine.
+`HandleCapability`'s `capability_routes_publish_through_dispatcher_thread`
+shows the full round trip; its `duplicate_claim_rejects_with_typed_error`
+asserts the one-claimant guarantee by pre-registering the name and
+expecting `BootError::MailboxAlreadyClaimed`.
 
 For an end-to-end check across the real chassis — rendering, the frame
 loop, multiple caps — drive

@@ -1376,89 +1376,81 @@ mod tests {
         transport.flush_outbound();
     }
 
-    /// Contention/backoff-sensitive tests live in `mod heavy`: this exercises
-    /// the concurrent flush / consumer-release race, so it is serialized into
-    /// the `serial-heavy` nextest group (`.config/nextest.toml`) to avoid
-    /// oversubscribing cores.
-    mod heavy {
-        use super::*;
+    /// 2b load-bearing race: the producer flushes tagged blobs into its
+    /// ring while consumer threads read each `InRing` payload in place
+    /// and drop the envelope (RAII-releasing the blob lock). A reused
+    /// region — the producer overwriting bytes a consumer is mid-read on
+    /// — would surface as a tag mismatch. This lifts the 2a ring stress
+    /// test onto the full 2b path: buffer → flush → route → mpsc →
+    /// consumer drop.
+    #[test]
+    fn buffered_concurrent_flush_and_consumer_release() {
+        use std::thread;
 
-        /// 2b load-bearing race: the producer flushes tagged blobs into its
-        /// ring while consumer threads read each `InRing` payload in place
-        /// and drop the envelope (RAII-releasing the blob lock). A reused
-        /// region — the producer overwriting bytes a consumer is mid-read on
-        /// — would surface as a tag mismatch. This lifts the 2a ring stress
-        /// test onto the full 2b path: buffer → flush → route → mpsc →
-        /// consumer drop.
-        #[test]
-        fn buffered_concurrent_flush_and_consumer_release() {
-            use std::thread;
+        let (registry, mailer) = fresh_substrate();
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        registry.register_inbox("test.sink", forward_to_envelope_sender(tx));
+        let recipient = registry.lookup("test.sink").unwrap();
+        let transport = NativeBinding::new_for_test(mailer, MailboxId(0x9191));
 
-            let (registry, mailer) = fresh_substrate();
-            let (tx, rx) = mpsc::channel::<Envelope>();
-            registry.register_inbox("test.sink", forward_to_envelope_sender(tx));
-            let recipient = registry.lookup("test.sink").unwrap();
-            let transport = NativeBinding::new_for_test(mailer, MailboxId(0x9191));
+        let rx = Arc::new(Mutex::new(rx));
+        let done = Arc::new(AtomicBool::new(false));
+        let consumed = Arc::new(AtomicU64::new(0));
+        let n_consumers = 4;
 
-            let rx = Arc::new(Mutex::new(rx));
-            let done = Arc::new(AtomicBool::new(false));
-            let consumed = Arc::new(AtomicU64::new(0));
-            let n_consumers = 4;
-
-            let consumers: Vec<_> = (0..n_consumers)
-                .map(|_| {
-                    let rx = Arc::clone(&rx);
-                    let done = Arc::clone(&done);
-                    let consumed = Arc::clone(&consumed);
-                    thread::spawn(move || {
-                        loop {
-                            let got = {
-                                let guard = rx.lock().expect("rx mutex poisoned");
-                                guard.recv_timeout(Duration::from_millis(20))
-                            };
-                            match got {
-                                Ok(env) => {
-                                    let bytes = env.payload.bytes();
-                                    let tag = bytes[0];
-                                    assert!(
-                                        bytes.iter().all(|&b| b == tag),
-                                        "decode-in-place saw a reused region: expected tag {tag}"
-                                    );
-                                    drop(env); // RAII release of the blob lock
-                                    consumed.fetch_add(1, Ordering::AcqRel);
-                                }
-                                // Empty for the timeout: exit only once the
-                                // producer is done (channel fully drained).
-                                Err(_) if done.load(Ordering::Acquire) => break,
-                                Err(_) => {}
+        let consumers: Vec<_> = (0..n_consumers)
+            .map(|_| {
+                let rx = Arc::clone(&rx);
+                let done = Arc::clone(&done);
+                let consumed = Arc::clone(&consumed);
+                thread::spawn(move || {
+                    loop {
+                        let got = {
+                            let guard = rx.lock().expect("rx mutex poisoned");
+                            guard.recv_timeout(Duration::from_millis(20))
+                        };
+                        match got {
+                            Ok(env) => {
+                                let bytes = env.payload.bytes();
+                                let tag = bytes[0];
+                                assert!(
+                                    bytes.iter().all(|&b| b == tag),
+                                    "decode-in-place saw a reused region: expected tag {tag}"
+                                );
+                                drop(env); // RAII release of the blob lock
+                                consumed.fetch_add(1, Ordering::AcqRel);
                             }
+                            // Empty for the timeout: exit only once the
+                            // producer is done (channel fully drained).
+                            Err(_) if done.load(Ordering::Acquire) => break,
+                            Err(_) => {}
                         }
-                    })
+                    }
                 })
-                .collect();
+            })
+            .collect();
 
-            let mut sent = 0u64;
-            for i in 0..4_000u32 {
-                let tag = (i & 0xff) as u8;
-                let n = (i % 4 + 1) as usize;
-                let payload = vec![tag; 8 + (i as usize % 24)];
-                for _ in 0..n {
-                    transport.push_envelope_buffered(recipient.0, 7, &payload, 1, None, None);
-                    sent += 1;
-                }
-                transport.flush_outbound();
+        let mut sent = 0u64;
+        for i in 0..4_000u32 {
+            let tag = (i & 0xff) as u8;
+            let n = (i % 4 + 1) as usize;
+            let payload = vec![tag; 8 + (i as usize % 24)];
+            for _ in 0..n {
+                transport.push_envelope_buffered(recipient.0, 7, &payload, 1, None, None);
+                sent += 1;
             }
-            // All flushes returned synchronously, so every envelope is in the
-            // channel before we signal done.
-            done.store(true, Ordering::Release);
-            for h in consumers {
-                h.join().expect("consumer thread joins");
-            }
-            assert_eq!(
-                consumed.load(Ordering::Acquire),
-                sent,
-                "every flushed mail must be consumed"
-            );
+            transport.flush_outbound();
         }
+        // All flushes returned synchronously, so every envelope is in the
+        // channel before we signal done.
+        done.store(true, Ordering::Release);
+        for h in consumers {
+            h.join().expect("consumer thread joins");
+        }
+        assert_eq!(
+            consumed.load(Ordering::Acquire),
+            sent,
+            "every flushed mail must be consumed"
+        );
     }
 }

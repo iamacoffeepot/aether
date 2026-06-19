@@ -1825,1878 +1825,1823 @@ mod tests {
         );
     }
 
-    /// Contention/backoff-sensitive tests live in `mod heavy`: these boot a
-    /// chassis and sleep-poll a 500ms dispatcher-scheduling deadline (some
-    /// drive teardown across pooled spawned actors through the worker
-    /// park/wake path, which loses wakes under oversubscription), so they
-    /// are serialized into the `serial-heavy` nextest group
-    /// (`.config/nextest.toml`).
-    mod heavy {
-        use super::*;
+    /// Issue 552 stage 1: end-to-end smoke for the new
+    /// [`Builder::with_actor`] boot path. Boots a hand-rolled
+    /// `NativeActor + NativeDispatch` fixture, looks it up via
+    /// [`PassiveChassis::actor`], pushes one envelope at the cap's
+    /// mailbox, and asserts the dispatcher routed it to the right
+    /// handler. Stage 1 lands the infrastructure; stage 2 migrates
+    /// real caps onto it. This test is the load-bearing acceptance
+    /// gate.
+    #[test]
+    fn with_actor_boots_dispatches_and_tears_down() {
+        use crate::mail::registry::MailboxEntry;
+        use aether_data::Kind;
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
-        /// Issue 552 stage 1: end-to-end smoke for the new
-        /// [`Builder::with_actor`] boot path. Boots a hand-rolled
-        /// `NativeActor + NativeDispatch` fixture, looks it up via
-        /// [`PassiveChassis::actor`], pushes one envelope at the cap's
-        /// mailbox, and asserts the dispatcher routed it to the right
-        /// handler. Stage 1 lands the infrastructure; stage 2 migrates
-        /// real caps onto it. This test is the load-bearing acceptance
-        /// gate.
-        #[test]
-        fn with_actor_boots_dispatches_and_tears_down() {
-            use crate::mail::registry::MailboxEntry;
-            use aether_data::Kind;
-            use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-
-            // Fixture kind: a 4-byte cast-shape payload so encode_into_bytes
-            // lands on the bytemuck path.
-            #[repr(C)]
-            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-            struct Ping {
-                tag: u32,
-            }
-            impl Kind for Ping {
-                const NAME: &'static str = "test.with_actor.ping";
-                const ID: KindId = KindId(0xA1B2_C3D4_E5F6_0001);
-                fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                    if bytes.len() != size_of::<Self>() {
-                        return None;
-                    }
-                    Some(bytemuck::pod_read_unaligned(bytes))
+        // Fixture kind: a 4-byte cast-shape payload so encode_into_bytes
+        // lands on the bytemuck path.
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Ping {
+            tag: u32,
+        }
+        impl Kind for Ping {
+            const NAME: &'static str = "test.with_actor.ping";
+            const ID: KindId = KindId(0xA1B2_C3D4_E5F6_0001);
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != size_of::<Self>() {
+                    return None;
                 }
-                fn encode_into_bytes(&self) -> Vec<u8> {
-                    bytemuck::bytes_of(self).to_vec()
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+        }
+
+        // Fixture cap. State behind interior mutability so `&self`
+        // dispatch can mutate it (the post-552 norm).
+        struct ProbeCap {
+            received: Arc<AtomicU32>,
+        }
+        impl Addressable for ProbeCap {
+            const NAMESPACE: &'static str = "test.with_actor.probe";
+            type Resolver = aether_actor::One;
+        }
+        impl HandlesKind<Ping> for ProbeCap {}
+
+        impl aether_actor::Lifecycle for ProbeCap {
+            type Config = Arc<AtomicU32>;
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self { received: config })
+            }
+        }
+
+        impl NativeActor for ProbeCap {}
+
+        // Hand-rolled NativeDispatch — what the macro arm emits in
+        // task #731. The if-arm decodes Ping bytes, calls the
+        // handler, returns Some(()) on success.
+        impl NativeDispatch for ProbeCap {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut NativeCtx<'_, crate::Manual>,
+                kind: KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Ping::ID.0 {
+                    let _decoded = Ping::decode_from_bytes(payload)?;
+                    self.received.fetch_add(1, AtomicOrdering::SeqCst);
+                    return Some(());
                 }
+                None
             }
+        }
 
-            // Fixture cap. State behind interior mutability so `&self`
-            // dispatch can mutate it (the post-552 norm).
-            struct ProbeCap {
-                received: Arc<AtomicU32>,
-            }
-            impl Addressable for ProbeCap {
-                const NAMESPACE: &'static str = "test.with_actor.probe";
-                type Resolver = aether_actor::One;
-            }
-            impl HandlesKind<Ping> for ProbeCap {}
+        let (registry, mailer) = fresh_substrate();
+        let received = Arc::new(AtomicU32::new(0));
 
-            impl aether_actor::Lifecycle for ProbeCap {
-                type Config = Arc<AtomicU32>;
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init(
-                    config: Self::Config,
-                    _ctx: &mut NativeInitCtx<'_>,
-                ) -> Result<Self, BootError> {
-                    Ok(Self { received: config })
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<ProbeCap>(Arc::clone(&received))
+            .build_passive()
+            .expect("with_actor boot succeeds");
+
+        // Issue 629 / Phase A: chassis-level `actor::<X>()` retired.
+        // The cap is owned by its dispatcher thread; the test verifies
+        // the cap is alive via the mail dispatch round-trip below.
+
+        // Push one envelope at the cap's mailbox via the registry's
+        // sink handler. The dispatcher thread pulls from its inbox
+        // and routes through __aether_dispatch_envelope → on_ping.
+        let mailbox_id = registry
+            .lookup(<ProbeCap as Addressable>::NAMESPACE)
+            .expect("with_actor claimed the mailbox");
+        let MailboxEntry::Inbox { handler, .. } =
+            registry.entry(mailbox_id).expect("sink registered")
+        else {
+            panic!("ProbeCap claim must be a sink entry");
+        };
+
+        let payload = Ping { tag: 0xDEAD_BEEF };
+        let bytes = payload.encode_into_bytes();
+        handler.enqueue(registry::test_owned_dispatch(
+            <Ping as Kind>::ID,
+            Ping::NAME,
+            &bytes,
+            1,
+        ));
+
+        // Wait briefly for the dispatcher thread to dispatch.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while received.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            received.load(AtomicOrdering::SeqCst),
+            1,
+            "dispatcher should have routed Ping → on_ping within the wait budget"
+        );
+
+        drop(chassis);
+    }
+
+    /// Issue 582: the chassis dispatcher trampoline stamps the
+    /// per-actor [`ActorSlots`] into TLS
+    /// for the duration of `init` and each handler call. A cap that
+    /// reaches for `Local::with_mut` from inside both lifecycle
+    /// stages must see its own state — verified end-to-end here so
+    /// the stamping wiring can't silently regress.
+    #[test]
+    fn with_actor_stamps_local_for_init_and_handler() {
+        use crate::mail::registry::MailboxEntry;
+        use aether_actor::Local;
+        use aether_data::Kind;
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Tick {
+            seq: u32,
+        }
+        impl Kind for Tick {
+            const NAME: &'static str = "test.local.tick";
+            const ID: KindId = KindId(0xA1B2_C3D4_E5F6_0002);
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != size_of::<Self>() {
+                    return None;
                 }
+                Some(bytemuck::pod_read_unaligned(bytes))
             }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+        }
 
-            impl NativeActor for ProbeCap {}
+        // The cap holds an Arc<AtomicU32> the test reads after each
+        // dispatch. The actor-local counter is keyed by `TypeId<Counter>`
+        // — the chassis stamp is what makes `with_mut` resolve at
+        // all (outside a stamp it would `debug_assert!` panic).
+        struct LocalProbe {
+            observed: Arc<AtomicU32>,
+        }
+        impl Addressable for LocalProbe {
+            const NAMESPACE: &'static str = "test.local.probe";
+            type Resolver = aether_actor::One;
+        }
+        impl HandlesKind<Tick> for LocalProbe {}
 
-            // Hand-rolled NativeDispatch — what the macro arm emits in
-            // task #731. The if-arm decodes Ping bytes, calls the
-            // handler, returns Some(()) on success.
-            impl NativeDispatch for ProbeCap {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    _ctx: &mut NativeCtx<'_, crate::Manual>,
-                    kind: KindId,
-                    payload: &[u8],
-                ) -> Option<()> {
-                    if kind.0 == Ping::ID.0 {
-                        let _decoded = Ping::decode_from_bytes(payload)?;
-                        self.received.fetch_add(1, AtomicOrdering::SeqCst);
-                        return Some(());
-                    }
-                    None
+        // Newtype-per-slot is the Local convention: each
+        // logical storage gets its own type, so two probes that
+        // both want a u32 don't alias under TypeId. The
+        // `#[local]` attribute is the shorthand for the
+        // marker impl.
+        #[derive(Default)]
+        #[aether_actor::local]
+        struct Counter(u32);
+
+        impl aether_actor::Lifecycle for LocalProbe {
+            type Config = Arc<AtomicU32>;
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                // Init runs inside the chassis builder's stamp guard
+                // — write a sentinel so the handler test below proves
+                // the same slots are reused across init→dispatch.
+                Counter::with_mut(|c| c.0 = 100);
+                Ok(Self { observed: config })
+            }
+        }
+
+        impl NativeActor for LocalProbe {}
+
+        impl NativeDispatch for LocalProbe {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut NativeCtx<'_, crate::Manual>,
+                kind: KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Tick::ID.0 {
+                    let _decoded = Tick::decode_from_bytes(payload)?;
+                    Counter::with_mut(|c| c.0 += 1);
+                    let snapshot = Counter::with(|c| c.0);
+                    self.observed.store(snapshot, AtomicOrdering::SeqCst);
+                    return Some(());
                 }
+                None
             }
+        }
 
-            let (registry, mailer) = fresh_substrate();
-            let received = Arc::new(AtomicU32::new(0));
+        let (registry, mailer) = fresh_substrate();
+        let observed = Arc::new(AtomicU32::new(0));
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<LocalProbe>(Arc::clone(&observed))
+            .build_passive()
+            .expect("LocalProbe boots");
 
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<ProbeCap>(Arc::clone(&received))
-                .build_passive()
-                .expect("with_actor boot succeeds");
+        let mailbox_id = registry
+            .lookup(<LocalProbe as Addressable>::NAMESPACE)
+            .expect("with_actor claimed the mailbox");
+        let MailboxEntry::Inbox { handler, .. } =
+            registry.entry(mailbox_id).expect("sink registered")
+        else {
+            panic!("LocalProbe claim must be a sink entry");
+        };
 
-            // Issue 629 / Phase A: chassis-level `actor::<X>()` retired.
-            // The cap is owned by its dispatcher thread; the test verifies
-            // the cap is alive via the mail dispatch round-trip below.
-
-            // Push one envelope at the cap's mailbox via the registry's
-            // sink handler. The dispatcher thread pulls from its inbox
-            // and routes through __aether_dispatch_envelope → on_ping.
-            let mailbox_id = registry
-                .lookup(<ProbeCap as Addressable>::NAMESPACE)
-                .expect("with_actor claimed the mailbox");
-            let MailboxEntry::Inbox { handler, .. } =
-                registry.entry(mailbox_id).expect("sink registered")
-            else {
-                panic!("ProbeCap claim must be a sink entry");
-            };
-
-            let payload = Ping { tag: 0xDEAD_BEEF };
+        // Three dispatches. Init seeded 100; the handler bumps once
+        // per dispatch and snapshots — so observed should walk
+        // 101, 102, 103 in order. We assert the final 103 with a
+        // wait budget to cover dispatcher-thread scheduling.
+        for seq in 0..3 {
+            let payload = Tick { seq };
             let bytes = payload.encode_into_bytes();
             handler.enqueue(registry::test_owned_dispatch(
-                <Ping as Kind>::ID,
-                Ping::NAME,
+                <Tick as Kind>::ID,
+                Tick::NAME,
                 &bytes,
                 1,
             ));
-
-            // Wait briefly for the dispatcher thread to dispatch.
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while received.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(5));
-            }
-            assert_eq!(
-                received.load(AtomicOrdering::SeqCst),
-                1,
-                "dispatcher should have routed Ping → on_ping within the wait budget"
-            );
-
-            drop(chassis);
         }
 
-        /// Issue 582: the chassis dispatcher trampoline stamps the
-        /// per-actor [`ActorSlots`] into TLS
-        /// for the duration of `init` and each handler call. A cap that
-        /// reaches for `Local::with_mut` from inside both lifecycle
-        /// stages must see its own state — verified end-to-end here so
-        /// the stamping wiring can't silently regress.
-        #[test]
-        fn with_actor_stamps_local_for_init_and_handler() {
-            use crate::mail::registry::MailboxEntry;
-            use aether_actor::Local;
-            use aether_data::Kind;
-            use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-
-            #[repr(C)]
-            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-            struct Tick {
-                seq: u32,
-            }
-            impl Kind for Tick {
-                const NAME: &'static str = "test.local.tick";
-                const ID: KindId = KindId(0xA1B2_C3D4_E5F6_0002);
-                fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                    if bytes.len() != size_of::<Self>() {
-                        return None;
-                    }
-                    Some(bytemuck::pod_read_unaligned(bytes))
-                }
-                fn encode_into_bytes(&self) -> Vec<u8> {
-                    bytemuck::bytes_of(self).to_vec()
-                }
-            }
-
-            // The cap holds an Arc<AtomicU32> the test reads after each
-            // dispatch. The actor-local counter is keyed by `TypeId<Counter>`
-            // — the chassis stamp is what makes `with_mut` resolve at
-            // all (outside a stamp it would `debug_assert!` panic).
-            struct LocalProbe {
-                observed: Arc<AtomicU32>,
-            }
-            impl Addressable for LocalProbe {
-                const NAMESPACE: &'static str = "test.local.probe";
-                type Resolver = aether_actor::One;
-            }
-            impl HandlesKind<Tick> for LocalProbe {}
-
-            // Newtype-per-slot is the Local convention: each
-            // logical storage gets its own type, so two probes that
-            // both want a u32 don't alias under TypeId. The
-            // `#[local]` attribute is the shorthand for the
-            // marker impl.
-            #[derive(Default)]
-            #[aether_actor::local]
-            struct Counter(u32);
-
-            impl aether_actor::Lifecycle for LocalProbe {
-                type Config = Arc<AtomicU32>;
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init(
-                    config: Self::Config,
-                    _ctx: &mut NativeInitCtx<'_>,
-                ) -> Result<Self, BootError> {
-                    // Init runs inside the chassis builder's stamp guard
-                    // — write a sentinel so the handler test below proves
-                    // the same slots are reused across init→dispatch.
-                    Counter::with_mut(|c| c.0 = 100);
-                    Ok(Self { observed: config })
-                }
-            }
-
-            impl NativeActor for LocalProbe {}
-
-            impl NativeDispatch for LocalProbe {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    _ctx: &mut NativeCtx<'_, crate::Manual>,
-                    kind: KindId,
-                    payload: &[u8],
-                ) -> Option<()> {
-                    if kind.0 == Tick::ID.0 {
-                        let _decoded = Tick::decode_from_bytes(payload)?;
-                        Counter::with_mut(|c| c.0 += 1);
-                        let snapshot = Counter::with(|c| c.0);
-                        self.observed.store(snapshot, AtomicOrdering::SeqCst);
-                        return Some(());
-                    }
-                    None
-                }
-            }
-
-            let (registry, mailer) = fresh_substrate();
-            let observed = Arc::new(AtomicU32::new(0));
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<LocalProbe>(Arc::clone(&observed))
-                .build_passive()
-                .expect("LocalProbe boots");
-
-            let mailbox_id = registry
-                .lookup(<LocalProbe as Addressable>::NAMESPACE)
-                .expect("with_actor claimed the mailbox");
-            let MailboxEntry::Inbox { handler, .. } =
-                registry.entry(mailbox_id).expect("sink registered")
-            else {
-                panic!("LocalProbe claim must be a sink entry");
-            };
-
-            // Three dispatches. Init seeded 100; the handler bumps once
-            // per dispatch and snapshots — so observed should walk
-            // 101, 102, 103 in order. We assert the final 103 with a
-            // wait budget to cover dispatcher-thread scheduling.
-            for seq in 0..3 {
-                let payload = Tick { seq };
-                let bytes = payload.encode_into_bytes();
-                handler.enqueue(registry::test_owned_dispatch(
-                    <Tick as Kind>::ID,
-                    Tick::NAME,
-                    &bytes,
-                    1,
-                ));
-            }
-
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while observed.load(AtomicOrdering::SeqCst) != 103 && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(5));
-            }
-            assert_eq!(
-                observed.load(AtomicOrdering::SeqCst),
-                103,
-                "init seeded 100 + 3 handler bumps ⇒ Local at 103 (proves the same \
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while observed.load(AtomicOrdering::SeqCst) != 103 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            observed.load(AtomicOrdering::SeqCst),
+            103,
+            "init seeded 100 + 3 handler bumps ⇒ Local at 103 (proves the same \
              ActorSlots is stamped across init and dispatch)"
-            );
+        );
 
-            drop(chassis);
+        drop(chassis);
+    }
+
+    /// Issue 607 Phase 3b verify: a singleton parent's handler calls
+    /// `ctx.spawn_child::<Child>(...)` to launch an instanced actor.
+    /// Asserts the child's `MailboxId` lands in the chassis's
+    /// `ActorRegistry` as a Live entry, and that the parent-pre-loaded
+    /// `after_init` mail dispatches as the child's first envelope.
+    #[test]
+    fn ctx_spawn_child_routes_through_handler() {
+        use crate::actor::native::spawn::Subname;
+        use crate::mail::registry::MailboxEntry;
+        use aether_actor::HandlesKind;
+        use aether_data::{Kind, KindId as DataKindId};
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Hatch {
+            tag: u32,
+        }
+        impl Kind for Hatch {
+            const NAME: &'static str = "test.spawn_child.hatch";
+            const ID: DataKindId = DataKindId(0xC0C1_C2C3_C4C5_C6C7);
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
         }
 
-        /// Issue 607 Phase 3b verify: a singleton parent's handler calls
-        /// `ctx.spawn_child::<Child>(...)` to launch an instanced actor.
-        /// Asserts the child's `MailboxId` lands in the chassis's
-        /// `ActorRegistry` as a Live entry, and that the parent-pre-loaded
-        /// `after_init` mail dispatches as the child's first envelope.
-        #[test]
-        fn ctx_spawn_child_routes_through_handler() {
-            use crate::actor::native::spawn::Subname;
-            use crate::mail::registry::MailboxEntry;
-            use aether_actor::HandlesKind;
-            use aether_data::{Kind, KindId as DataKindId};
-            use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-
-            #[repr(C)]
-            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-            struct Hatch {
-                tag: u32,
-            }
-            impl Kind for Hatch {
-                const NAME: &'static str = "test.spawn_child.hatch";
-                const ID: DataKindId = DataKindId(0xC0C1_C2C3_C4C5_C6C7);
-                fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                    if bytes.len() != size_of::<Self>() {
-                        return None;
-                    }
-                    Some(bytemuck::pod_read_unaligned(bytes))
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Ping {
+            tag: u32,
+        }
+        impl Kind for Ping {
+            const NAME: &'static str = "test.spawn_child.ping";
+            const ID: DataKindId = DataKindId(0xD0D1_D2D3_D4D5_D6D7);
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != size_of::<Self>() {
+                    return None;
                 }
-                fn encode_into_bytes(&self) -> Vec<u8> {
-                    bytemuck::bytes_of(self).to_vec()
-                }
+                Some(bytemuck::pod_read_unaligned(bytes))
             }
-
-            #[repr(C)]
-            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-            struct Ping {
-                tag: u32,
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
-            impl Kind for Ping {
-                const NAME: &'static str = "test.spawn_child.ping";
-                const ID: DataKindId = DataKindId(0xD0D1_D2D3_D4D5_D6D7);
-                fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                    if bytes.len() != size_of::<Self>() {
-                        return None;
-                    }
-                    Some(bytemuck::pod_read_unaligned(bytes))
-                }
-                fn encode_into_bytes(&self) -> Vec<u8> {
-                    bytemuck::bytes_of(self).to_vec()
-                }
-            }
-
-            struct ChildCap {
-                received: Arc<AtomicU32>,
-            }
-            impl Addressable for ChildCap {
-                const NAMESPACE: &'static str = "test.spawn_child.child";
-                type Resolver = aether_actor::Many;
-            }
-            impl HandlesKind<Ping> for ChildCap {}
-            impl aether_actor::Lifecycle for ChildCap {
-                type Config = Arc<AtomicU32>;
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init(
-                    config: Self::Config,
-                    _ctx: &mut NativeInitCtx<'_>,
-                ) -> Result<Self, BootError> {
-                    Ok(Self { received: config })
-                }
-            }
-            impl NativeActor for ChildCap {}
-            impl NativeDispatch for ChildCap {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    _ctx: &mut NativeCtx<'_, crate::Manual>,
-                    kind: KindId,
-                    payload: &[u8],
-                ) -> Option<()> {
-                    if kind.0 == Ping::ID.0 {
-                        let _ = Ping::decode_from_bytes(payload)?;
-                        self.received.fetch_add(1, AtomicOrdering::SeqCst);
-                        return Some(());
-                    }
-                    None
-                }
-            }
-
-            struct ParentCap {
-                spawn_count: Arc<AtomicU32>,
-                child_received: Arc<AtomicU32>,
-            }
-            impl Addressable for ParentCap {
-                const NAMESPACE: &'static str = "test.spawn_child.parent";
-                type Resolver = aether_actor::One;
-            }
-            impl HandlesKind<Hatch> for ParentCap {}
-            impl aether_actor::Lifecycle for ParentCap {
-                type Config = (Arc<AtomicU32>, Arc<AtomicU32>);
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init(
-                    (spawn_count, child_received): Self::Config,
-                    _ctx: &mut NativeInitCtx<'_>,
-                ) -> Result<Self, BootError> {
-                    Ok(Self {
-                        spawn_count,
-                        child_received,
-                    })
-                }
-            }
-            impl NativeActor for ParentCap {}
-            impl NativeDispatch for ParentCap {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    ctx: &mut NativeCtx<'_, crate::Manual>,
-                    kind: KindId,
-                    payload: &[u8],
-                ) -> Option<()> {
-                    if kind.0 == Hatch::ID.0 {
-                        let _ = Hatch::decode_from_bytes(payload)?;
-                        let _id = ctx
-                            .spawn_child::<ChildCap>(
-                                Subname::Counter,
-                                Arc::clone(&self.child_received),
-                            )
-                            .after_init(Ping { tag: 42 })
-                            .finish()
-                            .expect("spawn_child must succeed");
-                        self.spawn_count.fetch_add(1, AtomicOrdering::SeqCst);
-                        return Some(());
-                    }
-                    None
-                }
-            }
-
-            let (registry, mailer) = fresh_substrate();
-            let spawn_count = Arc::new(AtomicU32::new(0));
-            let child_received = Arc::new(AtomicU32::new(0));
-
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<ParentCap>((Arc::clone(&spawn_count), Arc::clone(&child_received)))
-                .build_passive()
-                .expect("ParentCap boots");
-
-            // Push Hatch at the parent's mailbox; the parent's handler
-            // calls `ctx.spawn_child::<ChildCap>` which in turn pushes a
-            // Ping at the new child via the after_init bootstrap.
-            let parent_id = registry
-                .lookup(<ParentCap as Addressable>::NAMESPACE)
-                .expect("ParentCap claimed");
-            let MailboxEntry::Inbox { handler, .. } = registry.entry(parent_id).expect("sink")
-            else {
-                panic!("expected mailbox entry");
-            };
-            let bytes = (Hatch { tag: 1 }).encode_into_bytes();
-            handler.enqueue(registry::test_owned_dispatch(
-                <Hatch as Kind>::ID,
-                Hatch::NAME,
-                &bytes,
-                1,
-            ));
-
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while child_received.load(AtomicOrdering::SeqCst) < 1 && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(5));
-            }
-            assert_eq!(
-                spawn_count.load(AtomicOrdering::SeqCst),
-                1,
-                "parent's handler ran spawn_child exactly once"
-            );
-            assert_eq!(
-                child_received.load(AtomicOrdering::SeqCst),
-                1,
-                "spawn_child's after_init mail dispatched as the child's first envelope"
-            );
-
-            // Child is Live in the chassis's actor registry under the
-            // ADR-0099 §3 lineage fold: the parent is a root cap (depth-1,
-            // carry == id), so the child's id folds the child node's ActorId
-            // onto the parent's id — not the flat `hash(NAMESPACE:subname)`.
-            let child_id = MailboxId(aether_data::with_tag(
-                aether_data::Tag::Mailbox,
-                aether_data::fold_lineage(
-                    parent_id.0,
-                    aether_data::ActorId::instanced("test.spawn_child.child", "0"),
-                ),
-            ));
-            assert!(
-                chassis.actor_registry().is_live(child_id),
-                "spawned child should be Live in the actor registry under the lineage-folded id"
-            );
-
-            drop(chassis);
         }
 
-        /// Issue 607 Phase 4a verify: `ctx.shutdown()` from inside an
-        /// instanced actor's handler triggers the drain → unwire → exit
-        /// path, flips the `actor_registry` slot to `Dead`, and inserts the
-        /// id into `tombstones`. A reused subname after retirement returns
-        /// `SpawnError::SubnameRetired`.
-        #[test]
-        fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
-            use crate::actor::native::spawn::{SpawnError, Subname};
-            use crate::mail::registry::MailboxEntry;
-            use aether_actor::HandlesKind;
-            use aether_data::{Kind, KindId as DataKindId};
-            use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+        struct ChildCap {
+            received: Arc<AtomicU32>,
+        }
+        impl Addressable for ChildCap {
+            const NAMESPACE: &'static str = "test.spawn_child.child";
+            type Resolver = aether_actor::Many;
+        }
+        impl HandlesKind<Ping> for ChildCap {}
+        impl aether_actor::Lifecycle for ChildCap {
+            type Config = Arc<AtomicU32>;
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self { received: config })
+            }
+        }
+        impl NativeActor for ChildCap {}
+        impl NativeDispatch for ChildCap {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut NativeCtx<'_, crate::Manual>,
+                kind: KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Ping::ID.0 {
+                    let _ = Ping::decode_from_bytes(payload)?;
+                    self.received.fetch_add(1, AtomicOrdering::SeqCst);
+                    return Some(());
+                }
+                None
+            }
+        }
 
-            #[repr(C)]
-            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-            struct Quit {
-                tag: u32,
+        struct ParentCap {
+            spawn_count: Arc<AtomicU32>,
+            child_received: Arc<AtomicU32>,
+        }
+        impl Addressable for ParentCap {
+            const NAMESPACE: &'static str = "test.spawn_child.parent";
+            type Resolver = aether_actor::One;
+        }
+        impl HandlesKind<Hatch> for ParentCap {}
+        impl aether_actor::Lifecycle for ParentCap {
+            type Config = (Arc<AtomicU32>, Arc<AtomicU32>);
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init(
+                (spawn_count, child_received): Self::Config,
+                _ctx: &mut NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self {
+                    spawn_count,
+                    child_received,
+                })
             }
-            impl Kind for Quit {
-                const NAME: &'static str = "test.shutdown.quit";
-                const ID: DataKindId = DataKindId(0xE0E1_E2E3_E4E5_E6E7);
-                fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                    if bytes.len() != size_of::<Self>() {
-                        return None;
-                    }
-                    Some(bytemuck::pod_read_unaligned(bytes))
+        }
+        impl NativeActor for ParentCap {}
+        impl NativeDispatch for ParentCap {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                ctx: &mut NativeCtx<'_, crate::Manual>,
+                kind: KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Hatch::ID.0 {
+                    let _ = Hatch::decode_from_bytes(payload)?;
+                    let _id = ctx
+                        .spawn_child::<ChildCap>(Subname::Counter, Arc::clone(&self.child_received))
+                        .after_init(Ping { tag: 42 })
+                        .finish()
+                        .expect("spawn_child must succeed");
+                    self.spawn_count.fetch_add(1, AtomicOrdering::SeqCst);
+                    return Some(());
                 }
-                fn encode_into_bytes(&self) -> Vec<u8> {
-                    bytemuck::bytes_of(self).to_vec()
-                }
+                None
             }
+        }
 
-            struct Closer {
-                close_observed: Arc<AtomicU32>,
-            }
-            impl Addressable for Closer {
-                const NAMESPACE: &'static str = "test.shutdown.closer";
-                type Resolver = aether_actor::Many;
-            }
-            impl HandlesKind<Quit> for Closer {}
-            impl aether_actor::Lifecycle for Closer {
-                type Config = Arc<AtomicU32>;
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init(
-                    config: Self::Config,
-                    _ctx: &mut NativeInitCtx<'_>,
-                ) -> Result<Self, BootError> {
-                    Ok(Self {
-                        close_observed: config,
-                    })
-                }
-                fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
-                    self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
-                }
-            }
-            impl NativeActor for Closer {}
-            impl NativeDispatch for Closer {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    ctx: &mut NativeCtx<'_, crate::Manual>,
-                    kind: KindId,
-                    payload: &[u8],
-                ) -> Option<()> {
-                    if kind.0 == Quit::ID.0 {
-                        let _ = Quit::decode_from_bytes(payload)?;
-                        ctx.shutdown();
-                        return Some(());
-                    }
-                    None
-                }
-            }
+        let (registry, mailer) = fresh_substrate();
+        let spawn_count = Arc::new(AtomicU32::new(0));
+        let child_received = Arc::new(AtomicU32::new(0));
 
-            let (registry, mailer) = fresh_substrate();
-            let close_observed = Arc::new(AtomicU32::new(0));
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .build_passive()
-                .expect("empty chassis boots");
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<ParentCap>((Arc::clone(&spawn_count), Arc::clone(&child_received)))
+            .build_passive()
+            .expect("ParentCap boots");
 
-            let id = chassis
-                .spawn_actor::<Closer>(Subname::Counter, Arc::clone(&close_observed))
+        // Push Hatch at the parent's mailbox; the parent's handler
+        // calls `ctx.spawn_child::<ChildCap>` which in turn pushes a
+        // Ping at the new child via the after_init bootstrap.
+        let parent_id = registry
+            .lookup(<ParentCap as Addressable>::NAMESPACE)
+            .expect("ParentCap claimed");
+        let MailboxEntry::Inbox { handler, .. } = registry.entry(parent_id).expect("sink") else {
+            panic!("expected mailbox entry");
+        };
+        let bytes = (Hatch { tag: 1 }).encode_into_bytes();
+        handler.enqueue(registry::test_owned_dispatch(
+            <Hatch as Kind>::ID,
+            Hatch::NAME,
+            &bytes,
+            1,
+        ));
+
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while child_received.load(AtomicOrdering::SeqCst) < 1 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            spawn_count.load(AtomicOrdering::SeqCst),
+            1,
+            "parent's handler ran spawn_child exactly once"
+        );
+        assert_eq!(
+            child_received.load(AtomicOrdering::SeqCst),
+            1,
+            "spawn_child's after_init mail dispatched as the child's first envelope"
+        );
+
+        // Child is Live in the chassis's actor registry under the
+        // ADR-0099 §3 lineage fold: the parent is a root cap (depth-1,
+        // carry == id), so the child's id folds the child node's ActorId
+        // onto the parent's id — not the flat `hash(NAMESPACE:subname)`.
+        let child_id = MailboxId(aether_data::with_tag(
+            aether_data::Tag::Mailbox,
+            aether_data::fold_lineage(
+                parent_id.0,
+                aether_data::ActorId::instanced("test.spawn_child.child", "0"),
+            ),
+        ));
+        assert!(
+            chassis.actor_registry().is_live(child_id),
+            "spawned child should be Live in the actor registry under the lineage-folded id"
+        );
+
+        drop(chassis);
+    }
+
+    /// Issue 607 Phase 4a verify: `ctx.shutdown()` from inside an
+    /// instanced actor's handler triggers the drain → unwire → exit
+    /// path, flips the `actor_registry` slot to `Dead`, and inserts the
+    /// id into `tombstones`. A reused subname after retirement returns
+    /// `SpawnError::SubnameRetired`.
+    #[test]
+    fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
+        use crate::actor::native::spawn::{SpawnError, Subname};
+        use crate::mail::registry::MailboxEntry;
+        use aether_actor::HandlesKind;
+        use aether_data::{Kind, KindId as DataKindId};
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Quit {
+            tag: u32,
+        }
+        impl Kind for Quit {
+            const NAME: &'static str = "test.shutdown.quit";
+            const ID: DataKindId = DataKindId(0xE0E1_E2E3_E4E5_E6E7);
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+        }
+
+        struct Closer {
+            close_observed: Arc<AtomicU32>,
+        }
+        impl Addressable for Closer {
+            const NAMESPACE: &'static str = "test.shutdown.closer";
+            type Resolver = aether_actor::Many;
+        }
+        impl HandlesKind<Quit> for Closer {}
+        impl aether_actor::Lifecycle for Closer {
+            type Config = Arc<AtomicU32>;
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self {
+                    close_observed: config,
+                })
+            }
+            fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
+                self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+        impl NativeActor for Closer {}
+        impl NativeDispatch for Closer {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                ctx: &mut NativeCtx<'_, crate::Manual>,
+                kind: KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Quit::ID.0 {
+                    let _ = Quit::decode_from_bytes(payload)?;
+                    ctx.shutdown();
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let close_observed = Arc::new(AtomicU32::new(0));
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let id = chassis
+            .spawn_actor::<Closer>(Subname::Counter, Arc::clone(&close_observed))
+            .finish()
+            .expect("spawn instanced actor");
+
+        // Push a Quit envelope at the spawned mailbox via the
+        // registered sink handler. The handler's `ctx.shutdown()`
+        // flips the dispatcher's flag; after the handler returns the
+        // trampoline drains, runs `unwire`, marks Dead, tombstones.
+        let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("sink registered")
+        else {
+            panic!("expected mailbox entry for instanced actor");
+        };
+        let bytes = (Quit { tag: 1 }).encode_into_bytes();
+        handler.enqueue(registry::test_owned_dispatch(
+            <Quit as Kind>::ID,
+            Quit::NAME,
+            &bytes,
+            1,
+        ));
+
+        // Wait for unwire to run + the registry slot to flip Dead.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while close_observed.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            close_observed.load(AtomicOrdering::SeqCst),
+            1,
+            "unwire fired exactly once after the dispatcher drained"
+        );
+        // Spin until the slot transitions Dead — the dispatcher
+        // thread runs `mark_dead` after `unwire`, so there's a
+        // small window between the close-observed bump above and the
+        // registry update.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while chassis.actor_registry().is_live(id) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !chassis.actor_registry().is_live(id),
+            "registry slot should transition Live → Dead after unwire runs"
+        );
+        assert!(
+            chassis.actor_registry().is_tombstoned(id),
+            "tombstone insertion forbids reuse of the retired full name"
+        );
+
+        // Spawning again under the same `Subname::Counter` would
+        // increment the per-Spawner counter (so it'd target a fresh
+        // id, not collide); reuse the same `Named` subname to land
+        // back at the tombstoned id.
+        let err = chassis
+            .spawn_actor::<Closer>(Subname::Named("0"), Arc::clone(&close_observed))
+            .finish()
+            .expect_err("retired subname must reject");
+        assert!(
+            matches!(err, SpawnError::SubnameRetired { .. }),
+            "expected SubnameRetired, got {err:?}"
+        );
+
+        drop(chassis);
+    }
+
+    /// Issue 685: chassis teardown drives `unwire` on every spawned
+    /// instanced actor, even those that never received a self-shutdown
+    /// trigger. Pre-685 the Pooled spawn path's slot was reachable
+    /// from the chassis only through the wake's `Weak`, and nothing
+    /// signaled shutdown at chassis exit — so spawned actors silently
+    /// skipped their close path. The Spawner's `shutdown_instanced`
+    /// step now signals + wakes every spawned slot before the pool
+    /// drops, and the chassis waits for each `Drainable::is_closed`.
+    #[test]
+    fn chassis_teardown_runs_unwire_for_pooled_spawned_actors() {
+        use crate::actor::native::spawn::Subname;
+
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        struct Quiet {
+            close_observed: Arc<AtomicU32>,
+        }
+        impl Addressable for Quiet {
+            const NAMESPACE: &'static str = "test.teardown.quiet";
+            type Resolver = aether_actor::Many;
+        }
+        impl aether_actor::Lifecycle for Quiet {
+            type Config = Arc<AtomicU32>;
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self {
+                    close_observed: config,
+                })
+            }
+            fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
+                self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+        impl NativeActor for Quiet {}
+        impl NativeDispatch for Quiet {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut NativeCtx<'_, crate::Manual>,
+                _kind: KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let close_observed = Arc::new(AtomicU32::new(0));
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let id = chassis
+            .spawn_actor::<Quiet>(Subname::Counter, Arc::clone(&close_observed))
+            .finish()
+            .expect("spawn instanced actor");
+
+        // No mail at all — the actor sits idle from the moment it
+        // spawns. Pre-685 chassis teardown skipped its close path
+        // entirely; post-685 the teardown step signals + wakes it and
+        // the worker runs the close cycle before the pool drops.
+        assert_eq!(close_observed.load(AtomicOrdering::SeqCst), 0);
+
+        drop(chassis);
+
+        assert_eq!(
+            close_observed.load(AtomicOrdering::SeqCst),
+            1,
+            "chassis teardown must drive unwire exactly once for a quiet spawned actor",
+        );
+        // Drop the unused id binding so clippy stays quiet — its
+        // referent (the actor_registry's Live entry) drops with the
+        // chassis above.
+        let _ = id;
+    }
+
+    /// Issue 714: stress version of the chassis-teardown contract.
+    /// Spawn N=64 instanced actors and assert all N `close_observed`
+    /// counters tick to exactly 1 after `drop(chassis)`. Pre-714 the
+    /// polling-based `shutdown_instanced` could lose individual wakes
+    /// under contention; the channel-signal rewrite is deterministic
+    /// — even one missed `unwire` here fails the test.
+    #[test]
+    fn chassis_teardown_runs_unwire_for_many_pooled_actors() {
+        use crate::actor::native::spawn::Subname;
+
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        struct Quiet {
+            close_observed: Arc<AtomicU32>,
+        }
+        impl Addressable for Quiet {
+            const NAMESPACE: &'static str = "test.teardown.quiet_many";
+            type Resolver = aether_actor::Many;
+        }
+        impl aether_actor::Lifecycle for Quiet {
+            type Config = Arc<AtomicU32>;
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self {
+                    close_observed: config,
+                })
+            }
+            fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
+                self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+        impl NativeActor for Quiet {}
+        impl NativeDispatch for Quiet {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut NativeCtx<'_, crate::Manual>,
+                _kind: KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
+            }
+        }
+
+        const N: usize = 64;
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let counters: Vec<Arc<AtomicU32>> = (0..N).map(|_| Arc::new(AtomicU32::new(0))).collect();
+        for (i, counter) in counters.iter().enumerate() {
+            let name = format!("inst-{i}");
+            chassis
+                .spawn_actor::<Quiet>(Subname::Named(&name), Arc::clone(counter))
                 .finish()
                 .expect("spawn instanced actor");
-
-            // Push a Quit envelope at the spawned mailbox via the
-            // registered sink handler. The handler's `ctx.shutdown()`
-            // flips the dispatcher's flag; after the handler returns the
-            // trampoline drains, runs `unwire`, marks Dead, tombstones.
-            let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("sink registered")
-            else {
-                panic!("expected mailbox entry for instanced actor");
-            };
-            let bytes = (Quit { tag: 1 }).encode_into_bytes();
-            handler.enqueue(registry::test_owned_dispatch(
-                <Quit as Kind>::ID,
-                Quit::NAME,
-                &bytes,
-                1,
-            ));
-
-            // Wait for unwire to run + the registry slot to flip Dead.
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while close_observed.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(5));
-            }
-            assert_eq!(
-                close_observed.load(AtomicOrdering::SeqCst),
-                1,
-                "unwire fired exactly once after the dispatcher drained"
-            );
-            // Spin until the slot transitions Dead — the dispatcher
-            // thread runs `mark_dead` after `unwire`, so there's a
-            // small window between the close-observed bump above and the
-            // registry update.
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while chassis.actor_registry().is_live(id) && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(5));
-            }
-            assert!(
-                !chassis.actor_registry().is_live(id),
-                "registry slot should transition Live → Dead after unwire runs"
-            );
-            assert!(
-                chassis.actor_registry().is_tombstoned(id),
-                "tombstone insertion forbids reuse of the retired full name"
-            );
-
-            // Spawning again under the same `Subname::Counter` would
-            // increment the per-Spawner counter (so it'd target a fresh
-            // id, not collide); reuse the same `Named` subname to land
-            // back at the tombstoned id.
-            let err = chassis
-                .spawn_actor::<Closer>(Subname::Named("0"), Arc::clone(&close_observed))
-                .finish()
-                .expect_err("retired subname must reject");
-            assert!(
-                matches!(err, SpawnError::SubnameRetired { .. }),
-                "expected SubnameRetired, got {err:?}"
-            );
-
-            drop(chassis);
         }
 
-        /// Issue 685: chassis teardown drives `unwire` on every spawned
-        /// instanced actor, even those that never received a self-shutdown
-        /// trigger. Pre-685 the Pooled spawn path's slot was reachable
-        /// from the chassis only through the wake's `Weak`, and nothing
-        /// signaled shutdown at chassis exit — so spawned actors silently
-        /// skipped their close path. The Spawner's `shutdown_instanced`
-        /// step now signals + wakes every spawned slot before the pool
-        /// drops, and the chassis waits for each `Drainable::is_closed`.
-        #[test]
-        fn chassis_teardown_runs_unwire_for_pooled_spawned_actors() {
-            use crate::actor::native::spawn::Subname;
-
-            use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-
-            struct Quiet {
-                close_observed: Arc<AtomicU32>,
-            }
-            impl Addressable for Quiet {
-                const NAMESPACE: &'static str = "test.teardown.quiet";
-                type Resolver = aether_actor::Many;
-            }
-            impl aether_actor::Lifecycle for Quiet {
-                type Config = Arc<AtomicU32>;
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init(
-                    config: Self::Config,
-                    _ctx: &mut NativeInitCtx<'_>,
-                ) -> Result<Self, BootError> {
-                    Ok(Self {
-                        close_observed: config,
-                    })
-                }
-                fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
-                    self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
-                }
-            }
-            impl NativeActor for Quiet {}
-            impl NativeDispatch for Quiet {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    _ctx: &mut NativeCtx<'_, crate::Manual>,
-                    _kind: KindId,
-                    _payload: &[u8],
-                ) -> Option<()> {
-                    None
-                }
-            }
-
-            let (registry, mailer) = fresh_substrate();
-            let close_observed = Arc::new(AtomicU32::new(0));
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .build_passive()
-                .expect("empty chassis boots");
-
-            let id = chassis
-                .spawn_actor::<Quiet>(Subname::Counter, Arc::clone(&close_observed))
-                .finish()
-                .expect("spawn instanced actor");
-
-            // No mail at all — the actor sits idle from the moment it
-            // spawns. Pre-685 chassis teardown skipped its close path
-            // entirely; post-685 the teardown step signals + wakes it and
-            // the worker runs the close cycle before the pool drops.
-            assert_eq!(close_observed.load(AtomicOrdering::SeqCst), 0);
-
-            drop(chassis);
-
-            assert_eq!(
-                close_observed.load(AtomicOrdering::SeqCst),
-                1,
-                "chassis teardown must drive unwire exactly once for a quiet spawned actor",
-            );
-            // Drop the unused id binding so clippy stays quiet — its
-            // referent (the actor_registry's Live entry) drops with the
-            // chassis above.
-            let _ = id;
+        for counter in &counters {
+            assert_eq!(counter.load(AtomicOrdering::SeqCst), 0);
         }
 
-        /// Issue 714: stress version of the chassis-teardown contract.
-        /// Spawn N=64 instanced actors and assert all N `close_observed`
-        /// counters tick to exactly 1 after `drop(chassis)`. Pre-714 the
-        /// polling-based `shutdown_instanced` could lose individual wakes
-        /// under contention; the channel-signal rewrite is deterministic
-        /// — even one missed `unwire` here fails the test.
-        #[test]
-        fn chassis_teardown_runs_unwire_for_many_pooled_actors() {
-            use crate::actor::native::spawn::Subname;
+        drop(chassis);
 
-            use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+        for (i, counter) in counters.iter().enumerate() {
+            assert_eq!(
+                counter.load(AtomicOrdering::SeqCst),
+                1,
+                "actor {i} must have run unwire exactly once",
+            );
+        }
+    }
 
-            struct Quiet {
-                close_observed: Arc<AtomicU32>,
+    /// Issue 607 Phase 5: type mismatch through `resolve_actor` returns
+    /// `None` rather than a downcast that succeeds against the wrong
+    /// type. Two instanced types live under different namespaces; a
+    /// lookup with one type at the other's id mismatches and returns
+    /// None.
+    #[test]
+    fn resolve_actor_returns_none_on_type_mismatch() {
+        use crate::actor::native::spawn::Subname;
+
+        struct Foo;
+        impl Addressable for Foo {
+            const NAMESPACE: &'static str = "test.resolve_mismatch.foo";
+            type Resolver = aether_actor::Many;
+        }
+        impl aether_actor::Lifecycle for Foo {
+            type Config = ();
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self)
             }
-            impl Addressable for Quiet {
-                const NAMESPACE: &'static str = "test.teardown.quiet_many";
-                type Resolver = aether_actor::Many;
-            }
-            impl aether_actor::Lifecycle for Quiet {
-                type Config = Arc<AtomicU32>;
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init(
-                    config: Self::Config,
-                    _ctx: &mut NativeInitCtx<'_>,
-                ) -> Result<Self, BootError> {
-                    Ok(Self {
-                        close_observed: config,
-                    })
-                }
-                fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
-                    self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
-                }
-            }
-            impl NativeActor for Quiet {}
-            impl NativeDispatch for Quiet {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    _ctx: &mut NativeCtx<'_, crate::Manual>,
-                    _kind: KindId,
-                    _payload: &[u8],
-                ) -> Option<()> {
-                    None
-                }
-            }
-
-            const N: usize = 64;
-
-            let (registry, mailer) = fresh_substrate();
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .build_passive()
-                .expect("empty chassis boots");
-
-            let counters: Vec<Arc<AtomicU32>> =
-                (0..N).map(|_| Arc::new(AtomicU32::new(0))).collect();
-            for (i, counter) in counters.iter().enumerate() {
-                let name = format!("inst-{i}");
-                chassis
-                    .spawn_actor::<Quiet>(Subname::Named(&name), Arc::clone(counter))
-                    .finish()
-                    .expect("spawn instanced actor");
-            }
-
-            for counter in &counters {
-                assert_eq!(counter.load(AtomicOrdering::SeqCst), 0);
-            }
-
-            drop(chassis);
-
-            for (i, counter) in counters.iter().enumerate() {
-                assert_eq!(
-                    counter.load(AtomicOrdering::SeqCst),
-                    1,
-                    "actor {i} must have run unwire exactly once",
-                );
+        }
+        impl NativeActor for Foo {}
+        impl NativeDispatch for Foo {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut NativeCtx<'_, crate::Manual>,
+                _kind: KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
             }
         }
 
-        /// Issue 607 Phase 5: type mismatch through `resolve_actor` returns
-        /// `None` rather than a downcast that succeeds against the wrong
-        /// type. Two instanced types live under different namespaces; a
-        /// lookup with one type at the other's id mismatches and returns
-        /// None.
-        #[test]
-        fn resolve_actor_returns_none_on_type_mismatch() {
-            use crate::actor::native::spawn::Subname;
-
-            struct Foo;
-            impl Addressable for Foo {
-                const NAMESPACE: &'static str = "test.resolve_mismatch.foo";
-                type Resolver = aether_actor::Many;
+        struct Bar;
+        impl Addressable for Bar {
+            const NAMESPACE: &'static str = "test.resolve_mismatch.bar";
+            type Resolver = aether_actor::Many;
+        }
+        impl aether_actor::Lifecycle for Bar {
+            type Config = ();
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self)
             }
-            impl aether_actor::Lifecycle for Foo {
-                type Config = ();
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-                    Ok(Self)
-                }
+        }
+        impl NativeActor for Bar {}
+        impl NativeDispatch for Bar {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut NativeCtx<'_, crate::Manual>,
+                _kind: KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
             }
-            impl NativeActor for Foo {}
-            impl NativeDispatch for Foo {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    _ctx: &mut NativeCtx<'_, crate::Manual>,
-                    _kind: KindId,
-                    _payload: &[u8],
-                ) -> Option<()> {
-                    None
-                }
-            }
-
-            struct Bar;
-            impl Addressable for Bar {
-                const NAMESPACE: &'static str = "test.resolve_mismatch.bar";
-                type Resolver = aether_actor::Many;
-            }
-            impl aether_actor::Lifecycle for Bar {
-                type Config = ();
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-                    Ok(Self)
-                }
-            }
-            impl NativeActor for Bar {}
-            impl NativeDispatch for Bar {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    _ctx: &mut NativeCtx<'_, crate::Manual>,
-                    _kind: KindId,
-                    _payload: &[u8],
-                ) -> Option<()> {
-                    None
-                }
-            }
-
-            let (registry, mailer) = fresh_substrate();
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .build_passive()
-                .expect("empty chassis boots");
-
-            let _ = chassis
-                .spawn_actor::<Foo>(Subname::Named("only"), ())
-                .finish()
-                .expect("spawn foo");
-
-            // Resolving with the same subname but the wrong type returns
-            // None — the namespaces differ so the hashed full names differ
-            // and Bar's "only" is just not present. (The TypeId guard
-            // would catch a hash collision.)
-            assert!(chassis.resolve_actor::<Bar>("only").is_none());
-
-            // resolve_actors::<Bar>() is empty because no Bar instances
-            // were spawned, even though a Foo with the same subname exists.
-            assert_eq!(chassis.resolve_actors::<Bar>().len(), 0);
-            assert_eq!(chassis.resolve_actors::<Foo>().len(), 1);
-
-            drop(chassis);
         }
 
-        /// Issue 607 Phase 4b verify: a `ctx.monitor(target)` registration
-        /// fires exactly one `MonitorNotice` at the watcher when the
-        /// target self-shuts. Two-actor scenario: Watcher (instanced)
-        /// holds a `MonitorHandle` against Target (instanced) and counts
-        /// the notices it receives; Target self-shuts on `Quit`. After
-        /// the close fan-out we assert (1) the watcher saw the notice
-        /// once with the right target id, (2) the target's slot is Dead +
-        /// tombstoned, and (3) the registry's forward index drained.
-        #[test]
-        fn ctx_monitor_fires_notice_at_target_close() {
-            use crate::actor::native::spawn::Subname;
-            use crate::mail::registry::MailboxEntry;
-            use aether_actor::HandlesKind;
-            use aether_data::{Kind, KindId as DataKindId};
-            use std::sync::Mutex;
-            use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
 
-            // Self-shutdown trigger for the target.
-            #[repr(C)]
-            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-            struct Quit {
-                tag: u32,
-            }
-            impl Kind for Quit {
-                const NAME: &'static str = "test.monitor.quit";
-                const ID: DataKindId = DataKindId(0xC0DE_C0DE_4B4B_4B4B);
-                fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                    if bytes.len() != size_of::<Self>() {
-                        return None;
-                    }
-                    Some(bytemuck::pod_read_unaligned(bytes))
+        let _ = chassis
+            .spawn_actor::<Foo>(Subname::Named("only"), ())
+            .finish()
+            .expect("spawn foo");
+
+        // Resolving with the same subname but the wrong type returns
+        // None — the namespaces differ so the hashed full names differ
+        // and Bar's "only" is just not present. (The TypeId guard
+        // would catch a hash collision.)
+        assert!(chassis.resolve_actor::<Bar>("only").is_none());
+
+        // resolve_actors::<Bar>() is empty because no Bar instances
+        // were spawned, even though a Foo with the same subname exists.
+        assert_eq!(chassis.resolve_actors::<Bar>().len(), 0);
+        assert_eq!(chassis.resolve_actors::<Foo>().len(), 1);
+
+        drop(chassis);
+    }
+
+    /// Issue 607 Phase 4b verify: a `ctx.monitor(target)` registration
+    /// fires exactly one `MonitorNotice` at the watcher when the
+    /// target self-shuts. Two-actor scenario: Watcher (instanced)
+    /// holds a `MonitorHandle` against Target (instanced) and counts
+    /// the notices it receives; Target self-shuts on `Quit`. After
+    /// the close fan-out we assert (1) the watcher saw the notice
+    /// once with the right target id, (2) the target's slot is Dead +
+    /// tombstoned, and (3) the registry's forward index drained.
+    #[test]
+    fn ctx_monitor_fires_notice_at_target_close() {
+        use crate::actor::native::spawn::Subname;
+        use crate::mail::registry::MailboxEntry;
+        use aether_actor::HandlesKind;
+        use aether_data::{Kind, KindId as DataKindId};
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
+
+        // Self-shutdown trigger for the target.
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Quit {
+            tag: u32,
+        }
+        impl Kind for Quit {
+            const NAME: &'static str = "test.monitor.quit";
+            const ID: DataKindId = DataKindId(0xC0DE_C0DE_4B4B_4B4B);
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != size_of::<Self>() {
+                    return None;
                 }
-                fn encode_into_bytes(&self) -> Vec<u8> {
-                    bytemuck::bytes_of(self).to_vec()
-                }
+                Some(bytemuck::pod_read_unaligned(bytes))
             }
-
-            // Tells the watcher which target to monitor. The watcher's
-            // handler reads `target_id` and calls `ctx.monitor`.
-            #[repr(C)]
-            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-            struct WatchOrder {
-                target_id: u64,
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
-            impl Kind for WatchOrder {
-                const NAME: &'static str = "test.monitor.watch_order";
-                const ID: DataKindId = DataKindId(0x4B4B_C0DE_C0DE_C0DE);
-                fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                    if bytes.len() != size_of::<Self>() {
-                        return None;
-                    }
-                    Some(bytemuck::pod_read_unaligned(bytes))
-                }
-                fn encode_into_bytes(&self) -> Vec<u8> {
-                    bytemuck::bytes_of(self).to_vec()
-                }
-            }
-
-            // Target — handles Quit by self-shutting.
-            struct Target;
-            impl Addressable for Target {
-                const NAMESPACE: &'static str = "test.monitor.target";
-                type Resolver = aether_actor::Many;
-            }
-            impl HandlesKind<Quit> for Target {}
-            impl aether_actor::Lifecycle for Target {
-                type Config = ();
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init((): Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-                    Ok(Self)
-                }
-            }
-            impl NativeActor for Target {}
-            impl NativeDispatch for Target {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    ctx: &mut NativeCtx<'_, crate::Manual>,
-                    kind: KindId,
-                    payload: &[u8],
-                ) -> Option<()> {
-                    if kind.0 == Quit::ID.0 {
-                        let _ = Quit::decode_from_bytes(payload)?;
-                        ctx.shutdown();
-                        return Some(());
-                    }
-                    None
-                }
-            }
-
-            // Watcher — handles WatchOrder by registering a monitor;
-            // handles MonitorNotice by recording the target id and
-            // bumping a counter.
-            struct Watcher {
-                notice_count: Arc<AtomicU32>,
-                last_target: Arc<AtomicU64>,
-                handle: Mutex<Option<MonitorHandle>>,
-            }
-            impl Addressable for Watcher {
-                const NAMESPACE: &'static str = "test.monitor.watcher";
-                type Resolver = aether_actor::Many;
-            }
-            impl HandlesKind<WatchOrder> for Watcher {}
-            impl HandlesKind<aether_kinds::MonitorNotice> for Watcher {}
-            impl aether_actor::Lifecycle for Watcher {
-                type Config = (Arc<AtomicU32>, Arc<AtomicU64>);
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init(
-                    config: Self::Config,
-                    _ctx: &mut NativeInitCtx<'_>,
-                ) -> Result<Self, BootError> {
-                    Ok(Self {
-                        notice_count: config.0,
-                        last_target: config.1,
-                        handle: Mutex::new(None),
-                    })
-                }
-            }
-            impl NativeActor for Watcher {}
-            impl NativeDispatch for Watcher {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    ctx: &mut NativeCtx<'_, crate::Manual>,
-                    kind: KindId,
-                    payload: &[u8],
-                ) -> Option<()> {
-                    if kind.0 == WatchOrder::ID.0 {
-                        let order = WatchOrder::decode_from_bytes(payload)?;
-                        let target = MailboxId(order.target_id);
-                        let h = ctx
-                            .monitor(target)
-                            .expect("target must be Live at order time");
-                        *self.handle.lock().unwrap() = Some(h);
-                        return Some(());
-                    }
-                    if kind.0 == <aether_kinds::MonitorNotice as Kind>::ID.0 {
-                        let notice =
-                            <aether_kinds::MonitorNotice as Kind>::decode_from_bytes(payload)?;
-                        self.last_target
-                            .store(notice.target.0, AtomicOrdering::SeqCst);
-                        self.notice_count.fetch_add(1, AtomicOrdering::SeqCst);
-                        return Some(());
-                    }
-                    None
-                }
-            }
-
-            let (registry, mailer) = fresh_substrate();
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .build_passive()
-                .expect("empty chassis boots");
-
-            // Spawn target first so the watcher can register against a
-            // Live id.
-            let target_id = chassis
-                .spawn_actor::<Target>(Subname::Counter, ())
-                .finish()
-                .expect("spawn target");
-
-            let notice_count = Arc::new(AtomicU32::new(0));
-            let last_target = Arc::new(AtomicU64::new(0));
-            let watcher_id = chassis
-                .spawn_actor::<Watcher>(
-                    Subname::Counter,
-                    (Arc::clone(&notice_count), Arc::clone(&last_target)),
-                )
-                .finish()
-                .expect("spawn watcher");
-
-            // Drive the watcher to register the monitor by pushing a
-            // WatchOrder through its sink handler. After this returns
-            // the watcher's handle is stored in `self.handle`.
-            let MailboxEntry::Inbox {
-                handler: watcher_handler,
-                ..
-            } = registry.entry(watcher_id).expect("watcher sink registered")
-            else {
-                panic!("expected mailbox entry for watcher");
-            };
-            let order = WatchOrder {
-                target_id: target_id.0,
-            };
-            watcher_handler.enqueue(registry::test_owned_dispatch(
-                <WatchOrder as Kind>::ID,
-                WatchOrder::NAME,
-                &order.encode_into_bytes(),
-                1,
-            ));
-
-            // Wait until the registry sees the monitor entry.
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while chassis.actor_registry().monitor_count(target_id) == 0
-                && Instant::now() < deadline
-            {
-                thread::sleep(Duration::from_millis(5));
-            }
-            assert_eq!(
-                chassis.actor_registry().monitor_count(target_id),
-                1,
-                "watcher's monitor should be registered against target",
-            );
-            assert_eq!(
-                chassis.actor_registry().monitoring_count(watcher_id),
-                1,
-                "watcher should appear in the reverse index",
-            );
-
-            // Fire Quit at the target — its handler self-shuts; the
-            // dispatcher's close path runs `close_actor`, which fans out
-            // a MonitorNotice mail to watcher_id.
-            let MailboxEntry::Inbox {
-                handler: target_handler,
-                ..
-            } = registry.entry(target_id).expect("target sink registered")
-            else {
-                panic!("expected mailbox entry for target");
-            };
-            target_handler.enqueue(registry::test_owned_dispatch(
-                <Quit as Kind>::ID,
-                Quit::NAME,
-                &(Quit { tag: 1 }).encode_into_bytes(),
-                1,
-            ));
-
-            // Wait for the notice to land at the watcher.
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while notice_count.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(5));
-            }
-            assert_eq!(
-                notice_count.load(AtomicOrdering::SeqCst),
-                1,
-                "watcher should have received exactly one MonitorNotice",
-            );
-            assert_eq!(
-                last_target.load(AtomicOrdering::SeqCst),
-                target_id.0,
-                "MonitorNotice.target should match the closed actor's id",
-            );
-
-            // Wait for target slot to flip Dead (the close path runs
-            // close_actor → mark_dead after fan-out).
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while chassis.actor_registry().is_live(target_id) && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(5));
-            }
-            assert!(
-                !chassis.actor_registry().is_live(target_id),
-                "target slot should transition Live → Dead after close fan-out",
-            );
-            assert!(
-                chassis.actor_registry().is_tombstoned(target_id),
-                "target id should be tombstoned",
-            );
-            // Forward index for target was drained.
-            assert_eq!(
-                chassis.actor_registry().monitor_count(target_id),
-                0,
-                "monitors_of[target] must drain after fan-out",
-            );
-
-            drop(chassis);
         }
 
-        /// Issue 607 Phase 4b verify: when the *watcher* dies first, the
-        /// reverse-index walk prunes the watcher's entry from each
-        /// monitored target's `monitors_of`. No `MonitorNotice` fires (the
-        /// watcher is the one closing; targets are still alive).
-        #[test]
-        fn watcher_close_prunes_targets_forward_index() {
-            use crate::actor::native::spawn::Subname;
-            use crate::mail::registry::MailboxEntry;
-            use aether_actor::HandlesKind;
-            use aether_data::{Kind, KindId as DataKindId};
-            use std::sync::Mutex;
-            use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-
-            // Re-use Quit + WatchOrder shape inline (test isolation).
-            #[repr(C)]
-            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-            struct Quit {
-                tag: u32,
-            }
-            impl Kind for Quit {
-                const NAME: &'static str = "test.monitor.quit2";
-                const ID: DataKindId = DataKindId(0xCAFE_BABE_DEAD_BEEF);
-                fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                    if bytes.len() != size_of::<Self>() {
-                        return None;
-                    }
-                    Some(bytemuck::pod_read_unaligned(bytes))
+        // Tells the watcher which target to monitor. The watcher's
+        // handler reads `target_id` and calls `ctx.monitor`.
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct WatchOrder {
+            target_id: u64,
+        }
+        impl Kind for WatchOrder {
+            const NAME: &'static str = "test.monitor.watch_order";
+            const ID: DataKindId = DataKindId(0x4B4B_C0DE_C0DE_C0DE);
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != size_of::<Self>() {
+                    return None;
                 }
-                fn encode_into_bytes(&self) -> Vec<u8> {
-                    bytemuck::bytes_of(self).to_vec()
-                }
+                Some(bytemuck::pod_read_unaligned(bytes))
             }
-            #[repr(C)]
-            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-            struct WatchOrder {
-                target_id: u64,
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
-            impl Kind for WatchOrder {
-                const NAME: &'static str = "test.monitor.watch_order2";
-                const ID: DataKindId = DataKindId(0xBEEF_DEAD_BABE_CAFE);
-                fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                    if bytes.len() != size_of::<Self>() {
-                        return None;
-                    }
-                    Some(bytemuck::pod_read_unaligned(bytes))
-                }
-                fn encode_into_bytes(&self) -> Vec<u8> {
-                    bytemuck::bytes_of(self).to_vec()
-                }
-            }
-
-            struct Target;
-            impl Addressable for Target {
-                const NAMESPACE: &'static str = "test.monitor.target2";
-                type Resolver = aether_actor::Many;
-            }
-            impl aether_actor::Lifecycle for Target {
-                type Config = ();
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init((): Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-                    Ok(Self)
-                }
-            }
-            impl NativeActor for Target {}
-            impl NativeDispatch for Target {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    _ctx: &mut NativeCtx<'_, crate::Manual>,
-                    _kind: KindId,
-                    _payload: &[u8],
-                ) -> Option<()> {
-                    None
-                }
-            }
-
-            struct Watcher {
-                handle: Mutex<Option<MonitorHandle>>,
-                close_observed: Arc<AtomicU32>,
-            }
-            impl Addressable for Watcher {
-                const NAMESPACE: &'static str = "test.monitor.watcher2";
-                type Resolver = aether_actor::Many;
-            }
-            impl HandlesKind<WatchOrder> for Watcher {}
-            impl HandlesKind<Quit> for Watcher {}
-            impl aether_actor::Lifecycle for Watcher {
-                type Config = Arc<AtomicU32>;
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init(
-                    config: Self::Config,
-                    _ctx: &mut NativeInitCtx<'_>,
-                ) -> Result<Self, BootError> {
-                    Ok(Self {
-                        handle: Mutex::new(None),
-                        close_observed: config,
-                    })
-                }
-                fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
-                    self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
-                }
-            }
-            impl NativeActor for Watcher {}
-            impl NativeDispatch for Watcher {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    ctx: &mut NativeCtx<'_, crate::Manual>,
-                    kind: KindId,
-                    payload: &[u8],
-                ) -> Option<()> {
-                    if kind.0 == WatchOrder::ID.0 {
-                        let order = WatchOrder::decode_from_bytes(payload)?;
-                        let target = MailboxId(order.target_id);
-                        let h = ctx.monitor(target).expect("target Live");
-                        *self.handle.lock().unwrap() = Some(h);
-                        return Some(());
-                    }
-                    if kind.0 == Quit::ID.0 {
-                        let _ = Quit::decode_from_bytes(payload)?;
-                        ctx.shutdown();
-                        return Some(());
-                    }
-                    None
-                }
-            }
-
-            let (registry, mailer) = fresh_substrate();
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .build_passive()
-                .expect("empty chassis boots");
-
-            let target_id = chassis
-                .spawn_actor::<Target>(Subname::Counter, ())
-                .finish()
-                .expect("spawn target");
-            let close_observed = Arc::new(AtomicU32::new(0));
-            let watcher_id = chassis
-                .spawn_actor::<Watcher>(Subname::Counter, Arc::clone(&close_observed))
-                .finish()
-                .expect("spawn watcher");
-
-            // Watcher registers monitor against target.
-            let MailboxEntry::Inbox {
-                handler: watcher_handler,
-                ..
-            } = registry.entry(watcher_id).expect("watcher sink registered")
-            else {
-                panic!("expected mailbox entry for watcher");
-            };
-            let order = WatchOrder {
-                target_id: target_id.0,
-            };
-            watcher_handler.enqueue(registry::test_owned_dispatch(
-                <WatchOrder as Kind>::ID,
-                WatchOrder::NAME,
-                &order.encode_into_bytes(),
-                1,
-            ));
-
-            // Wait for register to land.
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while chassis.actor_registry().monitor_count(target_id) == 0
-                && Instant::now() < deadline
-            {
-                thread::sleep(Duration::from_millis(5));
-            }
-            assert_eq!(chassis.actor_registry().monitor_count(target_id), 1);
-
-            // Quit watcher — its close path walks `monitoring[watcher]` and
-            // prunes watcher from `monitors_of[target]`.
-            watcher_handler.enqueue(registry::test_owned_dispatch(
-                <Quit as Kind>::ID,
-                Quit::NAME,
-                &(Quit { tag: 1 }).encode_into_bytes(),
-                1,
-            ));
-
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while close_observed.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(5));
-            }
-            assert_eq!(
-                close_observed.load(AtomicOrdering::SeqCst),
-                1,
-                "watcher's unwire fired exactly once",
-            );
-
-            // Watcher slot tombstones; target slot still Live; target's
-            // forward index drained of the dead watcher.
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while chassis.actor_registry().is_live(watcher_id) && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(5));
-            }
-            assert!(
-                chassis.actor_registry().is_tombstoned(watcher_id),
-                "watcher tombstoned",
-            );
-            assert!(
-                chassis.actor_registry().is_live(target_id),
-                "target should still be Live (watcher closed, not target)",
-            );
-            assert_eq!(
-                chassis.actor_registry().monitor_count(target_id),
-                0,
-                "target's monitors_of should drop the dead watcher",
-            );
-
-            drop(chassis);
         }
 
-        /// Issue 607 Phase 5 verify: `resolve_actor` and `resolve_actors`
-        /// against a multi-instance fixture. Spawns three instanced actors
-        /// under one type, asserts:
-        ///   - `resolve_actor::<A>("a")` finds the named instance.
-        ///   - `resolve_actor::<A>("missing")` returns `None`.
-        ///   - `resolve_actors::<A>()` enumerates all three (subname-keyed).
-        ///   - After one closes, the iterator drops to two and the closed
-        ///     name returns `None` from `resolve_actor`.
-        #[test]
-        fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
-            use crate::actor::native::spawn::Subname;
-            use crate::mail::registry::MailboxEntry;
-            use aether_actor::HandlesKind;
-            use aether_data::{Kind, KindId as DataKindId};
-            use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-
-            #[repr(C)]
-            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-            struct Quit {
-                tag: u32,
+        // Target — handles Quit by self-shutting.
+        struct Target;
+        impl Addressable for Target {
+            const NAMESPACE: &'static str = "test.monitor.target";
+            type Resolver = aether_actor::Many;
+        }
+        impl HandlesKind<Quit> for Target {}
+        impl aether_actor::Lifecycle for Target {
+            type Config = ();
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init((): Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self)
             }
-            impl Kind for Quit {
-                const NAME: &'static str = "test.resolve.quit";
-                const ID: DataKindId = DataKindId(0xF00D_F00D_F00D_F00D);
-                fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                    if bytes.len() != size_of::<Self>() {
-                        return None;
-                    }
-                    Some(bytemuck::pod_read_unaligned(bytes))
+        }
+        impl NativeActor for Target {}
+        impl NativeDispatch for Target {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                ctx: &mut NativeCtx<'_, crate::Manual>,
+                kind: KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Quit::ID.0 {
+                    let _ = Quit::decode_from_bytes(payload)?;
+                    ctx.shutdown();
+                    return Some(());
                 }
-                fn encode_into_bytes(&self) -> Vec<u8> {
-                    bytemuck::bytes_of(self).to_vec()
-                }
+                None
             }
-
-            // The `tag` field is set at init from the per-instance config
-            // and would be read by handler code; Phase A's resolve_actor
-            // returns MailboxId rather than `Arc<Member>` so the tag is no
-            // longer externally observable. Kept as an init payload so the
-            // spawn path covers the full Config-threaded shape.
-            #[allow(dead_code)]
-            struct Member {
-                tag: u32,
-            }
-            impl Addressable for Member {
-                const NAMESPACE: &'static str = "test.resolve.member";
-                type Resolver = aether_actor::Many;
-            }
-            impl HandlesKind<Quit> for Member {}
-            impl aether_actor::Lifecycle for Member {
-                type Config = u32;
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init(tag: u32, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-                    Ok(Self { tag })
-                }
-            }
-            impl NativeActor for Member {}
-            impl NativeDispatch for Member {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    ctx: &mut NativeCtx<'_, crate::Manual>,
-                    kind: KindId,
-                    payload: &[u8],
-                ) -> Option<()> {
-                    if kind.0 == Quit::ID.0 {
-                        let _ = Quit::decode_from_bytes(payload)?;
-                        ctx.shutdown();
-                        return Some(());
-                    }
-                    None
-                }
-            }
-
-            let (registry, mailer) = fresh_substrate();
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .build_passive()
-                .expect("empty chassis boots");
-
-            let id_a = chassis
-                .spawn_actor::<Member>(Subname::Named("a"), 1)
-                .finish()
-                .expect("spawn a");
-            let _id_b = chassis
-                .spawn_actor::<Member>(Subname::Named("b"), 2)
-                .finish()
-                .expect("spawn b");
-            let id_c = chassis
-                .spawn_actor::<Member>(Subname::Named("c"), 3)
-                .finish()
-                .expect("spawn c");
-
-            // Issue 629 / Phase A: resolve_actor returns the address
-            // (`MailboxId`), not `Arc<A>`. Verify the address resolves and
-            // matches the spawn-time id.
-            let a_id = chassis.resolve_actor::<Member>("a").expect("a is live");
-            assert_eq!(a_id, id_a, "resolve_actor returns the matching MailboxId");
-
-            // Missing subname → None.
-            assert!(
-                chassis.resolve_actor::<Member>("missing").is_none(),
-                "unknown subname should return None",
-            );
-
-            // resolve_actors enumerates all three. Order is registry-defined
-            // (HashMap iteration), so collect into a sorted subname vec for
-            // assertions. The Member's per-instance tag is dispatcher-thread
-            // owned (Phase A) and not externally observable here; the
-            // subname uniquely identifies the instance.
-            let mut all: Vec<String> = chassis
-                .resolve_actors::<Member>()
-                .into_iter()
-                .map(|(name, _id)| name)
-                .collect();
-            all.sort();
-            assert_eq!(
-                all,
-                vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
-                "resolve_actors should enumerate every Live instance subname",
-            );
-
-            // Close c — Quit it through the sink handler. After close,
-            // resolve_actors drops to two and resolve_actor::<Member>("c")
-            // returns None.
-            let MailboxEntry::Inbox { handler, .. } =
-                registry.entry(id_c).expect("c sink registered")
-            else {
-                panic!("expected mailbox entry for c");
-            };
-            handler.enqueue(registry::test_owned_dispatch(
-                <Quit as Kind>::ID,
-                Quit::NAME,
-                &(Quit { tag: 1 }).encode_into_bytes(),
-                1,
-            ));
-
-            // Wait for c's slot to flip Dead.
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while chassis.actor_registry().is_live(id_c) && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(5));
-            }
-
-            assert!(
-                chassis.resolve_actor::<Member>("c").is_none(),
-                "closed instance should disappear from resolve_actor",
-            );
-            let mut after: Vec<String> = chassis
-                .resolve_actors::<Member>()
-                .into_iter()
-                .map(|(name, _id)| name)
-                .collect();
-            after.sort();
-            assert_eq!(
-                after,
-                vec!["a".to_owned(), "b".to_owned()],
-                "resolve_actors should drop the closed instance",
-            );
-
-            // Counter for unused warning. (`_id_a` / `_id_b` retain their
-            // names elsewhere; this guard keeps the compiler happy.)
-            let _ = AtomicU32::new(0).load(AtomicOrdering::SeqCst);
-
-            drop(chassis);
         }
 
-        /// Issue 607 Phase 5.5 verify: an instanced parent's handler calls
-        /// `ctx.spawn_child::<Grandchild>(...)` to launch an instanced
-        /// grandchild. Phase 3b shipped `Arc<Spawner>` threading through
-        /// every spawned actor's transport precisely so this works; this
-        /// test is the first end-to-end coverage of the instanced→instanced
-        /// path. Phase 6b (`TcpListenerActor` → `TcpSessionActor`) structurally
-        /// depends on this — listeners spawning sessions IS the recursive
-        /// case.
-        ///
-        /// Asserts:
-        ///   1. Grandchild's `MailboxId` is `Live` in the registry.
-        ///   2. `chassis.resolve_actor::<Grandchild>(name)` resolves it.
-        ///   3. Grandchild's `after_init` mail dispatches as its first
-        ///      envelope (received counter bumps to 1).
-        ///   4. Closing the parent does NOT cascade-close the grandchild —
-        ///      no parent-child shutdown coupling is wired by default;
-        ///      that's monitor-driven, opt-in.
-        #[test]
-        fn instanced_can_spawn_grandchild() {
-            use crate::actor::native::spawn::Subname;
-            use crate::mail::registry::MailboxEntry;
-            use aether_actor::HandlesKind;
-            use aether_data::{Kind, KindId as DataKindId};
-            use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-
-            // Trigger to make the parent spawn its grandchild.
-            #[repr(C)]
-            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-            struct Hatch {
-                tag: u32,
+        // Watcher — handles WatchOrder by registering a monitor;
+        // handles MonitorNotice by recording the target id and
+        // bumping a counter.
+        struct Watcher {
+            notice_count: Arc<AtomicU32>,
+            last_target: Arc<AtomicU64>,
+            handle: Mutex<Option<MonitorHandle>>,
+        }
+        impl Addressable for Watcher {
+            const NAMESPACE: &'static str = "test.monitor.watcher";
+            type Resolver = aether_actor::Many;
+        }
+        impl HandlesKind<WatchOrder> for Watcher {}
+        impl HandlesKind<aether_kinds::MonitorNotice> for Watcher {}
+        impl aether_actor::Lifecycle for Watcher {
+            type Config = (Arc<AtomicU32>, Arc<AtomicU64>);
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self {
+                    notice_count: config.0,
+                    last_target: config.1,
+                    handle: Mutex::new(None),
+                })
             }
-            impl Kind for Hatch {
-                const NAME: &'static str = "test.recursive.hatch";
-                const ID: DataKindId = DataKindId(0xA00A_A00A_A00A_A00A);
-                fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                    if bytes.len() != size_of::<Self>() {
-                        return None;
-                    }
-                    Some(bytemuck::pod_read_unaligned(bytes))
+        }
+        impl NativeActor for Watcher {}
+        impl NativeDispatch for Watcher {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                ctx: &mut NativeCtx<'_, crate::Manual>,
+                kind: KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == WatchOrder::ID.0 {
+                    let order = WatchOrder::decode_from_bytes(payload)?;
+                    let target = MailboxId(order.target_id);
+                    let h = ctx
+                        .monitor(target)
+                        .expect("target must be Live at order time");
+                    *self.handle.lock().unwrap() = Some(h);
+                    return Some(());
                 }
-                fn encode_into_bytes(&self) -> Vec<u8> {
-                    bytemuck::bytes_of(self).to_vec()
+                if kind.0 == <aether_kinds::MonitorNotice as Kind>::ID.0 {
+                    let notice = <aether_kinds::MonitorNotice as Kind>::decode_from_bytes(payload)?;
+                    self.last_target
+                        .store(notice.target.0, AtomicOrdering::SeqCst);
+                    self.notice_count.fetch_add(1, AtomicOrdering::SeqCst);
+                    return Some(());
                 }
+                None
             }
-
-            // Pre-loaded onto the grandchild via after_init.
-            #[repr(C)]
-            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-            struct Ping {
-                tag: u32,
-            }
-            impl Kind for Ping {
-                const NAME: &'static str = "test.recursive.ping";
-                const ID: DataKindId = DataKindId(0xB00B_B00B_B00B_B00B);
-                fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                    if bytes.len() != size_of::<Self>() {
-                        return None;
-                    }
-                    Some(bytemuck::pod_read_unaligned(bytes))
-                }
-                fn encode_into_bytes(&self) -> Vec<u8> {
-                    bytemuck::bytes_of(self).to_vec()
-                }
-            }
-
-            // Self-shutdown trigger for the parent.
-            #[repr(C)]
-            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-            struct Quit {
-                tag: u32,
-            }
-            impl Kind for Quit {
-                const NAME: &'static str = "test.recursive.quit";
-                const ID: DataKindId = DataKindId(0xC00C_C00C_C00C_C00C);
-                fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                    if bytes.len() != size_of::<Self>() {
-                        return None;
-                    }
-                    Some(bytemuck::pod_read_unaligned(bytes))
-                }
-                fn encode_into_bytes(&self) -> Vec<u8> {
-                    bytemuck::bytes_of(self).to_vec()
-                }
-            }
-
-            struct Grandchild {
-                received: Arc<AtomicU32>,
-            }
-            impl Addressable for Grandchild {
-                const NAMESPACE: &'static str = "test.recursive.grandchild";
-                type Resolver = aether_actor::Many;
-            }
-            impl HandlesKind<Ping> for Grandchild {}
-            impl aether_actor::Lifecycle for Grandchild {
-                type Config = Arc<AtomicU32>;
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init(
-                    config: Self::Config,
-                    _ctx: &mut NativeInitCtx<'_>,
-                ) -> Result<Self, BootError> {
-                    Ok(Self { received: config })
-                }
-            }
-            impl NativeActor for Grandchild {}
-            impl NativeDispatch for Grandchild {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    _ctx: &mut NativeCtx<'_, crate::Manual>,
-                    kind: KindId,
-                    payload: &[u8],
-                ) -> Option<()> {
-                    if kind.0 == Ping::ID.0 {
-                        let _ = Ping::decode_from_bytes(payload)?;
-                        self.received.fetch_add(1, AtomicOrdering::SeqCst);
-                        return Some(());
-                    }
-                    None
-                }
-            }
-
-            struct Parent {
-                grandchild_received: Arc<AtomicU32>,
-            }
-            impl Addressable for Parent {
-                const NAMESPACE: &'static str = "test.recursive.parent";
-                type Resolver = aether_actor::Many;
-            }
-            impl HandlesKind<Hatch> for Parent {}
-            impl HandlesKind<Quit> for Parent {}
-            impl aether_actor::Lifecycle for Parent {
-                type Config = Arc<AtomicU32>;
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init(
-                    config: Self::Config,
-                    _ctx: &mut NativeInitCtx<'_>,
-                ) -> Result<Self, BootError> {
-                    Ok(Self {
-                        grandchild_received: config,
-                    })
-                }
-            }
-            impl NativeActor for Parent {}
-            impl NativeDispatch for Parent {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    ctx: &mut NativeCtx<'_, crate::Manual>,
-                    kind: KindId,
-                    payload: &[u8],
-                ) -> Option<()> {
-                    if kind.0 == Hatch::ID.0 {
-                        let _ = Hatch::decode_from_bytes(payload)?;
-                        // Recursive spawn: instanced parent → instanced
-                        // grandchild. Pre-load a Ping so the grandchild's
-                        // first envelope dispatches without an external
-                        // mail step.
-                        let _id = ctx
-                            .spawn_child::<Grandchild>(
-                                Subname::Named("only"),
-                                Arc::clone(&self.grandchild_received),
-                            )
-                            .after_init(Ping { tag: 0xCAFE })
-                            .finish()
-                            .expect("recursive spawn must succeed");
-                        return Some(());
-                    }
-                    if kind.0 == Quit::ID.0 {
-                        let _ = Quit::decode_from_bytes(payload)?;
-                        ctx.shutdown();
-                        return Some(());
-                    }
-                    None
-                }
-            }
-
-            let (registry, mailer) = fresh_substrate();
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .build_passive()
-                .expect("empty chassis boots");
-
-            let grandchild_received = Arc::new(AtomicU32::new(0));
-            let parent_id = chassis
-                .spawn_actor::<Parent>(Subname::Named("p1"), Arc::clone(&grandchild_received))
-                .finish()
-                .expect("spawn parent");
-
-            // Trigger parent → grandchild spawn.
-            let MailboxEntry::Inbox {
-                handler: parent_handler,
-                ..
-            } = registry.entry(parent_id).expect("parent sink registered")
-            else {
-                panic!("expected mailbox entry for parent");
-            };
-            parent_handler.enqueue(registry::test_owned_dispatch(
-                <Hatch as Kind>::ID,
-                Hatch::NAME,
-                &(Hatch { tag: 1 }).encode_into_bytes(),
-                1,
-            ));
-
-            // Wait for the grandchild's after_init Ping to dispatch (proves
-            // the recursive spawn happened AND the after_init plumbing
-            // works through it).
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while grandchild_received.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline
-            {
-                thread::sleep(Duration::from_millis(5));
-            }
-            assert_eq!(
-                grandchild_received.load(AtomicOrdering::SeqCst),
-                1,
-                "grandchild's after_init Ping should dispatch as its first envelope",
-            );
-
-            // Grandchild is Live under the ADR-0099 §3 lineage fold. The
-            // parent was chassis-spawned (no parent → depth-1, carry == id),
-            // so the grandchild's id folds its node's ActorId onto the
-            // parent's id — not the flat `hash(NAMESPACE:subname)`.
-            let grandchild_id = MailboxId(aether_data::with_tag(
-                aether_data::Tag::Mailbox,
-                aether_data::fold_lineage(
-                    parent_id.0,
-                    aether_data::ActorId::instanced("test.recursive.grandchild", "only"),
-                ),
-            ));
-            assert!(
-                chassis.actor_registry().is_live(grandchild_id),
-                "grandchild should be Live in the registry under the lineage-folded id",
-            );
-
-            // Issue 629 / Phase A: resolve_actor returns the address.
-            // Verify it resolves and matches the registry id.
-            let resolved = chassis
-                .resolve_actor::<Grandchild>("only")
-                .expect("resolve_actor must find the grandchild");
-            assert_eq!(
-                resolved, grandchild_id,
-                "resolve_actor returns the matching MailboxId",
-            );
-            // The grandchild is alive (verifies the dispatcher's Arc<AtomicU32>
-            // is the same one passed in via config — the test's `received`
-            // counter sees handler dispatches against the live instance).
-            let _ = &grandchild_received;
-
-            // Closing the parent does NOT cascade-close the grandchild.
-            // Parent-child shutdown coupling is opt-in via monitor; without
-            // it, the grandchild keeps running.
-            parent_handler.enqueue(registry::test_owned_dispatch(
-                <Quit as Kind>::ID,
-                Quit::NAME,
-                &(Quit { tag: 1 }).encode_into_bytes(),
-                1,
-            ));
-
-            // Wait for parent slot to flip Dead.
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while chassis.actor_registry().is_live(parent_id) && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(5));
-            }
-            assert!(
-                chassis.actor_registry().is_tombstoned(parent_id),
-                "parent should have tombstoned",
-            );
-            // Grandchild survives — no cascade.
-            assert!(
-                chassis.actor_registry().is_live(grandchild_id),
-                "grandchild should outlive parent (no automatic cascade-close)",
-            );
-            assert!(
-                chassis.resolve_actor::<Grandchild>("only").is_some(),
-                "grandchild remains resolvable after parent's death",
-            );
-
-            drop(chassis);
         }
 
-        /// Issue 697 multi-pass model: wire-time mail crosses actors
-        /// regardless of declaration order. Pinger's `wire` mails Ponger;
-        /// Ponger's handler increments a counter. With Pinger declared
-        /// FIRST, a single-pass interleaved boot would have Pinger's wire
-        /// fire before Ponger's claim — the mail would warn-drop. The
-        /// multi-pass model (claim-all → init-all → wire-all → spawn-all)
-        /// claims both mailboxes before any wire runs, so the mail queues
-        /// in Ponger's inbox and processes once dispatchers come up.
-        #[test]
-        fn wire_pass_mail_crosses_actors_pinger_first() {
-            wire_pass_mail_crosses_actors(/* pinger_first */ true);
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        // Spawn target first so the watcher can register against a
+        // Live id.
+        let target_id = chassis
+            .spawn_actor::<Target>(Subname::Counter, ())
+            .finish()
+            .expect("spawn target");
+
+        let notice_count = Arc::new(AtomicU32::new(0));
+        let last_target = Arc::new(AtomicU64::new(0));
+        let watcher_id = chassis
+            .spawn_actor::<Watcher>(
+                Subname::Counter,
+                (Arc::clone(&notice_count), Arc::clone(&last_target)),
+            )
+            .finish()
+            .expect("spawn watcher");
+
+        // Drive the watcher to register the monitor by pushing a
+        // WatchOrder through its sink handler. After this returns
+        // the watcher's handle is stored in `self.handle`.
+        let MailboxEntry::Inbox {
+            handler: watcher_handler,
+            ..
+        } = registry.entry(watcher_id).expect("watcher sink registered")
+        else {
+            panic!("expected mailbox entry for watcher");
+        };
+        let order = WatchOrder {
+            target_id: target_id.0,
+        };
+        watcher_handler.enqueue(registry::test_owned_dispatch(
+            <WatchOrder as Kind>::ID,
+            WatchOrder::NAME,
+            &order.encode_into_bytes(),
+            1,
+        ));
+
+        // Wait until the registry sees the monitor entry.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while chassis.actor_registry().monitor_count(target_id) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            chassis.actor_registry().monitor_count(target_id),
+            1,
+            "watcher's monitor should be registered against target",
+        );
+        assert_eq!(
+            chassis.actor_registry().monitoring_count(watcher_id),
+            1,
+            "watcher should appear in the reverse index",
+        );
+
+        // Fire Quit at the target — its handler self-shuts; the
+        // dispatcher's close path runs `close_actor`, which fans out
+        // a MonitorNotice mail to watcher_id.
+        let MailboxEntry::Inbox {
+            handler: target_handler,
+            ..
+        } = registry.entry(target_id).expect("target sink registered")
+        else {
+            panic!("expected mailbox entry for target");
+        };
+        target_handler.enqueue(registry::test_owned_dispatch(
+            <Quit as Kind>::ID,
+            Quit::NAME,
+            &(Quit { tag: 1 }).encode_into_bytes(),
+            1,
+        ));
+
+        // Wait for the notice to land at the watcher.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while notice_count.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            notice_count.load(AtomicOrdering::SeqCst),
+            1,
+            "watcher should have received exactly one MonitorNotice",
+        );
+        assert_eq!(
+            last_target.load(AtomicOrdering::SeqCst),
+            target_id.0,
+            "MonitorNotice.target should match the closed actor's id",
+        );
+
+        // Wait for target slot to flip Dead (the close path runs
+        // close_actor → mark_dead after fan-out).
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while chassis.actor_registry().is_live(target_id) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !chassis.actor_registry().is_live(target_id),
+            "target slot should transition Live → Dead after close fan-out",
+        );
+        assert!(
+            chassis.actor_registry().is_tombstoned(target_id),
+            "target id should be tombstoned",
+        );
+        // Forward index for target was drained.
+        assert_eq!(
+            chassis.actor_registry().monitor_count(target_id),
+            0,
+            "monitors_of[target] must drain after fan-out",
+        );
+
+        drop(chassis);
+    }
+
+    /// Issue 607 Phase 4b verify: when the *watcher* dies first, the
+    /// reverse-index walk prunes the watcher's entry from each
+    /// monitored target's `monitors_of`. No `MonitorNotice` fires (the
+    /// watcher is the one closing; targets are still alive).
+    #[test]
+    fn watcher_close_prunes_targets_forward_index() {
+        use crate::actor::native::spawn::Subname;
+        use crate::mail::registry::MailboxEntry;
+        use aether_actor::HandlesKind;
+        use aether_data::{Kind, KindId as DataKindId};
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        // Re-use Quit + WatchOrder shape inline (test isolation).
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Quit {
+            tag: u32,
+        }
+        impl Kind for Quit {
+            const NAME: &'static str = "test.monitor.quit2";
+            const ID: DataKindId = DataKindId(0xCAFE_BABE_DEAD_BEEF);
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+        }
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct WatchOrder {
+            target_id: u64,
+        }
+        impl Kind for WatchOrder {
+            const NAME: &'static str = "test.monitor.watch_order2";
+            const ID: DataKindId = DataKindId(0xBEEF_DEAD_BABE_CAFE);
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
         }
 
-        /// Mirror of [`wire_pass_mail_crosses_actors_pinger_first`] with
-        /// the registration order reversed. Multi-pass model means both
-        /// orderings are valid; this test pins the symmetry.
-        #[test]
-        fn wire_pass_mail_crosses_actors_ponger_first() {
-            wire_pass_mail_crosses_actors(/* pinger_first */ false);
+        struct Target;
+        impl Addressable for Target {
+            const NAMESPACE: &'static str = "test.monitor.target2";
+            type Resolver = aether_actor::Many;
+        }
+        impl aether_actor::Lifecycle for Target {
+            type Config = ();
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init((): Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self)
+            }
+        }
+        impl NativeActor for Target {}
+        impl NativeDispatch for Target {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut NativeCtx<'_, crate::Manual>,
+                _kind: KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
+            }
         }
 
-        /// Issue 584 Phase 2a runtime sibling: `Spawner::spawn_actor` runs
-        /// `wire` exactly once on a freshly-spawned instanced actor —
-        /// after `init` Ok and after the mailbox is published, before
-        /// pre-load mail or the dispatcher pull. Runtime spawn doesn't
-        /// need the chassis-boot multi-pass barrier (the substrate is
-        /// already steady-state).
-        #[test]
-        fn spawn_actor_runs_wire_once_after_init() {
-            use crate::actor::native::spawn::Subname;
-
-            use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-
-            struct WireSpawnProbe {
-                wire_count: Arc<AtomicU32>,
-            }
-            impl Addressable for WireSpawnProbe {
-                const NAMESPACE: &'static str = "test.spawn_wire.probe";
-                type Resolver = aether_actor::Many;
-            }
-            impl aether_actor::Lifecycle for WireSpawnProbe {
-                type Config = Arc<AtomicU32>;
-                type InitError = BootError;
-                type InitCtx<'a> = NativeInitCtx<'a>;
-                type Ctx<'a> = NativeCtx<'a>;
-                fn init(
-                    config: Self::Config,
-                    _ctx: &mut NativeInitCtx<'_>,
-                ) -> Result<Self, BootError> {
-                    Ok(Self { wire_count: config })
-                }
-                fn wire(&mut self, _ctx: &mut NativeCtx<'_>) {
-                    self.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
-                }
-            }
-            impl NativeActor for WireSpawnProbe {}
-            impl NativeDispatch for WireSpawnProbe {
-                fn __aether_dispatch_envelope(
-                    &mut self,
-                    _ctx: &mut NativeCtx<'_, crate::Manual>,
-                    _kind: KindId,
-                    _payload: &[u8],
-                ) -> Option<()> {
-                    None
-                }
-            }
-
-            let (registry, mailer) = fresh_substrate();
-            let wire_count = Arc::new(AtomicU32::new(0));
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .build_passive()
-                .expect("empty chassis boots");
-
-            let id = chassis
-                .spawn_actor::<WireSpawnProbe>(Subname::Counter, Arc::clone(&wire_count))
-                .finish()
-                .expect("spawn instanced actor");
-
-            assert_eq!(
-                wire_count.load(AtomicOrdering::SeqCst),
-                1,
-                "wire must fire exactly once on Spawner::spawn_actor",
-            );
-
-            drop(chassis);
-            let _ = id;
+        struct Watcher {
+            handle: Mutex<Option<MonitorHandle>>,
+            close_observed: Arc<AtomicU32>,
         }
+        impl Addressable for Watcher {
+            const NAMESPACE: &'static str = "test.monitor.watcher2";
+            type Resolver = aether_actor::Many;
+        }
+        impl HandlesKind<WatchOrder> for Watcher {}
+        impl HandlesKind<Quit> for Watcher {}
+        impl aether_actor::Lifecycle for Watcher {
+            type Config = Arc<AtomicU32>;
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self {
+                    handle: Mutex::new(None),
+                    close_observed: config,
+                })
+            }
+            fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
+                self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+        impl NativeActor for Watcher {}
+        impl NativeDispatch for Watcher {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                ctx: &mut NativeCtx<'_, crate::Manual>,
+                kind: KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == WatchOrder::ID.0 {
+                    let order = WatchOrder::decode_from_bytes(payload)?;
+                    let target = MailboxId(order.target_id);
+                    let h = ctx.monitor(target).expect("target Live");
+                    *self.handle.lock().unwrap() = Some(h);
+                    return Some(());
+                }
+                if kind.0 == Quit::ID.0 {
+                    let _ = Quit::decode_from_bytes(payload)?;
+                    ctx.shutdown();
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let target_id = chassis
+            .spawn_actor::<Target>(Subname::Counter, ())
+            .finish()
+            .expect("spawn target");
+        let close_observed = Arc::new(AtomicU32::new(0));
+        let watcher_id = chassis
+            .spawn_actor::<Watcher>(Subname::Counter, Arc::clone(&close_observed))
+            .finish()
+            .expect("spawn watcher");
+
+        // Watcher registers monitor against target.
+        let MailboxEntry::Inbox {
+            handler: watcher_handler,
+            ..
+        } = registry.entry(watcher_id).expect("watcher sink registered")
+        else {
+            panic!("expected mailbox entry for watcher");
+        };
+        let order = WatchOrder {
+            target_id: target_id.0,
+        };
+        watcher_handler.enqueue(registry::test_owned_dispatch(
+            <WatchOrder as Kind>::ID,
+            WatchOrder::NAME,
+            &order.encode_into_bytes(),
+            1,
+        ));
+
+        // Wait for register to land.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while chassis.actor_registry().monitor_count(target_id) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(chassis.actor_registry().monitor_count(target_id), 1);
+
+        // Quit watcher — its close path walks `monitoring[watcher]` and
+        // prunes watcher from `monitors_of[target]`.
+        watcher_handler.enqueue(registry::test_owned_dispatch(
+            <Quit as Kind>::ID,
+            Quit::NAME,
+            &(Quit { tag: 1 }).encode_into_bytes(),
+            1,
+        ));
+
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while close_observed.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            close_observed.load(AtomicOrdering::SeqCst),
+            1,
+            "watcher's unwire fired exactly once",
+        );
+
+        // Watcher slot tombstones; target slot still Live; target's
+        // forward index drained of the dead watcher.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while chassis.actor_registry().is_live(watcher_id) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            chassis.actor_registry().is_tombstoned(watcher_id),
+            "watcher tombstoned",
+        );
+        assert!(
+            chassis.actor_registry().is_live(target_id),
+            "target should still be Live (watcher closed, not target)",
+        );
+        assert_eq!(
+            chassis.actor_registry().monitor_count(target_id),
+            0,
+            "target's monitors_of should drop the dead watcher",
+        );
+
+        drop(chassis);
+    }
+
+    /// Issue 607 Phase 5 verify: `resolve_actor` and `resolve_actors`
+    /// against a multi-instance fixture. Spawns three instanced actors
+    /// under one type, asserts:
+    ///   - `resolve_actor::<A>("a")` finds the named instance.
+    ///   - `resolve_actor::<A>("missing")` returns `None`.
+    ///   - `resolve_actors::<A>()` enumerates all three (subname-keyed).
+    ///   - After one closes, the iterator drops to two and the closed
+    ///     name returns `None` from `resolve_actor`.
+    #[test]
+    fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
+        use crate::actor::native::spawn::Subname;
+        use crate::mail::registry::MailboxEntry;
+        use aether_actor::HandlesKind;
+        use aether_data::{Kind, KindId as DataKindId};
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Quit {
+            tag: u32,
+        }
+        impl Kind for Quit {
+            const NAME: &'static str = "test.resolve.quit";
+            const ID: DataKindId = DataKindId(0xF00D_F00D_F00D_F00D);
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+        }
+
+        // The `tag` field is set at init from the per-instance config
+        // and would be read by handler code; Phase A's resolve_actor
+        // returns MailboxId rather than `Arc<Member>` so the tag is no
+        // longer externally observable. Kept as an init payload so the
+        // spawn path covers the full Config-threaded shape.
+        #[allow(dead_code)]
+        struct Member {
+            tag: u32,
+        }
+        impl Addressable for Member {
+            const NAMESPACE: &'static str = "test.resolve.member";
+            type Resolver = aether_actor::Many;
+        }
+        impl HandlesKind<Quit> for Member {}
+        impl aether_actor::Lifecycle for Member {
+            type Config = u32;
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init(tag: u32, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self { tag })
+            }
+        }
+        impl NativeActor for Member {}
+        impl NativeDispatch for Member {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                ctx: &mut NativeCtx<'_, crate::Manual>,
+                kind: KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Quit::ID.0 {
+                    let _ = Quit::decode_from_bytes(payload)?;
+                    ctx.shutdown();
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let id_a = chassis
+            .spawn_actor::<Member>(Subname::Named("a"), 1)
+            .finish()
+            .expect("spawn a");
+        let _id_b = chassis
+            .spawn_actor::<Member>(Subname::Named("b"), 2)
+            .finish()
+            .expect("spawn b");
+        let id_c = chassis
+            .spawn_actor::<Member>(Subname::Named("c"), 3)
+            .finish()
+            .expect("spawn c");
+
+        // Issue 629 / Phase A: resolve_actor returns the address
+        // (`MailboxId`), not `Arc<A>`. Verify the address resolves and
+        // matches the spawn-time id.
+        let a_id = chassis.resolve_actor::<Member>("a").expect("a is live");
+        assert_eq!(a_id, id_a, "resolve_actor returns the matching MailboxId");
+
+        // Missing subname → None.
+        assert!(
+            chassis.resolve_actor::<Member>("missing").is_none(),
+            "unknown subname should return None",
+        );
+
+        // resolve_actors enumerates all three. Order is registry-defined
+        // (HashMap iteration), so collect into a sorted subname vec for
+        // assertions. The Member's per-instance tag is dispatcher-thread
+        // owned (Phase A) and not externally observable here; the
+        // subname uniquely identifies the instance.
+        let mut all: Vec<String> = chassis
+            .resolve_actors::<Member>()
+            .into_iter()
+            .map(|(name, _id)| name)
+            .collect();
+        all.sort();
+        assert_eq!(
+            all,
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            "resolve_actors should enumerate every Live instance subname",
+        );
+
+        // Close c — Quit it through the sink handler. After close,
+        // resolve_actors drops to two and resolve_actor::<Member>("c")
+        // returns None.
+        let MailboxEntry::Inbox { handler, .. } = registry.entry(id_c).expect("c sink registered")
+        else {
+            panic!("expected mailbox entry for c");
+        };
+        handler.enqueue(registry::test_owned_dispatch(
+            <Quit as Kind>::ID,
+            Quit::NAME,
+            &(Quit { tag: 1 }).encode_into_bytes(),
+            1,
+        ));
+
+        // Wait for c's slot to flip Dead.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while chassis.actor_registry().is_live(id_c) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(
+            chassis.resolve_actor::<Member>("c").is_none(),
+            "closed instance should disappear from resolve_actor",
+        );
+        let mut after: Vec<String> = chassis
+            .resolve_actors::<Member>()
+            .into_iter()
+            .map(|(name, _id)| name)
+            .collect();
+        after.sort();
+        assert_eq!(
+            after,
+            vec!["a".to_owned(), "b".to_owned()],
+            "resolve_actors should drop the closed instance",
+        );
+
+        // Counter for unused warning. (`_id_a` / `_id_b` retain their
+        // names elsewhere; this guard keeps the compiler happy.)
+        let _ = AtomicU32::new(0).load(AtomicOrdering::SeqCst);
+
+        drop(chassis);
+    }
+
+    /// Issue 607 Phase 5.5 verify: an instanced parent's handler calls
+    /// `ctx.spawn_child::<Grandchild>(...)` to launch an instanced
+    /// grandchild. Phase 3b shipped `Arc<Spawner>` threading through
+    /// every spawned actor's transport precisely so this works; this
+    /// test is the first end-to-end coverage of the instanced→instanced
+    /// path. Phase 6b (`TcpListenerActor` → `TcpSessionActor`) structurally
+    /// depends on this — listeners spawning sessions IS the recursive
+    /// case.
+    ///
+    /// Asserts:
+    ///   1. Grandchild's `MailboxId` is `Live` in the registry.
+    ///   2. `chassis.resolve_actor::<Grandchild>(name)` resolves it.
+    ///   3. Grandchild's `after_init` mail dispatches as its first
+    ///      envelope (received counter bumps to 1).
+    ///   4. Closing the parent does NOT cascade-close the grandchild —
+    ///      no parent-child shutdown coupling is wired by default;
+    ///      that's monitor-driven, opt-in.
+    #[test]
+    fn instanced_can_spawn_grandchild() {
+        use crate::actor::native::spawn::Subname;
+        use crate::mail::registry::MailboxEntry;
+        use aether_actor::HandlesKind;
+        use aether_data::{Kind, KindId as DataKindId};
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        // Trigger to make the parent spawn its grandchild.
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Hatch {
+            tag: u32,
+        }
+        impl Kind for Hatch {
+            const NAME: &'static str = "test.recursive.hatch";
+            const ID: DataKindId = DataKindId(0xA00A_A00A_A00A_A00A);
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+        }
+
+        // Pre-loaded onto the grandchild via after_init.
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Ping {
+            tag: u32,
+        }
+        impl Kind for Ping {
+            const NAME: &'static str = "test.recursive.ping";
+            const ID: DataKindId = DataKindId(0xB00B_B00B_B00B_B00B);
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+        }
+
+        // Self-shutdown trigger for the parent.
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Quit {
+            tag: u32,
+        }
+        impl Kind for Quit {
+            const NAME: &'static str = "test.recursive.quit";
+            const ID: DataKindId = DataKindId(0xC00C_C00C_C00C_C00C);
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+        }
+
+        struct Grandchild {
+            received: Arc<AtomicU32>,
+        }
+        impl Addressable for Grandchild {
+            const NAMESPACE: &'static str = "test.recursive.grandchild";
+            type Resolver = aether_actor::Many;
+        }
+        impl HandlesKind<Ping> for Grandchild {}
+        impl aether_actor::Lifecycle for Grandchild {
+            type Config = Arc<AtomicU32>;
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self { received: config })
+            }
+        }
+        impl NativeActor for Grandchild {}
+        impl NativeDispatch for Grandchild {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut NativeCtx<'_, crate::Manual>,
+                kind: KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Ping::ID.0 {
+                    let _ = Ping::decode_from_bytes(payload)?;
+                    self.received.fetch_add(1, AtomicOrdering::SeqCst);
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        struct Parent {
+            grandchild_received: Arc<AtomicU32>,
+        }
+        impl Addressable for Parent {
+            const NAMESPACE: &'static str = "test.recursive.parent";
+            type Resolver = aether_actor::Many;
+        }
+        impl HandlesKind<Hatch> for Parent {}
+        impl HandlesKind<Quit> for Parent {}
+        impl aether_actor::Lifecycle for Parent {
+            type Config = Arc<AtomicU32>;
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self {
+                    grandchild_received: config,
+                })
+            }
+        }
+        impl NativeActor for Parent {}
+        impl NativeDispatch for Parent {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                ctx: &mut NativeCtx<'_, crate::Manual>,
+                kind: KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Hatch::ID.0 {
+                    let _ = Hatch::decode_from_bytes(payload)?;
+                    // Recursive spawn: instanced parent → instanced
+                    // grandchild. Pre-load a Ping so the grandchild's
+                    // first envelope dispatches without an external
+                    // mail step.
+                    let _id = ctx
+                        .spawn_child::<Grandchild>(
+                            Subname::Named("only"),
+                            Arc::clone(&self.grandchild_received),
+                        )
+                        .after_init(Ping { tag: 0xCAFE })
+                        .finish()
+                        .expect("recursive spawn must succeed");
+                    return Some(());
+                }
+                if kind.0 == Quit::ID.0 {
+                    let _ = Quit::decode_from_bytes(payload)?;
+                    ctx.shutdown();
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let grandchild_received = Arc::new(AtomicU32::new(0));
+        let parent_id = chassis
+            .spawn_actor::<Parent>(Subname::Named("p1"), Arc::clone(&grandchild_received))
+            .finish()
+            .expect("spawn parent");
+
+        // Trigger parent → grandchild spawn.
+        let MailboxEntry::Inbox {
+            handler: parent_handler,
+            ..
+        } = registry.entry(parent_id).expect("parent sink registered")
+        else {
+            panic!("expected mailbox entry for parent");
+        };
+        parent_handler.enqueue(registry::test_owned_dispatch(
+            <Hatch as Kind>::ID,
+            Hatch::NAME,
+            &(Hatch { tag: 1 }).encode_into_bytes(),
+            1,
+        ));
+
+        // Wait for the grandchild's after_init Ping to dispatch (proves
+        // the recursive spawn happened AND the after_init plumbing
+        // works through it).
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while grandchild_received.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            grandchild_received.load(AtomicOrdering::SeqCst),
+            1,
+            "grandchild's after_init Ping should dispatch as its first envelope",
+        );
+
+        // Grandchild is Live under the ADR-0099 §3 lineage fold. The
+        // parent was chassis-spawned (no parent → depth-1, carry == id),
+        // so the grandchild's id folds its node's ActorId onto the
+        // parent's id — not the flat `hash(NAMESPACE:subname)`.
+        let grandchild_id = MailboxId(aether_data::with_tag(
+            aether_data::Tag::Mailbox,
+            aether_data::fold_lineage(
+                parent_id.0,
+                aether_data::ActorId::instanced("test.recursive.grandchild", "only"),
+            ),
+        ));
+        assert!(
+            chassis.actor_registry().is_live(grandchild_id),
+            "grandchild should be Live in the registry under the lineage-folded id",
+        );
+
+        // Issue 629 / Phase A: resolve_actor returns the address.
+        // Verify it resolves and matches the registry id.
+        let resolved = chassis
+            .resolve_actor::<Grandchild>("only")
+            .expect("resolve_actor must find the grandchild");
+        assert_eq!(
+            resolved, grandchild_id,
+            "resolve_actor returns the matching MailboxId",
+        );
+        // The grandchild is alive (verifies the dispatcher's Arc<AtomicU32>
+        // is the same one passed in via config — the test's `received`
+        // counter sees handler dispatches against the live instance).
+        let _ = &grandchild_received;
+
+        // Closing the parent does NOT cascade-close the grandchild.
+        // Parent-child shutdown coupling is opt-in via monitor; without
+        // it, the grandchild keeps running.
+        parent_handler.enqueue(registry::test_owned_dispatch(
+            <Quit as Kind>::ID,
+            Quit::NAME,
+            &(Quit { tag: 1 }).encode_into_bytes(),
+            1,
+        ));
+
+        // Wait for parent slot to flip Dead.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while chassis.actor_registry().is_live(parent_id) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            chassis.actor_registry().is_tombstoned(parent_id),
+            "parent should have tombstoned",
+        );
+        // Grandchild survives — no cascade.
+        assert!(
+            chassis.actor_registry().is_live(grandchild_id),
+            "grandchild should outlive parent (no automatic cascade-close)",
+        );
+        assert!(
+            chassis.resolve_actor::<Grandchild>("only").is_some(),
+            "grandchild remains resolvable after parent's death",
+        );
+
+        drop(chassis);
+    }
+
+    /// Issue 697 multi-pass model: wire-time mail crosses actors
+    /// regardless of declaration order. Pinger's `wire` mails Ponger;
+    /// Ponger's handler increments a counter. With Pinger declared
+    /// FIRST, a single-pass interleaved boot would have Pinger's wire
+    /// fire before Ponger's claim — the mail would warn-drop. The
+    /// multi-pass model (claim-all → init-all → wire-all → spawn-all)
+    /// claims both mailboxes before any wire runs, so the mail queues
+    /// in Ponger's inbox and processes once dispatchers come up.
+    #[test]
+    fn wire_pass_mail_crosses_actors_pinger_first() {
+        wire_pass_mail_crosses_actors(/* pinger_first */ true);
+    }
+
+    /// Mirror of [`wire_pass_mail_crosses_actors_pinger_first`] with
+    /// the registration order reversed. Multi-pass model means both
+    /// orderings are valid; this test pins the symmetry.
+    #[test]
+    fn wire_pass_mail_crosses_actors_ponger_first() {
+        wire_pass_mail_crosses_actors(/* pinger_first */ false);
+    }
+
+    /// Issue 584 Phase 2a runtime sibling: `Spawner::spawn_actor` runs
+    /// `wire` exactly once on a freshly-spawned instanced actor —
+    /// after `init` Ok and after the mailbox is published, before
+    /// pre-load mail or the dispatcher pull. Runtime spawn doesn't
+    /// need the chassis-boot multi-pass barrier (the substrate is
+    /// already steady-state).
+    #[test]
+    fn spawn_actor_runs_wire_once_after_init() {
+        use crate::actor::native::spawn::Subname;
+
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        struct WireSpawnProbe {
+            wire_count: Arc<AtomicU32>,
+        }
+        impl Addressable for WireSpawnProbe {
+            const NAMESPACE: &'static str = "test.spawn_wire.probe";
+            type Resolver = aether_actor::Many;
+        }
+        impl aether_actor::Lifecycle for WireSpawnProbe {
+            type Config = Arc<AtomicU32>;
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self { wire_count: config })
+            }
+            fn wire(&mut self, _ctx: &mut NativeCtx<'_>) {
+                self.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+        impl NativeActor for WireSpawnProbe {}
+        impl NativeDispatch for WireSpawnProbe {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut NativeCtx<'_, crate::Manual>,
+                _kind: KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let wire_count = Arc::new(AtomicU32::new(0));
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let id = chassis
+            .spawn_actor::<WireSpawnProbe>(Subname::Counter, Arc::clone(&wire_count))
+            .finish()
+            .expect("spawn instanced actor");
+
+        assert_eq!(
+            wire_count.load(AtomicOrdering::SeqCst),
+            1,
+            "wire must fire exactly once on Spawner::spawn_actor",
+        );
+
+        drop(chassis);
+        let _ = id;
     }
 
     /// Issue 584 Phase 2a / 697 wire pass: `wire` runs exactly once
