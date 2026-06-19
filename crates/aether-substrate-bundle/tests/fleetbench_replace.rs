@@ -18,7 +18,7 @@ mod tests {
         use aether_data::Kind;
         use aether_kinds::{ComponentCapabilities, LogTailResult, Ping, Tick};
         use aether_kit::camera::CameraCreate;
-        use aether_test_fixtures::SetRender;
+        use aether_test_fixtures_kinds::SetRender;
 
         use crate::fleetbench::{FleetBench, dist_manifest_present};
 
@@ -40,7 +40,7 @@ mod tests {
             }
             let mut bench = FleetBench::start();
             let engine = bench.spawn_headless();
-            let loaded = bench.load_full(engine, "probe");
+            let loaded = bench.load_full(engine, "aether_test_fixtures_bundle");
 
             let has = |caps: &ComponentCapabilities, id| caps.handlers.iter().any(|h| h.id == id);
 
@@ -118,9 +118,10 @@ mod tests {
             let mut bench = FleetBench::start();
             let engine = bench.spawn_headless();
 
-            // Load the entry export (RootManager). `export: None` on load
-            // instantiates the first type in the `export!` list.
-            let loaded = bench.load_full(engine, "multi_actor");
+            // Load the `RootManager` actor (a strict receiver) from the
+            // bundle by its `ui.root` export. It is a non-entry actor in the
+            // bundle (the entry is `Probe`), so it is selected explicitly.
+            let loaded = bench.load_full_export(engine, "aether_test_fixtures_bundle", "ui.root");
 
             // Pre-replace: the entry is a strict receiver — it declares a
             // Ping handler and no fallback.
@@ -141,7 +142,12 @@ mod tests {
 
             // Replace into the non-entry export `ui.panel`, at the same
             // mailbox id, carrying the export over the wire.
-            let caps = bench.replace_export(engine, loaded.mailbox_id, "multi_actor", "ui.panel");
+            let caps = bench.replace_export(
+                engine,
+                loaded.mailbox_id,
+                "aether_test_fixtures_bundle",
+                "ui.panel",
+            );
 
             // Post-replace: Panel's capability group is active — still a
             // Ping handler, but now with a fallback, the observable

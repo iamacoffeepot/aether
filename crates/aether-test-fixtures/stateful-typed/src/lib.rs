@@ -18,7 +18,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, Manual, OutboundReply, actor};
-use aether_test_fixtures::{Bump, CountQuery, CountReport};
+use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
 /// Durable state the `Counter` carries across `replace_component`. The
 /// `count` field is the only thing worth persisting — the macro frames it

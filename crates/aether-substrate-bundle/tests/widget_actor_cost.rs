@@ -73,12 +73,12 @@ use aether_capabilities::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{CostTail, CostTailResult, LoadComponent, LoadResult, Tick};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
-use aether_test_fixtures::UiWidgetConfig;
+use aether_test_fixtures_kinds::UiWidgetConfig;
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries land
 // in this test binary (mirrors `cost_table.rs`).
 #[allow(unused_imports)]
-use aether_test_fixtures as _;
+use aether_test_fixtures_kinds as _;
 
 /// One frame at 60fps, in nanoseconds — the budget the aggregate per-frame
 /// cost has to fit inside.
@@ -114,7 +114,8 @@ fn load_widgets(
                         wasm: wasm.to_vec(),
                         name: Some(format!("ui-widget-{i}")),
                         config: config.clone(),
-                        export: None,
+                        // `UiWidget` is a non-entry actor in the bundle.
+                        export: Some("test_fixtures_ui_widget".to_owned()),
                     },
                 ),
             )])
@@ -203,7 +204,7 @@ fn env_counts(key: &str, default: &[usize], min: usize) -> Vec<usize> {
 #[test]
 #[ignore = "on-demand --release measurement; run with --ignored --nocapture"]
 fn widget_actor_per_frame_cost() {
-    let Some(wasm_path) = require_runtime("ui_widget") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read ui_widget wasm");
@@ -264,7 +265,7 @@ fn widget_actor_per_frame_cost() {
 #[test]
 #[ignore = "on-demand --release measurement; run with --ignored --nocapture"]
 fn widget_cost_vs_draw_weight() {
-    let Some(wasm_path) = require_runtime("ui_widget") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read ui_widget wasm");
@@ -382,7 +383,7 @@ fn budget_break_even(points: &[(usize, f64)]) -> Option<u64> {
 #[test]
 #[ignore = "on-demand --release measurement; run with --ignored --nocapture"]
 fn widget_actor_aggregate_scale() {
-    let Some(wasm_path) = require_runtime("ui_widget") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read ui_widget wasm");

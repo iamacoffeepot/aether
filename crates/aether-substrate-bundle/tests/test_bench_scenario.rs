@@ -50,7 +50,7 @@ use aether_substrate_bundle::test_bench::{
 use aether_substrate_bundle::visual::{
     background_top_left, bounding_box, centroid, coverage, decode_png,
 };
-use aether_test_fixtures::{
+use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
     InlineProbe, SetRender,
 };
@@ -60,7 +60,7 @@ use aether_test_fixtures::{
 // host-target rlib's descriptor symbols can be stripped by the linker
 // and `aether_kinds::descriptors::all()` won't see fixture kinds.
 #[allow(unused_imports)]
-use aether_test_fixtures as _;
+use aether_test_fixtures_kinds as _;
 use std::env;
 use std::fs;
 
@@ -145,7 +145,8 @@ fn load_cube(bench: &mut TestBench, wasm_path: &Path) {
                     wasm,
                     name: Some("cube".to_owned()),
                     config: Vec::new(),
-                    export: None,
+                    // `Cube` is a non-entry actor in the bundle.
+                    export: Some("cube".to_owned()),
                 },
             ),
         )])
@@ -167,7 +168,7 @@ fn load_cube(bench: &mut TestBench, wasm_path: &Path) {
 /// liveness from a log-ring side channel.
 #[test]
 fn list_components_reports_loaded_probe_lineage() {
-    let Some(wasm_path) = require_runtime("probe") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -195,7 +196,7 @@ fn list_components_reports_loaded_probe_lineage() {
 /// `subscribe_input` → tick fanout path end-to-end.
 #[test]
 fn input_subscription_yields_one_tick_observed_per_advance() {
-    let Some(wasm_path) = require_runtime("probe") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -213,18 +214,17 @@ fn input_subscription_yields_one_tick_observed_per_advance() {
     );
 }
 
-/// ADR-0096: a multi-actor module (`export!(RootManager, Panel)`) loads
-/// through the unmodified host, instantiating its entry export — the
-/// first type in the list, `RootManager` — via the boxed
-/// `ErasedFfiActor` path. Omitting `name` exercises the `aether.namespace`
-/// section, which carries the entry type's `NAMESPACE` (`ui.root`), and
-/// the `LoadResult` capabilities come from the entry type's
-/// `aether.kinds.inputs` manifest. Proves init-through-the-box and the
-/// multi-actor section emission end-to-end; selecting the `Panel` export
-/// is the follow-on.
+/// ADR-0096: a multi-actor module loads through the unmodified host,
+/// instantiating its entry export — the first type in the `export!`
+/// list, `Probe` — via the boxed `ErasedFfiActor` path. Omitting `name`
+/// exercises the `aether.namespace` section, which carries the entry
+/// type's `NAMESPACE` (`test_fixture_probe`), and the `LoadResult`
+/// capabilities come from the entry type's `aether.kinds.inputs`
+/// manifest. Proves init-through-the-box and the multi-actor section
+/// emission end-to-end; selecting a non-entry export is the follow-on.
 #[test]
 fn multi_actor_module_loads_entry_export() {
-    let Some(wasm_path) = require_runtime("multi_actor") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -239,7 +239,7 @@ fn multi_actor_module_loads_entry_export() {
                     // No name: resolve from the entry type's aether.namespace section.
                     name: None,
                     config: Vec::new(),
-                    // No selector: load the entry export (RootManager).
+                    // No selector: load the entry export (Probe).
                     export: None,
                 },
             ),
@@ -253,12 +253,13 @@ fn multi_actor_module_loads_entry_export() {
             name, capabilities, ..
         } => {
             assert!(
-                name.ends_with(":ui.root"),
-                "entry export should resolve to the first type's NAMESPACE (ui.root); got {name}",
+                name.ends_with(":test_fixture_probe"),
+                "entry export should resolve to the first type's NAMESPACE \
+                 (test_fixture_probe); got {name}",
             );
             assert!(
                 !capabilities.handlers.is_empty(),
-                "entry export RootManager declares a Ping handler; capabilities.handlers was empty",
+                "entry export Probe declares handlers; capabilities.handlers was empty",
             );
         }
         LoadResult::Err { error } => panic!("multi-actor load failed: {error}"),
@@ -275,7 +276,7 @@ fn multi_actor_module_loads_entry_export() {
 /// the right group was selected.
 #[test]
 fn multi_actor_module_loads_selected_export() {
-    let Some(wasm_path) = require_runtime("multi_actor") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -321,7 +322,7 @@ fn multi_actor_module_loads_selected_export() {
 /// type. The error names the requested export.
 #[test]
 fn multi_actor_unknown_export_errors() {
-    let Some(wasm_path) = require_runtime("multi_actor") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -367,7 +368,7 @@ fn multi_actor_unknown_export_errors() {
 /// registered before the second send routes.
 #[test]
 fn multi_actor_sibling_spawn() {
-    let Some(wasm_path) = require_runtime("multi_actor") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -380,8 +381,10 @@ fn multi_actor_sibling_spawn() {
                 &LoadComponent {
                     wasm,
                     name: None,
+                    // `RootManager` is a non-entry actor in the bundle; select
+                    // it by its `ui.root` export.
                     config: Vec::new(),
-                    export: None,
+                    export: Some("ui.root".to_owned()),
                 },
             ),
         )])
@@ -395,7 +398,7 @@ fn multi_actor_sibling_spawn() {
     };
     assert!(
         root_name.ends_with(":ui.root"),
-        "entry load should resolve to ui.root; got {root_name}",
+        "selected export should resolve to ui.root; got {root_name}",
     );
 
     // ADR-0099 §3/§4: a spawned sibling nests under its spawner, so the
@@ -434,7 +437,7 @@ fn multi_actor_sibling_spawn() {
 /// reach it (ADR-0021 + ADR-0038 actor lifecycle).
 #[test]
 fn drop_component_silences_tick_echoes() {
-    let Some(wasm_path) = require_runtime("probe") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -497,7 +500,7 @@ fn drop_component_silences_tick_echoes() {
 #[test]
 #[allow(clippy::cast_precision_loss)]
 fn capture_frame_round_trip_runs_pre_and_after_mails() {
-    let Some(wasm_path) = require_runtime("probe") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -613,7 +616,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
 #[test]
 #[allow(clippy::cast_precision_loss)]
 fn cube_render_projects_centered_silhouette() {
-    let Some(wasm_path) = require_runtime("cube") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     // 128×96 matches the fixture's `view_proj` aspect (4:3), so the
@@ -1108,7 +1111,7 @@ fn capture_frame_checks_return_substrate_verdict() {
 /// mailbox.
 #[test]
 fn replace_component_preserves_mailbox_identity() {
-    let Some(wasm_path) = require_runtime("probe") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -1181,7 +1184,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
 
     const FIXTURE_NAME: &str = "stateful_replace";
 
-    let Some(wasm_path) = require_runtime(FIXTURE_NAME) else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let addr = format!(
@@ -1192,7 +1195,8 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    // Load the entry export (Counter) and capture its mailbox id.
+    // Load the `Counter` actor (a non-entry actor in the bundle) under the
+    // `stateful_replace` name and capture its mailbox id.
     let loaded = bench
         .execute(vec![(
             "load",
@@ -1202,7 +1206,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
                     wasm,
                     name: Some(FIXTURE_NAME.to_owned()),
                     config: Vec::new(),
-                    export: None,
+                    export: Some("stateful.counter".to_owned()),
                 },
             ),
         )])
@@ -1294,7 +1298,7 @@ fn replace_preserves_state_via_typed_state_kind() {
 
     const FIXTURE_NAME: &str = "stateful_replace_typed";
 
-    let Some(wasm_path) = require_runtime(FIXTURE_NAME) else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_stateful_typed") else {
         return;
     };
     let addr = format!(
@@ -1400,12 +1404,11 @@ fn typed_state_decode_miss_boots_fresh() {
     use aether_actor::Addressable;
 
     const TYPED_NAME: &str = "stateful_replace_typed";
-    const RESHAPED_NAME: &str = "stateful_replace_reshaped";
 
-    let Some(typed_path) = require_runtime(TYPED_NAME) else {
+    let Some(typed_path) = require_runtime("aether_test_fixtures_stateful_typed") else {
         return;
     };
-    let Some(reshaped_path) = require_runtime(RESHAPED_NAME) else {
+    let Some(reshaped_path) = require_runtime("aether_test_fixtures_stateful_reshaped") else {
         return;
     };
     let addr = format!(
@@ -2319,7 +2322,7 @@ fn text_draws_world_space_label() {
 fn replace_preserves_inline_child_state_via_reconstruct() {
     use aether_actor::Addressable;
 
-    const BUNDLE_STEM: &str = "inline_child";
+    const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
     const FIXTURE_NAME: &str = "inline_child_stateful";
 
     let Some(wasm_path) = require_runtime(BUNDLE_STEM) else {
@@ -2455,7 +2458,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
 fn despawn_inline_child_settles_orphan_mail_via_parent() {
     use aether_actor::Addressable;
 
-    const BUNDLE_STEM: &str = "inline_child";
+    const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
     const FIXTURE_NAME: &str = "inline_child_despawn";
 
     let Some(wasm_path) = require_runtime(BUNDLE_STEM) else {
@@ -2551,7 +2554,7 @@ fn childless_component_hot_reloads_unchanged() {
 
     const FIXTURE_NAME: &str = "stateful_replace";
 
-    let Some(wasm_path) = require_runtime(FIXTURE_NAME) else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let addr = format!(
@@ -2571,7 +2574,8 @@ fn childless_component_hot_reloads_unchanged() {
                     wasm,
                     name: Some(FIXTURE_NAME.to_owned()),
                     config: Vec::new(),
-                    export: None,
+                    // `Counter` is a non-entry actor in the bundle.
+                    export: Some("stateful.counter".to_owned()),
                 },
             ),
         )])

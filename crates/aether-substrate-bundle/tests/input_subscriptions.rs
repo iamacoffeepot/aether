@@ -25,7 +25,7 @@ use aether_kinds::{
     UnsubscribeInput,
 };
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
-use aether_test_fixtures::KeyObserved;
+use aether_test_fixtures_kinds::KeyObserved;
 use std::fs;
 
 /// Arbitrary key code for the synthetic `Key` events these tests inject.
@@ -116,7 +116,7 @@ fn drop_component(bench: &mut TestBench, mailbox_id: MailboxId) {
 /// subscriber set rather than firing unconditionally.
 #[test]
 fn empty_subscribers_means_no_delivery() {
-    if require_runtime("probe").is_none() {
+    if require_runtime("aether_test_fixtures_bundle").is_none() {
         return;
     }
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -132,7 +132,7 @@ fn empty_subscribers_means_no_delivery() {
 /// One subscribed probe broadcasts once per injected key.
 #[test]
 fn subscribed_component_receives_published_keys() {
-    let Some(wasm_path) = require_runtime("probe") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -154,7 +154,7 @@ fn subscribed_component_receives_published_keys() {
 /// 4 broadcasts.
 #[test]
 fn two_subscribers_each_receive_every_key() {
-    let Some(wasm_path) = require_runtime("probe") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -177,7 +177,7 @@ fn two_subscribers_each_receive_every_key() {
 /// from that probe.
 #[test]
 fn unsubscribe_stops_delivery() {
-    let Some(wasm_path) = require_runtime("probe") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -209,7 +209,7 @@ fn unsubscribe_stops_delivery() {
 /// the dropped probe.
 #[test]
 fn drop_clears_subscriptions() {
-    let Some(wasm_path) = require_runtime("probe") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");

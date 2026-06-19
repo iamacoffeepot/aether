@@ -1,14 +1,14 @@
-//! Shared `Kind` definitions for the workspace's wasm test fixtures
-//! (ADR-0090 c1). Each `examples/<name>.rs` actor is its own cdylib
-//! that pulls the shared kinds from this rlib — that way integration
-//! tests can import `aether_test_fixtures::{TickObserved, …}` for
-//! decode + assertions without re-declaring the schemas.
+//! Shared `Kind` definitions for the workspace's wasm test fixtures.
+//! The fixture component crates (the `bundle` cdylib and the
+//! `stateful-{typed,reshaped}` satellites) pull these schemas from this
+//! rlib, and the integration tests import the same types — visible as
+//! `aether_test_fixtures_kinds::{TickObserved, …}` — for decode +
+//! assertions without re-declaring them.
 //!
-//! Pre-#1256 this crate was `aether-test-fixture-probe` and the actor
-//! lived alongside the kinds in `src/lib.rs`. The rename and example
-//! split exists so a sibling fixture (`probe_with_config`, exercising
-//! ADR-0090's typed `FfiActor::Config`) can live next to the original
-//! probe without taking on its own member crate.
+//! The typed↔reshaped `CounterState` variants are deliberately absent:
+//! each satellite crate carries its own so the schemas (and therefore
+//! `Kind::ID`s) differ, which is what the ADR-0113 decode-miss test
+//! turns on.
 
 #![no_std]
 

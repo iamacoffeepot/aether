@@ -1,0 +1,23 @@
+[package]
+name = "aether-test-fixtures-stateful-reshaped"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ADR-0113 decode-miss companion / replace TARGET: same
+# `NAMESPACE = "stateful.typed"` and `CounterState` kind name as the typed
+# satellite, but a reshaped state shape (an added `generation` field
+# changes `Kind::ID`). Replacing the typed fixture with this one makes the
+# generated `on_rehydrate` decode-miss and boot fresh. Standalone for the
+# same two-binary reason as the typed satellite.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-actor = { path = "../../aether-actor" }
+aether-data = { path = "../../aether-data", features = ["derive"] }
+aether-test-fixtures-kinds = { path = "../kinds" }
+serde = { workspace = true, default-features = false, features = ["derive"] }
+
+[lints]
+workspace = true

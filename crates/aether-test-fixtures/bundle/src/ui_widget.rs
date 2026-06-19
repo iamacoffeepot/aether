@@ -27,7 +27,7 @@ use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::{DrawSolidQuads, QuadSpace, SolidQuad, Tick};
-use aether_test_fixtures::UiWidgetConfig;
+use aether_test_fixtures_kinds::UiWidgetConfig;
 
 pub struct UiWidget {
     config: UiWidgetConfig,
@@ -76,5 +76,3 @@ impl FfiActor for UiWidget {
         });
     }
 }
-
-aether_actor::export!(UiWidget);

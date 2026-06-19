@@ -12,7 +12,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, Manual, OutboundReply, actor};
-use aether_test_fixtures::{Bump, CountQuery, CountReport};
+use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
 /// Reshaped durable state — the added `generation` field changes the
 /// schema and therefore `Kind::ID`, which is what drives the decode-miss

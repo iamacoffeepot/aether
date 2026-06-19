@@ -161,5 +161,3 @@ impl FfiActor for Cube {
         }
     }
 }
-
-aether_actor::export!(Cube);

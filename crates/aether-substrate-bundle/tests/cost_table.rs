@@ -23,12 +23,12 @@ use aether_capabilities::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{CostTail, CostTailResult, LoadComponent, LoadResult, Tick};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
-use aether_test_fixtures::SetRender;
+use aether_test_fixtures_kinds::SetRender;
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries
 // land in this test binary (mirrors `cap_registry.rs`).
 #[allow(unused_imports)]
-use aether_test_fixtures as _;
+use aether_test_fixtures_kinds as _;
 
 fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
@@ -63,7 +63,7 @@ fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
 /// real component — the path the in-crate unit tests can only stub.
 #[test]
 fn init_seeds_cells_and_dispatch_folds() {
-    let Some(wasm_path) = require_runtime("probe") else {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");

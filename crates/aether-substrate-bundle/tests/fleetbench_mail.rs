@@ -20,7 +20,7 @@ mod tests {
         use aether_data::{Kind, MailId};
         use aether_kinds::trace::DispatchTraced;
         use aether_kinds::{List, ListResult};
-        use aether_test_fixtures::{ConfigEcho, ConfigQuery, ProbeConfig};
+        use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 
         use crate::fleetbench::{FleetBench, dist_manifest_present};
 
@@ -50,7 +50,7 @@ mod tests {
             };
             let addr = bench.load_with_config_export(
                 engine,
-                "probe",
+                "aether_test_fixtures_bundle",
                 &config,
                 "test_fixtures_probe_with_config",
             );

@@ -39,7 +39,7 @@ mod tests {
             }
             let mut bench = FleetBench::start();
             let engine = bench.spawn_headless();
-            let wasm = read_component_wasm("probe");
+            let wasm = read_component_wasm("aether_test_fixtures_bundle");
 
             // Load the probe and read its mailbox id off the LoadResult —
             // the harness `load` helper returns only the registered name,

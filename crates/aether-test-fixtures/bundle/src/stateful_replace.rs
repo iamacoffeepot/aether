@@ -24,7 +24,7 @@ use aether_actor::{
     BootError, FfiActor, FfiCtx, FfiDropCtx, FfiInitCtx, Instanced, Mail, Manual, OutboundReply,
     PriorState, actor,
 };
-use aether_test_fixtures::{Bump, CountQuery, CountReport};
+use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
 /// Entry export — the first type in the `export!` list. Holds a counter
 /// that must survive `replace_component`.
@@ -90,5 +90,3 @@ impl FfiActor for Sidecar {
     #[fallback]
     fn on_other(&mut self, _ctx: &mut FfiCtx<'_>, _mail: Mail<'_>) {}
 }
-
-aether_actor::export!(Counter, Sidecar);

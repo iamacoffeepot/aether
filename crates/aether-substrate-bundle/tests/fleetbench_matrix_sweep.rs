@@ -37,7 +37,7 @@ mod tests {
     mod heavy {
         use aether_data::Kind;
         use aether_kinds::{LogEntry, LogTailResult};
-        use aether_test_fixtures::{CollectMatrix, MatrixReport, RunMatrix};
+        use aether_test_fixtures_kinds::{CollectMatrix, MatrixReport, RunMatrix};
 
         use crate::fleetbench::{FleetBench, dist_manifest_present};
 
@@ -55,8 +55,14 @@ mod tests {
 
             // The cluster (parent + two inline children) and a separate
             // cross-cluster observer component.
-            let parent_addr = bench.load(engine, "matrix_sweep");
-            let observer = bench.load_full(engine, "source_observer");
+            let parent_addr = bench
+                .load_full_export(engine, "aether_test_fixtures_bundle", "test.matrix.parent")
+                .addr;
+            let observer = bench.load_full_export(
+                engine,
+                "aether_test_fixtures_bundle",
+                "test.source_observer",
+            );
 
             // Drive the sweep: the parent fans out every in-cluster direction
             // in place, plus a cross-cluster send to the observer during the

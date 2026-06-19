@@ -296,7 +296,7 @@ dependencies = [
  "aether-labyrinth",
  "aether-math",
  "aether-substrate",
- "aether-test-fixtures",
+ "aether-test-fixtures-kinds",
  "anyhow",
  "bytemuck",
  "clap",
@@ -317,7 +317,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-test-fixtures"
+name = "aether-test-fixtures-bundle"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
@@ -325,9 +325,40 @@ dependencies = [
  "aether-data",
  "aether-kinds",
  "aether-math",
+ "aether-test-fixtures-kinds",
  "bytemuck",
  "serde",
  "tracing",
+]
+
+[[package]]
+name = "aether-test-fixtures-kinds"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-data",
+ "aether-math",
+ "bytemuck",
+ "serde",
+]
+
+[[package]]
+name = "aether-test-fixtures-stateful-reshaped"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-test-fixtures-kinds",
+ "serde",
+]
+
+[[package]]
+name = "aether-test-fixtures-stateful-typed"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-test-fixtures-kinds",
+ "serde",
 ]
 
 [[package]]

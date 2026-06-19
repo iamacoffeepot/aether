@@ -14,7 +14,7 @@
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor` entries are
 // present in this test binary (same rationale as test_bench_scenario.rs).
 #[allow(unused_imports)]
-use aether_test_fixtures as _;
+use aether_test_fixtures_kinds as _;
 
 mod tests {
     mod heavy {
@@ -55,7 +55,7 @@ mod tests {
         /// `fleetbench_actor_logs_surface_the_probe_first_tick_entry`.
         #[test]
         fn test_bench_actor_logs_surface_the_probe_first_tick_entry() {
-            let Some(wasm_path) = require_runtime("probe") else {
+            let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
                 return;
             };
             let mut bench = match TestBench::start_with_size(64, 48) {

@@ -1,0 +1,27 @@
+[package]
+name = "aether-test-fixtures-kinds"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Shared `Kind` definitions for the workspace's wasm test fixtures. This
+# rlib holds the schemas the bundle / satellite component crates emit and
+# the integration tests import for decode + assertions — visible as
+# `aether_test_fixtures_kinds::{TickObserved, SetRender, ProbeConfig, …}`.
+# The two satellite `CounterState` variants are NOT here: each
+# `stateful-{typed,reshaped}` crate defines its own so their `Kind::ID`s
+# differ (the ADR-0113 decode-miss test rests on the mismatch).
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+aether-data = { path = "../../aether-data", features = ["derive"] }
+# Issue 1472: `Vec4Observed { input: Ref<Vec4> }` carries the
+# `aether.math.vec4` kind in its `Ref` slot, so the shared lib needs
+# `Vec4`. `aether-math` is `no_std`, keeping this rlib `no_std`.
+aether-math = { path = "../../aether-math" }
+bytemuck = { workspace = true, default-features = false, features = ["derive"] }
+serde = { workspace = true, default-features = false, features = ["derive"] }
+
+[lints]
+workspace = true

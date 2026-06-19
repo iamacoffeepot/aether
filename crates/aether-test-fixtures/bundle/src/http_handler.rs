@@ -54,5 +54,3 @@ impl FfiActor for HttpHandler {
         }
     }
 }
-
-aether_actor::export!(HttpHandler);

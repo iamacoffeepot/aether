@@ -50,7 +50,7 @@ mod tests {
         #[test]
         fn autoloaded_component_comes_up_with_no_hub() {
             let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-            let Some(wasm_path) = locate_component_wasm("probe") else {
+            let Some(wasm_path) = locate_component_wasm("aether_test_fixtures_bundle") else {
                 assert!(
                     !strict,
                     "AETHER_REQUIRE_RUNTIME set but probe.wasm not pre-built; \
@@ -126,7 +126,7 @@ mod tests {
             // carrying a component list drives — and the resolved autoload
             // brings the probe up with no hub.
             let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-            let Some(wasm_path) = locate_component_wasm("probe") else {
+            let Some(wasm_path) = locate_component_wasm("aether_test_fixtures_bundle") else {
                 assert!(
                     !strict,
                     "AETHER_REQUIRE_RUNTIME set but probe.wasm not pre-built; \

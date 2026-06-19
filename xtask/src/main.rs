@@ -655,11 +655,36 @@ mod tests {
         let stems: BTreeSet<&str> = components.iter().map(|c| c.stem.as_str()).collect();
 
         // Parity with the structural sweep preflight / CI ran before this
-        // xtask: a drop here surfaces as an AETHER_REQUIRE_RUNTIME panic.
-        for expected in ["probe", "multi_actor", "aether_kit", "aether_mesh_viewer"] {
+        // xtask: a drop here surfaces as an AETHER_REQUIRE_RUNTIME panic. The
+        // test fixtures are three single-output cdylib crates discovered the
+        // same way as `aether-kit` / `aether-mesh-viewer` — no example path.
+        for expected in [
+            "aether_test_fixtures_bundle",
+            "aether_test_fixtures_stateful_typed",
+            "aether_test_fixtures_stateful_reshaped",
+            "aether_kit",
+            "aether_mesh_viewer",
+        ] {
             assert!(
                 stems.contains(expected),
                 "discovery dropped component {expected}; found {stems:?}",
+            );
+        }
+
+        // The fixture crates are lib cdylibs, not `[[example]]` targets, so
+        // they need no example-build special-casing.
+        for fixture in [
+            "aether_test_fixtures_bundle",
+            "aether_test_fixtures_stateful_typed",
+            "aether_test_fixtures_stateful_reshaped",
+        ] {
+            let component = components
+                .iter()
+                .find(|c| c.stem == fixture)
+                .unwrap_or_else(|| panic!("fixture {fixture} discovered"));
+            assert!(
+                !component.from_example,
+                "fixture {fixture} is a lib cdylib, not an example target",
             );
         }
 
