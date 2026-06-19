@@ -51,8 +51,8 @@ use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_kinds::{
-    BinaryEntry, BinaryManifest, ComponentActor, ComponentEntry, ComponentManifest, ListBinaries,
-    ListComponents,
+    BinaryEntry, BinaryManifest, ComponentActor, ComponentEntry, ComponentManifest,
+    ListComponentBinaries, ListEngineBinaries,
 };
 use aether_substrate::atomic_write::atomic_write;
 use aether_substrate::pid_lock::{LockAcquisition, LockGuard, acquire_lock_pid};
@@ -327,7 +327,7 @@ impl ArtifactStore {
     /// constraint". Component entries are excluded — only `Binary`-kind
     /// artifacts are listed here.
     #[must_use]
-    pub fn list_binaries(&self, filter: &ListBinaries) -> Vec<BinaryEntry> {
+    pub fn list_binaries(&self, filter: &ListEngineBinaries) -> Vec<BinaryEntry> {
         self.entries
             .iter()
             .filter_map(|(hash, entry)| {
@@ -348,7 +348,7 @@ impl ArtifactStore {
     /// Each absent field is "no constraint". Binary entries are excluded —
     /// only `Component`-kind artifacts are listed here.
     #[must_use]
-    pub fn list_components(&self, filter: &ListComponents) -> Vec<ComponentEntry> {
+    pub fn list_components(&self, filter: &ListComponentBinaries) -> Vec<ComponentEntry> {
         self.entries
             .iter()
             .filter_map(|(hash, entry)| {
@@ -472,8 +472,8 @@ impl ArtifactStore {
     }
 }
 
-/// Whether a binary manifest passes a [`ListBinaries`] filter.
-fn matches_binary_filter(manifest: &BinaryManifest, filter: &ListBinaries) -> bool {
+/// Whether a binary manifest passes a [`ListEngineBinaries`] filter.
+fn matches_binary_filter(manifest: &BinaryManifest, filter: &ListEngineBinaries) -> bool {
     if let Some(chassis) = &filter.chassis
         && &manifest.chassis != chassis
     {
@@ -487,11 +487,11 @@ fn matches_binary_filter(manifest: &BinaryManifest, filter: &ListBinaries) -> bo
     filter.caps.iter().all(|c| manifest.caps.contains(c))
 }
 
-/// Whether a component manifest passes a [`ListComponents`] filter
+/// Whether a component manifest passes a [`ListComponentBinaries`] filter
 /// (ADR-0116): the optional `namespace` must be one of the exported actor
 /// namespaces, and the optional `handled_kind` must be in the manifest's
 /// handled-kind union. Each absent field is "no constraint".
-fn matches_component_filter(manifest: &ComponentManifest, filter: &ListComponents) -> bool {
+fn matches_component_filter(manifest: &ComponentManifest, filter: &ListComponentBinaries) -> bool {
     if let Some(namespace) = &filter.namespace
         && !manifest.namespaces.iter().any(|n| n == namespace)
     {
@@ -724,8 +724,8 @@ fn now_nanos() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactKind, ArtifactStore, DEFAULT_DISK_BUDGET_BYTES, ListBinaries, ListComponents,
-        Selector, StoredManifest,
+        ArtifactKind, ArtifactStore, DEFAULT_DISK_BUDGET_BYTES, ListComponentBinaries,
+        ListEngineBinaries, Selector, StoredManifest,
     };
     use aether_data::Kind;
     use aether_kinds::{ComponentActor, ComponentManifest, Key, Tick};
@@ -833,11 +833,11 @@ mod tests {
             None,
         );
         assert_eq!(
-            store.list_binaries(&ListBinaries::default()).len(),
+            store.list_binaries(&ListEngineBinaries::default()).len(),
             1,
             "only the binary lists as a binary",
         );
-        let components = store.list_components(&ListComponents::default());
+        let components = store.list_components(&ListComponentBinaries::default());
         assert_eq!(
             components.len(),
             1,
@@ -847,17 +847,17 @@ mod tests {
 
         // Attribute filters: namespace + handled-kind keep the entry; a
         // miss drops it.
-        let by_namespace = store.list_components(&ListComponents {
+        let by_namespace = store.list_components(&ListComponentBinaries {
             namespace: Some("test_fixture_probe".to_owned()),
             handled_kind: None,
         });
         assert_eq!(by_namespace.len(), 1, "a matching namespace keeps it");
-        let by_kind = store.list_components(&ListComponents {
+        let by_kind = store.list_components(&ListComponentBinaries {
             namespace: None,
             handled_kind: Some(Tick::ID),
         });
         assert_eq!(by_kind.len(), 1, "a matching handled-kind keeps it");
-        let miss = store.list_components(&ListComponents {
+        let miss = store.list_components(&ListComponentBinaries {
             namespace: Some("nope".to_owned()),
             handled_kind: None,
         });
@@ -979,7 +979,7 @@ mod tests {
         };
         store.upload(b"desktop-bin", ArtifactKind::Binary, desktop, None);
 
-        let headless_only = store.list_binaries(&ListBinaries {
+        let headless_only = store.list_binaries(&ListEngineBinaries {
             chassis: Some("headless".to_owned()),
             caps: vec![],
             target: None,
@@ -987,7 +987,7 @@ mod tests {
         assert_eq!(headless_only.len(), 1);
         assert_eq!(headless_only[0].manifest.chassis, "headless");
 
-        let render_capable = store.list_binaries(&ListBinaries {
+        let render_capable = store.list_binaries(&ListEngineBinaries {
             chassis: None,
             caps: vec!["aether.render".to_owned()],
             target: None,
@@ -999,7 +999,7 @@ mod tests {
         );
         assert_eq!(render_capable[0].manifest.chassis, "desktop");
 
-        let all = store.list_binaries(&ListBinaries::default());
+        let all = store.list_binaries(&ListEngineBinaries::default());
         assert_eq!(all.len(), 2);
         let _ = fs::remove_dir_all(&root);
     }

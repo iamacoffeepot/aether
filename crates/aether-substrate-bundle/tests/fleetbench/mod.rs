@@ -55,12 +55,12 @@ use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME}
 use aether_kinds::{
     BinaryEntry, BinarySelector, Cancel, CancelResult, ComponentCapabilities, ComponentEntry,
     ComponentSelector, DagDescriptor, DeadEngineDescriptor, EngineDescriptor, HandleDescribe,
-    HandleDescribeResult, ListBinaries, ListBinariesResult, ListComponents, ListComponentsResult,
-    ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail, LogTailResult,
-    ReplaceComponent, ReplaceResult, ResolveComponent, ResolveComponentResult, SpawnEngine,
-    SpawnEngineResult, Status, StatusResult, Submit, SubmitResult, TerminateEngine,
-    TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent,
-    UploadComponentResult,
+    HandleDescribeResult, ListComponentBinaries, ListComponentBinariesResult, ListComponents,
+    ListComponentsResult, ListEngineBinaries, ListEngineBinariesResult, ListEngines,
+    ListEnginesResult, LoadComponent, LoadResult, LogTail, LogTailResult, ReplaceComponent,
+    ReplaceResult, ResolveComponent, ResolveComponentResult, SpawnEngine, SpawnEngineResult,
+    Status, StatusResult, Submit, SubmitResult, TerminateEngine, TerminateEngineResult,
+    UploadBinary, UploadBinaryResult, UploadComponent, UploadComponentResult,
 };
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
@@ -275,15 +275,15 @@ impl FleetBench {
         UploadBinaryResult::decode_from_bytes(&payload).expect("undecodable UploadBinaryResult")
     }
 
-    /// Enumerate the hub's stored binaries (ADR-0115, issue 1953) under the
-    /// given filter. Hub-local — addressed at `aether.engine` with no
-    /// engine route.
-    pub fn list_binaries(&mut self, filter: &ListBinaries) -> Vec<BinaryEntry> {
+    /// Enumerate the hub's stored engine binaries (ADR-0115, issue 1953)
+    /// under the given filter. Hub-local — addressed at `aether.engine` with
+    /// no engine route.
+    pub fn list_engine_binaries(&mut self, filter: &ListEngineBinaries) -> Vec<BinaryEntry> {
         let replies = self.call(None, "aether.engine", filter);
-        let payload = single_reply(&replies, "ListBinaries");
-        match ListBinariesResult::decode_from_bytes(&payload) {
+        let payload = single_reply(&replies, "ListEngineBinaries");
+        match ListEngineBinariesResult::decode_from_bytes(&payload) {
             Some(result) => result.binaries,
-            None => panic!("undecodable ListBinariesResult"),
+            None => panic!("undecodable ListEngineBinariesResult"),
         }
     }
 
@@ -310,14 +310,32 @@ impl FleetBench {
             .expect("undecodable UploadComponentResult")
     }
 
-    /// Enumerate the hub's stored components (ADR-0116, issue 1956) under
-    /// the given filter. Hub-local — addressed at `aether.engine` with no
-    /// engine route.
-    pub fn list_components(&mut self, filter: &ListComponents) -> Vec<ComponentEntry> {
+    /// Enumerate the hub's stored component binaries (ADR-0116, issue 1956)
+    /// under the given filter. Hub-local — addressed at `aether.engine` with
+    /// no engine route.
+    pub fn list_component_binaries(
+        &mut self,
+        filter: &ListComponentBinaries,
+    ) -> Vec<ComponentEntry> {
         let replies = self.call(None, "aether.engine", filter);
+        let payload = single_reply(&replies, "ListComponentBinaries");
+        match ListComponentBinariesResult::decode_from_bytes(&payload) {
+            Some(result) => result.components,
+            None => panic!("undecodable ListComponentBinariesResult"),
+        }
+    }
+
+    /// Enumerate the components an `engine` has actually loaded and
+    /// registered, by ADR-0099 lineage name (issue 2020). Engine-local —
+    /// addressed at the engine's own `aether.component` mailbox, a definitive
+    /// snapshot of the live trampoline set. Poll this after a boot-manifest
+    /// spawn to learn deterministically when a requested component is loaded,
+    /// rather than inferring liveness from a log-ring side channel.
+    pub fn list_components(&mut self, engine: EngineId) -> Vec<String> {
+        let replies = self.call(Some(engine), "aether.component", &ListComponents {});
         let payload = single_reply(&replies, "ListComponents");
         match ListComponentsResult::decode_from_bytes(&payload) {
-            Some(result) => result.components,
+            Some(result) => result.names,
             None => panic!("undecodable ListComponentsResult"),
         }
     }

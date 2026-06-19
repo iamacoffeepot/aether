@@ -11,7 +11,7 @@ mod fleetbench;
 
 mod tests {
     mod heavy {
-        use aether_kinds::{ListBinaries, UploadBinaryResult};
+        use aether_kinds::{ListEngineBinaries, UploadBinaryResult};
 
         use crate::fleetbench::FleetBench;
 
@@ -41,7 +41,7 @@ mod tests {
 
             // List with no filter — the entry is present with the headless
             // manifest the `--describe` fork captured.
-            let all = bench.list_binaries(&ListBinaries::default());
+            let all = bench.list_engine_binaries(&ListEngineBinaries::default());
             let entry = all
                 .iter()
                 .find(|e| e.hash == hash)
@@ -62,7 +62,7 @@ mod tests {
             );
 
             // A chassis filter that matches keeps it; one that doesn't drops it.
-            let headless_filtered = bench.list_binaries(&ListBinaries {
+            let headless_filtered = bench.list_engine_binaries(&ListEngineBinaries {
                 chassis: Some("headless".to_owned()),
                 caps: vec![],
                 target: None,
@@ -71,7 +71,7 @@ mod tests {
                 headless_filtered.iter().any(|e| e.hash == hash),
                 "a matching chassis filter keeps the entry",
             );
-            let desktop_filtered = bench.list_binaries(&ListBinaries {
+            let desktop_filtered = bench.list_engine_binaries(&ListEngineBinaries {
                 chassis: Some("desktop".to_owned()),
                 caps: vec![],
                 target: None,

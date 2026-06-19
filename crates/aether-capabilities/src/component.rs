@@ -30,7 +30,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use aether_actor::{Actor, FfiActorMailbox};
-use aether_kinds::{DropComponent, LoadComponent, ReplaceComponent};
+use aether_kinds::{DropComponent, ListComponents, LoadComponent, ReplaceComponent};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_kinds::{LifecycleUnsubscribeAll, UnsubscribeAll};
 #[cfg(not(target_arch = "wasm32"))]
@@ -128,11 +128,13 @@ mod native {
     use aether_actor::Actor;
     use aether_actor::actor;
     use aether_data::Kind;
-    use aether_kinds::{ComponentCapabilities, LoadResult};
+    use aether_data::MailboxCategory;
+    use aether_kinds::{ComponentCapabilities, ListComponentsResult, LoadResult};
     use wasmtime::{Engine, Linker, Module};
 
     use super::{
-        DropComponent, LifecycleUnsubscribeAll, LoadComponent, ReplaceComponent, UnsubscribeAll,
+        DropComponent, LifecycleUnsubscribeAll, ListComponents, LoadComponent, ReplaceComponent,
+        UnsubscribeAll,
     };
 
     use aether_substrate::actor::native::spawn::Subname;
@@ -280,6 +282,43 @@ mod native {
         #[handler]
         fn on_replace_component(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
             self.forward_to_trampoline(ctx, payload.mailbox_id, ReplaceComponent::ID, &payload);
+        }
+
+        /// Enumerate the components this engine has actually loaded and
+        /// registered, by their ADR-0099 lineage names (issue 2020).
+        ///
+        /// Reads the registry's live mailbox snapshot — the same list
+        /// already egressed to the hub after each load — and keeps only the
+        /// [`MailboxCategory::Trampoline`] entries, the loaded-component set.
+        /// Chassis caps are boot-present and static, so the trampolines are
+        /// the only registry membership a readiness poll cares about. The
+        /// reply is names only: the mailbox id is a deterministic hash-chain
+        /// over the lineage the name renders (ADR-0099) and routing is the
+        /// substrate's job, so the caller never needs the handle.
+        ///
+        /// # Agent
+        /// Fieldless `ListComponents` to the `aether.component` mailbox —
+        /// guaranteed present from boot, so the send always resolves and the
+        /// reply is a definitive snapshot. Reply `ListComponentsResult {
+        /// names }` lists every currently-loaded component's full lineage
+        /// address (`aether.component/aether.embedded:NAME`). Poll it after a
+        /// boot-manifest spawn (ADR-0116) to learn deterministically when a
+        /// requested component is loaded, instead of inferring liveness by
+        /// proxy.
+        #[handler]
+        fn on_list_components(
+            &mut self,
+            _ctx: &mut NativeCtx<'_>,
+            _payload: ListComponents,
+        ) -> ListComponentsResult {
+            let names = self
+                .registry
+                .list_mailbox_descriptors()
+                .into_iter()
+                .filter(|d| d.category == Some(MailboxCategory::Trampoline))
+                .map(|d| d.name)
+                .collect();
+            ListComponentsResult { names }
         }
     }
 
