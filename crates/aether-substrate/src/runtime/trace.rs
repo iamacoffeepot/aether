@@ -102,21 +102,22 @@ impl TraceHandle {
         }
     }
 
-    /// Issue 1990: set the chassis-host ring's capacity to `ring_cap`.
+    /// Issue 1990: set the chassis-host ring's floor + growth ceiling.
     /// Called once at chassis boot from `boot_passives` with the resolved
-    /// trace-ring capacity so off-actor trace producers (chassis-root /
-    /// injected mail) lap at the same configured depth as the per-actor
-    /// rings. The ring is empty at boot, so replacing it loses nothing.
+    /// trace-ring capacities so off-actor trace producers (chassis-root /
+    /// injected mail) lap at — and grow to — the same configured depth as
+    /// the per-actor rings. The ring is empty at boot, so replacing it
+    /// loses nothing.
     ///
     /// # Panics
     /// Panics if the chassis-host ring mutex is poisoned (fail-fast per
     /// ADR-0063) — unreachable at boot before any producer runs.
-    pub fn set_chassis_host_ring_capacity(&self, ring_cap: usize) {
+    pub fn set_chassis_host_ring_capacity(&self, floor: usize, max: usize) {
         *self
             .chassis_host_ring
             .lock()
             .expect("chassis-host trace ring mutex poisoned; fail-fast per ADR-0063") =
-            ActorTraceRing::with_capacity(ring_cap);
+            ActorTraceRing::with_growth(floor, max);
     }
 
     /// Install the chassis [`SettlementRegistry`] so the emit-time counter
@@ -158,22 +159,30 @@ impl TraceHandle {
     /// # Panics
     /// Panics if the chassis-host ring mutex is poisoned (fail-fast per
     /// ADR-0063) — only reachable on the off-actor fallback path.
+    ///
+    /// The ring's settlement-aware eviction (issue 2076) reads liveness
+    /// from the emit-time [`SettlementTable`]: when a ring is full it
+    /// grows only to protect an oldest chain still in flight, and reclaims
+    /// the oldest entry once its chain has settled. This is the one
+    /// direction trace consults settlement (a cheap `is_live` probe);
+    /// settlement never depends on trace (ADR-0086).
     pub fn push_trace_ring(&self, root: MailId, event: TraceEvent) {
         // Move the event into whichever ring applies. `try_with_mut`
         // skips the closure entirely when no actor is stamped, leaving
         // `slot` populated for the chassis-host fallback — so the event
         // moves exactly once with no clone.
+        let settlement = &self.settlement_counter;
         let mut slot = Some(event);
         ActorTraceRing::try_with_mut(|ring| {
             if let Some(event) = slot.take() {
-                ring.push(root, event);
+                ring.push(root, event, |front_root| settlement.is_live(front_root));
             }
         });
         if let Some(event) = slot.take() {
             self.chassis_host_ring
                 .lock()
                 .expect("chassis-host trace ring mutex poisoned; fail-fast per ADR-0063")
-                .push(root, event);
+                .push(root, event, |front_root| settlement.is_live(front_root));
         }
     }
 

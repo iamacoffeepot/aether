@@ -410,7 +410,10 @@ impl Spawner {
         // first `Local::with_mut::<Ring>` finds them instead of building
         // the const-`Default` ring.
         slots.seed(ActorLogRing::with_capacity(self.ring_caps.log));
-        slots.seed(ActorTraceRing::with_capacity(self.ring_caps.trace));
+        slots.seed(ActorTraceRing::with_growth(
+            self.ring_caps.trace,
+            self.ring_caps.trace_max,
+        ));
 
         let actor = {
             // Instanced actors don't publish driver-facing sub-handles

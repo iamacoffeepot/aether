@@ -130,9 +130,11 @@ querying each mailbox and merging, which is exactly what an agent does when it
 walks several mailboxes over MCP.
 
 The log rings have a sibling: the **trace rings**. Both are bounded per-actor
-storage with the same wrap-under-load behavior, queried the same way —
-`aether.log.tail` for what an actor *said*, `aether.trace.tail` for what a mail
-*caused*. They answer different questions and stay separate;
+storage queried the same way — `aether.log.tail` for what an actor *said*,
+`aether.trace.tail` for what a mail *caused*. They differ under saturation: a log
+ring wraps immediately, dropping its oldest line; a trace ring grows toward a
+configured ceiling first, because dropping a single trace event leaves a hole in
+the tree it belongs to. They answer different questions and stay separate;
 [Tracing & settlement](tracing-and-settlement.md) is the page for the trace side.
 
 ## Where to read more

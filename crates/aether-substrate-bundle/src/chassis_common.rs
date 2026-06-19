@@ -37,7 +37,7 @@ use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
 // The `aether.trajectory` recorder cap moved to `aether-labyrinth` (issue
 // 1908); the mailbox NAMESPACE (and so its hash-derived id) is unchanged.
 use aether_actor::log::DEFAULT_RING_CAP;
-use aether_actor::trace_ring::DEFAULT_TRACE_RING_CAP;
+use aether_actor::trace_ring::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
 use aether_labyrinth::TrajectoryRecorderCapability;
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
@@ -117,11 +117,13 @@ pub const CHASSIS_KNOBS: &[KnobRecord] = &[
 /// boot and lowered via [`Self::to_ring_capacities`] to the `Copy`
 /// [`RingCapacities`] the chassis builder threads down the spawn path.
 ///
-/// `env_prefix = "AETHER_ACTOR"` joins the two field env keys; the
-/// explicit `env =` overrides pin the historical names — the log key
+/// `env_prefix = "AETHER_ACTOR"` joins the field env keys; the explicit
+/// `env =` overrides pin the historical names — the log key
 /// (`AETHER_ACTOR_LOG_RING_SIZE`) is the one ADR-0081 already documented
-/// (previously documented-but-dead; this is what wires it), and the trace
-/// key (`AETHER_ACTOR_TRACE_RING_SIZE`) is the new sibling.
+/// (previously documented-but-dead; this is what wires it), the trace
+/// floor key (`AETHER_ACTOR_TRACE_RING_SIZE`) its sibling, and the trace
+/// ceiling key (`AETHER_ACTOR_TRACE_RING_MAX_SIZE`) the size a saturating
+/// trace ring grows to before it resumes drop-oldest.
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_ACTOR", cli_prefix = "actor")]
 pub struct ActorRingConfig {
@@ -135,15 +137,25 @@ pub struct ActorRingConfig {
     )]
     pub log_ring_capacity: usize,
     /// `AETHER_ACTOR_TRACE_RING_SIZE=<entries>` per-actor (and
-    /// chassis-host) trace-ring capacity (default
-    /// [`DEFAULT_TRACE_RING_CAP`]). Zero clamps to 1 inside
-    /// `ActorTraceRing::with_capacity`.
+    /// chassis-host) trace-ring *floor* — the size each ring starts at
+    /// (default [`DEFAULT_TRACE_RING_CAP`]). Zero clamps to 1 inside
+    /// `ActorTraceRing::with_growth`.
     #[config(
         env = "AETHER_ACTOR_TRACE_RING_SIZE",
         default = 4096,
         parse = parse_ring_capacity::<DEFAULT_TRACE_RING_CAP>
     )]
     pub trace_ring_capacity: usize,
+    /// `AETHER_ACTOR_TRACE_RING_MAX_SIZE=<entries>` ceiling a saturating
+    /// trace ring grows to before it resumes drop-oldest (default
+    /// [`DEFAULT_TRACE_RING_MAX_CAP`]). A value below the floor clamps up
+    /// to the floor inside `ActorTraceRing::with_growth`.
+    #[config(
+        env = "AETHER_ACTOR_TRACE_RING_MAX_SIZE",
+        default = 65536,
+        parse = parse_ring_capacity::<DEFAULT_TRACE_RING_MAX_CAP>
+    )]
+    pub trace_ring_max_size: usize,
 }
 
 impl Default for ActorRingConfig {
@@ -151,6 +163,7 @@ impl Default for ActorRingConfig {
         Self {
             log_ring_capacity: DEFAULT_RING_CAP,
             trace_ring_capacity: DEFAULT_TRACE_RING_CAP,
+            trace_ring_max_size: DEFAULT_TRACE_RING_MAX_CAP,
         }
     }
 }
@@ -163,6 +176,7 @@ impl ActorRingConfig {
         RingCapacities {
             log: self.log_ring_capacity,
             trace: self.trace_ring_capacity,
+            trace_max: self.trace_ring_max_size,
         }
     }
 }
@@ -625,7 +639,7 @@ mod tests {
     use super::chassis_known_keys;
     use super::parse_workers_env;
     use aether_actor::log::DEFAULT_RING_CAP;
-    use aether_actor::trace_ring::DEFAULT_TRACE_RING_CAP;
+    use aether_actor::trace_ring::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
     use std::env;
     use std::sync::Mutex;
     use std::sync::PoisonError;
@@ -640,7 +654,7 @@ mod tests {
     fn actor_ring_config_defaults_match() {
         use confique::Config as _;
         // No `.env()` source: literal defaults only — env-free. The
-        // layer's `default = 1024 / 4096` literals must equal the
+        // layer's `default = 1024 / 4096 / 65536` literals must equal the
         // `aether-actor` const caps so an unset knob reproduces the
         // const-`Default` ring behaviour.
         let _guard = RING_ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
@@ -649,9 +663,16 @@ mod tests {
             .expect("defaults load");
         assert_eq!(layer.log_ring_capacity, DEFAULT_RING_CAP);
         assert_eq!(layer.trace_ring_capacity, DEFAULT_TRACE_RING_CAP);
+        assert_eq!(layer.trace_ring_max_size, DEFAULT_TRACE_RING_MAX_CAP);
         let default = ActorRingConfig::default();
         assert_eq!(default.log_ring_capacity, DEFAULT_RING_CAP);
         assert_eq!(default.trace_ring_capacity, DEFAULT_TRACE_RING_CAP);
+        assert_eq!(default.trace_ring_max_size, DEFAULT_TRACE_RING_MAX_CAP);
+        // The default lowers to the same trace floor/ceiling on the `Copy`
+        // RingCapacities the spawn path threads.
+        let caps = default.to_ring_capacities();
+        assert_eq!(caps.trace, DEFAULT_TRACE_RING_CAP);
+        assert_eq!(caps.trace_max, DEFAULT_TRACE_RING_MAX_CAP);
     }
 
     #[test]
@@ -661,15 +682,18 @@ mod tests {
         unsafe {
             env::set_var("AETHER_ACTOR_LOG_RING_SIZE", "256");
             env::set_var("AETHER_ACTOR_TRACE_RING_SIZE", "9000");
+            env::set_var("AETHER_ACTOR_TRACE_RING_MAX_SIZE", "120000");
         }
         let resolved = ActorRingConfig::from_env().to_ring_capacities();
         // SAFETY: same serialised scope.
         unsafe {
             env::remove_var("AETHER_ACTOR_LOG_RING_SIZE");
             env::remove_var("AETHER_ACTOR_TRACE_RING_SIZE");
+            env::remove_var("AETHER_ACTOR_TRACE_RING_MAX_SIZE");
         }
         assert_eq!(resolved.log, 256);
         assert_eq!(resolved.trace, 9000);
+        assert_eq!(resolved.trace_max, 120_000);
     }
 
     #[test]
@@ -700,6 +724,7 @@ mod tests {
         let known = chassis_known_keys();
         assert!(known.contains("AETHER_ACTOR_LOG_RING_SIZE"));
         assert!(known.contains("AETHER_ACTOR_TRACE_RING_SIZE"));
+        assert!(known.contains("AETHER_ACTOR_TRACE_RING_MAX_SIZE"));
     }
 
     #[test]

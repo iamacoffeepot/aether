@@ -485,7 +485,10 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         // `Spawner::spawn_actor`.
         let ring_caps = ctx.spawner_arc().ring_caps();
         slots.seed(ActorLogRing::with_capacity(ring_caps.log));
-        slots.seed(ActorTraceRing::with_capacity(ring_caps.trace));
+        slots.seed(ActorTraceRing::with_growth(
+            ring_caps.trace,
+            ring_caps.trace_max,
+        ));
 
         self.state = BootState::Claimed {
             resources: ClaimResources {
@@ -1177,11 +1180,12 @@ fn boot_passives(
     // Issue 1990: the chassis-host trace ring (off-actor producers —
     // `Tick` / MCP sends / test injects) lives on the Mailer's
     // `TraceHandle`, outside the `Spawner`/builder slot path, so set its
-    // capacity explicitly to the same configured trace cap the per-actor
-    // rings get. The ring is empty at boot, so resizing it now is safe.
+    // floor + growth ceiling explicitly to the same configured trace caps
+    // the per-actor rings get. The ring is empty at boot, so resizing it
+    // now is safe.
     mailer
         .trace_handle()
-        .set_chassis_host_ring_capacity(ring_caps.trace);
+        .set_chassis_host_ring_capacity(ring_caps.trace, ring_caps.trace_max);
     let spawner: Arc<crate::Spawner> = Arc::new(crate::Spawner::new(
         Arc::clone(registry),
         Arc::clone(&actor_registry),
