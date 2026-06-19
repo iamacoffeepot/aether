@@ -5,7 +5,7 @@
 //!   the module **entry**, so a bare `load` of `aether_kit.wasm`
 //!   instantiates it.
 //! - [`camera::CameraComponent`] — the multi-camera driver, selected by
-//!   the `aether_kit@camera` export. Its `aether.camera.*` driver kinds
+//!   the `aether_kit@aether.camera` export. Its `aether.camera.*` driver kinds
 //!   live in [`crate::camera`].
 //!
 //! `export!(Locomotion, CameraComponent)` lists the entry first; the

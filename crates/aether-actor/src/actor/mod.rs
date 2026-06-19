@@ -138,9 +138,9 @@ pub trait Addressable: Sized + Send + 'static {
     /// it is the full mailbox name (`aether.<name>`). For an actor
     /// hosted inside a parent the full mailbox name is the path
     /// `"{scope}:{NAMESPACE}"`, so `NAMESPACE` is just the segment: a
-    /// wasm component declaring `NAMESPACE = "camera"` and loaded at its
-    /// default name registers at `aether.embedded:camera`
-    /// under its component-host, not at the bare `"camera"`.
+    /// wasm component declaring `NAMESPACE = "aether.camera"` and loaded at its
+    /// default name registers at `aether.embedded:aether.camera`
+    /// under its component-host, not at the bare `"aether.camera"`.
     const NAMESPACE: &'static str;
 
     /// The resolution strategy this actor selects (ADR-0119). Cardinality

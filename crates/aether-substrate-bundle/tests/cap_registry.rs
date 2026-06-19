@@ -170,10 +170,10 @@ fn cap_registry_updates_on_replace() {
                     wasm: kit_wasm,
                     drain_timeout_ms: None,
                     config: Vec::new(),
-                    // ADR-0096 / #2027: select the non-entry `camera`
+                    // ADR-0096 / #2027: select the non-entry `aether.camera`
                     // export from the multi-actor kit module; a bare
                     // replace would reuse the trampoline's probe tag.
-                    export: Some("camera".to_owned()),
+                    export: Some("aether.camera".to_owned()),
                 },
             ),
         )])
