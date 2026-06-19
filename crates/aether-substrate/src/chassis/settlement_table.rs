@@ -84,7 +84,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use aether_data::MailId;
+use aether_data::{MailId, MailboxId};
 
 use super::settlement_counter::CounterCell;
 
@@ -429,6 +429,32 @@ impl SettlementTable {
     pub fn held_open(&self, root: MailId) -> u32 {
         self.find_slot(root).map_or(0, |slot| slot.cell.load().1)
     }
+
+    /// Snapshot every live root and its `(in_flight, held_open)` counts —
+    /// the diagnostic surface a wedged settlement gate dumps so a genuine
+    /// deadlock/livelock names its stuck roots instead of surfacing a bare
+    /// timeout (issue 2062). Walks the slots like [`Self::live_roots`]: a
+    /// concurrent snapshot, exact only at quiescence and best-effort under
+    /// churn (a slot whose occupant changes mid-read fails the seqlock and
+    /// is skipped). Bounded by the slot count.
+    #[must_use]
+    pub fn pending_roots(&self) -> Vec<(MailId, u32, u32)> {
+        self.slots
+            .iter()
+            .filter_map(|slot| {
+                let (sender, correlation) = Self::read_key(slot)?;
+                let (in_flight, held_open) = slot.cell.load();
+                Some((
+                    MailId {
+                        sender: MailboxId(sender),
+                        correlation_id: correlation,
+                    },
+                    in_flight,
+                    held_open,
+                ))
+            })
+            .collect()
+    }
 }
 
 impl Default for SettlementTable {
@@ -501,6 +527,35 @@ mod tests {
 
         assert_eq!(fires, 2);
         assert_eq!(t.live_roots(), 0);
+    }
+
+    /// `pending_roots` enumerates every live root with its
+    /// `(in_flight, held_open)` counts — the wedge-diagnostic surface
+    /// (issue 2062). Two roots with distinct counts show up; the table is
+    /// empty once both settle.
+    #[test]
+    fn pending_roots_enumerates_live_counts() {
+        let t = SettlementTable::new();
+        let a = root(1, 1);
+        let b = root(2, 2);
+        t.record_sent(a); // a: (1,0)
+        t.record_sent(a); // a: (2,0)
+        t.record_sent(b); // b: (1,0)
+        t.record_hold_open(b); // b: (1,1)
+
+        let mut pending = t.pending_roots();
+        pending.sort_by_key(|(r, _, _)| (r.sender.0, r.correlation_id));
+        assert_eq!(pending, vec![(a, 2, 0), (b, 1, 1)]);
+
+        // Drain both to (0,0); the table empties.
+        assert!(!t.record_finished(a)); // (1,0)
+        assert!(t.record_finished(a)); // (0,0)
+        assert!(!t.record_finished(b)); // (0,1)
+        assert!(t.record_release(b)); // (0,0)
+        assert!(
+            t.pending_roots().is_empty(),
+            "settled roots leave no pending entries"
+        );
     }
 
     /// Orphan `Finished`/`Release` (no live slot) is a no-op returning
