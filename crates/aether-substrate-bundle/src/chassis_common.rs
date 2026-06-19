@@ -15,6 +15,7 @@ use std::env;
 use std::net::SocketAddr;
 use std::num::ParseIntError;
 use std::sync::Arc;
+use std::time::Duration;
 
 use aether_actor::Addressable;
 use aether_capabilities::anthropic::AnthropicConfigLayer;
@@ -182,6 +183,80 @@ fn parse_ring_capacity<const D: usize>(s: &str) -> Result<usize, ParseIntError> 
     s.trim().parse::<usize>()
 }
 
+/// Default cumulative settlement-patience cap, in seconds (issue 2062).
+/// Five minutes — a generous deadlock/livelock backstop a healthy chain
+/// never reaches even on a saturated box, not the gate a healthy chain
+/// meets. The literal `default = 300` on [`SettlementConfig`] must equal
+/// this; `settlement_config_defaults_match` guards the pair.
+const DEFAULT_SETTLEMENT_CAP_SECS: u64 = 300;
+
+/// Settlement-patience backstop knob (issue 2062). The bench's settlement
+/// gates block on the settlement signal and treat this cap as a generous
+/// deadlock/livelock backstop, not the 30 s wall-clock correctness gate
+/// that false-fired under `nextest --workspace` saturation (a healthy-but-
+/// slow chain settling at e.g. 45 s was wrongly declared wedged). The
+/// `#[derive(aether_substrate::Config)]` emits the env-shaped
+/// `SettlementConfigLayer`, the clap-shaped `SettlementOverlay`, the
+/// `FromArgvThenEnv` impl, and the inherent `from_env` /
+/// `from_argv_then_env` shims (ADR-0090 unit g) — mirrors
+/// [`ActorRingConfig`]. Resolved once at gate construction and lowered via
+/// [`Self::to_cap`] to the `Duration` the bench reads.
+#[derive(Clone, Debug, aether_substrate::Config)]
+#[config(env_prefix = "AETHER_SETTLEMENT", cli_prefix = "settlement")]
+pub struct SettlementConfig {
+    /// `AETHER_SETTLEMENT_CAP_SECS=<seconds>` cumulative settlement
+    /// patience before a gate is declared wedged (default
+    /// [`DEFAULT_SETTLEMENT_CAP_SECS`]). `0` is the sentinel for "no cap —
+    /// wait forever," for attaching a debugger to a suspected deadlock; in
+    /// that mode the per-round warn log stays the live signal.
+    #[config(
+        env = "AETHER_SETTLEMENT_CAP_SECS",
+        default = 300,
+        parse = parse_cap_secs
+    )]
+    pub cap_secs: u64,
+}
+
+impl Default for SettlementConfig {
+    fn default() -> Self {
+        Self {
+            cap_secs: DEFAULT_SETTLEMENT_CAP_SECS,
+        }
+    }
+}
+
+impl SettlementConfig {
+    /// Lower the resolved knob to the cumulative-cap [`Duration`] the
+    /// settlement gates read. `0` maps to [`Duration::MAX`] — the
+    /// "no cap" sentinel, which the gate's `waited >= cap` test never
+    /// trips, so the wait blocks on the signal forever.
+    #[must_use]
+    pub fn to_cap(&self) -> Duration {
+        if self.cap_secs == 0 {
+            Duration::MAX
+        } else {
+            Duration::from_secs(self.cap_secs)
+        }
+    }
+}
+
+/// Parse `AETHER_SETTLEMENT_CAP_SECS` (seconds; ADR-0090 §4 hard-error
+/// half): empty → unset, falling back to [`DEFAULT_SETTLEMENT_CAP_SECS`];
+/// a non-empty value that isn't a valid `u64` errors, which confique
+/// surfaces from `.load()` and the chassis env resolver turns into a
+/// `ConfigError`.
+///
+/// # Errors
+///
+/// Returns a [`ParseIntError`] for a non-empty value that isn't a valid
+/// `u64`.
+fn parse_cap_secs(s: &str) -> Result<u64, ParseIntError> {
+    if s.trim().is_empty() {
+        return Ok(DEFAULT_SETTLEMENT_CAP_SECS);
+    }
+    s.trim().parse::<u64>()
+}
+
 /// Assemble the chassis-wide [`KnownKeys`] set (ADR-0090 §4): every
 /// migrated `*Layer::META` (http / gemini / anthropic / audio / fs /
 /// persist) plus the hand-registered chassis knobs ([`CHASSIS_KNOBS`])
@@ -216,6 +291,7 @@ fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
         &NamespaceRootsLayer::META,
         &PersistConfigLayer::META,
         &ActorRingConfigLayer::META,
+        &SettlementConfigLayer::META,
     ];
     let mut records: Vec<KnobRecord> = CHASSIS_KNOBS.to_vec();
     records.extend_from_slice(SCHEDULER_KNOBS);
@@ -544,6 +620,8 @@ pub fn parse_workers_env() -> Option<usize> {
 mod tests {
     use super::ActorRingConfig;
     use super::ActorRingConfigLayer;
+    use super::DEFAULT_SETTLEMENT_CAP_SECS;
+    use super::SettlementConfig;
     use super::chassis_known_keys;
     use super::parse_workers_env;
     use aether_actor::log::DEFAULT_RING_CAP;
@@ -551,6 +629,7 @@ mod tests {
     use std::env;
     use std::sync::Mutex;
     use std::sync::PoisonError;
+    use std::time::Duration;
 
     /// Process-wide guard around the `AETHER_ACTOR_*` ring env mutation,
     /// distinct from `ENV_LOCK` so a ring test and a workers test don't
@@ -621,6 +700,40 @@ mod tests {
         let known = chassis_known_keys();
         assert!(known.contains("AETHER_ACTOR_LOG_RING_SIZE"));
         assert!(known.contains("AETHER_ACTOR_TRACE_RING_SIZE"));
+    }
+
+    #[test]
+    fn settlement_to_cap_maps_seconds_and_zero_sentinel() {
+        // Issue 2062 — the only logic this knob owns: seconds → `Duration`,
+        // with `0` as the "no cap — wait forever" sentinel. Constructed
+        // directly, so the test exercises our `to_cap`, not confique's
+        // env/argv resolution (which the derive macro generates and
+        // confique's own tests cover).
+        assert_eq!(
+            SettlementConfig { cap_secs: 0 }.to_cap(),
+            Duration::MAX,
+            "0 → wait forever",
+        );
+        assert_eq!(
+            SettlementConfig { cap_secs: 45 }.to_cap(),
+            Duration::from_secs(45),
+        );
+        assert_eq!(
+            SettlementConfig::default().to_cap(),
+            Duration::from_secs(DEFAULT_SETTLEMENT_CAP_SECS),
+        );
+    }
+
+    #[test]
+    fn settlement_key_is_known() {
+        // Guards the one-line registration of `SettlementConfigLayer::META`
+        // in the chassis registry: without it the cap env key trips the
+        // unknown-AETHER_* boot warn (e1). The production desktop/headless
+        // gates don't read the knob yet (issue 2062 §Side findings: a
+        // follow-up adopts it), so this registration is the only thing
+        // keeping the key claimed.
+        let known = chassis_known_keys();
+        assert!(known.contains("AETHER_SETTLEMENT_CAP_SECS"));
     }
 
     /// Process-wide guard around `AETHER_WORKERS` env mutation —

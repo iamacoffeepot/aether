@@ -55,6 +55,7 @@ use aether_substrate::{
 use super::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
 use super::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use super::render::Gpu;
+use crate::chassis_common::SettlementConfig;
 use std::error;
 use std::thread;
 
@@ -71,11 +72,14 @@ pub const DEFAULT_HEIGHT: u32 = 600;
 /// covers replies that never arrive (chassis hung or wrong target);
 /// `Advance` and `Capture` pass through `Err` variants from the
 /// substrate's reply. `SettlementTimeout` surfaces when a
-/// `send_mail` / `send_bytes` chain didn't drain within
-/// `SETTLEMENT_TIMEOUT` — issue 834: the bench waits on each
-/// pushed chain's `Settled { root }` so the next observation
-/// (`capture()`, the next typed send, an assertion) is causally
-/// after the producer's full descendant tree dispatched.
+/// `send_mail` / `send_bytes` chain didn't settle before the
+/// settlement-patience backstop (issue 834: the bench waits on each
+/// pushed chain's `Settled { root }` so the next observation —
+/// `capture()`, the next typed send, an assertion — is causally
+/// after the producer's full descendant tree dispatched). Issue 2062:
+/// the backstop is a generous deadlock/livelock cap a healthy chain
+/// never reaches, so a `SettlementTimeout` names a genuine wedge and
+/// carries a `pending` dump of the stuck roots and their counts.
 #[derive(Debug)]
 pub enum TestBenchError {
     Boot(String),
@@ -90,6 +94,11 @@ pub enum TestBenchError {
     SettlementTimeout {
         recipient: String,
         kind_name: &'static str,
+        /// Diagnostic dump of the settlement table's pending roots at the
+        /// moment the gate wedged — `root → in_flight=N held_open=M`,
+        /// comma-joined (or `<none>`). Names the stuck chain so a genuine
+        /// deadlock/livelock is actionable, not a bare timeout (issue 2062).
+        pending: String,
     },
 }
 
@@ -111,25 +120,23 @@ impl fmt::Display for TestBenchError {
             Self::SettlementTimeout {
                 recipient,
                 kind_name,
+                pending,
             } => write!(
                 f,
-                "send to {recipient:?} ({kind_name}) did not settle within {} s — chain likely has an in_flight leak; check `engine_logs` for stuck mail",
-                SETTLEMENT_TIMEOUT.as_secs(),
+                "send to {recipient:?} ({kind_name}) did not settle before the patience backstop — a genuine deadlock/livelock in the chain (a healthy chain never reaches this cap); pending roots: {pending}",
             ),
         }
     }
 }
 
-/// Per-round settlement patience (the log cadence of the escalating
-/// wait). Mirrors the `run_frame` tick wait at `bench.rs::run_frame`;
-/// long enough to absorb wasm compile + cap dispatcher wake under
-/// nextest CPU contention.
+/// Per-round settlement patience: the re-arm interval of the escalating
+/// wait, i.e. how often [`await_internal_signal`] logs `gate … slow …
+/// extending` while a slow-but-healthy chain is still settling. The log
+/// heartbeat, not the gate — a chain that settles is unaffected by its
+/// value; only the backstop cap (see [`TestBench::settlement_cap`])
+/// declares a wedge. Long enough to absorb wasm compile + cap dispatcher
+/// wake under nextest CPU contention.
 const SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Cumulative patience cap before a settlement gate is declared wedged
-/// (issue #1305). A starved-but-healthy chain resolves before this cap;
-/// a genuine wedge exhausts it and surfaces `SettlementTimeout`.
-const SETTLEMENT_CAP: Duration = Duration::from_secs(30);
 
 impl error::Error for TestBenchError {}
 
@@ -165,6 +172,16 @@ pub struct TestBench {
 
     frame: u64,
     next_correlation_id: AtomicU64,
+
+    /// Cumulative settlement-patience backstop the settlement gates
+    /// (`push_and_settle`, the capture pre-mail wait, `pump_until_event`'s
+    /// no-progress deadline) read instead of a hardcoded 30 s constant
+    /// (issue 2062). Resolved at boot from `AETHER_SETTLEMENT_CAP_SECS`
+    /// (argv > env > default 5 min) via `SettlementConfig`, or pinned by
+    /// the builder. A generous deadlock/livelock cap a healthy chain never
+    /// reaches under nextest saturation; [`Duration::MAX`] is the "no cap —
+    /// wait forever" sentinel (`AETHER_SETTLEMENT_CAP_SECS=0`).
+    settlement_cap: Duration,
     /// Stable session identity for reply addressing. The substrate
     /// echoes this on every reply addressed to `SourceAddr::Session`,
     /// so the loopback receiver can recognise its own replies.
@@ -223,6 +240,7 @@ pub struct TestBenchBuilder {
     pool_workers: Option<usize>,
     log_ring_capacity: Option<usize>,
     trace_ring_capacity: Option<usize>,
+    settlement_cap: Option<Duration>,
 }
 
 impl Default for TestBenchBuilder {
@@ -234,6 +252,7 @@ impl Default for TestBenchBuilder {
             pool_workers: None,
             log_ring_capacity: None,
             trace_ring_capacity: None,
+            settlement_cap: None,
         }
     }
 }
@@ -291,6 +310,18 @@ impl TestBenchBuilder {
         self
     }
 
+    /// Issue 2062: override the settlement-patience backstop the gates
+    /// read. `None` (the default) resolves `AETHER_SETTLEMENT_CAP_SECS`
+    /// (argv > env > default 5 min) via `SettlementConfig`; `Some(d)`
+    /// pins it — a small value lets a wedge test trip a gate fast without
+    /// waiting the real multi-minute backstop, and [`Duration::MAX`] is
+    /// the "no cap" sentinel. Per-bench, no process env.
+    #[must_use]
+    pub fn settlement_cap(mut self, cap: Option<Duration>) -> Self {
+        self.settlement_cap = cap;
+        self
+    }
+
     /// Boot the bench. Equivalent to `TestBench::start_with_size` for
     /// the default builder; overrides applied via the builder methods
     /// flow through to `SubstrateBoot::builder` and the chassis-side
@@ -304,12 +335,16 @@ impl TestBenchBuilder {
             log: self.log_ring_capacity.unwrap_or(default.log),
             trace: self.trace_ring_capacity.unwrap_or(default.trace),
         };
+        let settlement_cap = self
+            .settlement_cap
+            .unwrap_or_else(|| SettlementConfig::from_env().to_cap());
         TestBench::start_inner(
             self.width,
             self.height,
             self.namespace_roots,
             self.pool_workers,
             ring_caps,
+            settlement_cap,
         )
     }
 }
@@ -331,7 +366,14 @@ impl TestBench {
     /// Boot a `TestBench` with a specific offscreen target size.
     /// Width / height are clamped to a minimum of 1 inside `Gpu::new`.
     pub fn start_with_size(width: u32, height: u32) -> Result<Self, TestBenchError> {
-        Self::start_inner(width, height, None, None, RingCapacities::default())
+        Self::start_inner(
+            width,
+            height,
+            None,
+            None,
+            RingCapacities::default(),
+            SettlementConfig::from_env().to_cap(),
+        )
     }
 
     fn start_inner(
@@ -340,6 +382,7 @@ impl TestBench {
         namespace_roots: Option<NamespaceRoots>,
         pool_workers: Option<usize>,
         ring_caps: RingCapacities,
+        settlement_cap: Duration,
     ) -> Result<Self, TestBenchError> {
         let capture_queue = CaptureQueue::new();
         let (events_tx, events_rx) = event_channel();
@@ -406,6 +449,7 @@ impl TestBench {
             kind_lifecycle_advance,
             frame: 0,
             next_correlation_id: AtomicU64::new(1),
+            settlement_cap,
             session: SessionToken(Uuid::from_u128(TESTBENCH_SESSION_UUID)),
             stashed_replies: HashMap::new(),
             observed_kinds,
@@ -551,14 +595,49 @@ impl TestBench {
             &rx,
             "test_bench.push_and_settle",
             SETTLEMENT_TIMEOUT,
-            SETTLEMENT_CAP,
+            self.settlement_cap,
             TerminalDisposition::ReplyErr,
         ) {
             WaitOutcome::Settled => Ok(()),
-            WaitOutcome::Wedged(_) => Err(TestBenchError::SettlementTimeout {
-                recipient: recipient_name.to_owned(),
+            WaitOutcome::Wedged(_) => Err(self.settlement_timeout(
+                recipient_name.to_owned(),
                 kind_name,
-            }),
+                "test_bench.push_and_settle",
+            )),
+        }
+    }
+
+    /// Build a [`TestBenchError::SettlementTimeout`] carrying a dump of the
+    /// settlement table's currently-pending roots, and log it (issue 2062).
+    /// Shared by the settlement gate sites so a wedge — a genuine
+    /// deadlock/livelock, since the cap is a generous backstop a healthy
+    /// chain never reaches — names the stuck root(s) and their
+    /// `(in_flight, held_open)` counts instead of surfacing a bare timeout.
+    fn settlement_timeout(
+        &self,
+        recipient: String,
+        kind_name: &'static str,
+        gate: &str,
+    ) -> TestBenchError {
+        let pending = format_pending_roots(
+            &self
+                .queue
+                .trace_handle()
+                .settlement_counter()
+                .pending_roots(),
+        );
+        tracing::error!(
+            target: "aether_substrate::test_bench",
+            gate,
+            recipient = %recipient,
+            kind = kind_name,
+            pending = %pending,
+            "settlement gate wedged: chain did not settle before the patience backstop",
+        );
+        TestBenchError::SettlementTimeout {
+            recipient,
+            kind_name,
+            pending,
         }
     }
 
@@ -882,14 +961,17 @@ impl TestBench {
         const BACKOFF_FLOOR: Duration = Duration::from_micros(50);
         const BACKOFF_CAP: Duration = Duration::from_millis(10);
         // Wall-clock budget for consecutive quiet (no-progress) time
-        // before giving up. A deadline rather than an iteration count
-        // so the stall timeout is invariant to poll granularity. Long
-        // enough to ride out a wasmtime compile under parallel-test CPU
-        // pressure (issue 603 routed `LoadComponent` through
-        // `ComponentHostCapability`'s thread, so a load step waits on a
-        // dispatcher hop + compile when N test binaries run in
-        // parallel).
-        const STALL_DEADLINE: Duration = Duration::from_mins(1);
+        // before giving up — a deadlock/livelock backstop, not the gate a
+        // healthy reply meets, so it reads the runtime-configurable
+        // settlement cap (issue 2062) rather than a 1-min constant that
+        // false-fired under nextest saturation. A deadline rather than an
+        // iteration count so the stall timeout is invariant to poll
+        // granularity. The default 5 min rides out a wasmtime compile under
+        // parallel-test CPU pressure (issue 603 routed `LoadComponent`
+        // through `ComponentHostCapability`'s thread, so a load step waits
+        // on a dispatcher hop + compile when N test binaries run in
+        // parallel); `Duration::MAX` (the no-cap sentinel) waits forever.
+        let stall_deadline = self.settlement_cap;
 
         // Check the stash first.
         if let Some(frame) = self.stashed_replies.remove(&cid) {
@@ -938,7 +1020,7 @@ impl TestBench {
                 backoff = BACKOFF_FLOOR;
                 last_progress = Instant::now();
             } else {
-                if last_progress.elapsed() >= STALL_DEADLINE {
+                if last_progress.elapsed() >= stall_deadline {
                     return Err(TestBenchError::Timeout {
                         expected,
                         pumped_iterations: iterations,
@@ -1133,13 +1215,14 @@ impl TestBench {
                         &rx,
                         "test_bench.capture_pre_mail",
                         SETTLEMENT_TIMEOUT,
-                        SETTLEMENT_CAP,
+                        self.settlement_cap,
                         TerminalDisposition::ReplyErr,
                     ) {
-                        return Err(TestBenchError::SettlementTimeout {
-                            recipient: "capture pre-mail chain".to_owned(),
-                            kind_name: "<pre-mail>",
-                        });
+                        return Err(self.settlement_timeout(
+                            "capture pre-mail chain".to_owned(),
+                            "<pre-mail>",
+                            "test_bench.capture_pre_mail",
+                        ));
                     }
                 }
                 let result = CaptureFrameResult::from(
@@ -1171,6 +1254,24 @@ impl TestBench {
     }
 }
 
+/// Render the settlement table's pending roots as a compact wedge
+/// diagnostic — `root → in_flight=N held_open=M`, comma-joined (issue
+/// 2062). Empty renders `<none>`: a wedge with nothing pending points at
+/// the signal wiring (a dropped subscriber, a lost `Settled`), not a
+/// stuck chain.
+fn format_pending_roots(pending: &[(MailId, u32, u32)]) -> String {
+    if pending.is_empty() {
+        return "<none>".to_owned();
+    }
+    pending
+        .iter()
+        .map(|(root, in_flight, held_open)| {
+            format!("{root:?} → in_flight={in_flight} held_open={held_open}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Pull the `correlation_id` out of an `EgressEvent`, if it represents
 /// a session-targeted reply. `Broadcast` and the other event shapes
 /// aren't replies and return `None` — `pump_until_reply` records the
@@ -1195,6 +1296,27 @@ fn correlation_of(event: &EgressEvent) -> Option<u64> {
 mod tests {
     use super::*;
 
+    /// The wedge dump renders each pending root with its counts (issue
+    /// 2062) — a pure-function check, no chassis boot needed.
+    #[test]
+    fn format_pending_roots_renders_counts() {
+        let a = MailId {
+            sender: MailboxId(1),
+            correlation_id: 2,
+        };
+        let rendered = format_pending_roots(&[(a, 3, 1)]);
+        assert!(rendered.contains("in_flight=3"), "rendered: {rendered}");
+        assert!(rendered.contains("held_open=1"), "rendered: {rendered}");
+    }
+
+    /// An empty pending set renders `<none>` rather than a blank string,
+    /// so a wedge with nothing pending reads as a signal-wiring fault, not
+    /// a stuck chain.
+    #[test]
+    fn format_pending_roots_empty_is_none() {
+        assert_eq!(format_pending_roots(&[]), "<none>");
+    }
+
     /// Every `TestBench` test boots a full multi-worker chassis (offscreen
     /// wgpu), so they live in `mod heavy` for the `serial-heavy` nextest
     /// group (issue 1522). Driverless boxes still skip on boot error.
@@ -1203,6 +1325,49 @@ mod tests {
         use crate::test_bench::BenchOp;
         use std::thread;
         use std::time::Instant;
+
+        /// Issue 2062: a wedged settlement gate names the stuck root and its
+        /// `(in_flight, held_open)` counts instead of a bare timeout. Drive
+        /// the dump path directly against a deliberately-stuck root recorded
+        /// on the live settlement table — `record_sent` with no matching
+        /// `Finished` leaves a root at `in_flight=1` forever — and assert the
+        /// surfaced `SettlementTimeout` enumerates it. No timing wait: the
+        /// gate's *wedge detection* is covered by `await_internal_signal`'s
+        /// own tests; this covers the *diagnostic content*.
+        #[test]
+        fn settlement_wedge_dump_names_stuck_root() {
+            let tb = match TestBench::start_with_size(64, 48) {
+                Ok(tb) => tb,
+                Err(e) => {
+                    eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                    return;
+                }
+            };
+            // A synthetic root that never settles: one `Sent`, no `Finished`.
+            let stuck = MailId {
+                sender: MailboxId(0xDEAD),
+                correlation_id: 0xBEEF,
+            };
+            tb.queue
+                .trace_handle()
+                .settlement_counter()
+                .record_sent(stuck);
+
+            let err =
+                tb.settlement_timeout("stuck.recipient".to_owned(), "StuckKind", "test.wedge");
+            let TestBenchError::SettlementTimeout { pending, .. } = &err else {
+                panic!("expected SettlementTimeout, got {err:?}");
+            };
+            assert!(
+                pending.contains("in_flight=1"),
+                "dump should name the stuck root with in_flight=1: {pending}",
+            );
+            // The rendered error string carries the dump too.
+            assert!(
+                err.to_string().contains("in_flight=1"),
+                "Display should surface the pending dump: {err}",
+            );
+        }
 
         /// Boot, advance one tick, capture, sanity-check the PNG.
         /// The default scene is empty so the captured frame is the
