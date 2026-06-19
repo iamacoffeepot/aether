@@ -14,7 +14,10 @@ cargo-fuzz = true
 [workspace]
 
 [dependencies]
+arbitrary = { version = "1", features = ["derive"] }
 libfuzzer-sys = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
 serde_json = "1"
 
 [dependencies.aether-codec]
@@ -42,6 +45,34 @@ bench = false
 [[bin]]
 name = "decode_schema"
 path = "fuzz_targets/decode_schema.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_roundtrip"
+path = "fuzz_targets/wire_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_decode_str"
+path = "fuzz_targets/wire_decode_str.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_decode_seq"
+path = "fuzz_targets/wire_decode_seq.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_decode_enum"
+path = "fuzz_targets/wire_decode_enum.rs"
 test = false
 doc = false
 bench = false
