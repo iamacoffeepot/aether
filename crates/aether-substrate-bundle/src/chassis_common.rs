@@ -16,7 +16,7 @@ use std::net::SocketAddr;
 use std::num::ParseIntError;
 use std::sync::Arc;
 
-use aether_actor::Actor;
+use aether_actor::Addressable;
 use aether_capabilities::anthropic::AnthropicConfigLayer;
 use aether_capabilities::audio::AudioConfigLayer;
 use aether_capabilities::fs::NamespaceRootsLayer;
@@ -411,7 +411,7 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
 /// The mailbox namespaces `with_common_caps` registers — the linked
 /// capabilities every full-stack chassis carries, for the `--describe`
 /// manifest (ADR-0115, issue 1953). Read straight off each cap type's
-/// `Actor::NAMESPACE` const, so the values can't drift from what
+/// `Addressable::NAMESPACE` const, so the values can't drift from what
 /// `with_common_caps` actually claims; the *membership* of this list must
 /// be kept in lockstep with the `.with_actor::<_>()` chain above (a cap
 /// added there must be added here). The renderer / window / lifecycle
@@ -420,20 +420,20 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
 #[must_use]
 pub fn common_cap_namespaces() -> Vec<&'static str> {
     vec![
-        <HandleCapability as Actor>::NAMESPACE,
-        <TraceDispatchCapability as Actor>::NAMESPACE,
-        <DagCapability as Actor>::NAMESPACE,
-        <TrajectoryRecorderCapability as Actor>::NAMESPACE,
-        <InputCapability as Actor>::NAMESPACE,
-        <ComponentHostCapability as Actor>::NAMESPACE,
-        <FsCapability as Actor>::NAMESPACE,
-        <TextCapability as Actor>::NAMESPACE,
-        <UiCapability as Actor>::NAMESPACE,
-        <InventoryCapability as Actor>::NAMESPACE,
-        <HttpCapability as Actor>::NAMESPACE,
-        <TcpCapability as Actor>::NAMESPACE,
-        <AnthropicCapability as Actor>::NAMESPACE,
-        <GeminiCapability as Actor>::NAMESPACE,
+        <HandleCapability as Addressable>::NAMESPACE,
+        <TraceDispatchCapability as Addressable>::NAMESPACE,
+        <DagCapability as Addressable>::NAMESPACE,
+        <TrajectoryRecorderCapability as Addressable>::NAMESPACE,
+        <InputCapability as Addressable>::NAMESPACE,
+        <ComponentHostCapability as Addressable>::NAMESPACE,
+        <FsCapability as Addressable>::NAMESPACE,
+        <TextCapability as Addressable>::NAMESPACE,
+        <UiCapability as Addressable>::NAMESPACE,
+        <InventoryCapability as Addressable>::NAMESPACE,
+        <HttpCapability as Addressable>::NAMESPACE,
+        <TcpCapability as Addressable>::NAMESPACE,
+        <AnthropicCapability as Addressable>::NAMESPACE,
+        <GeminiCapability as Addressable>::NAMESPACE,
     ]
 }
 

@@ -187,7 +187,7 @@ pub struct ComponentCtx {
 /// reference one const instead of mirroring two literals; capabilities'
 /// `trampoline_namespace_matches_substrate` test guards the match.
 pub const TRAMPOLINE_NAMESPACE: &str =
-    <aether_actor::EmbeddedHost as aether_actor::Actor>::NAMESPACE;
+    <aether_actor::EmbeddedHost as aether_actor::Addressable>::NAMESPACE;
 
 /// ADR-0097: a sibling-spawn request the `spawn_sibling` host fn stages
 /// onto [`ComponentCtx`] for the trampoline to drain and execute.

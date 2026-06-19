@@ -342,7 +342,7 @@ mod native {
         fn manifest_contains_chassis_name_and_worker_template() {
             // Force `FsCapability`'s `NameEntry` submission to link.
             use crate::fs::FsCapability;
-            use aether_actor::Actor;
+            use aether_actor::Addressable;
             assert_eq!(FsCapability::NAMESPACE, "aether.fs");
             // Force the substrate's worker / root / instanced thread-name
             // templates to link by referencing the resolve chain.
@@ -386,7 +386,7 @@ mod native {
         #[test]
         fn manifest_surfaces_one_per_cardinality_for_trampoline() {
             use crate::trampoline::WasmTrampoline;
-            use aether_actor::Actor;
+            use aether_actor::Addressable;
             assert_eq!(WasmTrampoline::NAMESPACE, "aether.embedded");
 
             let mut fix = fixture();
@@ -587,7 +587,7 @@ mod native {
         /// contract.
         #[test]
         fn handlers_surfaces_native_reply_contract() {
-            use aether_actor::Actor;
+            use aether_actor::Addressable;
             use aether_data::Kind;
             // Force `ReplyProbeCap`'s `#[actor]` HandlerEntry submission to
             // link into this test binary.

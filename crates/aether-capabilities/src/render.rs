@@ -1376,7 +1376,7 @@ mod native {
 
         use super::*;
         use crate::test_chassis::TestChassis;
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
         use aether_kinds::trace::Nanos;
         use aether_substrate::chassis::builder::{Builder, PassiveChassis};
         use aether_substrate::mail::MailId;
@@ -1403,7 +1403,7 @@ mod native {
             use aether_actor::Singleton;
             use aether_data::mailbox_id_from_name;
 
-            let frozen = mailbox_id_from_name(<RenderCapability as Actor>::NAMESPACE);
+            let frozen = mailbox_id_from_name(<RenderCapability as Addressable>::NAMESPACE);
             assert_eq!(<RenderCapability as Singleton>::resolve(0), frozen);
             assert_eq!(
                 <RenderCapability as Singleton>::resolve(0xFFFF_FFFF_FFFF_FFFF),

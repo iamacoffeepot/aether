@@ -8,7 +8,7 @@
 use std::sync::mpsc;
 use std::sync::{Arc, Weak};
 
-use aether_actor::Actor;
+use aether_actor::Addressable;
 use aether_actor::local::ActorSlots;
 
 use crate::actor::native::envelope::Envelope;
@@ -367,7 +367,7 @@ impl<'a> ChassisCtx<'a> {
     ///
     /// Tests that need a parameterized name (one fixture, many
     /// claims) reach for [`Self::claim_mailbox_with_override`].
-    pub fn claim_mailbox<C: Actor>(&mut self) -> Result<MailboxClaim, BootError> {
+    pub fn claim_mailbox<C: Addressable>(&mut self) -> Result<MailboxClaim, BootError> {
         self.claim_mailbox_with_override(C::NAMESPACE)
     }
 
@@ -450,7 +450,7 @@ impl<'a> ChassisCtx<'a> {
     /// `C::NAMESPACE`. See
     /// [`Self::claim_mailbox_drop_on_shutdown_with_override`] for the
     /// arbitrary-name escape hatch.
-    pub fn claim_mailbox_drop_on_shutdown<C: Actor>(
+    pub fn claim_mailbox_drop_on_shutdown<C: Addressable>(
         &mut self,
     ) -> Result<DropOnShutdownClaim, BootError> {
         self.claim_mailbox_drop_on_shutdown_with_override(C::NAMESPACE)

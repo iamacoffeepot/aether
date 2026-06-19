@@ -1138,18 +1138,21 @@ mod tests {
     #[test]
     fn ctx_actor_folds_own_child_singleton_onto_caller_carry() {
         use crate::actor::native::ctx::NativeCtx;
-        use aether_actor::{Actor, Singleton};
+        use aether_actor::{Addressable, Singleton};
         use aether_data::{ActorId, Tag, fold_lineage, mailbox_id_from_name, with_tag};
 
         struct OwnChild;
-        impl Actor for OwnChild {
+        impl Addressable for OwnChild {
             const NAMESPACE: &'static str = "test.actor_fold.child";
         }
         impl Singleton for OwnChild {
             fn resolve(caller_carry: u64) -> MailboxId {
                 MailboxId(with_tag(
                     Tag::Mailbox,
-                    fold_lineage(caller_carry, ActorId::singleton(<Self as Actor>::NAMESPACE)),
+                    fold_lineage(
+                        caller_carry,
+                        ActorId::singleton(<Self as Addressable>::NAMESPACE),
+                    ),
                 ))
             }
         }
@@ -1187,12 +1190,12 @@ mod tests {
     fn mailsender_send_routes_through_resolve_not_flat_hash() {
         use crate::actor::native::ctx::NativeCtx;
         use aether_actor::actor::HandlesKind;
-        use aether_actor::{Actor, MailSender, Singleton};
+        use aether_actor::{Addressable, MailSender, Singleton};
         use aether_data::mailbox_id_from_name;
         use aether_kinds::Tick;
 
         struct Child;
-        impl Actor for Child {
+        impl Addressable for Child {
             const NAMESPACE: &'static str = "test.send_fold.child";
         }
         impl Singleton for Child {

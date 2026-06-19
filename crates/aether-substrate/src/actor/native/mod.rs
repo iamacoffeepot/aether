@@ -91,7 +91,7 @@ pub use mailbox::NativeActorMailbox;
 pub use spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
 pub use spawn_thread::{InheritCtx, RootCtx};
 
-use aether_actor::{Actor, Lifecycle};
+use aether_actor::{Addressable, Lifecycle};
 
 use crate::chassis::error::BootError;
 use crate::mail::KindId;
@@ -109,20 +109,20 @@ pub use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapabil
 /// `#[actor] impl NativeActor for X` block. The boot lifecycle
 /// (`init` / `wire` / `unwire`, plus `type Config`) lives on the shared
 /// [`Lifecycle`] capability; `NativeActor`
-/// composes it alongside the identity [`Actor`] supertrait and pins
+/// composes it alongside the identity [`Addressable`] supertrait and pins
 /// `InitError` to the chassis [`BootError`]. Native config stays a live
 /// Rust value (e.g. `AudioConfig`), so unlike the FFI side it carries no
 /// `Kind` bound. The `#[actor]` macro synthesizes the per-target ctx GATs
 /// (`NativeInitCtx` / `NativeCtx`) into the generated `impl Lifecycle`.
 ///
-/// Issue 629 / Phase A: the `Actor` supertrait gives `Send + 'static`.
+/// Issue 629 / Phase A: the `Addressable` supertrait gives `Send + 'static`.
 /// The dispatcher thread owns the cap as `Box<Self>` for its lifetime —
 /// no cross-thread `Arc` share, no `Sync` bound. Cap state can be plain
 /// fields without interior-mutability gymnastics once Phase B sweeps each
 /// cap. Per-kind dispatch wiring lives on the sibling [`NativeDispatch`]
 /// trait, also macro-emitted.
 pub trait NativeActor:
-    Actor
+    Addressable
     + for<'a> Lifecycle<
         InitError = BootError,
         InitCtx<'a> = NativeInitCtx<'a>,

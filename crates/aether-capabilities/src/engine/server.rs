@@ -969,7 +969,7 @@ mod server_native {
     /// a bare token resolves as a hash first, then a name.
     fn resolve_component_token(store: &mut ArtifactStore, token: &str) -> ResolveComponentResult {
         // `module@actor` (ADR-0096) takes precedence: the `@actor` half is a
-        // component `Actor::NAMESPACE`, distinct from a binary `name@version`
+        // component `Addressable::NAMESPACE`, distinct from a binary `name@version`
         // build id. Resolve the module half (hash, then name), forward the
         // actor half as `export`.
         if let Some((module, actor)) = token.split_once('@') {
@@ -1257,7 +1257,7 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
     use super::{EngineConfig, EngineServer, ReplyCells, ReplySink};
     use crate::test_chassis::TestChassis;
-    use aether_actor::Actor;
+    use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
     use aether_kinds::descriptors;
     use aether_kinds::{
@@ -1320,8 +1320,8 @@ mod tests {
     /// and block until `probe` sees a recorded reply (or the deadline
     /// passes).
     fn drive<K: Kind, T>(mailer: &Arc<Mailer>, request: &K, probe: impl Fn() -> Option<T>) -> T {
-        let server = mailbox_id_from_name(<EngineServer as Actor>::NAMESPACE);
-        let sink = mailbox_id_from_name(<ReplySink as Actor>::NAMESPACE);
+        let server = mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE);
+        let sink = mailbox_id_from_name(<ReplySink as Addressable>::NAMESPACE);
         mailer.push(
             Mail::new(server, K::ID, request.encode_into_bytes(), 1)
                 .with_reply_to(Source::with_correlation(SourceAddr::Component(sink), 1)),
@@ -1346,7 +1346,7 @@ mod tests {
         cells: &ReplyCells,
         fire: &K,
     ) -> aether_kinds::ListEnginesResult {
-        let server = mailbox_id_from_name(<EngineServer as Actor>::NAMESPACE);
+        let server = mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE);
         mailer.push(Mail::new(server, K::ID, fire.encode_into_bytes(), 1));
         drive(mailer, &ListEngines {}, || {
             cells

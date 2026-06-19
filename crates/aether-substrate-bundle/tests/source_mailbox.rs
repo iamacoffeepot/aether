@@ -34,7 +34,7 @@ use aether_test_fixtures as _;
 
 use std::fs;
 
-use aether_actor::Actor;
+use aether_actor::Addressable;
 use aether_capabilities::ComponentHostCapability;
 use aether_data::MailboxId;
 use aether_kinds::{LoadComponent, LoadResult, LogTailResult};

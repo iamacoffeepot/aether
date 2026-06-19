@@ -245,8 +245,8 @@ mod native {
 #[must_use]
 #[allow(clippy::disallowed_methods)]
 pub fn dag_mailbox_id() -> aether_data::MailboxId {
-    use aether_actor::Actor;
-    aether_data::mailbox_id_from_name(<DagCapability as Actor>::NAMESPACE)
+    use aether_actor::Addressable;
+    aether_data::mailbox_id_from_name(<DagCapability as Addressable>::NAMESPACE)
 }
 
 // Test-support kinds + actors for the DAG-executor scenario tests

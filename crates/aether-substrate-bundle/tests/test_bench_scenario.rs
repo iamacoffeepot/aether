@@ -73,7 +73,7 @@ const PROBE_NAME: &str = "probe";
 /// §4): the component host `aether.component` `/`-joined to the
 /// trampoline node — exactly what `LoadResult.name` reports.
 fn probe_address() -> String {
-    use aether_actor::Actor;
+    use aether_actor::Addressable;
     format!(
         "aether.component/{}:{}",
         aether_capabilities::WasmTrampoline::NAMESPACE,
@@ -1177,7 +1177,7 @@ fn replace_component_preserves_mailbox_identity() {
 /// the hooks as no-ops and the replacement booted fresh at 0.
 #[test]
 fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
-    use aether_actor::Actor;
+    use aether_actor::Addressable;
 
     const FIXTURE_NAME: &str = "stateful_replace";
 
@@ -1290,7 +1290,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
 /// `as_kind`, so the count survives the swap.
 #[test]
 fn replace_preserves_state_via_typed_state_kind() {
-    use aether_actor::Actor;
+    use aether_actor::Addressable;
 
     const FIXTURE_NAME: &str = "stateful_replace_typed";
 
@@ -1397,7 +1397,7 @@ fn replace_preserves_state_via_typed_state_kind() {
 /// route `aether.log` mail through its observed sinks).
 #[test]
 fn typed_state_decode_miss_boots_fresh() {
-    use aether_actor::Actor;
+    use aether_actor::Addressable;
 
     const TYPED_NAME: &str = "stateful_replace_typed";
     const RESHAPED_NAME: &str = "stateful_replace_reshaped";
@@ -2317,7 +2317,7 @@ fn text_draws_world_space_label() {
 /// proved the over-the-wire child addressing, so this doesn't re-prove it.
 #[test]
 fn replace_preserves_inline_child_state_via_reconstruct() {
-    use aether_actor::Actor;
+    use aether_actor::Addressable;
 
     const BUNDLE_STEM: &str = "inline_child";
     const FIXTURE_NAME: &str = "inline_child_stateful";
@@ -2453,7 +2453,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
 /// `FleetBench` already proved over-the-wire inline addressing.
 #[test]
 fn despawn_inline_child_settles_orphan_mail_via_parent() {
-    use aether_actor::Actor;
+    use aether_actor::Addressable;
 
     const BUNDLE_STEM: &str = "inline_child";
     const FIXTURE_NAME: &str = "inline_child_despawn";
@@ -2547,7 +2547,7 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
 /// guards it at the bundle layer.
 #[test]
 fn childless_component_hot_reloads_unchanged() {
-    use aether_actor::Actor;
+    use aether_actor::Addressable;
 
     const FIXTURE_NAME: &str = "stateful_replace";
 

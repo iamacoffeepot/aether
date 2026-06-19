@@ -18,7 +18,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use aether_actor::Actor;
+use aether_actor::Addressable;
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
@@ -150,11 +150,11 @@ impl DesktopChassis {
     pub fn describe_manifest() -> BinaryManifest {
         let mut caps = crate::common_cap_namespaces();
         caps.extend([
-            <AudioCapability as Actor>::NAMESPACE,
-            <RenderCapability as Actor>::NAMESPACE,
-            <UnsupportedTestBenchCapability as Actor>::NAMESPACE,
-            <LifecycleCapability as Actor>::NAMESPACE,
-            <RpcServerCapability as Actor>::NAMESPACE,
+            <AudioCapability as Addressable>::NAMESPACE,
+            <RenderCapability as Addressable>::NAMESPACE,
+            <UnsupportedTestBenchCapability as Addressable>::NAMESPACE,
+            <LifecycleCapability as Addressable>::NAMESPACE,
+            <RpcServerCapability as Addressable>::NAMESPACE,
         ]);
         crate::binary_manifest(Self::PROFILE, caps)
     }

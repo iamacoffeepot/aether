@@ -71,7 +71,7 @@ pub struct ComponentSpec {
     #[serde(default)]
     pub config_path: Option<String>,
     /// ADR-0096: which exported actor type to instantiate from a
-    /// multi-actor module, named by its `Actor::NAMESPACE`. Omit to load
+    /// multi-actor module, named by its `Addressable::NAMESPACE`. Omit to load
     /// the module's entry type. A `module@actor` selector populates this
     /// from its `@actor` half — set it explicitly to override.
     #[serde(default)]
@@ -110,7 +110,7 @@ pub struct UploadComponentArgs {
     /// (a component is too large for the tool channel).
     pub staged_path: String,
     /// Optional human-readable name to point at the resulting hash (the
-    /// component's `Actor::NAMESPACE` is the natural one). A later upload
+    /// component's `Addressable::NAMESPACE` is the natural one). A later upload
     /// with the same name repoints it; the named entry is protected from
     /// LRU eviction.
     #[serde(default)]
@@ -121,7 +121,7 @@ pub struct UploadComponentArgs {
 /// optional AND-combined filter; omit all to list every stored component.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListComponentsArgs {
-    /// Keep only components exporting an actor with this `Actor::NAMESPACE`.
+    /// Keep only components exporting an actor with this `Addressable::NAMESPACE`.
     #[serde(default)]
     pub namespace: Option<String>,
     /// Keep only components handling this kind, by its tagged kind id
@@ -307,7 +307,7 @@ pub struct LoadComponentArgs {
     #[serde(default)]
     pub config_path: Option<String>,
     /// ADR-0096: which exported actor type to instantiate from a
-    /// multi-actor module, named by its `Actor::NAMESPACE` (e.g.
+    /// multi-actor module, named by its `Addressable::NAMESPACE` (e.g.
     /// `"ui.panel"`). Omit to load the module's entry type — the first
     /// in its `export!` list, and the only type a single-actor module
     /// has. A `module@actor` selector populates this from its `@actor`
@@ -342,7 +342,7 @@ pub struct ReplaceComponentArgs {
     #[serde(default)]
     pub config_path: Option<String>,
     /// ADR-0096: which exported actor type to instantiate from the
-    /// replacement module, named by its `Actor::NAMESPACE` (e.g.
+    /// replacement module, named by its `Addressable::NAMESPACE` (e.g.
     /// `"ui.panel"`). Omit to reuse the actor type the trampoline
     /// currently hosts — not necessarily the entry — preserving today's
     /// replace behaviour. A `module@actor` selector populates this from

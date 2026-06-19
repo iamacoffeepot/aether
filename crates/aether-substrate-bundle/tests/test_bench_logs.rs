@@ -22,7 +22,7 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
         use aether_kinds::{LoadComponent, LoadResult, LogTailResult};
         use aether_substrate_bundle::test_bench::{
             BenchOp, TestBench, test_helpers::require_runtime,

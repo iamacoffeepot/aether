@@ -32,8 +32,8 @@ use aether_substrate::handle_store::HandleStore;
 use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
 use aether_substrate::mail::{MailId, MailRef};
 use aether_substrate::{
-    Actor, BootError, Builder, BuiltChassis, Chassis, Mailer, Manual, NativeActor, NativeBinding,
-    NativeCtx, NativeDispatch, NativeInitCtx, NeverDriver, PassiveChassis, Registry,
+    Addressable, BootError, Builder, BuiltChassis, Chassis, Mailer, Manual, NativeActor,
+    NativeBinding, NativeCtx, NativeDispatch, NativeInitCtx, NeverDriver, PassiveChassis, Registry,
     mail::MailboxId,
 };
 use std::thread;

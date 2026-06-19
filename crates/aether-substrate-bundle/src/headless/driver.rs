@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_actor::Actor;
+use aether_actor::Addressable;
 use aether_capabilities::LifecycleCapability;
 use aether_data::{Kind, KindId, encode_empty, mailbox_id_from_name};
 use aether_kinds::LifecycleAdvance;
@@ -129,7 +129,9 @@ impl DriverCapability for HeadlessTimerDriverCapability {
             // Chassis route-freezing: the lifecycle cap's own id (its NAMESPACE),
             // ctx-less, no sibling resolver in scope.
             #[allow(clippy::disallowed_methods)]
-            lifecycle_mailbox: mailbox_id_from_name(<LifecycleCapability as Actor>::NAMESPACE),
+            lifecycle_mailbox: mailbox_id_from_name(
+                <LifecycleCapability as Addressable>::NAMESPACE,
+            ),
             kind_lifecycle_advance: <LifecycleAdvance as Kind>::ID,
             tick_period,
             shutdown,
@@ -303,7 +305,9 @@ mod tests {
 
         let running = Box::new(HeadlessTimerRunning {
             queue: Arc::clone(&boot.queue),
-            lifecycle_mailbox: mailbox_id_from_name(<LifecycleCapability as Actor>::NAMESPACE),
+            lifecycle_mailbox: mailbox_id_from_name(
+                <LifecycleCapability as Addressable>::NAMESPACE,
+            ),
             kind_lifecycle_advance: <LifecycleAdvance as Kind>::ID,
             // Irrelevant — the pre-set flag breaks before the first sleep.
             tick_period: Duration::from_millis(16),

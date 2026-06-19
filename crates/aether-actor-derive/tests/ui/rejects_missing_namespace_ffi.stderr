@@ -1,4 +1,4 @@
-error: #[actor] impl FfiActor for X must declare `const NAMESPACE: &'static str = ...` so the marker `impl Actor` can carry it
+error: #[actor] impl FfiActor for X must declare `const NAMESPACE: &'static str = ...` so the marker `impl Addressable` can carry it
   --> tests/ui/rejects_missing_namespace_ffi.rs:26:33
    |
 26 | impl aether_actor::FfiActor for NoNamespace {

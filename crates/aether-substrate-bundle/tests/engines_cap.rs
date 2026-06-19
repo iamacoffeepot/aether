@@ -13,7 +13,7 @@
 // for fixture wiring — reference id derivation, not sibling-cap addressing.
 #![allow(clippy::disallowed_methods)]
 
-use aether_actor::Actor;
+use aether_actor::Addressable;
 use aether_capabilities::{EngineConfig, EngineServer};
 use aether_data::{Kind, mailbox_id_from_name};
 use aether_kinds::descriptors;
@@ -160,8 +160,8 @@ fn drive<K: Kind, T>(
     deadline: Duration,
     probe: impl Fn() -> Option<T>,
 ) -> T {
-    let server = mailbox_id_from_name(<EngineServer as Actor>::NAMESPACE);
-    let sink = mailbox_id_from_name(<ReplySink as Actor>::NAMESPACE);
+    let server = mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE);
+    let sink = mailbox_id_from_name(<ReplySink as Addressable>::NAMESPACE);
     mailer.push(
         Mail::new(server, K::ID, request.encode_into_bytes(), 1)
             .with_reply_to(Source::with_correlation(SourceAddr::Component(sink), 1)),

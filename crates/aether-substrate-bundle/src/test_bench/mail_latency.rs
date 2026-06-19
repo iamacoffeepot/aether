@@ -57,7 +57,7 @@ struct RingRelay {
     next: MailboxId,
 }
 
-impl aether_actor::Actor for RingRelay {
+impl aether_actor::Addressable for RingRelay {
     const NAMESPACE: &'static str = "mlat.ring";
 }
 impl aether_actor::Instanced for RingRelay {}
@@ -109,7 +109,7 @@ fn ring_id(i: usize) -> MailboxId {
 /// the emit-time settlement counter (ADR-0086).
 struct HoldRelay;
 
-impl aether_actor::Actor for HoldRelay {
+impl aether_actor::Addressable for HoldRelay {
     const NAMESPACE: &'static str = "mlat.hold";
 }
 // Both markers: `Instanced` lets the bench's `spawn_actor` place it,

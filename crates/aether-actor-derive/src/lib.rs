@@ -730,8 +730,8 @@ fn to_screaming_snake_case(s: &str) -> String {
 ///   `export!` shim's `receive_p32` calls.
 /// - The `aether.kinds.inputs` manifest consts (substrate reads them via
 ///   the wasm custom section the cdylib's `export!` pins in).
-/// - The `Actor`-trait const re-routing (`NAMESPACE` flows from the impl
-///   block into a sibling `impl Actor`).
+/// - The `Addressable`-trait const re-routing (`NAMESPACE` flows from the impl
+///   block into a sibling `impl Addressable`).
 ///
 /// Renamed from `#[actor]` in PR A of issue 533. Same behavior; the
 /// new name reads as "decorate this actor's impl" — natural now that the
@@ -752,7 +752,7 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Parsed `#[actor(...)]` attribute arguments. Only `skip_markers` is
 /// recognised today (issue 565: tells the expander not to emit
-/// `Actor` + `HandlesKind` impls because a wrapping `#[bridge]`
+/// `Addressable` + `HandlesKind` impls because a wrapping `#[bridge]`
 /// already emitted them as siblings of a cfg-gated module).
 #[derive(Default, Clone, Copy)]
 struct ActorOpts {
@@ -782,14 +782,14 @@ fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
 /// The mod hosts substrate-side imports, helpers, and a single
 /// `#[actor] impl NativeActor for X { ... }` block. Wasm consumers
 /// (loading the cap crate via `aether-capabilities` with
-/// `default-features = false`) must still see the always-on `Actor`
+/// `default-features = false`) must still see the always-on `Addressable`
 /// and `HandlesKind<K>` markers so typed sends like
 /// `ctx.actor::<X>().send(&kind)` compile-check, but the substrate-side
 /// trait impls and helpers can't be in scope on wasm32.
 ///
 /// `#[bridge]`'s expansion splits across that boundary:
 ///
-/// 1. The marker impls (`Actor` + `HandlesKind<K>` per handler kind)
+/// 1. The marker impls (`Addressable` + `HandlesKind<K>` per handler kind)
 ///    are emitted at sibling level to the mod, **outside** any cfg
 ///    gate — wasm consumers see them.
 /// 2. The original mod is emitted with `#[cfg(not(target_arch =
@@ -1009,7 +1009,7 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
 
         // Walk the impl items to collect handler kind types and the
         // `NAMESPACE` const expression. The const lives on the supertrait
-        // `Actor`, but the user wrote it inside `impl NativeActor for X`
+        // `Addressable`, but the user wrote it inside `impl NativeActor for X`
         // — same source-of-truth contract `expand_native_actor_trait`
         // uses.
         let mut handler_kinds: Vec<Type> = Vec::new();
@@ -1064,7 +1064,7 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
             syn::Error::new_spanned(
                 actor_impl,
                 "#[bridge]'s inner #[actor] block must declare \
-                 `const NAMESPACE: &'static str = ...` so the marker `impl Actor` can carry it",
+                 `const NAMESPACE: &'static str = ...` so the marker `impl Addressable` can carry it",
             )
         })?;
         // Issue 576 + issue 603: bridge-wrapped actors come in three
@@ -1107,7 +1107,7 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
     // - On native, the `pub use` re-exports the real struct from `mod
     //   native` to file root, so callers writing `crate::log::LogCapability`
     //   (chassis builders, tests in sibling mods) keep working.
-    // - Singleton, Actor, and HandlesKind impls are always-on so wasm
+    // - Singleton, Addressable, and HandlesKind impls are always-on so wasm
     //   consumers compile typed sends without the substrate runtime.
     // When the bridge declares `feature = "X"`, the wasm stub also
     // covers "native target without the feature" so consumers that
@@ -1139,7 +1139,7 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
     // `#[bridge(singleton)]` or `#[bridge(instanced)]`; absence is
     // hand-rolled (test fixtures, future cases that don't fit either).
     let actor_marker = quote! {
-        impl #impl_generics ::aether_actor::Actor for #self_ty #where_clause {
+        impl #impl_generics ::aether_actor::Addressable for #self_ty #where_clause {
             const NAMESPACE: &'static str = #namespace_expr;
         }
     };
@@ -1401,7 +1401,7 @@ pub fn derive_instanced(input: TokenStream) -> TokenStream {
 /// ```ignore
 /// impl Singleton for T {
 ///     fn resolve(_caller_carry: u64) -> MailboxId {
-///         ::aether_capabilities::resolve_embedded(<T as Actor>::NAMESPACE)
+///         ::aether_capabilities::resolve_embedded(<T as Addressable>::NAMESPACE)
 ///     }
 /// }
 /// ```
@@ -1431,7 +1431,7 @@ pub fn derive_embeddable(input: TokenStream) -> TokenStream {
         impl #impl_generics ::aether_actor::Singleton for #name #ty_generics #where_clause {
             fn resolve(_caller_carry: u64) -> ::aether_data::MailboxId {
                 ::aether_capabilities::resolve_embedded(
-                    <#name #ty_generics as ::aether_actor::Actor>::NAMESPACE,
+                    <#name #ty_generics as ::aether_actor::Addressable>::NAMESPACE,
                 )
             }
         }
@@ -1853,7 +1853,7 @@ fn classify_task_reply_mode(sig: &Signature, is_borrow: bool) -> syn::Result<Tas
 /// the back-compat `impl Component for X`). Emits the full wasm
 /// surface: dispatch table referencing `aether_actor::FfiCtx<'_>`,
 /// init wrapper, `aether.kinds.inputs` manifest consts, kind retention
-/// statics, plus the `HandlesKind<K>` and `Actor` impls common to both
+/// statics, plus the `HandlesKind<K>` and `Addressable` impls common to both
 /// shapes.
 #[allow(clippy::too_many_lines)] // emits the full wasm-actor surface in one go
 fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
@@ -2164,19 +2164,19 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
         build_kinds_section_retention_statics(self_ty, &handlers, config_kind_ty);
 
     // Issue 525 Phase 4: trait consts (today just NAMESPACE) live
-    // on the `Actor` super-trait, not `Component` / `FfiActor`. Route
+    // on the `Addressable` super-trait, not `Component` / `FfiActor`. Route
     // any const items the user declared inside `#[actor] impl
-    // Component for X` to a sibling `impl ::aether_actor::Actor`
+    // Component for X` to a sibling `impl ::aether_actor::Addressable`
     // block so satisfying `FfiActor: Actor` works without making the
     // user split the impl manually.
     //
     // Validate the const surface first: `NAMESPACE` is required (the
-    // marker `impl Actor` carries it) and is the only authorable const on
-    // the `Actor` super-trait. A removed `SCHEDULING` const (issue 1187)
+    // marker `impl Addressable` carries it) and is the only authorable const on
+    // the `Addressable` super-trait. A removed `SCHEDULING` const (issue 1187)
     // and any stray const are rejected at their own span, and a missing
     // `NAMESPACE` at the type — each a pointed diagnostic rather than a
     // later "no associated const NAMESPACE" error against the surfaceless
-    // `Actor` trait.
+    // `Addressable` trait.
     let mut has_namespace = false;
     for c in &consts {
         if c.ident == "NAMESPACE" {
@@ -2192,7 +2192,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
             return Err(syn::Error::new_spanned(
                 c,
                 "#[actor] impl FfiActor for X accepts only \
-                 `const NAMESPACE: &'static str = …` — the `Actor` super-trait carries no \
+                 `const NAMESPACE: &'static str = …` — the `Addressable` super-trait carries no \
                  other authorable const",
             ));
         }
@@ -2201,7 +2201,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
         return Err(syn::Error::new_spanned(
             self_ty,
             "#[actor] impl FfiActor for X must declare \
-             `const NAMESPACE: &'static str = ...` so the marker `impl Actor` can carry it",
+             `const NAMESPACE: &'static str = ...` so the marker `impl Addressable` can carry it",
         ));
     }
     let const_tokens = consts.iter();
@@ -2209,7 +2209,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
         quote! {}
     } else {
         quote! {
-            impl #impl_generics ::aether_actor::Actor for #self_ty #where_clause {
+            impl #impl_generics ::aether_actor::Addressable for #self_ty #where_clause {
                 #(#const_tokens)*
             }
         }
@@ -2361,7 +2361,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
         // stays concrete (the `export!` arm tag-matches and boxes).
         impl #impl_generics ::aether_actor::ErasedFfiActor for #self_ty #where_clause {
             fn erased_namespace(&self) -> &'static str {
-                <#self_ty as ::aether_actor::Actor>::NAMESPACE
+                <#self_ty as ::aether_actor::Addressable>::NAMESPACE
             }
             fn erased_dispatch(
                 &mut self,
@@ -2403,7 +2403,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
 /// across the wasm/native split.
 ///
 /// Emits, all rooted in the consumer crate's namespace:
-///   - `impl Actor for X` carrying the user-declared `const NAMESPACE`
+///   - `impl Addressable for X` carrying the user-declared `const NAMESPACE`
 ///     (extracted from the impl block so the `NativeActor: Actor`
 ///     supertrait bound is satisfied).
 ///   - `impl HandlesKind<K> for X` per `#[handler]` method — the
@@ -2622,15 +2622,15 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         }
     }
 
-    // `NAMESPACE` is declared on the supertrait `Actor`, but the user
+    // `NAMESPACE` is declared on the supertrait `Addressable`, but the user
     // wrote it inside `impl NativeActor for X` for the symmetric
-    // authoring shape. Route the const onto a sibling `impl Actor for X`
+    // authoring shape. Route the const onto a sibling `impl Addressable for X`
     // block so satisfying the supertrait bound works without making the
     // user split the impl.
     //
     // `skip_markers` (issue 565): when `#[bridge]` wraps a cfg-gated
     // `mod native` containing the actor block, it emits the always-on
-    // `Actor` + `HandlesKind` impls itself as siblings of the mod and
+    // `Addressable` + `HandlesKind` impls itself as siblings of the mod and
     // rewrites this `#[actor]` to `#[actor(skip_markers)]` so this
     // expansion does not duplicate them. The native-only impls below
     // still emit unchanged.
@@ -2640,16 +2640,16 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     // longer authorable (issue 1187): the scheduling enum + trait const
     // were removed — every actor drains on the chassis worker pool, so a
     // leftover `SCHEDULING` const earns a pointed diagnostic. Any const
-    // other than `NAMESPACE` is stray (the `Actor` super-trait carries no
+    // other than `NAMESPACE` is stray (the `Addressable` super-trait carries no
     // other
     // authorable const) and is rejected at its own span rather than
-    // silently routed onto the sibling `impl Actor` block; and the
+    // silently routed onto the sibling `impl Addressable` block; and the
     // presence of `NAMESPACE` is tracked so a block that omits it fails
     // here (spanned at the type, mirroring the `#[bridge]` path) instead
     // of at a later "no associated const NAMESPACE" error against the
-    // surfaceless `Actor` trait. A `skip_markers` (bridge-wrapped) block
+    // surfaceless `Addressable` trait. A `skip_markers` (bridge-wrapped) block
     // legitimately omits `NAMESPACE` — the `#[bridge]` expansion emits
-    // the marker `impl Actor` carrying it as a sibling — so the
+    // the marker `impl Addressable` carrying it as a sibling — so the
     // missing-NAMESPACE check is gated on `!opts.skip_markers`.
     let mut has_namespace = false;
     for c in &consts {
@@ -2666,7 +2666,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
             return Err(syn::Error::new_spanned(
                 c,
                 "#[actor] impl NativeActor for X accepts only \
-                 `const NAMESPACE: &'static str = …` — the `Actor` super-trait carries no \
+                 `const NAMESPACE: &'static str = …` — the `Addressable` super-trait carries no \
                  other authorable const",
             ));
         }
@@ -2675,7 +2675,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         return Err(syn::Error::new_spanned(
             self_ty,
             "#[actor] impl NativeActor for X must declare \
-             `const NAMESPACE: &'static str = ...` so the marker `impl Actor` can carry it",
+             `const NAMESPACE: &'static str = ...` so the marker `impl Addressable` can carry it",
         ));
     }
     // NAMESPACE passes through unchanged because its RHS is a
@@ -2685,7 +2685,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         quote! {}
     } else {
         quote! {
-            impl #impl_generics ::aether_actor::Actor for #self_ty #where_clause {
+            impl #impl_generics ::aether_actor::Addressable for #self_ty #where_clause {
                 #(#const_tokens)*
             }
         }
@@ -2935,7 +2935,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     // `In -> Out` the way `describe_component` does for a wasm component.
     // Gated on `not(wasm32)` to match the rest of the native surface
     // (the `inventory` crate doesn't link on wasm32). Skipped for a
-    // generic native actor — none exist, and `<Self as Actor>::NAMESPACE`
+    // generic native actor — none exist, and `<Self as Addressable>::NAMESPACE`
     // wouldn't const-resolve in the non-generic inventory static.
     let handler_inventory = if generics.params.is_empty() {
         let submissions = handlers.iter().map(|h| {
@@ -2949,7 +2949,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                 #[cfg(not(target_arch = "wasm32"))]
                 ::aether_data::name_inventory::inventory::submit! {
                     ::aether_data::name_inventory::HandlerEntry {
-                        namespace: <#self_ty as ::aether_actor::Actor>::NAMESPACE,
+                        namespace: <#self_ty as ::aether_actor::Addressable>::NAMESPACE,
                         id: <#kind_ty as ::aether_data::Kind>::ID,
                         name: <#kind_ty as ::aether_data::Kind>::NAME,
                         reply: #reply_expr,
@@ -2967,7 +2967,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     // and native-only types in their bodies. They're emitted under
     // `#[cfg(not(target_arch = "wasm32"))]` so `aether-capabilities`
     // can compile for `wasm32-unknown-unknown` without the substrate
-    // dep — wasm consumers see only the always-on Actor +
+    // dep — wasm consumers see only the always-on Addressable +
     // HandlesKind markers, which is enough for typed
     // `ctx.actor::<R>().send(...)` against cap markers.
     //

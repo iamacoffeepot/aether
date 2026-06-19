@@ -209,7 +209,7 @@ mod native {
         use std::thread;
         use std::time::{Duration, Instant};
 
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
         use aether_data::{HandleId, Kind, KindId};
         use aether_data::{SessionToken, Uuid};
 

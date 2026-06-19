@@ -24,7 +24,7 @@ use core::marker::PhantomData;
 
 use aether_data::{ActorId, Kind, Tag, fold_lineage, mailbox_id_from_name, with_tag};
 
-use crate::actor::{Actor, HandlesKind};
+use crate::actor::{Addressable, HandlesKind};
 use crate::ffi::inline::InlineRegistry;
 
 /// Phantom-typed receiver-actor handle for FFI guests, built by
@@ -111,7 +111,7 @@ impl<'a, R> FfiActorMailbox<'a, R> {
     // `FfiCtx::resolve_actor`): the peer name is supplied at runtime.
     #[must_use]
     #[allow(clippy::disallowed_methods)]
-    pub fn resolve_peer<Peer: Actor>(&self, name: &str) -> FfiActorMailbox<'a, Peer> {
+    pub fn resolve_peer<Peer: Addressable>(&self, name: &str) -> FfiActorMailbox<'a, Peer> {
         FfiActorMailbox::__new(mailbox_id_from_name(name).0, self.sender, self.inline)
     }
 
@@ -126,7 +126,7 @@ impl<'a, R> FfiActorMailbox<'a, R> {
     /// `self.mailbox` is the parent carry: exact for a root-pinned cap
     /// (depth-1, carry == id), which is every cap that hosts children.
     #[must_use]
-    pub fn resolve_peer_scoped<Peer: Actor>(
+    pub fn resolve_peer_scoped<Peer: Addressable>(
         &self,
         scope: &str,
         segment: &str,
@@ -140,7 +140,7 @@ impl<'a, R> FfiActorMailbox<'a, R> {
     }
 }
 
-impl<R: Actor> FfiActorMailbox<'_, R> {
+impl<R: Addressable> FfiActorMailbox<'_, R> {
     /// Send a single payload of kind `K` to actor `R`. Compile-checked
     /// against `R: HandlesKind<K>` — wrong-kind sends are rejected at
     /// the call site.

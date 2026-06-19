@@ -922,7 +922,7 @@ pub enum InputsRecord {
     /// of each exported type's own handler / fallback / component-doc /
     /// config records, so the reader can group the flat record stream
     /// back into per-type capability sets. `namespace` is the type's
-    /// `Actor::NAMESPACE`; the first boundary names the entry type.
+    /// `Addressable::NAMESPACE`; the first boundary names the entry type.
     /// Appended last so its postcard variant tag stays additive — a
     /// single-actor module emits no boundary and decodes byte-identically
     /// under the existing reader, so no section-version bump is needed.

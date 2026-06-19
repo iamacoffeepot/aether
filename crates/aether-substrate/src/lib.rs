@@ -9,7 +9,7 @@
 //! — a `NativeActor` instanced under `aether.embedded:NAME`
 //! that delegates incoming mail to the wasm guest via `#[fallback]`
 //! (issue 634 Phase 4; trampoline moved to capabilities by issue 654
-//! so its `Actor::NAMESPACE` is the single cap-owned declaration of
+//! so its `Addressable::NAMESPACE` is the single cap-owned declaration of
 //! the prefix). The chassis-side `ComponentHostCapability`
 //! (in `aether-capabilities`) shrinks to a `LoadComponent` handler
 //! that spawns the trampoline (and forwarders for `DropComponent` /
@@ -72,7 +72,7 @@ pub use actor::native::{NativeActor, NativeDispatch};
 pub use actor::registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError};
 #[cfg(feature = "wasm")]
 pub use actor::wasm::component::{Component, ComponentCtx};
-pub use aether_actor::Actor;
+pub use aether_actor::Addressable;
 pub use aether_actor::{Manual, ReplyMode, Single, Stream};
 pub use aether_derive::Config;
 #[cfg(feature = "wasm")]

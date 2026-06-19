@@ -1307,7 +1307,7 @@ mod tests {
             Arc, Builder, EchoHttpHandler, HttpServerCapability, SilentHttpHandler, TestChassis,
             TraceDispatchCapability, config_for, fresh_substrate, port_of, round_trip,
         };
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
 
         fn body_of(response: &str) -> &str {
             response.split_once("\r\n\r\n").map_or("", |(_, body)| body)
@@ -1321,7 +1321,7 @@ mod tests {
             let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<EchoHttpHandler>(())
                 .with_actor::<HttpServerCapability>(config_for(
-                    <EchoHttpHandler as Actor>::NAMESPACE,
+                    <EchoHttpHandler as Addressable>::NAMESPACE,
                     1024,
                 ))
                 .build_passive()
@@ -1359,7 +1359,7 @@ mod tests {
             let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<EchoHttpHandler>(())
                 .with_actor::<HttpServerCapability>(config_for(
-                    <EchoHttpHandler as Actor>::NAMESPACE,
+                    <EchoHttpHandler as Addressable>::NAMESPACE,
                     1024,
                 ))
                 .build_passive()
@@ -1388,7 +1388,7 @@ mod tests {
             let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<EchoHttpHandler>(())
                 .with_actor::<HttpServerCapability>(config_for(
-                    <EchoHttpHandler as Actor>::NAMESPACE,
+                    <EchoHttpHandler as Addressable>::NAMESPACE,
                     8,
                 ))
                 .build_passive()
@@ -1411,7 +1411,7 @@ mod tests {
             let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<EchoHttpHandler>(())
                 .with_actor::<HttpServerCapability>(config_for(
-                    <EchoHttpHandler as Actor>::NAMESPACE,
+                    <EchoHttpHandler as Addressable>::NAMESPACE,
                     1024,
                 ))
                 .build_passive()
@@ -1460,7 +1460,7 @@ mod tests {
                 .with_actor::<TraceDispatchCapability>(())
                 .with_actor::<SilentHttpHandler>(())
                 .with_actor::<HttpServerCapability>(config_for(
-                    <SilentHttpHandler as Actor>::NAMESPACE,
+                    <SilentHttpHandler as Addressable>::NAMESPACE,
                     1024,
                 ))
                 .build_passive()

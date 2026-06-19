@@ -57,7 +57,7 @@ const COMPONENT_NAME: &str = "mv";
 /// §4): the component host `aether.component` `/`-joined to the
 /// trampoline node — exactly what `LoadResult.name` reports.
 fn component_address() -> String {
-    use aether_actor::Actor;
+    use aether_actor::Addressable;
     format!(
         "aether.component/{}:{}",
         aether_capabilities::WasmTrampoline::NAMESPACE,

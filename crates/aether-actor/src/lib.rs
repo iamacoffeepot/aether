@@ -68,7 +68,7 @@ pub use actor::ctx::{
 };
 pub use actor::slot::Slot;
 pub use actor::{
-    Actor, EmbeddedHost, HandlesKind, Instanced, Lifecycle, NAMESPACE_SEGMENT_MAX_LEN,
+    Actor, Addressable, EmbeddedHost, HandlesKind, Instanced, Lifecycle, NAMESPACE_SEGMENT_MAX_LEN,
     NamespaceError, Singleton, Subname, validate_namespace_segment,
 };
 pub use local::Local;
@@ -146,7 +146,7 @@ pub use aether_data::{
     local,
 };
 // `Singleton` and `Instanced` each live in two namespaces:
-//   - the type namespace for the marker trait (`Actor` super-trait),
+//   - the type namespace for the marker trait (`Addressable` super-trait),
 //     re-exported above as part of `actor::*`.
 //   - the macro namespace for the `#[derive(Singleton)]` /
 //     `#[derive(Instanced)]` proc-macros, forwarded through

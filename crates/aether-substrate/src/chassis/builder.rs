@@ -45,7 +45,7 @@ use crate::scheduler::WakeHandle;
 use crate::scheduler::log_handoff_calibration;
 use crate::scheduler::{Pool, PoolConfig, PoolHandle};
 #[cfg(test)]
-use aether_actor::Actor;
+use aether_actor::Addressable;
 #[cfg(test)]
 use aether_actor::HandlesKind;
 use aether_actor::cost::CostCells;
@@ -417,7 +417,7 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         };
 
         // Issue 607 Phase 3b (ADR-0079): claim namespace ownership for
-        // this singleton's `Actor::NAMESPACE`. The actor registry
+        // this singleton's `Addressable::NAMESPACE`. The actor registry
         // tracks one TypeId per namespace across both cardinalities
         // (Singleton/Instanced), so a later `spawn_child::<X>` whose
         // `X::NAMESPACE` collides with this singleton's namespace
@@ -1654,7 +1654,7 @@ mod tests {
     /// (per-cap dispatch coverage lives in `aether-capabilities`); the
     /// real caps would force a circular dep, so this stub stands in.
     struct StubLog;
-    impl Actor for StubLog {
+    impl Addressable for StubLog {
         const NAMESPACE: &'static str = "test.chassis_builder.stub_log";
     }
     impl aether_actor::Singleton for StubLog {}
@@ -1777,7 +1777,7 @@ mod tests {
     #[test]
     fn failed_singleton_init_releases_namespace_and_sink() {
         struct FailingCap;
-        impl Actor for FailingCap {
+        impl Addressable for FailingCap {
             const NAMESPACE: &'static str = "test.phase7.failing_cap";
         }
         impl aether_actor::Singleton for FailingCap {}
@@ -1874,7 +1874,7 @@ mod tests {
             struct ProbeCap {
                 received: Arc<AtomicU32>,
             }
-            impl Actor for ProbeCap {
+            impl Addressable for ProbeCap {
                 const NAMESPACE: &'static str = "test.with_actor.probe";
             }
             impl aether_actor::Singleton for ProbeCap {}
@@ -1930,7 +1930,7 @@ mod tests {
             // sink handler. The dispatcher thread pulls from its inbox
             // and routes through __aether_dispatch_envelope → on_ping.
             let mailbox_id = registry
-                .lookup(<ProbeCap as Actor>::NAMESPACE)
+                .lookup(<ProbeCap as Addressable>::NAMESPACE)
                 .expect("with_actor claimed the mailbox");
             let MailboxEntry::Inbox { handler, .. } =
                 registry.entry(mailbox_id).expect("sink registered")
@@ -2000,7 +2000,7 @@ mod tests {
             struct LocalProbe {
                 observed: Arc<AtomicU32>,
             }
-            impl Actor for LocalProbe {
+            impl Addressable for LocalProbe {
                 const NAMESPACE: &'static str = "test.local.probe";
             }
             impl aether_actor::Singleton for LocalProbe {}
@@ -2060,7 +2060,7 @@ mod tests {
                 .expect("LocalProbe boots");
 
             let mailbox_id = registry
-                .lookup(<LocalProbe as Actor>::NAMESPACE)
+                .lookup(<LocalProbe as Addressable>::NAMESPACE)
                 .expect("with_actor claimed the mailbox");
             let MailboxEntry::Inbox { handler, .. } =
                 registry.entry(mailbox_id).expect("sink registered")
@@ -2151,7 +2151,7 @@ mod tests {
             struct ChildCap {
                 received: Arc<AtomicU32>,
             }
-            impl Actor for ChildCap {
+            impl Addressable for ChildCap {
                 const NAMESPACE: &'static str = "test.spawn_child.child";
             }
             impl Instanced for ChildCap {}
@@ -2189,7 +2189,7 @@ mod tests {
                 spawn_count: Arc<AtomicU32>,
                 child_received: Arc<AtomicU32>,
             }
-            impl Actor for ParentCap {
+            impl Addressable for ParentCap {
                 const NAMESPACE: &'static str = "test.spawn_child.parent";
             }
             impl aether_actor::Singleton for ParentCap {}
@@ -2247,7 +2247,7 @@ mod tests {
             // calls `ctx.spawn_child::<ChildCap>` which in turn pushes a
             // Ping at the new child via the after_init bootstrap.
             let parent_id = registry
-                .lookup(<ParentCap as Actor>::NAMESPACE)
+                .lookup(<ParentCap as Addressable>::NAMESPACE)
                 .expect("ParentCap claimed");
             let MailboxEntry::Inbox { handler, .. } = registry.entry(parent_id).expect("sink")
             else {
@@ -2330,7 +2330,7 @@ mod tests {
             struct Closer {
                 close_observed: Arc<AtomicU32>,
             }
-            impl Actor for Closer {
+            impl Addressable for Closer {
                 const NAMESPACE: &'static str = "test.shutdown.closer";
             }
             impl Instanced for Closer {}
@@ -2456,7 +2456,7 @@ mod tests {
             struct Quiet {
                 close_observed: Arc<AtomicU32>,
             }
-            impl Actor for Quiet {
+            impl Addressable for Quiet {
                 const NAMESPACE: &'static str = "test.teardown.quiet";
             }
             impl Instanced for Quiet {}
@@ -2534,7 +2534,7 @@ mod tests {
             struct Quiet {
                 close_observed: Arc<AtomicU32>,
             }
-            impl Actor for Quiet {
+            impl Addressable for Quiet {
                 const NAMESPACE: &'static str = "test.teardown.quiet_many";
             }
             impl Instanced for Quiet {}
@@ -2610,7 +2610,7 @@ mod tests {
             use aether_actor::Instanced;
 
             struct Foo;
-            impl Actor for Foo {
+            impl Addressable for Foo {
                 const NAMESPACE: &'static str = "test.resolve_mismatch.foo";
             }
             impl Instanced for Foo {}
@@ -2636,7 +2636,7 @@ mod tests {
             }
 
             struct Bar;
-            impl Actor for Bar {
+            impl Addressable for Bar {
                 const NAMESPACE: &'static str = "test.resolve_mismatch.bar";
             }
             impl Instanced for Bar {}
@@ -2745,7 +2745,7 @@ mod tests {
 
             // Target — handles Quit by self-shutting.
             struct Target;
-            impl Actor for Target {
+            impl Addressable for Target {
                 const NAMESPACE: &'static str = "test.monitor.target";
             }
             impl Instanced for Target {}
@@ -2784,7 +2784,7 @@ mod tests {
                 last_target: Arc<AtomicU64>,
                 handle: Mutex<Option<MonitorHandle>>,
             }
-            impl Actor for Watcher {
+            impl Addressable for Watcher {
                 const NAMESPACE: &'static str = "test.monitor.watcher";
             }
             impl Instanced for Watcher {}
@@ -3004,7 +3004,7 @@ mod tests {
             }
 
             struct Target;
-            impl Actor for Target {
+            impl Addressable for Target {
                 const NAMESPACE: &'static str = "test.monitor.target2";
             }
             impl Instanced for Target {}
@@ -3033,7 +3033,7 @@ mod tests {
                 handle: Mutex<Option<MonitorHandle>>,
                 close_observed: Arc<AtomicU32>,
             }
-            impl Actor for Watcher {
+            impl Addressable for Watcher {
                 const NAMESPACE: &'static str = "test.monitor.watcher2";
             }
             impl Instanced for Watcher {}
@@ -3209,7 +3209,7 @@ mod tests {
             struct Member {
                 tag: u32,
             }
-            impl Actor for Member {
+            impl Addressable for Member {
                 const NAMESPACE: &'static str = "test.resolve.member";
             }
             impl Instanced for Member {}
@@ -3419,7 +3419,7 @@ mod tests {
             struct Grandchild {
                 received: Arc<AtomicU32>,
             }
-            impl Actor for Grandchild {
+            impl Addressable for Grandchild {
                 const NAMESPACE: &'static str = "test.recursive.grandchild";
             }
             impl Instanced for Grandchild {}
@@ -3456,7 +3456,7 @@ mod tests {
             struct Parent {
                 grandchild_received: Arc<AtomicU32>,
             }
-            impl Actor for Parent {
+            impl Addressable for Parent {
                 const NAMESPACE: &'static str = "test.recursive.parent";
             }
             impl Instanced for Parent {}
@@ -3647,7 +3647,7 @@ mod tests {
             struct WireSpawnProbe {
                 wire_count: Arc<AtomicU32>,
             }
-            impl Actor for WireSpawnProbe {
+            impl Addressable for WireSpawnProbe {
                 const NAMESPACE: &'static str = "test.spawn_wire.probe";
             }
             impl Instanced for WireSpawnProbe {}
@@ -3710,7 +3710,7 @@ mod tests {
         struct WireProbe {
             wire_count: Arc<AtomicU32>,
         }
-        impl Actor for WireProbe {
+        impl Addressable for WireProbe {
             const NAMESPACE: &'static str = "test.wire.singleton";
         }
         impl aether_actor::Singleton for WireProbe {}
@@ -3781,7 +3781,7 @@ mod tests {
         struct Pinger {
             wire_ran: Arc<AtomicU32>,
         }
-        impl Actor for Pinger {
+        impl Addressable for Pinger {
             const NAMESPACE: &'static str = "test.barrier.pinger";
         }
         impl aether_actor::Singleton for Pinger {}
@@ -3816,7 +3816,7 @@ mod tests {
         struct Ponger {
             received: Arc<AtomicU32>,
         }
-        impl Actor for Ponger {
+        impl Addressable for Ponger {
             const NAMESPACE: &'static str = "test.barrier.ponger";
         }
         impl aether_actor::Singleton for Ponger {}

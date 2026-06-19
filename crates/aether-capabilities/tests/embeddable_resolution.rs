@@ -12,7 +12,7 @@
 // primitive yields the reference id under test, not a sibling-cap address.
 #![allow(clippy::disallowed_methods)]
 
-use aether_actor::{Actor, Embeddable, Singleton};
+use aether_actor::{Addressable, Embeddable, Singleton};
 use aether_capabilities::resolve_embedded;
 use aether_data::{mailbox_id_from_name, mailbox_id_from_path};
 
@@ -23,7 +23,7 @@ use aether_data::{mailbox_id_from_name, mailbox_id_from_path};
 #[derive(Embeddable)]
 struct FixtureComponent;
 
-impl Actor for FixtureComponent {
+impl Addressable for FixtureComponent {
     const NAMESPACE: &'static str = "test.embeddable.fixture";
 }
 

@@ -4,7 +4,7 @@
 //! duplicate-symbol collision, which ADR-0014 §4 previously forbade),
 //! that the entry type (the first export, `RootManager`) loads through
 //! an unmodified host, that the host can select the non-entry export
-//! (`Panel`) by its `Actor::NAMESPACE` (ADR-0096), and that `RootManager`
+//! (`Panel`) by its `Addressable::NAMESPACE` (ADR-0096), and that `RootManager`
 //! can spawn a `Panel` sibling at runtime via `ctx.spawn_child::<Panel>`
 //! (ADR-0097).
 //!

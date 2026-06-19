@@ -40,7 +40,7 @@ mod server_native {
     use crate::rpc::{
         Hello, HelloAck, MailEnvelope, MailboxAddress, RpcError, WIRE_VERSION, WireFrame,
     };
-    use aether_actor::{Actor, actor};
+    use aether_actor::{Addressable, actor};
     use aether_codec::frame::FrameError;
     use aether_codec::frame::{read_frame, write_frame};
     use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
@@ -639,7 +639,7 @@ mod server_native {
                 // holds opaque MailboxId/KindId/bytes, with no compile-time
                 // sibling type to resolve through.
                 #[allow(clippy::disallowed_methods)]
-                let engine_cap = mailbox_id_from_name(<EngineServer as Actor>::NAMESPACE);
+                let engine_cap = mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE);
                 let mail_id = ctx.send_envelope_as_root(
                     engine_cap,
                     <RouteEnvelope as Kind>::ID,
@@ -1099,7 +1099,7 @@ mod tests {
         use crate::rpc::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
         use crate::rpc::{MailEnvelope, MailboxAddress};
         use crate::trace::TraceDispatchCapability;
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
         use aether_data::{Kind, mailbox_id_from_name};
 
         let (registry, mailer) = fresh_substrate();
@@ -1124,7 +1124,7 @@ mod tests {
         // Fire a Call against the echo actor. cid = 0xabc; the cap
         // correlates and ends with ReplyEnd matching the same cid.
         let echo_payload = TestEchoRequest { value: 42 }.encode_into_bytes();
-        let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Actor>::NAMESPACE);
+        let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Addressable>::NAMESPACE);
         write_frame(
             &mut stream,
             &WireFrame::Call {
@@ -1180,7 +1180,7 @@ mod tests {
         use crate::rpc::{MailEnvelope, MailboxAddress};
         use crate::trace::TraceDispatchCapability;
         use crate::window::HeadlessWindowCapability;
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
         use aether_data::{Kind, mailbox_id_from_name};
         use aether_kinds::{SetWindowMode, SetWindowModeResult, WindowMode};
 
@@ -1204,7 +1204,8 @@ mod tests {
             height: None,
         }
         .encode_into_bytes();
-        let window_mailbox = mailbox_id_from_name(<HeadlessWindowCapability as Actor>::NAMESPACE);
+        let window_mailbox =
+            mailbox_id_from_name(<HeadlessWindowCapability as Addressable>::NAMESPACE);
         write_frame(
             &mut stream,
             &WireFrame::Call {
@@ -1262,13 +1263,13 @@ mod tests {
     fn call_deferred_echo_settles_after_reply() {
         use crate::rpc::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
         use crate::rpc::{MailEnvelope, MailboxAddress};
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
         use aether_data::{Kind, mailbox_id_from_name};
 
         let (_chassis, mut stream) = boot_with_deferred_echo(Duration::from_secs(5));
 
         let payload = DeferredEchoRequest { value: 99 }.encode_into_bytes();
-        let mailbox = mailbox_id_from_name(<DeferredEchoActor as Actor>::NAMESPACE);
+        let mailbox = mailbox_id_from_name(<DeferredEchoActor as Addressable>::NAMESPACE);
         write_frame(
             &mut stream,
             &WireFrame::Call {
@@ -1338,7 +1339,7 @@ mod tests {
         use crate::rpc::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
         use crate::rpc::{MailEnvelope, MailboxAddress};
         use crate::trace::TraceDispatchCapability;
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
         use aether_data::{Kind, mailbox_id_from_name};
         use aether_kinds::MailEnvelope as TracedEnvelope;
         use aether_kinds::trace::DispatchTraced;
@@ -1351,20 +1352,21 @@ mod tests {
         let batch = DispatchTraced {
             mails: vec![
                 TracedEnvelope {
-                    recipient_name: <DeferredEchoActor as Actor>::NAMESPACE.into(),
+                    recipient_name: <DeferredEchoActor as Addressable>::NAMESPACE.into(),
                     kind_name: <DeferredEchoRequest as Kind>::NAME.into(),
                     payload: DeferredEchoRequest { value: 11 }.encode_into_bytes(),
                     count: 1,
                 },
                 TracedEnvelope {
-                    recipient_name: <DeferredEchoActor as Actor>::NAMESPACE.into(),
+                    recipient_name: <DeferredEchoActor as Addressable>::NAMESPACE.into(),
                     kind_name: <DeferredEchoRequest as Kind>::NAME.into(),
                     payload: DeferredEchoRequest { value: 22 }.encode_into_bytes(),
                     count: 1,
                 },
             ],
         };
-        let trace_mailbox = mailbox_id_from_name(<TraceDispatchCapability as Actor>::NAMESPACE);
+        let trace_mailbox =
+            mailbox_id_from_name(<TraceDispatchCapability as Addressable>::NAMESPACE);
         let payload = batch.encode_into_bytes();
         write_frame(
             &mut stream,
@@ -1440,7 +1442,7 @@ mod tests {
     fn call_without_cid_is_fire_and_forget() {
         use crate::rpc::test_echo::{TestEchoActor, TestEchoRequest};
         use crate::rpc::{MailEnvelope, MailboxAddress};
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
         use aether_data::{Kind, mailbox_id_from_name};
 
         let (registry, mailer) = fresh_substrate();
@@ -1460,7 +1462,7 @@ mod tests {
         // still reply, but with cid None there's no in-flight entry
         // so the reply has no matching correlation and gets dropped.
         let echo_payload = TestEchoRequest { value: 7 }.encode_into_bytes();
-        let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Actor>::NAMESPACE);
+        let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Addressable>::NAMESPACE);
         write_frame(
             &mut stream,
             &WireFrame::Call {
@@ -1629,7 +1631,7 @@ mod tests {
         use crate::rpc::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
         use crate::rpc::{MailEnvelope, MailboxAddress, RpcClient};
         use crate::trace::TraceDispatchCapability;
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
         use aether_data::{Kind, mailbox_id_from_name};
 
         let (registry, mailer) = fresh_substrate();
@@ -1670,7 +1672,7 @@ mod tests {
         }
 
         let echo_payload = TestEchoRequest { value: 42 }.encode_into_bytes();
-        let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Actor>::NAMESPACE);
+        let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Addressable>::NAMESPACE);
         let cid = conn
             .client
             .call(MailEnvelope {

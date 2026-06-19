@@ -23,7 +23,7 @@
 //! attached MCP session.
 //!
 //! [`NativeActor`]: aether_substrate::actor::native::NativeActor
-//! [`Actor`]: aether_actor::Actor
+//! [`Addressable`]: aether_actor::Addressable
 
 // `aether.anthropic` content-gen cap (ADR-0050, issue 1014). Native-
 // only — embeds the native-only contentgen dispatch helper and makes
@@ -192,7 +192,7 @@ pub use window::HeadlessWindowCapability;
 
 #[cfg(all(test, feature = "native"))]
 mod auto_name_inventory_tests {
-    use aether_actor::Actor;
+    use aether_actor::Addressable;
     use aether_data::{build_static_reverse_map, mailbox_id_from_name};
 
     use crate::fs::FsCapability;
