@@ -1,325 +1,219 @@
-//! `Local` — per-actor scratch storage, type-keyed.
-//! Issue 582.
+//! `Local` — ambient per-actor type-keyed storage over an injected backend.
+//! Issue 582; backend inversion iamacoffeepot/aether#2070.
 //!
-//! Storage is *semantically mailbox-keyed*: the chassis dispatcher
-//! trampoline stamps a `*const ActorSlots` into TLS via
-//! [`with_stamped`] before each handler call (and around `init`),
-//! and `with` / `with_mut` read the stamped pointer to find the
-//! current actor's storage. Within an actor's storage the lookup
-//! is keyed on `TypeId<Self>` — distinct logical storages map to
-//! distinct types. This is the convention: `struct AppLog(Vec<u8>);
-//! struct AuditLog(Vec<u8>);` get independent slots because their
-//! `TypeId`s differ. The type system makes "I want distinct
-//! storage" a structural fact rather than a runtime convention.
+//! `Local` gives an actor ambient, type-keyed, per-actor scratch storage
+//! reachable from a *free function* — no `ctx` threading. That ambient
+//! reach is the whole point: the first consumers are framework subsystems
+//! that hold no actor reference on their call stack — ADR-0081's per-actor
+//! log/trace rings (pushed into by the host tracing subscriber) and the
+//! per-handler cost EWMA. A consumer writes `struct AppLog(Vec<u8>); impl
+//! Local for AppLog {}` and reaches its slot with `AppLog::with_mut(|l|
+//! …)`; `TypeId<Self>` is the storage key, so distinct logical storages are
+//! distinct types, structurally.
 //!
-//! TLS is a per-handler-call routing pointer, not the data:
-//! `ActorSlots` lives in a `Box` owned by the actor's dispatcher
-//! closure for the actor's lifetime. If the scheduler shape ever
-//! changed and an actor migrated between threads, the `Box` would
-//! transfer with the actor, the new thread would `with_stamped`
-//! the same heap pointer, and `with_mut` callers would see the
-//! same data — the binding is to the actor, not to the thread.
-//! See `native_slots_follow_box_across_threads`.
+//! Two pieces, split so neither names a target:
 //!
-//! Single-threaded-per-actor (ADR-0038) is what makes `RefCell`
-//! safe on both targets:
+//! - [`ActorSlots`] is the storage primitive — a `TypeId`-keyed slot map,
+//!   target-blind and `no_std`. It is the same type whether the host owns
+//!   one per actor on the heap or a single-actor image holds one in a
+//!   `static`.
+//! - *Which* actor's slots a free `Local::with` call resolves is answered
+//!   by an injected [`SlotsProvider`] the **driver** installs once, via
+//!   [`install_slots_provider`]. The host (`aether-substrate`) installs a
+//!   `thread_local!`-routed provider at boot, because it multiplexes many
+//!   actors over a worker pool and must resolve *which* actor a given
+//!   thread is serving. A single-actor image (the wasm guest, where the
+//!   linear memory *is* the actor) installs the turnkey [`install_static_backend`]
+//!   below — there is one actor, so a `static` slot map is unambiguous and
+//!   no routing is needed.
 //!
-//! - Concurrent borrows of the same `Self` panic via
-//!   `RefCell::borrow_mut` ("already borrowed"). Free runtime
-//!   check covering cross-actor leak, dispatcher bug, and
-//!   recursive-from-the-same-handler.
-//! - Native panics with `debug_assert!` if `with` / `with_mut`
-//!   is called outside an active stamp (substrate boot code,
-//!   init-before-stamp, etc.).
+//! This mirrors the substrate's existing injection seams: `InlineRegistry`
+//! (a guest-owned `static` the `export!` macro creates) and `MailboxWakeSlot`
+//! (a host-installed hook whose hot-path read is a single relaxed load). The
+//! provider read here is the same shape — an `Acquire` load plus an indirect
+//! call ahead of the storage op.
 //!
-//! First consumer: ADR-0081's per-actor [`crate::log::ActorLogRing`],
-//! the bounded `VecDeque<LogEntry>` every actor owns. The host's
-//! actor-aware tracing subscriber pushes into the ring through
-//! `Local::try_with_mut`; the framework's `aether.log.tail` dispatch
-//! arm reads through the same stamped slot when serving queries.
-//! Pre-ADR-0081 this was the `LogBuffer` flush-hop staging area;
-//! ADR-0081 §1 collapsed buffer + central store into one ring.
+//! Single-threaded-per-actor (ADR-0038) is what makes the inner `RefCell`
+//! sound on every target: concurrent borrows of the same `Self` panic via
+//! `RefCell::borrow_mut` ("already borrowed"), a free runtime check covering
+//! a cross-actor leak, a dispatcher bug, and recursion from the same handler.
+//! Before any provider is installed, or when the provider reports no actor
+//! in scope, `with` / `with_mut` panic ("Local accessed outside actor
+//! dispatch") and `try_with` / `try_with_mut` return `None` — the host-code
+//! path (substrate boot, the panic hook, the actor-aware tracing layer).
 
-#[cfg(target_arch = "wasm32")]
-mod wasm {
-    extern crate alloc;
+extern crate alloc;
 
-    use alloc::boxed::Box;
-    use alloc::collections::BTreeMap;
-    use core::any::{Any, TypeId};
-    use core::cell::{RefCell, UnsafeCell};
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use core::any::{Any, TypeId};
+use core::cell::RefCell;
+use core::mem::transmute;
+use core::ptr;
+use core::sync::atomic::{AtomicPtr, Ordering};
 
-    /// Single-actor type-keyed storage in wasm linear memory. The
-    /// `unsafe impl Sync` is justified by the structural single-
-    /// thread of the wasm linear memory: every component runs on
-    /// one logical thread inside its own linear memory, so the
-    /// static can never be racily aliased across threads. Same
-    /// loophole `crate::ffi::bridge::mail`'s wasm linear-memory scope uses.
-    ///
-    /// `BTreeMap` instead of `HashMap` because `BTreeMap::new()`
-    /// is `const fn` and `aether-actor` is `no_std + alloc` — we
-    /// don't pull in `hashbrown`. The map holds at most a handful
-    /// of entries per actor in practice (one per `Local`-
-    /// implementing type), so the log-N lookup cost is irrelevant.
-    pub(super) struct FfiActorSlots {
-        inner: UnsafeCell<RefCell<BTreeMap<TypeId, Box<dyn Any>>>>,
+/// Per-actor type-keyed slot map — the storage primitive, target-blind.
+///
+/// `RefCell` (not `Mutex`) is sound because an actor is single-threaded at
+/// any instant (ADR-0038), so nothing concurrent reaches a slot; the borrow
+/// panic is a feature, catching reentrancy. `BTreeMap` rather than `HashMap`
+/// keeps the crate `no_std` without pulling `hashbrown` and gives a `const`
+/// constructor so a single-actor image can hold one in a `static`. Each slot
+/// stores `Box<RefCell<T>>` erased as `Box<dyn Any + Send>`: `Send` so a
+/// host slot map can move with its actor between worker threads (ADR-0087);
+/// trivially satisfied on the single-threaded guest.
+pub struct ActorSlots {
+    by_type: RefCell<BTreeMap<TypeId, Box<dyn Any + Send>>>,
+}
+
+impl ActorSlots {
+    /// Construct an empty slot map. `const` so the single-actor static
+    /// backend can initialize one with no runtime cost.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            by_type: RefCell::new(BTreeMap::new()),
+        }
     }
 
-    unsafe impl Sync for FfiActorSlots {}
+    /// Pre-insert a constructed `T` so the first `with` / `with_mut::<T>`
+    /// observes it instead of `T::default()`. The chassis spawn path seeds
+    /// each actor's log / trace rings at their configured capacity here.
+    /// Overwrites any existing slot — a boot-time op that runs before any
+    /// handler dispatch, so there is never a live value to clobber.
+    pub fn seed<T: Default + Send + 'static>(&self, value: T) {
+        self.by_type.borrow_mut().insert(
+            TypeId::of::<T>(),
+            Box::new(RefCell::new(value)) as Box<dyn Any + Send>,
+        );
+    }
 
-    impl FfiActorSlots {
-        const fn new() -> Self {
-            Self {
-                inner: UnsafeCell::new(RefCell::new(BTreeMap::new())),
-            }
-        }
-
-        /// Resolve (or lazily insert) the per-type `RefCell<T>` slot
-        /// and return a raw pointer to it. The caller owns the outer
-        /// borrow lifetime and is responsible for not aliasing.
-        ///
-        /// # Safety
-        /// * `self.inner` must point at a live `RefCell<BTreeMap<...>>`
-        ///   (constructor invariant — `inner` is initialized in `new()`
-        ///   and never replaced).
-        /// * The returned pointer is stable across nested `with`/`with_mut`
-        ///   calls on different `T` because we never remove entries and
-        ///   `Box` keeps the inner `RefCell<T>` heap-pinned.
-        unsafe fn slot_ptr_for<T: Default + 'static>(&self) -> *const RefCell<T> {
-            let map_cell = unsafe { &*self.inner.get() };
-            let mut map = map_cell.borrow_mut();
-            let entry = map
-                .entry(TypeId::of::<T>())
-                .or_insert_with(|| Box::new(RefCell::new(T::default())) as Box<dyn Any>);
+    /// Resolve (or lazily insert) the per-type `RefCell<T>` slot and return
+    /// a raw pointer to it.
+    ///
+    /// The outer map borrow is released before the pointer is used so a
+    /// nested `with_mut::<U>` on a different type can re-enter the map. The
+    /// pointer stays valid across that re-entry because the `Box<RefCell<T>>`
+    /// is heap-pinned — a `BTreeMap` rebalance moves the `Box` header in the
+    /// node, not the pointed-to `RefCell<T>`.
+    fn slot_ptr_for<T: Default + Send + 'static>(&self) -> *const RefCell<T> {
+        let mut map = self.by_type.borrow_mut();
+        let entry = map
+            .entry(TypeId::of::<T>())
+            .or_insert_with(|| Box::new(RefCell::new(T::default())) as Box<dyn Any + Send>);
+        ptr::from_ref::<RefCell<T>>(
             entry
                 .downcast_ref::<RefCell<T>>()
-                .expect("TypeId<T> ⇒ RefCell<T>") as *const RefCell<T>
-        }
-
-        pub(super) fn with_mut<T, R>(&self, f: impl FnOnce(&mut T) -> R) -> R
-        where
-            T: Default + 'static,
-        {
-            // SAFETY: see `slot_ptr_for`'s doc — `inner` is live, and
-            // the wasm linear memory is single-threaded so the stamp /
-            // borrow pair below cannot race.
-            let cell_ptr = unsafe { self.slot_ptr_for::<T>() };
-            let cell = unsafe { &*cell_ptr };
-            let mut borrow = cell.borrow_mut();
-            f(&mut *borrow)
-        }
-
-        pub(super) fn with<T, R>(&self, f: impl FnOnce(&T) -> R) -> R
-        where
-            T: Default + 'static,
-        {
-            // SAFETY: see `slot_ptr_for`.
-            let cell_ptr = unsafe { self.slot_ptr_for::<T>() };
-            let cell = unsafe { &*cell_ptr };
-            let borrow = cell.borrow();
-            f(&*borrow)
-        }
+                .expect("TypeId<T> ⇒ RefCell<T>"),
+        )
     }
 
-    pub(super) static WASM_SLOTS: FfiActorSlots = FfiActorSlots::new();
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-mod native_impl {
-    extern crate std;
-
-    use core::any::{Any, TypeId};
-    use core::cell::{Cell, RefCell};
-    use core::ptr;
-    use std::boxed::Box;
-    use std::collections::HashMap;
-
-    /// Per-actor slot map. Owned as a `Box<ActorSlots>` by the
-    /// chassis dispatcher closure for the actor's lifetime; the
-    /// dispatcher stamps a `*const ActorSlots` into TLS via
-    /// [`with_stamped`] for the duration of `init` and each
-    /// handler call.
-    ///
-    /// `RefCell<HashMap>` is deliberate: the single-thread-per-
-    /// actor invariant (ADR-0038) means no concurrent access can
-    /// reach this, so `RefCell` suffices instead of `Mutex`. Each
-    /// slot stores `Box<RefCell<T>>` erased as
-    /// `Box<dyn Any + Send>` so concurrent borrows of the same
-    /// slot panic via the inner cell while concurrent borrows of
-    /// different slots succeed.
-    ///
-    /// Keyed on `TypeId<T>`. Two `struct AppLog(Vec<u8>);` and
-    /// `struct AuditLog(Vec<u8>);` impls of `Local` get
-    /// independent slots because their `TypeId`s differ.
-    pub struct ActorSlots {
-        by_type: RefCell<HashMap<TypeId, Box<dyn Any + Send>>>,
+    fn with_mut<T, R>(&self, f: impl FnOnce(&mut T) -> R) -> R
+    where
+        T: Default + Send + 'static,
+    {
+        let cell_ptr = self.slot_ptr_for::<T>();
+        // SAFETY: pointer into a heap-pinned `Box<RefCell<T>>` owned by
+        // `self.by_type`. The outer map borrow released at the end of
+        // `slot_ptr_for`, so a nested `with_mut::<U>` can re-enter the map;
+        // the `&RefCell<T>` reborrow is unique for the closure's run.
+        let cell = unsafe { &*cell_ptr };
+        let mut borrow = cell.borrow_mut();
+        f(&mut borrow)
     }
 
-    impl ActorSlots {
-        /// Construct an empty slot map. The substrate's
-        /// dispatcher trampoline calls this once per booted
-        /// native actor.
-        #[must_use]
-        pub fn new() -> Self {
-            Self {
-                by_type: RefCell::new(HashMap::new()),
-            }
-        }
-
-        /// Pre-insert a constructed `T` into the slot map so the first
-        /// `with`/`with_mut::<T>` finds this value instead of
-        /// lazily building `T::default()`. The chassis spawn path seeds
-        /// the two per-actor rings (`ActorLogRing` / `ActorTraceRing`)
-        /// with their configured capacities here right after
-        /// `ActorSlots::new()`; every other `Local<T>` keeps the
-        /// lazy-`Default` slot-construction path untouched.
-        ///
-        /// Overwrites any existing slot for `T` — seeding is a boot-time
-        /// op that runs before any handler dispatch, so there is never a
-        /// live value to clobber. Idempotent-overwrite (last seed wins)
-        /// rather than a debug-assert so a double-seed is harmless.
-        pub fn seed<T: Default + Send + 'static>(&self, value: T) {
-            self.by_type.borrow_mut().insert(
-                TypeId::of::<T>(),
-                Box::new(RefCell::new(value)) as Box<dyn Any + Send>,
-            );
-        }
-
-        /// Resolve (or lazily insert) the per-type `RefCell<T>` slot
-        /// and return a raw pointer to it.
-        ///
-        /// # Safety
-        /// The returned pointer is into a heap-allocated `Box<RefCell<T>>`
-        /// owned by `self.by_type`. The pointer is stable across nested
-        /// `with`/`with_mut` calls on different `T` because we never
-        /// remove entries and `HashMap` rehashes move the `Box` header
-        /// in the bucket, not the pointed-to `RefCell<T>`. The caller
-        /// must drop the outer borrow before re-entering the map.
-        fn slot_ptr_for<T: Default + Send + 'static>(&self) -> *const RefCell<T> {
-            let mut map = self.by_type.borrow_mut();
-            let entry = map
-                .entry(TypeId::of::<T>())
-                .or_insert_with(|| Box::new(RefCell::new(T::default())) as Box<dyn Any + Send>);
-            ptr::from_ref::<RefCell<T>>(
-                entry
-                    .downcast_ref::<RefCell<T>>()
-                    .expect("TypeId<T> ⇒ RefCell<T>"),
-            )
-        }
-
-        pub(super) fn with_mut<T, R>(&self, f: impl FnOnce(&mut T) -> R) -> R
-        where
-            T: Default + Send + 'static,
-        {
-            let cell_ptr = self.slot_ptr_for::<T>();
-            // SAFETY: see `slot_ptr_for` — pointer is to a heap-pinned
-            // `RefCell<T>`. The outer map borrow released at end of
-            // `slot_ptr_for`, so a nested `with_mut::<U>` can re-enter
-            // the map. The `&RefCell<T>` reborrow is unique for the
-            // closure's run.
-            let cell = unsafe { &*cell_ptr };
-            let mut borrow = cell.borrow_mut();
-            f(&mut *borrow)
-        }
-
-        pub(super) fn with<T, R>(&self, f: impl FnOnce(&T) -> R) -> R
-        where
-            T: Default + Send + 'static,
-        {
-            let cell_ptr = self.slot_ptr_for::<T>();
-            // SAFETY: see `slot_ptr_for` — same justification as `with_mut`.
-            let cell = unsafe { &*cell_ptr };
-            let borrow = cell.borrow();
-            f(&*borrow)
-        }
-    }
-
-    impl Default for ActorSlots {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    std::thread_local! {
-        static CURRENT_SLOTS: Cell<*const ActorSlots> = const { Cell::new(ptr::null()) };
-    }
-
-    /// RAII guard restoring the prior `CURRENT_SLOTS` value on
-    /// drop. Built by [`with_stamped`]; covers panics from the
-    /// wrapped closure so the TLS slot doesn't leak a dangling
-    /// pointer past a panicking handler.
-    struct StampGuard {
-        prev: *const ActorSlots,
-    }
-
-    impl Drop for StampGuard {
-        fn drop(&mut self) {
-            CURRENT_SLOTS.set(self.prev);
-        }
-    }
-
-    /// Stamp `slots` as the current actor's slot map for the
-    /// duration of `f`. The chassis dispatcher trampoline calls
-    /// this around each handler dispatch (and around `init`); the
-    /// pointer is restored to its prior value (almost always
-    /// null) before this returns. Panics propagate out — the TLS
-    /// slot is restored via an internal RAII guard's drop, not via
-    /// explicit unwind handling.
-    pub fn with_stamped<R>(slots: &ActorSlots, f: impl FnOnce() -> R) -> R {
-        let _guard = CURRENT_SLOTS.with(|slot| {
-            let prev = slot.get();
-            slot.set(ptr::from_ref::<ActorSlots>(slots));
-            StampGuard { prev }
-        });
-        f()
-    }
-
-    pub(super) fn with_current<R>(f: impl FnOnce(&ActorSlots) -> R) -> R {
-        CURRENT_SLOTS.with(|slot| {
-            let ptr = slot.get();
-            debug_assert!(!ptr.is_null(), "Local accessed outside actor dispatch");
-            // SAFETY: `with_stamped` only stamps a live
-            // `&ActorSlots`; the StampGuard restores the prior
-            // value before returning. Reading the pointer here
-            // happens within the `with_stamped` call's stack
-            // frame, so the slot pointee is still alive.
-            let slots = unsafe { &*ptr };
-            f(slots)
-        })
-    }
-
-    /// Like [`with_current`] but tolerates "no actor stamped" by
-    /// returning `None`. Used by callers that legitimately run on
-    /// both sides of an actor boundary — ADR-0081's actor-aware
-    /// tracing layer is the first consumer: in-actor → push to the
-    /// per-actor `ActorLogRing`; no actor → drop on the floor (the
-    /// substrate's `tsfmt::Layer` already handles stderr surfacing).
-    pub(super) fn try_with_current<R>(f: impl FnOnce(&ActorSlots) -> R) -> Option<R> {
-        CURRENT_SLOTS.with(|slot| {
-            let ptr = slot.get();
-            if ptr.is_null() {
-                None
-            } else {
-                // SAFETY: same justification as `with_current` —
-                // the stamp is live for the duration of the
-                // surrounding `with_stamped`.
-                let slots = unsafe { &*ptr };
-                Some(f(slots))
-            }
-        })
+    fn with<T, R>(&self, f: impl FnOnce(&T) -> R) -> R
+    where
+        T: Default + Send + 'static,
+    {
+        let cell_ptr = self.slot_ptr_for::<T>();
+        // SAFETY: same justification as `with_mut`.
+        let cell = unsafe { &*cell_ptr };
+        let borrow = cell.borrow();
+        f(&borrow)
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub use native_impl::{ActorSlots, with_stamped};
+impl Default for ActorSlots {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Provider signature: yields the current actor's slots for the duration of
+/// the call that reads it, or `None` when no actor is in scope (host-code
+/// path). A non-capturing `fn` so it lives in an atomic install slot.
+pub type SlotsProvider = fn() -> Option<*const ActorSlots>;
+
+/// Process-global current-slots provider, installed once by the driver.
+/// Null = not yet installed. Stored as the fn pointer behind an
+/// `AtomicPtr` so the cell is `no_std`-safe and `Sync`; set once with
+/// `Release`, read with `Acquire` — a single relaxed-class load on the
+/// dispatch hot path.
+static SLOTS_PROVIDER: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Install the process-global current-slots provider. Set-once: the first
+/// install wins and later ones are ignored. Exactly one driver installs per
+/// process — the host at boot, a single-actor guest at init.
+///
+/// # Safety
+/// `provider` must return a pointer valid for the duration of the `Local`
+/// access that reads it — the contract the host's stamped pointer and the
+/// guest's `'static` backend both satisfy.
+pub unsafe fn install_slots_provider(provider: SlotsProvider) {
+    // A `fn` pointer casts cleanly to a thin data pointer; `current_slots`
+    // transmutes it back (pointer → `fn` is not a plain cast).
+    let raw: *mut () = provider as *mut ();
+    let _ =
+        SLOTS_PROVIDER.compare_exchange(ptr::null_mut(), raw, Ordering::Release, Ordering::Relaxed);
+}
+
+/// Read the installed provider. `None` before any install, or when the
+/// provider reports no actor in scope.
+#[inline]
+fn current_slots() -> Option<*const ActorSlots> {
+    let raw = SLOTS_PROVIDER.load(Ordering::Acquire);
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: `SLOTS_PROVIDER` only ever holds a `SlotsProvider` cast to a
+    // thin pointer by `install_slots_provider`; this reconstructs it. A data
+    // pointer → `fn` pointer is not a plain cast, so `transmute` is required.
+    let provider: SlotsProvider = unsafe { transmute::<*mut (), SlotsProvider>(raw) };
+    provider()
+}
+
+/// Single-actor static backend: a process-`static` slot map for an image
+/// that hosts exactly one actor in its address space (the wasm guest — the
+/// linear memory *is* the actor). The `unsafe impl Sync` is licensed by that
+/// single logical thread, the same argument behind `crate::Slot` and
+/// `crate::ffi::inline::InlineRegistry`.
+struct StaticBackend(ActorSlots);
+
+// SAFETY: a single-actor image runs on one logical thread (the wasm linear
+// memory is the actor), so this static can never be racily aliased.
+unsafe impl Sync for StaticBackend {}
+
+static STATIC_SLOTS: StaticBackend = StaticBackend(ActorSlots::new());
+
+/// Install the single-actor static backend as the current-slots provider.
+/// Called from a single-actor image's init prologue (the `export!` guest
+/// runtime). A multi-actor host installs its own `thread_local!`-routed
+/// backend instead and never calls this.
+pub fn install_static_backend() {
+    // SAFETY: `STATIC_SLOTS` is `'static`, so the returned pointer is valid
+    // for any access — `install_slots_provider`'s contract is satisfied.
+    unsafe {
+        install_slots_provider(|| Some(ptr::from_ref(&STATIC_SLOTS.0)));
+    }
+}
 
 /// Per-actor scratch storage, type-keyed.
 ///
-/// Implement `Local` on a named newtype to claim a slot:
-/// `TypeId<Self>` is the storage key. `struct AppLog(Vec<u8>);`
-/// and `struct AuditLog(Vec<u8>);` get independent slots because
-/// their `TypeId`s differ — distinct logical storage = distinct
-/// type, structurally.
+/// Implement `Local` on a named newtype to claim a slot: `TypeId<Self>` is
+/// the storage key, so `struct AppLog(Vec<u8>);` and `struct
+/// AuditLog(Vec<u8>);` get independent slots because their `TypeId`s differ —
+/// distinct logical storage = distinct type, structurally.
 ///
 /// ```ignore
 /// use aether_actor::Local;
@@ -333,158 +227,145 @@ pub use native_impl::{ActorSlots, with_stamped};
 /// }
 /// ```
 ///
-/// Lazy-initialized via `Default::default()` on first access.
-/// Concurrent borrows of the same `Self` panic via the inner
-/// `RefCell`. Concurrent borrows of *different* `Local`
-/// types succeed (each type is its own slot).
+/// Lazy-initialized via `Default::default()` on first access. Concurrent
+/// borrows of the same `Self` panic via the inner `RefCell`; concurrent
+/// borrows of *different* `Local` types succeed (each type is its own slot).
 ///
-/// Native: outside an active [`with_stamped`] guard, `with` /
-/// `with_mut` trip `debug_assert!` ("Local accessed outside
-/// actor dispatch"). The chassis dispatcher trampoline opens that
-/// guard around every handler call and around `init`.
+/// Outside an actor (no provider installed, or the provider reports no actor
+/// in scope), `with` / `with_mut` panic ("Local accessed outside actor
+/// dispatch"); `try_with` / `try_with_mut` return `None`.
 ///
-/// `Send` (native only) so slot maps can move between the chassis
-/// builder thread (during `init`) and the dispatcher thread
-/// (during handler dispatch).
-#[cfg(not(target_arch = "wasm32"))]
+/// `Send` so a host slot map can move between the chassis builder thread
+/// (during `init`) and the dispatcher thread (during handler dispatch);
+/// trivially met on the single-threaded guest.
 pub trait Local: Default + Send + 'static {
     /// Borrow this actor's instance of `Self` immutably.
     fn with<R>(f: impl FnOnce(&Self) -> R) -> R {
-        native_impl::with_current(|slots| slots.with::<Self, R>(f))
+        let slots = current_slots().expect("Local accessed outside actor dispatch");
+        // SAFETY: the installed provider guarantees the pointer is valid for
+        // the duration of this call.
+        let slots = unsafe { &*slots };
+        slots.with::<Self, R>(f)
     }
 
-    /// Borrow this actor's instance of `Self` mutably. Lazily
-    /// initialized via `Default::default()` on first access.
+    /// Borrow this actor's instance of `Self` mutably. Lazily initialized via
+    /// `Default::default()` on first access.
     fn with_mut<R>(f: impl FnOnce(&mut Self) -> R) -> R {
-        native_impl::with_current(|slots| slots.with_mut::<Self, R>(f))
+        let slots = current_slots().expect("Local accessed outside actor dispatch");
+        // SAFETY: see `with`.
+        let slots = unsafe { &*slots };
+        slots.with_mut::<Self, R>(f)
     }
 
-    /// Issue #581: like [`Self::with`] but returns `None` when no
-    /// actor is currently stamped (host-code path: substrate boot,
-    /// scheduler, panic hook). Lets callers run on both sides of
-    /// an actor boundary without panicking.
+    /// Like [`Self::with`] but returns `None` when no actor is in scope
+    /// (host-code path: substrate boot, scheduler, panic hook). Lets callers
+    /// run on both sides of an actor boundary without panicking.
     fn try_with<R>(f: impl FnOnce(&Self) -> R) -> Option<R> {
-        native_impl::try_with_current(|slots| slots.with::<Self, R>(f))
+        let slots = current_slots()?;
+        // SAFETY: see `with`.
+        let slots = unsafe { &*slots };
+        Some(slots.with::<Self, R>(f))
     }
 
-    /// Mutable variant of [`Self::try_with`]. Same semantics: returns
-    /// `None` when host-code; lazily initializes via `Default::default()`
-    /// on first in-actor access.
+    /// Mutable variant of [`Self::try_with`]. Same semantics; lazily
+    /// initializes via `Default::default()` on first in-actor access.
     fn try_with_mut<R>(f: impl FnOnce(&mut Self) -> R) -> Option<R> {
-        native_impl::try_with_current(|slots| slots.with_mut::<Self, R>(f))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-pub trait Local: Default + 'static {
-    /// Borrow this actor's instance of `Self` immutably.
-    fn with<R>(f: impl FnOnce(&Self) -> R) -> R {
-        wasm::WASM_SLOTS.with::<Self, R>(f)
-    }
-
-    /// Borrow this actor's instance of `Self` mutably. Lazily
-    /// initialized via `Default::default()` on first access.
-    fn with_mut<R>(f: impl FnOnce(&mut Self) -> R) -> R {
-        wasm::WASM_SLOTS.with_mut::<Self, R>(f)
-    }
-
-    /// Symmetric counterpart to the native `try_with`. Wasm linear
-    /// memory is always "in actor" (the linear memory IS the actor),
-    /// so this always succeeds — present for API symmetry with the
-    /// native trait.
-    fn try_with<R>(f: impl FnOnce(&Self) -> R) -> Option<R> {
-        Some(wasm::WASM_SLOTS.with::<Self, R>(f))
-    }
-
-    /// Symmetric counterpart to native `try_with_mut`; always
-    /// returns `Some` on wasm.
-    fn try_with_mut<R>(f: impl FnOnce(&mut Self) -> R) -> Option<R> {
-        Some(wasm::WASM_SLOTS.with_mut::<Self, R>(f))
+        let slots = current_slots()?;
+        // SAFETY: see `with`.
+        let slots = unsafe { &*slots };
+        Some(slots.with_mut::<Self, R>(f))
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
 mod tests {
     extern crate std;
 
     use super::*;
     use crate::local;
-    use alloc::boxed::Box;
     use alloc::string::String;
-    use std::panic;
-    use std::panic::AssertUnwindSafe;
-    use std::thread;
+    use core::cell::Cell;
 
-    // Probe newtypes via the `#[local]` attribute — exercises
-    // the macro and keeps the test bodies focused on the storage
-    // semantics rather than boilerplate.
-    #[cfg(not(target_arch = "wasm32"))]
+    std::thread_local! {
+        // The core tests drive storage through a host-shaped test provider:
+        // a thread-local "current slots" pointer the test stamps, mirroring
+        // the substrate's real `thread_local!` routing. The genuine host
+        // backend (RAII stamp, panic-restore, cross-thread Box) is tested in
+        // `aether-substrate`, where it lives.
+        static TEST_CURRENT: Cell<*const ActorSlots> = const { Cell::new(ptr::null()) };
+    }
+
+    fn ensure_test_provider() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            // SAFETY: the test provider returns the thread-local stamp,
+            // valid for the stamped scope; set-once for the test binary.
+            unsafe {
+                install_slots_provider(|| {
+                    let p = TEST_CURRENT.get();
+                    if p.is_null() { None } else { Some(p) }
+                });
+            }
+        });
+    }
+
+    fn test_stamped<R>(slots: &ActorSlots, f: impl FnOnce() -> R) -> R {
+        ensure_test_provider();
+        let prev = TEST_CURRENT.replace(ptr::from_ref(slots));
+        let out = f();
+        TEST_CURRENT.set(prev);
+        out
+    }
+
     #[derive(Default)]
     #[local]
     struct Probe(u64);
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[derive(Default)]
     #[local]
     struct OtherProbe(u64);
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[derive(Default)]
     #[local]
     struct ProbeStr(String);
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn native_per_actor_isolation() {
-        // Two ActorSlots, one user type — each "actor" sees its
-        // own value. The TLS stamp routes the lookup into the
-        // current actor's slots.
-        let slots_a = ActorSlots::new();
-        let slots_b = ActorSlots::new();
-
-        with_stamped(&slots_a, || Probe::with_mut(|p| p.0 = 7));
-        with_stamped(&slots_b, || Probe::with_mut(|p| p.0 = 11));
-
-        with_stamped(&slots_a, || Probe::with(|p| assert_eq!(p.0, 7)));
-        with_stamped(&slots_b, || Probe::with(|p| assert_eq!(p.0, 11)));
+    fn per_actor_isolation() {
+        // Two slot maps, one user type — each "actor" sees its own value;
+        // the stamp routes the lookup into the current map.
+        let a = ActorSlots::new();
+        let b = ActorSlots::new();
+        test_stamped(&a, || Probe::with_mut(|p| p.0 = 7));
+        test_stamped(&b, || Probe::with_mut(|p| p.0 = 11));
+        test_stamped(&a, || Probe::with(|p| assert_eq!(p.0, 7)));
+        test_stamped(&b, || Probe::with(|p| assert_eq!(p.0, 11)));
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn native_seed_pre_inserts_value_seen_by_with_and_with_mut() {
-        // Seeding a slot before first access makes `with` / `with_mut`
-        // observe the seeded value rather than `T::default()` — the
-        // mechanism the chassis spawn path uses to hand each actor a
-        // ring constructed at the configured capacity.
+    fn seed_pre_inserts_value_seen_by_with_and_with_mut() {
         let slots = ActorSlots::new();
         slots.seed(Probe(0x5EED));
-        with_stamped(&slots, || {
+        test_stamped(&slots, || {
             Probe::with(|p| assert_eq!(p.0, 0x5EED, "seeded value, not default"));
             Probe::with_mut(|p| p.0 += 1);
             Probe::with(|p| assert_eq!(p.0, 0x5EEE));
         });
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn native_unseeded_type_still_lazily_defaults() {
-        // Seeding one type leaves an unrelated type on the lazy-`Default`
-        // path — `slot_ptr_for` stays untouched for everything not seeded.
+    fn unseeded_type_still_lazily_defaults() {
         let slots = ActorSlots::new();
         slots.seed(Probe(0x5EED));
-        with_stamped(&slots, || {
+        test_stamped(&slots, || {
             OtherProbe::with(|p| assert_eq!(p.0, 0, "unseeded type defaults"));
         });
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn native_distinct_types_independent() {
-        // Two distinct user types, same ActorSlots, independent
-        // slots keyed by TypeId.
+    fn distinct_types_independent() {
         let slots = ActorSlots::new();
-        with_stamped(&slots, || {
+        test_stamped(&slots, || {
             Probe::with_mut(|p| p.0 = 42);
             ProbeStr::with_mut(|p| p.0.push_str("hello"));
             Probe::with(|p| assert_eq!(p.0, 42));
@@ -492,13 +373,10 @@ mod tests {
         });
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn native_nested_with_mut_disjoint_types_succeeds() {
-        // Different types ⇒ different TypeId slots ⇒ nested
-        // borrow succeeds.
+    fn nested_with_mut_disjoint_types_succeeds() {
         let slots = ActorSlots::new();
-        with_stamped(&slots, || {
+        test_stamped(&slots, || {
             Probe::with_mut(|a| {
                 a.0 = 1;
                 OtherProbe::with_mut(|b| b.0 = 2);
@@ -508,15 +386,12 @@ mod tests {
         });
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn native_nested_with_mut_same_type_panics() {
-        // Two re-entrant borrows of the *same* Local type
-        // trip the inner RefCell — this is the recursion-guard
-        // for hazards like a logging buffer that loops back into
-        // itself.
+    fn nested_with_mut_same_type_panics() {
+        use std::panic;
+        use std::panic::AssertUnwindSafe;
         let slots = ActorSlots::new();
-        with_stamped(&slots, || {
+        test_stamped(&slots, || {
             Probe::with_mut(|outer| {
                 outer.0 = 1;
                 let inner = panic::catch_unwind(AssertUnwindSafe(|| {
@@ -527,62 +402,23 @@ mod tests {
         });
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    #[should_panic(expected = "Local accessed outside actor dispatch")]
-    fn native_outside_stamp_panics_in_debug() {
-        // No `with_stamped` wrapping — debug_assert! trips.
-        Probe::with_mut(|p| p.0 += 1);
+    fn try_with_returns_none_when_no_actor_in_scope() {
+        ensure_test_provider();
+        // No active stamp on this thread — the provider reports no actor.
+        TEST_CURRENT.set(ptr::null());
+        assert!(Probe::try_with(|p| p.0).is_none());
+        assert!(Probe::try_with_mut(|p| p.0).is_none());
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn native_stamp_restores_prior_on_panic() {
-        // If a handler panics, the StampGuard drop must still
-        // restore CURRENT_SLOTS so a subsequent stamped call
-        // doesn't see a stale pointer. Verify by checking that
-        // an out-of-stamp access *after* a panicking stamp still
-        // trips debug_assert.
+    fn static_backend_routes_through_the_provider() {
+        // `install_static_backend` is the single-actor install; once a
+        // provider is set the test provider wins (set-once), so assert the
+        // install call is a no-op rather than a panic and the API exists.
+        install_static_backend();
         let slots = ActorSlots::new();
-        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-            with_stamped(&slots, || panic!("handler trapped"));
-        }));
-        assert!(outcome.is_err(), "inner panic propagates");
-
-        let outside = panic::catch_unwind(AssertUnwindSafe(|| {
-            Probe::with_mut(|p| p.0 = 1);
-        }));
-        assert!(
-            outside.is_err(),
-            "post-panic access must still panic via debug_assert"
-        );
-    }
-
-    /// Issue 582: the binding is to the actor (via `Box<ActorSlots>`
-    /// ownership), not to the thread. If a future scheduler
-    /// migrated an actor between threads, the `Box` would transfer
-    /// with it and the same data would still be reachable. Today's
-    /// chassis pins one thread per actor (ADR-0038), but the API
-    /// must not bake that in — this test asserts the design
-    /// property explicitly so a future regression that ties data to
-    /// thread identity (e.g., switching to true `thread_local!`)
-    /// would fail loudly.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn native_slots_follow_box_across_threads() {
-        let slots = Box::new(ActorSlots::new());
-
-        // Thread A (this test thread): write 42 through the
-        // stamped slots.
-        with_stamped(&slots, || Probe::with_mut(|p| p.0 = 42));
-
-        // Move the Box into a freshly-spawned thread and read
-        // back — same slots, same data, despite the thread
-        // boundary.
-        let observed = thread::spawn(move || with_stamped(&slots, || Probe::with(|p| p.0)))
-            .join()
-            .expect("worker thread joined cleanly");
-
-        assert_eq!(observed, 42, "Local data follows the Box, not the thread");
+        test_stamped(&slots, || Probe::with_mut(|p| p.0 = 5));
+        test_stamped(&slots, || Probe::with(|p| assert_eq!(p.0, 5)));
     }
 }

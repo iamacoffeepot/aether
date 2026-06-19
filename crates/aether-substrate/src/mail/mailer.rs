@@ -110,7 +110,7 @@ pub struct Mailer {
     /// iamacoffeepot/aether#1128 global per-handler execution-cost
     /// table — Phase 0 of the cost-aware recruiter. A sibling of
     /// [`Self::capability_registry`]: the cold-path index over every
-    /// actor's per-handler [`aether_actor::cost::CostCell`]s, shared as
+    /// actor's per-handler [`crate::mail::cost::CostCell`]s, shared as
     /// the same `Arc<CostCell>` the actor's lock-free per-actor
     /// `CostCells` cache holds. The component-load / native-cap-boot
     /// path seeds it (alongside the cap-registry accept-set); the

@@ -53,7 +53,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_actor::cost::ewma_step;
+use crate::mail::cost::ewma_step;
 
 use crate::config::{KnobKind, KnobRecord};
 
@@ -81,7 +81,7 @@ const TRIALS: usize = 64;
 const WARMUP: usize = 16;
 
 /// Constant EWMA shift `k`: `mean += (x − mean) >> k`. `k = 4` is α = 1/16,
-/// matching `aether_actor::cost::EWMA_SHIFT` so the handoff estimate
+/// matching `crate::mail::cost::EWMA_SHIFT` so the handoff estimate
 /// smooths over the same ~16-sample window the per-handler cost cell does.
 /// Power-of-two so the live fold is a shift, not a float multiply.
 const EWMA_SHIFT: u32 = 4;
@@ -90,7 +90,7 @@ const EWMA_SHIFT: u32 = 4;
 /// boot probe ([`HandoffEwma::seed`]) and refined by live `notify → wake`
 /// samples ([`HandoffEwma::fold`]).
 ///
-/// Unlike `aether_actor::cost::CostCell` — which a single actor folds under
+/// Unlike `crate::mail::cost::CostCell` — which a single actor folds under
 /// the actor lock, so a plain `load → compute → store` suffices — this cell
 /// is folded by **many woken workers concurrently** (each folds its own
 /// wake latency on resume), so the fold is a `compare_exchange` loop to

@@ -49,8 +49,9 @@ use std::time::Instant;
 
 use crate::actor::native::Envelope;
 use crate::runtime::thread_name;
-use aether_actor::local;
 use aether_actor::local::ActorSlots;
+
+use crate::actor::native::local;
 use aether_kinds::trace::TraceEvent;
 use std::ops::Deref;
 use std::sync::PoisonError;

@@ -6,7 +6,7 @@
 //! the spawn path's `with_stamped(&slots, …)` — so a loaded component's
 //! handlers are measurable with no lazy first-dispatch pull. The unit
 //! tests cover the EWMA + table mechanics in isolation
-//! (`aether_actor::cost`, `aether_substrate::mail::cost`); this is the
+//! (`aether_substrate::mail::cost`); this is the
 //! load-path integration guard, and in particular the one that proves
 //! the per-actor `CostCells` cache was actually stamped at construction:
 //! a fold only records if the cache holds the cell, so a nonzero sample

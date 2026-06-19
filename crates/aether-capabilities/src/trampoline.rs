@@ -97,7 +97,7 @@ mod native {
     use std::io;
 
     use aether_actor::Local as _;
-    use aether_actor::cost::CostCells;
+    use aether_substrate::mail::CostCells;
 
     /// Configuration handed to [`Lifecycle::init`](aether_actor::Lifecycle::init) by the spawn
     /// path. Carries the wasmtime engine / linker plus the parsed

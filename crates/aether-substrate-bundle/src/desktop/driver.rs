@@ -21,7 +21,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use aether_actor::Addressable;
-use aether_actor::local;
 use aether_capabilities::InputCapability;
 use aether_capabilities::RenderHandles;
 use aether_data::Kind;
@@ -31,6 +30,7 @@ use aether_kinds::{
     MouseButton, MouseMove, Quit, SetWindowMode, SetWindowModeResult, SetWindowTitle,
     SetWindowTitleResult, Tick, WindowMode, WindowSize, keycode,
 };
+use aether_substrate::actor::native::local;
 // Only the unit tests name the `Envelope` (aka `OwnedDispatch`) type now —
 // `try_framework_dispatch` reaches it through `InboundMail::envelope()`.
 #[cfg(test)]
@@ -1571,10 +1571,11 @@ mod tests {
         use std::sync::mpsc;
         use std::time::Duration;
 
-        use aether_actor::local::{ActorSlots, with_stamped};
+        use aether_actor::local::ActorSlots;
         use aether_data::MailId;
         use aether_kinds::descriptors;
         use aether_kinds::{LogTail, LogTailResult};
+        use aether_substrate::actor::native::local::with_stamped;
 
         use aether_substrate::chassis::settlement::SettlementRegistry;
         use aether_substrate::handle_store::HandleStore;
@@ -1677,9 +1678,10 @@ mod tests {
     fn try_framework_dispatch_skips_window_kinds() {
         use std::sync::mpsc;
 
-        use aether_actor::local::{ActorSlots, with_stamped};
+        use aether_actor::local::ActorSlots;
         use aether_data::MailId;
         use aether_kinds::descriptors;
+        use aether_substrate::actor::native::local::with_stamped;
 
         use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::Mail;

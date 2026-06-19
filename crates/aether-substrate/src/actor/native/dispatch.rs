@@ -21,8 +21,9 @@
 
 use aether_actor::Local;
 use aether_actor::OutboundReply;
-use aether_actor::cost::CostCells;
 use aether_actor::log::ActorLogRing;
+
+use crate::mail::cost::CostCells;
 use aether_actor::trace_ring::ActorTraceRing;
 use aether_data::Kind;
 use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
@@ -273,7 +274,7 @@ pub fn dispatch_cost_tail_if_matching_free(
 /// iamacoffeepot/aether#1128 dark-instrumentation fold. Folds one
 /// handler-execution sample — `finished − t_received`, the existing
 /// `(Finished.t − Received.t)` trace bracket with no new clock read on
-/// the fast path — into the per-handler [`aether_actor::cost::CostCell`]
+/// the fast path — into the per-handler [`crate::mail::cost::CostCell`]
 /// EWMA. Runs inside the dispatch `local::with_stamped` block, so it
 /// reaches its cell through the lock-free per-actor [`CostCells`] cache.
 /// A kind not in the cache (the framework arms `log.tail` / `trace.tail`
@@ -310,7 +311,9 @@ mod cost_tests {
     use super::*;
     use crate::mail::MailboxId;
     use crate::test_util::fresh_substrate;
-    use aether_actor::local::{ActorSlots, with_stamped};
+    use aether_actor::local::ActorSlots;
+
+    use crate::actor::native::local::with_stamped;
     use aether_kinds::{CostTail, CostTailResult};
 
     /// iamacoffeepot/aether#1128 step 4: folding a known handler's
@@ -424,7 +427,9 @@ mod free_dispatch_tests {
     use crate::mail::mailer::Mailer;
     use crate::mail::registry::Registry;
     use crate::mail::{MailRef, Source, SourceAddr};
-    use aether_actor::local::{ActorSlots, with_stamped};
+    use aether_actor::local::ActorSlots;
+
+    use crate::actor::native::local::with_stamped;
     use aether_data::MailId;
     use aether_kinds::SetWindowTitle;
     use aether_kinds::descriptors;

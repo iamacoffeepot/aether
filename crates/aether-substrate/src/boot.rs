@@ -40,6 +40,7 @@ use std::sync::Arc;
 use aether_data::KindDescriptor;
 use wasmtime::{Engine, Linker};
 
+use crate::actor::native::local as actor_local;
 use crate::handle_store::PersistConfig;
 use crate::mail::registry::MailDispatch;
 use crate::runtime::log_install;
@@ -198,6 +199,9 @@ impl SubstrateBootBuilder<'_> {
         let outbound = HubOutbound::disconnected();
         // Issue #581: install the actor-aware tracing subscriber stack.
         log_install::init_subscriber();
+        // #2070: install the host thread-local backend for `aether_actor::Local`
+        // before any actor dispatch stamps it.
+        actor_local::install();
 
         let engine = Arc::new(Engine::default());
         let registry = Arc::new(Registry::new());
