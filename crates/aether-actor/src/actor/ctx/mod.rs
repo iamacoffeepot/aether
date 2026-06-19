@@ -7,8 +7,6 @@
 //! - [`OutboundReply`] — reply-to-originator (per-handler ctxs only).
 //! - [`Persistence`] — `replace_component` migration bundle (drop
 //!   ctxs only).
-//! - [`LifecycleControl`] — self-shutdown + monitor (per-handler ctxs
-//!   that participate in ADR-0079 lifecycle).
 //!
 //! The concrete ctx structs live next to their transport: FFI-side
 //! `FfiInitCtx` / `FfiCtx` / `FfiDropCtx` in [`crate::ffi::ctx`];
@@ -18,13 +16,11 @@
 //! [`MailSender`] cover the routing methods so the per-impl code is
 //! the stage-specific accessors.
 
-pub mod lifecycle;
 pub mod mail_sender;
 pub mod outbound_reply;
 pub mod persistence;
 pub mod reply_mode;
 
-pub use lifecycle::LifecycleControl;
 pub use mail_sender::MailSender;
 pub use outbound_reply::OutboundReply;
 pub use persistence::Persistence;

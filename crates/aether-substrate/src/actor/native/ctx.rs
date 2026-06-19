@@ -4,9 +4,9 @@
 //! in `crate::actor::monitor`.
 //!
 //! Issue 663 phase B added per-stage capability-trait impls
-//! ([`MailSender`], [`OutboundReply`], [`LifecycleControl`]) on
-//! [`NativeCtx`] / [`NativeInitCtx`] alongside the existing inherent
-//! methods, so user-facing handler bodies are now spelled in the same
+//! ([`MailSender`], [`OutboundReply`]) on [`NativeCtx`] /
+//! [`NativeInitCtx`] alongside the existing inherent methods, so
+//! user-facing handler bodies are now spelled in the same
 //! cross-transport vocabulary FFI guests use. Substrate-internal
 //! accessors (`mailer`, `publish_handle`, `transport_arc`, `self_id`,
 //! plus the `spawn_child` builder) stay inherent — they expose
@@ -21,7 +21,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aether_actor::actor::ctx::{LifecycleControl, MailSender, OutboundReply};
+use aether_actor::actor::ctx::{MailSender, OutboundReply};
 use aether_actor::{Addressable, HandlesKind, Manual, ReplyMode, Single, Singleton, Stream};
 use core::marker::PhantomData;
 use core::ptr;
@@ -1022,16 +1022,14 @@ impl<'a> NativeInitCtx<'a> {
 // subscriptions, peer hellos, and self-mail kickoffs all belong in
 // `wire`, where `NativeCtx` provides the full mail surface.
 
-// The per-stage capability trait impls (`MailSender` / `OutboundReply`
-// / `LifecycleControl`). `send` / `send_many` / `send_to_named` inherit
-// this handler's in-flight lineage (ADR-0080 §7); `send_detached` /
+// The per-stage capability trait impls (`MailSender` / `OutboundReply`).
+// `send` / `send_many` / `send_to_named` inherit this handler's
+// in-flight lineage (ADR-0080 §7); `send_detached` /
 // `send_detached_to_named` are spelled out below to suppress it (the
 // trait default delegates to the now-inheriting `send`, so it can't
-// detach on its own). `LifecycleControl::shutdown` /
-// `monitor` forward to the existing inherent methods that today
-// reach into the substrate-internal spawner + actor registry; future
-// FFI-side wiring (issue 607 phase 4 / ADR-0079) will program against
-// the trait the same way native callers do.
+// detach on its own). `shutdown` / `monitor` are inherent methods on
+// `NativeCtx` that reach into the substrate-internal spawner + actor
+// registry.
 
 impl<M: ReplyMode> MailSender for NativeCtx<'_, M> {
     //noinspection DuplicatedCode
@@ -1171,25 +1169,6 @@ impl OutboundReply for NativeCtx<'_, Manual> {
             self.in_flight_root,
             self.outbound_parent(),
         );
-    }
-}
-
-impl<M: ReplyMode> LifecycleControl for NativeCtx<'_, M> {
-    type MonitorHandle = MonitorHandle;
-    type MonitorError = MonitorError;
-
-    fn shutdown(&self) {
-        self.binding.signal_shutdown();
-    }
-
-    fn monitor(&self, target: MailboxId) -> Result<MonitorHandle, MonitorError> {
-        let spawner = self.binding.spawner().expect(
-            "NativeCtx::monitor requires a chassis-built transport (no spawner installed — likely a `new_for_test` transport)",
-        );
-        let registry = Arc::clone(spawner.actor_registry());
-        let watcher = self.binding.self_mailbox();
-        registry.register_monitor(watcher, target)?;
-        Ok(MonitorHandle::new(registry, watcher, target))
     }
 }
 
