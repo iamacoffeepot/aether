@@ -46,9 +46,10 @@ use crate::scheduler::Drainable;
 use crate::scheduler::SeizeHandle;
 use crate::scheduler::WakeHandle;
 use crate::scheduler::WakeSink;
-use aether_actor::local;
 use aether_actor::local::ActorSlots;
 use aether_actor::log::ActorLogRing;
+
+use crate::actor::native::local;
 use aether_actor::trace_ring::ActorTraceRing;
 use std::sync::Weak;
 use std::time::Duration;

@@ -55,7 +55,6 @@ extern crate alloc;
 extern crate self as aether_actor;
 
 pub mod actor;
-pub mod cost;
 pub mod ffi;
 pub mod local;
 pub mod log;

@@ -72,8 +72,8 @@ const TRUNCATED_SUFFIX: &str = " [truncated]";
 /// writer: the actor's dispatcher thread is the sole producer
 /// (post-ADR-0038 — one OS thread per actor), so the `sequence`
 /// counter and the underlying `VecDeque` need no lock or atomic
-/// internally. Cross-thread reads run through the `Local`
-/// [`crate::local::with_stamped`] path on the responding actor's
+/// internally. Cross-thread reads run through the [`Local`] stamp
+/// path on the responding actor's
 /// dispatcher (the framework-built-in `aether.log.tail` handler
 /// invokes [`Self::tail`] from inside the dispatcher loop, holding
 /// `&mut` exclusively for the duration of the read).
@@ -381,6 +381,11 @@ static WASM_INSTALLED: core::sync::atomic::AtomicBool = core::sync::atomic::Atom
 #[cfg(target_arch = "wasm32")]
 pub fn install_wasm_subscriber() {
     use core::sync::atomic::Ordering;
+    // Install the single-actor static slot backend before the subscriber is
+    // set: the subscriber pushes into the per-actor `ActorLogRing` (a
+    // `Local`) on its first event, so the slots provider must be live first
+    // (iamacoffeepot/aether#2070). Set-once, so a repeat call is a no-op.
+    crate::local::install_static_backend();
     if WASM_INSTALLED.swap(true, Ordering::SeqCst) {
         return;
     }

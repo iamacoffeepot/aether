@@ -48,9 +48,10 @@ use crate::scheduler::{Pool, PoolConfig, PoolHandle};
 use aether_actor::Addressable;
 #[cfg(test)]
 use aether_actor::HandlesKind;
-use aether_actor::cost::CostCells;
-use aether_actor::local;
 use aether_actor::local::ActorSlots;
+
+use crate::actor::native::local;
+use crate::mail::cost::CostCells;
 use aether_actor::log::ActorLogRing;
 use aether_actor::trace_ring::ActorTraceRing;
 

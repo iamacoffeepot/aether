@@ -70,6 +70,7 @@ pub(crate) mod dispatch;
 pub mod dispatch_blocking;
 pub(crate) mod dispatcher_slot;
 pub mod envelope;
+pub mod local;
 pub mod mailbox;
 pub mod spawn;
 pub mod spawn_thread;

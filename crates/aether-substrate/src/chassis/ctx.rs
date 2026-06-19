@@ -38,7 +38,7 @@ use std::sync::OnceLock;
 ///
 /// `actor_slots` carries this claim's per-actor [`ActorSlots`] — the
 /// chassis [`crate::chassis::builder::Builder::with_actor`] path
-/// stamps this into TLS via [`aether_actor::local::with_stamped`]
+/// stamps this into TLS via [`crate::actor::native::local::with_stamped`]
 /// around `init` / `wire` / each dispatch so per-actor `Local<T>`
 /// lookups (notably the ADR-0081 `ActorLogRing`) resolve to the
 /// caller's storage. Driver-as-actor capabilities (issue 603 Phase 3,
@@ -119,8 +119,8 @@ impl SharedActorSlots {
         Self(Arc::new(ActorSlots::new()))
     }
 
-    /// Borrow the inner [`ActorSlots`] for an
-    /// [`aether_actor::local::with_stamped`] call.
+    /// Borrow the inner [`ActorSlots`] for a
+    /// [`crate::actor::native::local::with_stamped`] call.
     #[must_use]
     pub fn slots(&self) -> &ActorSlots {
         &self.0
@@ -617,7 +617,8 @@ mod tests {
     use super::*;
 
     use aether_actor::Local;
-    use aether_actor::local::with_stamped;
+
+    use crate::actor::native::local::with_stamped;
     use aether_kinds::descriptors;
 
     use aether_kinds::trace::Nanos;

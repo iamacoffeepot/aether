@@ -2,8 +2,8 @@
 // Phase 0 of iamacoffeepot/aether#1127's cost-aware recruiter.
 // **Measure-only; no scheduling change.**
 //
-// The cold-path index over the per-handler [`CostCell`]s
-// (`aether_actor::cost`). Cost is *measured* at the recipient (its
+// The cold-path index over the per-handler [`CostCell`]s (defined in this
+// module). Cost is *measured* at the recipient (its
 // handler runs, and the dispatch fold writes the cell through that
 // actor's lock-free per-actor `CostCells` cache — on whichever worker is
 // dispatching it, exclusively) but *consumed* cross-thread — by the
@@ -27,10 +27,147 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
-use aether_actor::cost::CostCell;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use aether_actor::Local;
 use aether_kinds::{CostRow, CostTail, CostTailResult};
 
 use crate::mail::{KindId, MailboxId};
+
+/// Constant EWMA shift `k`: `mean += (x − mean) >> k`. `k = 4` is an α of
+/// `1/16` — recent samples weigh ~6% each, so the estimate tracks a
+/// sustained shift within ~16 dispatches while smoothing one-off outliers.
+/// Power-of-two so the update is a shift, not a float multiply — no float on
+/// the dispatch hot path.
+pub const EWMA_SHIFT: u32 = 4;
+
+/// One handler's execution-cost EWMA in fixed-point nanos
+/// (iamacoffeepot/aether#1128). The fold is single-writer-serialized by the
+/// actor lock (an actor dispatches on one thread at a time), so the RMW is a
+/// plain `load → compute → store` rather than a CAS loop; cross-thread
+/// readers (the `cost.tail` dump, the future #1178 recruiter) see an
+/// eventually-consistent estimate. `Relaxed` throughout — no ordering is
+/// needed between the three cells, and it is zero-cost over a hypothetical
+/// plain `u64` on the target ISAs.
+#[derive(Debug, Default)]
+pub struct CostCell {
+    /// EWMA of the per-dispatch handler execution time, nanos.
+    mean: AtomicU64,
+    /// EWMA of the absolute deviation `|x − mean|`, nanos — a cheap spread
+    /// signal (mean absolute deviation, not variance) so a reader can tell a
+    /// steady handler from a bimodal one.
+    mad: AtomicU64,
+    /// Count of folded samples. `0` is the neutral seed: a handler that is
+    /// *known* (pre-seeded from the load-time handler set) but has not run
+    /// yet. Distinguishes "known-but-unrun" from "absent".
+    samples: AtomicU64,
+}
+
+impl CostCell {
+    /// A fresh neutral-seed cell: `mean = mad = samples = 0`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fold one execution-time `sample` (nanos) into the EWMA. The first
+    /// sample seeds `mean` directly (no warm-up bias); subsequent samples
+    /// apply the constant-α update. Plain `load → compute → store` —
+    /// single-writer per the actor lock, so no CAS.
+    pub fn fold(&self, sample: u64) {
+        let prior = self.samples.load(Ordering::Relaxed);
+        if prior == 0 {
+            self.mean.store(sample, Ordering::Relaxed);
+            self.mad.store(0, Ordering::Relaxed);
+        } else {
+            let mean = self.mean.load(Ordering::Relaxed);
+            let next_mean = ewma_step(mean, sample, EWMA_SHIFT);
+            self.mean.store(next_mean, Ordering::Relaxed);
+
+            let dev = sample.abs_diff(next_mean);
+            let mad = self.mad.load(Ordering::Relaxed);
+            self.mad
+                .store(ewma_step(mad, dev, EWMA_SHIFT), Ordering::Relaxed);
+        }
+        self.samples
+            .store(prior.saturating_add(1), Ordering::Relaxed);
+    }
+
+    /// Current EWMA mean (nanos). `0` before the first fold.
+    #[must_use]
+    pub fn mean_nanos(&self) -> u64 {
+        self.mean.load(Ordering::Relaxed)
+    }
+
+    /// Current EWMA mean-absolute-deviation (nanos). `0` before the second
+    /// fold.
+    #[must_use]
+    pub fn mad_nanos(&self) -> u64 {
+        self.mad.load(Ordering::Relaxed)
+    }
+
+    /// Number of folded samples. `0` is the neutral seed.
+    #[must_use]
+    pub fn samples(&self) -> u64 {
+        self.samples.load(Ordering::Relaxed)
+    }
+}
+
+/// One constant-α EWMA step toward `sample`, computed on the signed
+/// difference (`current + (sample − current) >> shift`) so a falling cost
+/// converges as fast as a rising one. Integer-only. Shared with the
+/// scheduler's handoff calibration, which folds with its own shift.
+#[must_use]
+pub fn ewma_step(current: u64, sample: u64, shift: u32) -> u64 {
+    if sample >= current {
+        current + ((sample - current) >> shift)
+    } else {
+        current - ((current - sample) >> shift)
+    }
+}
+
+/// Per-actor cache mapping a handled `KindId` to its shared [`CostCell`].
+/// Stamped on the actor's `ActorSlots` as a [`Local`]; the dispatch fold
+/// reaches it lock-free on the actor's own thread. Each `Arc<CostCell>` is
+/// shared with the global [`CostTable`] so the cold dump and the recruiter
+/// read the same cell the fold writes.
+///
+/// A `Vec` rather than a map: handler sets are tiny (a handful of kinds per
+/// actor), so a linear scan beats a hash.
+#[derive(Debug, Default)]
+pub struct CostCells(Vec<(KindId, Arc<CostCell>)>);
+
+impl Local for CostCells {}
+
+impl CostCells {
+    /// Empty cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Install the actor's handler-kind cells, sharing each `Arc<CostCell>`
+    /// with the global table. Called once at actor construction (under the
+    /// dispatch stamp); a `replace`-spawned actor re-seeds wholesale and drop
+    /// seeds an empty `Vec` to clear.
+    pub fn seed(&mut self, cells: Vec<(KindId, Arc<CostCell>)>) {
+        self.0 = cells;
+    }
+
+    /// Look up the cell for `kind`. `None` for a kind not in the handler set
+    /// (framework arms like `log.tail`, or a fallback dispatch) — the fold
+    /// skips those.
+    #[must_use]
+    pub fn get(&self, kind: KindId) -> Option<&Arc<CostCell>> {
+        self.0.iter().find(|(k, _)| *k == kind).map(|(_, c)| c)
+    }
+
+    /// Borrow the `(kind, cell)` pairs for the dump. Read-only.
+    #[must_use]
+    pub fn entries(&self) -> &[(KindId, Arc<CostCell>)] {
+        &self.0
+    }
+}
 
 /// A single handler's measured cost, resolved from a [`CostCell`] under
 /// one read-lock. Carries the EWMA mean plus the two confidence signals
@@ -205,6 +342,101 @@ impl CostLookup<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mean_converges_to_constant_input() {
+        let cell = CostCell::new();
+        for _ in 0..64 {
+            cell.fold(1_000);
+        }
+        assert_eq!(cell.mean_nanos(), 1_000);
+        assert_eq!(cell.mad_nanos(), 0, "no deviation on a constant input");
+        assert_eq!(cell.samples(), 64);
+    }
+
+    #[test]
+    fn first_sample_seeds_mean_directly() {
+        let cell = CostCell::new();
+        cell.fold(5_000);
+        assert_eq!(cell.mean_nanos(), 5_000);
+        assert_eq!(cell.samples(), 1);
+    }
+
+    #[test]
+    fn mean_tracks_a_step_up() {
+        let granularity = 1u64 << EWMA_SHIFT;
+        let cell = CostCell::new();
+        cell.fold(100);
+        assert_eq!(cell.mean_nanos(), 100);
+        let mut last = cell.mean_nanos();
+        for _ in 0..200 {
+            cell.fold(10_000);
+            let now = cell.mean_nanos();
+            assert!(now >= last, "EWMA must not overshoot a step up");
+            assert!(now <= 10_000, "EWMA must not exceed the input level");
+            last = now;
+        }
+        assert!(
+            10_000 - cell.mean_nanos() < granularity,
+            "converges to within the shift granularity of the new level: {}",
+            cell.mean_nanos()
+        );
+        assert!(cell.samples() > 1);
+    }
+
+    #[test]
+    fn mean_tracks_a_step_down() {
+        let granularity = 1u64 << EWMA_SHIFT;
+        let cell = CostCell::new();
+        cell.fold(10_000);
+        for _ in 0..200 {
+            cell.fold(100);
+        }
+        assert!(
+            cell.mean_nanos() - 100 < granularity,
+            "converges to within the shift granularity of the lower level: {}",
+            cell.mean_nanos()
+        );
+    }
+
+    #[test]
+    fn mad_rises_on_a_step() {
+        let cell = CostCell::new();
+        cell.fold(100);
+        for _ in 0..5 {
+            cell.fold(10_000);
+        }
+        assert!(
+            cell.mad_nanos() > 0,
+            "MAD tracks the spread while the mean catches up"
+        );
+    }
+
+    #[test]
+    fn neutral_seed_reports_zero_samples() {
+        let cell = CostCell::new();
+        assert_eq!(cell.samples(), 0);
+        assert_eq!(cell.mean_nanos(), 0);
+        assert_eq!(cell.mad_nanos(), 0);
+    }
+
+    #[test]
+    fn cost_cells_seed_and_lookup() {
+        let mut cells = CostCells::new();
+        assert!(cells.get(KindId(10)).is_none(), "empty cache misses");
+        let a = Arc::new(CostCell::new());
+        let b = Arc::new(CostCell::new());
+        cells.seed(vec![
+            (KindId(10), Arc::clone(&a)),
+            (KindId(20), Arc::clone(&b)),
+        ]);
+        assert!(cells.get(KindId(10)).is_some());
+        assert!(cells.get(KindId(20)).is_some());
+        assert!(cells.get(KindId(30)).is_none());
+        // The cached Arc and the seeded Arc share the same cell.
+        cells.get(KindId(10)).expect("kind 10 is seeded").fold(777);
+        assert_eq!(a.mean_nanos(), 777);
+    }
 
     #[test]
     fn seed_returns_neutral_cells_in_both_indexes() {

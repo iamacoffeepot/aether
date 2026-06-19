@@ -17,7 +17,7 @@ pub mod registry;
 pub mod ring;
 
 pub use capability::{CapabilityRegistry, MailboxCaps};
-pub use cost::CostTable;
+pub use cost::{CostCell, CostCells, CostTable};
 pub use mail_ref::MailRef;
 pub use mailer::Mailer;
 pub use outbound::{DroppingBackend, EgressBackend, EgressEvent, HubOutbound, RecordingBackend};
