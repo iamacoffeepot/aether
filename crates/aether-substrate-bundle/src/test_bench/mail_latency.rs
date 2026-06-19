@@ -278,6 +278,7 @@ fn mail_saturation_profile() {
 /// guarding the observer fold against settling on a truncated chain;
 /// that failure mode retired with the fold — the counter never settles
 /// on a partial chain.)
+#[test]
 #[allow(clippy::print_stderr)]
 fn depth_chain_settles_every_root() {
     let workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
@@ -303,33 +304,6 @@ fn depth_chain_settles_every_root() {
 
     for (idx, (_root, rx)) in pending.iter().enumerate() {
         assert_settled(rx, &format!("mlat.per_root_lineage[{idx}]"));
-    }
-}
-
-/// Contention/backoff-sensitive tests live in `mod heavy`: these settlement
-/// scenarios drive a multi-worker pool whose park/wake backoff path
-/// oversubscribes cores under the full suite, so they are serialized into the
-/// `serial-heavy` nextest group (`.config/nextest.toml`). Each delegates
-/// to the scenario body declared at module scope.
-mod heavy {
-    #[test]
-    fn depth_chain_settles_every_root() {
-        super::depth_chain_settles_every_root();
-    }
-
-    #[test]
-    fn emit_settlement_settles_two_level_tree() {
-        super::emit_settlement_settles_two_level_tree();
-    }
-
-    #[test]
-    fn emit_settlement_settles_wide_fanout() {
-        super::emit_settlement_settles_wide_fanout();
-    }
-
-    #[test]
-    fn emit_settlement_settles_under_chunked_demux() {
-        super::emit_settlement_settles_under_chunked_demux();
     }
 }
 
@@ -372,6 +346,7 @@ fn emit_settlement_settles_every_root(topo: &Topology) {
 }
 
 /// Rich topology: fan-out + a shared (two-parent) node + depth.
+#[test]
 fn emit_settlement_settles_two_level_tree() {
     emit_settlement_settles_every_root(&two_level_tree());
 }
@@ -383,6 +358,7 @@ fn emit_settlement_settles_two_level_tree() {
 /// inline-demux path balances `Sent`/`Finished` for every fanned mail —
 /// a dropped or double-counted demux mail would wedge `in_flight` and
 /// the root would never settle.
+#[test]
 fn emit_settlement_settles_wide_fanout() {
     emit_settlement_settles_every_root(&fanout(8));
 }
@@ -396,6 +372,7 @@ fn emit_settlement_settles_wide_fanout() {
 /// `in_flight` and a root would never settle. Also drives the
 /// steal-mid-demux race (a sibling steals a remainder sub-blob while the
 /// producer runs its own chunk).
+#[test]
 #[allow(clippy::print_stderr)]
 fn emit_settlement_settles_under_chunked_demux() {
     // Force chunking on for this process. SAFETY: set before any actor is

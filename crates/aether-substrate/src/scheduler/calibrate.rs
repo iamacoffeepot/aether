@@ -422,49 +422,41 @@ mod tests {
         assert_eq!(cell.samples(), 201, "every live fold counted");
     }
 
-    /// Contention/backoff-sensitive tests live in `mod heavy`: they exercise
-    /// the concurrent handoff-EWMA fold path, so they are serialized into the
-    /// `serial-heavy` nextest group (`.config/nextest.toml`) to avoid
-    /// oversubscribing cores against one another.
-    mod heavy {
-        use super::*;
+    /// Many workers fold the same cell concurrently (the real wake
+    /// pattern): the CAS fold + `fetch_add` count must lose no update.
+    /// Folding the seed value keeps the mean fixed, so the final mean and
+    /// the exact sample count are both deterministic regardless of
+    /// interleaving — a lost CAS or a lost increment would show up.
+    #[test]
+    fn handoff_ewma_concurrent_folds_lose_nothing() {
+        const THREADS: usize = 8;
+        const PER_THREAD: u64 = 2_000;
+        let cell = Arc::new(HandoffEwma::new());
+        cell.seed(1_000);
 
-        /// Many workers fold the same cell concurrently (the real wake
-        /// pattern): the CAS fold + `fetch_add` count must lose no update.
-        /// Folding the seed value keeps the mean fixed, so the final mean and
-        /// the exact sample count are both deterministic regardless of
-        /// interleaving — a lost CAS or a lost increment would show up.
-        #[test]
-        fn handoff_ewma_concurrent_folds_lose_nothing() {
-            const THREADS: usize = 8;
-            const PER_THREAD: u64 = 2_000;
-            let cell = Arc::new(HandoffEwma::new());
-            cell.seed(1_000);
-
-            let workers: Vec<_> = (0..THREADS)
-                .map(|_| {
-                    let cell = Arc::clone(&cell);
-                    thread::spawn(move || {
-                        for _ in 0..PER_THREAD {
-                            cell.fold(1_000);
-                        }
-                    })
+        let workers: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let cell = Arc::clone(&cell);
+                thread::spawn(move || {
+                    for _ in 0..PER_THREAD {
+                        cell.fold(1_000);
+                    }
                 })
-                .collect();
-            for w in workers {
-                w.join().expect("fold worker panicked");
-            }
-
-            assert_eq!(
-                cell.mean(),
-                1_000,
-                "folding the seed value leaves the mean fixed under any interleaving",
-            );
-            assert_eq!(
-                cell.samples(),
-                1 + THREADS as u64 * PER_THREAD,
-                "every concurrent fold's count survives (no lost fetch_add)",
-            );
+            })
+            .collect();
+        for w in workers {
+            w.join().expect("fold worker panicked");
         }
+
+        assert_eq!(
+            cell.mean(),
+            1_000,
+            "folding the seed value leaves the mean fixed under any interleaving",
+        );
+        assert_eq!(
+            cell.samples(),
+            1 + THREADS as u64 * PER_THREAD,
+            "every concurrent fold's count survives (no lost fetch_add)",
+        );
     }
 }

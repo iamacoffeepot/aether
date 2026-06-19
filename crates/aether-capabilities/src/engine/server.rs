@@ -1441,242 +1441,234 @@ mod tests {
         })
     }
 
-    /// Contention-sensitive driver tests: each boots a `PassiveChassis`
-    /// whose dispatcher thread must make timely cross-thread progress for
-    /// the poll-until deadline to pass, so they serialize under
-    /// `serial-heavy` (the `::heavy::` path is the marker).
-    mod heavy {
-        use super::*;
+    /// `on_list` on a fresh cap replies with an empty engine list.
+    #[test]
+    fn list_on_empty_cap_is_empty() {
+        let (_chassis, mailer, cells) = boot();
+        let result = drive(&mailer, &ListEngines {}, || {
+            cells
+                .list
+                .lock()
+                .expect("test setup: list cell mutex poisoned")
+                .take()
+        });
+        assert!(result.engines.is_empty(), "fresh cap supervises no engines");
+    }
 
-        /// `on_list` on a fresh cap replies with an empty engine list.
-        #[test]
-        fn list_on_empty_cap_is_empty() {
-            let (_chassis, mailer, cells) = boot();
-            let result = drive(&mailer, &ListEngines {}, || {
-                cells
-                    .list
-                    .lock()
-                    .expect("test setup: list cell mutex poisoned")
-                    .take()
-            });
-            assert!(result.engines.is_empty(), "fresh cap supervises no engines");
-        }
-
-        /// `on_spawn` with a selector that resolves to no stored binary
-        /// fails fast at resolution — the store is empty (each cap test
-        /// isolates a fresh binary store), so no proxy is spawned and no
-        /// fork is attempted (ADR-0115, #1954).
-        #[test]
-        fn spawn_with_missing_binary_replies_err() {
-            let (_chassis, mailer, cells) = boot();
-            let result = drive(
-                &mailer,
-                &SpawnEngine {
-                    selector: BinarySelector {
-                        query: Some("nonexistent-hash-or-name".to_owned()),
-                        chassis: None,
-                        caps: vec![],
-                        target: None,
-                    },
-                    args: vec![],
-                    boot_manifest: None,
-                },
-                || {
-                    cells
-                        .spawn
-                        .lock()
-                        .expect("test setup: spawn cell mutex poisoned")
-                        .take()
-                },
-            );
-            match result {
-                SpawnEngineResult::Err { error } => {
-                    assert!(
-                        error.contains("no binary in the registry matched selector"),
-                        "unexpected error: {error}"
-                    );
-                }
-                SpawnEngineResult::Ok { .. } => {
-                    panic!("an unresolvable selector must not spawn")
-                }
-            }
-        }
-
-        /// Bootstrap-ingest a stand-in headless binary (passed directly as
-        /// the bootstrap list), then resolve the `default` selector (empty
-        /// `query`, no attribute filters) to it — the bare-spawn path a
-        /// fresh hub serves (ADR-0115, #1954). Heavy: it forks
-        /// `<stand-in> --describe`.
-        #[cfg(unix)]
-        #[test]
-        fn bootstrap_populates_and_default_resolves_to_headless() {
-            use super::super::server_native::{bootstrap_ingest, resolve_selector};
-            use crate::store::{ArtifactStore, DEFAULT_DISK_BUDGET_BYTES};
-            use std::collections::HashSet;
-            use std::fs;
-            use std::os::unix::fs::PermissionsExt;
-
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos());
-            let dir = env::temp_dir().join(format!(
-                "aether-binstore-bootstrap-{}-{nanos}",
-                process::id()
-            ));
-            fs::create_dir_all(&dir).expect("test setup: bootstrap temp dir");
-
-            // A stand-in chassis bin: on `--describe` it prints a headless
-            // manifest; its own bytes are what the store content-addresses.
-            let stand_in = dir.join("aether-substrate-headless");
-            fs::write(
-                &stand_in,
-                "#!/bin/sh\nif [ \"$1\" = \"--describe\" ]; then printf \
-                 '{\"chassis\":\"headless\",\"caps\":[\"aether.fs\"],\"git_sha\":\"deadbee\",\
-                 \"profile\":\"debug\",\"target\":\"x86_64-unknown-linux-gnu\"}'; fi\n",
-            )
-            .expect("test setup: write stand-in");
-            fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755))
-                .expect("test setup: chmod stand-in");
-
-            let mut store = ArtifactStore::open(&dir.join("store"), DEFAULT_DISK_BUDGET_BYTES);
-            let bootstrap = HashSet::from([stand_in.to_string_lossy().into_owned()]);
-            bootstrap_ingest(&mut store, &bootstrap);
-
-            let resolved = resolve_selector(
-                &mut store,
-                &BinarySelector {
-                    query: None,
+    /// `on_spawn` with a selector that resolves to no stored binary
+    /// fails fast at resolution — the store is empty (each cap test
+    /// isolates a fresh binary store), so no proxy is spawned and no
+    /// fork is attempted (ADR-0115, #1954).
+    #[test]
+    fn spawn_with_missing_binary_replies_err() {
+        let (_chassis, mailer, cells) = boot();
+        let result = drive(
+            &mailer,
+            &SpawnEngine {
+                selector: BinarySelector {
+                    query: Some("nonexistent-hash-or-name".to_owned()),
                     chassis: None,
                     caps: vec![],
                     target: None,
                 },
-            )
-            .expect("the default selector resolves to the bootstrapped headless bin");
-            assert_eq!(
-                resolved
-                    .manifest
-                    .as_binary()
-                    .expect("the resolved artifact is a binary")
-                    .chassis,
-                "headless",
-                "default resolves to the headless chassis",
-            );
-
-            let _ = fs::remove_dir_all(&dir);
+                args: vec![],
+                boot_manifest: None,
+            },
+            || {
+                cells
+                    .spawn
+                    .lock()
+                    .expect("test setup: spawn cell mutex poisoned")
+                    .take()
+            },
+        );
+        match result {
+            SpawnEngineResult::Err { error } => {
+                assert!(
+                    error.contains("no binary in the registry matched selector"),
+                    "unexpected error: {error}"
+                );
+            }
+            SpawnEngineResult::Ok { .. } => {
+                panic!("an unresolvable selector must not spawn")
+            }
         }
+    }
 
-        /// `on_terminate` with an `engine_id` that isn't a UUID, and one
-        /// that is well-formed but names no supervised engine, both reply
-        /// `Err` rather than panicking.
-        #[test]
-        fn terminate_unknown_engine_replies_err() {
-            let (_chassis, mailer, cells) = boot();
+    /// Bootstrap-ingest a stand-in headless binary (passed directly as
+    /// the bootstrap list), then resolve the `default` selector (empty
+    /// `query`, no attribute filters) to it — the bare-spawn path a
+    /// fresh hub serves (ADR-0115, #1954). It forks
+    /// `<stand-in> --describe`.
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_populates_and_default_resolves_to_headless() {
+        use super::server_native::{bootstrap_ingest, resolve_selector};
+        use crate::store::{ArtifactStore, DEFAULT_DISK_BUDGET_BYTES};
+        use std::collections::HashSet;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
 
-            let malformed = drive(
-                &mailer,
-                &TerminateEngine {
-                    engine_id: "not-a-uuid".to_owned(),
-                },
-                || {
-                    cells
-                        .terminate
-                        .lock()
-                        .expect("test setup: terminate cell mutex poisoned")
-                        .take()
-                },
-            );
-            assert!(
-                matches!(malformed, TerminateEngineResult::Err { .. }),
-                "a malformed engine_id should be rejected",
-            );
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = env::temp_dir().join(format!(
+            "aether-binstore-bootstrap-{}-{nanos}",
+            process::id()
+        ));
+        fs::create_dir_all(&dir).expect("test setup: bootstrap temp dir");
 
-            let unknown = drive(
-                &mailer,
-                &TerminateEngine {
-                    engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
-                },
-                || {
-                    cells
-                        .terminate
-                        .lock()
-                        .expect("test setup: terminate cell mutex poisoned")
-                        .take()
-                },
-            );
-            assert!(
-                matches!(unknown, TerminateEngineResult::Err { .. }),
-                "a well-formed but unknown engine_id should be rejected",
-            );
-        }
+        // A stand-in chassis bin: on `--describe` it prints a headless
+        // manifest; its own bytes are what the store content-addresses.
+        let stand_in = dir.join("aether-substrate-headless");
+        fs::write(
+            &stand_in,
+            "#!/bin/sh\nif [ \"$1\" = \"--describe\" ]; then printf \
+                 '{\"chassis\":\"headless\",\"caps\":[\"aether.fs\"],\"git_sha\":\"deadbee\",\
+                 \"profile\":\"debug\",\"target\":\"x86_64-unknown-linux-gnu\"}'; fi\n",
+        )
+        .expect("test setup: write stand-in");
+        fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755))
+            .expect("test setup: chmod stand-in");
 
-        /// `on_engine_died` for an engine the cap never supervised — the
-        /// terminate-race / double-report case — is an idempotent no-op,
-        /// not a panic, and inserts nothing. Covers both a malformed and a
-        /// well-formed-but-unknown `engine_id` (issue 1339). The
-        /// `is_some()` guard also keeps the death off the recently-died
-        /// ring: a `died` for an engine we never knew records no phantom
-        /// death, which is what keeps the ring one-record-per-real-death
-        /// under the idempotent duplicate-`died` contract (issue 1906).
-        #[test]
-        fn engine_died_for_unknown_is_noop() {
-            let (_chassis, mailer, cells) = boot();
+        let mut store = ArtifactStore::open(&dir.join("store"), DEFAULT_DISK_BUDGET_BYTES);
+        let bootstrap = HashSet::from([stand_in.to_string_lossy().into_owned()]);
+        bootstrap_ingest(&mut store, &bootstrap);
 
-            let after_malformed = push_then_list(
-                &mailer,
-                &cells,
-                &EngineDied {
-                    engine_id: "not-a-uuid".to_owned(),
-                    reason: DeathReason::Crashed {
-                        detail: "peer closed".to_owned(),
-                    },
-                },
-            );
-            assert!(
-                after_malformed.engines.is_empty(),
-                "a malformed died must not panic or insert",
-            );
-            assert!(
-                after_malformed.recently_died.is_empty(),
-                "a malformed died records no phantom death",
-            );
+        let resolved = resolve_selector(
+            &mut store,
+            &BinarySelector {
+                query: None,
+                chassis: None,
+                caps: vec![],
+                target: None,
+            },
+        )
+        .expect("the default selector resolves to the bootstrapped headless bin");
+        assert_eq!(
+            resolved
+                .manifest
+                .as_binary()
+                .expect("the resolved artifact is a binary")
+                .chassis,
+            "headless",
+            "default resolves to the headless chassis",
+        );
 
-            let after_unknown = push_then_list(
-                &mailer,
-                &cells,
-                &EngineDied {
-                    engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
-                    reason: DeathReason::Evicted {
-                        detail: "heartbeat miss limit 3 of 3".to_owned(),
-                    },
-                },
-            );
-            assert!(
-                after_unknown.engines.is_empty(),
-                "a died for an unknown engine is a no-op",
-            );
-            assert!(
-                after_unknown.recently_died.is_empty(),
-                "a died for an unknown engine records no phantom death",
-            );
-        }
+        let _ = fs::remove_dir_all(&dir);
+    }
 
-        /// `on_engine_alive` for an unknown engine is a silent no-op (no
-        /// panic, no spurious insert) — a stale `alive` racing an eviction
-        /// must not resurrect the engine (issue 1339).
-        #[test]
-        fn engine_alive_for_unknown_is_noop() {
-            let (_chassis, mailer, cells) = boot();
-            let after = push_then_list(
-                &mailer,
-                &cells,
-                &EngineAlive {
-                    engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+    /// `on_terminate` with an `engine_id` that isn't a UUID, and one
+    /// that is well-formed but names no supervised engine, both reply
+    /// `Err` rather than panicking.
+    #[test]
+    fn terminate_unknown_engine_replies_err() {
+        let (_chassis, mailer, cells) = boot();
+
+        let malformed = drive(
+            &mailer,
+            &TerminateEngine {
+                engine_id: "not-a-uuid".to_owned(),
+            },
+            || {
+                cells
+                    .terminate
+                    .lock()
+                    .expect("test setup: terminate cell mutex poisoned")
+                    .take()
+            },
+        );
+        assert!(
+            matches!(malformed, TerminateEngineResult::Err { .. }),
+            "a malformed engine_id should be rejected",
+        );
+
+        let unknown = drive(
+            &mailer,
+            &TerminateEngine {
+                engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+            },
+            || {
+                cells
+                    .terminate
+                    .lock()
+                    .expect("test setup: terminate cell mutex poisoned")
+                    .take()
+            },
+        );
+        assert!(
+            matches!(unknown, TerminateEngineResult::Err { .. }),
+            "a well-formed but unknown engine_id should be rejected",
+        );
+    }
+
+    /// `on_engine_died` for an engine the cap never supervised — the
+    /// terminate-race / double-report case — is an idempotent no-op,
+    /// not a panic, and inserts nothing. Covers both a malformed and a
+    /// well-formed-but-unknown `engine_id` (issue 1339). The
+    /// `is_some()` guard also keeps the death off the recently-died
+    /// ring: a `died` for an engine we never knew records no phantom
+    /// death, which is what keeps the ring one-record-per-real-death
+    /// under the idempotent duplicate-`died` contract (issue 1906).
+    #[test]
+    fn engine_died_for_unknown_is_noop() {
+        let (_chassis, mailer, cells) = boot();
+
+        let after_malformed = push_then_list(
+            &mailer,
+            &cells,
+            &EngineDied {
+                engine_id: "not-a-uuid".to_owned(),
+                reason: DeathReason::Crashed {
+                    detail: "peer closed".to_owned(),
                 },
-            );
-            assert!(
-                after.engines.is_empty(),
-                "an alive for an unknown engine must not insert it",
-            );
-        }
+            },
+        );
+        assert!(
+            after_malformed.engines.is_empty(),
+            "a malformed died must not panic or insert",
+        );
+        assert!(
+            after_malformed.recently_died.is_empty(),
+            "a malformed died records no phantom death",
+        );
+
+        let after_unknown = push_then_list(
+            &mailer,
+            &cells,
+            &EngineDied {
+                engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+                reason: DeathReason::Evicted {
+                    detail: "heartbeat miss limit 3 of 3".to_owned(),
+                },
+            },
+        );
+        assert!(
+            after_unknown.engines.is_empty(),
+            "a died for an unknown engine is a no-op",
+        );
+        assert!(
+            after_unknown.recently_died.is_empty(),
+            "a died for an unknown engine records no phantom death",
+        );
+    }
+
+    /// `on_engine_alive` for an unknown engine is a silent no-op (no
+    /// panic, no spurious insert) — a stale `alive` racing an eviction
+    /// must not resurrect the engine (issue 1339).
+    #[test]
+    fn engine_alive_for_unknown_is_noop() {
+        let (_chassis, mailer, cells) = boot();
+        let after = push_then_list(
+            &mailer,
+            &cells,
+            &EngineAlive {
+                engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+            },
+        );
+        assert!(
+            after.engines.is_empty(),
+            "an alive for an unknown engine must not insert it",
+        );
     }
 }

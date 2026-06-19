@@ -251,178 +251,169 @@ mod native {
             Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xfeed))))
         }
 
-        /// These boot the cap on its dispatcher thread and sleep-poll the
-        /// hub-outbound channel under a multi-second deadline (one joins the
-        /// dispatcher thread), so they live in `mod heavy` for the
-        /// `serial-heavy` nextest group (issue 1522).
-        mod heavy {
-            use super::*;
+        /// End-to-end through the cap: boot it via `with_actor`, push a
+        /// `HandlePublish` mail at the registered mailbox, the dispatcher
+        /// thread runs the macro-emitted `NativeDispatch::__aether_dispatch_envelope`
+        /// which calls `on_publish`, the reply lands on the hub-outbound
+        /// channel via the ADR-0112 `-> R` reply path →
+        /// `Mailer::send_reply` → `outbound.send_reply`.
+        #[test]
+        fn capability_routes_publish_through_dispatcher_thread() {
+            let (store, mailer, registry, rx) = fresh_substrate();
 
-            /// End-to-end through the cap: boot it via `with_actor`, push a
-            /// `HandlePublish` mail at the registered mailbox, the dispatcher
-            /// thread runs the macro-emitted `NativeDispatch::__aether_dispatch_envelope`
-            /// which calls `on_publish`, the reply lands on the hub-outbound
-            /// channel via the ADR-0112 `-> R` reply path →
-            /// `Mailer::send_reply` → `outbound.send_reply`.
-            #[test]
-            fn capability_routes_publish_through_dispatcher_thread() {
-                let (store, mailer, registry, rx) = fresh_substrate();
+            let chassis = boot_test_chassis_with::<HandleCapability>(&registry, &mailer, ());
 
-                let chassis = boot_test_chassis_with::<HandleCapability>(&registry, &mailer, ());
+            let id = registry
+                .lookup(HandleCapability::NAMESPACE)
+                .expect("mailbox registered");
+            let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("entry") else {
+                panic!("expected mailbox entry");
+            };
 
-                let id = registry
-                    .lookup(HandleCapability::NAMESPACE)
-                    .expect("mailbox registered");
-                let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("entry") else {
-                    panic!("expected mailbox entry");
-                };
+            let req = HandlePublish {
+                kind_id: KindId(0xCAFE),
+                bytes: vec![1, 2, 3, 4, 5],
+            };
+            let bytes = req.encode_into_bytes();
+            handler.enqueue(OwnedDispatch::disarmed(
+                <HandlePublish as Kind>::ID,
+                "aether.handle.publish".to_owned(),
+                None,
+                session_reply_to(),
+                MailRef::from(bytes),
+                1,
+                MailId::NONE,
+                MailId::NONE,
+                None,
+                Nanos(0),
+                0,
+                aether_data::MailboxId(0),
+            ));
 
-                let req = HandlePublish {
-                    kind_id: KindId(0xCAFE),
-                    bytes: vec![1, 2, 3, 4, 5],
-                };
-                let bytes = req.encode_into_bytes();
-                handler.enqueue(OwnedDispatch::disarmed(
-                    <HandlePublish as Kind>::ID,
-                    "aether.handle.publish".to_owned(),
-                    None,
-                    session_reply_to(),
-                    MailRef::from(bytes),
-                    1,
-                    MailId::NONE,
-                    MailId::NONE,
-                    None,
-                    Nanos(0),
-                    0,
-                    aether_data::MailboxId(0),
-                ));
-
-                let deadline = Instant::now() + Duration::from_secs(2);
-                let frame = loop {
-                    if let Ok(f) = rx.try_recv() {
-                        break f;
-                    }
-                    assert!(
-                        Instant::now() < deadline,
-                        "publish reply did not arrive within deadline"
-                    );
-                    thread::sleep(Duration::from_millis(5));
-                };
-                let payload = match frame {
-                    EgressEvent::ToSession { payload, .. } => payload,
-                    other => panic!("expected ToSession egress, got {other:?}"),
-                };
-                let result = HandlePublishResult::decode_from_bytes(&payload)
-                    .expect("test setup: HandlePublishResult decodes");
-                let HandlePublishResult::Ok {
-                    kind_id,
-                    id: handle_id,
-                } = result
-                else {
-                    panic!("expected Ok, got {result:?}");
-                };
-                assert_eq!(kind_id, KindId(0xCAFE));
-                assert_ne!(handle_id, HandleId(0));
-                let (stored_kind, stored_bytes) = store
-                    .get(handle_id)
-                    .expect("test setup: stored handle should be retrievable");
-                assert_eq!(stored_kind, KindId(0xCAFE));
-                assert_eq!(stored_bytes, vec![1, 2, 3, 4, 5]);
-
-                drop(chassis);
-            }
-
-            /// `aether.handle.describe` flows through the cap and returns a
-            /// `HandleDescribeResult` whose counts match the store contents
-            /// (ADR-0049 §10).
-            #[test]
-            fn capability_describe_summarizes_store() {
-                use aether_kinds::{HandleDescribe, HandleDescribeResult};
-
-                let (store, mailer, registry, rx) = fresh_substrate();
-                // Pre-populate the store: 3 entries, 1 pinned.
-                store
-                    .put(HandleId(1), KindId(0xA), vec![0u8; 100])
-                    .expect("put 1");
-                store
-                    .put(HandleId(2), KindId(0xB), vec![0u8; 200])
-                    .expect("put 2");
-                store
-                    .put(HandleId(3), KindId(0xC), vec![0u8; 50])
-                    .expect("put 3");
-                store.pin(HandleId(2));
-
-                let chassis = boot_test_chassis_with::<HandleCapability>(&registry, &mailer, ());
-
-                let id = registry
-                    .lookup(HandleCapability::NAMESPACE)
-                    .expect("mailbox registered");
-                let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("entry") else {
-                    panic!("expected mailbox entry");
-                };
-
-                let req = HandleDescribe { max: 16 };
-                let bytes = req.encode_into_bytes();
-                handler.enqueue(OwnedDispatch::disarmed(
-                    <HandleDescribe as Kind>::ID,
-                    "aether.handle.describe".to_owned(),
-                    None,
-                    session_reply_to(),
-                    MailRef::from(bytes),
-                    1,
-                    MailId::NONE,
-                    MailId::NONE,
-                    None,
-                    Nanos(0),
-                    0,
-                    aether_data::MailboxId(0),
-                ));
-
-                let deadline = Instant::now() + Duration::from_secs(2);
-                let frame = loop {
-                    if let Ok(f) = rx.try_recv() {
-                        break f;
-                    }
-                    assert!(Instant::now() < deadline, "describe reply did not arrive");
-                    thread::sleep(Duration::from_millis(5));
-                };
-                let payload = match frame {
-                    EgressEvent::ToSession { payload, .. } => payload,
-                    other => panic!("expected ToSession egress, got {other:?}"),
-                };
-                let result = HandleDescribeResult::decode_from_bytes(&payload)
-                    .expect("HandleDescribeResult decodes");
-                assert_eq!(result.total_entries, 3);
-                assert_eq!(result.in_memory_entries, 3);
-                assert_eq!(result.pinned_entries, 1);
-                assert_eq!(result.in_memory_bytes, 350);
-                // top_by_size descending: the 200-byte entry leads.
-                assert_eq!(result.top_by_size.first().map(|s| s.bytes_len), Some(200));
-
-                drop(chassis);
-            }
-
-            /// Channel-drop shutdown: drop the chassis, the cap's dispatcher
-            /// thread exits within a generous deadline.
-            #[test]
-            fn shutdown_joins_dispatcher_thread() {
-                let (_store, mailer, registry, _rx) = fresh_substrate();
-
-                //noinspection DuplicatedCode
-                let chassis =
-                    Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                        .with_actor::<HandleCapability>(())
-                        .build_passive()
-                        .expect("capability boots");
-
-                let start = Instant::now();
-                drop(chassis);
-                let elapsed = start.elapsed();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let frame = loop {
+                if let Ok(f) = rx.try_recv() {
+                    break f;
+                }
                 assert!(
-                    elapsed < Duration::from_millis(500),
-                    "shutdown should complete promptly via channel-drop (took {elapsed:?})"
+                    Instant::now() < deadline,
+                    "publish reply did not arrive within deadline"
                 );
-            }
+                thread::sleep(Duration::from_millis(5));
+            };
+            let payload = match frame {
+                EgressEvent::ToSession { payload, .. } => payload,
+                other => panic!("expected ToSession egress, got {other:?}"),
+            };
+            let result = HandlePublishResult::decode_from_bytes(&payload)
+                .expect("test setup: HandlePublishResult decodes");
+            let HandlePublishResult::Ok {
+                kind_id,
+                id: handle_id,
+            } = result
+            else {
+                panic!("expected Ok, got {result:?}");
+            };
+            assert_eq!(kind_id, KindId(0xCAFE));
+            assert_ne!(handle_id, HandleId(0));
+            let (stored_kind, stored_bytes) = store
+                .get(handle_id)
+                .expect("test setup: stored handle should be retrievable");
+            assert_eq!(stored_kind, KindId(0xCAFE));
+            assert_eq!(stored_bytes, vec![1, 2, 3, 4, 5]);
+
+            drop(chassis);
+        }
+
+        /// `aether.handle.describe` flows through the cap and returns a
+        /// `HandleDescribeResult` whose counts match the store contents
+        /// (ADR-0049 §10).
+        #[test]
+        fn capability_describe_summarizes_store() {
+            use aether_kinds::{HandleDescribe, HandleDescribeResult};
+
+            let (store, mailer, registry, rx) = fresh_substrate();
+            // Pre-populate the store: 3 entries, 1 pinned.
+            store
+                .put(HandleId(1), KindId(0xA), vec![0u8; 100])
+                .expect("put 1");
+            store
+                .put(HandleId(2), KindId(0xB), vec![0u8; 200])
+                .expect("put 2");
+            store
+                .put(HandleId(3), KindId(0xC), vec![0u8; 50])
+                .expect("put 3");
+            store.pin(HandleId(2));
+
+            let chassis = boot_test_chassis_with::<HandleCapability>(&registry, &mailer, ());
+
+            let id = registry
+                .lookup(HandleCapability::NAMESPACE)
+                .expect("mailbox registered");
+            let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("entry") else {
+                panic!("expected mailbox entry");
+            };
+
+            let req = HandleDescribe { max: 16 };
+            let bytes = req.encode_into_bytes();
+            handler.enqueue(OwnedDispatch::disarmed(
+                <HandleDescribe as Kind>::ID,
+                "aether.handle.describe".to_owned(),
+                None,
+                session_reply_to(),
+                MailRef::from(bytes),
+                1,
+                MailId::NONE,
+                MailId::NONE,
+                None,
+                Nanos(0),
+                0,
+                aether_data::MailboxId(0),
+            ));
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let frame = loop {
+                if let Ok(f) = rx.try_recv() {
+                    break f;
+                }
+                assert!(Instant::now() < deadline, "describe reply did not arrive");
+                thread::sleep(Duration::from_millis(5));
+            };
+            let payload = match frame {
+                EgressEvent::ToSession { payload, .. } => payload,
+                other => panic!("expected ToSession egress, got {other:?}"),
+            };
+            let result = HandleDescribeResult::decode_from_bytes(&payload)
+                .expect("HandleDescribeResult decodes");
+            assert_eq!(result.total_entries, 3);
+            assert_eq!(result.in_memory_entries, 3);
+            assert_eq!(result.pinned_entries, 1);
+            assert_eq!(result.in_memory_bytes, 350);
+            // top_by_size descending: the 200-byte entry leads.
+            assert_eq!(result.top_by_size.first().map(|s| s.bytes_len), Some(200));
+
+            drop(chassis);
+        }
+
+        /// Channel-drop shutdown: drop the chassis, the cap's dispatcher
+        /// thread exits within a generous deadline.
+        #[test]
+        fn shutdown_joins_dispatcher_thread() {
+            let (_store, mailer, registry, _rx) = fresh_substrate();
+
+            //noinspection DuplicatedCode
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_actor::<HandleCapability>(())
+                .build_passive()
+                .expect("capability boots");
+
+            let start = Instant::now();
+            drop(chassis);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < Duration::from_millis(500),
+                "shutdown should complete promptly via channel-drop (took {elapsed:?})"
+            );
         }
 
         /// Builder rejects a duplicate claim if the well-known mailbox

@@ -1302,178 +1302,172 @@ mod tests {
         assert!(port_of(&chassis) > 0, "bound to an OS-picked port");
     }
 
-    mod heavy {
-        use super::{
-            Arc, Builder, EchoHttpHandler, HttpServerCapability, SilentHttpHandler, TestChassis,
-            TraceDispatchCapability, config_for, fresh_substrate, port_of, round_trip,
-        };
-        use aether_actor::Addressable;
+    use aether_actor::Addressable;
 
-        fn body_of(response: &str) -> &str {
-            response.split_once("\r\n\r\n").map_or("", |(_, body)| body)
-        }
+    fn body_of(response: &str) -> &str {
+        response.split_once("\r\n\r\n").map_or("", |(_, body)| body)
+    }
 
-        /// A GET round-trips to the handler and its reply returns as
-        /// well-formed HTTP/1.1, carrying the parsed path / query / method.
-        #[test]
-        fn get_round_trips_to_handler() {
-            let (registry, mailer) = fresh_substrate();
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<EchoHttpHandler>(())
-                .with_actor::<HttpServerCapability>(config_for(
-                    <EchoHttpHandler as Addressable>::NAMESPACE,
-                    1024,
-                ))
-                .build_passive()
-                .expect("caps boot");
+    /// A GET round-trips to the handler and its reply returns as
+    /// well-formed HTTP/1.1, carrying the parsed path / query / method.
+    #[test]
+    fn get_round_trips_to_handler() {
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<EchoHttpHandler>(())
+            .with_actor::<HttpServerCapability>(config_for(
+                <EchoHttpHandler as Addressable>::NAMESPACE,
+                1024,
+            ))
+            .build_passive()
+            .expect("caps boot");
 
-            let response = round_trip(
-                port_of(&chassis),
-                b"GET /hello?name=ada HTTP/1.1\r\nHost: localhost\r\n\r\n",
-            );
-            assert!(
-                response.starts_with("HTTP/1.1 200 OK\r\n"),
-                "expected 200 status line, got: {response:?}",
-            );
-            assert!(
-                response.contains("x-aether-method: Get\r\n"),
-                "{response:?}"
-            );
-            assert!(
-                response.contains("x-aether-path: /hello\r\n"),
-                "{response:?}"
-            );
-            assert!(
-                response.contains("x-aether-query: name=ada\r\n"),
-                "{response:?}",
-            );
-            assert!(response.contains("Content-Length: 0\r\n"), "{response:?}");
-            assert!(response.contains("Date: "), "{response:?}");
-            assert!(response.contains("Connection: close\r\n"), "{response:?}");
-        }
+        let response = round_trip(
+            port_of(&chassis),
+            b"GET /hello?name=ada HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK\r\n"),
+            "expected 200 status line, got: {response:?}",
+        );
+        assert!(
+            response.contains("x-aether-method: Get\r\n"),
+            "{response:?}"
+        );
+        assert!(
+            response.contains("x-aether-path: /hello\r\n"),
+            "{response:?}"
+        );
+        assert!(
+            response.contains("x-aether-query: name=ada\r\n"),
+            "{response:?}",
+        );
+        assert!(response.contains("Content-Length: 0\r\n"), "{response:?}");
+        assert!(response.contains("Date: "), "{response:?}");
+        assert!(response.contains("Connection: close\r\n"), "{response:?}");
+    }
 
-        /// A POST round-trips the body verbatim to the handler.
-        #[test]
-        fn post_round_trips_body() {
-            let (registry, mailer) = fresh_substrate();
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<EchoHttpHandler>(())
-                .with_actor::<HttpServerCapability>(config_for(
-                    <EchoHttpHandler as Addressable>::NAMESPACE,
-                    1024,
-                ))
-                .build_passive()
-                .expect("caps boot");
+    /// A POST round-trips the body verbatim to the handler.
+    #[test]
+    fn post_round_trips_body() {
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<EchoHttpHandler>(())
+            .with_actor::<HttpServerCapability>(config_for(
+                <EchoHttpHandler as Addressable>::NAMESPACE,
+                1024,
+            ))
+            .build_passive()
+            .expect("caps boot");
 
-            let response = round_trip(
-                port_of(&chassis),
-                b"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello",
-            );
-            assert!(
-                response.starts_with("HTTP/1.1 200 OK\r\n"),
-                "expected 200, got: {response:?}",
-            );
-            assert!(
-                response.contains("x-aether-method: Post\r\n"),
-                "{response:?}"
-            );
-            assert_eq!(body_of(&response), "hello", "body echoed verbatim");
-        }
+        let response = round_trip(
+            port_of(&chassis),
+            b"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello",
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK\r\n"),
+            "expected 200, got: {response:?}",
+        );
+        assert!(
+            response.contains("x-aether-method: Post\r\n"),
+            "{response:?}"
+        );
+        assert_eq!(body_of(&response), "hello", "body echoed verbatim");
+    }
 
-        /// An announced `Content-Length` past the body cap is answered
-        /// `413` before any dispatch.
-        #[test]
-        fn oversize_body_is_413() {
-            let (registry, mailer) = fresh_substrate();
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<EchoHttpHandler>(())
-                .with_actor::<HttpServerCapability>(config_for(
-                    <EchoHttpHandler as Addressable>::NAMESPACE,
-                    8,
-                ))
-                .build_passive()
-                .expect("caps boot");
+    /// An announced `Content-Length` past the body cap is answered
+    /// `413` before any dispatch.
+    #[test]
+    fn oversize_body_is_413() {
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<EchoHttpHandler>(())
+            .with_actor::<HttpServerCapability>(config_for(
+                <EchoHttpHandler as Addressable>::NAMESPACE,
+                8,
+            ))
+            .build_passive()
+            .expect("caps boot");
 
-            let response = round_trip(
-                port_of(&chassis),
-                b"POST /big HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n",
-            );
-            assert!(
-                response.starts_with("HTTP/1.1 413 "),
-                "expected 413, got: {response:?}",
-            );
-        }
+        let response = round_trip(
+            port_of(&chassis),
+            b"POST /big HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n",
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 413 "),
+            "expected 413, got: {response:?}",
+        );
+    }
 
-        /// A non-enumerated method is answered `501` before any dispatch.
-        #[test]
-        fn unknown_method_is_501() {
-            let (registry, mailer) = fresh_substrate();
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<EchoHttpHandler>(())
-                .with_actor::<HttpServerCapability>(config_for(
-                    <EchoHttpHandler as Addressable>::NAMESPACE,
-                    1024,
-                ))
-                .build_passive()
-                .expect("caps boot");
+    /// A non-enumerated method is answered `501` before any dispatch.
+    #[test]
+    fn unknown_method_is_501() {
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<EchoHttpHandler>(())
+            .with_actor::<HttpServerCapability>(config_for(
+                <EchoHttpHandler as Addressable>::NAMESPACE,
+                1024,
+            ))
+            .build_passive()
+            .expect("caps boot");
 
-            let response = round_trip(
-                port_of(&chassis),
-                b"FROB /x HTTP/1.1\r\nHost: localhost\r\n\r\n",
-            );
-            assert!(
-                response.starts_with("HTTP/1.1 501 "),
-                "expected 501, got: {response:?}",
-            );
-        }
+        let response = round_trip(
+            port_of(&chassis),
+            b"FROB /x HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 501 "),
+            "expected 501, got: {response:?}",
+        );
+    }
 
-        /// A request whose configured handler resolves to nothing is
-        /// answered `503`.
-        #[test]
-        fn no_handler_is_503() {
-            let (registry, mailer) = fresh_substrate();
-            // The handler mailbox is named but no actor is registered under it.
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<HttpServerCapability>(config_for("aether.http.absent_handler", 1024))
-                .build_passive()
-                .expect("server boots");
+    /// A request whose configured handler resolves to nothing is
+    /// answered `503`.
+    #[test]
+    fn no_handler_is_503() {
+        let (registry, mailer) = fresh_substrate();
+        // The handler mailbox is named but no actor is registered under it.
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<HttpServerCapability>(config_for("aether.http.absent_handler", 1024))
+            .build_passive()
+            .expect("server boots");
 
-            let response = round_trip(
-                port_of(&chassis),
-                b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
-            );
-            assert!(
-                response.starts_with("HTTP/1.1 503 "),
-                "expected 503, got: {response:?}",
-            );
-        }
+        let response = round_trip(
+            port_of(&chassis),
+            b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 503 "),
+            "expected 503, got: {response:?}",
+        );
+    }
 
-        /// A handler that receives the request but never replies settles
-        /// into `502` via the settlement safety net.
-        #[test]
-        fn response_less_chain_is_502() {
-            let (registry, mailer) = fresh_substrate();
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                // TraceDispatchCapability folds trace events into per-root
-                // counters and fires settlement once a root drains; without it
-                // the server's settlement subscription never wakes.
-                .with_actor::<TraceDispatchCapability>(())
-                .with_actor::<SilentHttpHandler>(())
-                .with_actor::<HttpServerCapability>(config_for(
-                    <SilentHttpHandler as Addressable>::NAMESPACE,
-                    1024,
-                ))
-                .build_passive()
-                .expect("caps boot");
+    /// A handler that receives the request but never replies settles
+    /// into `502` via the settlement safety net.
+    #[test]
+    fn response_less_chain_is_502() {
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            // TraceDispatchCapability folds trace events into per-root
+            // counters and fires settlement once a root drains; without it
+            // the server's settlement subscription never wakes.
+            .with_actor::<TraceDispatchCapability>(())
+            .with_actor::<SilentHttpHandler>(())
+            .with_actor::<HttpServerCapability>(config_for(
+                <SilentHttpHandler as Addressable>::NAMESPACE,
+                1024,
+            ))
+            .build_passive()
+            .expect("caps boot");
 
-            let response = round_trip(
-                port_of(&chassis),
-                b"GET /drop HTTP/1.1\r\nHost: localhost\r\n\r\n",
-            );
-            assert!(
-                response.starts_with("HTTP/1.1 502 "),
-                "expected 502, got: {response:?}",
-            );
-        }
+        let response = round_trip(
+            port_of(&chassis),
+            b"GET /drop HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 502 "),
+            "expected 502, got: {response:?}",
+        );
     }
 }

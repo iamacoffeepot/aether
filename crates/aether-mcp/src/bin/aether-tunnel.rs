@@ -747,7 +747,6 @@ mod tests {
     /// last one could (the stub spaces them 300ms apart). If the proxy
     /// buffered the body to EOF, the first read would block until the
     /// whole stream finished — this guards against that regression.
-    /// Driven by `mod heavy::sse_get_streams_incrementally_without_buffering`.
     async fn run_sse_streams_incrementally() {
         let upstream = start_stub_upstream().await;
         let (tunnel_port, _t) = start_tunnel_with_upstream(upstream, sleep_hub_spec()).await;
@@ -871,19 +870,13 @@ mod tests {
         serde_json::from_str(&text).expect("json body")
     }
 
-    /// Contention/backoff-sensitive tests live in `mod heavy`: the SSE timing
-    /// assertion and the restart-pid race are timing-sensitive under load, so
-    /// they are serialized into the `serial-heavy` nextest group
-    /// (`.config/nextest.toml`). Each delegates to its `run_*` body.
-    mod heavy {
-        #[tokio::test]
-        async fn sse_get_streams_incrementally_without_buffering() {
-            super::run_sse_streams_incrementally().await;
-        }
+    #[tokio::test]
+    async fn sse_get_streams_incrementally_without_buffering() {
+        run_sse_streams_incrementally().await;
+    }
 
-        #[tokio::test]
-        async fn restart_hub_cycles_the_child() {
-            super::run_restart_hub_cycles_the_child().await;
-        }
+    #[tokio::test]
+    async fn restart_hub_cycles_the_child() {
+        run_restart_hub_cycles_the_child().await;
     }
 }

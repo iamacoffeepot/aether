@@ -13,9 +13,8 @@
 //! and per-node out-degree — over the same analytic fields, so a one-bit
 //! change in either the solver or the corridor pass surfaces here.
 //!
-//! Not `mod heavy` — the solver is a pure synchronous function with no
-//! dispatcher or timing dependence, so this belongs in the normal
-//! parallel test set.
+//! The solver is a pure synchronous function with no dispatcher or timing
+//! dependence, so these run in the normal parallel test set.
 
 use crate::corridor::build_corridor_graph_core;
 use crate::reachability::{UNREACHABLE, solve_cost_to_reach};

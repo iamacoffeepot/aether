@@ -164,332 +164,323 @@ fn wait_for(target: u32, counter: &AtomicU32, budget: Duration) -> bool {
     counter.load(AtomicOrdering::SeqCst) >= target
 }
 
-/// Dispatcher-thread tests: each boots a cap and `wait_for`/sleep-polls an
-/// atomic up to a target under a 500ms–2s deadline (some spawn pool
-/// workers), so they live in `mod heavy` for the `serial-heavy` nextest
-/// group (issue 1522).
-mod heavy {
-    use super::*;
+#[test]
+fn macro_emitted_cap_routes_postcard_kind_through_dispatch() {
+    let (registry, mailer) = fresh_substrate();
+    let greet_total = Arc::new(AtomicU32::new(0));
+    let ping_total = Arc::new(AtomicU32::new(0));
 
-    #[test]
-    fn macro_emitted_cap_routes_postcard_kind_through_dispatch() {
-        let (registry, mailer) = fresh_substrate();
-        let greet_total = Arc::new(AtomicU32::new(0));
-        let ping_total = Arc::new(AtomicU32::new(0));
+    let chassis: PassiveChassis<TestChassis> =
+        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<MacroProbeCap>(ProbeConfig {
+                greet_total: Arc::clone(&greet_total),
+                ping_total: Arc::clone(&ping_total),
+            })
+            .build_passive()
+            .expect("macro-emitted cap boots");
 
-        let chassis: PassiveChassis<TestChassis> =
-            Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<MacroProbeCap>(ProbeConfig {
-                    greet_total: Arc::clone(&greet_total),
-                    ping_total: Arc::clone(&ping_total),
-                })
-                .build_passive()
-                .expect("macro-emitted cap boots");
+    push_envelope(&registry, MacroProbeCap::NAMESPACE, &Greet { tag: 7 });
+    assert!(
+        wait_for(7, &greet_total, Duration::from_millis(500)),
+        "macro dispatcher should route Greet → on_greet within budget"
+    );
+    assert_eq!(ping_total.load(AtomicOrdering::SeqCst), 0);
 
-        push_envelope(&registry, MacroProbeCap::NAMESPACE, &Greet { tag: 7 });
+    drop(chassis);
+}
+
+/// iamacoffeepot/aether#1135: a blob demuxer seeds a free `Pooled` actor
+/// via `seize_and_run` — the seed dispatches in place (no inbox deposit /
+/// `try_recv` repop) and the slot returns to `Idle`. Boots a real Pooled
+/// actor through the chassis, lets it quiesce, then resolves the seize
+/// handle off its registry `Inbox` entry, wins the `Idle → Running` seize,
+/// and runs one seed envelope.
+#[test]
+fn seize_and_run_dispatches_seed_in_place() {
+    use aether_substrate::mail::registry::MailboxEntry;
+    use aether_substrate::scheduler::{BatchBudget, SlotStateLabel};
+
+    let (registry, mailer) = fresh_substrate();
+    let greet_total = Arc::new(AtomicU32::new(0));
+    let ping_total = Arc::new(AtomicU32::new(0));
+
+    let chassis: PassiveChassis<TestChassis> =
+        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<MacroProbeCap>(ProbeConfig {
+                greet_total: Arc::clone(&greet_total),
+                ping_total: Arc::clone(&ping_total),
+            })
+            .build_passive()
+            .expect("macro-emitted cap boots");
+
+    let id = registry
+        .lookup(MacroProbeCap::NAMESPACE)
+        .expect("cap mailbox registered");
+
+    // The cap boots with no pre-load mail, so its slot quiesces to `Idle`.
+    // Resolve the seize handle off the `Inbox` entry's deferred cell (the
+    // #1135 surfacing) and wait for the slot to be seizable.
+    let MailboxEntry::Inbox { seize, .. } = registry.entry(id).expect("entry exists") else {
+        panic!("expected an Inbox entry for the Pooled cap");
+    };
+    let seize = seize.get().expect("a Pooled actor exposes a seize handle");
+
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let slot = loop {
+        if let Some(slot) = seize.try_seize() {
+            break slot;
+        }
         assert!(
-            wait_for(7, &greet_total, Duration::from_millis(500)),
-            "macro dispatcher should route Greet → on_greet within budget"
+            Instant::now() < deadline,
+            "Pooled slot should quiesce to Idle and become seizable"
         );
-        assert_eq!(ping_total.load(AtomicOrdering::SeqCst), 0);
+        thread::sleep(Duration::from_millis(5));
+    };
+    // The seize put the slot in `Running`.
+    assert_eq!(seize.state().current(), SlotStateLabel::Running);
 
-        drop(chassis);
-    }
+    // Build one seed envelope and dispatch it in place — no inbox bounce.
+    let payload = Greet { tag: 11 }.encode_into_bytes();
+    let seed = OwnedDispatch::disarmed(
+        <Greet as Kind>::ID,
+        Greet::NAME.to_owned(),
+        None,
+        Source::NONE,
+        MailRef::from(payload),
+        1,
+        MailId::NONE,
+        MailId::NONE,
+        None,
+        // The #1135 contract: a direct-dispatched seed has residence ≈ 0.
+        Nanos(0),
+        0,
+        MailboxId(0),
+    );
+    slot.seize_and_run(seed, BatchBudget::standard());
 
-    /// iamacoffeepot/aether#1135: a blob demuxer seeds a free `Pooled` actor
-    /// via `seize_and_run` — the seed dispatches in place (no inbox deposit /
-    /// `try_recv` repop) and the slot returns to `Idle`. Boots a real Pooled
-    /// actor through the chassis, lets it quiesce, then resolves the seize
-    /// handle off its registry `Inbox` entry, wins the `Idle → Running` seize,
-    /// and runs one seed envelope.
-    #[test]
-    fn seize_and_run_dispatches_seed_in_place() {
-        use aether_substrate::mail::registry::MailboxEntry;
-        use aether_substrate::scheduler::{BatchBudget, SlotStateLabel};
+    // Handler ran exactly once; the slot drained empty back to `Idle`.
+    assert_eq!(
+        greet_total.load(AtomicOrdering::SeqCst),
+        11,
+        "the seed dispatched through on_greet in place"
+    );
+    assert_eq!(ping_total.load(AtomicOrdering::SeqCst), 0);
+    assert_eq!(
+        seize.state().current(),
+        SlotStateLabel::Idle,
+        "the slot drained empty and returned to Idle"
+    );
 
-        let (registry, mailer) = fresh_substrate();
-        let greet_total = Arc::new(AtomicU32::new(0));
-        let ping_total = Arc::new(AtomicU32::new(0));
+    drop(chassis);
+}
 
-        let chassis: PassiveChassis<TestChassis> =
-            Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<MacroProbeCap>(ProbeConfig {
-                    greet_total: Arc::clone(&greet_total),
-                    ping_total: Arc::clone(&ping_total),
-                })
-                .build_passive()
-                .expect("macro-emitted cap boots");
+#[test]
+fn macro_emitted_cap_routes_cast_kind_through_dispatch() {
+    let (registry, mailer) = fresh_substrate();
+    let greet_total = Arc::new(AtomicU32::new(0));
+    let ping_total = Arc::new(AtomicU32::new(0));
 
-        let id = registry
-            .lookup(MacroProbeCap::NAMESPACE)
-            .expect("cap mailbox registered");
+    let chassis: PassiveChassis<TestChassis> =
+        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<MacroProbeCap>(ProbeConfig {
+                greet_total: Arc::clone(&greet_total),
+                ping_total: Arc::clone(&ping_total),
+            })
+            .build_passive()
+            .expect("macro-emitted cap boots");
 
-        // The cap boots with no pre-load mail, so its slot quiesces to `Idle`.
-        // Resolve the seize handle off the `Inbox` entry's deferred cell (the
-        // #1135 surfacing) and wait for the slot to be seizable.
-        let MailboxEntry::Inbox { seize, .. } = registry.entry(id).expect("entry exists") else {
-            panic!("expected an Inbox entry for the Pooled cap");
-        };
-        let seize = seize.get().expect("a Pooled actor exposes a seize handle");
+    push_envelope(&registry, MacroProbeCap::NAMESPACE, &Ping { seq: 42 });
+    assert!(
+        wait_for(42, &ping_total, Duration::from_millis(500)),
+        "macro dispatcher should route Ping → on_ping within budget"
+    );
+    assert_eq!(greet_total.load(AtomicOrdering::SeqCst), 0);
 
-        let deadline = Instant::now() + Duration::from_millis(500);
-        let slot = loop {
-            if let Some(slot) = seize.try_seize() {
-                break slot;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "Pooled slot should quiesce to Idle and become seizable"
-            );
-            thread::sleep(Duration::from_millis(5));
-        };
-        // The seize put the slot in `Running`.
-        assert_eq!(seize.state().current(), SlotStateLabel::Running);
+    drop(chassis);
+}
 
-        // Build one seed envelope and dispatch it in place — no inbox bounce.
-        let payload = Greet { tag: 11 }.encode_into_bytes();
-        let seed = OwnedDispatch::disarmed(
-            <Greet as Kind>::ID,
-            Greet::NAME.to_owned(),
-            None,
-            Source::NONE,
-            MailRef::from(payload),
-            1,
-            MailId::NONE,
-            MailId::NONE,
-            None,
-            // The #1135 contract: a direct-dispatched seed has residence ≈ 0.
-            Nanos(0),
-            0,
-            MailboxId(0),
-        );
-        slot.seize_and_run(seed, BatchBudget::standard());
+#[test]
+fn macro_routes_task_completions_by_output_type() {
+    let (registry, mailer) = fresh_substrate();
+    let obs = TaskObservations {
+        dispatched: Arc::new(AtomicU32::new(0)),
+        a_value: Arc::new(AtomicU64::new(0)),
+        a_calls: Arc::new(AtomicU32::new(0)),
+        b_tag: Arc::new(AtomicU32::new(0)),
+        b_calls: Arc::new(AtomicU32::new(0)),
+    };
 
-        // Handler ran exactly once; the slot drained empty back to `Idle`.
-        assert_eq!(
-            greet_total.load(AtomicOrdering::SeqCst),
-            11,
-            "the seed dispatched through on_greet in place"
-        );
-        assert_eq!(ping_total.load(AtomicOrdering::SeqCst), 0);
-        assert_eq!(
-            seize.state().current(),
-            SlotStateLabel::Idle,
-            "the slot drained empty and returned to Idle"
-        );
+    let chassis: PassiveChassis<TestChassis> =
+        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<TaskRouteCap>(obs.clone())
+            .build_passive()
+            .expect("task-routing cap boots");
 
-        drop(chassis);
-    }
+    // Kick off both dispatches. Each handler spawns a worker that fills
+    // the ledger and pushes a `TaskCompletionWake` back to this actor's
+    // own mailbox; the chassis redelivers those wakes through the macro's
+    // single completion arm, which routes each to its output-typed
+    // handler.
+    push_envelope(&registry, TaskRouteCap::NAMESPACE, &KickA { seed: 7 });
+    push_envelope(&registry, TaskRouteCap::NAMESPACE, &KickB { seed: 9 });
 
-    #[test]
-    fn macro_emitted_cap_routes_cast_kind_through_dispatch() {
-        let (registry, mailer) = fresh_substrate();
-        let greet_total = Arc::new(AtomicU32::new(0));
-        let ping_total = Arc::new(AtomicU32::new(0));
+    assert!(
+        wait_for(1, &obs.a_calls, Duration::from_secs(2)),
+        "the ResultA completion routed to on_result_a"
+    );
+    assert!(
+        wait_for(1, &obs.b_calls, Duration::from_secs(2)),
+        "the ResultB completion routed to on_result_b"
+    );
 
-        let chassis: PassiveChassis<TestChassis> =
-            Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<MacroProbeCap>(ProbeConfig {
-                    greet_total: Arc::clone(&greet_total),
-                    ping_total: Arc::clone(&ping_total),
-                })
-                .build_passive()
-                .expect("macro-emitted cap boots");
+    // Each completion landed on the correct handler with the correct
+    // payload — output-type routing, not a kind id.
+    assert_eq!(
+        obs.a_value.load(AtomicOrdering::SeqCst),
+        7,
+        "on_result_a saw its own dispatch's value"
+    );
+    assert_eq!(
+        obs.b_tag.load(AtomicOrdering::SeqCst),
+        9,
+        "on_result_b saw its own dispatch's tag"
+    );
 
-        push_envelope(&registry, MacroProbeCap::NAMESPACE, &Ping { seq: 42 });
-        assert!(
-            wait_for(42, &ping_total, Duration::from_millis(500)),
-            "macro dispatcher should route Ping → on_ping within budget"
-        );
-        assert_eq!(greet_total.load(AtomicOrdering::SeqCst), 0);
+    // Neither completion was mis-delivered to the other-typed handler:
+    // each task handler fired exactly once. A wrong-type probe in the
+    // completion arm must leave the ledger entry intact (non-consuming
+    // `try_take_task_done`) — if it consumed, one handler would swallow
+    // the other's completion and its call count would be 0.
+    assert_eq!(
+        obs.a_calls.load(AtomicOrdering::SeqCst),
+        1,
+        "on_result_a fired exactly once (no mis-routed extra completion)"
+    );
+    assert_eq!(
+        obs.b_calls.load(AtomicOrdering::SeqCst),
+        1,
+        "on_result_b fired exactly once"
+    );
+    assert_eq!(
+        obs.dispatched.load(AtomicOrdering::SeqCst),
+        2,
+        "both kick handlers dispatched a worker"
+    );
 
-        drop(chassis);
-    }
+    drop(chassis);
+}
 
-    #[test]
-    fn macro_routes_task_completions_by_output_type() {
-        let (registry, mailer) = fresh_substrate();
-        let obs = TaskObservations {
-            dispatched: Arc::new(AtomicU32::new(0)),
-            a_value: Arc::new(AtomicU64::new(0)),
-            a_calls: Arc::new(AtomicU32::new(0)),
-            b_tag: Arc::new(AtomicU32::new(0)),
-            b_calls: Arc::new(AtomicU32::new(0)),
-        };
+/// ADR-0109: a `-> Pending<R>` request handler plus a borrow-form
+/// `&TaskDone -> R` completion settles with exactly one reply of `R`.
+/// The macro arms no immediate reply on the request, and on completion
+/// calls `resolve_value` with the handler's returned value, routing it
+/// back to the original caller.
+#[test]
+fn macro_pending_request_borrow_completion_replies_once() {
+    let (registry, mailer) = fresh_substrate();
+    let obs = DeferredObs::new();
 
-        let chassis: PassiveChassis<TestChassis> =
-            Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<TaskRouteCap>(obs.clone())
-                .build_passive()
-                .expect("task-routing cap boots");
+    let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
+    let caller = registry.register_inbox(
+        "test.macro_native_actor.deferred_caller",
+        forward_to(reply_tx),
+    );
 
-        // Kick off both dispatches. Each handler spawns a worker that fills
-        // the ledger and pushes a `TaskCompletionWake` back to this actor's
-        // own mailbox; the chassis redelivers those wakes through the macro's
-        // single completion arm, which routes each to its output-typed
-        // handler.
-        push_envelope(&registry, TaskRouteCap::NAMESPACE, &KickA { seed: 7 });
-        push_envelope(&registry, TaskRouteCap::NAMESPACE, &KickB { seed: 9 });
+    let chassis: PassiveChassis<TestChassis> =
+        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<DeferredReplyCap>(obs.clone())
+            .build_passive()
+            .expect("deferred-reply cap boots");
 
-        assert!(
-            wait_for(1, &obs.a_calls, Duration::from_secs(2)),
-            "the ResultA completion routed to on_result_a"
-        );
-        assert!(
-            wait_for(1, &obs.b_calls, Duration::from_secs(2)),
-            "the ResultB completion routed to on_result_b"
-        );
+    // The inbound names the caller as its reply target, so the deferred
+    // reply routes back there.
+    let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 55);
+    push_envelope_replying_to(
+        &registry,
+        DeferredReplyCap::NAMESPACE,
+        &KickP { seed: 21 },
+        caller_reply_to,
+    );
 
-        // Each completion landed on the correct handler with the correct
-        // payload — output-type routing, not a kind id.
-        assert_eq!(
-            obs.a_value.load(AtomicOrdering::SeqCst),
-            7,
-            "on_result_a saw its own dispatch's value"
-        );
-        assert_eq!(
-            obs.b_tag.load(AtomicOrdering::SeqCst),
-            9,
-            "on_result_b saw its own dispatch's tag"
-        );
+    let reply = reply_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the deferred reply lands on the caller");
+    assert_eq!(
+        reply.kind,
+        <EchoReply as Kind>::ID,
+        "the completion's `-> EchoReply` return routed back as the reply"
+    );
+    let echoed = EchoReply::decode_from_bytes(reply.payload.bytes()).expect("the reply decodes");
+    assert_eq!(
+        echoed.value, 21,
+        "resolve_value sent the value the completion handler returned"
+    );
+    assert_eq!(
+        reply.sender.correlation_id, 55,
+        "the caller's correlation is echoed onto the reply"
+    );
+    assert_eq!(
+        obs.echo_calls.load(AtomicOrdering::SeqCst),
+        1,
+        "the borrow-form completion handler fired once"
+    );
 
-        // Neither completion was mis-delivered to the other-typed handler:
-        // each task handler fired exactly once. A wrong-type probe in the
-        // completion arm must leave the ledger entry intact (non-consuming
-        // `try_take_task_done`) — if it consumed, one handler would swallow
-        // the other's completion and its call count would be 0.
-        assert_eq!(
-            obs.a_calls.load(AtomicOrdering::SeqCst),
-            1,
-            "on_result_a fired exactly once (no mis-routed extra completion)"
-        );
-        assert_eq!(
-            obs.b_calls.load(AtomicOrdering::SeqCst),
-            1,
-            "on_result_b fired exactly once"
-        );
-        assert_eq!(
-            obs.dispatched.load(AtomicOrdering::SeqCst),
-            2,
-            "both kick handlers dispatched a worker"
-        );
+    // Exactly one reply settles — the macro must not also drop the
+    // TaskDone (which would re-release) or double-send.
+    assert!(
+        reply_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "exactly one reply settles for the deferred request"
+    );
 
-        drop(chassis);
-    }
+    drop(chassis);
+}
 
-    /// ADR-0109: a `-> Pending<R>` request handler plus a borrow-form
-    /// `&TaskDone -> R` completion settles with exactly one reply of `R`.
-    /// The macro arms no immediate reply on the request, and on completion
-    /// calls `resolve_value` with the handler's returned value, routing it
-    /// back to the original caller.
-    #[test]
-    fn macro_pending_request_borrow_completion_replies_once() {
-        let (registry, mailer) = fresh_substrate();
-        let obs = DeferredObs::new();
+/// ADR-0109: a borrow-form `&TaskDone -> ()` completion releases the
+/// hold without sending any reply. The macro emits `release_no_reply`,
+/// so the completion runs cleanly (no lost-reply `debug_assert`) and
+/// nothing routes back to the caller.
+#[test]
+fn macro_borrow_task_no_reply_releases_without_replying() {
+    let (registry, mailer) = fresh_substrate();
+    let obs = DeferredObs::new();
 
-        let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-        let caller = registry.register_inbox(
-            "test.macro_native_actor.deferred_caller",
-            forward_to(reply_tx),
-        );
+    let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
+    let caller = registry.register_inbox(
+        "test.macro_native_actor.deferred_silent_caller",
+        forward_to(reply_tx),
+    );
 
-        let chassis: PassiveChassis<TestChassis> =
-            Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<DeferredReplyCap>(obs.clone())
-                .build_passive()
-                .expect("deferred-reply cap boots");
+    let chassis: PassiveChassis<TestChassis> =
+        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<DeferredReplyCap>(obs.clone())
+            .build_passive()
+            .expect("deferred-reply cap boots");
 
-        // The inbound names the caller as its reply target, so the deferred
-        // reply routes back there.
-        let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 55);
-        push_envelope_replying_to(
-            &registry,
-            DeferredReplyCap::NAMESPACE,
-            &KickP { seed: 21 },
-            caller_reply_to,
-        );
+    let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 9);
+    push_envelope_replying_to(
+        &registry,
+        DeferredReplyCap::NAMESPACE,
+        &KickS { seed: 88 },
+        caller_reply_to,
+    );
 
-        let reply = reply_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("the deferred reply lands on the caller");
-        assert_eq!(
-            reply.kind,
-            <EchoReply as Kind>::ID,
-            "the completion's `-> EchoReply` return routed back as the reply"
-        );
-        let echoed =
-            EchoReply::decode_from_bytes(reply.payload.bytes()).expect("the reply decodes");
-        assert_eq!(
-            echoed.value, 21,
-            "resolve_value sent the value the completion handler returned"
-        );
-        assert_eq!(
-            reply.sender.correlation_id, 55,
-            "the caller's correlation is echoed onto the reply"
-        );
-        assert_eq!(
-            obs.echo_calls.load(AtomicOrdering::SeqCst),
-            1,
-            "the borrow-form completion handler fired once"
-        );
+    assert!(
+        wait_for(1, &obs.silent_calls, Duration::from_secs(2)),
+        "the no-reply completion ran (release_no_reply, no lost-reply panic)"
+    );
+    assert_eq!(
+        obs.silent_value.load(AtomicOrdering::SeqCst),
+        88,
+        "the no-reply completion saw its own worker output"
+    );
 
-        // Exactly one reply settles — the macro must not also drop the
-        // TaskDone (which would re-release) or double-send.
-        assert!(
-            reply_rx.recv_timeout(Duration::from_millis(200)).is_err(),
-            "exactly one reply settles for the deferred request"
-        );
+    // No reply was sent — release_no_reply discharges without replying.
+    assert!(
+        reply_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "a `&TaskDone -> ()` completion sends nothing back to the caller"
+    );
 
-        drop(chassis);
-    }
-
-    /// ADR-0109: a borrow-form `&TaskDone -> ()` completion releases the
-    /// hold without sending any reply. The macro emits `release_no_reply`,
-    /// so the completion runs cleanly (no lost-reply `debug_assert`) and
-    /// nothing routes back to the caller.
-    #[test]
-    fn macro_borrow_task_no_reply_releases_without_replying() {
-        let (registry, mailer) = fresh_substrate();
-        let obs = DeferredObs::new();
-
-        let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-        let caller = registry.register_inbox(
-            "test.macro_native_actor.deferred_silent_caller",
-            forward_to(reply_tx),
-        );
-
-        let chassis: PassiveChassis<TestChassis> =
-            Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<DeferredReplyCap>(obs.clone())
-                .build_passive()
-                .expect("deferred-reply cap boots");
-
-        let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 9);
-        push_envelope_replying_to(
-            &registry,
-            DeferredReplyCap::NAMESPACE,
-            &KickS { seed: 88 },
-            caller_reply_to,
-        );
-
-        assert!(
-            wait_for(1, &obs.silent_calls, Duration::from_secs(2)),
-            "the no-reply completion ran (release_no_reply, no lost-reply panic)"
-        );
-        assert_eq!(
-            obs.silent_value.load(AtomicOrdering::SeqCst),
-            88,
-            "the no-reply completion saw its own worker output"
-        );
-
-        // No reply was sent — release_no_reply discharges without replying.
-        assert!(
-            reply_rx.recv_timeout(Duration::from_millis(200)).is_err(),
-            "a `&TaskDone -> ()` completion sends nothing back to the caller"
-        );
-
-        drop(chassis);
-    }
+    drop(chassis);
 }
 
 /// Type-level assertion that the macro emits the universal
