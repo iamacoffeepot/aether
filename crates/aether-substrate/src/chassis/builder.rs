@@ -1656,8 +1656,8 @@ mod tests {
     struct StubLog;
     impl Addressable for StubLog {
         const NAMESPACE: &'static str = "test.chassis_builder.stub_log";
+        type Resolver = aether_actor::One;
     }
-    impl aether_actor::Singleton for StubLog {}
 
     impl aether_actor::Lifecycle for StubLog {
         type Config = ();
@@ -1779,8 +1779,8 @@ mod tests {
         struct FailingCap;
         impl Addressable for FailingCap {
             const NAMESPACE: &'static str = "test.phase7.failing_cap";
+            type Resolver = aether_actor::One;
         }
-        impl aether_actor::Singleton for FailingCap {}
 
         impl aether_actor::Lifecycle for FailingCap {
             type Config = ();
@@ -1876,8 +1876,8 @@ mod tests {
             }
             impl Addressable for ProbeCap {
                 const NAMESPACE: &'static str = "test.with_actor.probe";
+                type Resolver = aether_actor::One;
             }
-            impl aether_actor::Singleton for ProbeCap {}
             impl HandlesKind<Ping> for ProbeCap {}
 
             impl aether_actor::Lifecycle for ProbeCap {
@@ -2002,8 +2002,8 @@ mod tests {
             }
             impl Addressable for LocalProbe {
                 const NAMESPACE: &'static str = "test.local.probe";
+                type Resolver = aether_actor::One;
             }
-            impl aether_actor::Singleton for LocalProbe {}
             impl HandlesKind<Tick> for LocalProbe {}
 
             // Newtype-per-slot is the Local convention: each
@@ -2106,7 +2106,7 @@ mod tests {
         fn ctx_spawn_child_routes_through_handler() {
             use crate::actor::native::spawn::Subname;
             use crate::mail::registry::MailboxEntry;
-            use aether_actor::{HandlesKind, Instanced};
+            use aether_actor::HandlesKind;
             use aether_data::{Kind, KindId as DataKindId};
             use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -2153,8 +2153,8 @@ mod tests {
             }
             impl Addressable for ChildCap {
                 const NAMESPACE: &'static str = "test.spawn_child.child";
+                type Resolver = aether_actor::Many;
             }
-            impl Instanced for ChildCap {}
             impl HandlesKind<Ping> for ChildCap {}
             impl aether_actor::Lifecycle for ChildCap {
                 type Config = Arc<AtomicU32>;
@@ -2191,8 +2191,8 @@ mod tests {
             }
             impl Addressable for ParentCap {
                 const NAMESPACE: &'static str = "test.spawn_child.parent";
+                type Resolver = aether_actor::One;
             }
-            impl aether_actor::Singleton for ParentCap {}
             impl HandlesKind<Hatch> for ParentCap {}
             impl aether_actor::Lifecycle for ParentCap {
                 type Config = (Arc<AtomicU32>, Arc<AtomicU32>);
@@ -2304,7 +2304,7 @@ mod tests {
         fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
             use crate::actor::native::spawn::{SpawnError, Subname};
             use crate::mail::registry::MailboxEntry;
-            use aether_actor::{HandlesKind, Instanced};
+            use aether_actor::HandlesKind;
             use aether_data::{Kind, KindId as DataKindId};
             use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -2332,8 +2332,8 @@ mod tests {
             }
             impl Addressable for Closer {
                 const NAMESPACE: &'static str = "test.shutdown.closer";
+                type Resolver = aether_actor::Many;
             }
-            impl Instanced for Closer {}
             impl HandlesKind<Quit> for Closer {}
             impl aether_actor::Lifecycle for Closer {
                 type Config = Arc<AtomicU32>;
@@ -2450,7 +2450,7 @@ mod tests {
         #[test]
         fn chassis_teardown_runs_unwire_for_pooled_spawned_actors() {
             use crate::actor::native::spawn::Subname;
-            use aether_actor::Instanced;
+
             use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
             struct Quiet {
@@ -2458,8 +2458,8 @@ mod tests {
             }
             impl Addressable for Quiet {
                 const NAMESPACE: &'static str = "test.teardown.quiet";
+                type Resolver = aether_actor::Many;
             }
-            impl Instanced for Quiet {}
             impl aether_actor::Lifecycle for Quiet {
                 type Config = Arc<AtomicU32>;
                 type InitError = BootError;
@@ -2528,7 +2528,7 @@ mod tests {
         #[test]
         fn chassis_teardown_runs_unwire_for_many_pooled_actors() {
             use crate::actor::native::spawn::Subname;
-            use aether_actor::Instanced;
+
             use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
             struct Quiet {
@@ -2536,8 +2536,8 @@ mod tests {
             }
             impl Addressable for Quiet {
                 const NAMESPACE: &'static str = "test.teardown.quiet_many";
+                type Resolver = aether_actor::Many;
             }
-            impl Instanced for Quiet {}
             impl aether_actor::Lifecycle for Quiet {
                 type Config = Arc<AtomicU32>;
                 type InitError = BootError;
@@ -2607,13 +2607,12 @@ mod tests {
         #[test]
         fn resolve_actor_returns_none_on_type_mismatch() {
             use crate::actor::native::spawn::Subname;
-            use aether_actor::Instanced;
 
             struct Foo;
             impl Addressable for Foo {
                 const NAMESPACE: &'static str = "test.resolve_mismatch.foo";
+                type Resolver = aether_actor::Many;
             }
-            impl Instanced for Foo {}
             impl aether_actor::Lifecycle for Foo {
                 type Config = ();
                 type InitError = BootError;
@@ -2638,8 +2637,8 @@ mod tests {
             struct Bar;
             impl Addressable for Bar {
                 const NAMESPACE: &'static str = "test.resolve_mismatch.bar";
+                type Resolver = aether_actor::Many;
             }
-            impl Instanced for Bar {}
             impl aether_actor::Lifecycle for Bar {
                 type Config = ();
                 type InitError = BootError;
@@ -2697,7 +2696,7 @@ mod tests {
         fn ctx_monitor_fires_notice_at_target_close() {
             use crate::actor::native::spawn::Subname;
             use crate::mail::registry::MailboxEntry;
-            use aether_actor::{HandlesKind, Instanced};
+            use aether_actor::HandlesKind;
             use aether_data::{Kind, KindId as DataKindId};
             use std::sync::Mutex;
             use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
@@ -2747,8 +2746,8 @@ mod tests {
             struct Target;
             impl Addressable for Target {
                 const NAMESPACE: &'static str = "test.monitor.target";
+                type Resolver = aether_actor::Many;
             }
-            impl Instanced for Target {}
             impl HandlesKind<Quit> for Target {}
             impl aether_actor::Lifecycle for Target {
                 type Config = ();
@@ -2786,8 +2785,8 @@ mod tests {
             }
             impl Addressable for Watcher {
                 const NAMESPACE: &'static str = "test.monitor.watcher";
+                type Resolver = aether_actor::Many;
             }
-            impl Instanced for Watcher {}
             impl HandlesKind<WatchOrder> for Watcher {}
             impl HandlesKind<aether_kinds::MonitorNotice> for Watcher {}
             impl aether_actor::Lifecycle for Watcher {
@@ -2960,7 +2959,7 @@ mod tests {
         fn watcher_close_prunes_targets_forward_index() {
             use crate::actor::native::spawn::Subname;
             use crate::mail::registry::MailboxEntry;
-            use aether_actor::{HandlesKind, Instanced};
+            use aether_actor::HandlesKind;
             use aether_data::{Kind, KindId as DataKindId};
             use std::sync::Mutex;
             use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -3006,8 +3005,8 @@ mod tests {
             struct Target;
             impl Addressable for Target {
                 const NAMESPACE: &'static str = "test.monitor.target2";
+                type Resolver = aether_actor::Many;
             }
-            impl Instanced for Target {}
             impl aether_actor::Lifecycle for Target {
                 type Config = ();
                 type InitError = BootError;
@@ -3035,8 +3034,8 @@ mod tests {
             }
             impl Addressable for Watcher {
                 const NAMESPACE: &'static str = "test.monitor.watcher2";
+                type Resolver = aether_actor::Many;
             }
-            impl Instanced for Watcher {}
             impl HandlesKind<WatchOrder> for Watcher {}
             impl HandlesKind<Quit> for Watcher {}
             impl aether_actor::Lifecycle for Watcher {
@@ -3177,7 +3176,7 @@ mod tests {
         fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
             use crate::actor::native::spawn::Subname;
             use crate::mail::registry::MailboxEntry;
-            use aether_actor::{HandlesKind, Instanced};
+            use aether_actor::HandlesKind;
             use aether_data::{Kind, KindId as DataKindId};
             use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -3211,8 +3210,8 @@ mod tests {
             }
             impl Addressable for Member {
                 const NAMESPACE: &'static str = "test.resolve.member";
+                type Resolver = aether_actor::Many;
             }
-            impl Instanced for Member {}
             impl HandlesKind<Quit> for Member {}
             impl aether_actor::Lifecycle for Member {
                 type Config = u32;
@@ -3352,7 +3351,7 @@ mod tests {
         fn instanced_can_spawn_grandchild() {
             use crate::actor::native::spawn::Subname;
             use crate::mail::registry::MailboxEntry;
-            use aether_actor::{HandlesKind, Instanced};
+            use aether_actor::HandlesKind;
             use aether_data::{Kind, KindId as DataKindId};
             use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -3421,8 +3420,8 @@ mod tests {
             }
             impl Addressable for Grandchild {
                 const NAMESPACE: &'static str = "test.recursive.grandchild";
+                type Resolver = aether_actor::Many;
             }
-            impl Instanced for Grandchild {}
             impl HandlesKind<Ping> for Grandchild {}
             impl aether_actor::Lifecycle for Grandchild {
                 type Config = Arc<AtomicU32>;
@@ -3458,8 +3457,8 @@ mod tests {
             }
             impl Addressable for Parent {
                 const NAMESPACE: &'static str = "test.recursive.parent";
+                type Resolver = aether_actor::Many;
             }
-            impl Instanced for Parent {}
             impl HandlesKind<Hatch> for Parent {}
             impl HandlesKind<Quit> for Parent {}
             impl aether_actor::Lifecycle for Parent {
@@ -3641,7 +3640,7 @@ mod tests {
         #[test]
         fn spawn_actor_runs_wire_once_after_init() {
             use crate::actor::native::spawn::Subname;
-            use aether_actor::Instanced;
+
             use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
             struct WireSpawnProbe {
@@ -3649,8 +3648,8 @@ mod tests {
             }
             impl Addressable for WireSpawnProbe {
                 const NAMESPACE: &'static str = "test.spawn_wire.probe";
+                type Resolver = aether_actor::Many;
             }
-            impl Instanced for WireSpawnProbe {}
             impl aether_actor::Lifecycle for WireSpawnProbe {
                 type Config = Arc<AtomicU32>;
                 type InitError = BootError;
@@ -3712,8 +3711,8 @@ mod tests {
         }
         impl Addressable for WireProbe {
             const NAMESPACE: &'static str = "test.wire.singleton";
+            type Resolver = aether_actor::One;
         }
-        impl aether_actor::Singleton for WireProbe {}
         impl aether_actor::Lifecycle for WireProbe {
             type Config = Arc<AtomicU32>;
             type InitError = BootError;
@@ -3783,8 +3782,8 @@ mod tests {
         }
         impl Addressable for Pinger {
             const NAMESPACE: &'static str = "test.barrier.pinger";
+            type Resolver = aether_actor::One;
         }
-        impl aether_actor::Singleton for Pinger {}
         impl aether_actor::Lifecycle for Pinger {
             type Config = Arc<AtomicU32>;
             type InitError = BootError;
@@ -3818,8 +3817,8 @@ mod tests {
         }
         impl Addressable for Ponger {
             const NAMESPACE: &'static str = "test.barrier.ponger";
+            type Resolver = aether_actor::One;
         }
-        impl aether_actor::Singleton for Ponger {}
         impl HandlesKind<WireBarrierPing> for Ponger {}
         impl aether_actor::Lifecycle for Ponger {
             type Config = Arc<AtomicU32>;

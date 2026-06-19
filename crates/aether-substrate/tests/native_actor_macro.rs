@@ -77,8 +77,6 @@ struct MacroProbeCap {
     ping_total: Arc<AtomicU32>,
 }
 
-impl aether_actor::Singleton for MacroProbeCap {}
-
 /// Per-cap config — caps without a domain-specific config type
 /// would write `()`, but here we thread shared atomic counters in
 /// so the test can observe each handler's effect.
@@ -651,8 +649,6 @@ struct TaskRouteCap {
     obs: TaskObservations,
 }
 
-impl aether_actor::Singleton for TaskRouteCap {}
-
 #[aether_data::actor]
 impl NativeActor for TaskRouteCap {
     type Config = TaskObservations;
@@ -926,8 +922,6 @@ impl DeferredObs {
 struct DeferredReplyCap {
     obs: DeferredObs,
 }
-
-impl aether_actor::Singleton for DeferredReplyCap {}
 
 #[aether_data::actor]
 impl NativeActor for DeferredReplyCap {

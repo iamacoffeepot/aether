@@ -182,19 +182,18 @@ mod native {
     #[actor]
     impl NativeActor for WasmTrampoline {
         type Config = WasmTrampolineConfig;
-        /// The embedding-host class namespace (ADR-0099 §5/§6),
-        /// **forward-fed** from [`EmbeddedHost`](aether_actor::EmbeddedHost)
-        /// — the sole owner of the `"aether.embedded"` literal. The
-        /// trampoline references the class const rather than re-declaring
-        /// the name, so an embeddable actor's id depends on what the code
-        /// is, not how it is hosted, and the namespace is written only on
-        /// its owner. Reachable on every target because the bridge stub
-        /// emits the always-on `Addressable` impl at file root. ADR-0097: the
+        /// The embedding-host scope namespace (ADR-0099 §5/§6, ADR-0119),
+        /// **forward-fed** from [`EMBEDDED_SCOPE`](aether_actor::EMBEDDED_SCOPE)
+        /// — `aether-actor`'s sole owner of the `"aether.embedded"` literal.
+        /// The trampoline references the const rather than re-declaring the
+        /// name, so an embeddable actor's id depends on what the code is, not
+        /// how it is hosted, and the namespace is written only on its owner.
+        /// Reachable on every target because the bridge stub emits the
+        /// always-on `Addressable` impl at file root. ADR-0097: the
         /// substrate's `TRAMPOLINE_NAMESPACE` forward-feeds the same const,
         /// collapsing the former two-literal mirror into one source; the
         /// `trampoline_namespace_matches_substrate` test guards the match.
-        const NAMESPACE: &'static str =
-            <aether_actor::EmbeddedHost as aether_actor::Addressable>::NAMESPACE;
+        const NAMESPACE: &'static str = aether_actor::EMBEDDED_SCOPE;
 
         fn init(
             config: WasmTrampolineConfig,
@@ -676,25 +675,24 @@ mod native {
 
     #[cfg(test)]
     mod tests {
-        use aether_actor::{Addressable, EmbeddedHost};
+        use aether_actor::{Addressable, EMBEDDED_SCOPE};
         use aether_substrate::actor::wasm::component::TRAMPOLINE_NAMESPACE;
 
-        /// ADR-0099 §5/§6: both `WasmTrampoline::NAMESPACE` (capabilities)
-        /// and the substrate's `TRAMPOLINE_NAMESPACE` forward-feed the
-        /// embedding-host class const `EmbeddedHost::NAMESPACE` — the sole
-        /// owner of the `"aether.embedded"` literal, which sits below both
-        /// crates. The former two-literal mirror is now one source; this
-        /// guards that the forward-feed stays wired, so an embedded
-        /// component registers under and resolves to the same class
-        /// namespace on both layers.
+        /// ADR-0099 §5/§6, ADR-0119: both `WasmTrampoline::NAMESPACE`
+        /// (capabilities) and the substrate's `TRAMPOLINE_NAMESPACE`
+        /// forward-feed [`EMBEDDED_SCOPE`] — `aether-actor`'s sole owner of
+        /// the `"aether.embedded"` literal, which sits below both crates. The
+        /// former two-literal mirror is now one source; this guards that the
+        /// forward-feed stays wired, so an embedded component registers under
+        /// and resolves to the same scope namespace on both layers.
         #[test]
         fn trampoline_namespace_matches_substrate() {
             assert_eq!(
                 <super::WasmTrampoline as Addressable>::NAMESPACE,
-                EmbeddedHost::NAMESPACE,
+                EMBEDDED_SCOPE,
             );
-            assert_eq!(TRAMPOLINE_NAMESPACE, EmbeddedHost::NAMESPACE);
-            assert_eq!(EmbeddedHost::NAMESPACE, "aether.embedded");
+            assert_eq!(TRAMPOLINE_NAMESPACE, EMBEDDED_SCOPE);
+            assert_eq!(EMBEDDED_SCOPE, "aether.embedded");
         }
     }
 }

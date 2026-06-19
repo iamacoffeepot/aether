@@ -1,7 +1,8 @@
 # ADR-0119: Actor addressing via a Resolver strategy
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-18
+- **Accepted:** 2026-06-19 (implementation arc iamacoffeepot/aether#2063 landed)
 
 ## Context
 

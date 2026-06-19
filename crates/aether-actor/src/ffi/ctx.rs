@@ -309,7 +309,7 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
     /// the inline registry the send routes through.
     #[must_use]
     pub fn actor<R: Singleton>(&self) -> FfiActorMailbox<'_, R> {
-        FfiActorMailbox::__new(R::resolve(self.mailbox).0, self.mailbox, self.inline)
+        FfiActorMailbox::__new(R::resolve(self.mailbox, ()).0, self.mailbox, self.inline)
     }
 
     /// Multi-instance sender. Resolve a ctx-bound [`FfiActorMailbox`]
@@ -639,7 +639,7 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
     {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(
-            R::resolve(self.mailbox).0,
+            R::resolve(self.mailbox, ()).0,
             K::ID.0,
             &bytes,
             1,
@@ -656,7 +656,7 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         self.inline.route_or_enqueue(
-            R::resolve(self.mailbox).0,
+            R::resolve(self.mailbox, ()).0,
             K::ID.0,
             bytes,
             payloads.len() as u32,
@@ -693,7 +693,7 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
     {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(
-            R::resolve(self.mailbox).0,
+            R::resolve(self.mailbox, ()).0,
             K::ID.0,
             &bytes,
             1,
@@ -857,7 +857,7 @@ impl MailSender for FfiDropCtx<'_> {
     {
         let bytes = payload.encode_into_bytes();
         mail::send_mail(
-            R::resolve(self.mailbox).0,
+            R::resolve(self.mailbox, ()).0,
             K::ID.0,
             &bytes,
             1,
@@ -874,7 +874,7 @@ impl MailSender for FfiDropCtx<'_> {
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         mail::send_mail(
-            R::resolve(self.mailbox).0,
+            R::resolve(self.mailbox, ()).0,
             K::ID.0,
             bytes,
             payloads.len() as u32,
@@ -911,7 +911,7 @@ impl MailSender for FfiDropCtx<'_> {
     {
         let bytes = payload.encode_into_bytes();
         mail::send_mail(
-            R::resolve(self.mailbox).0,
+            R::resolve(self.mailbox, ()).0,
             K::ID.0,
             &bytes,
             1,
@@ -952,8 +952,8 @@ mod tests {
         FfiCtx, InlineRegistry, Manual, NO_INBOUND_SOURCE, Single, SpawnError, install_inline_child,
     };
     use crate::Addressable;
+    use crate::actor::Subname;
     use crate::actor::ctx::OutboundReply;
-    use crate::actor::{Instanced, Subname};
     use crate::ffi::inline::RouteDecision;
     use crate::ffi::{BootError, ErasedFfiActor, FfiActor, FfiDropCtx, FfiInitCtx};
     use crate::mail::{Mail, PriorState};
@@ -969,9 +969,8 @@ mod tests {
 
     impl Addressable for FailingChild {
         const NAMESPACE: &'static str = "test.inline.failing_child";
+        type Resolver = crate::Many;
     }
-
-    impl Instanced for FailingChild {}
 
     impl crate::Lifecycle for FailingChild {
         type Config = ();
@@ -1081,9 +1080,8 @@ mod tests {
 
     impl Addressable for SucceedingChild {
         const NAMESPACE: &'static str = "test.inline.succeeding_child";
+        type Resolver = crate::Many;
     }
-
-    impl Instanced for SucceedingChild {}
 
     impl crate::Lifecycle for SucceedingChild {
         type Config = ();

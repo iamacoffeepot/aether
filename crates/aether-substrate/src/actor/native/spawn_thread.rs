@@ -130,7 +130,7 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
     {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.carry()).0,
+            R::resolve(self.binding.carry(), ()).0,
             K::ID.0,
             &bytes,
             1,
@@ -151,7 +151,7 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
         #[allow(clippy::cast_possible_truncation)]
         let count = payloads.len() as u32;
         self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.carry()).0,
+            R::resolve(self.binding.carry(), ()).0,
             K::ID.0,
             bytes,
             count,
@@ -213,7 +213,7 @@ impl<A: Addressable> MailSender for RootCtx<A> {
         // No inherited parent / root — each send mints its own chain
         // rooted at the freshly minted `MailId` (sender = A.mailbox).
         self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.carry()).0,
+            R::resolve(self.binding.carry(), ()).0,
             K::ID.0,
             &bytes,
             1,
@@ -233,7 +233,7 @@ impl<A: Addressable> MailSender for RootCtx<A> {
         #[allow(clippy::cast_possible_truncation)]
         let count = payloads.len() as u32;
         self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.carry()).0,
+            R::resolve(self.binding.carry(), ()).0,
             K::ID.0,
             bytes,
             count,
@@ -278,7 +278,9 @@ pub(crate) fn spawn_inherit<A, F>(
     f: F,
 ) -> JoinHandle<()>
 where
-    A: Addressable + Singleton + 'static,
+    // ADR-0119: `A` is used only for `A::NAMESPACE` + `InheritCtx<A>`
+    // (Addressable-only); the former `Singleton` bound was incidental.
+    A: Addressable + 'static,
     F: FnOnce(InheritCtx<A>) + Send + 'static,
 {
     // ADR-0080 §12 / iamacoffeepot/aether#716: acquire the settlement
@@ -339,7 +341,6 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use aether_actor::Singleton;
     use aether_data::{KindId, MailboxId};
 
     use crate::handle_store::HandleStore;
@@ -353,9 +354,8 @@ mod tests {
 
     impl Addressable for StubActor {
         const NAMESPACE: &'static str = "test.spawn_thread.stub";
+        type Resolver = aether_actor::One;
     }
-
-    impl Singleton for StubActor {}
 
     #[derive(Clone, Debug)]
     struct CapturedDispatch {

@@ -177,17 +177,16 @@ pub struct ComponentCtx {
 }
 
 /// The mailbox-name prefix every wasm component (loaded or spawned)
-/// registers under: `aether.embedded:<name>` — the embedding-host class
-/// namespace (ADR-0099 §5/§6). The `spawn_sibling` host fn (ADR-0097)
-/// needs this string to predict a spawned sibling's
+/// registers under: `aether.embedded:<name>` — the embedding-host scope
+/// namespace (ADR-0099 §5/§6, ADR-0119). The `spawn_sibling` host fn
+/// (ADR-0097) needs this string to predict a spawned sibling's
 /// `MailboxId = fold(host_carry, hash("{prefix}:{subname}"))`
 /// synchronously. It **forward-feeds** the sole owner of the literal,
-/// [`EmbeddedHost`](aether_actor::EmbeddedHost), which sits below this
+/// [`EMBEDDED_SCOPE`](aether_actor::EMBEDDED_SCOPE), which sits below this
 /// crate, so substrate and the capabilities-layer `WasmTrampoline` now
 /// reference one const instead of mirroring two literals; capabilities'
 /// `trampoline_namespace_matches_substrate` test guards the match.
-pub const TRAMPOLINE_NAMESPACE: &str =
-    <aether_actor::EmbeddedHost as aether_actor::Addressable>::NAMESPACE;
+pub const TRAMPOLINE_NAMESPACE: &str = aether_actor::EMBEDDED_SCOPE;
 
 /// ADR-0097: a sibling-spawn request the `spawn_sibling` host fn stages
 /// onto [`ComponentCtx`] for the trampoline to drain and execute.

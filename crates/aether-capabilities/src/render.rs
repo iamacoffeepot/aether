@@ -1400,13 +1400,12 @@ mod native {
         #[allow(clippy::disallowed_methods)]
         #[test]
         fn render_capability_resolves_to_frozen_depth_one_id() {
-            use aether_actor::Singleton;
             use aether_data::mailbox_id_from_name;
 
             let frozen = mailbox_id_from_name(<RenderCapability as Addressable>::NAMESPACE);
-            assert_eq!(<RenderCapability as Singleton>::resolve(0), frozen);
+            assert_eq!(<RenderCapability as Addressable>::resolve(0, ()), frozen);
             assert_eq!(
-                <RenderCapability as Singleton>::resolve(0xFFFF_FFFF_FFFF_FFFF),
+                <RenderCapability as Addressable>::resolve(0xFFFF_FFFF_FFFF_FFFF, ()),
                 frozen,
             );
         }

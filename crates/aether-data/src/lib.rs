@@ -90,10 +90,7 @@ pub use wire_id::{EngineId, SessionToken, Uuid};
 /// split into a single `aether-actor-derive` proc-macro crate so the
 /// SDK and the derive share a home.
 #[cfg(feature = "derive")]
-pub use aether_actor_derive::{
-    Embeddable, Instanced, Kind, Schema, Singleton, actor, bridge, capability, fallback, handler,
-    local,
-};
+pub use aether_actor_derive::{Kind, Schema, actor, bridge, capability, fallback, handler, local};
 
 /// Re-exported `#[transform]` attribute macro from `aether-data-derive`
 /// (ADR-0048 §1). A transform is a pure `Kind -> Kind` data-layer

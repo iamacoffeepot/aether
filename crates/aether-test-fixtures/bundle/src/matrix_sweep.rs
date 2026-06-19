@@ -36,8 +36,7 @@
 use core::cell::UnsafeCell;
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, FfiInitCtx, Instanced, MailboxId, Manual, OutboundReply, Subname,
-    actor,
+    BootError, FfiActor, FfiCtx, FfiInitCtx, MailboxId, Manual, OutboundReply, Subname, actor,
 };
 use aether_test_fixtures_kinds::{
     CollectMatrix, MATRIX_CELL_CHILD_TO_PARENT, MATRIX_CELL_CHILD_TO_SELF,
@@ -191,9 +190,7 @@ impl FfiActor for MatrixParent {
 /// the multi-actor module's type set includes it.
 pub struct MatrixChild;
 
-impl Instanced for MatrixChild {}
-
-#[actor]
+#[actor(instanced)]
 impl FfiActor for MatrixChild {
     const NAMESPACE: &'static str = "test.matrix.child";
 

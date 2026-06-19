@@ -97,27 +97,29 @@ impl ComponentHostNativeExt for NativeActorMailbox<'_, ComponentHostCapability> 
 }
 
 /// Resolve the [`MailboxId`](aether_data::MailboxId) of the embeddable
-/// component loaded under `name`, by delegating to its embedding-host
-/// **class** (ADR-0099 §5/§6). Folds the class instance node
-/// `aether.embedded:<name>` ([`EmbeddedHost`](aether_actor::EmbeddedHost))
-/// onto the `aether.component` host cap's carry.
+/// component loaded under `name`, by folding the instance node
+/// `aether.embedded:<name>` (the [`Embedded`](aether_actor::Embedded)
+/// resolver) onto the `aether.component` host cap's carry (ADR-0099 §5/§6,
+/// ADR-0119).
 ///
-/// This is the composition behind every embeddable actor's
-/// `Singleton::resolve` override (the `#[derive(Embeddable)]` surface):
-/// it names neither the `aether.component` host nor `aether.embedded`
-/// itself — each namespace is read only from its owner
-/// ([`ComponentHostCapability`] supplies the host carry via its own
-/// `resolve`, [`EmbeddedHost`](aether_actor::EmbeddedHost) supplies the
-/// class node). Equal by construction to the by-name verb
-/// [`loaded::<R>(name)`](ComponentHostFfiExt::loaded), which folds the same
-/// node onto the same carry, so bare-type and by-name addressing agree.
-/// Available on every target — a wasm peer resolves an embeddable the same
-/// way a native one does, no transport branch (ADR-0029 client-side
-/// no-lookup).
+/// This is the by-name carry-supplier. `aether-actor`'s `Embedded` resolver
+/// owns the fold and the reserved scope
+/// ([`EMBEDDED_SCOPE`](aether_actor::EMBEDDED_SCOPE)); this fn supplies the
+/// `aether.component` carry, read only from its owner
+/// [`ComponentHostCapability`]. Equal by construction to a component's own
+/// `type Resolver = Embedded` and to the by-name verb
+/// [`loaded::<R>(name)`](ComponentHostFfiExt::loaded), so bare-type and
+/// by-name addressing agree. Available on every target — a wasm peer resolves
+/// an embeddable the same way a native one does, no transport branch
+/// (ADR-0029 client-side no-lookup).
 #[must_use]
 pub fn resolve_embedded(name: &str) -> aether_data::MailboxId {
-    use aether_actor::{EmbeddedHost, Instanced, Singleton};
-    <EmbeddedHost as Instanced>::resolve(<ComponentHostCapability as Singleton>::resolve(0).0, name)
+    use aether_actor::{Addressable, Embedded, Resolve};
+    Embedded::resolve(
+        <ComponentHostCapability as Addressable>::resolve(0, ()).0,
+        name,
+        (),
+    )
 }
 
 #[aether_actor::bridge(singleton)]

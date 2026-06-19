@@ -1129,54 +1129,12 @@ mod tests {
         );
     }
 
-    /// ADR-0099 §5 own-child path through the real `ctx.actor` call site:
-    /// a non-root singleton overrides [`Singleton::resolve`] to fold the
-    /// caller's carry, and `ctx.actor::<R>()` feeds it `self.binding.carry()`.
-    /// A parent at carry `C` addressing this child by bare type lands on
-    /// `fold(C, ActorId::singleton(NAMESPACE))`, not the flat `hash(NAMESPACE)`
-    /// — the miss the lineage fold closes (#1364).
-    #[test]
-    fn ctx_actor_folds_own_child_singleton_onto_caller_carry() {
-        use crate::actor::native::ctx::NativeCtx;
-        use aether_actor::{Addressable, Singleton};
-        use aether_data::{ActorId, Tag, fold_lineage, mailbox_id_from_name, with_tag};
-
-        struct OwnChild;
-        impl Addressable for OwnChild {
-            const NAMESPACE: &'static str = "test.actor_fold.child";
-        }
-        impl Singleton for OwnChild {
-            fn resolve(caller_carry: u64) -> MailboxId {
-                MailboxId(with_tag(
-                    Tag::Mailbox,
-                    fold_lineage(
-                        caller_carry,
-                        ActorId::singleton(<Self as Addressable>::NAMESPACE),
-                    ),
-                ))
-            }
-        }
-
-        let (_registry, mailer) = fresh_substrate();
-        let parent_carry = 0x0BAD_F00D_u64;
-        let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(parent_carry)));
-        let ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
-
-        let resolved = ctx.actor::<OwnChild>().mailbox_id();
-        let expected = MailboxId(with_tag(
-            Tag::Mailbox,
-            fold_lineage(parent_carry, ActorId::singleton("test.actor_fold.child")),
-        ));
-        assert_eq!(
-            resolved, expected,
-            "ctx.actor feeds self.carry to Singleton::resolve, folding the own-child node"
-        );
-        assert_ne!(
-            resolved,
-            mailbox_id_from_name("test.actor_fold.child"),
-            "the folded own-child id differs from the flat depth-1 hash"
-        );
-    }
+    // ADR-0119: the per-impl `Singleton::resolve` override (the
+    // "folded-child singleton") is retired — resolution is the chosen
+    // resolver, not an overridable method. `ctx.actor` carry-folding is now
+    // exercised through the `Embedded` resolver (aether-actor's resolve unit
+    // tests + the send-path test below), so the dedicated own-child ctx.actor
+    // test is dropped rather than retargeted.
 
     /// ADR-0099 §5 own-child path through the generic `MailSender::send`
     /// surface: `send::<R>` resolves the receiver through
@@ -1190,30 +1148,26 @@ mod tests {
     fn mailsender_send_routes_through_resolve_not_flat_hash() {
         use crate::actor::native::ctx::NativeCtx;
         use aether_actor::actor::HandlesKind;
-        use aether_actor::{Addressable, MailSender, Singleton};
+        use aether_actor::{Addressable, Embedded, MailSender};
         use aether_data::mailbox_id_from_name;
         use aether_kinds::Tick;
 
         struct Child;
         impl Addressable for Child {
             const NAMESPACE: &'static str = "test.send_fold.child";
-        }
-        impl Singleton for Child {
-            // A carry-dependent target distinct from the flat hash: a different
-            // caller carry resolves to a different mailbox, so a send that lands
-            // here proves the carry was threaded through `resolve` rather than
-            // dropped for `mailbox_id_from_name(NAMESPACE)`. The exact ADR-0099
-            // fold is exercised by aether-actor's own resolve unit tests.
-            fn resolve(caller_carry: u64) -> MailboxId {
-                mailbox_id_from_name(&format!("test.send_fold.child.{caller_carry:x}"))
-            }
+            // ADR-0119: `Embedded` folds the caller carry under the embed
+            // scope, so a different caller carry resolves to a different
+            // mailbox — a carry-dependent target distinct from the flat hash.
+            // A send landing here proves the carry was threaded through
+            // `resolve` rather than dropped for `mailbox_id_from_name`.
+            type Resolver = Embedded;
         }
         impl HandlesKind<Tick> for Child {}
 
         let (registry, mailer) = fresh_substrate();
         let parent_carry = 0x0BAD_F00D_u64;
 
-        let resolved = Child::resolve(parent_carry);
+        let resolved = <Child as Addressable>::resolve(parent_carry, ());
         let flat = mailbox_id_from_name("test.send_fold.child");
         assert_ne!(
             resolved, flat,

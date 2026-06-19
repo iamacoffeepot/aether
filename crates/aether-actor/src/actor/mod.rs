@@ -25,6 +25,100 @@ pub mod slot;
 
 use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
 
+/// A resolution strategy (ADR-0119): given a caller's lineage carry, the
+/// actor's own `NAMESPACE`, and whatever args the strategy needs, produce
+/// the `MailboxId`. An actor selects one of these as its
+/// [`Addressable::Resolver`]; cardinality is *derived* from the resolver's
+/// [`Args`](Resolve::Args) shape rather than declared.
+///
+/// `Args` is a generic associated type because a keyed resolver borrows its
+/// key (`&'a str`): keyless strategies set `Args<'a> = ()`, keyed ones set
+/// `Args<'a> = &'a str`.
+pub trait Resolve {
+    /// What addressing this strategy requires: `()` keyless, a borrowed key
+    /// for a keyed (instanced) target.
+    type Args<'a>;
+
+    /// Produce the mailbox for `namespace` as this strategy sees it, given
+    /// the caller's lineage carry and the strategy-specific `args`.
+    #[must_use]
+    fn resolve(caller_carry: u64, namespace: &str, args: Self::Args<'_>) -> MailboxId;
+}
+
+/// Root-pinned keyless resolution (ADR-0119): the depth-1 fixed point
+/// (ADR-0099 §3), this actor's own [`ActorId`] tagged as a mailbox,
+/// **ignoring the caller's carry** because a root cap sits at the root. It
+/// equals `mailbox_id_from_name(NAMESPACE)` because [`with_tag`] is
+/// idempotent on an already-`Mailbox`-tagged value, so every chassis cap
+/// keeps the exact id it has today. Makes its actor a [`Singleton`].
+pub struct One;
+
+impl Resolve for One {
+    type Args<'a> = ();
+    fn resolve(_caller_carry: u64, namespace: &str, _args: ()) -> MailboxId {
+        MailboxId(with_tag(Tag::Mailbox, ActorId::singleton(namespace).0))
+    }
+}
+
+/// Keyed resolution (ADR-0119): folds `ActorId::instanced(NAMESPACE, subname)`
+/// onto the caller's carry, so the same type resolves to a different mailbox
+/// under each parent and for each subname. Makes its actor an [`Instanced`].
+pub struct Many;
+
+impl Resolve for Many {
+    type Args<'a> = &'a str;
+    fn resolve(caller_carry: u64, namespace: &str, subname: &str) -> MailboxId {
+        MailboxId(with_tag(
+            Tag::Mailbox,
+            fold_lineage(caller_carry, ActorId::instanced(namespace, subname)),
+        ))
+    }
+}
+
+/// The reserved scope under which every embedded actor — an FFI/wasm
+/// component hosted by the component-host trampoline — resolves (ADR-0099
+/// §5/§6, ADR-0119). The sole owner of the `"aether.embedded"` literal;
+/// concrete hosts (the trampoline, the substrate `TRAMPOLINE_NAMESPACE`)
+/// forward-feed this const rather than re-declaring it.
+pub const EMBEDDED_SCOPE: &str = "aether.embedded";
+
+/// Keyless embedded resolution (ADR-0119): folds
+/// `instanced(EMBEDDED_SCOPE, NAMESPACE)` onto the caller's carry — the
+/// component's own name as an instance under the reserved embed scope.
+/// Resolution is relative (ADR-0099 §5): in the embedding context the caller
+/// is the component host, whose carry is `aether.component`, so the result is
+/// the component's registered mailbox. The carry is supplied by the caller
+/// (`aether-capabilities`'s `resolve_embedded` for by-name lookups), not
+/// re-derived here. Keyless (`Args<'a> = ()`), so an embedded actor is a
+/// [`Singleton`].
+pub struct Embedded;
+
+impl Resolve for Embedded {
+    type Args<'a> = ();
+    fn resolve(caller_carry: u64, namespace: &str, _args: ()) -> MailboxId {
+        MailboxId(with_tag(
+            Tag::Mailbox,
+            fold_lineage(caller_carry, ActorId::instanced(EMBEDDED_SCOPE, namespace)),
+        ))
+    }
+}
+
+/// Keyed embedded resolution (ADR-0119, ADR-0097): a spawned sibling under
+/// the embed scope, keyed by a runtime `subname` rather than the actor's own
+/// `NAMESPACE`. Folds `instanced(EMBEDDED_SCOPE, subname)` onto the caller's
+/// carry. Keyed (`Args<'a> = &'a str`), so it is an [`Instanced`].
+pub struct EmbeddedMany;
+
+impl Resolve for EmbeddedMany {
+    type Args<'a> = &'a str;
+    fn resolve(caller_carry: u64, _namespace: &str, subname: &str) -> MailboxId {
+        MailboxId(with_tag(
+            Tag::Mailbox,
+            fold_lineage(caller_carry, ActorId::instanced(EMBEDDED_SCOPE, subname)),
+        ))
+    }
+}
+
 /// The symmetric trait every actor implements: the recipient name it
 /// claims. Lifecycle methods (`boot` for native chassis caps, `init`
 /// for wasm components) live on per-transport subtraits; this trait
@@ -48,6 +142,25 @@ pub trait Addressable: Sized + Send + 'static {
     /// default name registers at `aether.embedded:camera`
     /// under its component-host, not at the bare `"camera"`.
     const NAMESPACE: &'static str;
+
+    /// The resolution strategy this actor selects (ADR-0119). Cardinality
+    /// is derived from it: a keyless resolver ([`One`] / [`Embedded`],
+    /// `Args<'a> = ()`) makes the actor a [`Singleton`]; a keyed resolver
+    /// ([`Many`] / [`EmbeddedMany`], `Args<'a> = &'a str`) makes it
+    /// [`Instanced`]. The `#[bridge]` / `#[actor]` macros emit this; a
+    /// hand-written actor sets it directly.
+    type Resolver: Resolve;
+
+    /// This actor's [`MailboxId`] as seen by a caller whose lineage carry is
+    /// `caller_carry` (ADR-0099 §5), produced by delegating to the selected
+    /// [`Resolver`](Self::Resolver). Declared once here, never overridden —
+    /// variation lives in the chosen resolver, not in this method (ADR-0119).
+    /// `ctx.actor::<R>()` calls this with `()`; `ctx.resolve_actor::<R>(key)`
+    /// calls it with the borrowed key.
+    #[must_use]
+    fn resolve(caller_carry: u64, args: <Self::Resolver as Resolve>::Args<'_>) -> MailboxId {
+        <Self::Resolver as Resolve>::resolve(caller_carry, Self::NAMESPACE, args)
+    }
 }
 
 /// The boot/teardown capability an actor composes onto its identity
@@ -137,32 +250,12 @@ pub trait Lifecycle {
 /// Mutually exclusive with [`Instanced`] at the type level: an actor is
 /// either one-of-a-kind within a scope (singleton) or N-instances under
 /// a shared prefix (instanced, name-keyed). ADR-0079.
-pub trait Singleton: Addressable {
-    /// This actor's [`MailboxId`] as seen by a caller whose lineage carry
-    /// is `caller_carry` (ADR-0099 §5). `ctx.actor::<R>()` calls
-    /// `R::resolve(self_carry)` and addresses the result.
-    ///
-    /// The default is the static, root-pinned resolution: the depth-1
-    /// fixed point (§3), this actor's own [`ActorId`] tagged as a mailbox,
-    /// **ignoring the caller's carry** because a root cap sits at the root,
-    /// not below the caller. It equals today's `mailbox_id_from_name(NAMESPACE)`
-    /// because [`with_tag`] is idempotent on an already-`Mailbox`-tagged
-    /// value — so every chassis cap keeps the exact id it has today.
-    ///
-    /// A non-root actor overrides this. A direct child folds the caller's
-    /// carry — `with_tag(Mailbox, fold_lineage(caller_carry, ActorId::singleton(NAMESPACE)))`
-    /// — and an embeddable component delegates to its embedding-host class
-    /// ([`EmbeddedHost`], iamacoffeepot/aether#1432). The override is the only
-    /// carrier of the §2 position fact: a root-pinned actor keeps the default,
-    /// and nothing else about position is held at the type level.
-    #[must_use]
-    fn resolve(_caller_carry: u64) -> MailboxId {
-        MailboxId(with_tag(
-            Tag::Mailbox,
-            ActorId::singleton(Self::NAMESPACE).0,
-        ))
-    }
-}
+/// Derived from the resolver (ADR-0119): a keyless [`Resolver`](Addressable::Resolver)
+/// (`Args<'a> = ()` — [`One`] for root caps, [`Embedded`] for components)
+/// makes the actor a `Singleton`, reached by `ctx.actor::<R>()`. The blanket
+/// impl supplies it; nobody writes `impl Singleton`.
+pub trait Singleton: Addressable<Resolver: for<'a> Resolve<Args<'a> = ()>> {}
+impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = ()>>> Singleton for T {}
 
 /// Cardinality marker: many instances of this actor type can be live
 /// per substrate, each under its own subname. `R::NAMESPACE` is a
@@ -176,52 +269,13 @@ pub trait Singleton: Addressable {
 /// address an instance by name through `ctx.resolve_actor::<R>(subname)`.
 ///
 /// Mutually exclusive with [`Singleton`] at the type level. ADR-0079.
-pub trait Instanced: Addressable {
-    /// This actor's [`MailboxId`] for the instance named `subname`, as seen
-    /// by a caller whose lineage carry is `caller_carry` (ADR-0099 §5).
-    /// Symmetric to [`Singleton::resolve`]: an instanced node folds its
-    /// `ActorId` — `hash(NAMESPACE:subname)` — onto the caller's carry, so
-    /// the same type resolves to a different mailbox under each parent and
-    /// for each subname.
-    ///
-    /// The embedding-host class [`EmbeddedHost`] is the instanced type
-    /// behind every embeddable actor's resolution: a component folds its
-    /// own `NAMESPACE` as an instance under `aether.embedded` onto the
-    /// component-host cap's carry (the composition that supplies that carry
-    /// lives with the host cap — `aether-capabilities`'s `resolve_embedded`).
-    #[must_use]
-    fn resolve(caller_carry: u64, subname: &str) -> MailboxId {
-        MailboxId(with_tag(
-            Tag::Mailbox,
-            fold_lineage(caller_carry, ActorId::instanced(Self::NAMESPACE, subname)),
-        ))
-    }
-}
-
-/// The embedding-host class (ADR-0099 §5/§6): the reserved namespace
-/// `aether.embedded` under which every **embeddable** actor — an FFI/wasm
-/// component — resolves, independent of the concrete host that embeds it
-/// (`WasmTrampoline` today, a dynamic-library host tomorrow). This type is
-/// the sole owner of the `"aether.embedded"` literal; concrete hosts
-/// forward-feed `EmbeddedHost::NAMESPACE` rather than re-declaring it, so an
-/// embeddable actor's id depends on what the code is, not how it is hosted,
-/// and the class namespace is read only here (ADR-0099 §5's read-from-owner
-/// rule).
-///
-/// `EmbeddedHost` is [`Instanced`] — one node per embedded component, keyed
-/// by the component's own `NAMESPACE`. An embeddable actor resolves by
-/// folding its name as an instance under this class onto the component-host
-/// cap's carry; the carry is supplied by the composition co-located with the
-/// host cap (`aether-capabilities`'s `resolve_embedded`), which names neither
-/// the `aether.component` host nor `aether.embedded` itself — each is read
-/// only from its owner.
-pub struct EmbeddedHost;
-
-impl Addressable for EmbeddedHost {
-    const NAMESPACE: &'static str = "aether.embedded";
-}
-
-impl Instanced for EmbeddedHost {}
+/// Derived from the resolver (ADR-0119): a keyed [`Resolver`](Addressable::Resolver)
+/// (`Args<'a> = &'a str` — [`Many`], or [`EmbeddedMany`] for spawned
+/// siblings) makes the actor an `Instanced`, reached by
+/// `ctx.resolve_actor::<R>(subname)`. The blanket impl supplies it; nobody
+/// writes `impl Instanced`.
+pub trait Instanced: Addressable<Resolver: for<'a> Resolve<Args<'a> = &'a str>> {}
+impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = &'a str>>> Instanced for T {}
 
 /// How a spawned child's mailbox subname is derived (ADR-0079). The
 /// full mailbox name is `"{A::NAMESPACE}:{subname}"`; the substrate
@@ -335,104 +389,68 @@ mod tests {
     use super::*;
     use aether_data::{fold_lineage, mailbox_id_from_name};
 
-    /// Issue 625 (ADR-0079): `#[derive(Singleton)]` and
-    /// `#[derive(Instanced)]` are the explicit author-side surface
-    /// for cardinality. Trait mutual exclusion is documentation +
-    /// use-site bounds (no sealed-trait enforcement); this smoke
-    /// confirms both derives produce reachable marker impls
-    /// independently.
+    /// ADR-0119: cardinality is derived from the resolver. A keyless
+    /// [`One`] resolver makes the actor a reachable [`Singleton`] via
+    /// the blanket impl — no hand-written `impl Singleton`.
     #[test]
-    fn singleton_derive_emits_marker_impl() {
-        #[derive(crate::Singleton)]
+    fn one_resolver_derives_singleton() {
         struct UniqueCap;
         impl Addressable for UniqueCap {
             const NAMESPACE: &'static str = "test.cardinality.unique";
+            type Resolver = One;
         }
         fn requires_singleton<T: Singleton>() {}
         requires_singleton::<UniqueCap>();
     }
 
+    /// ADR-0119: a keyed [`Many`] resolver makes the actor a reachable
+    /// [`Instanced`] via the blanket impl.
     #[test]
-    fn instanced_derive_emits_marker_impl() {
-        #[derive(crate::Instanced)]
+    fn many_resolver_derives_instanced() {
         struct PerThing;
         impl Addressable for PerThing {
             const NAMESPACE: &'static str = "test.cardinality.per_thing";
+            type Resolver = Many;
         }
         fn requires_instanced<T: Instanced>() {}
         requires_instanced::<PerThing>();
     }
 
-    /// ADR-0099 §5 static default: a root-pinned singleton's [`Singleton::resolve`]
-    /// ignores the caller's carry and returns the depth-1 fixed point —
-    /// the id `mailbox_id_from_name(NAMESPACE)` yields today, so the
-    /// chassis-cap vocabulary stays frozen (§3).
+    /// ADR-0099 §5 / ADR-0119: the [`One`] resolver ignores the caller's
+    /// carry and returns the depth-1 fixed point — the id
+    /// `mailbox_id_from_name(NAMESPACE)` yields today, so the chassis-cap
+    /// vocabulary stays frozen (§3).
     #[test]
-    fn singleton_resolve_default_is_frozen_depth_one() {
+    fn one_resolver_is_frozen_depth_one() {
         struct RootCap;
         impl Addressable for RootCap {
             const NAMESPACE: &'static str = "test.resolve.rootcap";
+            type Resolver = One;
         }
-        impl Singleton for RootCap {}
 
         let frozen = mailbox_id_from_name("test.resolve.rootcap");
         assert_eq!(
-            RootCap::resolve(0),
+            <RootCap as Addressable>::resolve(0, ()),
             frozen,
-            "default resolve is the depth-1 id"
+            "One is the depth-1 id"
         );
         assert_eq!(
-            RootCap::resolve(0xDEAD_BEEF),
+            <RootCap as Addressable>::resolve(0xDEAD_BEEF, ()),
             frozen,
-            "a root cap ignores the caller's carry"
+            "One ignores the caller's carry"
         );
     }
 
-    /// ADR-0099 §5 own-child path: a non-root singleton overrides
-    /// [`Singleton::resolve`] to fold the caller's carry, so the same type
-    /// resolves to a different mailbox under each parent.
+    /// ADR-0099 §5 / ADR-0119: the [`Many`] resolver folds
+    /// `ActorId::instanced(NAMESPACE, subname)` onto the caller's carry, so
+    /// each instance under a parent gets its own id keyed by subname.
     #[test]
-    fn singleton_resolve_override_folds_caller_carry() {
-        struct Child;
-        impl Addressable for Child {
-            const NAMESPACE: &'static str = "test.resolve.child";
-        }
-        impl Singleton for Child {
-            fn resolve(caller_carry: u64) -> MailboxId {
-                MailboxId(with_tag(
-                    Tag::Mailbox,
-                    fold_lineage(
-                        caller_carry,
-                        ActorId::singleton(<Self as Addressable>::NAMESPACE),
-                    ),
-                ))
-            }
-        }
-
-        let carry = 0x1234_5678_u64;
-        let expected = MailboxId(with_tag(
-            Tag::Mailbox,
-            fold_lineage(carry, ActorId::singleton("test.resolve.child")),
-        ));
-        assert_eq!(Child::resolve(carry), expected, "override folds the carry");
-        assert_ne!(
-            Child::resolve(carry),
-            mailbox_id_from_name("test.resolve.child"),
-            "a folded child id differs from the flat depth-1 hash"
-        );
-    }
-
-    /// ADR-0099 §5 instanced default: an [`Instanced`] type's provided
-    /// `resolve` folds its `ActorId::instanced(NAMESPACE, subname)` onto the
-    /// caller's carry — symmetric to the singleton own-child override, but
-    /// keyed by `subname` so each instance under a parent gets its own id.
-    #[test]
-    fn instanced_resolve_default_folds_carry_and_subname() {
+    fn many_resolver_folds_carry_and_subname() {
         struct PerThing;
         impl Addressable for PerThing {
             const NAMESPACE: &'static str = "test.resolve.per_thing";
+            type Resolver = Many;
         }
-        impl Instanced for PerThing {}
 
         let carry = 0x0BAD_F00D_u64;
         let expected = MailboxId(with_tag(
@@ -440,41 +458,14 @@ mod tests {
             fold_lineage(carry, ActorId::instanced("test.resolve.per_thing", "42")),
         ));
         assert_eq!(
-            PerThing::resolve(carry, "42"),
+            <PerThing as Addressable>::resolve(carry, "42"),
             expected,
             "folds carry+subname"
         );
         assert_ne!(
-            PerThing::resolve(carry, "42"),
-            PerThing::resolve(carry, "43"),
+            <PerThing as Addressable>::resolve(carry, "42"),
+            <PerThing as Addressable>::resolve(carry, "43"),
             "different subnames resolve to different mailboxes"
-        );
-    }
-
-    /// ADR-0099 §5/§6: the embedding-host class [`EmbeddedHost`] owns the
-    /// reserved `aether.embedded` namespace and resolves an embedded instance
-    /// by folding `aether.embedded:<name>` onto the host cap's carry. This is
-    /// the fold `aether-capabilities`'s `resolve_embedded` composes (with the
-    /// component-host carry supplied there).
-    #[test]
-    fn embedded_host_folds_under_reserved_namespace() {
-        assert_eq!(EmbeddedHost::NAMESPACE, "aether.embedded");
-
-        // Stand in for the `aether.component` host cap's depth-1 carry.
-        let host_carry = mailbox_id_from_name("aether.component").0;
-        let expected = MailboxId(with_tag(
-            Tag::Mailbox,
-            fold_lineage(host_carry, ActorId::instanced("aether.embedded", "camera")),
-        ));
-        assert_eq!(
-            EmbeddedHost::resolve(host_carry, "camera"),
-            expected,
-            "embeddable id is the host-class fold"
-        );
-        assert_ne!(
-            EmbeddedHost::resolve(host_carry, "camera"),
-            mailbox_id_from_name("camera"),
-            "the fold differs from the bare-NAMESPACE hash (the #1364 miss)"
         );
     }
 }
