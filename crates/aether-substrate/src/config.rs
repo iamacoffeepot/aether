@@ -88,7 +88,7 @@ use std::fmt;
 use std::fmt::Write as _;
 
 use aether_actor::log::DEFAULT_RING_CAP;
-use aether_actor::trace_ring::DEFAULT_TRACE_RING_CAP;
+use aether_actor::trace_ring::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
 use confique::meta::{Expr, Field, FieldKind, LeafKind, Meta};
 
 use crate::BootError;
@@ -107,9 +107,16 @@ pub struct RingCapacities {
     /// [`DEFAULT_RING_CAP`]).
     pub log: usize,
     /// Per-actor [`ActorTraceRing`](aether_actor::trace_ring::ActorTraceRing)
-    /// and chassis-host-ring capacity (env `AETHER_ACTOR_TRACE_RING_SIZE`;
-    /// default [`DEFAULT_TRACE_RING_CAP`]).
+    /// and chassis-host-ring *floor* capacity — the size each ring starts
+    /// at (env `AETHER_ACTOR_TRACE_RING_SIZE`; default
+    /// [`DEFAULT_TRACE_RING_CAP`]).
     pub trace: usize,
+    /// Ceiling a saturating trace ring grows to before it resumes
+    /// drop-oldest (env `AETHER_ACTOR_TRACE_RING_MAX_SIZE`; default
+    /// [`DEFAULT_TRACE_RING_MAX_CAP`]). The trace ring grows geometrically
+    /// from [`trace`](Self::trace) toward this; the log ring has no such
+    /// ceiling (drop-oldest is its intended semantic).
+    pub trace_max: usize,
 }
 
 impl Default for RingCapacities {
@@ -117,6 +124,7 @@ impl Default for RingCapacities {
         Self {
             log: DEFAULT_RING_CAP,
             trace: DEFAULT_TRACE_RING_CAP,
+            trace_max: DEFAULT_TRACE_RING_MAX_CAP,
         }
     }
 }

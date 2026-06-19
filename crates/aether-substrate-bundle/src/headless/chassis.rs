@@ -320,6 +320,7 @@ impl HeadlessChassis {
             tick_hz = tick_hz,
             log_ring_capacity = ring_caps.log,
             trace_ring_capacity = ring_caps.trace,
+            trace_ring_max_capacity = ring_caps.trace_max,
             "componentless boot — load a component via aether.component.load",
         );
 

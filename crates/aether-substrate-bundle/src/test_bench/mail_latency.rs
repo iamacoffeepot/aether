@@ -562,6 +562,87 @@ fn small_trace_ring_cap_laps_chassis_host_ring() {
     );
 }
 
+/// Issue 2076: even with ample growth headroom (`trace_ring_max_capacity`
+/// well above the floor), a per-actor ring fed a stream of *settled*
+/// chains reclaims its oldest entries rather than growing — settlement-
+/// aware eviction keeps the ring at its floor instead of hoarding complete
+/// trees. Each root is settled (`assert_settled`) before the next inject,
+/// so by the time a later push finds the ring full, the oldest entry's
+/// chain is tombstoned in the `SettlementTable` and `is_live` returns
+/// false. This guards the `set_chassis_host_ring_capacity` / spawn-seed
+/// `with_growth` wiring *and* the liveness predicate end-to-end: a broken
+/// (always-grow) predicate would inflate the ring toward `MAX` and the
+/// length / truncation assertions would fail.
+#[test]
+#[allow(clippy::print_stderr)]
+fn settled_chains_reclaim_without_growing_per_actor_ring() {
+    const FLOOR: usize = 6;
+    const MAX: usize = 256;
+    // Two trace slots per settled inbound mail (Received + Finished); enough
+    // settled roots to comfortably overrun the floor were it to grow.
+    const INJECTS: usize = FLOOR * 4;
+    let Ok(mut tb) = TestBench::builder()
+        .with_workers(Some(2))
+        .trace_ring_capacity(Some(FLOOR))
+        .trace_ring_max_capacity(Some(MAX))
+        .size(16, 16)
+        .build()
+    else {
+        eprintln!(
+            "skipping settled_chains_reclaim_without_growing_per_actor_ring: no wgpu adapter"
+        );
+        return;
+    };
+
+    // Single leaf relay (depth-1 chain) — each inbound mail writes exactly
+    // Received + Finished into its own ring and nothing fans out.
+    spawn_topology(&tb, &depth_chain(1));
+    for seq in 0..INJECTS {
+        let (_root, rx) = tb.inject_root(
+            relay_id(0),
+            Ping::ID,
+            Ping {
+                seq: u32::try_from(seq).unwrap_or(u32::MAX),
+            }
+            .encode_into_bytes(),
+        );
+        // Settle before the next inject, so the oldest entry's chain is
+        // tombstoned (is_live == false) by the time the ring is full.
+        assert_settled(
+            &rx,
+            "mlat.settled_chains_reclaim_without_growing_per_actor_ring",
+        );
+    }
+
+    let req = TraceTail {
+        max: 0,
+        since: None,
+        root: None,
+    }
+    .encode_into_bytes();
+    let reply = tb
+        .send_bytes_and_await("mlat.relay:0", TraceTail::ID, req)
+        .expect("aether.trace.tail reply");
+    match TraceTailResult::decode_from_bytes(&reply).expect("decode TraceTailResult") {
+        TraceTailResult::Ok {
+            entries,
+            truncated_before,
+            ..
+        } => {
+            assert!(
+                entries.len() <= FLOOR,
+                "settled chains must reclaim, not grow: ring holds {} entries, floor is {FLOOR}",
+                entries.len()
+            );
+            assert!(
+                truncated_before.is_some(),
+                "reclaiming a settled prefix must signal truncated_before",
+            );
+        }
+        TraceTailResult::Err { error } => panic!("trace.tail error: {error}"),
+    }
+}
+
 /// Issue 1990: the configured `trace_ring_capacity` reaches a spawned
 /// actor's *per-actor* trace ring (the `Spawner` spawn funnel seeds it),
 /// not just the chassis-host ring. Drive a single relay (no downstream)

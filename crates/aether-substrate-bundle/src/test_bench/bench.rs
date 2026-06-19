@@ -240,6 +240,7 @@ pub struct TestBenchBuilder {
     pool_workers: Option<usize>,
     log_ring_capacity: Option<usize>,
     trace_ring_capacity: Option<usize>,
+    trace_ring_max_capacity: Option<usize>,
     settlement_cap: Option<Duration>,
 }
 
@@ -252,6 +253,7 @@ impl Default for TestBenchBuilder {
             pool_workers: None,
             log_ring_capacity: None,
             trace_ring_capacity: None,
+            trace_ring_max_capacity: None,
             settlement_cap: None,
         }
     }
@@ -310,6 +312,19 @@ impl TestBenchBuilder {
         self
     }
 
+    /// Override the per-actor `ActorTraceRing` (and chassis-host ring)
+    /// growth ceiling — the size a saturating ring grows to before it
+    /// resumes drop-oldest. `None` (the default) pins the ceiling to the
+    /// floor (`trace_ring_capacity`), giving a fixed ring so eviction
+    /// tests stay deterministic; `Some(n)` lets a growth test observe the
+    /// ring absorbing a burst past its floor up to `n`. Per-bench, no
+    /// process env.
+    #[must_use]
+    pub fn trace_ring_max_capacity(mut self, capacity: Option<usize>) -> Self {
+        self.trace_ring_max_capacity = capacity;
+        self
+    }
+
     /// Issue 2062: override the settlement-patience backstop the gates
     /// read. `None` (the default) resolves `AETHER_SETTLEMENT_CAP_SECS`
     /// (argv > env > default 5 min) via `SettlementConfig`; `Some(d)`
@@ -331,9 +346,17 @@ impl TestBenchBuilder {
         // `RingCapacities`, defaulting each unset field to the
         // `aether-actor` const cap.
         let default = RingCapacities::default();
+        let trace = self.trace_ring_capacity.unwrap_or(default.trace);
         let ring_caps = RingCapacities {
             log: self.log_ring_capacity.unwrap_or(default.log),
-            trace: self.trace_ring_capacity.unwrap_or(default.trace),
+            trace,
+            // The bench defaults the ceiling to the floor (a fixed,
+            // non-growing ring) so eviction tests that pin a small floor
+            // observe `truncated_before` deterministically; growth is
+            // opt-in via `trace_ring_max_capacity`. (Production chassis
+            // default the ceiling to `DEFAULT_TRACE_RING_MAX_CAP` instead,
+            // via `ActorRingConfig`.)
+            trace_max: self.trace_ring_max_capacity.unwrap_or(trace),
         };
         let settlement_cap = self
             .settlement_cap

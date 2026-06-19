@@ -188,14 +188,22 @@ wrong while a trace tree can be honestly incomplete — so don't reach for the t
 to decide whether work is *done*; that's settlement's job. Reach for it to see
 *what* happened and *how long* it took.
 
-**Gotcha — a trace is a bounded window, not a durable log.** The rings wrap: under
-load, or simply with enough elapsed time, an actor's oldest entries are
+**Gotcha — a trace is a bounded window, not a durable log.** A saturating ring
+reclaims and grows before it drops a live chain. When it fills, it first reclaims
+the oldest entries whose chains have already *settled* — those trees are complete,
+so dropping them costs nothing — and it grows its capacity, doubling toward a
+configured ceiling, only to make room for chains still in flight. Past the ceiling,
+or once every old entry belongs to a still-in-flight chain, the oldest entries are
 overwritten. Because overwriting any one node leaves a hole its tree can't be
 faithfully rebuilt from, the whole chain is dropped rather than served partial —
-and a chain still in flight when its entries lap is dropped with a warning. A tree
-self-reports where it was truncated, but old or high-volume chains can come back
-incomplete or not at all. Read a trace promptly after the work; don't count on
-reconstructing something from minutes ago or buried under a burst.
+and a chain still in flight when its entries lap is dropped with a warning. So what
+you tend to lose first is an old, already-settled trace you didn't read promptly,
+not the in-flight work the ring is actively protecting. A tree self-reports where
+it was truncated, but old or high-volume chains can come back incomplete or not at
+all. The starting size and the growth ceiling are tunable
+(`AETHER_ACTOR_TRACE_RING_SIZE` and `AETHER_ACTOR_TRACE_RING_MAX_SIZE`) if you
+routinely lose chains to bursts; even so, read a trace promptly after the work
+rather than counting on reconstructing something from minutes ago.
 
 ## How an agent uses it
 

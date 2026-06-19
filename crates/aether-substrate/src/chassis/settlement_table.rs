@@ -430,6 +430,19 @@ impl SettlementTable {
         self.find_slot(root).map_or(0, |slot| slot.cell.load().1)
     }
 
+    /// Whether `root` still has a live slot — `in_flight > 0` or
+    /// `held_open > 0`. The trace ring's eviction hint (issue 2076): a
+    /// settled root is tombstoned, so `is_live == false` means the ring
+    /// may reclaim that root's oldest entry instead of growing to retain
+    /// it; only a still-live (in-flight) oldest chain forces growth. O(1)
+    /// open-addressing probe, the same lookup `record_finished` does. A
+    /// concurrent read is best-effort: a stale answer only costs a
+    /// slightly-early grow or slightly-late reclaim, never correctness.
+    #[must_use]
+    pub fn is_live(&self, root: MailId) -> bool {
+        self.find_slot(root).is_some()
+    }
+
     /// Snapshot every live root and its `(in_flight, held_open)` counts —
     /// the diagnostic surface a wedged settlement gate dumps so a genuine
     /// deadlock/livelock names its stuck roots instead of surfacing a bare
@@ -566,6 +579,23 @@ mod tests {
         assert!(!t.record_finished(root(1, 1)));
         assert!(!t.record_release(root(1, 1)));
         assert_eq!(t.live_roots(), 0);
+    }
+
+    /// `is_live` (issue 2076, the trace ring's eviction hint) tracks the
+    /// slot's lifetime: false before any event, true while in-flight or
+    /// held-open, false again once settled (tombstoned).
+    #[test]
+    fn is_live_tracks_slot_lifetime() {
+        let t = SettlementTable::new();
+        let r = root(7, 7);
+        assert!(!t.is_live(r), "untracked root is not live");
+        t.record_sent(r);
+        assert!(t.is_live(r), "in-flight root is live");
+        t.record_hold_open(r);
+        assert!(!t.record_finished(r), "in_flight→0 but held_open=1");
+        assert!(t.is_live(r), "held-open root is still live");
+        assert!(t.record_release(r), "release fires settlement");
+        assert!(!t.is_live(r), "settled root is no longer live");
     }
 
     /// A hold keeps the root open after `in_flight` hits zero; only the

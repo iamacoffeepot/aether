@@ -203,3 +203,28 @@ fn actor_trace_ring_size_env_reaches_chassis_boot() {
         "AETHER_ACTOR_TRACE_RING_SIZE must reach the chassis boot",
     );
 }
+
+#[test]
+fn actor_trace_ring_max_size_env_reaches_chassis_boot() {
+    // Issue 2076 integration boot: a non-default
+    // `AETHER_ACTOR_TRACE_RING_MAX_SIZE` (the growth ceiling) is resolved
+    // by the headless chassis main and reaches the boot — observable on
+    // the same `aether_substrate::boot` tracing line as the floor. The
+    // in-process `TestBench` / `aether-actor` tests assert the ring-level
+    // growth behaviour; this guards the env → chassis-main → builder edge.
+    let lines = run_headless_capture_with_env(
+        &[],
+        &[("AETHER_ACTOR_TRACE_RING_MAX_SIZE", "131072")],
+        Duration::from_secs(2),
+    );
+    // The floor field (`trace_ring_capacity=`) is not a substring of the
+    // ceiling field (`trace_ring_max_capacity=`), so the search is
+    // unambiguous despite both landing on the same line.
+    let max = find_numeric_field(&lines, "trace_ring_max_capacity").unwrap_or_else(|| {
+        panic!("no trace_ring_max_capacity tracing line observed; stderr was:\n{lines:?}")
+    });
+    assert_eq!(
+        max, 131_072,
+        "AETHER_ACTOR_TRACE_RING_MAX_SIZE must reach the chassis boot",
+    );
+}
