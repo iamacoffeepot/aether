@@ -30,16 +30,18 @@ use core::fmt::Write as _;
 
 use aether_kinds::{LogEntry, LogTail, LogTailResult};
 use tracing::{
-    Event, Level,
+    Event, Level, Subscriber,
+    dispatcher::{Dispatch, set_global_default},
     field::{Field, Visit},
+    span,
 };
-// Wasm-only `tracing` imports needed by [`WasmSubscriber`]'s
-// `Subscriber` impl.
-#[cfg(target_arch = "wasm32")]
-use tracing::{Subscriber, span};
 
 use crate::Local;
+use crate::local::install_static_backend;
 use core::fmt;
+use core::mem::transmute;
+use core::ptr;
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 /// Default per-actor ring capacity. Overridable at substrate boot
 /// via `AETHER_ACTOR_LOG_RING_SIZE` — the substrate parses the env
@@ -316,47 +318,80 @@ fn truncate(mut s: String) -> String {
     s
 }
 
-/// Wasm-side tracing subscriber. Each `tracing::*` event the guest
-/// fires walks through this subscriber's `event()` and rides the
-/// trampoline's per-event FFI host fn back into the host process,
-/// where the host-side `ActorAwareLayer` lands it in the
-/// trampoline's [`ActorLogRing`]. ADR-0081 §7 — the previous
-/// guest-side `LogBuffer` + `drain_buffer` + `LogBatch` flush hop
-/// retired alongside this rewrite.
-#[cfg(target_arch = "wasm32")]
-pub struct WasmSubscriber {
-    next_span: core::sync::atomic::AtomicU64,
+/// Process-global log sink: a non-capturing `fn` the driver installs
+/// once, stored behind an `AtomicPtr` so the cell is `no_std`-safe and
+/// `Sync`. Mirrors `local::SLOTS_PROVIDER` — set once with `Release`,
+/// read with `Acquire`. Null until installed; an event fired before
+/// install is dropped rather than forwarded.
+pub type LogSink = fn(level: u8, target: &str, message: &str);
+
+static LOG_SINK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Install the process-global log sink. Set-once: the first install
+/// wins and later ones are ignored. The driver installs the target-
+/// specific forwarder — the wasm guest passes
+/// `ffi::bridge::mail::emit_log_event` (wasm32-only); a future C /
+/// OS-process host installs its own. This is the seam that keeps this
+/// module target-blind (issue #2078, mirroring `local.rs` #2070).
+pub fn install_log_sink(sink: LogSink) {
+    // A `fn` pointer casts cleanly to a thin data pointer; `current_sink`
+    // transmutes it back (pointer → `fn` is not a plain cast).
+    let raw: *mut () = sink as *mut ();
+    let _ = LOG_SINK.compare_exchange(ptr::null_mut(), raw, Ordering::Release, Ordering::Relaxed);
 }
 
-#[cfg(target_arch = "wasm32")]
-impl WasmSubscriber {
+/// Read the installed sink, or `None` before any install.
+#[inline]
+fn current_sink() -> Option<LogSink> {
+    let raw = LOG_SINK.load(Ordering::Acquire);
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: `LOG_SINK` only ever holds a `LogSink` cast to a thin
+    // pointer by `install_log_sink`; this reconstructs it. A data
+    // pointer → `fn` pointer is not a plain cast, so `transmute` is
+    // required.
+    Some(unsafe { transmute::<*mut (), LogSink>(raw) })
+}
+
+/// Target-blind `tracing` subscriber: renders each event via
+/// [`render_event`] and forwards `(level, target, message)` to the
+/// installed [`LogSink`]. The guest runtime sets it as `tracing`'s
+/// global default and installs the FFI sink, so each guest event rides
+/// the trampoline's per-event host fn into the host process, where the
+/// host-side `ActorAwareLayer` lands it in the trampoline's
+/// [`ActorLogRing`] (ADR-0081 §7). The host installs its own subscriber
+/// stack and never sets this one. Issue #2078 made this target-blind —
+/// the wasm-specificity now lives only in the installed sink.
+pub struct ForwardingSubscriber {
+    next_span: AtomicU64,
+}
+
+impl ForwardingSubscriber {
+    #[must_use]
     pub const fn new() -> Self {
         Self {
-            next_span: core::sync::atomic::AtomicU64::new(1),
+            next_span: AtomicU64::new(1),
         }
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-impl Default for WasmSubscriber {
+impl Default for ForwardingSubscriber {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-impl Subscriber for WasmSubscriber {
+impl Subscriber for ForwardingSubscriber {
     fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-        // Filtering happens on the substrate side; the wasm
-        // subscriber forwards everything so the host's `EnvFilter`
-        // sees the guest's reported target.
+        // Filtering happens on the substrate side; the forwarder
+        // forwards everything so the host's `EnvFilter` sees the
+        // reported target.
         true
     }
 
     fn new_span(&self, _attrs: &span::Attributes<'_>) -> span::Id {
-        let id = self
-            .next_span
-            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let id = self.next_span.fetch_add(1, Ordering::Relaxed);
         span::Id::from_u64(id.max(1))
     }
 
@@ -366,32 +401,31 @@ impl Subscriber for WasmSubscriber {
     fn exit(&self, _: &span::Id) {}
 
     fn event(&self, event: &Event<'_>) {
-        let (level, target, message) = render_event(event);
-        crate::ffi::bridge::mail::emit_log_event(level, &target, &message);
+        if let Some(sink) = current_sink() {
+            let (level, target, message) = render_event(event);
+            sink(level, &target, &message);
+        }
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-static WASM_INSTALLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static SUBSCRIBER_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-/// Install the wasm-side actor-aware subscriber as `tracing`'s
-/// global default. Called from the `export!` macro before the
-/// guest's `Component::init` runs (so logging from `init` works).
-/// Idempotent.
-#[cfg(target_arch = "wasm32")]
-pub fn install_wasm_subscriber() {
-    use core::sync::atomic::Ordering;
-    // Install the single-actor static slot backend before the subscriber is
-    // set: the subscriber pushes into the per-actor `ActorLogRing` (a
-    // `Local`) on its first event, so the slots provider must be live first
-    // (iamacoffeepot/aether#2070). Set-once, so a repeat call is a no-op.
-    crate::local::install_static_backend();
-    if WASM_INSTALLED.swap(true, Ordering::SeqCst) {
+/// Install the [`ForwardingSubscriber`] as `tracing`'s global default.
+/// Called from the `export!` macro before the guest's `init` runs (so
+/// logging from `init` works). Also installs the single-actor static
+/// `Local` backend the guest's per-actor slots need (#2070) — set
+/// before the subscriber so a first-event `Local` access has a live
+/// provider. Idempotent. Target-blind, but only the guest runtime calls
+/// it; the host installs its own subscriber stack.
+pub fn install_forwarding_subscriber() {
+    // Install the single-actor static slot backend before the subscriber
+    // is set, so a first-event `Local` access resolves (#2070). Set-once,
+    // so a repeat call is a no-op.
+    install_static_backend();
+    if SUBSCRIBER_INSTALLED.swap(true, Ordering::SeqCst) {
         return;
     }
-    let _ = tracing::dispatcher::set_global_default(tracing::dispatcher::Dispatch::new(
-        WasmSubscriber::new(),
-    ));
+    let _ = set_global_default(Dispatch::new(ForwardingSubscriber::new()));
 }
 
 /// `aether::log_trace!("msg")` — equivalent to `tracing::trace!`.

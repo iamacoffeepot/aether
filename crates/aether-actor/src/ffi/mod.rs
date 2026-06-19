@@ -271,6 +271,22 @@ pub fn stage_init_failure(message: &str) {
     }
 }
 
+/// Guest-runtime log install (wasm32). Wires the FFI sink
+/// (`bridge::mail::emit_log_event`) into the target-blind
+/// [`crate::log`] forwarding seam, then sets the forwarding subscriber
+/// as `tracing`'s global default. Called from the `export!` prologue
+/// before the guest's `init` runs. This is the only wasm-specific log
+/// glue — `bridge::mail` is `pub(crate)`, so the sink can only be wired
+/// from inside the crate; the subscriber itself stays target-blind in
+/// [`crate::log`]. Shared by the `export!` shims so the wiring isn't
+/// repeated per init shim.
+#[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
+pub fn install_guest_logging() {
+    crate::log::install_log_sink(bridge::mail::emit_log_event);
+    crate::log::install_forwarding_subscriber();
+}
+
 /// Generic guest allocator backing host→guest payload delivery (ADR-0095).
 ///
 /// The substrate writes every inbound payload — mail, init config, rehydrate
@@ -594,7 +610,7 @@ macro_rules! __export_internal {
             config_ptr: u32,
             config_len: u32,
         ) -> u32 {
-            $crate::log::install_wasm_subscriber();
+            $crate::ffi::install_guest_logging();
             // Build the config slice. Empty-len short-circuits to `&[]`
             // so a null/zero `config_ptr` is not dereferenced — mirrors
             // `PriorState::bytes`.
@@ -1085,7 +1101,7 @@ macro_rules! __export_multi_internal {
             config_ptr: u32,
             config_len: u32,
         ) -> u32 {
-            $crate::log::install_wasm_subscriber();
+            $crate::ffi::install_guest_logging();
             let config_bytes: &[u8] = if config_len == 0 {
                 &[]
             } else {
@@ -1119,7 +1135,7 @@ macro_rules! __export_multi_internal {
             config_ptr: u32,
             config_len: u32,
         ) -> u32 {
-            $crate::log::install_wasm_subscriber();
+            $crate::ffi::install_guest_logging();
             let config_bytes: &[u8] = if config_len == 0 {
                 &[]
             } else {

@@ -541,7 +541,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     )?;
 
     // ADR-0081 §7: `log_event_p32` re-fires a guest `tracing::*` event
-    // on the host side. `WasmSubscriber::event` calls this per event
+    // on the host side. `ForwardingSubscriber::event` calls this (via the
+    // installed log sink) per event
     // (no buffer, no flush hop — the pre-ADR-0081 `LogBatch` route
     // retired alongside `LogCapability`). The host re-emits via
     // `emit_host_event` on the trampoline's dispatcher thread, where
