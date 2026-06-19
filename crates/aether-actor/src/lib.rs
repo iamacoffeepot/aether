@@ -68,8 +68,8 @@ pub use actor::ctx::{
 };
 pub use actor::slot::Slot;
 pub use actor::{
-    Actor, EmbeddedHost, HandlesKind, Instanced, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError,
-    Singleton, Subname, validate_namespace_segment,
+    Actor, EmbeddedHost, HandlesKind, Instanced, Lifecycle, NAMESPACE_SEGMENT_MAX_LEN,
+    NamespaceError, Singleton, Subname, validate_namespace_segment,
 };
 pub use local::Local;
 // Issue 665: `Mailbox<K, T>` and `ActorMailbox<'_, R, T>` retired; the

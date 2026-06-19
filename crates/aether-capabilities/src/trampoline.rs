@@ -99,7 +99,7 @@ mod native {
     use aether_actor::Local as _;
     use aether_actor::cost::CostCells;
 
-    /// Configuration handed to [`WasmTrampoline::init`] by the spawn
+    /// Configuration handed to [`Lifecycle::init`](aether_actor::Lifecycle::init) by the spawn
     /// path. Carries the wasmtime engine / linker plus the parsed
     /// module bytes; `init` instantiates the `Component` against the
     /// trampoline's binding.

@@ -164,8 +164,11 @@ impl aether_actor::Actor for Relay {
 }
 impl aether_actor::Instanced for Relay {}
 impl aether_actor::HandlesKind<Ping> for Relay {}
-impl NativeActor for Relay {
+impl aether_actor::Lifecycle for Relay {
     type Config = RelayConfig;
+    type InitError = BootError;
+    type InitCtx<'a> = NativeInitCtx<'a>;
+    type Ctx<'a> = NativeCtx<'a>;
     fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self {
             downstreams: config.downstreams,
@@ -175,6 +178,7 @@ impl NativeActor for Relay {
         })
     }
 }
+impl NativeActor for Relay {}
 impl NativeDispatch for Relay {
     fn __aether_dispatch_envelope(
         &mut self,
@@ -253,10 +257,13 @@ impl aether_actor::Actor for TickSource {
 }
 impl aether_actor::Instanced for TickSource {}
 impl aether_actor::HandlesKind<Tick> for TickSource {}
-impl NativeActor for TickSource {
+impl aether_actor::Lifecycle for TickSource {
     /// `(entry, burst)`: the relay-0 mailbox and the number of `Ping`s to
     /// emit per `Tick` (`1` in `Latency`, `backlog` in `Saturate`).
     type Config = (MailboxId, u32);
+    type InitError = BootError;
+    type InitCtx<'a> = NativeInitCtx<'a>;
+    type Ctx<'a> = NativeCtx<'a>;
     fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         let (entry, burst) = config;
         Ok(Self {
@@ -267,6 +274,7 @@ impl NativeActor for TickSource {
         })
     }
 }
+impl NativeActor for TickSource {}
 impl NativeDispatch for TickSource {
     fn __aether_dispatch_envelope(
         &mut self,
