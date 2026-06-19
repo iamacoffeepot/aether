@@ -972,13 +972,19 @@ mod tests {
 
     impl Instanced for FailingChild {}
 
-    impl FfiActor for FailingChild {
+    impl crate::Lifecycle for FailingChild {
         type Config = ();
-        type State = ();
+        type InitError = BootError;
+        type InitCtx<'a> = FfiInitCtx<'a>;
+        type Ctx<'a> = FfiCtx<'a>;
 
         fn init(_config: (), _ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
             Err(BootError::new("inline child init deliberately fails"))
         }
+    }
+
+    impl FfiActor for FailingChild {
+        type State = ();
     }
 
     impl ErasedFfiActor for FailingChild {
@@ -1078,13 +1084,19 @@ mod tests {
 
     impl Instanced for SucceedingChild {}
 
-    impl FfiActor for SucceedingChild {
+    impl crate::Lifecycle for SucceedingChild {
         type Config = ();
-        type State = ();
+        type InitError = BootError;
+        type InitCtx<'a> = FfiInitCtx<'a>;
+        type Ctx<'a> = FfiCtx<'a>;
 
         fn init(_config: (), _ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self)
         }
+    }
+
+    impl FfiActor for SucceedingChild {
+        type State = ();
     }
 
     impl ErasedFfiActor for SucceedingChild {

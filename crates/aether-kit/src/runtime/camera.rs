@@ -462,7 +462,7 @@ impl FfiActor for CameraComponent {
 
 #[cfg(test)]
 mod tests {
-    use aether_actor::{FfiActor, FfiInitCtx};
+    use aether_actor::FfiInitCtx;
 
     use super::*;
 
@@ -471,7 +471,7 @@ mod tests {
     #[test]
     fn default_camera_boots_with_zero_speed() {
         let mut ctx = FfiInitCtx::__new(0);
-        let comp = CameraComponent::init((), &mut ctx).expect("init");
+        let comp = <CameraComponent as aether_actor::Lifecycle>::init((), &mut ctx).expect("init");
         let main = comp.cameras.get("main").expect("\"main\" camera present");
         match main.mode {
             ModeState::Orbit(state) => {

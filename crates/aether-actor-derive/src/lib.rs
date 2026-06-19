@@ -2298,18 +2298,38 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     let dehydrate_accessor_tokens = dehydrate_accessor.as_ref();
     let rehydrate_accessor_tokens = rehydrate_accessor.as_ref();
 
+    // iamacoffeepot/aether#2048: the boot lifecycle (`init` / `wire` /
+    // `unwire` + `type Config`) lives on the shared `Lifecycle` capability;
+    // the hot-swap hooks (`on_dehydrate` / `on_rehydrate`) stay on the
+    // target subtrait `FfiActor`. Route the user's hand-written hooks
+    // accordingly — boot hooks into `impl Lifecycle`, hot-swap into
+    // `impl FfiActor`. The per-target ctx GATs are pinned to the concrete
+    // FFI ctx types here, so a `wire`/`init` body keeps its concrete ctx.
+    let (boot_hooks, hotswap_hooks): (Vec<syn::ImplItemFn>, Vec<syn::ImplItemFn>) =
+        lifecycle_methods
+            .into_iter()
+            .partition(|m| matches!(m.sig.ident.to_string().as_str(), "wire" | "unwire"));
+
     Ok(quote! {
         #actor_impl
 
         #(#handles_kind_impls)*
 
-        impl #impl_generics #trait_path for #self_ty #where_clause {
+        impl #impl_generics ::aether_actor::Lifecycle for #self_ty #where_clause {
             #config_type_tokens
-            #state_type_tokens
+            type InitError = ::aether_actor::BootError;
+            type InitCtx<'__a> = ::aether_actor::FfiInitCtx<'__a>;
+            type Ctx<'__a> = ::aether_actor::FfiCtx<'__a>;
 
             #wrapped_init
 
-            #(#lifecycle_methods)*
+            #(#boot_hooks)*
+        }
+
+        impl #impl_generics #trait_path for #self_ty #where_clause {
+            #state_type_tokens
+
+            #(#hotswap_hooks)*
 
             #generated_state_hooks
         }
@@ -2353,10 +2373,10 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
             // ADR-0112: the lifecycle hooks keep their `FfiCtx<'_>` (= Single)
             // default signatures; downgrade the carried `Manual` ctx here.
             fn erased_wire(&mut self, __aether_ctx: &mut ::aether_actor::FfiCtx<'_, ::aether_actor::Manual>) {
-                <#self_ty as ::aether_actor::FfiActor>::wire(self, __aether_ctx.as_single());
+                <#self_ty as ::aether_actor::Lifecycle>::wire(self, __aether_ctx.as_single());
             }
             fn erased_unwire(&mut self, __aether_ctx: &mut ::aether_actor::FfiCtx<'_, ::aether_actor::Manual>) {
-                <#self_ty as ::aether_actor::FfiActor>::unwire(self, __aether_ctx.as_single());
+                <#self_ty as ::aether_actor::Lifecycle>::unwire(self, __aether_ctx.as_single());
             }
             fn erased_on_dehydrate(
                 &mut self,
@@ -2963,12 +2983,25 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
 
         #handler_inventory
 
+        // iamacoffeepot/aether#2048: the boot lifecycle (`init` / `wire` /
+        // `unwire` + `type Config`) lives on the shared `Lifecycle`
+        // capability, with the per-target ctx GATs pinned to the concrete
+        // native ctx types so an `init`/`wire` body keeps its concrete ctx.
         #[cfg(not(target_arch = "wasm32"))]
-        impl #impl_generics #trait_path for #self_ty #where_clause {
+        impl #impl_generics ::aether_actor::Lifecycle for #self_ty #where_clause {
             #config_type
+            type InitError = ::aether_substrate::BootError;
+            type InitCtx<'__a> = ::aether_substrate::NativeInitCtx<'__a>;
+            type Ctx<'__a> = ::aether_substrate::NativeCtx<'__a>;
             #init_method
             #(#lifecycle_methods)*
         }
+
+        // `NativeActor` is now the empty composition `Actor +
+        // Lifecycle<InitError = BootError>`; per-kind dispatch lives on the
+        // sibling `NativeDispatch` impl below.
+        #[cfg(not(target_arch = "wasm32"))]
+        impl #impl_generics #trait_path for #self_ty #where_clause {}
 
         #[cfg(not(target_arch = "wasm32"))]
         impl #impl_generics ::aether_substrate::NativeDispatch for #self_ty #where_clause {

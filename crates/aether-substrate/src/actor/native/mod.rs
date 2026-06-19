@@ -91,7 +91,7 @@ pub use mailbox::NativeActorMailbox;
 pub use spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
 pub use spawn_thread::{InheritCtx, RootCtx};
 
-use aether_actor::Actor;
+use aether_actor::{Actor, Lifecycle};
 
 use crate::chassis::error::BootError;
 use crate::mail::KindId;
@@ -106,63 +106,29 @@ use crate::mail::KindId;
 pub use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapability};
 
 /// Native chassis-cap actor trait. Per-cap shape: one struct, one
-/// `#[actor] impl NativeActor for X` block. The `Config` associated
-/// type is moved into [`Self::init`] by the chassis builder; pass
-/// `()` for caps with no configuration.
+/// `#[actor] impl NativeActor for X` block. The boot lifecycle
+/// (`init` / `wire` / `unwire`, plus `type Config`) lives on the shared
+/// [`Lifecycle`] capability; `NativeActor`
+/// composes it alongside the identity [`Actor`] supertrait and pins
+/// `InitError` to the chassis [`BootError`]. Native config stays a live
+/// Rust value (e.g. `AudioConfig`), so unlike the FFI side it carries no
+/// `Kind` bound. The `#[actor]` macro synthesizes the per-target ctx GATs
+/// (`NativeInitCtx` / `NativeCtx`) into the generated `impl Lifecycle`.
 ///
-/// Issue 629 / Phase A: bound is `: Actor` only (which gives
-/// `Send + 'static`). The dispatcher thread owns the cap as `Box<Self>`
-/// for its lifetime — no cross-thread `Arc` share, no `Sync` bound.
-/// Cap state can be plain fields without interior-mutability gymnastics
-/// once Phase B sweeps each cap.
-pub trait NativeActor: Actor {
-    /// Configuration the chassis builder threads through to
-    /// [`Self::init`]. `()` for caps without configuration; the
-    /// actual config struct (e.g. `AudioConfig`) for caps that
-    /// take one.
-    type Config: Send + 'static;
-
-    /// Boot the cap. The chassis has already claimed the cap's
-    /// mailbox under `Actor::NAMESPACE` and built a fresh
-    /// `NativeBinding` whose self-mailbox is that claim — the
-    /// `ctx` exposes those (and the actors-so-far map for boot-time
-    /// peer lookups) plus the universal handle-store for caps that
-    /// hold typed handles.
-    fn init(config: Self::Config, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError>
-    where
-        Self: Sized;
-
-    /// Post-init mail-allowed hook (issue 584, ADR-0079 amended
-    /// 2026-05-09). Runs after `init` returned `Ok` and the actor's
-    /// mailbox is published, but before the dispatcher pulls the
-    /// first envelope. The actor may send mail here — peers are
-    /// addressable and the chassis is past the boot barrier. Default
-    /// empty — opt-in for actors that need to register subscriptions,
-    /// announce themselves, or kick off a poll loop via self-mail.
-    fn wire(&mut self, _ctx: &mut NativeCtx<'_>) {}
-
-    /// Pre-shutdown mail-allowed hook (issue 584, ADR-0079 amended
-    /// 2026-05-09). Runs after the dispatcher's inbox drain, before
-    /// the actor value drops. Triggers:
-    ///
-    /// - Self-shutdown — actor's handler called `ctx.shutdown()`;
-    ///   dispatcher saw the flag set after the handler returned.
-    /// - Substrate shutdown — chassis dropped its registry, the sink
-    ///   handler's `Weak<Sender>` upgrade fails, the inbox channel
-    ///   disconnects, and `recv_blocking` returns `None`.
-    /// - Cooperative external — a peer mailed the actor a "please
-    ///   close" kind; the actor's handler did its cleanup and called
-    ///   `ctx.shutdown()`. From the dispatcher's perspective this is
-    ///   identical to self-shutdown.
-    ///
-    /// Mail emitted from `unwire` lands in peer mailboxes if those
-    /// peers are still alive; sends to a dead peer warn-drop. Use this
-    /// to publish a final broadcast, flush state, or signal monitors.
-    /// Default empty — opt-in.
-    ///
-    /// Issue 629 / Phase A: `&mut self` since the dispatcher thread
-    /// owns the cap exclusively.
-    fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {}
+/// Issue 629 / Phase A: the `Actor` supertrait gives `Send + 'static`.
+/// The dispatcher thread owns the cap as `Box<Self>` for its lifetime —
+/// no cross-thread `Arc` share, no `Sync` bound. Cap state can be plain
+/// fields without interior-mutability gymnastics once Phase B sweeps each
+/// cap. Per-kind dispatch wiring lives on the sibling [`NativeDispatch`]
+/// trait, also macro-emitted.
+pub trait NativeActor:
+    Actor
+    + for<'a> Lifecycle<
+        InitError = BootError,
+        InitCtx<'a> = NativeInitCtx<'a>,
+        Ctx<'a> = NativeCtx<'a>,
+    >
+{
 }
 
 /// Sum dispatch entry-point — emitted once per `#[actor] impl

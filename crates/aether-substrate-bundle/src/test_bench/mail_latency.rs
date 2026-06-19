@@ -62,12 +62,16 @@ impl aether_actor::Actor for RingRelay {
 }
 impl aether_actor::Instanced for RingRelay {}
 impl aether_actor::HandlesKind<Ping> for RingRelay {}
-impl NativeActor for RingRelay {
+impl aether_actor::Lifecycle for RingRelay {
     type Config = MailboxId;
+    type InitError = BootError;
+    type InitCtx<'a> = NativeInitCtx<'a>;
+    type Ctx<'a> = NativeCtx<'a>;
     fn init(next: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { next })
     }
 }
+impl NativeActor for RingRelay {}
 impl NativeDispatch for RingRelay {
     fn __aether_dispatch_envelope(
         &mut self,
@@ -115,12 +119,16 @@ impl aether_actor::Actor for HoldRelay {
 impl aether_actor::Instanced for HoldRelay {}
 impl aether_actor::Singleton for HoldRelay {}
 impl aether_actor::HandlesKind<Ping> for HoldRelay {}
-impl NativeActor for HoldRelay {
+impl aether_actor::Lifecycle for HoldRelay {
     type Config = ();
+    type InitError = BootError;
+    type InitCtx<'a> = NativeInitCtx<'a>;
+    type Ctx<'a> = NativeCtx<'a>;
     fn init((): Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self)
     }
 }
+impl NativeActor for HoldRelay {}
 impl NativeDispatch for HoldRelay {
     fn __aether_dispatch_envelope(
         &mut self,

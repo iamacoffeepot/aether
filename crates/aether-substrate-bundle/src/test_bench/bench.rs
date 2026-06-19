@@ -1519,8 +1519,11 @@ mod tests {
             }
             impl Instanced for Child {}
             impl HandlesKind<Bump> for Child {}
-            impl NativeActor for Child {
+            impl aether_actor::Lifecycle for Child {
                 type Config = Arc<AtomicU32>;
+                type InitError = BootError;
+                type InitCtx<'a> = NativeInitCtx<'a>;
+                type Ctx<'a> = NativeCtx<'a>;
                 fn init(
                     config: Self::Config,
                     _ctx: &mut NativeInitCtx<'_>,
@@ -1528,6 +1531,7 @@ mod tests {
                     Ok(Self { received: config })
                 }
             }
+            impl NativeActor for Child {}
             impl NativeDispatch for Child {
                 fn __aether_dispatch_envelope(
                     &mut self,

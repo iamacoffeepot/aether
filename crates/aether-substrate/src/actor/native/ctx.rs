@@ -921,7 +921,7 @@ impl<M: ReplyMode> Drop for NativeCtx<'_, M> {
     }
 }
 
-/// Boot-time context for [`NativeActor::init`]. Carries a borrow of
+/// Boot-time context for [`Lifecycle::init`](aether_actor::Lifecycle::init). Carries a borrow of
 /// the actor's transport (for init-time mail), a borrow of the
 /// chassis's [`ExportedHandles`] map (so the cap can publish a
 /// driver-facing sub-handle via [`Self::publish_handle`]), and a
@@ -1270,14 +1270,19 @@ mod tests {
 
     impl Singleton for StubActor {}
 
-    impl NativeActor for StubActor {
+    impl aether_actor::Lifecycle for StubActor {
         type Config = ();
+        type InitError = BootError;
+        type InitCtx<'a> = NativeInitCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a>;
         fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self {
                 boots: AtomicU32::new(0),
             })
         }
     }
+
+    impl NativeActor for StubActor {}
 
     /// Issue 629 / Phase A: handle-export round-trip. Caps publish a
     /// handle bundle during `init`; consumers retrieve a clone via
