@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aether_actor::actor::ctx::{LifecycleControl, MailSender, OutboundReply};
-use aether_actor::{Actor, HandlesKind, Manual, ReplyMode, Single, Singleton, Stream};
+use aether_actor::{Addressable, HandlesKind, Manual, ReplyMode, Single, Singleton, Stream};
 use core::marker::PhantomData;
 use core::ptr;
 
@@ -118,7 +118,7 @@ macro_rules! native_sender_methods {
         // runtime, so there is no `R::resolve` lineage carry to route through.
         #[must_use]
         #[allow(clippy::disallowed_methods)]
-        pub fn resolve_actor<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
+        pub fn resolve_actor<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R> {
             let (parent, root) = self.outbound_lineage();
             NativeActorMailbox::__new_in_flight(
                 mailbox_id_from_name(name).0,
@@ -136,7 +136,7 @@ macro_rules! native_sender_methods {
         /// than re-resolving by name. Captures the in-flight lineage like
         /// [`Self::actor`].
         #[must_use]
-        pub fn actor_at<R: Actor>(&self, id: MailboxId) -> NativeActorMailbox<'_, R> {
+        pub fn actor_at<R: Addressable>(&self, id: MailboxId) -> NativeActorMailbox<'_, R> {
             let (parent, root) = self.outbound_lineage();
             NativeActorMailbox::__new_in_flight(id.0, self.binding, parent, root)
         }
@@ -333,7 +333,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// lifetime today.
     pub fn spawn_inherit<A, F>(&self, f: F) -> JoinHandle<()>
     where
-        A: Actor + Singleton + 'static,
+        A: Addressable + Singleton + 'static,
         F: FnOnce(InheritCtx<A>) + Send + 'static,
     {
         spawn_thread::spawn_inherit::<A, F>(
@@ -355,7 +355,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// use [`Self::spawn_inherit`].
     pub fn spawn_detached<A, F>(&self, f: F) -> JoinHandle<()>
     where
-        A: Actor + Singleton + 'static,
+        A: Addressable + Singleton + 'static,
         F: FnOnce(RootCtx<A>) + Send + 'static,
     {
         spawn_thread::spawn_detached::<A, F>(Arc::clone(self.binding), f)
@@ -970,7 +970,7 @@ impl<'a> NativeInitCtx<'a> {
 
     /// The actor's own [`MailboxId`] — the deterministic FNV-1a hash
     /// of its full registered name (ADR-0029). For singletons that's
-    /// `Actor::NAMESPACE`; for instanced actors it's
+    /// `Addressable::NAMESPACE`; for instanced actors it's
     /// `"{NAMESPACE}:{subname}"` (ADR-0079). Init may use this to
     /// publish its own address — e.g. dispatch
     /// `aether.input.subscribe { mailbox: ctx.self_id() }` before
@@ -1255,7 +1255,7 @@ mod tests {
     use aether_data::KindId as DataKindId;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// Hand-rolled `Actor` impl referenced only by the `_assert_actor_send`
+    /// Hand-rolled `Addressable` impl referenced only by the `_assert_actor_send`
     /// type-level check below. The struct never gets constructed at
     /// runtime — its purpose is to fail to instantiate the assert if
     /// `NativeActor` ever loses its `Send + 'static` bound.
@@ -1264,7 +1264,7 @@ mod tests {
         boots: AtomicU32,
     }
 
-    impl Actor for StubActor {
+    impl Addressable for StubActor {
         const NAMESPACE: &'static str = "test.stub";
     }
 
@@ -1345,7 +1345,7 @@ mod tests {
     /// Compile-time signal that `NativeActor` is `Send + 'static` (no
     /// `Sync`), and that `ExportedHandles` values are
     /// `Send + Sync + Clone` so cross-thread driver access works.
-    /// If a future change to `Actor` drops `Send + 'static`, the
+    /// If a future change to `Addressable` drops `Send + 'static`, the
     /// asserts here fail to instantiate.
     fn _assert_actor_send() {
         fn requires_send<T: Send + 'static>() {}

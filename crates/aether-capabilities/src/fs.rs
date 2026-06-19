@@ -747,7 +747,7 @@ mod native {
             NamespaceAddr, NamespaceRoots, Read, Write,
         };
         use super::{Arc, FsCapability, Path, PathBuf};
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
         use aether_data::MailboxId;
         use aether_kinds::{CopyResult, DeleteResult, ListResult, ReadResult, WriteResult};
         use aether_substrate::actor::native::binding::NativeBinding;

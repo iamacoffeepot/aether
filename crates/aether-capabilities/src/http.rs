@@ -588,7 +588,7 @@ mod native {
             Arc, Duration, Fetch, FetchResult, HashSet, HttpCapability, UreqHttpAdapter,
             build_http_adapter,
         };
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
         use aether_data::MailboxId;
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::actor::native::ctx::NativeCtx;

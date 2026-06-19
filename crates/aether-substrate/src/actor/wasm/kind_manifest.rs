@@ -248,7 +248,7 @@ pub fn read_producers_from_bytes(wasm: &[u8]) -> String {
 }
 
 /// One exported actor's receive-side surface within a (possibly
-/// multi-actor) module, tagged by the `Actor::NAMESPACE` from its
+/// multi-actor) module, tagged by the `Addressable::NAMESPACE` from its
 /// `ActorBoundary` record (ADR-0096). A single-actor module emits no
 /// boundary, so it yields one group with `namespace: None` — the
 /// loader resolves its mailbox name from the `aether.namespace`
@@ -256,7 +256,7 @@ pub fn read_producers_from_bytes(wasm: &[u8]) -> String {
 /// entry type.
 #[derive(Debug, Clone)]
 pub struct ActorInputs {
-    /// `Actor::NAMESPACE` of this group's type, from its `ActorBoundary`
+    /// `Addressable::NAMESPACE` of this group's type, from its `ActorBoundary`
     /// record; `None` for the implicit single-actor group.
     pub namespace: Option<String>,
     /// The handler / fallback / component-doc / config records that

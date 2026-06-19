@@ -16,7 +16,7 @@
 
 use core::marker::PhantomData;
 
-use aether_actor::{Actor, HandlesKind};
+use aether_actor::{Addressable, HandlesKind};
 use aether_data::{ActorId, Kind, MailId, Tag, fold_lineage, mailbox_id_from_name, with_tag};
 
 use crate::actor::native::binding::NativeBinding;
@@ -124,7 +124,7 @@ impl<'a, R> NativeActorMailbox<'a, R> {
     // `NativeCtx::resolve_actor`): the peer name is supplied at runtime.
     #[must_use]
     #[allow(clippy::disallowed_methods)]
-    pub fn resolve_peer<Peer: Actor>(&self, name: &str) -> NativeActorMailbox<'a, Peer> {
+    pub fn resolve_peer<Peer: Addressable>(&self, name: &str) -> NativeActorMailbox<'a, Peer> {
         // Carry this handle's captured lineage onto the peer handle so a
         // send from it stays in the caller's chain (ADR-0080 §7).
         NativeActorMailbox::__new_in_flight(
@@ -144,7 +144,7 @@ impl<'a, R> NativeActorMailbox<'a, R> {
     /// the parent carry (exact for a root-pinned cap, depth-1). Threads
     /// the existing `'a` binding ref like [`Self::resolve_peer`].
     #[must_use]
-    pub fn resolve_peer_scoped<Peer: Actor>(
+    pub fn resolve_peer_scoped<Peer: Addressable>(
         &self,
         scope: &str,
         segment: &str,
@@ -159,7 +159,7 @@ impl<'a, R> NativeActorMailbox<'a, R> {
     }
 }
 
-impl<R: Actor> NativeActorMailbox<'_, R> {
+impl<R: Addressable> NativeActorMailbox<'_, R> {
     /// Send a single payload of kind `K` to actor `R`. Compile-checked
     /// against `R: HandlesKind<K>`. Wire shape (cast or postcard)
     /// follows `Kind::encode_into_bytes`.

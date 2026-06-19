@@ -20,7 +20,7 @@ mod tests {
         use std::thread;
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
         use aether_capabilities::WasmTrampoline;
         use aether_data::Kind;
         use aether_kinds::{
@@ -30,7 +30,7 @@ mod tests {
 
         use crate::fleetbench::{FleetBench, component_wasm_path, dist_manifest_present};
 
-        /// The probe fixture's declared `Actor::NAMESPACE` (distinct from the
+        /// The probe fixture's declared `Addressable::NAMESPACE` (distinct from the
         /// `probe` wasm stem).
         const PROBE_NAMESPACE: &str = "test_fixture_probe";
 

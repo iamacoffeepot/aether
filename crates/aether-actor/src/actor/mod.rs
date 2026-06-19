@@ -3,7 +3,7 @@
 //! ([`ctx`]) and the `Slot` single-instance
 //! backing store ([`slot`]). Marker traits are
 //! pure compile-time markers — no transport machinery, no lifecycle
-//! methods, just identity (`Actor`), singleton-ness (`Singleton`),
+//! methods, just identity (`Addressable`), singleton-ness (`Singleton`),
 //! and per-handler-kind gating (`HandlesKind`).
 //!
 //! Pre-PR-C of issue 533 these lived here. Issue 533's facade pattern
@@ -38,7 +38,7 @@ use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
 /// request/reply-shaped need is served by an FSM that carries state
 /// across handler invocations (send → return → handle the reply) rather
 /// than by parking a pool worker in-handler.
-pub trait Actor: Sized + Send + 'static {
+pub trait Addressable: Sized + Send + 'static {
     /// The recipient name this actor claims **within its scope**
     /// (ADR-0098). For a root-scoped actor — every chassis capability —
     /// it is the full mailbox name (`aether.<name>`). For an actor
@@ -63,7 +63,7 @@ pub trait Actor: Sized + Send + 'static {
 /// ctx, and a send inside a hook is gated on the *target's* cardinality
 /// marker, not on `Self`'s identity. The "a thing that boots must have a
 /// mailbox to boot into" constraint is asserted where it bites — on the
-/// transport subtraits (`FfiActor`/`NativeActor`), which add `Actor` as a
+/// transport subtraits (`FfiActor`/`NativeActor`), which add `Addressable` as a
 /// co-supertrait — rather than welded into the capability.
 ///
 /// The per-target contexts are generic associated types each concrete
@@ -137,7 +137,7 @@ pub trait Lifecycle {
 /// Mutually exclusive with [`Instanced`] at the type level: an actor is
 /// either one-of-a-kind within a scope (singleton) or N-instances under
 /// a shared prefix (instanced, name-keyed). ADR-0079.
-pub trait Singleton: Actor {
+pub trait Singleton: Addressable {
     /// This actor's [`MailboxId`] as seen by a caller whose lineage carry
     /// is `caller_carry` (ADR-0099 §5). `ctx.actor::<R>()` calls
     /// `R::resolve(self_carry)` and addresses the result.
@@ -176,7 +176,7 @@ pub trait Singleton: Actor {
 /// address an instance by name through `ctx.resolve_actor::<R>(subname)`.
 ///
 /// Mutually exclusive with [`Singleton`] at the type level. ADR-0079.
-pub trait Instanced: Actor {
+pub trait Instanced: Addressable {
     /// This actor's [`MailboxId`] for the instance named `subname`, as seen
     /// by a caller whose lineage carry is `caller_carry` (ADR-0099 §5).
     /// Symmetric to [`Singleton::resolve`]: an instanced node folds its
@@ -217,7 +217,7 @@ pub trait Instanced: Actor {
 /// only from its owner.
 pub struct EmbeddedHost;
 
-impl Actor for EmbeddedHost {
+impl Addressable for EmbeddedHost {
     const NAMESPACE: &'static str = "aether.embedded";
 }
 
@@ -316,7 +316,15 @@ pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
 /// RenderCapability`) are an opt-in extension if a real conversion case
 /// wants them; the default macro emission is strict so wire bytes stay
 /// obvious.
-pub trait HandlesKind<K: Kind>: Actor {}
+pub trait HandlesKind<K: Kind>: Addressable {}
+
+/// A complete actor: an addressable identity ([`Addressable`]) that also
+/// carries a boot lifecycle ([`Lifecycle`]). The blanket impl supplies it
+/// for any type that is both, so `FfiActor` / `NativeActor` implementors
+/// are `Actor` automatically. Code that wants a fully-formed actor bounds
+/// `Actor`; code that wants only identity bounds `Addressable`.
+pub trait Actor: Addressable + Lifecycle {}
+impl<T: Addressable + Lifecycle> Actor for T {}
 
 #[cfg(test)]
 mod tests {
@@ -337,7 +345,7 @@ mod tests {
     fn singleton_derive_emits_marker_impl() {
         #[derive(crate::Singleton)]
         struct UniqueCap;
-        impl Actor for UniqueCap {
+        impl Addressable for UniqueCap {
             const NAMESPACE: &'static str = "test.cardinality.unique";
         }
         fn requires_singleton<T: Singleton>() {}
@@ -348,7 +356,7 @@ mod tests {
     fn instanced_derive_emits_marker_impl() {
         #[derive(crate::Instanced)]
         struct PerThing;
-        impl Actor for PerThing {
+        impl Addressable for PerThing {
             const NAMESPACE: &'static str = "test.cardinality.per_thing";
         }
         fn requires_instanced<T: Instanced>() {}
@@ -362,7 +370,7 @@ mod tests {
     #[test]
     fn singleton_resolve_default_is_frozen_depth_one() {
         struct RootCap;
-        impl Actor for RootCap {
+        impl Addressable for RootCap {
             const NAMESPACE: &'static str = "test.resolve.rootcap";
         }
         impl Singleton for RootCap {}
@@ -386,14 +394,17 @@ mod tests {
     #[test]
     fn singleton_resolve_override_folds_caller_carry() {
         struct Child;
-        impl Actor for Child {
+        impl Addressable for Child {
             const NAMESPACE: &'static str = "test.resolve.child";
         }
         impl Singleton for Child {
             fn resolve(caller_carry: u64) -> MailboxId {
                 MailboxId(with_tag(
                     Tag::Mailbox,
-                    fold_lineage(caller_carry, ActorId::singleton(<Self as Actor>::NAMESPACE)),
+                    fold_lineage(
+                        caller_carry,
+                        ActorId::singleton(<Self as Addressable>::NAMESPACE),
+                    ),
                 ))
             }
         }
@@ -418,7 +429,7 @@ mod tests {
     #[test]
     fn instanced_resolve_default_folds_carry_and_subname() {
         struct PerThing;
-        impl Actor for PerThing {
+        impl Addressable for PerThing {
             const NAMESPACE: &'static str = "test.resolve.per_thing";
         }
         impl Instanced for PerThing {}

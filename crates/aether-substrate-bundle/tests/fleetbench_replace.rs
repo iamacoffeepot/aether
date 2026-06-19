@@ -13,7 +13,7 @@ mod fleetbench;
 
 mod tests {
     mod heavy {
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
         use aether_capabilities::WasmTrampoline;
         use aether_data::Kind;
         use aether_kinds::{ComponentCapabilities, LogTailResult, Ping, Tick};

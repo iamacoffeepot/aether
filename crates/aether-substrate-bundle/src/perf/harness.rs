@@ -147,7 +147,7 @@ pub struct RelayConfig {
 /// causal tree. A leaf relay (empty `downstreams`) just receives and
 /// returns. Before forwarding it burns `work_iters` of `busy_spin`
 /// CPU — zero by default, so trivial topologies are unchanged. Pooled
-/// (the `Actor` default).
+/// (the `Addressable` default).
 pub struct Relay {
     downstreams: Arc<[MailboxId]>,
     work_iters: u64,
@@ -159,7 +159,7 @@ pub struct Relay {
     sent: u64,
 }
 
-impl aether_actor::Actor for Relay {
+impl aether_actor::Addressable for Relay {
     const NAMESPACE: &'static str = "mlat.relay";
 }
 impl aether_actor::Instanced for Relay {}
@@ -252,7 +252,7 @@ pub struct TickSource {
     sent: u64,
 }
 
-impl aether_actor::Actor for TickSource {
+impl aether_actor::Addressable for TickSource {
     const NAMESPACE: &'static str = "mlat.ticksrc";
 }
 impl aether_actor::Instanced for TickSource {}

@@ -53,7 +53,7 @@ mod proxy_native {
         MailEnvelope, MailboxAddress, PeerKind, RpcClient, RpcClientError, RpcConnection, RpcError,
         WireFrame,
     };
-    use aether_actor::{Actor, actor};
+    use aether_actor::{Addressable, actor};
     use aether_data::{EngineId, Kind, KindId, MailboxId, mailbox_id_from_name};
     use aether_kinds::{CallSettled, DeathReason, EngineAlive, EngineDied};
     use aether_substrate::Mail;
@@ -72,14 +72,14 @@ mod proxy_native {
     /// Mailbox of the engines cap (`aether.engine`) — where a proxy
     /// reports its own liveness transitions (`EngineAlive` / `EngineDied`,
     /// issue 1339). A compile-time const derived from
-    /// `<EngineServer as Actor>::NAMESPACE`, so no host round-trip; matches
+    /// `<EngineServer as Addressable>::NAMESPACE`, so no host round-trip; matches
     /// the `RpcServerCapability`'s own route lookup.
     // Well-known engines-cap route shared with `RpcServerCapability`'s own
     // lookup; a ctx-less free helper in the proxy bridge mod, so there is no
     // sibling `ctx.actor::<_>()` to resolve through.
     #[allow(clippy::disallowed_methods)]
     fn engine_cap_mailbox() -> MailboxId {
-        mailbox_id_from_name(<EngineServer as Actor>::NAMESPACE)
+        mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE)
     }
 
     /// Total time [`connect_proxy`] keeps retrying a refused dial when
@@ -767,7 +767,7 @@ mod tests {
     use crate::rpc::{HelloAck, PeerKind, WIRE_VERSION, WireFrame};
     use crate::test_chassis::{TestChassis, fresh_substrate};
     use crate::trace::TraceDispatchCapability;
-    use aether_actor::Actor;
+    use aether_actor::Addressable;
     use aether_codec::frame::{read_frame, write_frame};
     use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
     use aether_substrate::Subname;
@@ -838,8 +838,8 @@ mod tests {
         let proxy_mailbox = chassis
             .resolve_actor::<EngineProxy>("e1")
             .expect("proxy resolves Live");
-        let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Actor>::NAMESPACE);
-        let sink_mailbox = mailbox_id_from_name(<ProxyReplySink as Actor>::NAMESPACE);
+        let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Addressable>::NAMESPACE);
+        let sink_mailbox = mailbox_id_from_name(<ProxyReplySink as Addressable>::NAMESPACE);
 
         // Forge a `ForwardEnvelope` at the proxy, reply-to the sink.
         // `mailer.push` directly (rather than through an actor send) so

@@ -161,7 +161,7 @@ mod native {
 
         use super::*;
         use crate::test_chassis::{TestChassis, boot_test_chassis_with};
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
         use aether_substrate::chassis::builder::Builder;
 
         /// Build a substrate where the `Arc<HandleStore>` is also returned

@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{env, thread};
 
-use aether_actor::Actor;
+use aether_actor::Addressable;
 use aether_data::{DagId, Kind, KindId, MailId, MailboxId, SessionToken, Uuid};
 use aether_kinds::descriptors;
 use aether_kinds::trace::Nanos;
@@ -155,7 +155,7 @@ fn await_session_reply<K: Kind>(rx: &Receiver<EgressEvent>, timeout: Duration) -
 
 /// The dag cap's mailbox name.
 fn dag_mailbox() -> &'static str {
-    <DagCapability as Actor>::NAMESPACE
+    <DagCapability as Addressable>::NAMESPACE
 }
 
 /// Poll `f` until it returns `true` or the deadline passes; returns the
@@ -215,7 +215,7 @@ fn source_node(id: u32, mailbox: MailboxId, kind: KindId, payload: Vec<u8>) -> N
 }
 
 /// Mailbox id for an actor by its namespace.
-fn mbx<A: Actor>() -> MailboxId {
+fn mbx<A: Addressable>() -> MailboxId {
     MailboxId(aether_data::mailbox_id_from_name(A::NAMESPACE).0)
 }
 

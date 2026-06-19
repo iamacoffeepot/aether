@@ -14,7 +14,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use aether_actor::Actor;
+use aether_actor::Addressable;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{EngineConfig, EngineServer, trace::TraceDispatchCapability};
 use aether_kinds::BinaryManifest;
@@ -55,9 +55,9 @@ impl HubChassis {
     #[must_use]
     pub fn describe_manifest() -> BinaryManifest {
         let caps = vec![
-            <TraceDispatchCapability as Actor>::NAMESPACE,
-            <EngineServer as Actor>::NAMESPACE,
-            <RpcServerCapability as Actor>::NAMESPACE,
+            <TraceDispatchCapability as Addressable>::NAMESPACE,
+            <EngineServer as Addressable>::NAMESPACE,
+            <RpcServerCapability as Addressable>::NAMESPACE,
         ];
         crate::binary_manifest(Self::PROFILE, caps)
     }

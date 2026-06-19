@@ -987,7 +987,7 @@ mod native {
                     // settlement subscription — a self-address compute with no
                     // sibling ctx, not a hardcoded peer namespace.
                     #[allow(clippy::disallowed_methods)]
-                    mailbox_id_from_name(<Self as aether_actor::Actor>::NAMESPACE),
+                    mailbox_id_from_name(<Self as aether_actor::Addressable>::NAMESPACE),
                     <Settled as Kind>::ID,
                     Arc::clone(&self.mailer),
                 );
@@ -1496,7 +1496,7 @@ mod native {
                 let _ = tx.send(captured);
             });
             let lifecycle_id = registry.register_inbox(
-                <LifecycleCapability as aether_actor::Actor>::NAMESPACE,
+                <LifecycleCapability as aether_actor::Addressable>::NAMESPACE,
                 handler,
             );
 

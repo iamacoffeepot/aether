@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
-use aether_actor::Actor;
+use aether_actor::Addressable;
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::fs::NamespaceRoots;
 use aether_data::{Kind, encode_empty, mailbox_id_from_name};
@@ -143,7 +143,7 @@ fn drive_events_loop(
     // Chassis route-freezing: the bin wires its loop to the lifecycle cap's own
     // id (its NAMESPACE) — ctx-less driver setup, no sibling resolver in scope.
     #[allow(clippy::disallowed_methods)]
-    let lifecycle_mailbox = mailbox_id_from_name(<LifecycleCapability as Actor>::NAMESPACE);
+    let lifecycle_mailbox = mailbox_id_from_name(<LifecycleCapability as Addressable>::NAMESPACE);
     let kind_lifecycle_advance = <LifecycleAdvance as Kind>::ID;
     let settlement_registry = Arc::clone(passive.settlement_registry());
     // ADR-0080 §6 chassis-root correlation counter (issue

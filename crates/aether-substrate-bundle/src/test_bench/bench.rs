@@ -40,7 +40,7 @@ use aether_kinds::{LogTail, LogTailResult, Tick};
 // `push_to_mailbox` encodes any sent kind through the descriptor-aware
 // `Kind::encode_into_bytes` (cast or postcard per the kind's shape);
 // `encode_empty` builds the zero-byte payload for unit lifecycle kinds.
-use aether_actor::Actor;
+use aether_actor::Addressable;
 use aether_capabilities::{RenderCapability, fs::NamespaceRoots};
 use aether_substrate::chassis::settlement::{
     TerminalDisposition, WaitOutcome, await_internal_signal,
@@ -388,7 +388,7 @@ impl TestBench {
         // no sibling resolver in scope.
         #[allow(clippy::disallowed_methods)]
         let lifecycle_mailbox = aether_data::mailbox_id_from_name(
-            <aether_capabilities::LifecycleCapability as Actor>::NAMESPACE,
+            <aether_capabilities::LifecycleCapability as Addressable>::NAMESPACE,
         );
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
         let _ = kind_tick; // PR 3b retired direct Tick push; kept on the
@@ -1492,7 +1492,7 @@ mod tests {
         /// dispatch.
         #[test]
         fn spawn_instanced_actor_smoke() {
-            use aether_actor::{Actor as ActorTrait, HandlesKind, Instanced};
+            use aether_actor::{Addressable as ActorTrait, HandlesKind, Instanced};
             use aether_data::{Kind as DataKind, KindId as DataKindId, mailbox_id_from_name};
             use aether_substrate::{
                 BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, SpawnError,

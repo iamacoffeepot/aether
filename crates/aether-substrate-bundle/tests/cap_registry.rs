@@ -25,7 +25,7 @@
 
 use std::path::Path;
 
-use aether_actor::Actor;
+use aether_actor::Addressable;
 use aether_capabilities::{ComponentHostCapability, FsCapability};
 use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
 use aether_kinds::{

@@ -26,7 +26,8 @@ use crate::actor::ctx::outbound_reply::OutboundReply;
 use crate::actor::ctx::persistence::Persistence;
 use crate::actor::ctx::reply_mode::{Manual, ReplyMode, Single, Stream};
 use crate::actor::{
-    Actor, HandlesKind, Instanced, NamespaceError, Singleton, Subname, validate_namespace_segment,
+    Addressable, HandlesKind, Instanced, NamespaceError, Singleton, Subname,
+    validate_namespace_segment,
 };
 use crate::ffi::bridge::{mail, persist};
 use crate::ffi::inline::InlineRegistry;
@@ -318,7 +319,7 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
     // so there is no `R::resolve` lineage carry to route through.
     #[must_use]
     #[allow(clippy::disallowed_methods)]
-    pub fn resolve_actor<R: Actor>(&self, name: &str) -> FfiActorMailbox<'_, R> {
+    pub fn resolve_actor<R: Addressable>(&self, name: &str) -> FfiActorMailbox<'_, R> {
         FfiActorMailbox::__new(mailbox_id_from_name(name).0, self.mailbox, self.inline)
     }
 
@@ -366,7 +367,7 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
         // ADR-0029) — this is the id definition for the new instance, computed
         // before any lineage carry exists.
         #[allow(clippy::disallowed_methods)]
-        let tag = mailbox_id_from_name(<A as Actor>::NAMESPACE).0;
+        let tag = mailbox_id_from_name(<A as Addressable>::NAMESPACE).0;
         let (is_counter, full_subname) = resolve_subname(subname)?;
         let config_bytes = config.encode_into_bytes();
         let id = mail::spawn_sibling(tag, is_counter, &full_subname, &config_bytes);
@@ -430,7 +431,7 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
         // tag `init_typed_p32` selects on. This is the id definition for the
         // child type, so the disallowed-method allow mirrors `spawn_child`.
         #[allow(clippy::disallowed_methods)]
-        let type_tag = mailbox_id_from_name(<A as Actor>::NAMESPACE).0;
+        let type_tag = mailbox_id_from_name(<A as Addressable>::NAMESPACE).0;
         // The spawner's real folded id is recorded as the child's logical
         // parent so relative addressing (`ctx.parent()` / `ctx.sibling()`)
         // resolves over the registry. The alias fold itself stays flat on
@@ -950,7 +951,7 @@ mod tests {
     use super::{
         FfiCtx, InlineRegistry, Manual, NO_INBOUND_SOURCE, Single, SpawnError, install_inline_child,
     };
-    use crate::Actor;
+    use crate::Addressable;
     use crate::actor::ctx::OutboundReply;
     use crate::actor::{Instanced, Subname};
     use crate::ffi::inline::RouteDecision;
@@ -966,7 +967,7 @@ mod tests {
     /// dispatches the child.
     struct FailingChild;
 
-    impl Actor for FailingChild {
+    impl Addressable for FailingChild {
         const NAMESPACE: &'static str = "test.inline.failing_child";
     }
 
@@ -1078,7 +1079,7 @@ mod tests {
     /// despawns.
     struct SucceedingChild;
 
-    impl Actor for SucceedingChild {
+    impl Addressable for SucceedingChild {
         const NAMESPACE: &'static str = "test.inline.succeeding_child";
     }
 

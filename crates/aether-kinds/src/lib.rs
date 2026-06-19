@@ -1376,7 +1376,7 @@ mod engine {
     /// it per entry so an observer (and the resolve query) can select a component
     /// by what it is.
     ///
-    /// - `namespaces` — every exported actor's `Actor::NAMESPACE`. A
+    /// - `namespaces` — every exported actor's `Addressable::NAMESPACE`. A
     ///   single-actor module yields one; a multi-actor module
     ///   (`export!(A, B, …)`) yields one per type, the entry type first.
     /// - `actors` — one [`ComponentActor`] per exported actor type, the
@@ -1397,7 +1397,7 @@ mod engine {
 
     /// One exported actor type within a (possibly multi-actor) component
     /// module (ADR-0096, issue 1956). `namespace` is the type's
-    /// `Actor::NAMESPACE` — the `@actor` half of a `module@actor` selector;
+    /// `Addressable::NAMESPACE` — the `@actor` half of a `module@actor` selector;
     /// `handled_kinds` is the kind ids this actor handles; `fallback` is
     /// whether it declares a `#[fallback]`. A single-actor module's
     /// implicit group reports `namespace` as the module's `aether.namespace`
@@ -1412,7 +1412,7 @@ mod engine {
     /// One stored component in a [`ListComponentBinariesResult`] (ADR-0116,
     /// issue 1956). `hash` is the sha256 hex over the wasm's raw bytes — the
     /// content-address key. `name` is the optional human-readable name the
-    /// latest upload pointed at this hash (`Actor::NAMESPACE` is the
+    /// latest upload pointed at this hash (`Addressable::NAMESPACE` is the
     /// natural one). `manifest` is what the wasm self-reported.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub struct ComponentEntry {
@@ -1432,7 +1432,7 @@ mod engine {
     ///   version index yet, ADR-0116), or a `name` an upload pointed at a
     ///   hash. `module@actor` resolves the `module` part as the
     ///   `name`/`hash` and the `@actor` part as the [`ResolveComponentResult`]
-    ///   `export` (the actor `Actor::NAMESPACE` to instantiate, ADR-0096).
+    ///   `export` (the actor `Addressable::NAMESPACE` to instantiate, ADR-0096).
     /// - `namespace` / `handled_kind` are an attribute query over the
     ///   type-tagged component manifests, consulted when `query` is `None`:
     ///   keep only components exporting that `namespace`, or handling that
@@ -1565,7 +1565,7 @@ mod control_plane {
         /// (SDK-typed, not wire-typed), matching `wasm`'s `Vec<u8>`.
         pub config: Vec<u8>,
         /// ADR-0096: which exported actor type to instantiate from a
-        /// multi-actor module, named by its `Actor::NAMESPACE`. `None`
+        /// multi-actor module, named by its `Addressable::NAMESPACE`. `None`
         /// loads the **entry** type (the first in the module's
         /// `export!` list), which is also the only type a single-actor
         /// module has — so an unset selector preserves the pre-ADR-0096
@@ -1696,7 +1696,7 @@ mod control_plane {
         /// empty vec means "no config".
         pub config: Vec<u8>,
         /// ADR-0096: which exported actor type to instantiate from the
-        /// replacement module, named by its `Actor::NAMESPACE`. `None`
+        /// replacement module, named by its `Addressable::NAMESPACE`. `None`
         /// reuses the trampoline's **current hosted type** (not
         /// necessarily the entry), so a bare replace preserves
         /// today's behaviour byte-for-byte. `Some(ns)` instantiates the

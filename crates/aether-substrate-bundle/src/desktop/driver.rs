@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
-use aether_actor::Actor;
+use aether_actor::Addressable;
 use aether_actor::local;
 use aether_capabilities::InputCapability;
 use aether_capabilities::RenderHandles;
@@ -1376,8 +1376,9 @@ impl DriverCapability for DesktopDriverCapability {
         // the lifecycle cap's own id (its NAMESPACE) at construction time —
         // ctx-less, no sibling resolver in scope.
         #[allow(clippy::disallowed_methods)]
-        let lifecycle_mailbox =
-            mailbox_id_from_name(<aether_capabilities::LifecycleCapability as Actor>::NAMESPACE);
+        let lifecycle_mailbox = mailbox_id_from_name(
+            <aether_capabilities::LifecycleCapability as Addressable>::NAMESPACE,
+        );
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
 
         // iamacoffeepot/aether#1489: install the SIGINT/SIGTERM →
@@ -1610,7 +1611,7 @@ mod tests {
         // The window inbox forwards armed envelopes onto the
         // `SettlingInbox`'s channel, exactly as `claim_mailbox` does.
         let window_mailbox = mailbox_id_from_name(
-            <aether_capabilities::HeadlessWindowCapability as Actor>::NAMESPACE,
+            <aether_capabilities::HeadlessWindowCapability as Addressable>::NAMESPACE,
         );
         let (tx, rx) = mpsc::channel::<Envelope>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
@@ -1692,7 +1693,7 @@ mod tests {
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
 
         let window_mailbox = mailbox_id_from_name(
-            <aether_capabilities::HeadlessWindowCapability as Actor>::NAMESPACE,
+            <aether_capabilities::HeadlessWindowCapability as Addressable>::NAMESPACE,
         );
         let (tx, rx) = mpsc::channel::<Envelope>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
@@ -1772,7 +1773,7 @@ mod tests {
         // Register the window mailbox forwarding armed envelopes onto the
         // `SettlingInbox`'s channel, exactly as `claim_mailbox` does.
         let window_mailbox = mailbox_id_from_name(
-            <aether_capabilities::HeadlessWindowCapability as Actor>::NAMESPACE,
+            <aether_capabilities::HeadlessWindowCapability as Addressable>::NAMESPACE,
         );
         let (tx, rx) = mpsc::channel::<Envelope>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
@@ -1875,8 +1876,9 @@ mod tests {
             .expect("register the reply inbox");
         let inbox = SettlingInbox::new(reply_mailbox, rx, Arc::clone(&mailer));
 
-        let cap_mailbox =
-            mailbox_id_from_name(<aether_capabilities::LifecycleCapability as Actor>::NAMESPACE);
+        let cap_mailbox = mailbox_id_from_name(
+            <aether_capabilities::LifecycleCapability as Addressable>::NAMESPACE,
+        );
 
         // (1) Non-`NONE`-root reply (the degraded `on_advance` inline-reply
         // shape): the producer hook records the reply's `Sent` against

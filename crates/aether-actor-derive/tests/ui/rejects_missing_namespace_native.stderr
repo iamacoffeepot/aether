@@ -1,4 +1,4 @@
-error: #[actor] impl NativeActor for X must declare `const NAMESPACE: &'static str = ...` so the marker `impl Actor` can carry it
+error: #[actor] impl NativeActor for X must declare `const NAMESPACE: &'static str = ...` so the marker `impl Addressable` can carry it
   --> tests/ui/rejects_missing_namespace_native.rs:26:55
    |
 26 | impl aether_substrate::actor::native::NativeActor for NoNamespace {

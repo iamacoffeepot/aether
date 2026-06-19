@@ -17,7 +17,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_actor::Actor;
+use aether_actor::Addressable;
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
@@ -75,11 +75,11 @@ impl HeadlessChassis {
     pub fn describe_manifest() -> BinaryManifest {
         let mut caps = crate::common_cap_namespaces();
         caps.extend([
-            <HeadlessRenderCapability as Actor>::NAMESPACE,
-            <HeadlessWindowCapability as Actor>::NAMESPACE,
-            <UnsupportedTestBenchCapability as Actor>::NAMESPACE,
-            <LifecycleCapability as Actor>::NAMESPACE,
-            <RpcServerCapability as Actor>::NAMESPACE,
+            <HeadlessRenderCapability as Addressable>::NAMESPACE,
+            <HeadlessWindowCapability as Addressable>::NAMESPACE,
+            <UnsupportedTestBenchCapability as Addressable>::NAMESPACE,
+            <LifecycleCapability as Addressable>::NAMESPACE,
+            <RpcServerCapability as Addressable>::NAMESPACE,
         ]);
         crate::binary_manifest(Self::PROFILE, caps)
     }

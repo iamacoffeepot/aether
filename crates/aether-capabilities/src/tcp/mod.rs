@@ -54,7 +54,7 @@ pub use listener::TcpListenerConfig;
 #[cfg(not(target_arch = "wasm32"))]
 pub use session::TcpSessionConfig;
 
-use aether_actor::{Actor, FfiActorMailbox};
+use aether_actor::{Addressable, FfiActorMailbox};
 use aether_data::{ActorId, Tag, fold_lineage, with_tag};
 // Always-on imports — every kind named in the ext-trait helpers
 // must be reachable from wasm too so the `TcpFfiExt` impl
@@ -165,13 +165,17 @@ pub trait TcpFfiExt {
     /// itself, but the type parameter lets callers address a custom
     /// wrapper that handles a different kind vocabulary on the same
     /// mailbox).
-    fn listener<R: Actor>(&self, name: &str) -> FfiActorMailbox<'_, R>;
+    fn listener<R: Addressable>(&self, name: &str) -> FfiActorMailbox<'_, R>;
 
     /// Resolve a typed session-instance mailbox for the open session
     /// named `name`. The full mailbox address is
     /// `format!("{}:{}", TcpSessionActor::NAMESPACE, name)`. See
     /// [`Self::listener`] for the `R` parameter shape.
-    fn session<R: Actor>(&self, listener_name: &str, session_name: &str) -> FfiActorMailbox<'_, R>;
+    fn session<R: Addressable>(
+        &self,
+        listener_name: &str,
+        session_name: &str,
+    ) -> FfiActorMailbox<'_, R>;
 }
 
 impl TcpFfiExt for FfiActorMailbox<'_, TcpCapability> {
@@ -205,13 +209,17 @@ impl TcpFfiExt for FfiActorMailbox<'_, TcpCapability> {
         self.session::<TcpSessionActor>(listener_name, session_name)
             .send(&SessionClose::default());
     }
-    fn listener<R: Actor>(&self, name: &str) -> FfiActorMailbox<'_, R> {
+    fn listener<R: Addressable>(&self, name: &str) -> FfiActorMailbox<'_, R> {
         // ADR-0099 §3: a listener is this cap's child — fold its node
         // onto the cap's carry (the cap is depth-1, so `self`'s id is
         // its carry).
         self.resolve_peer_scoped::<R>(TcpListenerActor::NAMESPACE, name)
     }
-    fn session<R: Actor>(&self, listener_name: &str, session_name: &str) -> FfiActorMailbox<'_, R> {
+    fn session<R: Addressable>(
+        &self,
+        listener_name: &str,
+        session_name: &str,
+    ) -> FfiActorMailbox<'_, R> {
         // The session id is folded by a custom scheme rather than by name, so
         // rewrap it with `at`, inheriting this cap handle's ctx binding so the
         // session handle's sends stamp the same origin (issue 1987).
@@ -258,11 +266,11 @@ pub trait TcpNativeExt {
     /// returned handle inherits the parent mailbox's `'a` binding ref
     /// so `.send::<K>(&mail)` dispatches through the same
     /// `NativeBinding` without re-threading the ctx.
-    fn listener<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R>;
+    fn listener<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R>;
 
     /// Resolve a typed session-instance mailbox. See
     /// [`TcpFfiExt::session`] for the addressing rationale.
-    fn session<R: Actor>(
+    fn session<R: Addressable>(
         &self,
         listener_name: &str,
         session_name: &str,
@@ -301,12 +309,12 @@ impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
         self.session::<TcpSessionActor>(listener_name, session_name)
             .send(&SessionClose::default());
     }
-    fn listener<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
+    fn listener<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R> {
         // ADR-0099 §3: fold the listener node onto the cap's carry (the
         // cap is depth-1, so `self`'s id is its carry).
         self.resolve_peer_scoped::<R>(TcpListenerActor::NAMESPACE, name)
     }
-    fn session<R: Actor>(
+    fn session<R: Addressable>(
         &self,
         listener_name: &str,
         session_name: &str,
@@ -591,7 +599,7 @@ mod cap_native {
             UnbindListener, UnbindListenerResult,
         };
         use crate::test_chassis::TestChassis;
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
         use aether_data::{Kind, SessionToken, Uuid};
         use aether_kinds::descriptors;
         use aether_kinds::trace::Nanos;

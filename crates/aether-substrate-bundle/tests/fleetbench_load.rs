@@ -11,7 +11,7 @@ mod fleetbench;
 
 mod tests {
     mod heavy {
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
         use aether_capabilities::WasmTrampoline;
         use aether_data::Kind;
         use aether_kinds::{LoadComponent, LoadResult};
@@ -21,7 +21,7 @@ mod tests {
         /// Load the `probe` component and assert `LoadResult.name` is the
         /// `/`-rendered lineage
         /// `aether.component/aether.embedded:<NAMESPACE>` (ADR-0099
-        /// §3/§4). The probe example's `Actor::NAMESPACE` is
+        /// §3/§4). The probe example's `Addressable::NAMESPACE` is
         /// `test_fixture_probe` — distinct from the wasm stem (`probe`),
         /// so this also pins that the registered name comes from the
         /// component's declared namespace, not the file name. Also

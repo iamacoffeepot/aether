@@ -40,7 +40,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-use aether_actor::actor::{Actor, HandlesKind};
+use aether_actor::actor::{Addressable, HandlesKind};
 use aether_actor::{MailSender, Singleton};
 use aether_data::{Kind, MailId, mailbox_id_from_name};
 
@@ -121,7 +121,7 @@ impl<A> InheritCtx<A> {
     }
 }
 
-impl<A: Actor> MailSender for InheritCtx<A> {
+impl<A: Addressable> MailSender for InheritCtx<A> {
     //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
@@ -203,7 +203,7 @@ impl<A> RootCtx<A> {
     }
 }
 
-impl<A: Actor> MailSender for RootCtx<A> {
+impl<A: Addressable> MailSender for RootCtx<A> {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Singleton + HandlesKind<K>,
@@ -278,7 +278,7 @@ pub(crate) fn spawn_inherit<A, F>(
     f: F,
 ) -> JoinHandle<()>
 where
-    A: Actor + Singleton + 'static,
+    A: Addressable + Singleton + 'static,
     F: FnOnce(InheritCtx<A>) + Send + 'static,
 {
     // ADR-0080 §12 / iamacoffeepot/aether#716: acquire the settlement
@@ -314,7 +314,7 @@ where
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn spawn_detached<A, F>(binding: Arc<NativeBinding>, f: F) -> JoinHandle<()>
 where
-    A: Actor + Singleton + 'static,
+    A: Addressable + Singleton + 'static,
     F: FnOnce(RootCtx<A>) + Send + 'static,
 {
     thread::Builder::new()
@@ -351,7 +351,7 @@ mod tests {
     /// require it; never instantiated.
     struct StubActor;
 
-    impl Actor for StubActor {
+    impl Addressable for StubActor {
         const NAMESPACE: &'static str = "test.spawn_thread.stub";
     }
 

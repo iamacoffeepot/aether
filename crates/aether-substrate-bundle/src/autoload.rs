@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use aether_actor::Actor;
+use aether_actor::Addressable;
 use aether_capabilities::ComponentHostCapability;
 use aether_data::{Kind as _, mailbox_id_from_name};
 use aether_kinds::LoadComponent;
@@ -86,7 +86,7 @@ pub(crate) fn autoload_mail(component: AutoloadComponent) -> Mail {
         // ctx-less free fn, the same address the hub and test bench load
         // through, with no sibling resolver in scope.
         #[allow(clippy::disallowed_methods)]
-        mailbox_id_from_name(<ComponentHostCapability as Actor>::NAMESPACE),
+        mailbox_id_from_name(<ComponentHostCapability as Addressable>::NAMESPACE),
         LoadComponent::ID,
         payload,
         1,
@@ -112,7 +112,7 @@ mod tests {
         });
         assert_eq!(
             mail.recipient,
-            mailbox_id_from_name(<ComponentHostCapability as Actor>::NAMESPACE)
+            mailbox_id_from_name(<ComponentHostCapability as Addressable>::NAMESPACE)
         );
         assert_eq!(mail.kind, LoadComponent::ID);
     }

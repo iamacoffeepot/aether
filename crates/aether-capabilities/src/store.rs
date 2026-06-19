@@ -514,7 +514,7 @@ fn matches_component_filter(manifest: &ComponentManifest, filter: &ListComponent
 /// module's `aether.namespace`, and `read_producers_from_bytes` for build
 /// provenance. The hub indexes a component by what it self-reports.
 ///
-/// Each [`ComponentActor`]'s `namespace` is the group's `Actor::NAMESPACE`
+/// Each [`ComponentActor`]'s `namespace` is the group's `Addressable::NAMESPACE`
 /// from its `ActorBoundary` record; a single-actor module's implicit group
 /// (`namespace: None`) takes the module's `aether.namespace` section value.
 /// The top-level `handled_kinds` / `fallback` are the union across every
@@ -535,7 +535,7 @@ pub fn component_manifest(wasm: &[u8]) -> Result<ComponentManifest, String> {
 
     let mut actors: Vec<ComponentActor> = Vec::with_capacity(groups.len());
     for group in groups {
-        // A boundary-named group carries its own `Actor::NAMESPACE`; a
+        // A boundary-named group carries its own `Addressable::NAMESPACE`; a
         // single-actor module's implicit group (`None`) resolves its name
         // from the `aether.namespace` section, falling back to empty.
         let namespace = group

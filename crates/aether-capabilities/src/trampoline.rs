@@ -12,7 +12,7 @@
 //! [`crate::component::ComponentHostCapability`] — its only consumer —
 //! and the namespace is whatever `WasmTrampoline::NAMESPACE` says it
 //! is. Single declaration, cap-owned, reachable on every target via
-//! the `Actor` trait const.
+//! the `Addressable` trait const.
 //!
 //! The native impl still uses substrate internals (`Engine`, `Linker`,
 //! `Registry`, `Mailer`, `HubOutbound`) — that's exactly what
@@ -189,12 +189,12 @@ mod native {
         /// the name, so an embeddable actor's id depends on what the code
         /// is, not how it is hosted, and the namespace is written only on
         /// its owner. Reachable on every target because the bridge stub
-        /// emits the always-on `Actor` impl at file root. ADR-0097: the
+        /// emits the always-on `Addressable` impl at file root. ADR-0097: the
         /// substrate's `TRAMPOLINE_NAMESPACE` forward-feeds the same const,
         /// collapsing the former two-literal mirror into one source; the
         /// `trampoline_namespace_matches_substrate` test guards the match.
         const NAMESPACE: &'static str =
-            <aether_actor::EmbeddedHost as aether_actor::Actor>::NAMESPACE;
+            <aether_actor::EmbeddedHost as aether_actor::Addressable>::NAMESPACE;
 
         fn init(
             config: WasmTrampolineConfig,
@@ -676,7 +676,7 @@ mod native {
 
     #[cfg(test)]
     mod tests {
-        use aether_actor::{Actor, EmbeddedHost};
+        use aether_actor::{Addressable, EmbeddedHost};
         use aether_substrate::actor::wasm::component::TRAMPOLINE_NAMESPACE;
 
         /// ADR-0099 §5/§6: both `WasmTrampoline::NAMESPACE` (capabilities)
@@ -690,7 +690,7 @@ mod native {
         #[test]
         fn trampoline_namespace_matches_substrate() {
             assert_eq!(
-                <super::WasmTrampoline as Actor>::NAMESPACE,
+                <super::WasmTrampoline as Addressable>::NAMESPACE,
                 EmbeddedHost::NAMESPACE,
             );
             assert_eq!(TRAMPOLINE_NAMESPACE, EmbeddedHost::NAMESPACE);

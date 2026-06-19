@@ -18,7 +18,7 @@
 use std::fs;
 use std::path::Path;
 
-use aether_actor::Actor;
+use aether_actor::Addressable;
 use aether_capabilities::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{CostTail, CostTailResult, LoadComponent, LoadResult, Tick};

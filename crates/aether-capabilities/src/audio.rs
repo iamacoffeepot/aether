@@ -3190,7 +3190,7 @@ mod native {
             TestChassis, boot_test_chassis_with, decode_session_reply, drive_task_completion,
             fresh_substrate, test_mailer_and_rx,
         };
-        use aether_actor::Actor;
+        use aether_actor::Addressable;
         use aether_data::{MailId, SessionToken, Source, SourceAddr, Uuid};
         use aether_kinds::FsError;
         use aether_substrate::actor::native::binding::NativeBinding;
