@@ -27,7 +27,7 @@ struct Dup;
 impl aether_actor::WasmActor for Dup {
     const NAMESPACE: &'static str = "dup";
 
-    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::BootError>
+    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::ActorInitError>
     {
         Ok(Dup)
     }

@@ -20,7 +20,7 @@
 // ignores `self` is correct but triggers `unused_self`.
 #![allow(clippy::needless_pass_by_value, clippy::unused_self)]
 
-use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{HttpServerRequest, HttpServerResponse};
 
 pub struct HttpHandler;
@@ -29,7 +29,7 @@ pub struct HttpHandler;
 impl WasmActor for HttpHandler {
     const NAMESPACE: &'static str = "web";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(HttpHandler)
     }
 

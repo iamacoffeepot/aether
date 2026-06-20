@@ -45,7 +45,7 @@
 
 use std::collections::HashMap;
 
-use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
@@ -258,7 +258,7 @@ pub struct CameraComponent {
 impl WasmActor for CameraComponent {
     const NAMESPACE: &'static str = "aether.camera";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         let mut cameras = HashMap::new();
         cameras.insert(
             "main".to_owned(),

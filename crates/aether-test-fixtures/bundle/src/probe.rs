@@ -59,7 +59,7 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    BootError, MailSender, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, MailSender, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
@@ -79,7 +79,7 @@ pub struct Probe {
 impl WasmActor for Probe {
     const NAMESPACE: &'static str = "test_fixture_probe";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Probe {
             tick_count: 0,
             render: SetRender::default(),
@@ -185,7 +185,7 @@ impl WasmActor for ProbeWithConfig {
     type Config = ProbeConfig;
     const NAMESPACE: &'static str = "test_fixtures_probe_with_config";
 
-    fn init(config: ProbeConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(config: ProbeConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(ProbeWithConfig {
             seed: config.seed,
             label: config.label,

@@ -116,7 +116,7 @@ pub struct ComponentCtx {
     /// surfaces the message back up the control plane.
     pub save_state_error: Option<String>,
     /// Set by the `init_failed_p32` host fn when the guest's `init`
-    /// returns `Err(BootError)`. Issue 525 Phase 4b / issue 531: the
+    /// returns `Err(ActorInitError)`. Issue 525 Phase 4b / issue 531: the
     /// substrate reads this after `init` returns non-zero and
     /// surfaces the message in `LoadResult::Err { error }`. The guest
     /// stages the bytes here and returns 1 from its `init` shim;
@@ -842,7 +842,7 @@ impl Component {
         // that probes `init` first would silently skip the config path.
         //
         // Issue 525 Phase 4b / issue 531: a non-zero return value
-        // means the guest's `WasmActor::init` returned `Err(BootError)`
+        // means the guest's `WasmActor::init` returned `Err(ActorInitError)`
         // and staged the message via `init_failed_p32`. Drain the
         // staged string off the ctx and surface it as a wasmtime
         // error so the existing `dispatch_load_component` failure

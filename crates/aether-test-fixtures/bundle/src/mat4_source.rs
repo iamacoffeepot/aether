@@ -35,7 +35,7 @@
 // value to match the dispatch ABI even though it only reads the slot.
 #![allow(clippy::needless_pass_by_value, clippy::unused_self)]
 
-use aether_actor::{BootError, MailSender, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, MailSender, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::Ref;
 use aether_kinds::{Mat4Apply, Write};
 use aether_math::{Mat4, Vec4};
@@ -53,7 +53,7 @@ pub struct MatSource;
 impl WasmActor for MatSource {
     const NAMESPACE: &'static str = "mat4_source";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(MatSource)
     }
 
@@ -91,7 +91,7 @@ pub struct Vec4Observer;
 impl WasmActor for Vec4Observer {
     const NAMESPACE: &'static str = "vec4_observer";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Vec4Observer)
     }
 

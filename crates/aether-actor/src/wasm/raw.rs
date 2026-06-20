@@ -62,10 +62,10 @@ unsafe extern "C" {
     /// of this kind."
     #[link_name = "prev_correlation_p32"]
     pub fn prev_correlation() -> u64;
-    /// Issue 525 Phase 4b / issue 531: stage a `BootError` message
+    /// Issue 525 Phase 4b / issue 531: stage a `ActorInitError` message
     /// for the substrate to surface in `LoadResult::Err` after the
     /// guest's `init` returns non-zero. The `export!` macro is the
-    /// only intended caller — user code returns `Err(BootError)`
+    /// only intended caller — user code returns `Err(ActorInitError)`
     /// from `WasmActor::init` and the macro plumbs the bytes
     /// through this import. Bytes at `(ptr, len)` are copied out of
     /// guest memory before the call returns.

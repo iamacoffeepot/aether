@@ -117,7 +117,7 @@ A component is an `Actor` whose receive side is declared with the **`#[actor]`**
 impl WasmActor for CameraComponent {
     const NAMESPACE: &'static str = "aether.camera";       // default load name
 
-    fn init<C: Resolver>(ctx: &mut C) -> Result<Self, BootError> { /* build state */ }
+    fn init<C: Resolver>(ctx: &mut C) -> Result<Self, ActorInitError> { /* build state */ }
 
     fn wire(&mut self, ctx: &mut WasmCtx<'_>) {              // post-init, mail allowed
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>(); // subscribe the calling actor

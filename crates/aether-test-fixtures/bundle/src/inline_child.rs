@@ -49,7 +49,7 @@
 #![allow(clippy::unused_self, clippy::needless_pass_by_value)]
 
 use aether_actor::{
-    BootError, Mail, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, Mail, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::MailboxId;
 use aether_test_fixtures_kinds::{
@@ -85,7 +85,7 @@ pub struct InlineParent;
 impl WasmActor for InlineParent {
     const NAMESPACE: &'static str = "test.inline.parent";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(InlineParent)
     }
 
@@ -113,7 +113,7 @@ pub struct InlineChild;
 impl WasmActor for InlineChild {
     const NAMESPACE: &'static str = "test.inline.child";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(InlineChild)
     }
 
@@ -136,7 +136,7 @@ pub struct InlineStatefulParent;
 impl WasmActor for InlineStatefulParent {
     const NAMESPACE: &'static str = "test.inline.stateful_parent";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(InlineStatefulParent)
     }
 
@@ -172,7 +172,7 @@ impl WasmActor for InlineStatefulChild {
     /// the composite migration bundle.
     type State = InlineCounterState;
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(InlineStatefulChild { count: 0 })
     }
 
@@ -219,7 +219,7 @@ pub struct InlineDespawnParent {
 impl WasmActor for InlineDespawnParent {
     const NAMESPACE: &'static str = "test.inline.despawn_parent";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(InlineDespawnParent { child: None })
     }
 
@@ -262,7 +262,7 @@ pub struct InlineDespawnChild;
 impl WasmActor for InlineDespawnChild {
     const NAMESPACE: &'static str = "test.inline.despawn_child";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(InlineDespawnChild)
     }
 

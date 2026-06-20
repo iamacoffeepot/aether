@@ -32,7 +32,7 @@ status code, optional headers, and a byte body. The server writes the formatted
 HTTP/1.1 response to the client socket and closes the connection.
 
 ```rust
-use aether_actor::{BootError, WasmActor, WasmCtx, OutboundReply, Resolver, actor};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, OutboundReply, Resolver, actor};
 use aether_kinds::{HttpServerRequest, HttpServerResponse};
 
 pub struct Web;
@@ -41,7 +41,7 @@ pub struct Web;
 impl WasmActor for Web {
     const NAMESPACE: &'static str = "web";
 
-    fn init<C: Resolver>(_ctx: &mut C) -> Result<Self, BootError> {
+    fn init<C: Resolver>(_ctx: &mut C) -> Result<Self, ActorInitError> {
         Ok(Web)
     }
 

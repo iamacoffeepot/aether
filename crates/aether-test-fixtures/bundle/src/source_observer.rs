@@ -27,7 +27,8 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    BootError, MailSender, MailboxId, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, MailSender, MailboxId, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx,
+    actor,
 };
 use aether_test_fixtures_kinds::{
     SendSourceQuery, SourceQuery, SourceReport, TEST_BENCH_OBSERVER_MAILBOX_NAME,
@@ -39,7 +40,7 @@ pub struct SourceObserver;
 impl WasmActor for SourceObserver {
     const NAMESPACE: &'static str = "test.source_observer";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(SourceObserver)
     }
 

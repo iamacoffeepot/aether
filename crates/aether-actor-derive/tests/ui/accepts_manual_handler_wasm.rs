@@ -38,7 +38,7 @@ struct ManualProbe;
 impl aether_actor::WasmActor for ManualProbe {
     const NAMESPACE: &'static str = "manual_probe";
 
-    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::BootError>
+    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::ActorInitError>
     {
         Ok(ManualProbe)
     }

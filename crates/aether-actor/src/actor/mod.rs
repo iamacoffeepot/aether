@@ -185,7 +185,7 @@ pub trait Addressable: Sized + Send + 'static {
 /// native pair), so a `wire`/`unwire` body reaches the concrete ctx's
 /// inherent methods (`ctx.actor::<R>().send(&p)`) with no generic bound at
 /// the call site. `InitError` is pinned per transport subtrait
-/// (`WasmActor: Lifecycle<InitError = BootError>`), so existing generic call
+/// (`WasmActor: Lifecycle<InitError = ActorInitError>`), so existing generic call
 /// sites keep seeing a concrete error type.
 pub trait Lifecycle {
     /// ADR-0090 boot configuration the chassis threads into [`Self::init`].

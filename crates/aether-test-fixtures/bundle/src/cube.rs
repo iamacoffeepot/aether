@@ -29,7 +29,7 @@
 
 use core::f32::consts::FRAC_PI_4;
 
-use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::{Camera, DrawTriangle, Tick, Vertex};
@@ -129,7 +129,7 @@ impl Cube {
 impl WasmActor for Cube {
     const NAMESPACE: &'static str = "cube";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Cube {
             view_proj: Cube::framing_view_proj(),
         })

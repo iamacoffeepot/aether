@@ -62,11 +62,11 @@ contract: it's exactly what you're permitted to do at that point.
 The three stages exist because constructing an actor and letting it participate in
 the mail system are different moments, and only the second is safe to send from.
 `init` runs while the actor is still being built: its mailbox isn't published yet,
-peers may not have booted, and it returns `Result<Self, BootError>` so a failure
+peers may not have booted, and it returns `Result<Self, ActorInitError>` so a failure
 aborts the load cleanly. Sending mail from there would mean announcing yourself
 before you're addressable, or mailing a peer that doesn't exist yet. So `init` stays
 a pure synchronous constructor — resolve kind ids and mailbox addresses, assemble
-state, return it (or fail with a `BootError` that surfaces instead of leaving a
+state, return it (or fail with an `ActorInitError` that surfaces instead of leaving a
 half-built actor behind).
 
 `wire` is the first point where sending is safe. It runs once `init` has succeeded,
@@ -128,7 +128,7 @@ it handles from the method's **third parameter**:
 impl WasmActor for Hello {
     const NAMESPACE: &'static str = "hello";
 
-    fn init<C: Resolver>(_ctx: &mut C) -> Result<Self, BootError> {
+    fn init<C: Resolver>(_ctx: &mut C) -> Result<Self, ActorInitError> {
         Ok(Hello)
     }
 
@@ -175,7 +175,7 @@ impl WasmActor for ProbeWithConfig {
     type Config = ProbeConfig;
     const NAMESPACE: &'static str = "probe_with_config";
 
-    fn init<C>(config: ProbeConfig, ctx: &mut C) -> Result<Self, BootError>
+    fn init<C>(config: ProbeConfig, ctx: &mut C) -> Result<Self, ActorInitError>
     where C: Resolver { … }
 }
 ```

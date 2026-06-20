@@ -21,7 +21,7 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    BootError, Mail, Manual, OutboundReply, PriorState, WasmActor, WasmCtx, WasmDropCtx,
+    ActorInitError, Mail, Manual, OutboundReply, PriorState, WasmActor, WasmCtx, WasmDropCtx,
     WasmInitCtx, actor,
 };
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
@@ -36,7 +36,7 @@ pub struct Counter {
 impl WasmActor for Counter {
     const NAMESPACE: &'static str = "stateful.counter";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Counter { count: 0 })
     }
 
@@ -81,7 +81,7 @@ pub struct Sidecar;
 impl WasmActor for Sidecar {
     const NAMESPACE: &'static str = "stateful.sidecar";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Sidecar)
     }
 
