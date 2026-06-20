@@ -39,7 +39,7 @@
 //! # `ProbeWithConfig`
 //!
 //! ADR-0090 c1 typed-config fixture. Exercises the
-//! `FfiActor::Config = ProbeConfig` path end-to-end: the host places
+//! `WasmActor::Config = ProbeConfig` path end-to-end: the host places
 //! postcard-encoded `ProbeConfig` bytes in a delivery region (ADR-0095) during
 //! `Component::instantiate`; the guest's `init_with_config_p32` shim decodes
 //! them via `<ProbeConfig as Kind>::decode_from_bytes` and threads
@@ -59,7 +59,7 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, FfiInitCtx, MailSender, Manual, OutboundReply, actor,
+    BootError, MailSender, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
@@ -76,10 +76,10 @@ pub struct Probe {
 }
 
 #[actor]
-impl FfiActor for Probe {
+impl WasmActor for Probe {
     const NAMESPACE: &'static str = "test_fixture_probe";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Probe {
             tick_count: 0,
             render: SetRender::default(),
@@ -94,7 +94,7 @@ impl FfiActor for Probe {
     /// `aether.lifecycle` (ADR-0082); `Key` is a genuine input interrupt,
     /// so it subscribes on `aether.input` (ADR-0021) — the input-stream
     /// path the round-trip scenarios exercise (issue 1490).
-    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
         ctx.actor::<InputCapability>().subscribe::<Key>();
     }
@@ -111,7 +111,7 @@ impl FfiActor for Probe {
     /// `receive_mail` for `aether.test_fixture.tick_observed` to see
     /// the count climbing.
     #[handler]
-    fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _: Tick) {
         self.tick_count += 1;
         ctx.send_to_named::<TickObserved>(
             TEST_BENCH_OBSERVER_MAILBOX_NAME,
@@ -150,7 +150,7 @@ impl FfiActor for Probe {
     /// every `aether.input`-subscribed mailbox when a key is pressed.
     /// Watch `receive_mail` for `aether.test_fixture.key_observed`.
     #[handler]
-    fn on_key(&mut self, ctx: &mut FfiCtx<'_>, key: Key) {
+    fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         ctx.send_to_named::<KeyObserved>(
             TEST_BENCH_OBSERVER_MAILBOX_NAME,
             &KeyObserved { code: key.code },
@@ -165,13 +165,13 @@ impl FfiActor for Probe {
     /// and params `{ r, g, b, visible }`. Used by `capture_frame`
     /// scenarios to flip the fixture's render output between frames.
     #[handler]
-    fn on_set_render(&mut self, _ctx: &mut FfiCtx<'_>, mail: SetRender) {
+    fn on_set_render(&mut self, _ctx: &mut WasmCtx<'_>, mail: SetRender) {
         self.render = mail;
     }
 }
 
 /// ADR-0090 c1 typed-config fixture. Exercises the
-/// `FfiActor::Config = ProbeConfig` path end-to-end.
+/// `WasmActor::Config = ProbeConfig` path end-to-end.
 ///
 /// Consumers load this actor from the `probe` bundle with
 /// `export: Some("test_fixtures_probe_with_config")`.
@@ -181,11 +181,11 @@ pub struct ProbeWithConfig {
 }
 
 #[actor]
-impl FfiActor for ProbeWithConfig {
+impl WasmActor for ProbeWithConfig {
     type Config = ProbeConfig;
     const NAMESPACE: &'static str = "test_fixtures_probe_with_config";
 
-    fn init(config: ProbeConfig, _ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(config: ProbeConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(ProbeWithConfig {
             seed: config.seed,
             label: config.label,
@@ -196,7 +196,7 @@ impl FfiActor for ProbeWithConfig {
     /// the integration test observe what the typed `init` actually
     /// received without scraping logs or readback.
     #[handler::manual]
-    fn on_config_query(&mut self, ctx: &mut FfiCtx<'_, Manual>, _query: ConfigQuery) {
+    fn on_config_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: ConfigQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&ConfigEcho {
                 seed: self.seed,

@@ -1,5 +1,5 @@
-error: #[actor] impl FfiActor for X must declare `const NAMESPACE: &'static str = ...` so the marker `impl Addressable` can carry it
-  --> tests/ui/rejects_missing_namespace_ffi.rs:26:33
+error: #[actor] impl WasmActor for X must declare `const NAMESPACE: &'static str = ...` so the marker `impl Addressable` can carry it
+  --> tests/ui/rejects_missing_namespace_ffi.rs:26:34
    |
-26 | impl aether_actor::FfiActor for NoNamespace {
-   |                                 ^^^^^^^^^^^
+26 | impl aether_actor::WasmActor for NoNamespace {
+   |                                  ^^^^^^^^^^^

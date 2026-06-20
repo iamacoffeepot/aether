@@ -21,7 +21,7 @@
 // `&mut self` to match the dispatch ABI but don't read state.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, Manual, actor};
+use aether_actor::{BootError, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::Kind;
 use aether_data::{INPUTS_SECTION_VERSION, InputsRecord, ReplyContract, wire};
 use bytemuck::{Pod, Zeroable};
@@ -62,23 +62,23 @@ struct Poke {
 struct ManifestProbe;
 
 #[actor]
-impl FfiActor for ManifestProbe {
+impl WasmActor for ManifestProbe {
     const NAMESPACE: &'static str = "manifest_probe";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self)
     }
 
     /// # Agent
     /// Increments the tick counter.
     #[handler]
-    fn on_tick(&mut self, _ctx: &mut FfiCtx<'_>, _tick: Tick) {}
+    fn on_tick(&mut self, _ctx: &mut WasmCtx<'_>, _tick: Tick) {}
 
     // ADR-0109: a `-> R` handler — the return type is the reply
     // contract, so the macro auto-replies `Pong` and threads its kind id
     // onto this handler's inputs-manifest record.
     #[handler]
-    fn on_ping(&mut self, _ctx: &mut FfiCtx<'_>, ping: Ping) -> Pong {
+    fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, ping: Ping) -> Pong {
         Pong { seq: ping.seq }
     }
 
@@ -86,14 +86,14 @@ impl FfiActor for ManifestProbe {
     // issues its own replies, so the manifest reports `ReplyContract::Manual`
     // (no single static reply kind).
     #[handler::manual]
-    fn on_poke(&mut self, _ctx: &mut FfiCtx<'_, Manual>, _poke: Poke) {}
+    fn on_poke(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _poke: Poke) {}
 
     /// # Agent
     /// Catch-all for anything else.
     #[fallback]
-    fn on_other(&mut self, _ctx: &mut FfiCtx<'_>, _mail: aether_actor::Mail<'_>) {}
+    fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: aether_actor::Mail<'_>) {}
 
-    fn unwire(&mut self, _ctx: &mut FfiCtx<'_>) {}
+    fn unwire(&mut self, _ctx: &mut WasmCtx<'_>) {}
 }
 
 fn parse_section(bytes: &[u8]) -> Vec<InputsRecord> {

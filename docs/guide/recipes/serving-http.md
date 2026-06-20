@@ -32,13 +32,13 @@ status code, optional headers, and a byte body. The server writes the formatted
 HTTP/1.1 response to the client socket and closes the connection.
 
 ```rust
-use aether_actor::{BootError, FfiActor, FfiCtx, OutboundReply, Resolver, actor};
+use aether_actor::{BootError, WasmActor, WasmCtx, OutboundReply, Resolver, actor};
 use aether_kinds::{HttpServerRequest, HttpServerResponse};
 
 pub struct Web;
 
 #[actor]
-impl FfiActor for Web {
+impl WasmActor for Web {
     const NAMESPACE: &'static str = "web";
 
     fn init<C: Resolver>(_ctx: &mut C) -> Result<Self, BootError> {
@@ -46,7 +46,7 @@ impl FfiActor for Web {
     }
 
     #[handler]
-    fn on_request(&mut self, ctx: &mut FfiCtx<'_>, req: HttpServerRequest) {
+    fn on_request(&mut self, ctx: &mut WasmCtx<'_>, req: HttpServerRequest) {
         let (status, body): (u16, &[u8]) = match req.path.as_str() {
             "/" => (200, b"hello"),
             _ => (404, b"not found"),

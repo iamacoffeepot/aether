@@ -21,7 +21,7 @@
 // ADR-0033 / ADR-0038 dispatch ABI but doesn't need any field access.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
+use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::InputCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{Key, MouseButton, MouseMove, SubscribeInput};
@@ -29,14 +29,14 @@ use aether_kinds::{Key, MouseButton, MouseMove, SubscribeInput};
 pub struct InputLogger;
 
 #[actor]
-impl FfiActor for InputLogger {
+impl WasmActor for InputLogger {
     const NAMESPACE: &'static str = "input_logger";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(InputLogger)
     }
 
-    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         let me = MailboxId(ctx.mailbox_id());
         let input = ctx.actor::<InputCapability>();
         for kind in [Key::ID, MouseMove::ID, MouseButton::ID] {
@@ -45,13 +45,13 @@ impl FfiActor for InputLogger {
     }
 
     #[handler]
-    fn on_key(&mut self, _ctx: &mut FfiCtx<'_>, _key: Key) {}
+    fn on_key(&mut self, _ctx: &mut WasmCtx<'_>, _key: Key) {}
 
     #[handler]
-    fn on_mouse_button(&mut self, _ctx: &mut FfiCtx<'_>, _mb: MouseButton) {}
+    fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, _mb: MouseButton) {}
 
     #[handler]
-    fn on_mouse_move(&mut self, _ctx: &mut FfiCtx<'_>, _m: MouseMove) {}
+    fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, _m: MouseMove) {}
 }
 
 aether_actor::export!(InputLogger);

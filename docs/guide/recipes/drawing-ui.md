@@ -105,7 +105,7 @@ In a component, you receive that reply with a handler on the clicked kind:
 
 ```rust
 #[handler]
-fn on_clicked(&mut self, _ctx: &mut FfiCtx<'_>, click: UiClicked) {
+fn on_clicked(&mut self, _ctx: &mut WasmCtx<'_>, click: UiClicked) {
     if click.id == RESTART_BUTTON {
         self.restart();
     }

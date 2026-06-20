@@ -346,7 +346,7 @@ impl ComponentCtx {
     /// counterpart of [`Self::send`]. Routes the guest's send without
     /// inheriting the in-flight dispatch's lineage, so the recipient
     /// starts a fresh causal chain. Reached from the `send_mail_p32`
-    /// host fn when the guest sets the detached flag (`FfiActorMailbox::
+    /// host fn when the guest sets the detached flag (`WasmActorMailbox::
     /// send_detached`). Correlation / reply-routing are identical to
     /// `send` — only the trace lineage differs. `from` (issue 1987) is the
     /// guest-carried dispatch identity, resolved the same way as in `send`.
@@ -781,7 +781,7 @@ impl Component {
     /// component will see.
     ///
     /// ADR-0090 (issue 1256): `config_bytes` is the wire-encoded
-    /// `<FfiActor::Config as Kind>` payload threaded through to the
+    /// `<WasmActor::Config as Kind>` payload threaded through to the
     /// guest's `init_with_config_p32` shim. Pass `&[]` for actors whose
     /// `Config = ()` or for the back-compat path (legacy `init` does
     /// not consume the bytes).
@@ -842,7 +842,7 @@ impl Component {
         // that probes `init` first would silently skip the config path.
         //
         // Issue 525 Phase 4b / issue 531: a non-zero return value
-        // means the guest's `FfiActor::init` returned `Err(BootError)`
+        // means the guest's `WasmActor::init` returned `Err(BootError)`
         // and staged the message via `init_failed_p32`. Drain the
         // staged string off the ctx and surface it as a wasmtime
         // error so the existing `dispatch_load_component` failure
@@ -950,7 +950,7 @@ impl Component {
         }
 
         // ADR-0015 hook exports are optional. A component whose
-        // `FfiActor::on_dehydrate` is the default no-op still emits the
+        // `WasmActor::on_dehydrate` is the default no-op still emits the
         // symbol via `export!`, but a raw-FFI guest without the macro
         // won't. Either way: look it up, store `None` if missing.
         // (Issue 584 Phase 3 retired `on_drop` — `unwire` is the
@@ -1137,7 +1137,7 @@ impl Component {
         // own mailbox id.
         //
         // Issue 2001: thread the resolved inbound source as the trailing
-        // slot too, so the guest's `FfiCtx::source_mailbox` is a single
+        // slot too, so the guest's `WasmCtx::source_mailbox` is a single
         // ctx-field read on both the in-place and top-level paths and the
         // `source_of_p32` host round-trip can be retired. Resolved exactly
         // as `source_of_p32` did — a peer-component origin yields its

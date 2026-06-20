@@ -27,7 +27,7 @@
 // decoded bytes so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
 
-use aether_actor::FfiActorMailbox;
+use aether_actor::WasmActorMailbox;
 use aether_data::{Kind, MailboxId};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_kinds::SubscribeInputResult;
@@ -58,7 +58,7 @@ pub use native::InputConfig;
 /// Impl'd for both transports `ctx.actor::<InputCapability>()` can
 /// return:
 ///
-/// - [`FfiActorMailbox<InputCapability>`] — always-on, for
+/// - [`WasmActorMailbox<InputCapability>`] — always-on, for
 ///   wasm-component callers.
 /// - [`NativeActorMailbox<'_, InputCapability>`] — native cap-to-cap
 ///   sends, gated on `#[cfg(not(target_arch = "wasm32"))]`.
@@ -102,7 +102,7 @@ pub trait InputMailboxExt {
     fn unsubscribe_all(&self, mailbox: MailboxId);
 }
 
-impl InputMailboxExt for FfiActorMailbox<'_, InputCapability> {
+impl InputMailboxExt for WasmActorMailbox<'_, InputCapability> {
     fn subscribe<K: Kind>(&self) {
         self.send(&SubscribeInputSelf { kind: K::ID });
     }

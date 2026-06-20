@@ -165,7 +165,7 @@ pub trait Addressable: Sized + Send + 'static {
 
 /// The boot/teardown capability an actor composes onto its identity
 /// (iamacoffeepot/aether#2048). The lifecycle was declared twice —
-/// once on [`crate::FfiActor`] (wasm/guest) and once on
+/// once on [`crate::WasmActor`] (wasm/guest) and once on
 /// `aether_substrate::NativeActor` (native cap) — with near-identical
 /// signatures the two crates kept in sync by hand. Hoisting it onto one
 /// standalone trait both transports compose makes a divergent edit a
@@ -176,20 +176,20 @@ pub trait Addressable: Sized + Send + 'static {
 /// ctx, and a send inside a hook is gated on the *target's* cardinality
 /// marker, not on `Self`'s identity. The "a thing that boots must have a
 /// mailbox to boot into" constraint is asserted where it bites — on the
-/// transport subtraits (`FfiActor`/`NativeActor`), which add `Addressable` as a
+/// transport subtraits (`WasmActor`/`NativeActor`), which add `Addressable` as a
 /// co-supertrait — rather than welded into the capability.
 ///
 /// The per-target contexts are generic associated types each concrete
 /// impl pins: the `#[actor]` macro knows the target and emits
-/// `type InitCtx<'a> = FfiInitCtx<'a>; type Ctx<'a> = FfiCtx<'a>;` (or the
+/// `type InitCtx<'a> = WasmInitCtx<'a>; type Ctx<'a> = WasmCtx<'a>;` (or the
 /// native pair), so a `wire`/`unwire` body reaches the concrete ctx's
 /// inherent methods (`ctx.actor::<R>().send(&p)`) with no generic bound at
 /// the call site. `InitError` is pinned per transport subtrait
-/// (`FfiActor: Lifecycle<InitError = BootError>`), so existing generic call
+/// (`WasmActor: Lifecycle<InitError = BootError>`), so existing generic call
 /// sites keep seeing a concrete error type.
 pub trait Lifecycle {
     /// ADR-0090 boot configuration the chassis threads into [`Self::init`].
-    /// `Send + 'static` only here; [`crate::FfiActor`] tightens it to
+    /// `Send + 'static` only here; [`crate::WasmActor`] tightens it to
     /// `Kind` (FFI config crosses the wasm boundary as bytes) while native
     /// config stays a live Rust value.
     type Config: Send + 'static;
@@ -198,11 +198,11 @@ pub trait Lifecycle {
     /// to the concrete boot error on each transport subtrait.
     type InitError;
 
-    /// The per-target init ctx (`FfiInitCtx<'a>` / `NativeInitCtx<'a>`),
+    /// The per-target init ctx (`WasmInitCtx<'a>` / `NativeInitCtx<'a>`),
     /// synthesized per impl by `#[actor]`.
     type InitCtx<'a>;
 
-    /// The per-target post-init ctx (`FfiCtx<'a>` / `NativeCtx<'a>`),
+    /// The per-target post-init ctx (`WasmCtx<'a>` / `NativeCtx<'a>`),
     /// synthesized per impl by `#[actor]`.
     type Ctx<'a>;
 
@@ -281,7 +281,7 @@ impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = &'a str>>> Instanced fo
 /// full mailbox name is `"{A::NAMESPACE}:{subname}"`; the substrate
 /// hashes that string deterministically (ADR-0029) to the returned
 /// `MailboxId`. Shared spawn-addressing vocabulary: native
-/// `spawn_child` and the FFI guest's `FfiCtx::spawn_child` (ADR-0097)
+/// `spawn_child` and the FFI guest's `WasmCtx::spawn_child` (ADR-0097)
 /// both name children through it, so the two transports name children
 /// the same way.
 #[derive(Debug, Clone, Copy)]
@@ -374,7 +374,7 @@ pub trait HandlesKind<K: Kind>: Addressable {}
 
 /// A complete actor: an addressable identity ([`Addressable`]) that also
 /// carries a boot lifecycle ([`Lifecycle`]). The blanket impl supplies it
-/// for any type that is both, so `FfiActor` / `NativeActor` implementors
+/// for any type that is both, so `WasmActor` / `NativeActor` implementors
 /// are `Actor` automatically. Code that wants a fully-formed actor bounds
 /// `Actor`; code that wants only identity bounds `Addressable`.
 pub trait Actor: Addressable + Lifecycle {}

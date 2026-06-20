@@ -1171,7 +1171,7 @@ fn replace_component_preserves_mailbox_identity() {
 
 /// ADR-0101: a multi-actor module's entry export carries state across
 /// `replace_component` through the `on_dehydrate` / `on_rehydrate`
-/// hooks, now `FfiActor` defaults rather than an opt-in subtrait. Loads
+/// hooks, now `WasmActor` defaults rather than an opt-in subtrait. Loads
 /// the `stateful_replace` fixture (`export!(Counter, Sidecar)`), bumps
 /// the entry `Counter`'s in-memory count to 3, replaces the wasm at the
 /// same mailbox id with the same binary, then re-queries the count.

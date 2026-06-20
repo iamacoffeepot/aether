@@ -31,12 +31,12 @@ struct Counter {
 }
 
 #[actor]
-impl aether_actor::FfiActor for Counter {
+impl aether_actor::WasmActor for Counter {
     const NAMESPACE: &'static str = "counter";
 
     type State = CounterState;
 
-    fn init(_ctx: &mut aether_actor::FfiInitCtx<'_>) -> Result<Self, aether_actor::BootError>
+    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::BootError>
     {
         Ok(Counter { count: 0 })
     }
@@ -49,10 +49,10 @@ impl aether_actor::FfiActor for Counter {
         self.count = state.count;
     }
 
-    fn on_dehydrate(&mut self, _ctx: &mut aether_actor::FfiDropCtx<'_>) {}
+    fn on_dehydrate(&mut self, _ctx: &mut aether_actor::WasmDropCtx<'_>) {}
 
     #[handler]
-    fn on_bump(&mut self, _ctx: &mut aether_actor::FfiCtx<'_>, bump: Bump) {
+    fn on_bump(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, bump: Bump) {
         self.count += bump.delta;
     }
 }

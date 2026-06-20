@@ -1,4 +1,4 @@
-//! Baseline: a minimal well-formed `#[actor] impl FfiActor` — one
+//! Baseline: a minimal well-formed `#[actor] impl WasmActor` — one
 //! `#[handler]` plus a `const NAMESPACE` — expands cleanly. Guards the
 //! reject fixtures against false positives: the new diagnostics must
 //! fire on the malformed shapes, not on every actor.
@@ -22,16 +22,16 @@ struct Ping {
 struct Minimal;
 
 #[actor]
-impl aether_actor::FfiActor for Minimal {
+impl aether_actor::WasmActor for Minimal {
     const NAMESPACE: &'static str = "minimal";
 
-    fn init(_ctx: &mut aether_actor::FfiInitCtx<'_>) -> Result<Self, aether_actor::BootError>
+    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::BootError>
     {
         Ok(Minimal)
     }
 
     #[handler]
-    fn on_ping(&mut self, _ctx: &mut aether_actor::FfiCtx<'_>, _ping: Ping) {}
+    fn on_ping(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, _ping: Ping) {}
 }
 
 fn main() {}

@@ -11,7 +11,7 @@
 // owned for an all-`Copy` state, so silence the false positive.
 #![allow(clippy::needless_pass_by_value)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, Manual, OutboundReply, actor};
+use aether_actor::{BootError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
 /// Reshaped durable state — the added `generation` field changes the
@@ -36,12 +36,12 @@ pub struct Counter {
 }
 
 #[actor]
-impl FfiActor for Counter {
+impl WasmActor for Counter {
     const NAMESPACE: &'static str = "stateful.typed";
 
     type State = CounterState;
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Counter {
             count: 0,
             generation: 0,
@@ -61,12 +61,12 @@ impl FfiActor for Counter {
     }
 
     #[handler]
-    fn on_bump(&mut self, _ctx: &mut FfiCtx<'_>, _bump: Bump) {
+    fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.count += 1;
     }
 
     #[handler::manual]
-    fn on_count_query(&mut self, ctx: &mut FfiCtx<'_, Manual>, _query: CountQuery) {
+    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&CountReport { count: self.count });
         }

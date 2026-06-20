@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! TcpStream → HttpServerCapability → aether.component.load (wasm guest)
-//!           → HttpServerRequest dispatch → FfiActor::on_request
+//!           → HttpServerRequest dispatch → WasmActor::on_request
 //!           → HttpServerResponse reply → formatted HTTP/1.1 response
 //! ```
 //!

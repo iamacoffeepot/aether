@@ -7,16 +7,16 @@
 ## Context
 
 A wasm component carries state across `replace_component` by overriding two
-`FfiActor` hooks: `on_dehydrate` saves a bundle on the dying instance, and
+`WasmActor` hooks: `on_dehydrate` saves a bundle on the dying instance, and
 `on_rehydrate` reads it back on the replacement (ADR-0101 made both default
 no-op methods, so there is no opt-in flag). The reference `stateful_replace`
 fixture shows the shape:
 
 ```rust
-fn on_dehydrate(&mut self, ctx: &mut FfiDropCtx<'_>) {
+fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
     ctx.save_state_kind::<CountReport>(0, &CountReport { count: self.count });
 }
-fn on_rehydrate(&mut self, _ctx: &mut FfiCtx<'_>, prior: PriorState<'_>) {
+fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
     if let Some(saved) = prior.as_kind::<CountReport>() {
         self.count = saved.count;
     }
@@ -43,14 +43,14 @@ the bytes and a reshaped `K` is rejected automatically. ADR-0040 then
 It parked the associated type because committing to it then "commits to a
 trait shape before we have one concrete component using it seriously." That
 objection is now answerable. ADR-0090 landed `type Config` — an associated
-`Kind` on `FfiActor` that defaults to `()`, is synthesized by the `#[actor]`
+`Kind` on `WasmActor` that defaults to `()`, is synthesized by the `#[actor]`
 macro when omitted, and crosses the FFI as bytes. `type Config` is the
 working precedent for "a declared kind the macro threads through a lifecycle
 boundary," so the state side can mirror it rather than invent a shape.
 
 ## Decision
 
-Add a `type State: aether_data::Kind` associated type to `FfiActor`,
+Add a `type State: aether_data::Kind` associated type to `WasmActor`,
 mirroring `type Config`, and generate the dehydrate/rehydrate hooks from it.
 
 **Trait shape.** `type State` defaults to `()` the same way `type Config`
@@ -81,11 +81,11 @@ only place it can be drawn.
 **Generated hooks.** From the accessors the macro emits:
 
 ```rust
-fn on_dehydrate(&mut self, ctx: &mut FfiDropCtx<'_>) {
+fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
     let state = self.dehydrate();
     ctx.save_state_kind::<Self::State>(0, &state);
 }
-fn on_rehydrate(&mut self, _ctx: &mut FfiCtx<'_>, prior: PriorState<'_>) {
+fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
     match prior.as_kind::<Self::State>() {
         Some(state) => self.rehydrate(state),
         None => { /* decode-miss: boot fresh, warn if the bundle was non-empty */ }
@@ -124,7 +124,7 @@ makes large state easier to accumulate without noticing.
   the FFI hooks are generated, so a component never hand-writes the
   `K::ID`-prefixed framing or the `as_kind` decode. The incomplete-pair
   correctness hazard is gone — the type system requires both accessors.
-- `type State` is wasm-only, on `FfiActor`. Native chassis caps
+- `type State` is wasm-only, on `WasmActor`. Native chassis caps
   (`NativeActor`) are not hot-swapped through `replace_component`, so they
   have no dehydrate/rehydrate hooks and gain no `type State`. The asymmetry is
   structural rather than a special case: only wasm components are replaced in
@@ -156,7 +156,7 @@ makes large state easier to accumulate without noticing.
   new instance. The accessor split is what carries that distinction.
 - **A single combined hook returning `Option<State>`** — fold save and restore
   into one method. Rejected: dehydrate runs on the dying instance through
-  `FfiDropCtx` and rehydrate on the replacement through `FfiCtx`; they are
+  `WasmDropCtx` and rehydrate on the replacement through `WasmCtx`; they are
   different instances at different lifecycle points with different ctxs, so a
   single method cannot serve both.
 - **Error on decode-miss instead of booting fresh** — Rejected: the old

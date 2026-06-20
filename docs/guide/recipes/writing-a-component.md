@@ -68,12 +68,12 @@ link the same source. `aether-kit` packs several actors into one cdylib with
 
 ## 2. Write the actor block
 
-The receive side is one `#[actor] impl FfiActor for C` block. Each `#[handler]`
+The receive side is one `#[actor] impl WasmActor for C` block. Each `#[handler]`
 method *is* a handler — the macro infers the kind it handles from the method's third
 parameter, so there's no typelist to maintain.
 
 ```rust
-use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
+use aether_actor::{BootError, WasmActor, WasmCtx, Resolver, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::{DrawTriangle, Tick};
@@ -81,7 +81,7 @@ use aether_kinds::{DrawTriangle, Tick};
 pub struct MyComponent {}
 
 #[actor]
-impl FfiActor for MyComponent {
+impl WasmActor for MyComponent {
     const NAMESPACE: &'static str = "my_component";   // default load name
 
     fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
@@ -91,14 +91,14 @@ impl FfiActor for MyComponent {
         Ok(MyComponent {})
     }
 
-    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         // Subscribe the calling actor to the tick stream. This is the
         // first point sending is allowed.
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
     }
 
     #[handler]
-    fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         ctx.actor::<RenderCapability>().send(&TRIANGLE);
     }
 }

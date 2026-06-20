@@ -36,7 +36,7 @@
 use core::cell::UnsafeCell;
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, FfiInitCtx, MailboxId, Manual, OutboundReply, Subname, actor,
+    BootError, MailboxId, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_test_fixtures_kinds::{
     CollectMatrix, MATRIX_CELL_CHILD_TO_PARENT, MATRIX_CELL_CHILD_TO_SELF,
@@ -138,16 +138,16 @@ fn snapshot_report() -> MatrixReport {
 pub struct MatrixParent;
 
 #[actor]
-impl FfiActor for MatrixParent {
+impl WasmActor for MatrixParent {
     const NAMESPACE: &'static str = "test.matrix.parent";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(MatrixParent)
     }
 
     /// Co-locate two inline children under the `Named` subnames `a` and `b`,
     /// the cluster's leaf nodes.
-    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         let _ = ctx.spawn_inline_child::<MatrixChild>(Subname::Named("a"), &());
         let _ = ctx.spawn_inline_child::<MatrixChild>(Subname::Named("b"), &());
     }
@@ -157,7 +157,7 @@ impl FfiActor for MatrixParent {
     /// child-origin cells (child → parent / sibling / self) and the
     /// cross-cluster send. Everything settles in this one receive's drain.
     #[handler]
-    fn on_run_matrix(&mut self, ctx: &mut FfiCtx<'_>, msg: RunMatrix) {
+    fn on_run_matrix(&mut self, ctx: &mut WasmCtx<'_>, msg: RunMatrix) {
         let parent_id = ctx.mailbox_id();
         let child_a = ctx.child("a").expect("inline child a is resident");
         record_ids(parent_id, child_a.mailbox_id().0);
@@ -171,14 +171,14 @@ impl FfiActor for MatrixParent {
     /// child\[a\] → parent: a ping addressed to the parent's own id. Record the
     /// cell with the source the parent read (the membrane's own-id path).
     #[handler::manual]
-    fn on_matrix_ping(&mut self, ctx: &mut FfiCtx<'_, Manual>, ping: MatrixPing) {
+    fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_, Manual>, ping: MatrixPing) {
         record_cell(ping.cell, ctx.source_mailbox().map_or(0, |m| m.0));
     }
 
     /// Read the cluster's shared observation log and reply the structured
     /// matrix report. Sent after `RunMatrix` has fully settled.
     #[handler::manual]
-    fn on_collect_matrix(&mut self, ctx: &mut FfiCtx<'_, Manual>, _query: CollectMatrix) {
+    fn on_collect_matrix(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CollectMatrix) {
         if ctx.reply_target().is_some() {
             ctx.reply(&snapshot_report());
         }
@@ -191,10 +191,10 @@ impl FfiActor for MatrixParent {
 pub struct MatrixChild;
 
 #[actor(instanced)]
-impl FfiActor for MatrixChild {
+impl WasmActor for MatrixChild {
     const NAMESPACE: &'static str = "test.matrix.child";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(MatrixChild)
     }
 
@@ -202,7 +202,7 @@ impl FfiActor for MatrixChild {
     /// ping is the fan-out ping (parent → child\[a\]) — drive the child-origin
     /// cells and the cross-cluster send, all in place.
     #[handler::manual]
-    fn on_matrix_ping(&mut self, ctx: &mut FfiCtx<'_, Manual>, ping: MatrixPing) {
+    fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_, Manual>, ping: MatrixPing) {
         record_cell(ping.cell, ctx.source_mailbox().map_or(0, |m| m.0));
 
         if ping.fan_out == 0 {

@@ -1,5 +1,5 @@
 error: #[actor] generates `on_dehydrate` / `on_rehydrate` from `type State` plus the `dehydrate` / `rehydrate` accessors (ADR-0113); remove the hand-written hook, or drop `type State` and the accessors to write the hooks by hand
   --> tests/ui/rejects_state_with_manual_hook.rs:52:5
    |
-52 |     fn on_dehydrate(&mut self, _ctx: &mut aether_actor::FfiDropCtx<'_>) {}
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+52 |     fn on_dehydrate(&mut self, _ctx: &mut aether_actor::WasmDropCtx<'_>) {}
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

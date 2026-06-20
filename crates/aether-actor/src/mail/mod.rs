@@ -343,7 +343,7 @@ impl<'a> Mail<'a> {
 
 /// Opaque view of a prior state bundle handed to `on_rehydrate` by
 /// the substrate. Populated when the predecessor called
-/// `FfiDropCtx::save_state` during its own `on_dehydrate`; empty
+/// `WasmDropCtx::save_state` during its own `on_dehydrate`; empty
 /// otherwise (and in that case `on_rehydrate` is not called at all —
 /// ADR-0016 §3).
 ///

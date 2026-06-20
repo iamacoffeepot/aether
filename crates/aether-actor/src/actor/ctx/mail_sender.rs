@@ -2,8 +2,8 @@
 //!
 //! Per-stage capability trait (issue 663 + 665). Both init-time and
 //! runtime ctxs across every transport implement [`MailSender`]; each
-//! per-host concrete ctx struct (FFI: `FfiCtx` / `FfiInitCtx` /
-//! `FfiDropCtx`; substrate: `NativeCtx` / `NativeInitCtx`) provides
+//! per-host concrete ctx struct (FFI: `WasmCtx` / `WasmInitCtx` /
+//! `WasmDropCtx`; substrate: `NativeCtx` / `NativeInitCtx`) provides
 //! its own bodies — there are no default-impl bodies because the
 //! cross-target dispatch trait that backed them (`MailTransport`)
 //! retired in 665. Each side calls its dispatch surface inline:
@@ -12,7 +12,7 @@
 //!
 //! `actor::<R>()` / `resolve_actor::<R>(name)` retired from this trait
 //! because the returned typed-mailbox handle is per-side
-//! ([`crate::ffi::FfiActorMailbox<R>`] vs `NativeActorMailbox<'a, R>`).
+//! ([`crate::ffi::WasmActorMailbox<R>`] vs `NativeActorMailbox<'a, R>`).
 //! Each ctx provides them as inherent methods returning its own
 //! per-side type; the everyday user-facing `ctx.actor::<R>().send(&payload)`
 //! chain is unchanged. Generic-bounded code that needs cross-impl

@@ -2,7 +2,7 @@
 //! surface yet — the macro rejects it with a pointed "not yet
 //! implemented" error on the wasm expansion path.
 
-use aether_actor::{FfiCtx, Stream, actor};
+use aether_actor::{WasmCtx, Stream, actor};
 
 #[repr(C)]
 #[derive(
@@ -21,16 +21,16 @@ struct Ping {
 struct StreamProbe;
 
 #[actor]
-impl aether_actor::FfiActor for StreamProbe {
+impl aether_actor::WasmActor for StreamProbe {
     const NAMESPACE: &'static str = "stream_probe";
 
-    fn init(_ctx: &mut aether_actor::FfiInitCtx<'_>) -> Result<Self, aether_actor::BootError>
+    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::BootError>
     {
         Ok(StreamProbe)
     }
 
     #[handler::stream]
-    fn on_ping(&mut self, _ctx: &mut FfiCtx<'_, Stream>, _ping: Ping) {}
+    fn on_ping(&mut self, _ctx: &mut WasmCtx<'_, Stream>, _ping: Ping) {}
 }
 
 fn main() {}

@@ -100,7 +100,7 @@ with mail allowed. Address the cap by type and name the stream as a type
 parameter — the cap subscribes the calling actor:
 
 ```rust
-fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
     let input = ctx.actor::<InputCapability>();
     input.subscribe::<Key>();
     input.subscribe::<WindowSize>();
@@ -114,7 +114,7 @@ Then handle each stream as its kind, like any other mail:
 
 ```rust
 #[handler]
-fn on_key(&mut self, ctx: &mut FfiCtx<'_>, key: Key) { /* react to a keystroke */ }
+fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) { /* react to a keystroke */ }
 ```
 
 `aether-kit`'s `camera` export subscribes `WindowSize` this way to track the

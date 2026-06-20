@@ -1,9 +1,9 @@
 //! [`ReplyMode`] — the phantom marker a per-handler ctx carries to
 //! select which reply surface its handler class permits (ADR-0112).
 //!
-//! One ctx type per target (`FfiCtx` / `NativeCtx`) is parameterized by
+//! One ctx type per target (`WasmCtx` / `NativeCtx`) is parameterized by
 //! a [`ReplyMode`] marker that defaults to [`Single`], so the common
-//! signature stays `FfiCtx<'_>` / `NativeCtx<'_>`. The reply surface is
+//! signature stays `WasmCtx<'_>` / `NativeCtx<'_>`. The reply surface is
 //! selected by which traits the per-mode ctx implements:
 //!
 //! - [`Single`] — 0-or-1 reply via the return value (ADR-0109). No
@@ -33,7 +33,7 @@ pub trait ReplyMode: sealed::Sealed {}
 
 /// single-class marker (ADR-0112): the handler replies 0-or-1 through
 /// its return value (ADR-0109). The default `M` on both ctx types, so
-/// an unmarked `FfiCtx<'_>` / `NativeCtx<'_>` is the single-mode view.
+/// an unmarked `WasmCtx<'_>` / `NativeCtx<'_>` is the single-mode view.
 pub struct Single;
 
 /// manual-class marker (ADR-0112): the handler issues its own replies
@@ -60,7 +60,7 @@ mod tests {
     use core::mem::size_of;
 
     /// The mode markers are zero-sized — the invariant the layout-
-    /// identity reborrow in `FfiCtx::as_single` / `NativeCtx::as_single`
+    /// identity reborrow in `WasmCtx::as_single` / `NativeCtx::as_single`
     /// rests on (a `PhantomData<M>` field stays a ZST for every `M`).
     #[test]
     fn reply_mode_types_are_zsts() {

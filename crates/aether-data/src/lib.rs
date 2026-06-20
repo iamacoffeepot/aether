@@ -182,7 +182,7 @@ macro_rules! pod_kind_codec {
 
 /// `Kind` impl for the unit type. Lets `()` ride the same
 /// `Kind::decode_from_bytes` / `Kind::encode_into_bytes` shim path as
-/// real kinds, which is what makes the `FfiActor::Config = ()` default
+/// real kinds, which is what makes the `WasmActor::Config = ()` default
 /// (ADR-0090) decode through a uniform macro body. A zero-length byte
 /// slice decodes to `Some(())`; any non-empty slice returns `None`.
 /// Encoding is the empty byte vector.

@@ -13,7 +13,7 @@
 //! module owns the wasm-specific machinery.
 //!
 //! - [`Component`] / [`ComponentCtx`] — substrate-side counterpart of
-//!   `aether_actor::FfiActor`. The wasmtime trampoline drives them
+//!   `aether_actor::WasmActor`. The wasmtime trampoline drives them
 //!   per inbound mail.
 //! - [`host_fns`] — `extern "C"` import linker registration matching
 //!   the names guest [`aether_actor::ffi::raw`] expects.

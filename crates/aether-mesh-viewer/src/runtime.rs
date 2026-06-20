@@ -33,7 +33,7 @@
 //!    triangles to `"aether.render"`.
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, FfiInitCtx, Manual, OutboundReply, ReplyHandle, actor,
+    BootError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_capabilities::fs::FsMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
@@ -231,10 +231,10 @@ struct ScrubIndex {
 /// via `aether.fs.write` and re-sending `aether.mesh.load` against the
 /// same path.
 #[actor]
-impl FfiActor for MeshViewer {
+impl WasmActor for MeshViewer {
     const NAMESPACE: &'static str = "aether.mesh_viewer";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(MeshViewer {
             triangles: Vec::new(),
             overlay: Vec::new(),
@@ -259,7 +259,7 @@ impl FfiActor for MeshViewer {
     /// subscribe; the reply warn-drops and the viewer simply never
     /// receives `Render` and never submits — a no-op there, where the
     /// render cap discards anyway (ADR-0082 §7 / §11).
-    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Render>();
     }
 
@@ -271,7 +271,7 @@ impl FfiActor for MeshViewer {
     /// after a `load`, the file failed to read / parse / mesh — check
     /// `engine_logs`.
     #[handler]
-    fn on_render(&mut self, ctx: &mut FfiCtx<'_>, _render: Render) {
+    fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
         if !self.triangles.is_empty() {
             ctx.actor::<RenderCapability>().send_many(&self.triangles);
         }
@@ -305,7 +305,7 @@ impl FfiActor for MeshViewer {
     // the load body delegates straight to `FsCapability` via `ctx`.
     #[allow(clippy::needless_pass_by_value)]
     #[handler]
-    fn on_load(&mut self, ctx: &mut FfiCtx<'_>, msg: LoadMesh) {
+    fn on_load(&mut self, ctx: &mut WasmCtx<'_>, msg: LoadMesh) {
         // Park the requester's reply target across the async read.
         // `on_read_result` answers it with the structured outcome.
         // Overwriting any prior pending handle is intentional —
@@ -338,7 +338,7 @@ impl FfiActor for MeshViewer {
     /// re-address a tick.
     #[allow(clippy::needless_pass_by_value)]
     #[handler]
-    fn on_load_corridor(&mut self, ctx: &mut FfiCtx<'_>, msg: LoadCorridor) {
+    fn on_load_corridor(&mut self, ctx: &mut WasmCtx<'_>, msg: LoadCorridor) {
         self.pending_reply = ctx.reply_target();
         self.pending_load = PendingLoad::Corridor;
         tracing::info!(
@@ -362,7 +362,7 @@ impl FfiActor for MeshViewer {
     /// valid tick.
     #[allow(clippy::needless_pass_by_value)]
     #[handler]
-    fn on_scrub(&mut self, _ctx: &mut FfiCtx<'_>, msg: Scrub) {
+    fn on_scrub(&mut self, _ctx: &mut WasmCtx<'_>, msg: Scrub) {
         let ticks = self.corridor.as_ref().map_or(0, |c| c.index.ticks);
         // Clamp into `[0, ticks)`; an empty graph (ticks == 0) holds the
         // cursor at 0. `saturating_sub` keeps `ticks == 0` from underflowing.
@@ -395,7 +395,7 @@ impl FfiActor for MeshViewer {
     /// # Agent
     /// Substrate-driven; do not send manually.
     #[handler::manual]
-    fn on_read_result(&mut self, ctx: &mut FfiCtx<'_, Manual>, r: ReadResult) {
+    fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Manual>, r: ReadResult) {
         let pending = self.pending_load;
         let (namespace, path, outcome) = match r {
             ReadResult::Ok {
@@ -507,7 +507,7 @@ impl MeshViewer {
     /// so a stale target can't leak into a later load's reply.
     fn reply_load_result(
         &mut self,
-        ctx: &mut FfiCtx<'_, Manual>,
+        ctx: &mut WasmCtx<'_, Manual>,
         pending: PendingLoad,
         namespace: String,
         path: String,

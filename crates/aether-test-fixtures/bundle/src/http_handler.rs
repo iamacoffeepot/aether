@@ -20,16 +20,16 @@
 // ignores `self` is correct but triggers `unused_self`.
 #![allow(clippy::needless_pass_by_value, clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
+use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{HttpServerRequest, HttpServerResponse};
 
 pub struct HttpHandler;
 
 #[actor]
-impl FfiActor for HttpHandler {
+impl WasmActor for HttpHandler {
     const NAMESPACE: &'static str = "web";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(HttpHandler)
     }
 
@@ -42,7 +42,7 @@ impl FfiActor for HttpHandler {
     /// on every inbound request. Configure `HttpServerConfig.handler_mailbox`
     /// to `"aether.component/aether.embedded:web"` to route here.
     #[handler]
-    fn on_request(&mut self, _ctx: &mut FfiCtx<'_>, req: HttpServerRequest) -> HttpServerResponse {
+    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpServerResponse {
         let (status, body): (u16, &[u8]) = match req.path.as_str() {
             "/" => (200, b"hello from aether"),
             _ => (404, b"not found"),

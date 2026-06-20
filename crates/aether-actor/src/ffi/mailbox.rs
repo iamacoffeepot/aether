@@ -2,11 +2,11 @@
 // wasm32 host-fn ABI (`_p32` convention, ADR-0024).
 #![allow(clippy::cast_possible_truncation)]
 
-//! [`FfiActorMailbox`] — actor-typed sender handle for FFI guests.
+//! [`WasmActorMailbox`] — actor-typed sender handle for FFI guests.
 //!
 //! Issue 665 split the prior parametric `ActorMailbox<'a, R, T>` into
 //! per-side types so the `MailTransport` trait can retire. Issue 1987
-//! made the FFI variant a ctx-bound transient (`FfiActorMailbox<'a, R>`),
+//! made the FFI variant a ctx-bound transient (`WasmActorMailbox<'a, R>`),
 //! symmetric with the native `NativeActorMailbox<'a, R>`: it carries the
 //! resolving actor's own id as the send's "from" half plus a borrow of
 //! the per-component inline registry the send routes through. The `'a`
@@ -14,8 +14,8 @@
 //! cannot be stored past the handler, so it can never carry a stale
 //! origin.
 //!
-//! Built via [`crate::ffi::ctx::FfiCtx::actor`] /
-//! [`crate::ffi::ctx::FfiCtx::resolve_actor`]. The compile-time
+//! Built via [`crate::ffi::ctx::WasmCtx::actor`] /
+//! [`crate::ffi::ctx::WasmCtx::resolve_actor`]. The compile-time
 //! `R: HandlesKind<K>` gate is the same as the prior parametric form:
 //! `ctx.actor::<RenderCapability>().send(&triangle)` compiles only when
 //! `RenderCapability: HandlesKind<DrawTriangle>`.
@@ -28,7 +28,7 @@ use crate::actor::{Addressable, HandlesKind};
 use crate::ffi::inline::InlineRegistry;
 
 /// Phantom-typed receiver-actor handle for FFI guests, built by
-/// [`crate::ffi::FfiCtx::actor`] / [`crate::ffi::FfiCtx::resolve_actor`].
+/// [`crate::ffi::WasmCtx::actor`] / [`crate::ffi::WasmCtx::resolve_actor`].
 ///
 /// Issue 1987 made it a ctx-bound transient (mirroring the native
 /// `NativeActorMailbox<'a, R>` and the in-cluster [`crate::ffi::RelativeMailbox`]):
@@ -38,7 +38,7 @@ use crate::ffi::inline::InlineRegistry;
 /// property of the *executing* actor — the handle cannot outlive the handler,
 /// so it can never carry a stale origin the way a stored address-only token
 /// would.
-pub struct FfiActorMailbox<'a, R> {
+pub struct WasmActorMailbox<'a, R> {
     mailbox: u64,
     /// The resolving actor's own folded [`aether_data::MailboxId`] raw value —
     /// the "from" half threaded onto every send so the recipient's
@@ -56,14 +56,14 @@ pub struct FfiActorMailbox<'a, R> {
     _r: PhantomData<fn() -> R>,
 }
 
-impl<R> Copy for FfiActorMailbox<'_, R> {}
-impl<R> Clone for FfiActorMailbox<'_, R> {
+impl<R> Copy for WasmActorMailbox<'_, R> {}
+impl<R> Clone for WasmActorMailbox<'_, R> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'a, R> FfiActorMailbox<'a, R> {
+impl<'a, R> WasmActorMailbox<'a, R> {
     /// Not part of the public API; the ctx-level constructors go
     /// through here so the fields stay private. `sender` is the
     /// resolving actor's own id (the "from" half); `inline` is the ctx's
@@ -92,13 +92,13 @@ impl<'a, R> FfiActorMailbox<'a, R> {
     /// same way. The by-id counterpart of [`Self::resolve_peer`], for a cap
     /// that folds a child / session id itself rather than resolving by name.
     #[must_use]
-    pub fn at<Peer>(&self, mailbox: u64) -> FfiActorMailbox<'a, Peer> {
-        FfiActorMailbox::__new(mailbox, self.sender, self.inline)
+    pub fn at<Peer>(&self, mailbox: u64) -> WasmActorMailbox<'a, Peer> {
+        WasmActorMailbox::__new(mailbox, self.sender, self.inline)
     }
 
     /// Resolve a sibling mailbox on the same transport, addressed by
     /// `name`. Same FNV-hash name resolution as
-    /// [`crate::ffi::FfiCtx::resolve_actor`] — `name` must be the peer's
+    /// [`crate::ffi::WasmCtx::resolve_actor`] — `name` must be the peer's
     /// **full registered name** (flat ADR-0029 hash). A caller that needs
     /// a lineage-folded child id (ADR-0099 §3) uses
     /// [`Self::resolve_peer_scoped`] instead. Kept as an inherent
@@ -108,11 +108,11 @@ impl<'a, R> FfiActorMailbox<'a, R> {
     /// through, so the peer handle's sends stamp the same origin and
     /// route the same way.
     // Runtime-name escape hatch (the by-name peer-resolution counterpart of
-    // `FfiCtx::resolve_actor`): the peer name is supplied at runtime.
+    // `WasmCtx::resolve_actor`): the peer name is supplied at runtime.
     #[must_use]
     #[allow(clippy::disallowed_methods)]
-    pub fn resolve_peer<Peer: Addressable>(&self, name: &str) -> FfiActorMailbox<'a, Peer> {
-        FfiActorMailbox::__new(mailbox_id_from_name(name).0, self.sender, self.inline)
+    pub fn resolve_peer<Peer: Addressable>(&self, name: &str) -> WasmActorMailbox<'a, Peer> {
+        WasmActorMailbox::__new(mailbox_id_from_name(name).0, self.sender, self.inline)
     }
 
     /// Resolve a child mailbox of *this* actor, where the child is the
@@ -130,9 +130,9 @@ impl<'a, R> FfiActorMailbox<'a, R> {
         &self,
         scope: &str,
         segment: &str,
-    ) -> FfiActorMailbox<'a, Peer> {
+    ) -> WasmActorMailbox<'a, Peer> {
         let node = ActorId::instanced(scope, segment);
-        FfiActorMailbox::__new(
+        WasmActorMailbox::__new(
             with_tag(Tag::Mailbox, fold_lineage(self.mailbox, node)),
             self.sender,
             self.inline,
@@ -140,7 +140,7 @@ impl<'a, R> FfiActorMailbox<'a, R> {
     }
 }
 
-impl<R: Addressable> FfiActorMailbox<'_, R> {
+impl<R: Addressable> WasmActorMailbox<'_, R> {
     /// Send a single payload of kind `K` to actor `R`. Compile-checked
     /// against `R: HandlesKind<K>` — wrong-kind sends are rejected at
     /// the call site.

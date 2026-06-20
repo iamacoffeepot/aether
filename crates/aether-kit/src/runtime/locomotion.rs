@@ -74,7 +74,7 @@ use core::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
 
-use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
+use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability, UiCapability};
@@ -358,10 +358,10 @@ pub struct Locomotion {
 }
 
 #[actor]
-impl FfiActor for Locomotion {
+impl WasmActor for Locomotion {
     const NAMESPACE: &'static str = "aether.locomotion";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         let mover = Mover {
             x: tile_center_octimeters(GRID_W / 2),
             z: tile_center_octimeters(GRID_H / 2),
@@ -392,7 +392,7 @@ impl FfiActor for Locomotion {
         })
     }
 
-    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         let input = ctx.actor::<InputCapability>();
         input.subscribe::<Key>();
         input.subscribe::<KeyRelease>();
@@ -405,7 +405,7 @@ impl FfiActor for Locomotion {
     }
 
     #[handler]
-    fn on_tick(&mut self, _ctx: &mut FfiCtx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, _ctx: &mut WasmCtx<'_>, _tick: Tick) {
         // In preview mode the game is frozen: the static matrix in the field
         // must persist, so skip the simulation entirely.
         if self.preview != 0 {
@@ -428,7 +428,7 @@ impl FfiActor for Locomotion {
     }
 
     #[handler]
-    fn on_render(&mut self, ctx: &mut FfiCtx<'_>, _render: Render) {
+    fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
         let render = ctx.actor::<RenderCapability>();
         // This actor owns the overhead camera: publish the view each frame
         // (latest-wins), then the geometry.
@@ -442,22 +442,22 @@ impl FfiActor for Locomotion {
     }
 
     #[handler]
-    fn on_mouse_move(&mut self, _ctx: &mut FfiCtx<'_>, mail: MouseMove) {
+    fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, mail: MouseMove) {
         self.cursor = (mail.x, mail.y);
     }
 
     #[handler]
-    fn on_window_size(&mut self, _ctx: &mut FfiCtx<'_>, mail: WindowSize) {
+    fn on_window_size(&mut self, _ctx: &mut WasmCtx<'_>, mail: WindowSize) {
         self.window = (mail.width, mail.height);
     }
 
     #[handler]
-    fn on_mouse_button(&mut self, _ctx: &mut FfiCtx<'_>, _mail: MouseButton) {
+    fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, _mail: MouseButton) {
         self.click_to_move();
     }
 
     #[handler]
-    fn on_key(&mut self, _ctx: &mut FfiCtx<'_>, key: Key) {
+    fn on_key(&mut self, _ctx: &mut WasmCtx<'_>, key: Key) {
         match key.code {
             keycode::KEY_TAB => self.cycle_granularity(),
             keycode::KEY_O => {
@@ -475,12 +475,12 @@ impl FfiActor for Locomotion {
     }
 
     #[handler]
-    fn on_key_release(&mut self, _ctx: &mut FfiCtx<'_>, key: KeyRelease) {
+    fn on_key_release(&mut self, _ctx: &mut WasmCtx<'_>, key: KeyRelease) {
         self.set_held(key.code, false);
     }
 
     #[handler]
-    fn on_teleport(&mut self, _ctx: &mut FfiCtx<'_>, mail: Teleport) {
+    fn on_teleport(&mut self, _ctx: &mut WasmCtx<'_>, mail: Teleport) {
         if self.map.walkable(mail.tile_x, mail.tile_z) {
             self.mover.x = tile_center_octimeters(mail.tile_x);
             self.mover.z = tile_center_octimeters(mail.tile_z);
@@ -496,7 +496,7 @@ impl FfiActor for Locomotion {
     }
 
     #[handler]
-    fn on_set_walkable(&mut self, _ctx: &mut FfiCtx<'_>, mail: SetWalkable) {
+    fn on_set_walkable(&mut self, _ctx: &mut WasmCtx<'_>, mail: SetWalkable) {
         if !self.map.set(mail.tile_x, mail.tile_z, mail.walkable) {
             tracing::warn!(
                 tile_x = mail.tile_x,
@@ -507,12 +507,12 @@ impl FfiActor for Locomotion {
     }
 
     #[handler]
-    fn on_set_granularity(&mut self, _ctx: &mut FfiCtx<'_>, mail: SetGranularity) {
+    fn on_set_granularity(&mut self, _ctx: &mut WasmCtx<'_>, mail: SetGranularity) {
         self.set_cell(mail.cell_octimeters);
     }
 
     #[handler]
-    fn on_preview(&mut self, _ctx: &mut FfiCtx<'_>, mail: Preview) {
+    fn on_preview(&mut self, _ctx: &mut WasmCtx<'_>, mail: Preview) {
         self.preview = mail.shape;
         if mail.shape != 0 {
             self.arena.show_matrix(mail.shape);
@@ -850,7 +850,7 @@ impl Locomotion {
     /// the cached window size and resent every frame in immediate mode.
     /// Skipped in preview (the parameter contact sheet carries no mover or
     /// HUD) and before the first `WindowSize` establishes a real viewport.
-    fn send_hud(&self, ctx: &mut FfiCtx<'_>) {
+    fn send_hud(&self, ctx: &mut WasmCtx<'_>) {
         if self.preview != 0 {
             return;
         }

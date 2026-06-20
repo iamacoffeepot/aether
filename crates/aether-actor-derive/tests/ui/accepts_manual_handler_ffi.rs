@@ -2,7 +2,7 @@
 //! ctx and issues its own reply via `OutboundReply::reply` — the
 //! manual-class path compiles cleanly on the wasm expansion.
 
-use aether_actor::{FfiCtx, Manual, OutboundReply, actor};
+use aether_actor::{WasmCtx, Manual, OutboundReply, actor};
 
 #[repr(C)]
 #[derive(
@@ -35,16 +35,16 @@ struct Ack {
 struct ManualProbe;
 
 #[actor]
-impl aether_actor::FfiActor for ManualProbe {
+impl aether_actor::WasmActor for ManualProbe {
     const NAMESPACE: &'static str = "manual_probe";
 
-    fn init(_ctx: &mut aether_actor::FfiInitCtx<'_>) -> Result<Self, aether_actor::BootError>
+    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::BootError>
     {
         Ok(ManualProbe)
     }
 
     #[handler::manual]
-    fn on_ping(&mut self, ctx: &mut FfiCtx<'_, Manual>, ping: Ping) {
+    fn on_ping(&mut self, ctx: &mut WasmCtx<'_, Manual>, ping: Ping) {
         ctx.reply(&Ack { seq: ping.seq });
     }
 }

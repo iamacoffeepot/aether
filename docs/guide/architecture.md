@@ -59,7 +59,7 @@ Two layers: infrastructure (describes and moves typed bytes) and runtime
 | `aether-substrate` | The shared runtime: mail scheduler, wasm host, the actor machinery. |
 | `aether-capabilities` | Native capabilities (the chassis actors): render, audio, fs, input, component-loader, handle store, etc. |
 | `aether-substrate-bundle` | The four chassis as submodules (`desktop` / `headless` / `hub` / `test_bench`) with one binary each, plus the hub library and its wire vocabulary. |
-| `aether-actor` | The guest/actor SDK: the `Actor` / `FfiActor` traits, `Mailbox<K>`, `FfiCtx`, the `#[actor]` macro, and `export!`. |
+| `aether-actor` | The guest/actor SDK: the `Actor` / `WasmActor` traits, `Mailbox<K>`, `WasmCtx`, the `#[actor]` macro, and `export!`. |
 
 **The harness (out-of-process, [ADR-0089](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0089-mcp-hub-lifecycle-tunnel.md)):** `aether-tunnel` (the stable MCP
 front that supervises and re-forks the volatile backends), `aether-mcp` (the

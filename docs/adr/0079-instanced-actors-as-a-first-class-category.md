@@ -179,7 +179,7 @@ No "force kill arbitrary actor" admin primitive. The misbehaving-actor leak (an 
 
 `unwire` names the hook for what it does (notify peers via mail before the actor disappears) rather than for the language feature it superficially resembled. The pair `wire` / `unwire` reads as a bracketed lifecycle phase: wire up to peers, do work, unwire from peers. Sync resource release continues to use Rust's `impl Drop` — the SDK trait surface stays out of `Drop`'s territory entirely.
 
-The same logic extends to the FFI side: `FfiActor::on_drop` retires (issue 584). Wasm guests get the symmetric `wire` / `unwire` exports; sync cleanup is the wasm runtime's responsibility, not surfaced to SDK authors.
+The same logic extends to the FFI side: `WasmActor::on_drop` retires (issue 584). Wasm guests get the symmetric `wire` / `unwire` exports; sync cleanup is the wasm runtime's responsibility, not surfaced to SDK authors.
 
 ### 7. Names are tombstoned on close, never reused
 
@@ -263,4 +263,4 @@ Replace semantics mesh cleanly with this: replace is "actor continues with new c
 - ADR-0021 — Input-stream subscriber cleanup on actor drop. Sets the precedent the monitor primitive follows for bidirectional cleanup.
 - ADR-0022 + ADR-0038 — Replace_component splice. The existing Replaceable machinery, extended to instanced wasm via `replace_actor` when wasm-side spawn unparks.
 - Issue 607 — design conversation thread; this ADR is the load-bearing decision capture.
-- Issue 584 — `wire` / `unwire` lifecycle hooks; `FfiActor::on_drop` retirement. Implements the §6 surface this ADR amendment landed.
+- Issue 584 — `wire` / `unwire` lifecycle hooks; `WasmActor::on_drop` retirement. Implements the §6 surface this ADR amendment landed.

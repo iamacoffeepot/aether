@@ -27,7 +27,7 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, FfiInitCtx, MailSender, MailboxId, Manual, OutboundReply, actor,
+    BootError, MailSender, MailboxId, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_test_fixtures_kinds::{
     SendSourceQuery, SourceQuery, SourceReport, TEST_BENCH_OBSERVER_MAILBOX_NAME,
@@ -36,10 +36,10 @@ use aether_test_fixtures_kinds::{
 pub struct SourceObserver;
 
 #[actor]
-impl FfiActor for SourceObserver {
+impl WasmActor for SourceObserver {
     const NAMESPACE: &'static str = "test.source_observer";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(SourceObserver)
     }
 
@@ -50,7 +50,7 @@ impl FfiActor for SourceObserver {
     /// ctx-mediated `ctx.send_to`, which threads this actor's own id as the
     /// send's `from` (issue 1987).
     #[handler]
-    fn on_send_source_query(&mut self, ctx: &mut FfiCtx<'_>, msg: SendSourceQuery) {
+    fn on_send_source_query(&mut self, ctx: &mut WasmCtx<'_>, msg: SendSourceQuery) {
         ctx.send_to(MailboxId(msg.to), &SourceQuery);
     }
 
@@ -59,7 +59,7 @@ impl FfiActor for SourceObserver {
     /// broadcast `SourceReport { mailbox_id }` to the observer, and reply to
     /// the direct sender with the same report.
     #[handler::manual]
-    fn on_source_query(&mut self, ctx: &mut FfiCtx<'_, Manual>, _query: SourceQuery) {
+    fn on_source_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: SourceQuery) {
         let mailbox_id = ctx.source_mailbox().map_or(0, |m| m.0);
         // Log the raw value so the TestBench integration test can verify it
         // with `log_tail` without relying on broadcast payload access.

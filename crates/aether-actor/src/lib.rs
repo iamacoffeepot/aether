@@ -30,9 +30,9 @@
 //!   - [`Slot`] — single-instance backing store the consumer's
 //!     [`export!`] macro emits as a `static`.
 //!   - [`ffi`] — FFI binding layer: [`ffi::bridge`] dispatch ZSTs +
-//!     [`FfiActor`] trait (with the `on_dehydrate` / `on_rehydrate`
+//!     [`WasmActor`] trait (with the `on_dehydrate` / `on_rehydrate`
 //!     hot-swap hooks, ADR-0101) +
-//!     [`FfiActorMailbox`] for the actor-typed sender chain +
+//!     [`WasmActorMailbox`] for the actor-typed sender chain +
 //!     the [`export!`] macro that pins `init` / `receive` /
 //!     lifecycle FFI exports plus the `aether.kinds.inputs` /
 //!     `aether.namespace` custom-section statics.
@@ -72,18 +72,18 @@ pub use local::Local;
 // Issue 665: `Mailbox<K, T>` and `ActorMailbox<'_, R, T>` retired; the
 // surviving [`mail::mailbox::Mailbox<K>`] is a transport-free
 // addressing token. Per-side actor-typed mailboxes live next to their
-// transport: [`ffi::FfiActorMailbox<R>`] for FFI guests and
+// transport: [`ffi::WasmActorMailbox<R>`] for FFI guests and
 // `aether_substrate::actor::native::NativeActorMailbox<'a, R>` for
 // native actors.
 pub use mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyHandle};
 
 // FFI surface promoted to the crate root so consumers see
-// `aether_actor::FfiCtx<'_>` / `aether_actor::FfiActor` / etc. without
+// `aether_actor::WasmCtx<'_>` / `aether_actor::WasmActor` / etc. without
 // an extra `ffi::` segment.
 pub use ffi::{
-    BootError, ErasedFfiActor, FfiActor, FfiActorMailbox, FfiCtx, FfiDropCtx, FfiInitCtx,
-    RelativeMailbox, SpawnError,
+    BootError, ErasedFfiActor, RelativeMailbox, SpawnError, WasmActor, WasmActorMailbox, WasmCtx,
+    WasmDropCtx, WasmInitCtx,
 };
 
 // Issue 665 retired `MailTransport` and its `MailTransportTrait`

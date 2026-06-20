@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-04-14
 - **Accepted:** 2026-04-17
-- **Revised by:** ADR-0101 (2026-06-09) — the opt-in is retired. `on_dehydrate` (the former `on_replace`) and `on_rehydrate` are now default-no-op `FfiActor` lifecycle hooks, not a `Replaceable` subtrait reached through an `export!` flag. The state-bundle protocol described below is unchanged.
+- **Revised by:** ADR-0101 (2026-06-09) — the opt-in is retired. `on_dehydrate` (the former `on_replace`) and `on_rehydrate` are now default-no-op `WasmActor` lifecycle hooks, not a `Replaceable` subtrait reached through an `export!` flag. The state-bundle protocol described below is unchanged.
 
 ## Context
 

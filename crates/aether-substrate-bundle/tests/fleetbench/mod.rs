@@ -952,7 +952,7 @@ impl FleetBench {
 
     /// Like [`load`](Self::load) but threads a typed init-config into the
     /// component: `config` is encoded into the `LoadComponent.config`
-    /// carrier the guest decodes as its `FfiActor::Config` (ADR-0090).
+    /// carrier the guest decodes as its `WasmActor::Config` (ADR-0090).
     /// Returns the registered ADR-0099 lineage address. Used by
     /// components whose typed `Config` cannot decode from the empty
     /// carrier the empty-config [`load`](Self::load) sends.

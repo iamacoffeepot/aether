@@ -5,7 +5,7 @@
 
 ## Context
 
-On the wasm side, one crate is one actor. `export!` takes a single `FfiActor` type and emits that module's FFI shims for it, so a wasm module *is* exactly one actor. A set of related actors — a coordinator plus a handful of sub-actor roles — therefore becomes a set of one-actor crates, each separately built, loaded, and versioned. That doesn't scale: as the actor population grows, the single-serving-actor crate turns every role into its own binary.
+On the wasm side, one crate is one actor. `export!` takes a single `WasmActor` type and emits that module's FFI shims for it, so a wasm module *is* exactly one actor. A set of related actors — a coordinator plus a handful of sub-actor roles — therefore becomes a set of one-actor crates, each separately built, loaded, and versioned. That doesn't scale: as the actor population grows, the single-serving-actor crate turns every role into its own binary.
 
 Native crates don't carry this constraint — a native binary compiles many actor types, and the framework spawns and addresses them individually. The wasm host should be able to hold a *library* of actors the same way: one crate, one binary, multiple exported actor types.
 
@@ -24,7 +24,7 @@ Three sub-decisions.
 
 ### 1. A wasm crate exports a set of actors
 
-`export!` accepts more than one `FfiActor` type:
+`export!` accepts more than one `WasmActor` type:
 
 ```rust
 aether_actor::export!(RootManager, Panel, Button);

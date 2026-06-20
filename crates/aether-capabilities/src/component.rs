@@ -29,7 +29,7 @@
 // decoded bytes so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
 
-use aether_actor::{Addressable, FfiActorMailbox};
+use aether_actor::{Addressable, WasmActorMailbox};
 use aether_kinds::{DropComponent, ListComponents, LoadComponent, ReplaceComponent};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_kinds::{LifecycleUnsubscribeAll, UnsubscribeAll};
@@ -57,7 +57,7 @@ pub use native::ComponentHostConfig;
 /// and propagates everywhere.
 ///
 /// `R: Addressable` is the peer's actor type, supplied by the caller (same
-/// as today's `FfiCtx::resolve_actor` surface). Type-checks at the
+/// as today's `WasmCtx::resolve_actor` surface). Type-checks at the
 /// send site — `peer.send::<K>(&mail)` compiles only when
 /// `R: HandlesKind<K>`.
 pub trait ComponentHostFfiExt {
@@ -66,11 +66,11 @@ pub trait ComponentHostFfiExt {
     /// `format!("{}:{}", WasmTrampoline::NAMESPACE, name)`. The resolved
     /// handle inherits this handle's ctx binding (`sender` + inline
     /// registry), so its sends stamp the same origin (issue 1987).
-    fn loaded<R: Addressable>(&self, name: &str) -> FfiActorMailbox<'_, R>;
+    fn loaded<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R>;
 }
 
-impl ComponentHostFfiExt for FfiActorMailbox<'_, ComponentHostCapability> {
-    fn loaded<R: Addressable>(&self, name: &str) -> FfiActorMailbox<'_, R> {
+impl ComponentHostFfiExt for WasmActorMailbox<'_, ComponentHostCapability> {
+    fn loaded<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
         self.resolve_peer_scoped::<R>(WasmTrampoline::NAMESPACE, name)
     }
 }
@@ -558,7 +558,7 @@ mod tests {
     // the reference value under test, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
     use aether_actor::ffi::inline::InlineRegistry;
-    use aether_actor::{Addressable, FfiActorMailbox};
+    use aether_actor::{Addressable, WasmActorMailbox};
     use aether_data::{ActorId, MailboxId, Tag, fold_lineage, mailbox_id_from_name, with_tag};
 
     use super::{ComponentHostCapability, ComponentHostFfiExt};
@@ -580,7 +580,7 @@ mod tests {
         // inline registry) is irrelevant to id resolution, so a throwaway
         // registry and a zero sender suffice (issue 1987).
         let registry = InlineRegistry::new();
-        let host = FfiActorMailbox::<ComponentHostCapability>::__new(
+        let host = WasmActorMailbox::<ComponentHostCapability>::__new(
             mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0,
             0,
             &registry,
@@ -607,7 +607,7 @@ mod tests {
     #[test]
     fn root_singleton_id_is_the_bare_namespace() {
         let registry = InlineRegistry::new();
-        let host = FfiActorMailbox::<ComponentHostCapability>::__new(
+        let host = WasmActorMailbox::<ComponentHostCapability>::__new(
             mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0,
             0,
             &registry,

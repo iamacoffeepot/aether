@@ -25,17 +25,17 @@ use alloc::vec::Vec;
 
 use aether_data::{Kind, MailboxId};
 
-use crate::ffi::ctx::{CapturedState, FfiDropCtx, FfiInitCtx, NO_INBOUND_SOURCE};
+use crate::ffi::ctx::{CapturedState, NO_INBOUND_SOURCE, WasmDropCtx, WasmInitCtx};
 use crate::ffi::inline::InlineRegistry;
 use crate::ffi::inline::bundle::{self, ChildEntry};
-use crate::ffi::{ErasedFfiActor, FfiActor, FfiCtx};
+use crate::ffi::{ErasedFfiActor, WasmActor, WasmCtx};
 use crate::mail::PriorState;
 
 /// Run the parent's `on_dehydrate` and every inline child's, packing one
 /// composite migration bundle (ADR-0114 §5).
 ///
 /// `run_parent_dehydrate` runs the live parent instance's `on_dehydrate`
-/// against the supplied capturing [`FfiDropCtx`] (so the parent's own
+/// against the supplied capturing [`WasmDropCtx`] (so the parent's own
 /// `save_state` is captured, not forwarded to the host). `registry` is the
 /// component's inline-child registry (the `export!`-emitted
 /// `static __AETHER_INLINE`); its resident children are walked here.
@@ -51,12 +51,12 @@ use crate::mail::PriorState;
 pub fn compose_dehydrate(
     mailbox_id: u64,
     registry: &InlineRegistry,
-    run_parent_dehydrate: impl FnOnce(&mut FfiDropCtx<'_>),
+    run_parent_dehydrate: impl FnOnce(&mut WasmDropCtx<'_>),
 ) -> Option<(u32, Vec<u8>)> {
     // Parent half: capture whatever the parent's `on_dehydrate` saves.
     let mut parent_capture = CapturedState::default();
     {
-        let mut ctx = FfiDropCtx::__new_capturing(mailbox_id, &mut parent_capture);
+        let mut ctx = WasmDropCtx::__new_capturing(mailbox_id, &mut parent_capture);
         run_parent_dehydrate(&mut ctx);
     }
     let parent_saved = parent_capture.take();
@@ -69,7 +69,7 @@ pub fn compose_dehydrate(
     for meta in metas {
         let mut child_capture = CapturedState::default();
         registry.with_child_mut(meta.id, |child| {
-            let mut ctx = FfiDropCtx::__new_capturing(meta.id.0, &mut child_capture);
+            let mut ctx = WasmDropCtx::__new_capturing(meta.id.0, &mut child_capture);
             child.erased_on_dehydrate(&mut ctx);
         });
         let (version, state_bytes) = child_capture.take().unwrap_or((0, Vec::new()));
@@ -188,7 +188,7 @@ pub fn reconstruct_one_child<A>(
     to_reconstruct: &InlineChildToReconstruct<'_>,
 ) -> bool
 where
-    A: FfiActor + ErasedFfiActor,
+    A: WasmActor + ErasedFfiActor,
 {
     // The child's config isn't part of the migration bundle; re-`init`
     // from empty config bytes, the same shape the legacy zero-config
@@ -197,7 +197,7 @@ where
     let Some(config) = <A::Config as Kind>::decode_from_bytes(&[]) else {
         return false;
     };
-    let mut init_ctx = FfiInitCtx::__new(to_reconstruct.alias.0);
+    let mut init_ctx = WasmInitCtx::__new(to_reconstruct.alias.0);
     let Ok(mut child) = A::init(config, &mut init_ctx) else {
         return false;
     };
@@ -206,7 +206,7 @@ where
     // registered, so the first inbound mail sees the rehydrated state.
     {
         // Rehydrate is not a mail dispatch — no inbound source on the ctx.
-        let mut ctx = FfiCtx::__new(to_reconstruct.alias.0, registry, NO_INBOUND_SOURCE);
+        let mut ctx = WasmCtx::__new(to_reconstruct.alias.0, registry, NO_INBOUND_SOURCE);
         // SAFETY: `state_bytes` lives for this call; `PriorState::__from_ptr`
         // forms a slice over it bounded by the borrow, never escaping.
         let prior = unsafe {
@@ -238,9 +238,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{InlineRegistry, compose_dehydrate, reconstruct_inline_children};
-    use crate::ffi::ctx::FfiDropCtx;
+    use crate::ffi::ctx::WasmDropCtx;
     use crate::ffi::inline::bundle;
-    use crate::ffi::{ErasedFfiActor, FfiCtx};
+    use crate::ffi::{ErasedFfiActor, WasmCtx};
     use crate::mail::{Mail, PriorState};
     use aether_data::MailboxId;
     use alloc::boxed::Box;
@@ -261,19 +261,19 @@ mod tests {
         }
         fn erased_dispatch(
             &mut self,
-            _ctx: &mut FfiCtx<'_, crate::Manual>,
+            _ctx: &mut WasmCtx<'_, crate::Manual>,
             _mail: Mail<'_>,
         ) -> u32 {
             0
         }
-        fn erased_wire(&mut self, _ctx: &mut FfiCtx<'_, crate::Manual>) {}
-        fn erased_unwire(&mut self, _ctx: &mut FfiCtx<'_, crate::Manual>) {}
-        fn erased_on_dehydrate(&mut self, ctx: &mut FfiDropCtx<'_>) {
+        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
+        fn erased_on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
             ctx.save_state(9, &self.tag.to_le_bytes());
         }
         fn erased_on_rehydrate(
             &mut self,
-            _ctx: &mut FfiCtx<'_, crate::Manual>,
+            _ctx: &mut WasmCtx<'_, crate::Manual>,
             _prior: PriorState<'_>,
         ) {
         }

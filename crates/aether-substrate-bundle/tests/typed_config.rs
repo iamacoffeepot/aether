@@ -1,5 +1,5 @@
 //! ADR-0090 c1 (issue 1256) integration coverage for the typed
-//! `FfiActor::Config` path. Loads the `ProbeWithConfig` actor from the
+//! `WasmActor::Config` path. Loads the `ProbeWithConfig` actor from the
 //! `probe` bundle (issue 1994, ADR-0096) via `export: Some("test_fixtures_probe_with_config")`
 //! through a [`TestBench`] and asserts the wasm guest's
 //! `init_with_config_p32` decode-error surfaces in `LoadResult::Err` when the

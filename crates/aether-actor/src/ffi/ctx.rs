@@ -2,7 +2,7 @@
 // to the wasm32 host-fn ABI (`_p32` convention, ADR-0024).
 #![allow(clippy::cast_possible_truncation)]
 
-//! Concrete FFI ctx structs — [`FfiInitCtx`] / [`FfiCtx`] / [`FfiDropCtx`].
+//! Concrete FFI ctx structs — [`WasmInitCtx`] / [`WasmCtx`] / [`WasmDropCtx`].
 //!
 //! Replaces the pre-issue-663 parametric `Ctx<'a, T>` / `InitCtx<'a, T>` /
 //! `DropCtx<'a, T>` aliases. The ctx interface is now spelled by the
@@ -31,8 +31,8 @@ use crate::actor::{
 };
 use crate::ffi::bridge::{mail, persist};
 use crate::ffi::inline::InlineRegistry;
-use crate::ffi::mailbox::FfiActorMailbox;
-use crate::ffi::{BootError, ErasedFfiActor, FfiActor};
+use crate::ffi::mailbox::WasmActorMailbox;
+use crate::ffi::{BootError, ErasedFfiActor, WasmActor};
 use crate::mail::ReplyHandle;
 use crate::mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
 use alloc::boxed::Box;
@@ -40,14 +40,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 /// Init-only capability handle for FFI guests. Resolved during
-/// `FfiActor::init`; not available at runtime (the type split fences
+/// `WasmActor::init`; not available at runtime (the type split fences
 /// "when can I resolve?" against "when can I send?" at compile time).
-pub struct FfiInitCtx<'a> {
+pub struct WasmInitCtx<'a> {
     mailbox: u64,
     _borrow: PhantomData<&'a ()>,
 }
 
-impl FfiInitCtx<'_> {
+impl WasmInitCtx<'_> {
     /// Not part of the public API; called only by [`crate::export!`].
     #[doc(hidden)]
     #[must_use]
@@ -81,21 +81,21 @@ impl FfiInitCtx<'_> {
     }
 
     // Issue 1987: the init ctx exposes no `actor()` / `resolve_actor()`
-    // sender shortcut. A `FfiActorMailbox` is now a ctx-bound sender that
+    // sender shortcut. A `WasmActorMailbox` is now a ctx-bound sender that
     // routes through the per-component inline registry, which the init
     // stage does not hold — and init is mail-forbidden anyway (the ctx
     // carries no send surface by design). Addressing + sending begin at
-    // `wire`, where `FfiCtx` carries the registry.
+    // `wire`, where `WasmCtx` carries the registry.
 }
 
 /// A type-erased sendable handle to a cluster relative — the parent,
 /// a sibling, or a child of the addressing actor (ADR-0114 addressing
-/// amendment). Returned by [`FfiCtx::parent`] / [`FfiCtx::sibling`] /
-/// [`FfiCtx::child`], it wraps the relative's resolved [`MailboxId`] (looked
+/// amendment). Returned by [`WasmCtx::parent`] / [`WasmCtx::sibling`] /
+/// [`WasmCtx::child`], it wraps the relative's resolved [`MailboxId`] (looked
 /// up in the per-component inline registry, never folded) plus the registry
 /// the send routes through.
 ///
-/// Unlike [`FfiActorMailbox`] this carries no receiver type and no
+/// Unlike [`WasmActorMailbox`] this carries no receiver type and no
 /// `R: HandlesKind<K>` bound — relative addressing is positional, so the
 /// target's handler set is not known at the call site (the by-id counterpart
 /// of the runtime-name `send_to_named` escape hatch). The send routes through
@@ -107,7 +107,7 @@ pub struct RelativeMailbox<'a> {
     /// The addressing actor's own folded [`MailboxId`] raw value — the "from"
     /// half stamped on the in-place send so the relative recipient's
     /// `ctx.source_mailbox()` resolves who sent it. Set by
-    /// [`FfiCtx::parent`] / [`FfiCtx::child`] / [`FfiCtx::sibling`] to the
+    /// [`WasmCtx::parent`] / [`WasmCtx::child`] / [`WasmCtx::sibling`] to the
     /// resolving ctx's `mailbox`.
     sender: u64,
     inline: &'a InlineRegistry,
@@ -144,11 +144,11 @@ impl RelativeMailbox<'_> {
 
 /// Why a synchronous spawn verb failed.
 ///
-/// For the detached [`FfiCtx::spawn_child`] (ADR-0097), only subname
+/// For the detached [`WasmCtx::spawn_child`] (ADR-0097), only subname
 /// validation can fail here — a spawn-time failure (a retired / in-use
 /// subname, or the sibling's `init` returning `Err`) surfaces
 /// asynchronously on the trampoline, not through this `Result`. For the
-/// inline [`FfiCtx::spawn_inline_child`] (ADR-0114) the child's `init`
+/// inline [`WasmCtx::spawn_inline_child`] (ADR-0114) the child's `init`
 /// runs in-process, synchronously, so its failure is reported here as
 /// [`SpawnError::InitFailed`].
 #[derive(Debug, Clone)]
@@ -160,17 +160,17 @@ pub enum SpawnError {
     /// wrapped [`BootError`] carries the actor's own failure message.
     /// Unlike the detached `spawn_child` — whose `init` runs later on the
     /// trampoline and logs asynchronously — an inline child's `init` runs
-    /// in-guest during [`FfiCtx::spawn_inline_child`], so the boot failure
+    /// in-guest during [`WasmCtx::spawn_inline_child`], so the boot failure
     /// comes back through this `Result`.
     InitFailed(BootError),
 }
 
 /// Per-receive (and post-init `wire` / pre-shutdown `unwire`)
 /// capability handle for FFI guests. Exposes send, reply, and the
-/// inherent [`mailbox_id`](FfiCtx::mailbox_id) so `wire`-stage explicit
+/// inherent [`mailbox_id`](WasmCtx::mailbox_id) so `wire`-stage explicit
 /// subscribes (sending [`SubscribeInput`](aether_kinds::SubscribeInput)
 /// to the `InputCapability`) can self-address.
-pub struct FfiCtx<'a, M: ReplyMode = Single> {
+pub struct WasmCtx<'a, M: ReplyMode = Single> {
     mailbox: u64,
     sender: Option<u32>,
     /// The inbound source — the folded [`MailboxId`] raw value of whoever
@@ -195,20 +195,20 @@ pub struct FfiCtx<'a, M: ReplyMode = Single> {
     _borrow: PhantomData<&'a ()>,
     /// ADR-0112: phantom reply-mode marker (a ZST, layout-neutral) that
     /// selects which reply surface this ctx exposes. Defaults to
-    /// [`Single`], so the common `FfiCtx<'_>` signature is unchanged.
+    /// [`Single`], so the common `WasmCtx<'_>` signature is unchanged.
     _mode: PhantomData<M>,
 }
 
-/// The `source` argument to [`FfiCtx::__new`] for a dispatch that carries no
+/// The `source` argument to [`WasmCtx::__new`] for a dispatch that carries no
 /// inbound source — a lifecycle hook (`wire` / `unwire` / `on_rehydrate`),
-/// where [`FfiCtx::source_mailbox`] returns `None`. Equals [`MailboxId::NONE`].
+/// where [`WasmCtx::source_mailbox`] returns `None`. Equals [`MailboxId::NONE`].
 /// (A top-level mail dispatch threads the host-resolved source over the
 /// `receive_p32` ABI; the drained-member path threads the enqueuing member's
 /// own id.) Named so the `__new` call sites read intent, not a bare `0`.
 #[doc(hidden)]
 pub const NO_INBOUND_SOURCE: u64 = MailboxId::NONE.0;
 
-impl<'a> FfiCtx<'a, Manual> {
+impl<'a> WasmCtx<'a, Manual> {
     /// Not part of the public API; called only by [`crate::export!`] and
     /// the inline membrane / drain. The runtime builds the most-permissive
     /// [`Manual`] view; the `#[actor]` dispatcher / lifecycle shims
@@ -239,14 +239,14 @@ impl<'a> FfiCtx<'a, Manual> {
     /// downgrades.
     #[doc(hidden)]
     #[must_use]
-    pub fn as_single(&mut self) -> &mut FfiCtx<'a, Single> {
-        // SAFETY: `M` is `PhantomData`-only, so `FfiCtx<'a, Manual>` and
-        // `FfiCtx<'a, Single>` are layout-identical (the marker field is a
+    pub fn as_single(&mut self) -> &mut WasmCtx<'a, Single> {
+        // SAFETY: `M` is `PhantomData`-only, so `WasmCtx<'a, Manual>` and
+        // `WasmCtx<'a, Single>` are layout-identical (the marker field is a
         // ZST for every `M` — see `reply_mode_types_are_zsts` and
         // `ffi_ctx_layout_identical_across_modes`). The reborrow swaps the
         // marker without touching any real field and only removes
         // capability, never adds it.
-        unsafe { &mut *ptr::from_mut(self).cast::<FfiCtx<'a, Single>>() }
+        unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, Single>>() }
     }
 
     /// ADR-0112 forward-only coercion to the reserved [`Stream`] view.
@@ -255,14 +255,14 @@ impl<'a> FfiCtx<'a, Manual> {
     /// downgrade path the day the emit surface lands.
     #[doc(hidden)]
     #[must_use]
-    pub fn as_stream(&mut self) -> &mut FfiCtx<'a, Stream> {
+    pub fn as_stream(&mut self) -> &mut WasmCtx<'a, Stream> {
         // SAFETY: same as `as_single` — `M` is `PhantomData`-only, so the
         // marker swap is a layout-identity reborrow.
-        unsafe { &mut *ptr::from_mut(self).cast::<FfiCtx<'a, Stream>>() }
+        unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, Stream>>() }
     }
 }
 
-impl<M: ReplyMode> FfiCtx<'_, M> {
+impl<M: ReplyMode> WasmCtx<'_, M> {
     /// Not part of the public API; called only by the `#[actor]`
     /// dispatcher. Accepts `None` or `Some(ReplyHandle)` — the dispatcher
     /// passes `mail.reply_handle()` verbatim so component-origin and
@@ -303,24 +303,24 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
         self.mailbox
     }
 
-    /// Singleton sender shortcut. Returns a ctx-bound [`FfiActorMailbox`]
+    /// Singleton sender shortcut. Returns a ctx-bound [`WasmActorMailbox`]
     /// addressing the unique instance of receiver actor `R`, carrying this
     /// actor's own id as the send's `from` (issue 1987) and a borrow of
     /// the inline registry the send routes through.
     #[must_use]
-    pub fn actor<R: Singleton>(&self) -> FfiActorMailbox<'_, R> {
-        FfiActorMailbox::__new(R::resolve(self.mailbox, ()).0, self.mailbox, self.inline)
+    pub fn actor<R: Singleton>(&self) -> WasmActorMailbox<'_, R> {
+        WasmActorMailbox::__new(R::resolve(self.mailbox, ()).0, self.mailbox, self.inline)
     }
 
-    /// Multi-instance sender. Resolve a ctx-bound [`FfiActorMailbox`]
+    /// Multi-instance sender. Resolve a ctx-bound [`WasmActorMailbox`]
     /// from a runtime instance name, carrying this actor's own id as the
     /// send's `from` and the inline registry the send routes through.
     // Runtime-name escape hatch: the instance name is only known at runtime,
     // so there is no `R::resolve` lineage carry to route through.
     #[must_use]
     #[allow(clippy::disallowed_methods)]
-    pub fn resolve_actor<R: Addressable>(&self, name: &str) -> FfiActorMailbox<'_, R> {
-        FfiActorMailbox::__new(mailbox_id_from_name(name).0, self.mailbox, self.inline)
+    pub fn resolve_actor<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
+        WasmActorMailbox::__new(mailbox_id_from_name(name).0, self.mailbox, self.inline)
     }
 
     /// ADR-0063 fail-fast: bring the substrate down with `reason`.
@@ -361,7 +361,7 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
         config: &A::Config,
     ) -> Result<MailboxId, SpawnError>
     where
-        A: Instanced + FfiActor,
+        A: Instanced + WasmActor,
     {
         // Compile-time actor-type tag for the spawned sibling (hash(NAMESPACE),
         // ADR-0029) — this is the id definition for the new instance, computed
@@ -412,7 +412,7 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
         // (ADR-0096) — the registry stores the child as `dyn
         // ErasedFfiActor`, so the bound is the mechanical realisation of
         // "reuse the existing erasure" (no new child-dispatch trait).
-        A: Instanced + FfiActor + ErasedFfiActor,
+        A: Instanced + WasmActor + ErasedFfiActor,
     {
         let (is_counter, full_subname) = resolve_subname(subname)?;
         let alias = MailboxId(mail::spawn_inline_child(is_counter, &full_subname));
@@ -490,7 +490,7 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
     }
 }
 
-impl<'a, M: ReplyMode> FfiCtx<'a, M> {
+impl<'a, M: ReplyMode> WasmCtx<'a, M> {
     /// ADR-0114 addressing amendment: a sendable handle to this actor's
     /// **parent** in the cluster, or `None` if this actor is the cluster
     /// root (the instance itself — its parent is cross-cluster, addressed
@@ -568,8 +568,8 @@ impl<'a, M: ReplyMode> FfiCtx<'a, M> {
 }
 
 /// Resolve a [`Subname`] into the `(is_counter, discriminator)` pair the
-/// spawn host fns take, shared by [`FfiCtx::spawn_child`] and
-/// [`FfiCtx::spawn_inline_child`]. `Counter` passes an empty discriminator
+/// spawn host fns take, shared by [`WasmCtx::spawn_child`] and
+/// [`WasmCtx::spawn_inline_child`]. `Counter` passes an empty discriminator
 /// the host ignores (it assigns a bare monotonic counter and produces just
 /// `n.to_string()`); `Named` validates the caller-supplied segment (no `:`,
 /// no control/whitespace, not empty) then passes it bare as the flat
@@ -585,7 +585,7 @@ fn resolve_subname(subname: Subname<'_>) -> Result<(bool, String), SpawnError> {
 }
 
 /// Build an inline child's actor value and register it under its alias in
-/// `registry` (ADR-0114). Split out of [`FfiCtx::spawn_inline_child`] so
+/// `registry` (ADR-0114). Split out of [`WasmCtx::spawn_inline_child`] so
 /// the in-guest `init` + registry insert is exercisable on the host build
 /// (where the `spawn_inline_child` host fn is a panicking stub): the unit
 /// test calls this with a local registry, a synthetic alias, and an owned
@@ -604,9 +604,9 @@ fn install_inline_child<A>(
     config: A::Config,
 ) -> Result<MailboxId, SpawnError>
 where
-    A: FfiActor + ErasedFfiActor,
+    A: WasmActor + ErasedFfiActor,
 {
-    let mut ctx = FfiInitCtx::__new(alias.0);
+    let mut ctx = WasmInitCtx::__new(alias.0);
     match A::init(config, &mut ctx) {
         Ok(child) => {
             registry.insert_child(
@@ -623,14 +623,14 @@ where
     }
 }
 
-// ADR-0114 addressing amendment: every `FfiCtx` send resolves the recipient
+// ADR-0114 addressing amendment: every `WasmCtx` send resolves the recipient
 // id then routes through the inline registry's `route_or_enqueue`, so a send
 // to a cluster member (own id or a resident inline-child alias) dispatches in
 // place through the membrane (queue + drain) and only a cross-cluster
 // recipient hits the host. For a childless component with no captured
 // `self_id` match the recipient is always `Remote`, so the path is identical
 // to a bare `mail::send_mail`.
-impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
+impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
     //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
@@ -722,7 +722,7 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
 // manual-class handler issues its own replies); `Single` deliberately
 // does not, so a `-> ()` single handler is provably silent and a stray
 // single-ctx `ctx.reply` is a compile error rather than a manifest lie.
-impl OutboundReply for FfiCtx<'_, Manual> {
+impl OutboundReply for WasmCtx<'_, Manual> {
     type ReplyHandle = ReplyHandle;
 
     fn reply_target(&self) -> Option<ReplyHandle> {
@@ -755,7 +755,7 @@ impl OutboundReply for FfiCtx<'_, Manual> {
 
 /// A `save_state` deposit captured in memory instead of forwarded to the
 /// host `save_state` import (ADR-0114 §5). The dehydrate compose hands the
-/// parent and each inline child a [`FfiDropCtx`] bound to one of these so
+/// parent and each inline child a [`WasmDropCtx`] bound to one of these so
 /// it can collect every saved blob and pack them into a single composite,
 /// then call the real host `save_state` once.
 #[derive(Default)]
@@ -777,7 +777,7 @@ impl CapturedState {
 /// Narrowed capability handle for the `on_dehydrate` save hook.
 /// Outbound mail still works through [`MailSender`]; the reply / resolve
 /// surfaces are intentionally absent.
-pub struct FfiDropCtx<'a> {
+pub struct WasmDropCtx<'a> {
     /// The actor's own mailbox id (its lineage carry), so a buffered
     /// `send` resolves the receiver through `R::resolve(self.mailbox)`
     /// like every other ctx (ADR-0099 §5).
@@ -790,7 +790,7 @@ pub struct FfiDropCtx<'a> {
     _borrow: PhantomData<&'a ()>,
 }
 
-impl<'a> FfiDropCtx<'a> {
+impl<'a> WasmDropCtx<'a> {
     /// Not part of the public API; called only by [`crate::export!`].
     /// Forwards `save_state` to the host import.
     #[doc(hidden)]
@@ -848,7 +848,7 @@ impl<'a> FfiDropCtx<'a> {
     }
 }
 
-impl MailSender for FfiDropCtx<'_> {
+impl MailSender for WasmDropCtx<'_> {
     //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
@@ -936,26 +936,27 @@ impl MailSender for FfiDropCtx<'_> {
     }
 }
 
-impl Persistence for FfiDropCtx<'_> {
+impl Persistence for WasmDropCtx<'_> {
     fn save_state(&mut self, version: u32, bytes: &[u8]) {
         // Route through the inherent `save_state` so the ADR-0114 §5
         // capture path applies — the generated `on_dehydrate` hooks reach
         // the bundle through `Persistence::save_state_kind`, which calls
         // this trait method, so a capturing ctx must intercept here too.
-        FfiDropCtx::save_state(self, version, bytes);
+        WasmDropCtx::save_state(self, version, bytes);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        FfiCtx, InlineRegistry, Manual, NO_INBOUND_SOURCE, Single, SpawnError, install_inline_child,
+        InlineRegistry, Manual, NO_INBOUND_SOURCE, Single, SpawnError, WasmCtx,
+        install_inline_child,
     };
     use crate::Addressable;
     use crate::actor::Subname;
     use crate::actor::ctx::OutboundReply;
     use crate::ffi::inline::RouteDecision;
-    use crate::ffi::{BootError, ErasedFfiActor, FfiActor, FfiDropCtx, FfiInitCtx};
+    use crate::ffi::{BootError, ErasedFfiActor, WasmActor, WasmDropCtx, WasmInitCtx};
     use crate::mail::{Mail, PriorState};
     use aether_data::MailboxId;
     use alloc::string::String;
@@ -975,15 +976,15 @@ mod tests {
     impl crate::Lifecycle for FailingChild {
         type Config = ();
         type InitError = BootError;
-        type InitCtx<'a> = FfiInitCtx<'a>;
-        type Ctx<'a> = FfiCtx<'a>;
+        type InitCtx<'a> = WasmInitCtx<'a>;
+        type Ctx<'a> = WasmCtx<'a>;
 
-        fn init(_config: (), _ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+        fn init(_config: (), _ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
             Err(BootError::new("inline child init deliberately fails"))
         }
     }
 
-    impl FfiActor for FailingChild {
+    impl WasmActor for FailingChild {
         type State = ();
     }
 
@@ -991,19 +992,19 @@ mod tests {
         fn erased_namespace(&self) -> &'static str {
             Self::NAMESPACE
         }
-        fn erased_dispatch(&mut self, _ctx: &mut FfiCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+        fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
             unreachable!("a failed-init child is never dispatched")
         }
-        fn erased_wire(&mut self, _ctx: &mut FfiCtx<'_, Manual>) {
+        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {
             unreachable!()
         }
-        fn erased_unwire(&mut self, _ctx: &mut FfiCtx<'_, Manual>) {
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {
             unreachable!()
         }
-        fn erased_on_dehydrate(&mut self, _ctx: &mut FfiDropCtx<'_>) {
+        fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {
             unreachable!()
         }
-        fn erased_on_rehydrate(&mut self, _ctx: &mut FfiCtx<'_, Manual>, _prior: PriorState<'_>) {
+        fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {
             unreachable!()
         }
     }
@@ -1038,7 +1039,7 @@ mod tests {
     #[test]
     fn spawn_inline_child_rejects_invalid_subname() {
         let registry = InlineRegistry::new();
-        let ctx = FfiCtx::__new(0, &registry, NO_INBOUND_SOURCE);
+        let ctx = WasmCtx::__new(0, &registry, NO_INBOUND_SOURCE);
         let result = ctx.spawn_inline_child::<FailingChild>(Subname::Named("bad:name"), &());
         assert!(
             matches!(result, Err(SpawnError::SubnameInvalid(_))),
@@ -1057,14 +1058,14 @@ mod tests {
         let registry = InlineRegistry::new();
 
         let source = MailboxId(0x9999_0000_1234_5678);
-        let ctx: FfiCtx<'_, Manual> = FfiCtx::__new(0x10, &registry, source.0);
+        let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x10, &registry, source.0);
         assert_eq!(
             ctx.source_mailbox(),
             Some(source),
             "a non-NONE threaded source must surface verbatim",
         );
 
-        let none_ctx: FfiCtx<'_, Manual> = FfiCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+        let none_ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
         assert_eq!(
             none_ctx.source_mailbox(),
             None,
@@ -1086,15 +1087,15 @@ mod tests {
     impl crate::Lifecycle for SucceedingChild {
         type Config = ();
         type InitError = BootError;
-        type InitCtx<'a> = FfiInitCtx<'a>;
-        type Ctx<'a> = FfiCtx<'a>;
+        type InitCtx<'a> = WasmInitCtx<'a>;
+        type Ctx<'a> = WasmCtx<'a>;
 
-        fn init(_config: (), _ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+        fn init(_config: (), _ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self)
         }
     }
 
-    impl FfiActor for SucceedingChild {
+    impl WasmActor for SucceedingChild {
         type State = ();
     }
 
@@ -1102,13 +1103,13 @@ mod tests {
         fn erased_namespace(&self) -> &'static str {
             Self::NAMESPACE
         }
-        fn erased_dispatch(&mut self, _ctx: &mut FfiCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+        fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
             unreachable!("the despawn test never dispatches this child")
         }
-        fn erased_wire(&mut self, _ctx: &mut FfiCtx<'_, Manual>) {}
-        fn erased_unwire(&mut self, _ctx: &mut FfiCtx<'_, Manual>) {}
-        fn erased_on_dehydrate(&mut self, _ctx: &mut FfiDropCtx<'_>) {}
-        fn erased_on_rehydrate(&mut self, _ctx: &mut FfiCtx<'_, Manual>, _prior: PriorState<'_>) {}
+        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+        fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
+        fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
     }
 
     /// Step 2: `despawn_inline_child` removes a resident inline child
@@ -1130,7 +1131,7 @@ mod tests {
         )
         .expect("a succeeding init installs the inline child");
 
-        let ctx = FfiCtx::__new(alias.0, &registry, NO_INBOUND_SOURCE);
+        let ctx = WasmCtx::__new(alias.0, &registry, NO_INBOUND_SOURCE);
         assert!(
             ctx.despawn_inline_child(alias),
             "despawning a resident child returns true",
@@ -1147,12 +1148,12 @@ mod tests {
     #[test]
     fn ffi_ctx_layout_identical_across_modes() {
         assert_eq!(
-            size_of::<FfiCtx<'static, Single>>(),
-            size_of::<FfiCtx<'static, Manual>>(),
+            size_of::<WasmCtx<'static, Single>>(),
+            size_of::<WasmCtx<'static, Manual>>(),
         );
         assert_eq!(
-            align_of::<FfiCtx<'static, Single>>(),
-            align_of::<FfiCtx<'static, Manual>>(),
+            align_of::<WasmCtx<'static, Single>>(),
+            align_of::<WasmCtx<'static, Manual>>(),
         );
     }
 
@@ -1163,7 +1164,7 @@ mod tests {
     #[test]
     fn outbound_reply_present_on_manual() {
         fn assert_impls<C: OutboundReply>() {}
-        assert_impls::<FfiCtx<'static, Manual>>();
+        assert_impls::<WasmCtx<'static, Manual>>();
     }
 
     /// ADR-0114 addressing amendment: a ctx self-identified as the cluster
@@ -1190,7 +1191,7 @@ mod tests {
         )
         .expect("a succeeding init installs the inline child");
 
-        let ctx: FfiCtx<'_, Manual> = FfiCtx::__new(root, &registry, NO_INBOUND_SOURCE);
+        let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
 
         // The root has no registry parent entry — its parent is cross-cluster.
         assert!(

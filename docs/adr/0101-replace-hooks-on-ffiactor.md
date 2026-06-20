@@ -1,4 +1,4 @@
-# ADR-0101: Replace hooks on FfiActor
+# ADR-0101: Replace hooks on WasmActor
 
 - **Status:** Accepted
 - **Date:** 2026-06-08
@@ -8,7 +8,7 @@
 
 `replace_component` (ADR-0022) swaps any component's wasm module behind a stable mailbox. Nothing opts in — the swap works on every component. The `Replaceable` trait and the `export!(X, replaceable)` flag (ADR-0016 / ADR-0040) govern only whether the instance carries state *across* that swap, through a save hook on the old instance (`on_replace` in today's code) and a restore hook on the new one (`on_rehydrate`). The name `Replaceable` implies a gate on replaceability; it gates only state-migration behavior.
 
-Those two hooks are the same lifecycle-hook shape as `wire` / `unwire`, which already sit on `FfiActor` as default-no-op methods an actor overrides if it cares (ADR-0015, "the default hook is a no-op"). The replace hooks are the outlier: split into a subtrait reached through an `export!` flag.
+Those two hooks are the same lifecycle-hook shape as `wire` / `unwire`, which already sit on `WasmActor` as default-no-op methods an actor overrides if it cares (ADR-0015, "the default hook is a no-op"). The replace hooks are the outlier: split into a subtrait reached through an `export!` flag.
 
 A multi-actor module (ADR-0096) boxes each instance as `Slot<Box<dyn ErasedFfiActor>>`. `ErasedFfiActor` (`aether-actor/src/ffi/mod.rs`) erases `erased_namespace` / `erased_dispatch` / `erased_wire` / `erased_unwire` only — not the replace hooks — so a boxed instance has no route to its concrete replace logic. The multi-actor `export!` arm therefore ships the save / `on_rehydrate_p32` exports as no-ops, and every `replace_component` on a multi-actor module resets the instance to a fresh `init`.
 
@@ -18,15 +18,15 @@ ADR-0016 made state migration opt-in deliberately: *"A pure render component wit
 
 ## Decision
 
-Make `on_dehydrate` / `on_rehydrate` default-no-op methods on `FfiActor`, beside `wire` / `unwire`. Retire the `Replaceable` subtrait and every opt-in spelling. An actor that wants state continuity across `replace_component` overrides the two hooks; one that does not gets a fresh instance, the existing default. `replace_component` itself is unchanged.
+Make `on_dehydrate` / `on_rehydrate` default-no-op methods on `WasmActor`, beside `wire` / `unwire`. Retire the `Replaceable` subtrait and every opt-in spelling. An actor that wants state continuity across `replace_component` overrides the two hooks; one that does not gets a fresh instance, the existing default. `replace_component` itself is unchanged.
 
 **Naming.** The save-side hook is `on_replace` in today's code. This ADR renames it to `on_dehydrate` so it pairs with `on_rehydrate`: the save step *is* dehydration (serialize to a dry bundle), and `on_replace` named the trigger rather than the action. The hook serializes by calling `ctx.save_state` / `ctx.save_state_kind` in its body, the same calls it accepts today. The rename carries through the trait method, the erased method, the wasm export name, and the host's lookup string; everything below uses `on_dehydrate`.
 
-1. **`FfiActor` gains two lifecycle hooks.** `fn on_dehydrate(&mut self, ctx: &mut FfiDropCtx<'_>) {}` and `fn on_rehydrate(&mut self, ctx: &mut FfiCtx<'_>, prior: PriorState<'_>) {}`, default no-op, beside `wire` / `unwire`. `FfiDropCtx` carries `Persistence::save_state` (so `on_dehydrate` serializes there); `FfiCtx` carries the send surface — the ctx types the hooks already used as `Replaceable`.
+1. **`WasmActor` gains two lifecycle hooks.** `fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {}` and `fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {}`, default no-op, beside `wire` / `unwire`. `WasmDropCtx` carries `Persistence::save_state` (so `on_dehydrate` serializes there); `WasmCtx` carries the send surface — the ctx types the hooks already used as `Replaceable`.
 
-2. **`ErasedFfiActor` gains the erased pair.** `erased_on_dehydrate(&mut self, &mut FfiDropCtx<'_>)` and `erased_on_rehydrate(&mut self, &mut FfiCtx<'_>, PriorState<'_>)`, joining `erased_wire` / `erased_unwire`. The concrete ctx types keep the trait object-safe.
+2. **`ErasedFfiActor` gains the erased pair.** `erased_on_dehydrate(&mut self, &mut WasmDropCtx<'_>)` and `erased_on_rehydrate(&mut self, &mut WasmCtx<'_>, PriorState<'_>)`, joining `erased_wire` / `erased_unwire`. The concrete ctx types keep the trait object-safe.
 
-3. **`#[actor]` forwards them uniformly.** Every `ErasedFfiActor` impl forwards the erased pair to the type's `FfiActor::on_dehydrate` / `on_rehydrate` — the same unconditional forwarding it already emits for `wire` / `unwire`. No flag, no per-type branch.
+3. **`#[actor]` forwards them uniformly.** Every `ErasedFfiActor` impl forwards the erased pair to the type's `WasmActor::on_dehydrate` / `on_rehydrate` — the same unconditional forwarding it already emits for `wire` / `unwire`. No flag, no per-type branch.
 
 4. **Both `export!` arms emit one shim shape.** The single-actor and multi-actor `on_dehydrate` / `on_rehydrate_p32` exports route to the instance's hooks — directly for single-actor, through the box for multi-actor. The single-actor `replaceable` / `no_replaceable` split and the multi-actor no-ops collapse into one forwarding shape that derives the rehydrate ctx's self-mailbox id from the instance's namespace.
 
@@ -36,11 +36,11 @@ Make `on_dehydrate` / `on_rehydrate` default-no-op methods on `FfiActor`, beside
 
 ### Revises ADR-0016
 
-ADR-0016 gated state migration behind an opt-in to spare stateless components a cost. That cost is two no-op wasm exports, the `wire` / `unwire` cost already accepted everywhere. This ADR revises that one decision: the replace hooks join the other lifecycle hooks as `FfiActor` defaults. ADR-0016's state-bundle protocol stands unchanged.
+ADR-0016 gated state migration behind an opt-in to spare stateless components a cost. That cost is two no-op wasm exports, the `wire` / `unwire` cost already accepted everywhere. This ADR revises that one decision: the replace hooks join the other lifecycle hooks as `WasmActor` defaults. ADR-0016's state-bundle protocol stands unchanged.
 
 ### Principle this sets
 
-Lifecycle hooks live on `FfiActor` (and `NativeActor`) as default-no-op methods, overridden when an actor cares. `wire`, `unwire`, and now `on_dehydrate` / `on_rehydrate` all take that shape. The only required entry points are `init` (the constructor — it returns `Self`, so it cannot be a no-op) and `receive` (dispatch). `Replaceable` was the single hook gated behind an opt-in subtrait, and it retires. A future lifecycle hook is added the same way — a defaulted method on the actor trait, never an opt-in subtrait or an `export!` flag. An audit at this ADR's writing confirmed those two were the only hooks off the pattern.
+Lifecycle hooks live on `WasmActor` (and `NativeActor`) as default-no-op methods, overridden when an actor cares. `wire`, `unwire`, and now `on_dehydrate` / `on_rehydrate` all take that shape. The only required entry points are `init` (the constructor — it returns `Self`, so it cannot be a no-op) and `receive` (dispatch). `Replaceable` was the single hook gated behind an opt-in subtrait, and it retires. A future lifecycle hook is added the same way — a defaulted method on the actor trait, never an opt-in subtrait or an `export!` flag. An audit at this ADR's writing confirmed those two were the only hooks off the pattern.
 
 ## Consequences
 
@@ -49,7 +49,7 @@ Lifecycle hooks live on `FfiActor` (and `NativeActor`) as default-no-op methods,
 - **One lifecycle-hook model.** `on_dehydrate` / `on_rehydrate` sit beside `wire` / `unwire`, overridden when wanted and defaulted otherwise — no subtrait, no flag, and no per-type granularity decision to make for multi-actor modules.
 - **The names line up.** `replace_component` was never gated by `Replaceable`; removing the trait stops the API implying it was, and the dehydrate / rehydrate pair reads as the save / restore it is.
 - **Multi-actor hot-swap falls out as a side effect.** Because the erased forwarding is uniform, a multi-actor module preserves state across `replace_component` with no multi-actor-specific machinery. #1479's `aether-camera` stays state-preservingly hot-swappable once it goes multi-actor — live-iterating the fly controller no longer resets the viewpoint on each swap.
-- **Blast radius is the SDK macro layer plus one host string.** `handle_replace`'s logic and the `_p32` export signatures are unchanged; only the save-hook's export name renames (`on_replace` → `on_dehydrate`), a one-string edit in its func lookup. The rest is the `FfiActor` defaults, the erased pair, the `#[actor]` forwarding, and the unified shim body.
+- **Blast radius is the SDK macro layer plus one host string.** `handle_replace`'s logic and the `_p32` export signatures are unchanged; only the save-hook's export name renames (`on_replace` → `on_dehydrate`), a one-string edit in its func lookup. The rest is the `WasmActor` defaults, the erased pair, the `#[actor]` forwarding, and the unified shim body.
 
 ### Negative
 
@@ -67,7 +67,7 @@ Lifecycle hooks live on `FfiActor` (and `NativeActor`) as default-no-op methods,
 ## Alternatives considered
 
 - **Keep the `Replaceable` opt-in (status quo).** Rejected: it gates state-migration behavior behind a name that implies it gates replaceability, and it splits two lifecycle hooks off the trait that holds the others — to avoid a cost the `wire` / `unwire` precedent already pays.
-- **Per-type opt-in for multi-actor (`#[actor(replaceable)]`), keeping the opt-in concept.** Rejected: it preserves the opt-in distinction and forces a granularity decision (per-type vs whole-module) to save a cost that does not exist. Unifying onto `FfiActor` dissolves the question.
+- **Per-type opt-in for multi-actor (`#[actor(replaceable)]`), keeping the opt-in concept.** Rejected: it preserves the opt-in distinction and forces a granularity decision (per-type vs whole-module) to save a cost that does not exist. Unifying onto `WasmActor` dissolves the question.
 - **Keep the `on_replace` name.** Rejected: it pairs a trigger-named hook (`on_replace`) with an action-named one (`on_rehydrate`), and `unwire` already covers pre-swap teardown. `on_dehydrate` names the save action and makes the dehydrate / rehydrate pair symmetric.
 - **Autodetect via `Replaceable` impl presence.** Moot once the trait retires; it would have needed a fragile autoref-specialization shim to let `#[actor]` see whether `impl Replaceable for X` exists.
 
