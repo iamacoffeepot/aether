@@ -38,7 +38,7 @@
 //!     `aether.namespace` custom-section statics.
 //!
 //! No FFI imports are pulled in unconditionally — the host-fn externs
-//! in [`ffi::raw`] live behind a `#[cfg(target_arch = "wasm32")]`
+//! in [`ffi::raw`] live behind a `#[cfg(target_family = "wasm")]`
 //! block and the native-target stubs panic if invoked, so the crate
 //! compiles for `cargo test --workspace` on the host without dragging
 //! the FFI surface into the linker.
