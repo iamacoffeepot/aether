@@ -39,11 +39,10 @@ use aether_kinds::{
     ComponentSelector, CostTail, CostTailResult, DeathReason, FrameCheck, FrameReduction,
     ListComponentBinaries, ListComponentBinariesResult, ListComponents, ListComponentsResult,
     ListEngineBinaries, ListEngineBinariesResult, ListEngines, ListEnginesResult, ListKinds,
-    ListKindsResult, LoadComponent, LoadResult, MailEnvelope as KindMailEnvelope, ReplaceComponent,
-    ReplaceResult, ResolveComponent, ResolveComponentResult, SimilarityCheck, SpawnEngine,
-    SpawnEngineResult, Status, StatusResult, Submit, SubmitResult, TerminateEngine,
-    TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent,
-    UploadComponentResult,
+    ListKindsResult, LoadComponent, LoadResult, NamedMail, ReplaceComponent, ReplaceResult,
+    ResolveComponent, ResolveComponentResult, SimilarityCheck, SpawnEngine, SpawnEngineResult,
+    Status, StatusResult, Submit, SubmitResult, TerminateEngine, TerminateEngineResult,
+    UploadBinary, UploadBinaryResult, UploadComponent, UploadComponentResult,
     trace::{
         DescribeTreeResult, DispatchTraced, DispatchTracedAck, MailNodeWire, TRACE_MAILBOX_NAME,
         TraceTail, TraceTailResult,
@@ -574,7 +573,7 @@ impl Mcp {
         let engine = parse_engine_id(&args.engine_id)?;
         // Encode the batch before sending — a bad spec produces a
         // clean invalid-params error and never touches the wire.
-        // Same shape `CaptureFrame` carries: `Vec<MailEnvelope>` with
+        // Same shape `CaptureFrame` carries: `Vec<NamedMail>` with
         // name-level addressing the substrate resolves at dispatch
         // time via `resolve_bundle`. ADR-0091: descriptors come from
         // the per-engine merged view so a component's own kinds
@@ -2340,7 +2339,7 @@ async fn build_descriptor(arg: DagDescriptorArg) -> anyhow::Result<DagDescriptor
 }
 
 impl Mcp {
-    /// Encode a `send_mail_traced` batch into the same `MailEnvelope`
+    /// Encode a `send_mail_traced` batch into the same `NamedMail`
     /// shape `CaptureFrame` carries: name-level addressing + schema-
     /// encoded payload. The substrate's `TraceObserver` resolves the
     /// names through its registry at dispatch time. Same lookup path
@@ -2350,7 +2349,7 @@ impl Mcp {
         &self,
         engine: EngineId,
         specs: &[TracedMailSpec],
-    ) -> anyhow::Result<Vec<KindMailEnvelope>> {
+    ) -> anyhow::Result<Vec<NamedMail>> {
         let mut out = Vec::with_capacity(specs.len());
         for spec in specs {
             let desc = self.lookup_descriptor(engine, &spec.kind_name).await?;
@@ -2362,7 +2361,7 @@ impl Mcp {
                 })?;
             let payload = aether_codec::encode_schema(&params, &desc.schema)
                 .map_err(|e| anyhow::anyhow!("param encode failed for {}: {e}", spec.kind_name))?;
-            out.push(KindMailEnvelope {
+            out.push(NamedMail {
                 recipient_name: spec.recipient_name.clone(),
                 kind_name: spec.kind_name.clone(),
                 payload,
@@ -2441,13 +2440,13 @@ impl Mcp {
     /// Encode a `capture_frame` mail bundle: resolve each spec's kind
     /// against the per-engine merged view (ADR-0091, static prefill +
     /// cached `ListKinds` reply), schema-encode its params, and wrap
-    /// into the substrate-side `aether_kinds::MailEnvelope` shape
+    /// into the substrate-side `aether_kinds::NamedMail` shape
     /// (name-level addressing + pre-encoded payload).
     async fn encode_capture_bundle(
         &self,
         engine: EngineId,
         specs: &[CaptureMailSpec],
-    ) -> anyhow::Result<Vec<aether_kinds::MailEnvelope>> {
+    ) -> anyhow::Result<Vec<NamedMail>> {
         let mut out = Vec::with_capacity(specs.len());
         for spec in specs {
             let desc = self.lookup_descriptor(engine, &spec.kind_name).await?;
@@ -2459,7 +2458,7 @@ impl Mcp {
                 })?;
             let payload = aether_codec::encode_schema(&params, &desc.schema)
                 .map_err(|e| anyhow::anyhow!("param encode failed for {}: {e}", spec.kind_name))?;
-            out.push(aether_kinds::MailEnvelope {
+            out.push(NamedMail {
                 recipient_name: spec.recipient_name.clone(),
                 kind_name: spec.kind_name.clone(),
                 payload,

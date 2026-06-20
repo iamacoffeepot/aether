@@ -1341,7 +1341,7 @@ mod tests {
         use crate::trace::TraceDispatchCapability;
         use aether_actor::Addressable;
         use aether_data::{Kind, mailbox_id_from_name};
-        use aether_kinds::MailEnvelope as TracedEnvelope;
+        use aether_kinds::NamedMail;
         use aether_kinds::trace::DispatchTraced;
 
         let (_chassis, mut stream) = boot_with_deferred_echo(Duration::from_secs(10));
@@ -1351,13 +1351,13 @@ mod tests {
         // trace cap resolves names through the registry).
         let batch = DispatchTraced {
             mails: vec![
-                TracedEnvelope {
+                NamedMail {
                     recipient_name: <DeferredEchoActor as Addressable>::NAMESPACE.into(),
                     kind_name: <DeferredEchoRequest as Kind>::NAME.into(),
                     payload: DeferredEchoRequest { value: 11 }.encode_into_bytes(),
                     count: 1,
                 },
-                TracedEnvelope {
+                NamedMail {
                     recipient_name: <DeferredEchoActor as Addressable>::NAMESPACE.into(),
                     kind_name: <DeferredEchoRequest as Kind>::NAME.into(),
                     payload: DeferredEchoRequest { value: 22 }.encode_into_bytes(),

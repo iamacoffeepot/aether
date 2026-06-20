@@ -6,7 +6,7 @@
 //! decode helper lives in `chassis/helpers.rs`.
 
 use aether_data::KindDescriptor;
-use aether_kinds::MailEnvelope;
+use aether_kinds::NamedMail;
 
 use crate::mail::Mail;
 use crate::mail::registry::Registry;
@@ -17,7 +17,7 @@ use crate::mail::registry::Registry;
 /// caller surfaces it as a `*Result::Err`.
 pub fn resolve_bundle(
     registry: &Registry,
-    bundle: &[MailEnvelope],
+    bundle: &[NamedMail],
     label: &str,
 ) -> Result<Vec<Mail>, String> {
     let mut out = Vec::with_capacity(bundle.len());

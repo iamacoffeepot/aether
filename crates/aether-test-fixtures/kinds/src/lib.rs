@@ -53,7 +53,7 @@ pub struct KeyObserved {
 /// Driver kind: scenarios send this to flip a probe fixture's render
 /// state. `visible == 0` halts the per-tick draw; any other value
 /// enables it. Cast-shape so encoding is just a memcpy of four
-/// bytes — keeps the test-side `MailEnvelope.payload` construction
+/// bytes — keeps the test-side `NamedMail.payload` construction
 /// trivial.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]

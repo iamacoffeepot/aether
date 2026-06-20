@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 use aether_data::{KindId, MailId, MailboxId, ThreadId};
 use serde::{Deserialize, Serialize};
 
-use crate::MailEnvelope;
+use crate::NamedMail;
 
 /// ADR-0080 §3 (slimmed by ADR-0086 Phase 3c): well-known mailbox name
 /// the `TraceDispatchCapability` (in `aether-capabilities`) registers
@@ -338,7 +338,7 @@ pub struct Settled {
 /// itself, then replies synchronously with [`DispatchTracedAck`]
 /// carrying that root id.
 ///
-/// Carries [`MailEnvelope`]s — the same name-addressed batch shape
+/// Carries [`NamedMail`]s — the same name-addressed batch shape
 /// `CaptureFrame` uses. The substrate-side handler resolves the
 /// recipient and kind names against its registry at dispatch time.
 ///
@@ -352,7 +352,7 @@ pub struct Settled {
 #[derive(Clone, Debug, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.trace.dispatch_traced")]
 pub struct DispatchTraced {
-    pub mails: Vec<MailEnvelope>,
+    pub mails: Vec<NamedMail>,
 }
 
 /// Issue 749: synchronous reply to [`DispatchTraced`]. `Ok` carries

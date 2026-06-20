@@ -871,8 +871,8 @@ impl TestBench {
     /// the wire shape of the MCP `capture_frame` tool.
     pub(crate) fn capture_with_mails(
         &mut self,
-        pre: Vec<aether_kinds::MailEnvelope>,
-        after: Vec<aether_kinds::MailEnvelope>,
+        pre: Vec<aether_kinds::NamedMail>,
+        after: Vec<aether_kinds::NamedMail>,
     ) -> Result<Vec<u8>, TestBenchError> {
         let cid = self.fresh_correlation_id();
         // Issue 603 Phase 2: capture_frame moved to the render

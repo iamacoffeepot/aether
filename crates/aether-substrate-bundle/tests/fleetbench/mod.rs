@@ -50,7 +50,7 @@ use aether_capabilities::trace::TraceDispatchCapability;
 use aether_capabilities::{EngineConfig, EngineServer};
 use aether_codec::frame::{FrameError, read_frame, write_frame};
 use aether_data::{DagId, EngineId, Kind, KindId, MailId, MailboxId, Uuid, mailbox_id_from_path};
-use aether_kinds::MailEnvelope as TracedEnvelope;
+use aether_kinds::NamedMail;
 use aether_kinds::descriptors;
 use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME};
 use aether_kinds::{
@@ -1041,7 +1041,7 @@ impl FleetBench {
         K: Kind + Serialize,
     {
         let batch = DispatchTraced {
-            mails: vec![TracedEnvelope {
+            mails: vec![NamedMail {
                 recipient_name: recipient.to_owned(),
                 kind_name: K::NAME.to_owned(),
                 payload: mail.encode_into_bytes(),
