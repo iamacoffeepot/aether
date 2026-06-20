@@ -552,7 +552,7 @@ impl<'a, M: ReplyMode> WasmCtx<'a, M> {
     /// actor's own id as the send's `from`. The by-id escape hatch for a
     /// recipient address known only at runtime (the typed-token counterpart
     /// is [`Self::send`]; the by-name counterpart is
-    /// [`crate::actor::ctx::MailSender::send_to_named`]). Routes through the
+    /// [`MailSender::send_to_named`]). Routes through the
     /// inline registry and inherits the handler's causal chain like every
     /// ctx send.
     pub fn send_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {

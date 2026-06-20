@@ -126,7 +126,7 @@ pub struct InlineChildToReconstruct<'a> {
 ///
 /// `run_parent_rehydrate` runs the freshly-`init`ed parent instance's
 /// `on_rehydrate` with the parent's saved `(version, bytes)` rebuilt as a
-/// [`crate::PriorState`]. `registry` is the component's inline-child
+/// [`PriorState`]. `registry` is the component's inline-child
 /// registry (the `export!`-emitted `static __AETHER_INLINE`), forwarded to
 /// each `reconstruct_child` call. `reconstruct_child` is the codegen
 /// callback that re-`init`s one child by type tag, restores its state, and
@@ -160,7 +160,7 @@ pub fn reconstruct_inline_children(
             // An unknown type tag (a replace that dropped a child type) or
             // a failed re-`init`: skip it. The codegen callback has already
             // logged; nothing else to do for this entry.
-            crate::__macro_internals::tracing::warn!(
+            tracing::warn!(
                 target = "aether_actor::inline",
                 alias = to_reconstruct.alias.0,
                 type_tag = to_reconstruct.type_tag,
