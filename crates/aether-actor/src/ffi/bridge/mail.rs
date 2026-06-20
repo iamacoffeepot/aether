@@ -137,8 +137,9 @@ pub fn prev_correlation() -> u64 {
 /// returning; the guest's borrows are released as soon as the
 /// FFI call completes.
 ///
-/// Only callable from wasm32 — the only caller (`crate::log::WasmSubscriber`)
-/// is gated behind `#[cfg(target_arch = "wasm32")]`.
+/// Only callable from wasm32 — installed as the [`crate::log::LogSink`]
+/// by the guest runtime (`export!`) and invoked from
+/// [`crate::log::ForwardingSubscriber::event`].
 #[cfg(target_arch = "wasm32")]
 pub fn emit_log_event(level: u8, target: &str, message: &str) {
     let target_bytes = target.as_bytes();
