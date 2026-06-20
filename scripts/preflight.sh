@@ -3,9 +3,11 @@
 #
 # Mirrors the CI gates (.github/workflows/ci.yml) that are feasible
 # to run locally: fmt + clippy + doc + nextest + wasm32 component
-# cross-build. Qodana is not run locally — it is a required CI gate
-# (ci-pass); scripts/qodana-report.sh surfaces its findings and /land
-# resolves them (see CLAUDE.md § "Qodana").
+# cross-build + qodana. Qodana runs in the pinned `jetbrains/qodana-rust`
+# container (read from qodana.yaml) diff-scoped to the origin/main
+# merge-base, mirroring CI's PR-mode scan; scripts/qodana-report.sh still
+# surfaces the CI run's findings and /land resolves them (see CLAUDE.md
+# § "Qodana"). Requires Docker.
 #
 # On success, writes `.git/aether-preflight-passed` with the current
 # HEAD sha + unix timestamp. The pre-push hook (.githooks/pre-push)
@@ -166,6 +168,28 @@ run_step "cargo xtask dist --no-bins (component wasm cross-build)" \
 run_step "cargo nextest run (workspace, parallel)" \
     env AETHER_REQUIRE_RUNTIME=1 \
     cargo nextest run --workspace --all-features --profile ci
+
+# Qodana mirrors CI's required scan locally, so a passing pre-flight covers
+# the full `CI pass` set rather than skipping the one gate cargo can't run.
+# It runs the pinned `jetbrains/qodana-rust` container named in qodana.yaml —
+# the single config source, read with no `--fail-threshold` override so the
+# gate stays identical to CI — which makes the local verdict match CI modulo
+# the diff scope. `--diff-start` scopes the run to the origin/main merge-base,
+# matching CI's PR mode: only findings the branch newly introduces count
+# toward `failThreshold`, so pre-existing findings don't false-fail locally.
+# Runs the container as root (`-u root`, matching ci.yml) so qodana.yaml's
+# `bootstrap` can apt-get/rustup in-container — without it the bootstrap
+# fails to write apt's lists as the host user (Qodana exit 100). Needs
+# Docker. Fail loud if origin/main is absent rather than scanning the whole
+# tree (which would re-flag the existing backlog).
+qodana_base="$(git merge-base HEAD origin/main 2>/dev/null || git rev-parse origin/main 2>/dev/null || true)"
+if [[ -z "$qodana_base" ]]; then
+    echo "[preflight] origin/main not found — cannot diff-scope qodana." >&2
+    echo "[preflight] run 'git fetch origin main' and retry." >&2
+    exit 1
+fi
+run_step "qodana scan (diff-scoped to origin/main merge-base)" \
+    qodana scan --diff-start "$qodana_base" -u root
 
 stamp_pass
 echo "[preflight] OK."
