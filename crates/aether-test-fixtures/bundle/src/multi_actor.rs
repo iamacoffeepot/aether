@@ -19,7 +19,9 @@
 // dispatch ABI even when stateless.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{BootError, Mail, MailSender, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{
+    ActorInitError, Mail, MailSender, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+};
 use aether_kinds::Ping;
 use aether_test_fixtures_kinds::{TEST_BENCH_OBSERVER_MAILBOX_NAME, TickObserved};
 
@@ -31,7 +33,7 @@ pub struct RootManager;
 impl WasmActor for RootManager {
     const NAMESPACE: &'static str = "ui.root";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(RootManager)
     }
 
@@ -56,7 +58,7 @@ pub struct Panel;
 impl WasmActor for Panel {
     const NAMESPACE: &'static str = "ui.panel";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Panel)
     }
 

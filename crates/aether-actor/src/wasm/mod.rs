@@ -21,7 +21,7 @@
 //!     free — the bridge free functions cover dispatch.
 //!   - [`WasmActor`] trait — entry point with the `init` constructor and
 //!     the `wire` / `unwire` / `on_dehydrate` / `on_rehydrate` lifecycle
-//!     hooks (ADR-0101). `init` returns `Result<Self, BootError>` so a
+//!     hooks (ADR-0101). `init` returns `Result<Self, ActorInitError>` so a
 //!     guest can surface its own error message instead of the panic-hook
 //!     path's generic "guest trapped during init" text.
 //!   - [`crate::export!`] — `#[no_mangle]` `init` / `receive` /
@@ -68,15 +68,15 @@ pub use mailbox::WasmActorMailbox;
 /// panic-hook path's generic "guest trapped during init" text.
 ///
 /// Wraps a `Cow<'static, str>` so static-string callers don't allocate
-/// (`BootError::from("config missing")`) while owned strings still flow
-/// through (`BootError::from(format!("..."))`).
+/// (`ActorInitError::from("config missing")`) while owned strings still flow
+/// through (`ActorInitError::from(format!("..."))`).
 #[derive(Debug, Clone)]
-pub struct BootError {
+pub struct ActorInitError {
     message: Cow<'static, str>,
 }
 
-impl BootError {
-    /// Construct a `BootError` from anything convertible to a
+impl ActorInitError {
+    /// Construct a `ActorInitError` from anything convertible to a
     /// `Cow<'static, str>` — `&'static str` for compile-time messages,
     /// `String` for `format!`-built diagnostics.
     pub fn new<S: Into<Cow<'static, str>>>(message: S) -> Self {
@@ -93,19 +93,19 @@ impl BootError {
     }
 }
 
-impl fmt::Display for BootError {
+impl fmt::Display for ActorInitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.message)
     }
 }
 
-impl From<&'static str> for BootError {
+impl From<&'static str> for ActorInitError {
     fn from(s: &'static str) -> Self {
         Self::new(s)
     }
 }
 
-impl From<String> for BootError {
+impl From<String> for ActorInitError {
     fn from(s: String) -> Self {
         Self::new(s)
     }
@@ -122,7 +122,7 @@ impl From<String> for BootError {
 /// composes it alongside the identity [`crate::Addressable`] supertrait and
 /// adds only the FFI-specific hot-swap surface (`type State`,
 /// `on_dehydrate`, `on_rehydrate`, ADR-0101). `InitError` is pinned to
-/// [`BootError`] so a guest surfaces its own message in
+/// [`ActorInitError`] so a guest surfaces its own message in
 /// `LoadResult::Err { error }`; `Self::Config` is tightened to
 /// [`Kind`](aether_data::Kind) — FFI config crosses the wasm boundary as
 /// encoded bytes.
@@ -133,7 +133,7 @@ impl From<String> for BootError {
 pub trait WasmActor:
     crate::Addressable
     + for<'a> crate::Lifecycle<
-        InitError = BootError,
+        InitError = ActorInitError,
         Config: aether_data::Kind,
         InitCtx<'a> = WasmInitCtx<'a>,
         Ctx<'a> = WasmCtx<'a>,
@@ -590,7 +590,7 @@ macro_rules! __export_internal {
         /// `init_failed_p32` and returns 1.
         ///
         /// Returns `0` on success and non-zero when the actor's `init`
-        /// returned `Err(BootError)` or its `Config::decode_from_bytes`
+        /// returned `Err(ActorInitError)` or its `Config::decode_from_bytes`
         /// produced `None`.
         #[cfg(target_family = "wasm")]
         #[unsafe(export_name = "init_with_config_p32")]

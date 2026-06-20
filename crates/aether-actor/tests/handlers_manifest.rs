@@ -21,7 +21,7 @@
 // `&mut self` to match the dispatch ABI but don't read state.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{BootError, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::Kind;
 use aether_data::{INPUTS_SECTION_VERSION, InputsRecord, ReplyContract, wire};
 use bytemuck::{Pod, Zeroable};
@@ -65,7 +65,7 @@ struct ManifestProbe;
 impl WasmActor for ManifestProbe {
     const NAMESPACE: &'static str = "manifest_probe";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Self)
     }
 

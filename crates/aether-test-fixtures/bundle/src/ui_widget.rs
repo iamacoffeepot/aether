@@ -23,7 +23,7 @@
 //! Not a demo — its only job is to expose a realistic per-frame widget
 //! cost to the measurement.
 
-use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::{DrawSolidQuads, QuadSpace, SolidQuad, Tick};
@@ -38,7 +38,7 @@ impl WasmActor for UiWidget {
     type Config = UiWidgetConfig;
     const NAMESPACE: &'static str = "test_fixtures_ui_widget";
 
-    fn init(config: UiWidgetConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(config: UiWidgetConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(UiWidget { config })
     }
 

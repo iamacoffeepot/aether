@@ -41,7 +41,7 @@ struct MismatchProbe;
 impl aether_actor::WasmActor for MismatchProbe {
     const NAMESPACE: &'static str = "mismatch_probe";
 
-    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::BootError>
+    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::ActorInitError>
     {
         Ok(MismatchProbe)
     }

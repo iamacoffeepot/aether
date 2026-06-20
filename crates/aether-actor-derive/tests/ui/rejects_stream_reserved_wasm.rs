@@ -24,7 +24,7 @@ struct StreamProbe;
 impl aether_actor::WasmActor for StreamProbe {
     const NAMESPACE: &'static str = "stream_probe";
 
-    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::BootError>
+    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::ActorInitError>
     {
         Ok(StreamProbe)
     }

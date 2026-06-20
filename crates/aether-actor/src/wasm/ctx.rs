@@ -29,7 +29,7 @@ use crate::mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
 use crate::wasm::bridge::{mail, persist};
 use crate::wasm::inline::InlineRegistry;
 use crate::wasm::mailbox::WasmActorMailbox;
-use crate::wasm::{BootError, ErasedWasmActor, WasmActor};
+use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -152,12 +152,12 @@ pub enum SpawnError {
     /// [`validate_namespace_segment`].
     SubnameInvalid(NamespaceError),
     /// ADR-0114: an inline child's synchronous `init` returned `Err`. The
-    /// wrapped [`BootError`] carries the actor's own failure message.
+    /// wrapped [`ActorInitError`] carries the actor's own failure message.
     /// Unlike the detached `spawn_child` — whose `init` runs later on the
     /// trampoline and logs asynchronously — an inline child's `init` runs
     /// in-guest during [`WasmCtx::spawn_inline_child`], so the boot failure
     /// comes back through this `Result`.
-    InitFailed(BootError),
+    InitFailed(ActorInitError),
 }
 
 /// Per-receive (and post-init `wire` / pre-shutdown `unwire`)
@@ -390,7 +390,7 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         // it sidesteps a `Clone` bound the detached verb also lacks.
         let bytes = config.encode_into_bytes();
         let Some(owned) = <A::Config as Kind>::decode_from_bytes(&bytes) else {
-            return Err(SpawnError::InitFailed(BootError::new(
+            return Err(SpawnError::InitFailed(ActorInitError::new(
                 "spawn_inline_child: Config round-trip failed",
             )));
         };
@@ -925,7 +925,7 @@ mod tests {
     use crate::actor::ctx::OutboundReply;
     use crate::mail::{Mail, PriorState};
     use crate::wasm::inline::RouteDecision;
-    use crate::wasm::{BootError, ErasedWasmActor, WasmActor, WasmDropCtx, WasmInitCtx};
+    use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmDropCtx, WasmInitCtx};
     use aether_data::MailboxId;
     use alloc::string::String;
     use core::mem::{align_of, size_of};
@@ -943,12 +943,12 @@ mod tests {
 
     impl crate::Lifecycle for FailingChild {
         type Config = ();
-        type InitError = BootError;
+        type InitError = ActorInitError;
         type InitCtx<'a> = WasmInitCtx<'a>;
         type Ctx<'a> = WasmCtx<'a>;
 
-        fn init(_config: (), _ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
-            Err(BootError::new("inline child init deliberately fails"))
+        fn init(_config: (), _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+            Err(ActorInitError::new("inline child init deliberately fails"))
         }
     }
 
@@ -1054,11 +1054,11 @@ mod tests {
 
     impl crate::Lifecycle for SucceedingChild {
         type Config = ();
-        type InitError = BootError;
+        type InitError = ActorInitError;
         type InitCtx<'a> = WasmInitCtx<'a>;
         type Ctx<'a> = WasmCtx<'a>;
 
-        fn init(_config: (), _ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+        fn init(_config: (), _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
             Ok(Self)
         }
     }

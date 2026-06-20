@@ -1956,7 +1956,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
     let mut init_method = init_method.ok_or_else(|| {
         syn::Error::new_spanned(
             self_ty,
-            "#[actor] requires `fn init(ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError>` \
+            "#[actor] requires `fn init(ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError>` \
              (or, with `type Config = T`, `fn init(config: T, ctx: &mut WasmInitCtx<'_>) -> …`)",
         )
     })?;
@@ -2280,7 +2280,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
 
         impl #impl_generics ::aether_actor::Lifecycle for #self_ty #where_clause {
             #config_type_tokens
-            type InitError = ::aether_actor::BootError;
+            type InitError = ::aether_actor::ActorInitError;
             type InitCtx<'__a> = ::aether_actor::WasmInitCtx<'__a>;
             type Ctx<'__a> = ::aether_actor::WasmCtx<'__a>;
 

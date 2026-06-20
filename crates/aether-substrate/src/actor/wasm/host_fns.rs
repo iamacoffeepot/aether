@@ -503,7 +503,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         |caller: Caller<'_, ComponentCtx>| -> u64 { caller.data().prev_correlation() },
     )?;
 
-    // HOST_FN_OK: ADR-0002 / issue 531. The BootError plumbing
+    // HOST_FN_OK: ADR-0002 / issue 531. The ActorInitError plumbing
     // can't ride a mail sink because mail is not dispatched until
     // the component finishes booting — the `init` FFI call itself
     // is the entry point, and a `Result::Err` returned from it
@@ -511,7 +511,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // substrate before the FFI call returns. A host fn is the
     // only mechanism that's available pre-`init`-completion.
     //
-    // Issue 525 Phase 4b / issue 531: stage a `BootError` message
+    // Issue 525 Phase 4b / issue 531: stage a `ActorInitError` message
     // for `Component::instantiate` to surface in `LoadResult::Err`
     // after the guest's `init` returns non-zero. The bytes are
     // copied out of guest memory before the call returns; OOB or

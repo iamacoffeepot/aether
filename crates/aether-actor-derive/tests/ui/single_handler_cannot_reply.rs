@@ -41,7 +41,7 @@ struct SilentProbe;
 impl aether_actor::WasmActor for SilentProbe {
     const NAMESPACE: &'static str = "silent_probe";
 
-    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::BootError>
+    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::ActorInitError>
     {
         Ok(SilentProbe)
     }

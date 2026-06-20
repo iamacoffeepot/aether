@@ -29,7 +29,7 @@ impl aether_substrate::actor::native::NativeActor for NoNamespace {
     fn init(
         _config: (),
         _ctx: &mut aether_substrate::actor::native::NativeInitCtx<'_>,
-    ) -> Result<Self, aether_actor::BootError> {
+    ) -> Result<Self, aether_actor::ActorInitError> {
         unimplemented!()
     }
 

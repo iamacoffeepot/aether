@@ -36,7 +36,8 @@
 use core::cell::UnsafeCell;
 
 use aether_actor::{
-    BootError, MailboxId, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, MailboxId, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx,
+    actor,
 };
 use aether_test_fixtures_kinds::{
     CollectMatrix, MATRIX_CELL_CHILD_TO_PARENT, MATRIX_CELL_CHILD_TO_SELF,
@@ -141,7 +142,7 @@ pub struct MatrixParent;
 impl WasmActor for MatrixParent {
     const NAMESPACE: &'static str = "test.matrix.parent";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(MatrixParent)
     }
 
@@ -194,7 +195,7 @@ pub struct MatrixChild;
 impl WasmActor for MatrixChild {
     const NAMESPACE: &'static str = "test.matrix.child";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(MatrixChild)
     }
 

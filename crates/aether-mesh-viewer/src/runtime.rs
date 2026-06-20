@@ -33,7 +33,7 @@
 //!    triangles to `"aether.render"`.
 
 use aether_actor::{
-    BootError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_capabilities::fs::FsMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
@@ -234,7 +234,7 @@ struct ScrubIndex {
 impl WasmActor for MeshViewer {
     const NAMESPACE: &'static str = "aether.mesh_viewer";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(MeshViewer {
             triangles: Vec::new(),
             overlay: Vec::new(),

@@ -25,7 +25,7 @@ struct Minimal;
 impl aether_actor::WasmActor for Minimal {
     const NAMESPACE: &'static str = "minimal";
 
-    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::BootError>
+    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::ActorInitError>
     {
         Ok(Minimal)
     }

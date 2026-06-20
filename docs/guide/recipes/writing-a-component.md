@@ -73,7 +73,7 @@ method *is* a handler — the macro infers the kind it handles from the method's
 parameter, so there's no typelist to maintain.
 
 ```rust
-use aether_actor::{BootError, WasmActor, WasmCtx, Resolver, actor};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, Resolver, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::{DrawTriangle, Tick};
@@ -84,7 +84,7 @@ pub struct MyComponent {}
 impl WasmActor for MyComponent {
     const NAMESPACE: &'static str = "my_component";   // default load name
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
+    fn init<C>(_ctx: &mut C) -> Result<Self, ActorInitError>
     where
         C: Resolver,
     {

@@ -36,7 +36,7 @@ impl aether_actor::WasmActor for Counter {
 
     type State = CounterState;
 
-    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::BootError>
+    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::ActorInitError>
     {
         Ok(Counter { count: 0 })
     }

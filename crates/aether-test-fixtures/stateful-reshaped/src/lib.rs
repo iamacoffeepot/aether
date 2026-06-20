@@ -11,7 +11,7 @@
 // owned for an all-`Copy` state, so silence the false positive.
 #![allow(clippy::needless_pass_by_value)]
 
-use aether_actor::{BootError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
 /// Reshaped durable state — the added `generation` field changes the
@@ -41,7 +41,7 @@ impl WasmActor for Counter {
 
     type State = CounterState;
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Counter {
             count: 0,
             generation: 0,

@@ -17,7 +17,7 @@
 // contract is the point, so silence the false positive here.
 #![allow(clippy::needless_pass_by_value)]
 
-use aether_actor::{BootError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
 /// Durable state the `Counter` carries across `replace_component`. The
@@ -47,7 +47,7 @@ impl WasmActor for Counter {
     /// `on_rehydrate` hooks.
     type State = CounterState;
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Counter { count: 0 })
     }
 

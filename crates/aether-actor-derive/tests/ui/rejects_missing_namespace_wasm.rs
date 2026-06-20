@@ -24,7 +24,7 @@ struct NoNamespace;
 
 #[actor]
 impl aether_actor::WasmActor for NoNamespace {
-    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::BootError>
+    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::ActorInitError>
     {
         Ok(NoNamespace)
     }
