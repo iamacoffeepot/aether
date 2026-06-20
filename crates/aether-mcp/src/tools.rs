@@ -14,8 +14,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
+use std::io;
 use std::mem;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -2169,6 +2170,9 @@ fn decode_reply_events(
     declared_reply: Option<KindId>,
 ) -> Vec<ReplyEventJson> {
     let static_descriptors = descriptors::all();
+    // Resolve the reply-`Bytes` spill threshold once for the whole batch
+    // (issue 2108) and thread it through every projection.
+    let inline_max = reply_inline_max_bytes();
     envelopes
         .iter()
         .map(|env| {
@@ -2209,7 +2213,7 @@ fn decode_reply_events(
                     // array, the MCP front projects it for the caller.
                     aether_codec::decode_schema(&env.payload, &d.schema)
                         .ok()
-                        .map(|v| render_bytes_reply(v, &d.schema))
+                        .map(|v| render_bytes_reply(v, &d.schema, inline_max))
                 })
                 .map_or_else(
                     // Decode miss: base64 the raw payload as the fallback
@@ -2747,22 +2751,26 @@ async fn resolve_bytes_embed(
 /// a bare string when the bytes are valid UTF-8 (the read-back-as-text
 /// ergonomic), else to `{"base64": …}`. Walks `schema` to reach a `Bytes`
 /// leaf nested in a composite, every other value untouched.
-fn render_bytes_reply(value: serde_json::Value, schema: &SchemaType) -> serde_json::Value {
+fn render_bytes_reply(
+    value: serde_json::Value,
+    schema: &SchemaType,
+    inline_max: usize,
+) -> serde_json::Value {
     use serde_json::Value;
     match schema {
-        SchemaType::Bytes => render_bytes_leaf(value),
+        SchemaType::Bytes => render_bytes_leaf(value, inline_max),
         SchemaType::Option(inner) => {
             if value.is_null() {
                 value
             } else {
-                render_bytes_reply(value, inner)
+                render_bytes_reply(value, inner, inline_max)
             }
         }
         SchemaType::Vec(inner) => match value {
             Value::Array(items) => Value::Array(
                 items
                     .into_iter()
-                    .map(|v| render_bytes_reply(v, inner))
+                    .map(|v| render_bytes_reply(v, inner, inline_max))
                     .collect(),
             ),
             other => other,
@@ -2771,7 +2779,7 @@ fn render_bytes_reply(value: serde_json::Value, schema: &SchemaType) -> serde_js
             Value::Array(items) => Value::Array(
                 items
                     .into_iter()
-                    .map(|v| render_bytes_reply(v, element))
+                    .map(|v| render_bytes_reply(v, element, inline_max))
                     .collect(),
             ),
             other => other,
@@ -2781,7 +2789,7 @@ fn render_bytes_reply(value: serde_json::Value, schema: &SchemaType) -> serde_js
                 for field in fields.iter() {
                     if let Some(slot) = map.get_mut(&*field.name) {
                         let taken = mem::take(slot);
-                        *slot = render_bytes_reply(taken, &field.ty);
+                        *slot = render_bytes_reply(taken, &field.ty, inline_max);
                     }
                 }
                 Value::Object(map)
@@ -2795,7 +2803,7 @@ fn render_bytes_reply(value: serde_json::Value, schema: &SchemaType) -> serde_js
             Value::Object(mut map) => {
                 for slot in map.values_mut() {
                     let taken = mem::take(slot);
-                    *slot = render_bytes_reply(taken, value_schema);
+                    *slot = render_bytes_reply(taken, value_schema, inline_max);
                 }
                 Value::Object(map)
             }
@@ -2812,13 +2820,13 @@ fn render_bytes_reply(value: serde_json::Value, schema: &SchemaType) -> serde_js
                 let rendered = match variants.iter().find(|v| v.name() == tag.as_str()) {
                     None | Some(EnumVariant::Unit { .. }) => payload,
                     Some(EnumVariant::Tuple { fields, .. }) => match fields.as_ref() {
-                        [single] => render_bytes_reply(payload, single),
+                        [single] => render_bytes_reply(payload, single, inline_max),
                         _ => match payload {
                             Value::Array(items) => Value::Array(
                                 items
                                     .into_iter()
                                     .zip(fields.iter())
-                                    .map(|(v, f)| render_bytes_reply(v, f))
+                                    .map(|(v, f)| render_bytes_reply(v, f, inline_max))
                                     .collect(),
                             ),
                             other => other,
@@ -2829,7 +2837,7 @@ fn render_bytes_reply(value: serde_json::Value, schema: &SchemaType) -> serde_js
                             for field in fields.iter() {
                                 if let Some(slot) = inner.get_mut(&*field.name) {
                                     let taken = mem::take(slot);
-                                    *slot = render_bytes_reply(taken, &field.ty);
+                                    *slot = render_bytes_reply(taken, &field.ty, inline_max);
                                 }
                             }
                             Value::Object(inner)
@@ -2847,10 +2855,55 @@ fn render_bytes_reply(value: serde_json::Value, schema: &SchemaType) -> serde_js
     }
 }
 
-/// Render one decoded `Bytes` value — a JSON array of byte numbers — to a
-/// bare string (valid UTF-8) or a `{"base64": …}` object (binary). A
-/// value that isn't the array-of-bytes shape is returned untouched.
-fn render_bytes_leaf(value: serde_json::Value) -> serde_json::Value {
+/// Resolve the reply-`Bytes` spill threshold (`AETHER_MCP_REPLY_INLINE_MAX_BYTES`,
+/// default 256 KiB). A reply `Bytes` leaf larger than this is staged to a
+/// harness-host temp file and surfaced as `{"file": …}` instead of inlined as
+/// base64 (issue 2108) — the reply-side mirror of the input `{"$file": …}`
+/// embed. Deliberately distinct from the RPC frame cap: an over-frame reply
+/// never reaches this projection (the inbound frame decode fails first), and
+/// 64 MiB is far past the point base64 bloats the tool channel.
+fn reply_inline_max_bytes() -> usize {
+    use std::env;
+    const DEFAULT_REPLY_INLINE_MAX_BYTES: usize = 256 * 1024;
+    // Process-level tuning knob, not capability config: the out-of-process MCP
+    // front has no `Config`-derive plumbing, so it reads this directly the same
+    // way `main.rs` reads `AETHER_MCP_PORT`.
+    #[allow(clippy::disallowed_methods)]
+    let raw = env::var("AETHER_MCP_REPLY_INLINE_MAX_BYTES").ok();
+    raw.and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_REPLY_INLINE_MAX_BYTES)
+}
+
+/// Stage `bytes` to a unique harness-host temp file under `dir` and return its
+/// absolute path. Mirrors the boot-manifest staging writes (`stage_boot_manifest`):
+/// a blocking `std::fs::write` into the temp dir, named `aether-reply-<uuid>.bin`.
+fn spill_reply_bytes(dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+    // `std::fs`, not the module's `tokio::fs`: this write is blocking by design
+    // (the MCP front handling a tool reply is not latency-critical).
+    use std::fs as std_fs;
+    let path = dir.join(format!("aether-reply-{}.bin", Uuid::new_v4()));
+    std_fs::write(&path, bytes)?;
+    Ok(path)
+}
+
+/// Render one decoded `Bytes` value — a JSON array of byte numbers — for the
+/// caller. The ladder: a value over `inline_max` (regardless of UTF-8 validity)
+/// is spilled to a harness-host temp file and rendered as `{"file": …}`; a
+/// smaller value renders as a bare string (valid UTF-8) or a `{"base64": …}`
+/// object (binary). A value that isn't the array-of-bytes shape is returned
+/// untouched.
+fn render_bytes_leaf(value: serde_json::Value, inline_max: usize) -> serde_json::Value {
+    use std::env;
+    render_bytes_leaf_in(value, inline_max, &env::temp_dir())
+}
+
+/// `render_bytes_leaf` with an explicit spill directory — the seam the unit
+/// tests drive so spills land under a scratch dir rather than the real temp dir.
+fn render_bytes_leaf_in(
+    value: serde_json::Value,
+    inline_max: usize,
+    spill_dir: &Path,
+) -> serde_json::Value {
     use serde_json::Value;
     let Value::Array(items) = &value else {
         return value;
@@ -2861,6 +2914,20 @@ fn render_bytes_leaf(value: serde_json::Value) -> serde_json::Value {
             Some(b) => bytes.push(b),
             None => return value,
         }
+    }
+    // Large reply (regardless of UTF-8 validity) → spill to a host temp file and
+    // surface a `{"file": …}` reference rather than inlining. On a spill IO error
+    // fall through to the in-band rendering below — the projector must never
+    // error or drop reply data (consistent with every other arm's pass-through).
+    if bytes.len() > inline_max
+        && let Ok(path) = spill_reply_bytes(spill_dir, &bytes)
+    {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "file".to_owned(),
+            Value::String(path.to_string_lossy().into_owned()),
+        );
+        return Value::Object(obj);
     }
     str::from_utf8(&bytes).map_or_else(
         |_| {
@@ -3101,16 +3168,20 @@ mod tests {
         assert_eq!(out, serde_json::json!({"blob": [104, 105]}));
     }
 
+    /// A spill threshold so high nothing in these projection tests trips it —
+    /// they assert the under-threshold UTF-8 / base64 ladder, unchanged.
+    const NO_SPILL: usize = usize::MAX;
+
     #[test]
     fn render_bytes_reply_utf8_to_string() {
-        let out = render_bytes_reply(serde_json::json!([104, 105]), &SchemaType::Bytes);
+        let out = render_bytes_reply(serde_json::json!([104, 105]), &SchemaType::Bytes, NO_SPILL);
         assert_eq!(out, serde_json::json!("hi"));
     }
 
     #[test]
     fn render_bytes_reply_binary_to_base64() {
         // 0xff 0xfe is not valid UTF-8 → base64 object.
-        let out = render_bytes_reply(serde_json::json!([255, 254]), &SchemaType::Bytes);
+        let out = render_bytes_reply(serde_json::json!([255, 254]), &SchemaType::Bytes, NO_SPILL);
         assert_eq!(out, serde_json::json!({"base64": "//4="}));
     }
 
@@ -3119,6 +3190,7 @@ mod tests {
         let out = render_bytes_reply(
             serde_json::json!({"blob": [104, 105]}),
             &blob_struct_schema(),
+            NO_SPILL,
         );
         assert_eq!(out, serde_json::json!({"blob": "hi"}));
     }
@@ -3156,6 +3228,7 @@ mod tests {
         let out = render_bytes_reply(
             serde_json::json!({"Ok": {"bytes": [104, 105]}}),
             &read_result_schema(),
+            NO_SPILL,
         );
         assert_eq!(out, serde_json::json!({"Ok": {"bytes": "hi"}}));
     }
@@ -3166,6 +3239,7 @@ mod tests {
         let out = render_bytes_reply(
             serde_json::json!({"Ok": {"bytes": [255, 254]}}),
             &read_result_schema(),
+            NO_SPILL,
         );
         assert_eq!(
             out,
@@ -3176,7 +3250,7 @@ mod tests {
     #[test]
     fn render_bytes_reply_enum_unit_variant_passthrough() {
         // `"Err"` is a bare-string Unit variant — no payload, passes through.
-        let out = render_bytes_reply(serde_json::json!("Err"), &read_result_schema());
+        let out = render_bytes_reply(serde_json::json!("Err"), &read_result_schema(), NO_SPILL);
         assert_eq!(out, serde_json::json!("Err"));
     }
 
@@ -3187,8 +3261,111 @@ mod tests {
         let out = render_bytes_reply(
             serde_json::json!({"Unknown": {"x": 1}}),
             &read_result_schema(),
+            NO_SPILL,
         );
         assert_eq!(out, serde_json::json!({"Unknown": {"x": 1}}));
+    }
+
+    /// A unique scratch directory under the system temp dir, so reply-spill
+    /// tests never litter the real temp dir with `aether-reply-*.bin` files.
+    fn reply_scratch_dir(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir =
+            std_env::temp_dir().join(format!("aether-reply-test-{tag}-{}-{nanos}", process::id()));
+        std_fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    #[test]
+    fn render_bytes_leaf_over_threshold_spills_to_file() {
+        // A reply Bytes leaf over the threshold spills to a host temp file and
+        // renders as `{"file": <path>}`; the file is present and byte-equal.
+        let dir = reply_scratch_dir("over-threshold");
+        let payload: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+        let json: Vec<serde_json::Value> = payload.iter().map(|b| serde_json::json!(b)).collect();
+        let out = render_bytes_leaf_in(serde_json::Value::Array(json), 1024, &dir);
+        let file = out
+            .get("file")
+            .and_then(|v| v.as_str())
+            .expect("over-threshold leaf renders as a {\"file\": …} reference");
+        let on_disk = std_fs::read(file).expect("spilled file is present on disk");
+        assert_eq!(on_disk, payload, "spilled bytes match the input");
+        std_fs::remove_file(file).ok();
+        std_fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn render_bytes_leaf_under_threshold_utf8_to_string() {
+        let dir = reply_scratch_dir("under-utf8");
+        let out = render_bytes_leaf_in(serde_json::json!([104, 105]), 1024, &dir);
+        assert_eq!(out, serde_json::json!("hi"));
+        // Nothing should have been written.
+        assert!(
+            std_fs::read_dir(&dir)
+                .expect("scratch dir")
+                .next()
+                .is_none()
+        );
+        std_fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn render_bytes_leaf_under_threshold_binary_to_base64() {
+        let dir = reply_scratch_dir("under-binary");
+        // 0xff 0xfe is not valid UTF-8 and is under the threshold → base64.
+        let out = render_bytes_leaf_in(serde_json::json!([255, 254]), 1024, &dir);
+        assert_eq!(out, serde_json::json!({"base64": "//4="}));
+        assert!(
+            std_fs::read_dir(&dir)
+                .expect("scratch dir")
+                .next()
+                .is_none()
+        );
+        std_fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn render_bytes_leaf_spill_io_failure_falls_back_to_base64() {
+        // A spill dir that doesn't exist makes `std::fs::write` fail; the leaf
+        // must fall through to the in-band rendering rather than error or drop
+        // data. 0xff bytes are non-UTF-8 → the fallback is base64.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let missing = std_env::temp_dir().join(format!(
+            "aether-reply-test-missing-{}-{nanos}",
+            process::id()
+        ));
+        let payload: Vec<u8> = vec![0xffu8; 64];
+        let json: Vec<serde_json::Value> = payload.iter().map(|b| serde_json::json!(b)).collect();
+        let out = render_bytes_leaf_in(serde_json::Value::Array(json), 8, &missing);
+        assert_eq!(
+            out,
+            serde_json::json!({"base64": STANDARD.encode(&payload)})
+        );
+        assert!(
+            !missing.exists(),
+            "the missing spill dir must not be created by the fallback"
+        );
+    }
+
+    #[test]
+    fn render_bytes_reply_threads_threshold_to_leaf() {
+        // End-to-end: the threshold threaded through `render_bytes_reply`
+        // reaches the leaf and triggers a spill. (Writes to the real temp dir
+        // since the public entry uses `env::temp_dir()`; cleaned up below.)
+        let payload: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+        let json: Vec<serde_json::Value> = payload.iter().map(|b| serde_json::json!(b)).collect();
+        let out = render_bytes_reply(serde_json::Value::Array(json), &SchemaType::Bytes, 1024);
+        let file = out
+            .get("file")
+            .and_then(|v| v.as_str())
+            .expect("threaded threshold spills the leaf to a file reference");
+        let on_disk = std_fs::read(file).expect("spilled file is present on disk");
+        assert_eq!(on_disk, payload);
+        std_fs::remove_file(file).ok();
     }
 
     #[tokio::test]
