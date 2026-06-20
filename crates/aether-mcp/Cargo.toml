@@ -67,6 +67,12 @@ serde_json = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs", "time", "io-util"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# `v4` random naming for the reply-`Bytes` spill temp files
+# (`aether-reply-<uuid>.bin`, issue 2108) — the same `Uuid::new_v4()`
+# staging the contentgen caps use. `aether-data` already pulls `uuid`
+# (serde-only); this declares the `v4` feature for the coordinator's own
+# build graph so `Uuid::new_v4()` resolves when `aether-mcp` builds alone.
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 aether-substrate = { path = "../aether-substrate" }
