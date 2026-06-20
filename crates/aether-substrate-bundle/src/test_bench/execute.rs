@@ -24,7 +24,7 @@ use std::error;
 use std::fmt;
 
 use aether_data::{Kind, KindId};
-use aether_kinds::MailEnvelope;
+use aether_kinds::NamedMail;
 
 use super::bench::{TestBench, TestBenchError};
 
@@ -74,8 +74,8 @@ pub enum BenchOp {
     /// pre-mail's geometry must land in the same frame as the
     /// readback.
     CaptureWithMails {
-        pre: Vec<MailEnvelope>,
-        after: Vec<MailEnvelope>,
+        pre: Vec<NamedMail>,
+        after: Vec<NamedMail>,
     },
 }
 
@@ -95,7 +95,7 @@ impl BenchOp {
     /// Capture with pre/after mail bundles dispatched atomically
     /// around the readback. See [`BenchOp::CaptureWithMails`].
     #[must_use]
-    pub fn capture_with_mails(pre: Vec<MailEnvelope>, after: Vec<MailEnvelope>) -> Self {
+    pub fn capture_with_mails(pre: Vec<NamedMail>, after: Vec<NamedMail>) -> Self {
         Self::CaptureWithMails { pre, after }
     }
 

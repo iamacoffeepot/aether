@@ -1893,8 +1893,8 @@ mod control_plane {
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.render.capture_frame")]
     pub struct CaptureFrame {
-        pub mails: Vec<MailEnvelope>,
-        pub after_mails: Vec<MailEnvelope>,
+        pub mails: Vec<NamedMail>,
+        pub after_mails: Vec<NamedMail>,
         pub checks: Vec<FrameCheck>,
         /// Optional reference-image similarity check
         /// (iamacoffeepot/aether#1780). `None` means no comparison.
@@ -1904,12 +1904,12 @@ mod control_plane {
     /// One mail in a `CaptureFrame.mails` bundle. Structurally mirrors
     /// `aether_data::MailFrame` — a pre-encoded payload plus
     /// the name-level addressing the substrate uses to resolve it.
-    /// The hub encodes each envelope's `payload` via the kind's
+    /// The hub encodes each entry's `payload` via the kind's
     /// descriptor before wrapping it into the bundle, so the
     /// substrate side just pushes `Mail::new(mailbox, kind_id,
     /// payload, count)` directly.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    pub struct MailEnvelope {
+    pub struct NamedMail {
         pub recipient_name: String,
         pub kind_name: String,
         pub payload: Vec<u8>,

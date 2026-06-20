@@ -38,7 +38,7 @@ use aether_kinds::{
     CreateTextureResult, Delete, DeleteResult, DrawSolidQuads, DrawText, DrawTexturedQuads,
     DropComponent, DropResult, FontMetricsRequest, FontMetricsResult, FontRef, FrameCheck,
     FrameCheckResult, FrameReduction, FsError, List, ListComponents, ListComponentsResult,
-    ListResult, LoadComponent, LoadFont, LoadFontResult, LoadResult, MailEnvelope, Ping, QuadScale,
+    ListResult, LoadComponent, LoadFont, LoadFontResult, LoadResult, NamedMail, Ping, QuadScale,
     QuadSpace, Read, ReadResult, ReplaceComponent, ReplaceResult, SolidQuad, TexturedQuad, UiBar,
     UiPanel, Write, WriteResult,
 };
@@ -82,11 +82,11 @@ fn probe_address() -> String {
 }
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
 
-/// Build a `MailEnvelope` for a `CaptureFrame` mail bundle. Uses
+/// Build a `NamedMail` for a `CaptureFrame` mail bundle. Uses
 /// the kind's wire encoding (`encode_into_bytes`) so any K — cast
 /// or structured — packs correctly.
-fn envelope<K: Kind>(recipient: &str, mail: &K) -> MailEnvelope {
-    MailEnvelope {
+fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
+    NamedMail {
         recipient_name: recipient.to_owned(),
         kind_name: K::NAME.to_owned(),
         payload: mail.encode_into_bytes(),
@@ -523,7 +523,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
                 visible: 1,
             },
         ),
-        MailEnvelope {
+        NamedMail {
             recipient_name: probe_address(),
             kind_name: "aether.lifecycle.tick".to_owned(),
             payload: Vec::new(),
