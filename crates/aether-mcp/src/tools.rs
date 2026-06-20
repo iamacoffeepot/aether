@@ -2552,6 +2552,7 @@ fn frame_size_aware_error(context: &str, e: anyhow::Error) -> McpError {
 /// descend, every other value passes through untouched. `max_file_bytes`
 /// is the RPC frame cap a `{"$file"}` read is guarded against; the
 /// production call sites pass `max_frame_size()`.
+#[allow(clippy::too_many_lines)] // one arm per SchemaType variant; splitting the enum arm out would obscure the symmetry with render_bytes_reply
 fn resolve_bytes_params<'a>(
     value: serde_json::Value,
     schema: &'a SchemaType,
@@ -2618,8 +2619,58 @@ fn resolve_bytes_params<'a>(
                 }
                 other => Ok(other),
             },
-            // Scalars, String, Enum, Ref, TypeId, Unit, Bool: no `Bytes`
-            // leaf is reachable through the embed grammar, so pass through.
+            SchemaType::Enum { variants } => match value {
+                // Unit variant — bare string, no payload to descend into.
+                Value::String(_) => Ok(value),
+                // Non-unit variant — externally-tagged one-key object
+                // `{"VariantName": payload}`. Resolve the tag, then recurse
+                // into the payload according to the matched variant kind.
+                Value::Object(map) if map.len() == 1 => {
+                    let (tag, payload) = map.into_iter().next().expect("len == 1");
+                    let variant = variants.iter().find(|v| v.name() == tag.as_str());
+                    let resolved = match variant {
+                        None | Some(EnumVariant::Unit { .. }) => payload,
+                        Some(EnumVariant::Tuple { fields, .. }) => match fields.as_ref() {
+                            [single] => {
+                                resolve_bytes_params(payload, single, max_file_bytes).await?
+                            }
+                            _ => match payload {
+                                Value::Array(items) => {
+                                    let mut out = Vec::with_capacity(items.len());
+                                    for (item, field) in items.into_iter().zip(fields.iter()) {
+                                        out.push(
+                                            resolve_bytes_params(item, field, max_file_bytes)
+                                                .await?,
+                                        );
+                                    }
+                                    Value::Array(out)
+                                }
+                                other => other,
+                            },
+                        },
+                        Some(EnumVariant::Struct { fields, .. }) => match payload {
+                            Value::Object(mut inner) => {
+                                for field in fields.iter() {
+                                    if let Some(slot) = inner.remove(&*field.name) {
+                                        let resolved =
+                                            resolve_bytes_params(slot, &field.ty, max_file_bytes)
+                                                .await?;
+                                        inner.insert(field.name.to_string(), resolved);
+                                    }
+                                }
+                                Value::Object(inner)
+                            }
+                            other => other,
+                        },
+                    };
+                    let mut out = serde_json::Map::new();
+                    out.insert(tag, resolved);
+                    Ok(Value::Object(out))
+                }
+                other => Ok(other),
+            },
+            // Scalars, String, Ref, TypeId, Unit, Bool: no `Bytes` leaf is
+            // reachable through the embed grammar, so pass through.
             _ => Ok(value),
         }
     })
@@ -2748,6 +2799,48 @@ fn render_bytes_reply(value: serde_json::Value, schema: &SchemaType) -> serde_js
                     *slot = render_bytes_reply(taken, value_schema);
                 }
                 Value::Object(map)
+            }
+            other => other,
+        },
+        SchemaType::Enum { variants } => match value {
+            // Unit variant — bare string, no payload to descend into.
+            Value::String(_) => value,
+            // Non-unit variant — externally-tagged one-key object
+            // `{"VariantName": payload}`. Resolve the tag, then recurse
+            // into the payload according to the matched variant kind.
+            Value::Object(map) if map.len() == 1 => {
+                let (tag, payload) = map.into_iter().next().expect("len == 1");
+                let rendered = match variants.iter().find(|v| v.name() == tag.as_str()) {
+                    None | Some(EnumVariant::Unit { .. }) => payload,
+                    Some(EnumVariant::Tuple { fields, .. }) => match fields.as_ref() {
+                        [single] => render_bytes_reply(payload, single),
+                        _ => match payload {
+                            Value::Array(items) => Value::Array(
+                                items
+                                    .into_iter()
+                                    .zip(fields.iter())
+                                    .map(|(v, f)| render_bytes_reply(v, f))
+                                    .collect(),
+                            ),
+                            other => other,
+                        },
+                    },
+                    Some(EnumVariant::Struct { fields, .. }) => match payload {
+                        Value::Object(mut inner) => {
+                            for field in fields.iter() {
+                                if let Some(slot) = inner.get_mut(&*field.name) {
+                                    let taken = mem::take(slot);
+                                    *slot = render_bytes_reply(taken, &field.ty);
+                                }
+                            }
+                            Value::Object(inner)
+                        }
+                        other => other,
+                    },
+                };
+                let mut out = serde_json::Map::new();
+                out.insert(tag, rendered);
+                Value::Object(out)
             }
             other => other,
         },
@@ -3029,6 +3122,88 @@ mod tests {
             &blob_struct_schema(),
         );
         assert_eq!(out, serde_json::json!({"blob": "hi"}));
+    }
+
+    /// Minimal `Result<Ok { bytes: Bytes }, Err>`-shaped enum schema — a
+    /// stand-in for `aether.fs.read_result` that pins the enum-nested-Bytes
+    /// regression (issue 2103).
+    fn read_result_schema() -> SchemaType {
+        use aether_data::{EnumVariant, NamedField};
+        SchemaType::Enum {
+            variants: vec![
+                EnumVariant::Struct {
+                    name: "Ok".into(),
+                    discriminant: 0,
+                    fields: vec![NamedField {
+                        name: "bytes".into(),
+                        ty: SchemaType::Bytes,
+                    }]
+                    .into(),
+                },
+                EnumVariant::Unit {
+                    name: "Err".into(),
+                    discriminant: 1,
+                },
+            ]
+            .into(),
+        }
+    }
+
+    #[test]
+    fn render_bytes_reply_enum_struct_variant_utf8() {
+        // `{"Ok": {"bytes": [104, 105]}}` → `{"Ok": {"bytes": "hi"}}`.
+        // This is the `aether.fs.read_result` shape — the primary advertised
+        // example of the bytes-render feature (issue 2103).
+        let out = render_bytes_reply(
+            serde_json::json!({"Ok": {"bytes": [104, 105]}}),
+            &read_result_schema(),
+        );
+        assert_eq!(out, serde_json::json!({"Ok": {"bytes": "hi"}}));
+    }
+
+    #[test]
+    fn render_bytes_reply_enum_struct_variant_binary() {
+        // Binary bytes inside a struct variant render to a base64 object.
+        let out = render_bytes_reply(
+            serde_json::json!({"Ok": {"bytes": [255, 254]}}),
+            &read_result_schema(),
+        );
+        assert_eq!(
+            out,
+            serde_json::json!({"Ok": {"bytes": {"base64": "//4="}}})
+        );
+    }
+
+    #[test]
+    fn render_bytes_reply_enum_unit_variant_passthrough() {
+        // `"Err"` is a bare-string Unit variant — no payload, passes through.
+        let out = render_bytes_reply(serde_json::json!("Err"), &read_result_schema());
+        assert_eq!(out, serde_json::json!("Err"));
+    }
+
+    #[test]
+    fn render_bytes_reply_enum_unknown_tag_passthrough() {
+        // An unrecognised tag passes through untouched — the walker is
+        // best-effort and must never drop data.
+        let out = render_bytes_reply(
+            serde_json::json!({"Unknown": {"x": 1}}),
+            &read_result_schema(),
+        );
+        assert_eq!(out, serde_json::json!({"Unknown": {"x": 1}}));
+    }
+
+    #[tokio::test]
+    async fn resolve_bytes_nested_in_enum_struct_variant() {
+        // A `$text` embed inside an enum struct variant resolves to a byte
+        // array — the request-side mirror of the render regression.
+        let out = resolve_bytes_params(
+            serde_json::json!({"Ok": {"bytes": {"$text": "hi"}}}),
+            &read_result_schema(),
+            NO_CAP,
+        )
+        .await
+        .expect("$text embed nested in enum struct variant resolves");
+        assert_eq!(out, serde_json::json!({"Ok": {"bytes": [104, 105]}}));
     }
 
     #[test]
