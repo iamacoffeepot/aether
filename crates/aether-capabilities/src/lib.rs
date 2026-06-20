@@ -49,6 +49,10 @@ mod config_env;
 pub mod dag;
 pub mod engine;
 pub mod fs;
+// `aether.nfs` sharded filesystem actor (ADR-0120, issue 2098). First slice:
+// read-only instanced actor standing beside the `aether.fs` monolith; boot-
+// declared instances registered in `with_common_caps` via `Builder::with_instance`.
+pub mod nfs;
 // `aether.gemini` content-gen cap (ADR-0050, issue 1015). Native-only
 // for the same reason as `anthropic`.
 #[cfg(not(target_arch = "wasm32"))]
@@ -166,6 +170,10 @@ pub use lifecycle::LifecycleConfig;
 pub use lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 
 pub use fs::FsCapability;
+// ADR-0120 `aether.nfs` sharded filesystem actor (issue 2098).
+pub use nfs::NfsInstance;
+#[cfg(not(target_family = "wasm"))]
+pub use nfs::NfsRoot;
 // ADR-0050 `aether.gemini` cap (issue 1015).
 #[cfg(not(target_arch = "wasm32"))]
 pub use gemini::{GeminiCapability, GeminiConfig};
