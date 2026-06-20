@@ -146,27 +146,3 @@ pub use aether_data::{
 // `Addressable::Resolver`, and the `Singleton` / `Instanced` marker traits
 // derive from it by blanket impl — so the only `aether_actor::{Singleton,
 // Instanced}` surface now is the trait (re-exported via `actor::*` above).
-
-/// Wrap one-or-more items in `#[cfg(not(target_arch = "wasm32"))]`.
-/// Issue 552 stage 4's wasm-header-only build of `aether-capabilities`
-/// gates per-cap native imports + helpers + impls behind that cfg;
-/// this macro compresses what would otherwise be 5-7 sprinkled
-/// attributes per cap file into one block per native-only chunk.
-///
-/// ```ignore
-/// aether_actor::native_only! {
-///     use aether_substrate::chassis::error::BootError;
-///     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-///
-///     fn put_error_to_handle_error(e: PutError) -> HandleError { ... }
-/// }
-/// ```
-///
-/// expands to each `$item` annotated with `#[cfg(not(target_arch = "wasm32"))]`.
-/// Pure mechanical wrap — no clever cfg, no feature flags.
-#[macro_export]
-macro_rules! native_only {
-    ($($item:item)*) => {
-        $( #[cfg(not(target_arch = "wasm32"))] $item )*
-    };
-}
