@@ -2,19 +2,14 @@
 // to the wasm32 host-fn ABI (`_p32` convention, ADR-0024).
 #![allow(clippy::cast_possible_truncation)]
 
-//! Concrete FFI ctx structs — [`WasmInitCtx`] / [`WasmCtx`] / [`WasmDropCtx`].
+//! Concrete wasm ctx structs — [`WasmInitCtx`] / [`WasmCtx`] / [`WasmDropCtx`].
 //!
-//! Replaces the pre-issue-663 parametric `Ctx<'a, T>` / `InitCtx<'a, T>` /
-//! `DropCtx<'a, T>` aliases. The ctx interface is now spelled by the
-//! per-stage capability traits in [`crate::actor::ctx`]; these structs
-//! are concrete impls that route outbound calls through the
-//! per-concern bridge functions in `crate::ffi::bridge::mail` and
-//! `crate::ffi::bridge::persist`.
-//!
-//! Issue 665 retired the `transport: &'a FfiTransport` field along
-//! with the `FfiTransport` ZST and `MailTransport` trait — ctxs hold
-//! per-mail state only (mailbox id at init; reply target at receive),
-//! and dispatch goes through the bridge functions directly.
+//! The ctx interface is spelled by the per-stage capability traits in
+//! [`crate::actor::ctx`]; these structs are concrete impls that route
+//! outbound calls through the per-concern bridge functions in
+//! `crate::wasm::bridge::mail` and `crate::wasm::bridge::persist`.
+//! Ctxs hold per-mail state only (mailbox id at init; reply target at
+//! receive), and dispatch goes through the bridge functions directly.
 
 use core::marker::PhantomData;
 use core::ptr;
@@ -29,12 +24,12 @@ use crate::actor::{
     Addressable, HandlesKind, Instanced, NamespaceError, Singleton, Subname,
     validate_namespace_segment,
 };
-use crate::ffi::bridge::{mail, persist};
-use crate::ffi::inline::InlineRegistry;
-use crate::ffi::mailbox::WasmActorMailbox;
-use crate::ffi::{BootError, ErasedFfiActor, WasmActor};
 use crate::mail::ReplyHandle;
 use crate::mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
+use crate::wasm::bridge::{mail, persist};
+use crate::wasm::inline::InlineRegistry;
+use crate::wasm::mailbox::WasmActorMailbox;
+use crate::wasm::{BootError, ErasedWasmActor, WasmActor};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -408,11 +403,11 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         config: &A::Config,
     ) -> Result<MailboxId, SpawnError>
     where
-        // `ErasedFfiActor` is the boxing seam every `#[actor]` type emits
+        // `ErasedWasmActor` is the boxing seam every `#[actor]` type emits
         // (ADR-0096) — the registry stores the child as `dyn
-        // ErasedFfiActor`, so the bound is the mechanical realisation of
+        // ErasedWasmActor`, so the bound is the mechanical realisation of
         // "reuse the existing erasure" (no new child-dispatch trait).
-        A: Instanced + WasmActor + ErasedFfiActor,
+        A: Instanced + WasmActor + ErasedWasmActor,
     {
         let (is_counter, full_subname) = resolve_subname(subname)?;
         let alias = MailboxId(mail::spawn_inline_child(is_counter, &full_subname));
@@ -557,7 +552,7 @@ impl<'a, M: ReplyMode> WasmCtx<'a, M> {
     /// actor's own id as the send's `from`. The by-id escape hatch for a
     /// recipient address known only at runtime (the typed-token counterpart
     /// is [`Self::send`]; the by-name counterpart is
-    /// [`crate::actor::ctx::MailSender::send_to_named`]). Routes through the
+    /// [`MailSender::send_to_named`]). Routes through the
     /// inline registry and inherits the handler's causal chain like every
     /// ctx send.
     pub fn send_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
@@ -604,7 +599,7 @@ fn install_inline_child<A>(
     config: A::Config,
 ) -> Result<MailboxId, SpawnError>
 where
-    A: WasmActor + ErasedFfiActor,
+    A: WasmActor + ErasedWasmActor,
 {
     let mut ctx = WasmInitCtx::__new(alias.0);
     match A::init(config, &mut ctx) {
@@ -804,7 +799,7 @@ impl<'a> WasmDropCtx<'a> {
     }
 
     /// Not part of the public API; called only by the dehydrate compose
-    /// (`crate::ffi::inline::compose`). `save_state` records into `capture`
+    /// (`crate::wasm::inline::compose`). `save_state` records into `capture`
     /// rather than the host import, so the composite can be assembled
     /// before a single real host `save_state`.
     #[doc(hidden)]
@@ -955,15 +950,15 @@ mod tests {
     use crate::Addressable;
     use crate::actor::Subname;
     use crate::actor::ctx::OutboundReply;
-    use crate::ffi::inline::RouteDecision;
-    use crate::ffi::{BootError, ErasedFfiActor, WasmActor, WasmDropCtx, WasmInitCtx};
     use crate::mail::{Mail, PriorState};
+    use crate::wasm::inline::RouteDecision;
+    use crate::wasm::{BootError, ErasedWasmActor, WasmActor, WasmDropCtx, WasmInitCtx};
     use aether_data::MailboxId;
     use alloc::string::String;
     use core::mem::{align_of, size_of};
 
     /// Test inline child whose `init` always fails — drives the
-    /// [`SpawnError::InitFailed`] path. The `ErasedFfiActor` dispatch
+    /// [`SpawnError::InitFailed`] path. The `ErasedWasmActor` dispatch
     /// hooks are unreachable: a failed `init` never registers or
     /// dispatches the child.
     struct FailingChild;
@@ -988,7 +983,7 @@ mod tests {
         type State = ();
     }
 
-    impl ErasedFfiActor for FailingChild {
+    impl ErasedWasmActor for FailingChild {
         fn erased_namespace(&self) -> &'static str {
             Self::NAMESPACE
         }
@@ -1099,7 +1094,7 @@ mod tests {
         type State = ();
     }
 
-    impl ErasedFfiActor for SucceedingChild {
+    impl ErasedWasmActor for SucceedingChild {
         fn erased_namespace(&self) -> &'static str {
             Self::NAMESPACE
         }

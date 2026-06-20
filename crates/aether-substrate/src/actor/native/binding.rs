@@ -28,9 +28,8 @@
 //!
 //! Capabilities build their `NativeBinding` at boot and pass
 //! `&self.transport` (or thread it through to a worker) wherever a
-//! `&NativeBinding` is needed. The FFI guest path rides
-//! [`aether_actor::ffi::bridge`] static ZSTs (`MAIL`, `PERSIST`,
-//! `SYNC_WAIT`) instead — issue 665 retired the cross-target
+//! `&NativeBinding` is needed. The wasm guest path rides
+//! [`aether_actor::wasm::bridge`] free functions instead — issue 665 retired the cross-target
 //! `MailTransport` trait that previously unified them, so each side
 //! exposes its own dispatch surface and the per-stage capability
 //! traits in `aether_actor::actor::ctx` are the only cross-target

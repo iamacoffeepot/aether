@@ -7,12 +7,12 @@
 //! its own bodies — there are no default-impl bodies because the
 //! cross-target dispatch trait that backed them (`MailTransport`)
 //! retired in 665. Each side calls its dispatch surface inline:
-//! FFI bodies call `crate::ffi::bridge::mail::send_mail`, native bodies hit
+//! FFI bodies call `crate::wasm::bridge::mail::send_mail`, native bodies hit
 //! `NativeBinding`'s inherent `send_mail`.
 //!
 //! `actor::<R>()` / `resolve_actor::<R>(name)` retired from this trait
 //! because the returned typed-mailbox handle is per-side
-//! ([`crate::ffi::WasmActorMailbox<R>`] vs `NativeActorMailbox<'a, R>`).
+//! ([`crate::wasm::WasmActorMailbox<R>`] vs `NativeActorMailbox<'a, R>`).
 //! Each ctx provides them as inherent methods returning its own
 //! per-side type; the everyday user-facing `ctx.actor::<R>().send(&payload)`
 //! chain is unchanged. Generic-bounded code that needs cross-impl

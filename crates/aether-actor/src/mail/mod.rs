@@ -12,7 +12,7 @@
 //! Issue 665 retired the `MailTransport` trait that previously sat at
 //! `transport.rs` here. Per-stage capability traits in
 //! [`crate::actor::ctx`] are the only cross-target trait surface;
-//! per-target dispatch goes through [`crate::ffi::bridge`] (FFI) and
+//! per-target dispatch goes through [`crate::wasm::bridge`] (wasm) and
 //! the inherent methods on `aether_substrate::actor::native::binding::NativeBinding`
 //! (native).
 

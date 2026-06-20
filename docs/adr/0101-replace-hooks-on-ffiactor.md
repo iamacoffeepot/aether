@@ -10,7 +10,7 @@
 
 Those two hooks are the same lifecycle-hook shape as `wire` / `unwire`, which already sit on `WasmActor` as default-no-op methods an actor overrides if it cares (ADR-0015, "the default hook is a no-op"). The replace hooks are the outlier: split into a subtrait reached through an `export!` flag.
 
-A multi-actor module (ADR-0096) boxes each instance as `Slot<Box<dyn ErasedFfiActor>>`. `ErasedFfiActor` (`aether-actor/src/ffi/mod.rs`) erases `erased_namespace` / `erased_dispatch` / `erased_wire` / `erased_unwire` only — not the replace hooks — so a boxed instance has no route to its concrete replace logic. The multi-actor `export!` arm therefore ships the save / `on_rehydrate_p32` exports as no-ops, and every `replace_component` on a multi-actor module resets the instance to a fresh `init`.
+A multi-actor module (ADR-0096) boxes each instance as `Slot<Box<dyn ErasedWasmActor>>`. `ErasedWasmActor` (`aether-actor/src/wasm/mod.rs`) erases `erased_namespace` / `erased_dispatch` / `erased_wire` / `erased_unwire` only — not the replace hooks — so a boxed instance has no route to its concrete replace logic. The multi-actor `export!` arm therefore ships the save / `on_rehydrate_p32` exports as no-ops, and every `replace_component` on a multi-actor module resets the instance to a fresh `init`.
 
 The host already supports the full swap. The trampoline's `handle_replace` (`aether-capabilities/src/trampoline.rs`) threads the resident instance's `type_tag` through `Component::instantiate` → `init_typed_p32`, reconstructing the same exported type the trampoline loaded; it runs `old.unwire()`, then the old instance's save hook, lifts any saved-state bundle, and calls `new.call_on_rehydrate(bundle)`. The save / `on_rehydrate_p32` exports are resolved as `Option<TypedFunc>` and invoked unconditionally when present. The missing surface is guest-side.
 
@@ -24,9 +24,9 @@ Make `on_dehydrate` / `on_rehydrate` default-no-op methods on `WasmActor`, besid
 
 1. **`WasmActor` gains two lifecycle hooks.** `fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {}` and `fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {}`, default no-op, beside `wire` / `unwire`. `WasmDropCtx` carries `Persistence::save_state` (so `on_dehydrate` serializes there); `WasmCtx` carries the send surface — the ctx types the hooks already used as `Replaceable`.
 
-2. **`ErasedFfiActor` gains the erased pair.** `erased_on_dehydrate(&mut self, &mut WasmDropCtx<'_>)` and `erased_on_rehydrate(&mut self, &mut WasmCtx<'_>, PriorState<'_>)`, joining `erased_wire` / `erased_unwire`. The concrete ctx types keep the trait object-safe.
+2. **`ErasedWasmActor` gains the erased pair.** `erased_on_dehydrate(&mut self, &mut WasmDropCtx<'_>)` and `erased_on_rehydrate(&mut self, &mut WasmCtx<'_>, PriorState<'_>)`, joining `erased_wire` / `erased_unwire`. The concrete ctx types keep the trait object-safe.
 
-3. **`#[actor]` forwards them uniformly.** Every `ErasedFfiActor` impl forwards the erased pair to the type's `WasmActor::on_dehydrate` / `on_rehydrate` — the same unconditional forwarding it already emits for `wire` / `unwire`. No flag, no per-type branch.
+3. **`#[actor]` forwards them uniformly.** Every `ErasedWasmActor` impl forwards the erased pair to the type's `WasmActor::on_dehydrate` / `on_rehydrate` — the same unconditional forwarding it already emits for `wire` / `unwire`. No flag, no per-type branch.
 
 4. **Both `export!` arms emit one shim shape.** The single-actor and multi-actor `on_dehydrate` / `on_rehydrate_p32` exports route to the instance's hooks — directly for single-actor, through the box for multi-actor. The single-actor `replaceable` / `no_replaceable` split and the multi-actor no-ops collapse into one forwarding shape that derives the rehydrate ctx's self-mailbox id from the instance's namespace.
 

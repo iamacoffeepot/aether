@@ -9,7 +9,7 @@
 //!   ctxs only).
 //!
 //! The concrete ctx structs live next to their transport: FFI-side
-//! `WasmInitCtx` / `WasmCtx` / `WasmDropCtx` in [`crate::ffi::ctx`];
+//! `WasmInitCtx` / `WasmCtx` / `WasmDropCtx` in [`crate::wasm::ctx`];
 //! native-side `NativeInitCtx` / `NativeCtx` in
 //! `aether_substrate::actor::native::ctx`. Each impls the trait
 //! subset applicable to its stage; default-impl bodies on

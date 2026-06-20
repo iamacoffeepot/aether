@@ -47,7 +47,7 @@ pub use session::TcpSessionActor;
 // types (native-only) so they live inside the native bridge mod
 // and only re-export under `not(target_arch = "wasm32")`. The
 // actor markers themselves (above) are always-on so wasm callers
-// can name them in [`TcpFfiExt::listener`] / [`TcpFfiExt::session`]
+// can name them in [`TcpWasmExt::listener`] / [`TcpWasmExt::session`]
 // type parameters.
 #[cfg(not(target_arch = "wasm32"))]
 pub use listener::TcpListenerConfig;
@@ -57,7 +57,7 @@ pub use session::TcpSessionConfig;
 use aether_actor::{Addressable, WasmActorMailbox};
 use aether_data::{ActorId, Tag, fold_lineage, with_tag};
 // Always-on imports — every kind named in the ext-trait helpers
-// must be reachable from wasm too so the `TcpFfiExt` impl
+// must be reachable from wasm too so the `TcpWasmExt` impl
 // compiles under `--target wasm32-unknown-unknown
 // --no-default-features` (issue 832 acceptance criteria).
 use aether_kinds::{
@@ -108,7 +108,7 @@ fn session_mailbox_id(cap_carry: u64, listener_name: &str, session_name: &str) -
 ///
 /// 2. Peer resolvers — [`listener::<R>`](Self::listener) and
 ///    [`session::<R>`](Self::session). Mirror
-///    [`crate::component::ComponentHostFfiExt::loaded`] (issue 654):
+///    [`crate::component::ComponentHostWasmExt::loaded`] (issue 654):
 ///    the "aether.tcp.listener:" / "aether.tcp.session:" prefixes live
 ///    in exactly two methods in the workspace — these — so a future
 ///    namespace rename touches one constant ([`TcpListenerActor::NAMESPACE`]
@@ -123,7 +123,7 @@ fn session_mailbox_id(cap_carry: u64, listener_name: &str, session_name: &str) -
 /// The generic escape hatch is unaffected: `mailbox.send(&CustomKind { .. })`
 /// still works for any `K` the cap declares via `HandlesKind<K>`, since
 /// `send` is an inherent method on the underlying mailbox type.
-pub trait TcpFfiExt {
+pub trait TcpWasmExt {
     /// Mail `aether.tcp.bind_listener { addr, name }` to the cap.
     /// Reply: `BindListenerResult`. Pass `name = None` to let the cap
     /// default the subname to the bound port (typically with `addr =
@@ -178,7 +178,7 @@ pub trait TcpFfiExt {
     ) -> WasmActorMailbox<'_, R>;
 }
 
-impl TcpFfiExt for WasmActorMailbox<'_, TcpCapability> {
+impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
     //noinspection DuplicatedCode
     fn bind_listener(&self, addr: &str, name: Option<&str>) {
         self.send(&BindListener {
@@ -233,12 +233,12 @@ impl TcpFfiExt for WasmActorMailbox<'_, TcpCapability> {
 
 /// Sender-side facade for native cap-to-cap callers addressing
 /// [`TcpCapability`] through a `ctx.actor::<TcpCapability>()` handle
-/// that returns a [`NativeActorMailbox`]. Same shape as [`TcpFfiExt`]
+/// that returns a [`NativeActorMailbox`]. Same shape as [`TcpWasmExt`]
 /// on the wasm transport — split into two traits because the listener /
 /// session peer resolvers return [`NativeActorMailbox<'a, R>`] here
 /// (with a transport-binding lifetime) vs [`WasmActorMailbox<R>`] on
 /// FFI, and a single trait can't carry both signatures. The precedent
-/// is [`crate::component::ComponentHostFfiExt`] /
+/// is [`crate::component::ComponentHostWasmExt`] /
 /// [`crate::component::ComponentHostNativeExt`] (issue 654).
 #[cfg(not(target_arch = "wasm32"))]
 pub trait TcpNativeExt {
@@ -262,14 +262,14 @@ pub trait TcpNativeExt {
     fn session_close(&self, listener_name: &str, session_name: &str);
 
     /// Resolve a typed listener-instance mailbox. See
-    /// [`TcpFfiExt::listener`] for the addressing rationale; the
+    /// [`TcpWasmExt::listener`] for the addressing rationale; the
     /// returned handle inherits the parent mailbox's `'a` binding ref
     /// so `.send::<K>(&mail)` dispatches through the same
     /// `NativeBinding` without re-threading the ctx.
     fn listener<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R>;
 
     /// Resolve a typed session-instance mailbox. See
-    /// [`TcpFfiExt::session`] for the addressing rationale.
+    /// [`TcpWasmExt::session`] for the addressing rationale.
     fn session<R: Addressable>(
         &self,
         listener_name: &str,

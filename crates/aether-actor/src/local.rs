@@ -187,7 +187,7 @@ fn current_slots() -> Option<*const ActorSlots> {
 /// that hosts exactly one actor in its address space (the wasm guest — the
 /// linear memory *is* the actor). The `unsafe impl Sync` is licensed by that
 /// single logical thread, the same argument behind `crate::Slot` and
-/// `crate::ffi::inline::InlineRegistry`.
+/// `crate::wasm::inline::InlineRegistry`.
 struct StaticBackend(ActorSlots);
 
 // SAFETY: a single-actor image runs on one logical thread (the wasm linear

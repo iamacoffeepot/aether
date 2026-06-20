@@ -13,7 +13,7 @@
 //! with the same wasm at the same mailbox id keeps the count instead of
 //! resetting to the fresh-`init` zero. `Sidecar` is a second trivial
 //! export that makes this a genuine multi-actor module
-//! (`export!(Counter, Sidecar)`), exercising the boxed `ErasedFfiActor`
+//! (`export!(Counter, Sidecar)`), exercising the boxed `ErasedWasmActor`
 //! hot-swap path.
 
 // `#[handler]` / `#[fallback]` methods take `&mut self` to match the
@@ -72,7 +72,7 @@ impl WasmActor for Counter {
 }
 
 /// Sibling export — present only to make the module genuinely
-/// multi-actor, so the swap exercises the boxed `ErasedFfiActor` path.
+/// multi-actor, so the swap exercises the boxed `ErasedWasmActor` path.
 /// `Instanced` so it mirrors the `multi_actor` precedent; carries a
 /// `#[fallback]` so its capability group is observably distinct.
 pub struct Sidecar;

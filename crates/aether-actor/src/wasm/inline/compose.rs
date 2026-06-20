@@ -25,11 +25,11 @@ use alloc::vec::Vec;
 
 use aether_data::{Kind, MailboxId};
 
-use crate::ffi::ctx::{CapturedState, NO_INBOUND_SOURCE, WasmDropCtx, WasmInitCtx};
-use crate::ffi::inline::InlineRegistry;
-use crate::ffi::inline::bundle::{self, ChildEntry};
-use crate::ffi::{ErasedFfiActor, WasmActor, WasmCtx};
 use crate::mail::PriorState;
+use crate::wasm::ctx::{CapturedState, NO_INBOUND_SOURCE, WasmDropCtx, WasmInitCtx};
+use crate::wasm::inline::InlineRegistry;
+use crate::wasm::inline::bundle::{self, ChildEntry};
+use crate::wasm::{ErasedWasmActor, WasmActor, WasmCtx};
 
 /// Run the parent's `on_dehydrate` and every inline child's, packing one
 /// composite migration bundle (ADR-0114 §5).
@@ -126,7 +126,7 @@ pub struct InlineChildToReconstruct<'a> {
 ///
 /// `run_parent_rehydrate` runs the freshly-`init`ed parent instance's
 /// `on_rehydrate` with the parent's saved `(version, bytes)` rebuilt as a
-/// [`crate::PriorState`]. `registry` is the component's inline-child
+/// [`PriorState`]. `registry` is the component's inline-child
 /// registry (the `export!`-emitted `static __AETHER_INLINE`), forwarded to
 /// each `reconstruct_child` call. `reconstruct_child` is the codegen
 /// callback that re-`init`s one child by type tag, restores its state, and
@@ -160,7 +160,7 @@ pub fn reconstruct_inline_children(
             // An unknown type tag (a replace that dropped a child type) or
             // a failed re-`init`: skip it. The codegen callback has already
             // logged; nothing else to do for this entry.
-            crate::__macro_internals::tracing::warn!(
+            tracing::warn!(
                 target = "aether_actor::inline",
                 alias = to_reconstruct.alias.0,
                 type_tag = to_reconstruct.type_tag,
@@ -188,7 +188,7 @@ pub fn reconstruct_one_child<A>(
     to_reconstruct: &InlineChildToReconstruct<'_>,
 ) -> bool
 where
-    A: WasmActor + ErasedFfiActor,
+    A: WasmActor + ErasedWasmActor,
 {
     // The child's config isn't part of the migration bundle; re-`init`
     // from empty config bytes, the same shape the legacy zero-config
@@ -238,10 +238,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{InlineRegistry, compose_dehydrate, reconstruct_inline_children};
-    use crate::ffi::ctx::WasmDropCtx;
-    use crate::ffi::inline::bundle;
-    use crate::ffi::{ErasedFfiActor, WasmCtx};
     use crate::mail::{Mail, PriorState};
+    use crate::wasm::ctx::WasmDropCtx;
+    use crate::wasm::inline::bundle;
+    use crate::wasm::{ErasedWasmActor, WasmCtx};
     use aether_data::MailboxId;
     use alloc::boxed::Box;
     use alloc::string::String;
@@ -255,7 +255,7 @@ mod tests {
         tag: u32,
     }
 
-    impl ErasedFfiActor for SavingChild {
+    impl ErasedWasmActor for SavingChild {
         fn erased_namespace(&self) -> &'static str {
             "test.inline.saving_child"
         }
@@ -347,7 +347,7 @@ mod tests {
         // Build a composite with a parent blob + two children directly
         // through the bundle helpers. The callback only records, so the
         // registry threaded in is never inserted into here.
-        use crate::ffi::inline::bundle::{ChildEntry, compose};
+        use crate::wasm::inline::bundle::{ChildEntry, compose};
 
         const TAG_KNOWN: u64 = 0xBEEF;
         const TAG_UNKNOWN: u64 = 0xDEAD;

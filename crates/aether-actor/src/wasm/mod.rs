@@ -1,18 +1,18 @@
-//! FFI-actor binding layer. The contract: any host that exposes the
-//! `_p32`-suffixed import surface (today: the wasm runtime in
-//! `aether-substrate::actor::wasm`; future: a C host, an OS-process
-//! host, ...) can drive an actor through this module.
+//! Wasm guest binding layer — the SDK a wasm32 actor compiles against
+//! to speak the `_p32`-suffixed host-fn import surface the substrate's
+//! wasm runtime provides.
 //!
 //! Surface:
 //!
 //!   - [`raw`] — `extern "C"` host-fn imports + host-target panic
-//!     stubs (the only place the `_p32` symbols are named).
+//!     stubs (the only place the `_p32` symbols are named). These are
+//!     the literal FFI boundary: ABI names (`init`, `receive_p32`,
+//!     `_p32` suffix, `aether.kinds.inputs`, `aether.namespace`) are
+//!     an on-the-wire contract the substrate's wasm runtime expects and
+//!     are deliberately unchanged.
 //!   - [`bridge`] — per-concern free-function modules (`bridge::mail`,
 //!     `bridge::persist`). Each module owns one FFI op family and
-//!     forwards calls to the matching `raw::*` host fn. Issue 665 split
-//!     the prior monolithic `MailTransport`-impl ZST into these per-concern
-//!     modules so persistence isn't mixed with mail; issue 1967 collapsed
-//!     the per-module ZST + static packaging into free functions.
+//!     forwards calls to the matching `raw::*` host fn.
 //!   - [`WasmInitCtx`] / [`WasmCtx`] / [`WasmDropCtx`] — concrete per-stage
 //!     ctx structs, each impling the relevant subset of the per-stage
 //!     capability traits in [`crate::actor::ctx`].
@@ -28,29 +28,19 @@
 //!     lifecycle shims plus the `aether.kinds.inputs` /
 //!     `aether.namespace` custom-section pins.
 //!
-//! Issue 663 renamed this module from `wasm` to `ffi`. The substrate
-//! side keeps the wasm naming (`aether_substrate::actor::wasm`)
-//! because that *is* the wasm runtime; the FFI binding layer here is
-//! generic. Wire-level FFI ABI names (`init`, `receive_p32`,
-//! `_p32` suffix, `aether.kinds.inputs` / `aether.namespace`
-//! link-section names) stay unchanged — they are the on-the-wire
-//! contract substrate's wasm runtime expects.
-//!
 //! No FFI imports are pulled in unconditionally — the host-fn externs
 //! in [`raw`] live behind a `#[cfg(target_family = "wasm")]` block and
 //! the native-target stubs panic if invoked, so the crate compiles
 //! for `cargo test --workspace` on the host without dragging the FFI
 //! surface into the linker.
 //!
-//! Original ADR coverage (history retained for the surfaces these
-//! types still implement): ADR-0012 (typed sinks), ADR-0013 (reply-
-//! to-sender), ADR-0014 (Component trait + Mail), ADR-0015 (lifecycle
-//! hooks), ADR-0016 (state-across-replace), ADR-0024 (`_p32` FFI),
+//! ADR coverage: ADR-0012 (typed sinks), ADR-0013 (reply-to-sender),
+//! ADR-0014 (Component trait + Mail), ADR-0015 (lifecycle hooks),
+//! ADR-0016 (state-across-replace), ADR-0024 (`_p32` FFI),
 //! ADR-0030 (compile-time kind ids), ADR-0033 (`#[actor]`), ADR-0040
-//! (kind-typed state), ADR-0041 (file I/O),
-//! ADR-0043 (HTTP egress), ADR-0045 (typed handles), ADR-0058
-//! (`aether.sink.*` namespace), ADR-0060 (tracing→mail bridge),
-//! ADR-0074 (unified actor model).
+//! (kind-typed state), ADR-0041 (file I/O), ADR-0043 (HTTP egress),
+//! ADR-0045 (typed handles), ADR-0058 (`aether.sink.*` namespace),
+//! ADR-0060 (tracing→mail bridge), ADR-0074 (unified actor model).
 
 use alloc::borrow::Cow;
 use alloc::string::String;
@@ -67,9 +57,8 @@ pub use ctx::{NO_INBOUND_SOURCE, RelativeMailbox, SpawnError, WasmCtx, WasmDropC
 pub use mailbox::WasmActorMailbox;
 
 // Issue 665 retired the `ffi::Mailbox<K>` 1-arg alias and the
-// FFI-flavoured `resolve_mailbox` shim that pinned `T = FfiTransport`.
-// The transport-free [`crate::mail::mailbox::Mailbox<K>`] is now the
-// only `Mailbox` type; the crate-root [`crate::resolve_mailbox`]
+// `resolve_mailbox` shim. The transport-free [`crate::mail::mailbox::Mailbox<K>`]
+// is now the only `Mailbox` type; the crate-root [`crate::resolve_mailbox`]
 // builds it directly.
 
 /// Error returned by [`Lifecycle::init`](crate::Lifecycle::init) when the actor cannot start
@@ -208,7 +197,7 @@ pub trait WasmActor:
 /// Object-safe erasure over a guest [`WasmActor`]'s post-construction
 /// surface (ADR-0096). A multi-actor module — `export!(A, B, …)` —
 /// holds whichever exported type a given instance became in one
-/// `Slot<Box<dyn ErasedFfiActor>>`, and the FFI shims route mail and
+/// `Slot<Box<dyn ErasedWasmActor>>`, and the FFI shims route mail and
 /// lifecycle calls through this trait. `#[actor]` emits the impl per
 /// type, forwarding to the inherent `__aether_dispatch` and the
 /// `WasmActor` lifecycle hooks.
@@ -217,12 +206,12 @@ pub trait WasmActor:
 /// returns `Self`, so it cannot be a trait-object method. The
 /// `export!` multi-actor arm matches the inbound actor-type tag against
 /// each exported type and calls the concrete `T::init` before boxing
-/// the result as a `dyn ErasedFfiActor`.
+/// the result as a `dyn ErasedWasmActor`.
 ///
 /// The hot-swap hooks erase the same way (ADR-0101), so a boxed
 /// multi-actor instance preserves state across `replace_component`
 /// with no multi-actor-specific machinery.
-pub trait ErasedFfiActor {
+pub trait ErasedWasmActor {
     /// The actor type's [`crate::Addressable::NAMESPACE`], so the `receive`
     /// shim can derive the instance's own mailbox id for self-addressing.
     fn erased_namespace(&self) -> &'static str;
@@ -549,8 +538,8 @@ macro_rules! __export_internal {
         // membrane and the dehydrate / rehydrate shims thread
         // `&__AETHER_INLINE` to the inline-child consumers instead of
         // reaching for a crate-global static.
-        static __AETHER_INLINE: $crate::ffi::inline::InlineRegistry =
-            $crate::ffi::inline::InlineRegistry::new();
+        static __AETHER_INLINE: $crate::wasm::inline::InlineRegistry =
+            $crate::wasm::inline::InlineRegistry::new();
 
         // ADR-0033 / issue 442: pin the actor's `aether.kinds.inputs`
         // bytes into the cdylib's wasm custom section. The const data
@@ -610,7 +599,7 @@ macro_rules! __export_internal {
             config_ptr: u32,
             config_len: u32,
         ) -> u32 {
-            $crate::ffi::install_guest_logging();
+            $crate::wasm::install_guest_logging();
             // Build the config slice. Empty-len short-circuits to `&[]`
             // so a null/zero `config_ptr` is not dereferenced — mirrors
             // `PriorState::bytes`.
@@ -641,7 +630,7 @@ macro_rules! __export_internal {
                     );
                     let bytes = msg.as_bytes();
                     unsafe {
-                        $crate::ffi::raw::init_failed(
+                        $crate::wasm::raw::init_failed(
                             bytes.as_ptr().addr() as u32,
                             bytes.len() as u32,
                         );
@@ -668,7 +657,7 @@ macro_rules! __export_internal {
                     let msg = err.message();
                     let bytes = msg.as_bytes();
                     unsafe {
-                        $crate::ffi::raw::init_failed(
+                        $crate::wasm::raw::init_failed(
                             bytes.as_ptr().addr() as u32,
                             bytes.len() as u32,
                         );
@@ -719,7 +708,7 @@ macro_rules! __export_internal {
             __AETHER_INLINE.set_self_id(mailbox_id);
             // ADR-0112: the runtime builds the `Manual` view; `wire`'s
             // default signature is `WasmCtx<'_>` (= Single), so downgrade.
-            let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::ffi::NO_INBOUND_SOURCE);
+            let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
             <$component as $crate::Lifecycle>::wire(instance, ctx.as_single());
             0
         }
@@ -735,7 +724,7 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::ffi::NO_INBOUND_SOURCE);
+            let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
             <$component as $crate::Lifecycle>::unwire(instance, ctx.as_single());
             0
         }
@@ -799,7 +788,7 @@ macro_rules! __export_internal {
                 // membrane gets the same `source` so a mail routed straight to
                 // an inline-child alias (ADR-0114) hands the child its source
                 // too, not just the cluster root.
-                $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, source, move |__aether_mail| {
+                $crate::wasm::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, source, move |__aether_mail| {
                     let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, source);
                     instance.__aether_dispatch(&mut ctx, __aether_mail)
                 })
@@ -810,7 +799,7 @@ macro_rules! __export_internal {
             // inside the per-item `dispatch_own` factory, which the drain
             // hands the item's inbound source (`__aether_source`, issue 1987)
             // so the own-path ctx reads the same source the child path threads.
-            $crate::ffi::inline::drain_cluster_queue(&__AETHER_INLINE, |__aether_source| {
+            $crate::wasm::inline::drain_cluster_queue(&__AETHER_INLINE, |__aether_source| {
                 move |__aether_mail| {
                     // SAFETY: re-acquired fresh per drained item; the prior
                     // iteration's borrow has already dropped (the membrane
@@ -831,11 +820,11 @@ macro_rules! __export_internal {
         /// free (`new_size == 0`). The substrate allocates a small region once
         /// at instantiate and a large region on demand, writes the payload, and
         /// calls the entry point (`receive` / `init_with_config` /
-        /// `on_rehydrate`). Backed by [`$crate::ffi::guest_alloc`].
+        /// `on_rehydrate`). Backed by [`$crate::wasm::guest_alloc`].
         ///
         /// # Safety
         /// Called by the substrate per the layout contract; see
-        /// [`$crate::ffi::guest_alloc::realloc_bytes`].
+        /// [`$crate::wasm::guest_alloc::realloc_bytes`].
         #[cfg(target_family = "wasm")]
         #[unsafe(export_name = "realloc_p32")]
         pub unsafe extern "C" fn realloc_p32(
@@ -847,7 +836,7 @@ macro_rules! __export_internal {
             // SAFETY: see `guest_alloc::realloc_bytes`. wasm32 pointers are
             // 32-bit; a null result (free, or allocation failure) maps to 0.
             unsafe {
-                $crate::ffi::guest_alloc::realloc_bytes(
+                $crate::wasm::guest_alloc::realloc_bytes(
                     old_ptr as *mut u8,
                     old_size as usize,
                     align as usize,
@@ -881,7 +870,7 @@ macro_rules! __export_internal {
             // composite is byte-identical to the parent's own blob, so a
             // childless component dehydrates exactly as before; a parent
             // that saves nothing and has no children skips the host save.
-            if let Some((version, bytes)) = $crate::ffi::inline::compose::compose_dehydrate(
+            if let Some((version, bytes)) = $crate::wasm::inline::compose::compose_dehydrate(
                 mailbox_id,
                 &__AETHER_INLINE,
                 |ctx| <$component as $crate::WasmActor>::on_dehydrate(instance, ctx),
@@ -923,12 +912,12 @@ macro_rules! __export_internal {
                 // ABI); the slice is bounded by this call.
                 unsafe { ::core::slice::from_raw_parts(ptr as usize as *const u8, len as usize) }
             };
-            $crate::ffi::inline::compose::reconstruct_inline_children(
+            $crate::wasm::inline::compose::reconstruct_inline_children(
                 version,
                 prior_bytes,
                 &__AETHER_INLINE,
                 |parent_version, parent_bytes| {
-                    let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::ffi::NO_INBOUND_SOURCE);
+                    let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
                     // SAFETY: `parent_bytes` lives for this closure call;
                     // `PriorState::__from_ptr` bounds the slice to it.
                     let parent_prior = unsafe {
@@ -967,7 +956,7 @@ macro_rules! __export_internal {
                 .0
             {
                 __aether_reconstructed =
-                    $crate::ffi::inline::compose::reconstruct_one_child::<$candidate>(
+                    $crate::wasm::inline::compose::reconstruct_one_child::<$candidate>(
                         $registry, $child,
                     );
             }
@@ -978,7 +967,7 @@ macro_rules! __export_internal {
 
 /// ADR-0096: FFI shims for a multi-actor module — `export!(A, B, …)`.
 ///
-/// One module-level `Slot<Box<dyn ErasedFfiActor>>` holds whichever
+/// One module-level `Slot<Box<dyn ErasedWasmActor>>` holds whichever
 /// exported type the instance became. Two construction entry points:
 ///
 /// - `init_with_config_p32` (the existing 3-arg ABI) constructs the
@@ -991,7 +980,7 @@ macro_rules! __export_internal {
 ///   resolve an export selector to a tag (the follow-on PR).
 ///
 /// `receive` / `wire` / `unwire` / `on_dehydrate` / `on_rehydrate` all
-/// route through the boxed `ErasedFfiActor`, so a multi-actor instance
+/// route through the boxed `ErasedWasmActor`, so a multi-actor instance
 /// preserves state across `replace_component` exactly as a single-actor
 /// one does (ADR-0101). The `aether.kinds.inputs` section carries every
 /// exported type's records, each preceded by an `ActorBoundary`
@@ -1004,7 +993,7 @@ macro_rules! __export_internal {
 macro_rules! __export_multi_internal {
     (@entry $entry:ty ; @all $($component:ty),+) => {
         static __AETHER_MULTI: $crate::Slot<
-            $crate::__macro_internals::Box<dyn $crate::ErasedFfiActor>
+            $crate::__macro_internals::Box<dyn $crate::ErasedWasmActor>
         > = $crate::Slot::new();
 
         // ADR-0114: the module's own inline-child registry — one per
@@ -1012,8 +1001,8 @@ macro_rules! __export_multi_internal {
         // and the dehydrate / rehydrate shims thread `&__AETHER_INLINE` to
         // the inline-child consumers instead of reaching for a crate-global
         // static.
-        static __AETHER_INLINE: $crate::ffi::inline::InlineRegistry =
-            $crate::ffi::inline::InlineRegistry::new();
+        static __AETHER_INLINE: $crate::wasm::inline::InlineRegistry =
+            $crate::wasm::inline::InlineRegistry::new();
 
         // ADR-0096: per-actor `aether.kinds.inputs` section. Each
         // exported type's records are preceded by an
@@ -1101,7 +1090,7 @@ macro_rules! __export_multi_internal {
             config_ptr: u32,
             config_len: u32,
         ) -> u32 {
-            $crate::ffi::install_guest_logging();
+            $crate::wasm::install_guest_logging();
             let config_bytes: &[u8] = if config_len == 0 {
                 &[]
             } else {
@@ -1135,7 +1124,7 @@ macro_rules! __export_multi_internal {
             config_ptr: u32,
             config_len: u32,
         ) -> u32 {
-            $crate::ffi::install_guest_logging();
+            $crate::wasm::install_guest_logging();
             let config_bytes: &[u8] = if config_len == 0 {
                 &[]
             } else {
@@ -1157,7 +1146,7 @@ macro_rules! __export_multi_internal {
                     return $crate::__export_multi_internal!(@construct $component, mailbox_id, config_bytes);
                 }
             )+
-            $crate::ffi::stage_init_failure(
+            $crate::wasm::stage_init_failure(
                 "guest init: unknown actor-type tag for multi-actor module",
             );
             1
@@ -1173,9 +1162,9 @@ macro_rules! __export_multi_internal {
             // here, idempotently, so the cluster self-identity is set even if
             // a future host calls `wire` without a prior init on this slot).
             __AETHER_INLINE.set_self_id(mailbox_id);
-            // ADR-0112: the boxed `ErasedFfiActor` seam carries the `Manual`
+            // ADR-0112: the boxed `ErasedWasmActor` seam carries the `Manual`
             // view; the synthesized impl downgrades to `Single` per hook.
-            let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::ffi::NO_INBOUND_SOURCE);
+            let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
             instance.erased_wire(&mut ctx);
             0
         }
@@ -1186,16 +1175,16 @@ macro_rules! __export_multi_internal {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                 return 1;
             };
-            // ADR-0112: the boxed `ErasedFfiActor` seam carries the `Manual`
+            // ADR-0112: the boxed `ErasedWasmActor` seam carries the `Manual`
             // view; the synthesized impl downgrades to `Single` per hook.
-            let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::ffi::NO_INBOUND_SOURCE);
+            let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
             instance.erased_unwire(&mut ctx);
             0
         }
 
         /// # Safety
         /// FFI receive contract (ADR-0024); routes through the boxed
-        /// `ErasedFfiActor`. Self-mailbox id derived from the live
+        /// `ErasedWasmActor`. Self-mailbox id derived from the live
         /// instance's namespace. The trailing `recipient: u64` (ADR-0114
         /// decision #1) carries the routed mailbox through to `Mail`.
         #[cfg(target_family = "wasm")]
@@ -1231,7 +1220,7 @@ macro_rules! __export_multi_internal {
             // ADR-0114: same receive membrane as the single-actor arm —
             // own id dispatches the entry/boxed type, an inline-child
             // alias dispatches the co-located child. ADR-0112: the boxed
-            // `ErasedFfiActor` seam carries the `Manual` view; the
+            // `ErasedWasmActor` seam carries the `Manual` view; the
             // synthesized impl downgrades to `Single` per hook. The
             // top-level dispatch's borrow is scoped so it is released before
             // the cluster-queue drain, which re-acquires the instance fresh
@@ -1247,7 +1236,7 @@ macro_rules! __export_multi_internal {
                 // membrane gets the same `source` so a mail routed straight to
                 // an inline-child alias (ADR-0114) hands the child its source
                 // too, not just the cluster root.
-                $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, source, move |__aether_mail| {
+                $crate::wasm::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, source, move |__aether_mail| {
                     let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, source);
                     instance.erased_dispatch(&mut ctx, __aether_mail)
                 })
@@ -1257,7 +1246,7 @@ macro_rules! __export_multi_internal {
             // boxed instance inside the per-item `dispatch_own` factory, which
             // the drain hands the item's inbound source (`__aether_source`,
             // issue 1987) so the own-path ctx matches the child path.
-            $crate::ffi::inline::drain_cluster_queue(&__AETHER_INLINE, |__aether_source| {
+            $crate::wasm::inline::drain_cluster_queue(&__AETHER_INLINE, |__aether_source| {
                 move |__aether_mail| {
                     // SAFETY: re-acquired fresh per drained item; the prior
                     // iteration's borrow has dropped (the membrane returned).
@@ -1283,7 +1272,7 @@ macro_rules! __export_multi_internal {
             new_size: u32,
         ) -> u32 {
             unsafe {
-                $crate::ffi::guest_alloc::realloc_bytes(
+                $crate::wasm::guest_alloc::realloc_bytes(
                     old_ptr as *mut u8,
                     old_size as usize,
                     align as usize,
@@ -1296,7 +1285,7 @@ macro_rules! __export_multi_internal {
         /// # Safety
         /// Called by the substrate exactly once, on the old instance,
         /// immediately before a `replace_component` swap. Routes through
-        /// the boxed `ErasedFfiActor` to the live type's
+        /// the boxed `ErasedWasmActor` to the live type's
         /// [`$crate::WasmActor::on_dehydrate`] (ADR-0101).
         #[cfg(target_family = "wasm")]
         #[unsafe(no_mangle)]
@@ -1315,7 +1304,7 @@ macro_rules! __export_multi_internal {
             // composite, then `save_state` once (the boxed instance's
             // dehydrate routes through `erased_on_dehydrate`). Childless ⇒
             // byte-identical to the boxed parent's own blob.
-            if let Some((version, bytes)) = $crate::ffi::inline::compose::compose_dehydrate(
+            if let Some((version, bytes)) = $crate::wasm::inline::compose::compose_dehydrate(
                 mailbox_id,
                 &__AETHER_INLINE,
                 |ctx| instance.erased_on_dehydrate(ctx),
@@ -1330,7 +1319,7 @@ macro_rules! __export_multi_internal {
         /// Called by the substrate after `init` on a freshly
         /// instantiated replacement, with `(version, ptr, len)`
         /// describing the prior-state bundle the old instance produced.
-        /// Routes through the boxed `ErasedFfiActor` to the live type's
+        /// Routes through the boxed `ErasedWasmActor` to the live type's
         /// [`$crate::WasmActor::on_rehydrate`] (ADR-0101). Self-mailbox id
         /// derived from the live instance's namespace.
         #[cfg(target_family = "wasm")]
@@ -1354,14 +1343,14 @@ macro_rules! __export_multi_internal {
                 // ABI); the slice is bounded by this call.
                 unsafe { ::core::slice::from_raw_parts(ptr as usize as *const u8, len as usize) }
             };
-            $crate::ffi::inline::compose::reconstruct_inline_children(
+            $crate::wasm::inline::compose::reconstruct_inline_children(
                 version,
                 prior_bytes,
                 &__AETHER_INLINE,
                 |parent_version, parent_bytes| {
-                    // ADR-0112: the boxed `ErasedFfiActor` seam carries the
+                    // ADR-0112: the boxed `ErasedWasmActor` seam carries the
                     // `Manual` view; the synthesized impl downgrades per hook.
-                    let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::ffi::NO_INBOUND_SOURCE);
+                    let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
                     // SAFETY: `parent_bytes` lives for this closure call.
                     let parent_prior = unsafe {
                         $crate::PriorState::__from_ptr(
@@ -1389,7 +1378,7 @@ macro_rules! __export_multi_internal {
         >::decode_from_bytes($config_bytes) {
             ::core::option::Option::Some(c) => c,
             ::core::option::Option::None => {
-                $crate::ffi::stage_init_failure(::core::concat!(
+                $crate::wasm::stage_init_failure(::core::concat!(
                     "guest init: ",
                     ::core::stringify!($ty),
                     " could not decode Config from bytes",
@@ -1403,13 +1392,13 @@ macro_rules! __export_multi_internal {
                 unsafe {
                     __AETHER_MULTI.set(
                         $crate::__macro_internals::Box::new(instance)
-                            as $crate::__macro_internals::Box<dyn $crate::ErasedFfiActor>,
+                            as $crate::__macro_internals::Box<dyn $crate::ErasedWasmActor>,
                     );
                 }
                 0
             }
             ::core::result::Result::Err(err) => {
-                $crate::ffi::stage_init_failure(err.message());
+                $crate::wasm::stage_init_failure(err.message());
                 1
             }
         }
