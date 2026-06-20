@@ -43,6 +43,8 @@ This is a large re-cut. It is built **adjacent** — the new sharded actors stan
 
 **5. Identity is the caller's naming policy; the filesystem is identity-agnostic.** An instance maps a token to bytes; it does not impose what the token *means*. A file names itself by path; the compute cache names derived data by content-hash; a caller may hand its own id. Cross-caller dedup is the caller's responsibility — deterministic callers (the DAG, by content-hash) get it by construction; the filesystem does not dedup what it does not interpret.
 
+**6. Roots and configuration.** Each instance is backed by **exactly one root, owned exclusively** — no two instances share a directory, and (per invariant 4) nothing outside the engine writes it. A root is **per-instance configuration** resolved through the ADR-0090 derive-`Config` path (`argv > env > default`), carrying the instance's `{ root, writable, cache policy }`. This is ADR-0041's `NamespaceRoots` re-expressed as one config per instance rather than one capability holding a namespace→root map. The **set of instances and their roots is a chassis boot decision** — which namespaces exist is configured at boot, the same way ADR-0041 §2 registers namespaces, not hardcoded. Every path is **normalized relative to its instance's root** (`..` and absolute prefixes rejected), carrying ADR-0041 §2's per-root sandbox forward unchanged.
+
 ### Trajectory above the floor (follow-on ADRs, recorded here for fit)
 
 These are **not** decided by this ADR. They are the direction the floor is shaped to admit, each deserving its own ADR once the floor stands:
@@ -64,7 +66,7 @@ These are **not** decided by this ADR. They are the direction the floor is shape
 ### Negative
 
 - **The `Ref` wire grows an owner.** A self-routing handle carries `owner: MailboxId`, abandoning the compact two-id form of ADR-0045 §1. Sharding buys parallelism at the cost of a fatter ref.
-- **Two coexisting systems during migration.** Adjacent-first means the old handle store and the new instances both exist until callers move over; the transition surface is real.
+- **Two coexisting systems during migration.** Adjacent-first means the old handle store and the old `aether.fs` both exist alongside the new instances until callers move over. The ADR-0079 namespace guard (a namespace string is owned by one `TypeId`) blocks the new type from claiming `aether.fs` while the monolith holds it, so the new instances run under a transition namespace and the cutover renames the const as it deletes the monolith. Because the namespace claim and the backing root are independent, a **read-only** namespace (`assets`) parallel-runs cleanly — two readers on one directory are fine — but a **writable** namespace (`save` / `config` / `cache`) cannot have two live owners on one root (the write-race invariant 4 forbids it), so its migration is a flip-cutover rather than a parallel run.
 - **Automatic cross-caller dedup is gone.** An identity-agnostic store cannot dedup bytes it does not interpret; callers that want shared cache entries must agree on a token.
 - **Cross-shard moves are explicit.** Bringing a source into the compute instance is a deliberate `copy` (or a pipeline source step), not transparent — correct under the single-owner rule, but more verbose than a global store.
 
