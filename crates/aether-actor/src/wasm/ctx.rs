@@ -19,7 +19,7 @@ use aether_data::{Kind, MailboxId, mailbox_id_from_name};
 use crate::actor::ctx::mail_sender::MailSender;
 use crate::actor::ctx::outbound_reply::OutboundReply;
 use crate::actor::ctx::persistence::Persistence;
-use crate::actor::ctx::reply_mode::{Manual, ReplyMode, Single, Stream};
+use crate::actor::ctx::reply_mode::{Manual, ReplyMode, Single};
 use crate::actor::{
     Addressable, HandlesKind, Instanced, NamespaceError, Singleton, Subname,
     validate_namespace_segment,
@@ -243,18 +243,6 @@ impl<'a> WasmCtx<'a, Manual> {
         // capability, never adds it.
         unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, Single>>() }
     }
-
-    /// ADR-0112 forward-only coercion to the reserved [`Stream`] view.
-    /// `#[handler::stream]` is rejected by the macro today, so this has
-    /// no in-tree caller yet; it exists so the stream class has its
-    /// downgrade path the day the emit surface lands.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn as_stream(&mut self) -> &mut WasmCtx<'a, Stream> {
-        // SAFETY: same as `as_single` — `M` is `PhantomData`-only, so the
-        // marker swap is a layout-identity reborrow.
-        unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, Stream>>() }
-    }
 }
 
 impl<M: ReplyMode> WasmCtx<'_, M> {
@@ -265,21 +253,6 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     #[doc(hidden)]
     pub fn __set_reply_to(&mut self, sender: Option<ReplyHandle>) {
         self.sender = sender.map(ReplyHandle::raw);
-    }
-
-    /// Reply with an explicit `sender` + cached `KindId<K>`.
-    ///
-    /// Prefer the trait surface: [`OutboundReply::reply`] replies to the
-    /// dispatcher-stamped sender (a no-op when there's none), and
-    /// [`OutboundReply::reply_to`] takes an explicit [`ReplyHandle`]. Both
-    /// derive the kind from `K::ID`, so the cached `KindId<K>` argument
-    /// here is redundant.
-    #[deprecated(
-        note = "use OutboundReply::reply / reply_to; ADR-0100 dropped the Serialize bound"
-    )]
-    pub fn reply_kind<K: Kind>(&self, sender: ReplyHandle, kind: KindId<K>, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        mail::reply_mail(sender.raw(), kind.raw(), &bytes, 1, self.mailbox);
     }
 
     /// Reply target for the mail currently being dispatched. Mirrors
@@ -1139,7 +1112,7 @@ mod tests {
 
     /// ADR-0112: the mode marker is layout-neutral — the `Single` and
     /// `Manual` views have identical size + alignment. This is the
-    /// invariant the `as_single` / `as_stream` pointer reborrows rest on.
+    /// invariant the `as_single` pointer reborrow rests on.
     #[test]
     fn ffi_ctx_layout_identical_across_modes() {
         assert_eq!(

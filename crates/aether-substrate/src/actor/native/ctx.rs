@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aether_actor::actor::ctx::{MailSender, OutboundReply};
-use aether_actor::{Addressable, HandlesKind, Manual, ReplyMode, Single, Singleton, Stream};
+use aether_actor::{Addressable, HandlesKind, Manual, ReplyMode, Single, Singleton};
 use core::marker::PhantomData;
 use core::ptr;
 
@@ -210,18 +210,6 @@ impl<'a> NativeCtx<'a, Manual> {
         // The reborrow swaps the marker without touching any real field and
         // only removes capability, never adds it.
         unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, Single>>() }
-    }
-
-    /// ADR-0112 forward-only coercion to the reserved [`Stream`] view.
-    /// `#[handler::stream]` is rejected by the macro today, so this has
-    /// no in-tree caller yet; it exists so the stream class has its
-    /// downgrade path the day the emit surface lands.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn as_stream(&mut self) -> &mut NativeCtx<'a, Stream> {
-        // SAFETY: same as `as_single` — `M` is `PhantomData`-only, so the
-        // marker swap is a layout-identity reborrow.
-        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, Stream>>() }
     }
 
     /// #1757: the per-dispatch constructor — moves the single dispatched
@@ -1300,7 +1288,7 @@ mod tests {
 
     /// ADR-0112: the mode marker is layout-neutral — the `Single` and
     /// `Manual` views have identical size + alignment. This is the
-    /// invariant the `as_single` / `as_stream` pointer reborrows rest on.
+    /// invariant the `as_single` pointer reborrow rests on.
     #[test]
     fn native_ctx_layout_identical_across_modes() {
         use std::mem::{align_of, size_of};

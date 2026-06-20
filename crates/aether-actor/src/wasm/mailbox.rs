@@ -22,7 +22,7 @@
 
 use core::marker::PhantomData;
 
-use aether_data::{ActorId, Kind, Tag, fold_lineage, mailbox_id_from_name, with_tag};
+use aether_data::{ActorId, Kind, Tag, fold_lineage, with_tag};
 
 use crate::actor::{Addressable, HandlesKind};
 use crate::wasm::inline::InlineRegistry;
@@ -89,30 +89,12 @@ impl<'a, R> WasmActorMailbox<'a, R> {
     /// Rewrap a precomputed `mailbox` id as a typed peer handle that
     /// inherits this handle's ctx binding (`sender` + inline registry), so
     /// the rewrapped handle's sends stamp the same origin and route the
-    /// same way. The by-id counterpart of [`Self::resolve_peer`], for a cap
-    /// that folds a child / session id itself rather than resolving by name.
+    /// same way. The by-id counterpart of [`Self::resolve_peer_scoped`], for
+    /// a cap that folds a child / session id itself rather than resolving by
+    /// name.
     #[must_use]
     pub fn at<Peer>(&self, mailbox: u64) -> WasmActorMailbox<'a, Peer> {
         WasmActorMailbox::__new(mailbox, self.sender, self.inline)
-    }
-
-    /// Resolve a sibling mailbox on the same transport, addressed by
-    /// `name`. Same FNV-hash name resolution as
-    /// [`crate::wasm::WasmCtx::resolve_actor`] — `name` must be the peer's
-    /// **full registered name** (flat ADR-0029 hash). A caller that needs
-    /// a lineage-folded child id (ADR-0099 §3) uses
-    /// [`Self::resolve_peer_scoped`] instead. Kept as an inherent
-    /// method so cap-owned ext traits (which only have a mailbox in
-    /// hand, not a ctx) can hand back peer handles without rethreading
-    /// the ctx. The resolving actor's `sender` + inline registry ride
-    /// through, so the peer handle's sends stamp the same origin and
-    /// route the same way.
-    // Runtime-name escape hatch (the by-name peer-resolution counterpart of
-    // `WasmCtx::resolve_actor`): the peer name is supplied at runtime.
-    #[must_use]
-    #[allow(clippy::disallowed_methods)]
-    pub fn resolve_peer<Peer: Addressable>(&self, name: &str) -> WasmActorMailbox<'a, Peer> {
-        WasmActorMailbox::__new(mailbox_id_from_name(name).0, self.sender, self.inline)
     }
 
     /// Resolve a child mailbox of *this* actor, where the child is the

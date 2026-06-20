@@ -24,8 +24,6 @@ use core::marker::PhantomData;
 
 use aether_data::{Kind, MailboxId, Schema, wire};
 
-use crate::mail::mailbox::KindId;
-
 /// Sentinel the substrate passes as the reply-handle parameter on
 /// the `receive` shim when there is no reply target — for
 /// component-originated mail (no Claude session involved) and for
@@ -109,7 +107,7 @@ pub struct Mail<'a> {
     _borrow: PhantomData<&'a [u8]>,
 }
 
-impl<'a> Mail<'a> {
+impl Mail<'_> {
     /// Not part of the public API; called only by `export!`. The FFI
     /// delivers `ptr` as a wasm32 offset (`u32`); this widens it.
     #[doc(hidden)]
@@ -158,9 +156,9 @@ impl<'a> Mail<'a> {
         }
     }
 
-    /// Raw kind id the substrate routed this mail under. Match against
-    /// a cached `KindId<K>` via `kind_id.matches(mail.kind())`, or use
-    /// `decode::<K>(kind_id)` and let it be the discriminator.
+    /// Raw kind id the substrate routed this mail under. The canonical
+    /// way to consume it is [`Self::decode_kind::<K>()`], which matches
+    /// the kind id and decodes in one call.
     #[must_use]
     pub fn kind(&self) -> u64 {
         self.kind
@@ -211,116 +209,16 @@ impl<'a> Mail<'a> {
         MailboxId(self.recipient)
     }
 
-    /// Decode as a single owned `K`. Returns `None` if the kind does
-    /// not match or if `count` is not 1. Copies rather than borrows so
-    /// alignment of the underlying bytes doesn't matter.
-    #[must_use]
-    pub fn decode<K: Kind + bytemuck::AnyBitPattern>(&self, kind_id: KindId<K>) -> Option<K> {
-        if !kind_id.matches(self.kind) || self.count != 1 {
-            return None;
-        }
-        let byte_len = size_of::<K>();
-        // SAFETY: `self.ptr` / `self.byte_len` originate from the
-        // substrate's receive ABI (`Mail::__from_raw` / `__from_ptr`),
-        // which guarantees the substrate wrote `self.byte_len >=
-        // size_of::<K>()` bytes valid at `self.ptr` for the lifetime
-        // of this `Mail`. `'a` ties the borrow to that lifetime.
-        let bytes = unsafe { slice::from_raw_parts(self.ptr as *const u8, byte_len) };
-        Some(bytemuck::pod_read_unaligned(bytes))
-    }
-
-    /// Decode as a zero-copy slice of `K`. Returns `None` if the kind
-    /// does not match or the bytes are not aligned for `K`. The
-    /// returned slice borrows from actor linear memory for the
-    /// lifetime of this `Mail`.
-    #[must_use]
-    pub fn decode_slice<K: Kind + bytemuck::AnyBitPattern>(
-        &self,
-        kind_id: KindId<K>,
-    ) -> Option<&'a [K]> {
-        if !kind_id.matches(self.kind) {
-            return None;
-        }
-        let byte_len = size_of::<K>() * self.count as usize;
-        // SAFETY: `self.ptr` / `self.byte_len` originate from the
-        // substrate's receive ABI; the substrate guarantees at least
-        // `size_of::<K>() * self.count` bytes valid at `self.ptr` for
-        // the lifetime of this `Mail`. `'a` ties the returned slice
-        // to that lifetime; `try_cast_slice` returns `None` on
-        // alignment mismatch.
-        let bytes = unsafe { slice::from_raw_parts(self.ptr as *const u8, byte_len) };
-        bytemuck::try_cast_slice(bytes).ok()
-    }
-
-    /// True if the inbound mail's kind id matches `<K as Kind>::ID`
-    /// (ADR-0030 compile-time hash). Zero-cost — just a `u64` compare
-    /// against a const. Useful as the discriminator before deciding
-    /// how to handle a kind, or as a signal check when `K` is a
-    /// zero-sized input marker like `Tick` / `MouseButton`.
-    #[must_use]
-    pub fn is<K: Kind>(&self) -> bool {
-        self.kind == K::ID.0
-    }
-
-    /// Type-driven sibling of `decode`: takes `K` as a type parameter
-    /// and uses `<K as Kind>::ID` directly (ADR-0030 compile-time hash),
-    /// so no `KindId<K>` thread-through is needed. Returns `None` if
-    /// the inbound kind doesn't match `K::ID`, if `count != 1`, or
-    /// if `byte_len` doesn't equal `size_of::<K>()` (a sender/receiver
-    /// schema-skew guard the substrate's frame metadata makes free).
-    /// Copies rather than borrows so alignment of the underlying bytes
-    /// doesn't matter — same semantics as `decode`.
-    #[must_use]
-    pub fn decode_typed<K: Kind + bytemuck::AnyBitPattern>(&self) -> Option<K> {
-        if self.kind != K::ID.0 || self.count != 1 {
-            return None;
-        }
-        let byte_len = size_of::<K>();
-        if self.byte_len as usize != byte_len {
-            return None;
-        }
-        // SAFETY: `self.ptr` / `self.byte_len` originate from the
-        // substrate's receive ABI; the `byte_len` check above proves
-        // the host promised exactly `size_of::<K>()` bytes valid at
-        // `self.ptr` for this `Mail`'s lifetime.
-        let bytes = unsafe { slice::from_raw_parts(self.ptr as *const u8, byte_len) };
-        Some(bytemuck::pod_read_unaligned(bytes))
-    }
-
-    /// Type-driven sibling of `decode_slice`. Borrowed, alignment
-    /// required (returns `None` if misaligned).
-    #[must_use]
-    pub fn decode_slice_typed<K: Kind + bytemuck::AnyBitPattern>(&self) -> Option<&'a [K]> {
-        if self.kind != K::ID.0 {
-            return None;
-        }
-        let byte_len = size_of::<K>() * self.count as usize;
-        if self.byte_len as usize != byte_len {
-            return None;
-        }
-        // SAFETY: `self.ptr` / `self.byte_len` originate from the
-        // substrate's receive ABI; the `byte_len` check above proves
-        // the host promised `size_of::<K>() * count` bytes valid at
-        // `self.ptr` for this `Mail`'s lifetime. `try_cast_slice`
-        // returns `None` on alignment mismatch.
-        let bytes = unsafe { slice::from_raw_parts(self.ptr as *const u8, byte_len) };
-        bytemuck::try_cast_slice(bytes).ok()
-    }
-
     /// Decode a single inbound `K` via the wire shape `K`'s `Kind`
     /// derive baked into `Kind::decode_from_bytes` — cast for
     /// `#[repr(C)]` + `Pod` types, postcard for schema-shaped types.
     /// This is the canonical receive-side decode and what the
-    /// `#[actor]` dispatcher calls on every typed handler;
-    /// `decode` / `decode_typed` / `decode_slice` / `decode_slice_typed`
-    /// remain as low-level escape hatches for fallback handlers that
-    /// want explicit wire-shape control.
+    /// `#[actor]` dispatcher calls on every typed handler.
     ///
     /// Hands `K::decode_from_bytes` exactly `byte_len` bytes from
     /// `ptr` so the decoder is bounded by the substrate-written
     /// frame and can't read past it into adjacent linear memory.
-    /// Returns `None` on kind mismatch, on `count != 1` (batch
-    /// receives go through `decode_slice_typed`), or when
+    /// Returns `None` on kind mismatch, on `count != 1`, or when
     /// `K::decode_from_bytes` itself returns `None` — which can be
     /// either the default body for hand-rolled `Kind` impls that
     /// didn't override, a cast-size mismatch, or a postcard decode
@@ -451,29 +349,13 @@ mod tests {
     use alloc::vec::Vec;
     use serde::{Deserialize, Serialize};
 
-    // The local `crate::mail::mailbox::KindId<K>` shadows the
-    // crate-level `aether_data::KindId` newtype; tests construct the
-    // raw newtype via the aliased import to keep both available.
-
     /// Hand-rolled `Kind` with a stable test sentinel id so the
-    /// decode tests can fabricate matching `Mail` frames without
+    /// decode tests can fabricate mismatched `Mail` frames without
     /// depending on a real schema-hashed id.
     struct FakeKind;
     impl Kind for FakeKind {
         const NAME: &'static str = "test.fake";
         const ID: DataKindId = DataKindId(0xDEAD_BEEF_0001_0001);
-    }
-
-    /// Cast-shape Pod kind for the slice / single-decode happy paths.
-    #[repr(C)]
-    #[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-    struct FakePod {
-        a: u32,
-        b: u32,
-    }
-    impl Kind for FakePod {
-        const NAME: &'static str = "test.fake_pod";
-        const ID: DataKindId = DataKindId(0xDEAD_BEEF_0001_0002);
     }
 
     /// Postcard-shape kind for the schema-driven `decode_kind` path.
@@ -497,57 +379,6 @@ mod tests {
     // variants rely on the `bytes()` / `decode*` accessors honouring
     // the `len == 0` early-return rather than forming a slice over the
     // null pointer.
-
-    #[test]
-    fn mail_decode_single_roundtrip() {
-        let value = FakePod { a: 5, b: 9 };
-        let ptr_raw = (&raw const value).addr();
-        let byte_len = size_of::<FakePod>() as u32;
-        // SAFETY: see module-level test fixture justification above.
-        let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 1, NO_REPLY_HANDLE, 0) };
-        let kind: KindId<FakePod> = KindId::__new(7);
-        let out = mail
-            .decode(kind)
-            .expect("test setup: matching kind id decodes");
-        assert_eq!(out, value);
-    }
-
-    #[test]
-    fn mail_decode_wrong_kind_returns_none() {
-        let value = FakePod { a: 5, b: 9 };
-        let ptr_raw = (&raw const value).addr();
-        let byte_len = size_of::<FakePod>() as u32;
-        // SAFETY: see module-level test fixture justification above.
-        let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 1, NO_REPLY_HANDLE, 0) };
-        let wrong: KindId<FakePod> = KindId::__new(8);
-        assert!(mail.decode(wrong).is_none());
-    }
-
-    #[test]
-    fn mail_decode_wrong_count_returns_none() {
-        let values = [FakePod { a: 5, b: 9 }, FakePod { a: 1, b: 1 }];
-        let ptr_raw = values.as_ptr().addr();
-        let byte_len = (size_of::<FakePod>() * 2) as u32;
-        // SAFETY: see module-level test fixture justification above.
-        let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 2, NO_REPLY_HANDLE, 0) };
-        let kind: KindId<FakePod> = KindId::__new(7);
-        // `decode` requires count == 1; use `decode_slice` for batches.
-        assert!(mail.decode(kind).is_none());
-    }
-
-    #[test]
-    fn mail_decode_slice_roundtrip() {
-        let values = [FakePod { a: 1, b: 2 }, FakePod { a: 3, b: 4 }];
-        let ptr_raw = values.as_ptr().addr();
-        let byte_len = (size_of::<FakePod>() * 2) as u32;
-        // SAFETY: see module-level test fixture justification above.
-        let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 2, NO_REPLY_HANDLE, 0) };
-        let kind: KindId<FakePod> = KindId::__new(7);
-        let out = mail
-            .decode_slice(kind)
-            .expect("test setup: matching kind id decodes slice");
-        assert_eq!(out, &values);
-    }
 
     #[test]
     fn mail_sender_none_for_sentinel_handle() {
@@ -607,65 +438,6 @@ mod tests {
         let prior = unsafe { PriorState::__from_ptr(3, buf.as_ptr().addr(), buf.len()) };
         assert_eq!(prior.schema_version(), 3);
         assert_eq!(prior.bytes(), &buf);
-    }
-
-    #[test]
-    fn mail_is_typed_matches_kind_id() {
-        // SAFETY: no pointer is dereferenced (`is::<K>` reads `kind`).
-        let mail = unsafe { Mail::__from_ptr(FakeKind::ID.0, 0, 0, 0, NO_REPLY_HANDLE, 0) };
-        assert!(mail.is::<FakeKind>());
-        assert!(!mail.is::<FakePod>());
-    }
-
-    #[test]
-    fn mail_decode_typed_roundtrip() {
-        let value = FakePod { a: 5, b: 9 };
-        let ptr_raw = (&raw const value).addr();
-        let byte_len = size_of::<FakePod>() as u32;
-        // SAFETY: see module-level test fixture justification above.
-        let mail =
-            unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE, 0) };
-        let out = mail
-            .decode_typed::<FakePod>()
-            .expect("test setup: matching kind id decodes typed");
-        assert_eq!(out, value);
-    }
-
-    #[test]
-    fn mail_decode_typed_wrong_kind_returns_none() {
-        let value = FakePod { a: 5, b: 9 };
-        let ptr_raw = (&raw const value).addr();
-        let byte_len = size_of::<FakePod>() as u32;
-        // Kind id deliberately mismatched (FakeKind instead of FakePod).
-        // SAFETY: see module-level test fixture justification above.
-        let mail =
-            unsafe { Mail::__from_ptr(FakeKind::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE, 0) };
-        assert!(mail.decode_typed::<FakePod>().is_none());
-    }
-
-    #[test]
-    fn mail_decode_typed_wrong_count_returns_none() {
-        let values = [FakePod { a: 5, b: 9 }, FakePod { a: 1, b: 1 }];
-        let ptr_raw = values.as_ptr().addr();
-        let byte_len = (size_of::<FakePod>() * 2) as u32;
-        // SAFETY: see module-level test fixture justification above.
-        let mail =
-            unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 2, NO_REPLY_HANDLE, 0) };
-        assert!(mail.decode_typed::<FakePod>().is_none());
-    }
-
-    #[test]
-    fn mail_decode_slice_typed_roundtrip() {
-        let values = [FakePod { a: 1, b: 2 }, FakePod { a: 3, b: 4 }];
-        let ptr_raw = values.as_ptr().addr();
-        let byte_len = (size_of::<FakePod>() * 2) as u32;
-        // SAFETY: see module-level test fixture justification above.
-        let mail =
-            unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 2, NO_REPLY_HANDLE, 0) };
-        let out = mail
-            .decode_slice_typed::<FakePod>()
-            .expect("test setup: matching kind id decodes typed slice");
-        assert_eq!(out, &values);
     }
 
     #[test]
@@ -816,33 +588,6 @@ mod tests {
             )
         };
         assert!(mail.decode_kind::<FakeKind>().is_none());
-    }
-
-    #[test]
-    fn mail_decode_typed_byte_len_mismatch_returns_none() {
-        // Cast decode now sanity-checks byte_len against
-        // `size_of::<K>() * count`. If the substrate ever delivers a
-        // mail whose declared byte_len doesn't match the kind's size,
-        // decode bails rather than reading the wrong window.
-        let value = FakePod { a: 5, b: 9 };
-        let ptr_raw = (&raw const value).addr();
-        let bogus_byte_len = (size_of::<FakePod>() + 4) as u32;
-        // SAFETY: the bogus `byte_len` is intentional; `decode_typed`
-        // detects the size mismatch and returns `None` before reading.
-        // The pointer is still valid for `size_of::<FakePod>()` bytes
-        // (the `value` allocation), so even if decode did read it
-        // would touch only valid memory.
-        let mail = unsafe {
-            Mail::__from_ptr(
-                FakePod::ID.0,
-                ptr_raw,
-                bogus_byte_len,
-                1,
-                NO_REPLY_HANDLE,
-                0,
-            )
-        };
-        assert!(mail.decode_typed::<FakePod>().is_none());
     }
 
     // ADR-0040 typed-state framing. `DropCtx::save_state_kind` can't be
