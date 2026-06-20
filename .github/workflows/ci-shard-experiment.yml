@@ -1,0 +1,70 @@
+name: CI shard experiment
+
+# Throwaway experiment (NOT a merge gate): shard the workspace test suite
+# across N runners via `nextest --partition` and compare the per-shard
+# wall-clock against the single `test` job in ci.yml on the same commit.
+# This job is intentionally absent from ci-pass's `needs:` list, so it can
+# never block a merge. Delete the file once we've read the numbers.
+#
+# Each shard builds the whole workspace in-place (same as today's `test`
+# job) and then runs only its 1/N slice of tests. That duplicates the
+# compile across shards on purpose: the step timings here (`Pre-build
+# wasm` + the compile portion of `Run shard` vs. the nextest-reported
+# execution time) tell us whether the 13-min wall is compile-bound or
+# execution-bound, which decides whether the build-once archive variant
+# is worth the path plumbing.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  shard:
+    name: Test shard ${{ matrix.shard }}/4
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [ 1, 2, 3, 4 ]
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -Clink-arg=-fuse-ld=mold
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          android: 'true'
+          dotnet: 'true'
+          haskell: 'true'
+          swap-storage: 'false'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install Linux deps (ALSA for cpal, Mesa lavapipe for wgpu, mold linker)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+          mesa-vulkan-drivers mold
+      # Shared cache key across all four shards: the build is identical on
+      # every shard, so they all restore the same warm artifacts. Only the
+      # first shard to finish writes the cache back; the rest no-op on save.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: shard-experiment
+      - name: Pre-build component wasm for scenario tests
+        run: cargo xtask dist
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
+      # `--partition count:i/N` builds every test binary, then runs only
+      # this shard's slice. nextest balances by test count, not by crate,
+      # so the heavy fork-contention integration tests spread across shards
+      # instead of all landing on one crate's runner.
+      - name: Run shard (build + partitioned test execution)
+        run: cargo nextest run --all-features --profile ci --partition count:${{ matrix.shard }}/4
+        env:
+          AETHER_REQUIRE_RUNTIME: "1"
