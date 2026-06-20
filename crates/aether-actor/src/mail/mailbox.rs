@@ -10,7 +10,7 @@
 //! `crate::ffi::bridge::mail::send_mail`; native: bodies hit
 //! `NativeBinding`'s inherent `send_mail`).
 //!
-//! Per-side actor-typed mailboxes ([`crate::ffi::FfiActorMailbox<R>`],
+//! Per-side actor-typed mailboxes ([`crate::ffi::WasmActorMailbox<R>`],
 //! `aether_substrate::actor::native::NativeActorMailbox<'a, R>`)
 //! replaced the parametric `ActorMailbox<'a, R, T>` for the
 //! `ctx.actor::<R>().send(&payload)` chain — they're per-target so

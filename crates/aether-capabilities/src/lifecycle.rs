@@ -37,7 +37,7 @@ use std::error::Error;
 use std::fmt;
 use std::marker::PhantomData;
 
-use aether_actor::FfiActorMailbox;
+use aether_actor::WasmActorMailbox;
 use aether_data::{Kind, KindId, MailboxId};
 use aether_kinds::trace::Settled;
 use aether_kinds::{
@@ -66,7 +66,7 @@ pub use native::LifecycleConfig;
 /// Impl'd for both transports `ctx.actor::<LifecycleCapability>()` can
 /// return:
 ///
-/// - [`FfiActorMailbox<LifecycleCapability>`] — always-on, for the §12
+/// - [`WasmActorMailbox<LifecycleCapability>`] — always-on, for the §12
 ///   wasm-component stage-subscribe site.
 /// - [`NativeActorMailbox<'_, LifecycleCapability>`] — native cap-to-cap
 ///   sends, gated on `#[cfg(not(target_arch = "wasm32"))]`.
@@ -106,7 +106,7 @@ pub trait LifecycleMailboxExt {
     fn unsubscribe_for<K: Kind>(&self, mailbox: MailboxId);
 }
 
-impl LifecycleMailboxExt for FfiActorMailbox<'_, LifecycleCapability> {
+impl LifecycleMailboxExt for WasmActorMailbox<'_, LifecycleCapability> {
     fn subscribe<K: Kind>(&self) {
         self.send(&LifecycleSubscribeSelf { stage: K::ID.0 });
     }

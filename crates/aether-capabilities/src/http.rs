@@ -26,7 +26,7 @@ use std::time::Duration;
 #[cfg(feature = "native")]
 #[allow(unused_imports)]
 use crate::config_env::parse_flag;
-use aether_actor::FfiActorMailbox;
+use aether_actor::WasmActorMailbox;
 use aether_kinds::{Fetch, HttpError, HttpHeader, HttpMethod};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::actor::native::NativeActorMailbox;
@@ -239,7 +239,7 @@ fn parse_timeout_millis(s: &str) -> Result<u32, ParseIntError> {
 /// Impl'd for both transports `ctx.actor::<HttpCapability>()` can
 /// return:
 ///
-/// - [`FfiActorMailbox<HttpCapability>`] — always-on, for
+/// - [`WasmActorMailbox<HttpCapability>`] — always-on, for
 ///   wasm-component callers.
 /// - [`NativeActorMailbox<'_, HttpCapability>`] — native cap-to-cap
 ///   sends, gated on `#[cfg(not(target_arch = "wasm32"))]`.
@@ -253,7 +253,7 @@ pub trait HttpMailboxExt {
     fn post(&self, url: &str, body: &[u8]);
 }
 
-impl HttpMailboxExt for FfiActorMailbox<'_, HttpCapability> {
+impl HttpMailboxExt for WasmActorMailbox<'_, HttpCapability> {
     //noinspection DuplicatedCode
     fn get(&self, url: &str) {
         self.send(&Fetch {

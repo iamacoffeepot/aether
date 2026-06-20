@@ -113,14 +113,14 @@ Both are frame-lifecycle stages, subscribed on `aether.lifecycle` from the `wire
 hook:
 
 ```rust
-fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
     let lifecycle = ctx.actor::<LifecycleCapability>();
     lifecycle.subscribe::<Tick>();
     lifecycle.subscribe::<Render>();
 }
 
 #[handler]
-fn on_render(&mut self, ctx: &mut FfiCtx<'_>, _render: Render) {
+fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
     ctx.actor::<RenderCapability>().send_many(&self.triangles);
 }
 ```

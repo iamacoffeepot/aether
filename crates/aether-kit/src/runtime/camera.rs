@@ -45,7 +45,7 @@
 
 use std::collections::HashMap;
 
-use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
+use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
@@ -255,10 +255,10 @@ pub struct CameraComponent {
 ///
 /// Use `capture_frame` between sends to verify each change.
 #[actor]
-impl FfiActor for CameraComponent {
+impl WasmActor for CameraComponent {
     const NAMESPACE: &'static str = "aether.camera";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         let mut cameras = HashMap::new();
         cameras.insert(
             "main".to_owned(),
@@ -291,7 +291,7 @@ impl FfiActor for CameraComponent {
     /// subscribe; the reply warn-drops and the camera simply never
     /// receives `Render` and never submits — a no-op there, where the
     /// render cap discards anyway (ADR-0082 §7 / §11).
-    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         ctx.actor::<InputCapability>().subscribe::<WindowSize>();
         let lifecycle = ctx.actor::<LifecycleCapability>();
         lifecycle.subscribe::<Tick>();
@@ -306,7 +306,7 @@ impl FfiActor for CameraComponent {
     /// # Agent
     /// Tick-driven; not useful to send manually.
     #[handler]
-    fn on_tick(&mut self, _ctx: &mut FfiCtx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, _ctx: &mut WasmCtx<'_>, _tick: Tick) {
         for cam in self.cameras.values_mut() {
             cam.mode.tick();
         }
@@ -321,7 +321,7 @@ impl FfiActor for CameraComponent {
     /// # Agent
     /// Lifecycle-driven; not useful to send manually.
     #[handler]
-    fn on_render(&mut self, ctx: &mut FfiCtx<'_>, _render: Render) {
+    fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
         if let Some(name) = &self.active
             && let Some(cam) = self.cameras.get(name)
         {
@@ -337,7 +337,7 @@ impl FfiActor for CameraComponent {
     /// Publish-subscribe; the substrate pulses this every tick. Not
     /// useful to send manually.
     #[handler]
-    fn on_window_size(&mut self, _ctx: &mut FfiCtx<'_>, size: WindowSize) {
+    fn on_window_size(&mut self, _ctx: &mut WasmCtx<'_>, size: WindowSize) {
         if size.width > 0 && size.height > 0 {
             self.aspect = size.width as f32 / size.height as f32;
         }
@@ -348,7 +348,7 @@ impl FfiActor for CameraComponent {
     /// camera instead. Newly-created cameras are not made active
     /// automatically; pair with `set_active` to switch publishing.
     #[handler]
-    fn on_create(&mut self, _ctx: &mut FfiCtx<'_>, msg: CameraCreate) {
+    fn on_create(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraCreate) {
         if self.cameras.contains_key(&msg.name) {
             tracing::warn!(
                 target: "aether_kit",
@@ -370,7 +370,7 @@ impl FfiActor for CameraComponent {
     /// publishing pauses (no `aether.camera` mail goes out) until
     /// `set_active` picks a survivor.
     #[handler]
-    fn on_destroy(&mut self, _ctx: &mut FfiCtx<'_>, msg: CameraDestroy) {
+    fn on_destroy(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraDestroy) {
         self.cameras.remove(&msg.name);
         if self.active.as_deref() == Some(msg.name.as_str()) {
             self.active = None;
@@ -381,7 +381,7 @@ impl FfiActor for CameraComponent {
     /// `"aether.render"` each tick. Errors (warn-log, no state
     /// change) if `name` isn't bound.
     #[handler]
-    fn on_set_active(&mut self, _ctx: &mut FfiCtx<'_>, msg: CameraSetActive) {
+    fn on_set_active(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraSetActive) {
         if self.cameras.contains_key(&msg.name) {
             self.active = Some(msg.name);
         } else {
@@ -398,7 +398,7 @@ impl FfiActor for CameraComponent {
     /// per-mode compiled defaults. No-op (warn-log) if `name` isn't
     /// bound.
     #[handler]
-    fn on_set_mode(&mut self, _ctx: &mut FfiCtx<'_>, msg: CameraSetMode) {
+    fn on_set_mode(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraSetMode) {
         if let Some(cam) = self.cameras.get_mut(&msg.name) {
             cam.mode = ModeState::from_init(&msg.mode);
         } else {
@@ -415,7 +415,7 @@ impl FfiActor for CameraComponent {
     /// (warn-log) if the camera doesn't exist or is in a different
     /// mode.
     #[handler]
-    fn on_orbit_set(&mut self, _ctx: &mut FfiCtx<'_>, msg: CameraOrbitSet) {
+    fn on_orbit_set(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraOrbitSet) {
         if let Some(cam) = self.cameras.get_mut(&msg.name) {
             match &mut cam.mode {
                 ModeState::Orbit(state) => state.apply(&msg.params),
@@ -439,7 +439,7 @@ impl FfiActor for CameraComponent {
     /// semantics as `orbit.set` for the orthographic mode's `center`
     /// / `extent`.
     #[handler]
-    fn on_topdown_set(&mut self, _ctx: &mut FfiCtx<'_>, msg: CameraTopdownSet) {
+    fn on_topdown_set(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraTopdownSet) {
         if let Some(cam) = self.cameras.get_mut(&msg.name) {
             match &mut cam.mode {
                 ModeState::Topdown(state) => state.apply(&msg.params),
@@ -462,7 +462,7 @@ impl FfiActor for CameraComponent {
 
 #[cfg(test)]
 mod tests {
-    use aether_actor::FfiInitCtx;
+    use aether_actor::WasmInitCtx;
 
     use super::*;
 
@@ -470,7 +470,7 @@ mod tests {
     /// speed must be exactly zero after `init`.
     #[test]
     fn default_camera_boots_with_zero_speed() {
-        let mut ctx = FfiInitCtx::__new(0);
+        let mut ctx = WasmInitCtx::__new(0);
         let comp = <CameraComponent as aether_actor::Lifecycle>::init((), &mut ctx).expect("init");
         let main = comp.cameras.get("main").expect("\"main\" camera present");
         match main.mode {

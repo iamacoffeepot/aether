@@ -35,7 +35,7 @@
 // value to match the dispatch ABI even though it only reads the slot.
 #![allow(clippy::needless_pass_by_value, clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, MailSender, actor};
+use aether_actor::{BootError, MailSender, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::Ref;
 use aether_kinds::{Mat4Apply, Write};
 use aether_math::{Mat4, Vec4};
@@ -50,10 +50,10 @@ use aether_test_fixtures_kinds::{Mat4SourceTrigger, Vec4Observed};
 pub struct MatSource;
 
 #[actor]
-impl FfiActor for MatSource {
+impl WasmActor for MatSource {
     const NAMESPACE: &'static str = "mat4_source";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(MatSource)
     }
 
@@ -67,7 +67,7 @@ impl FfiActor for MatSource {
     /// dispatches `aether.test_fixtures.mat4_source_trigger` and the
     /// reply (`aether.math.mat4_apply`) is the transform input.
     #[handler]
-    fn on_trigger(&mut self, _ctx: &mut FfiCtx<'_>, _trigger: Mat4SourceTrigger) -> Mat4Apply {
+    fn on_trigger(&mut self, _ctx: &mut WasmCtx<'_>, _trigger: Mat4SourceTrigger) -> Mat4Apply {
         Mat4Apply {
             matrix: Mat4::from_cols_array([
                 2.0, 0.0, 0.0, 0.0, //
@@ -88,10 +88,10 @@ impl FfiActor for MatSource {
 pub struct Vec4Observer;
 
 #[actor]
-impl FfiActor for Vec4Observer {
+impl WasmActor for Vec4Observer {
     const NAMESPACE: &'static str = "vec4_observer";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Vec4Observer)
     }
 
@@ -104,7 +104,7 @@ impl FfiActor for Vec4Observer {
     /// Driven only as a DAG `Observer` node — its incoming edge fills the
     /// `Ref<Vec4>` slot with the upstream transform's output.
     #[handler]
-    fn on_observed(&mut self, ctx: &mut FfiCtx<'_>, mail: Vec4Observed) {
+    fn on_observed(&mut self, ctx: &mut WasmCtx<'_>, mail: Vec4Observed) {
         if let Ref::Inline(v) = mail.input {
             ctx.send_to_named::<Write>(
                 "aether.fs",

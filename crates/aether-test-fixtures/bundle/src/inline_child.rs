@@ -49,7 +49,7 @@
 #![allow(clippy::unused_self, clippy::needless_pass_by_value)]
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, FfiInitCtx, Mail, Manual, OutboundReply, Subname, actor,
+    BootError, Mail, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::MailboxId;
 use aether_test_fixtures_kinds::{
@@ -71,7 +71,7 @@ pub struct InlineCounterState {
 
 /// Reply to an `InlineProbe` with the `who` marker of whichever actor
 /// handled it — shared by the basic and despawn parent/child actors.
-fn reply_who(ctx: &mut FfiCtx<'_, Manual>, who: u32) {
+fn reply_who(ctx: &mut WasmCtx<'_, Manual>, who: u32) {
     if ctx.reply_target().is_some() {
         ctx.reply(&InlineEcho { who });
     }
@@ -82,24 +82,24 @@ fn reply_who(ctx: &mut FfiCtx<'_, Manual>, who: u32) {
 pub struct InlineParent;
 
 #[actor]
-impl FfiActor for InlineParent {
+impl WasmActor for InlineParent {
     const NAMESPACE: &'static str = "test.inline.parent";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(InlineParent)
     }
 
     /// ADR-0114: co-locate an `InlineChild` under the `Named` subname
     /// `widget`. The returned alias `MailboxId` is fire-and-forget here —
     /// the `FleetBench` addresses the child by its rendered lineage name.
-    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         let _ = ctx.spawn_inline_child::<InlineChild>(Subname::Named("widget"), &());
     }
 
     /// Answer an `InlineProbe` addressed to the parent's own mailbox with
     /// the parent marker — the membrane's own-id (control) path.
     #[handler::manual]
-    fn on_probe(&mut self, ctx: &mut FfiCtx<'_, Manual>, _probe: InlineProbe) {
+    fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Manual>, _probe: InlineProbe) {
         reply_who(ctx, INLINE_WHO_PARENT);
     }
 }
@@ -110,17 +110,17 @@ impl FfiActor for InlineParent {
 pub struct InlineChild;
 
 #[actor(instanced)]
-impl FfiActor for InlineChild {
+impl WasmActor for InlineChild {
     const NAMESPACE: &'static str = "test.inline.child";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(InlineChild)
     }
 
     /// Answer an `InlineProbe` addressed to the child's alias with the
     /// child marker — the membrane's child-demux path.
     #[handler::manual]
-    fn on_probe(&mut self, ctx: &mut FfiCtx<'_, Manual>, _probe: InlineProbe) {
+    fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Manual>, _probe: InlineProbe) {
         reply_who(ctx, INLINE_WHO_CHILD);
     }
 }
@@ -133,10 +133,10 @@ impl FfiActor for InlineChild {
 pub struct InlineStatefulParent;
 
 #[actor]
-impl FfiActor for InlineStatefulParent {
+impl WasmActor for InlineStatefulParent {
     const NAMESPACE: &'static str = "test.inline.stateful_parent";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(InlineStatefulParent)
     }
 
@@ -144,14 +144,14 @@ impl FfiActor for InlineStatefulParent {
     /// subname `widget`. The child is addressed by its rendered lineage
     /// name (`{parent}/aether.embedded:widget`); the membrane demuxes
     /// the `Bump` / `CountQuery` mail to it.
-    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         let _ = ctx.spawn_inline_child::<InlineStatefulChild>(Subname::Named("widget"), &());
     }
 
     /// The parent ignores mail addressed to its own id — only the child
     /// carries state. A `#[fallback]` keeps the parent a valid receiver.
     #[fallback]
-    fn on_other(&mut self, _ctx: &mut FfiCtx<'_>, _mail: Mail<'_>) {}
+    fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
 }
 
 /// Inline child for the stateful fixture, co-located in the parent's wasm
@@ -163,7 +163,7 @@ pub struct InlineStatefulChild {
 }
 
 #[actor(instanced)]
-impl FfiActor for InlineStatefulChild {
+impl WasmActor for InlineStatefulChild {
     const NAMESPACE: &'static str = "test.inline.stateful_child";
 
     /// ADR-0113: the durable shape. The `#[actor]` macro generates the
@@ -172,7 +172,7 @@ impl FfiActor for InlineStatefulChild {
     /// the composite migration bundle.
     type State = InlineCounterState;
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(InlineStatefulChild { count: 0 })
     }
 
@@ -189,14 +189,14 @@ impl FfiActor for InlineStatefulChild {
     /// Increment the child's in-memory counter (mail demuxed to the
     /// child's alias).
     #[handler]
-    fn on_bump(&mut self, _ctx: &mut FfiCtx<'_>, _bump: Bump) {
+    fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.count += 1;
     }
 
     /// Reply with the live counter so a test can read the child's state
     /// across a swap.
     #[handler::manual]
-    fn on_count_query(&mut self, ctx: &mut FfiCtx<'_, Manual>, _query: CountQuery) {
+    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&CountReport { count: self.count });
         }
@@ -216,17 +216,17 @@ pub struct InlineDespawnParent {
 }
 
 #[actor]
-impl FfiActor for InlineDespawnParent {
+impl WasmActor for InlineDespawnParent {
     const NAMESPACE: &'static str = "test.inline.despawn_parent";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(InlineDespawnParent { child: None })
     }
 
     /// ADR-0114: co-locate an `InlineDespawnChild` under the `Named` subname
     /// `widget` and store the returned alias so the `DespawnChild` handler
     /// can tear it down.
-    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         if let Ok(alias) =
             ctx.spawn_inline_child::<InlineDespawnChild>(Subname::Named("widget"), &())
         {
@@ -238,7 +238,7 @@ impl FfiActor for InlineDespawnParent {
     /// alias route is kept, so a later probe to the now-dead alias settles
     /// back through this parent's dispatch tail rather than leaking.
     #[handler::manual]
-    fn on_despawn(&mut self, ctx: &mut FfiCtx<'_, Manual>, _trigger: DespawnChild) {
+    fn on_despawn(&mut self, ctx: &mut WasmCtx<'_, Manual>, _trigger: DespawnChild) {
         if let Some(child) = self.child {
             let _ = ctx.despawn_inline_child(child);
         }
@@ -248,7 +248,7 @@ impl FfiActor for InlineDespawnParent {
     /// the parent marker — the membrane's own-id (control) path, and the
     /// post-teardown fallthrough target for a probe to the dead child alias.
     #[handler::manual]
-    fn on_probe(&mut self, ctx: &mut FfiCtx<'_, Manual>, _probe: InlineProbe) {
+    fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Manual>, _probe: InlineProbe) {
         reply_who(ctx, INLINE_WHO_PARENT);
     }
 }
@@ -259,24 +259,24 @@ impl FfiActor for InlineDespawnParent {
 pub struct InlineDespawnChild;
 
 #[actor(instanced)]
-impl FfiActor for InlineDespawnChild {
+impl WasmActor for InlineDespawnChild {
     const NAMESPACE: &'static str = "test.inline.despawn_child";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(InlineDespawnChild)
     }
 
     /// Answer an `InlineProbe` addressed to the child's alias with the
     /// child marker — the membrane's child-demux path.
     #[handler::manual]
-    fn on_probe(&mut self, ctx: &mut FfiCtx<'_, Manual>, _probe: InlineProbe) {
+    fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Manual>, _probe: InlineProbe) {
         reply_who(ctx, INLINE_WHO_CHILD);
     }
 
     /// Self-despawn: tear *itself* down mid-dispatch (ADR-0114 reentrant
     /// teardown). The child's own alias is the ctx's mailbox id.
     #[handler::manual]
-    fn on_despawn(&mut self, ctx: &mut FfiCtx<'_, Manual>, _trigger: DespawnChild) {
+    fn on_despawn(&mut self, ctx: &mut WasmCtx<'_, Manual>, _trigger: DespawnChild) {
         let _ = ctx.despawn_inline_child(MailboxId(ctx.mailbox_id()));
     }
 }

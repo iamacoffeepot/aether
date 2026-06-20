@@ -2,7 +2,7 @@
 //!
 //! The `tests/ui/` fixtures exercise the spanned diagnostics the
 //! `#[actor]` macro emits on BOTH direct expansion paths — wasm
-//! (`impl FfiActor for X`) and native (`impl NativeActor for X`) — so a
+//! (`impl WasmActor for X`) and native (`impl NativeActor for X`) — so a
 //! malformed actor block earns a pointed error at the author's code
 //! instead of a downstream type error against a generated impl:
 //!

@@ -1,4 +1,4 @@
-//! Issue 1958: end-to-end proof that a WASM guest's `FfiCtx::source_mailbox()`
+//! Issue 1958: end-to-end proof that a WASM guest's `WasmCtx::source_mailbox()`
 //! correctly surfaces the inbound mail's component origin.
 //!
 //! Uses the `source_observer` test-fixture component — a single-actor module

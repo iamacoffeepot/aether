@@ -56,7 +56,7 @@ use std::time::Duration;
 
 /// The spawn-subname vocabulary, re-exported from `aether-actor`
 /// (ADR-0097). It's shared between native `spawn_child` and the FFI
-/// guest's `FfiCtx::spawn_child`, so it lives in the actor SDK both
+/// guest's `WasmCtx::spawn_child`, so it lives in the actor SDK both
 /// transports depend on; native call sites import it from this path
 /// unchanged. The full mailbox name is `"{A::NAMESPACE}:{subname}"`,
 /// hashed deterministically (ADR-0029) to the returned `MailboxId`.

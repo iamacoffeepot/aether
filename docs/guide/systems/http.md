@@ -139,7 +139,7 @@ arrives later as its own mail, which you receive like any other kind:
 
 ```rust
 #[handler]
-fn on_fetch_result(&mut self, ctx: &mut FfiCtx<'_>, result: FetchResult) {
+fn on_fetch_result(&mut self, ctx: &mut WasmCtx<'_>, result: FetchResult) {
     match result {
         FetchResult::Ok { url, status, body, .. } => { /* url tells you which fetch */ }
         FetchResult::Err { url, error } => { /* branch on error */ }

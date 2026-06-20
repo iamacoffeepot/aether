@@ -18,7 +18,7 @@ use aether_data::Kind;
 use serde::{Deserialize, Serialize};
 
 /// Captures whatever the dehydrate side deposits, standing in for the
-/// substrate-owned migration buffer the real `FfiDropCtx` writes to.
+/// substrate-owned migration buffer the real `WasmDropCtx` writes to.
 #[derive(Default)]
 struct CaptureCtx {
     saved: Option<(u32, Vec<u8>)>,

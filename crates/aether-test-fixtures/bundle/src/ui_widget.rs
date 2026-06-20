@@ -23,7 +23,7 @@
 //! Not a demo — its only job is to expose a realistic per-frame widget
 //! cost to the measurement.
 
-use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
+use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::{DrawSolidQuads, QuadSpace, SolidQuad, Tick};
@@ -34,18 +34,18 @@ pub struct UiWidget {
 }
 
 #[actor]
-impl FfiActor for UiWidget {
+impl WasmActor for UiWidget {
     type Config = UiWidgetConfig;
     const NAMESPACE: &'static str = "test_fixtures_ui_widget";
 
-    fn init(config: UiWidgetConfig, _ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(config: UiWidgetConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(UiWidget { config })
     }
 
     /// `Tick` is a frame-lifecycle stage, so it subscribes on
     /// `aether.lifecycle` (ADR-0082) — the same path a real per-frame
     /// widget uses to be driven each frame.
-    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
     }
 
@@ -56,7 +56,7 @@ impl FfiActor for UiWidget {
     /// it across the boundary every frame — the measured cost adds the
     /// batch build + mail encode + send that host-cached replay removes.
     #[handler]
-    fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _: Tick) {
         if !self.config.redraw_each_tick {
             return;
         }

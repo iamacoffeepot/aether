@@ -5,7 +5,7 @@
 //! the new diagnostics must fire on the malformed shapes, not on every
 //! stateful actor.
 
-use aether_actor::{FfiCtx, actor};
+use aether_actor::{WasmCtx, actor};
 use serde::{Deserialize, Serialize};
 
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize)]
@@ -33,12 +33,12 @@ struct Counter {
 }
 
 #[actor]
-impl aether_actor::FfiActor for Counter {
+impl aether_actor::WasmActor for Counter {
     const NAMESPACE: &'static str = "counter";
 
     type State = CounterState;
 
-    fn init(_ctx: &mut aether_actor::FfiInitCtx<'_>) -> Result<Self, aether_actor::BootError>
+    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::BootError>
     {
         Ok(Counter { count: 0 })
     }
@@ -52,7 +52,7 @@ impl aether_actor::FfiActor for Counter {
     }
 
     #[handler]
-    fn on_bump(&mut self, _ctx: &mut FfiCtx<'_>, bump: Bump) {
+    fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, bump: Bump) {
         self.count += bump.delta;
     }
 }

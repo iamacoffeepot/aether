@@ -68,7 +68,7 @@ The call surface keeps speaking cardinality — `ctx.actor::<R: Singleton>()`, `
 The shape rests on four facts that were checked directly rather than assumed:
 
 1. An overriding trait **can** pin a supertrait's associated **type** (`Addressable<Resolver = …>`), even though it cannot re-default a supertrait's **method** (`E0046`). Types are pinnable where methods are not.
-2. An associated-type equality (`Args = ()`) parked on a marker's **`where`** clause does not elaborate to consumers (`E0308` at the call site). In **supertrait position** it does — the same pattern already used for the `for<'a> Lifecycle<InitCtx<'a> = …>` pin on `FfiActor`.
+2. An associated-type equality (`Args = ()`) parked on a marker's **`where`** clause does not elaborate to consumers (`E0308` at the call site). In **supertrait position** it does — the same pattern already used for the `for<'a> Lifecycle<InitCtx<'a> = …>` pin on `WasmActor`.
 3. The supertrait pin holds when combined with `HandlesKind<K>` across the send surface and with the GAT lifetime on the keyed path: a `R: Singleton + HandlesKind<K>` body calls `R::resolve(carry, ())` and a `resolve_actor::<R>(key: &'k str)` plumbs `Args<'k> = &'k str` to the returned mailbox, neither requiring the bound to be restated.
 4. The boundary is type-safe in both directions: keyless-addressing an `Instanced` actor and keyed-addressing a `Singleton` are each rejected at compile time.
 

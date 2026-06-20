@@ -66,7 +66,7 @@ pub struct SetRender {
 }
 
 /// ADR-0090 c1 typed-config fixture payload. Threaded into the guest
-/// at instantiate-time as `<ProbeWithConfig as FfiActor>::Config`;
+/// at instantiate-time as `<ProbeWithConfig as WasmActor>::Config`;
 /// the actor stamps `seed` and `label` into its state and exposes
 /// them on demand via `ConfigEcho`.
 #[derive(
@@ -195,7 +195,7 @@ pub struct CountQuery;
 /// Reply to `CountQuery`, and the wire shape of the state bundle the
 /// fixture saves in `on_dehydrate` / restores in `on_rehydrate`. A test
 /// asserts this value survives a `replace_component` swap via the
-/// ADR-0101 hooks (now `FfiActor` defaults, no opt-in).
+/// ADR-0101 hooks (now `WasmActor` defaults, no opt-in).
 #[derive(
     aether_data::Kind,
     aether_data::Schema,

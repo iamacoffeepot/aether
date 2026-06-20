@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-05-19
-- **Amended 2026-06-09:** the wire type is named `Source`, not `Sender`. `Sender` collides with the pre-existing `aether_actor::Sender` trait (the `MailCtx` supertrait, impl'd across `FfiCtx` / `NativeCtx`); `Source` keeps the addressing type distinct from both that trait and the tracing vocabulary (`origin` / `root`). The §1 rename table, §Alternatives, and the accessor name (`source_mailbox()`) below reflect the corrected name.
+- **Amended 2026-06-09:** the wire type is named `Source`, not `Sender`. `Sender` collides with the pre-existing `aether_actor::Sender` trait (the `MailCtx` supertrait, impl'd across `WasmCtx` / `NativeCtx`); `Source` keeps the addressing type distinct from both that trait and the tracing vocabulary (`origin` / `root`). The §1 rename table, §Alternatives, and the accessor name (`source_mailbox()`) below reflect the corrected name.
 - **Builds on:** ADR-0013 / ADR-0017 (reply_mail), ADR-0037 (cross-engine bubble), ADR-0042 (correlation ids), ADR-0080 (mail tracing + settlement lineage)
 
 ## Context
@@ -74,7 +74,7 @@ This is a source rename only. Postcard / cast encoding is structural (by field l
 
 ## Alternatives considered
 
-- **`Sender` instead of `Source`.** Rejected — `Sender` collides with the pre-existing `aether_actor::Sender` trait (the `MailCtx` supertrait, re-exported at `aether_actor::Sender` and impl'd across `FfiCtx` / `NativeCtx`). A wire struct sharing that name re-creates exactly the two-types-one-name confusion this ADR sets out to remove. `Source` is chosen because it names the relationship directly — the immediate sender — while staying distinct from both that trait and the tracing vocabulary (`origin` / `root`), so "source = immediate, origin = chain root" lands without conflating the two.
+- **`Sender` instead of `Source`.** Rejected — `Sender` collides with the pre-existing `aether_actor::Sender` trait (the `MailCtx` supertrait, re-exported at `aether_actor::Sender` and impl'd across `WasmCtx` / `NativeCtx`). A wire struct sharing that name re-creates exactly the two-types-one-name confusion this ADR sets out to remove. `Source` is chosen because it names the relationship directly — the immediate sender — while staying distinct from both that trait and the tracing vocabulary (`origin` / `root`), so "source = immediate, origin = chain root" lands without conflating the two.
 - **Keep `ReplyTo`, just document it.** Rejected — the name actively mis-signals a retained redirect. A doc fixes one reader; the name keeps misleading the next.
 - **Promote `origin` into addressing** (let a node address the chain root directly). Rejected — re-enables cross-chain reply redirects, the abuse surface this model deliberately avoids. Origin stays in tracing: observable, not addressable.
 

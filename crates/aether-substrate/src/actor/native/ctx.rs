@@ -645,7 +645,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// non-recoverable invariant violation (today: the wasm trampoline
     /// on a guest trap). Native impl forwards to
     /// [`NativeBinding::fatal_abort`]. See also the
-    /// [`aether_actor::ffi::FfiCtx`] counterpart, which `panic!`s — the
+    /// [`aether_actor::ffi::WasmCtx`] counterpart, which `panic!`s — the
     /// substrate's wasm runtime catches the trap and ADR-0063 escalates
     /// symmetrically.
     pub fn fatal_abort(&self, reason: String) -> ! {

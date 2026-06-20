@@ -20,7 +20,7 @@ use std::sync::Arc;
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
-use aether_actor::FfiActorMailbox;
+use aether_actor::WasmActorMailbox;
 use aether_kinds::{Copy, CopyResult, Delete, FsError, List, NamespaceAddr, Read, Write};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::actor::native::NativeActorMailbox;
@@ -323,7 +323,7 @@ impl NamespaceRoots {
 /// Impl'd for both transports `ctx.actor::<FsCapability>()` can
 /// return:
 ///
-/// - [`FfiActorMailbox<FsCapability>`] — always-on, for wasm-component
+/// - [`WasmActorMailbox<FsCapability>`] — always-on, for wasm-component
 ///   callers.
 /// - [`NativeActorMailbox<'_, FsCapability>`] — native cap-to-cap
 ///   sends, gated on `#[cfg(not(target_arch = "wasm32"))]`.
@@ -364,7 +364,7 @@ pub trait FsMailboxExt {
     fn copy(&self, from: &str, to_namespace: &str, to_path: &str);
 }
 
-impl FsMailboxExt for FfiActorMailbox<'_, FsCapability> {
+impl FsMailboxExt for WasmActorMailbox<'_, FsCapability> {
     fn read(&self, namespace: &str, path: &str) {
         self.send(&Read {
             namespace: namespace.into(),

@@ -17,7 +17,7 @@
 // contract is the point, so silence the false positive here.
 #![allow(clippy::needless_pass_by_value)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, Manual, OutboundReply, actor};
+use aether_actor::{BootError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
 /// Durable state the `Counter` carries across `replace_component`. The
@@ -39,7 +39,7 @@ pub struct Counter {
 }
 
 #[actor]
-impl FfiActor for Counter {
+impl WasmActor for Counter {
     const NAMESPACE: &'static str = "stateful.typed";
 
     /// ADR-0113: the durable shape. Declaring it plus the accessors below
@@ -47,7 +47,7 @@ impl FfiActor for Counter {
     /// `on_rehydrate` hooks.
     type State = CounterState;
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Counter { count: 0 })
     }
 
@@ -65,13 +65,13 @@ impl FfiActor for Counter {
 
     /// Increment the in-memory counter.
     #[handler]
-    fn on_bump(&mut self, _ctx: &mut FfiCtx<'_>, _bump: Bump) {
+    fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.count += 1;
     }
 
     /// Reply with the live counter so a test can read it across a swap.
     #[handler::manual]
-    fn on_count_query(&mut self, ctx: &mut FfiCtx<'_, Manual>, _query: CountQuery) {
+    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&CountReport { count: self.count });
         }

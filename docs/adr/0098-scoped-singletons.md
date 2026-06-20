@@ -36,7 +36,7 @@ The constraints carried in:
 
 - **ADR-0029.** `MailboxId` is a 64-bit hash of the mailbox name. Whatever we compose for a scoped name must hash through the existing function — wire format unchanged.
 - **ADR-0079.** Cardinality axis, the `:` structural separator, name uniqueness enforced globally, tombstone-on-close. This ADR revises §1's "singleton NAMESPACE = full name" and extends the resolution surface; everything else in 0079 stands.
-- **Resolution is a hash with no inverse.** `mailbox_id_from_name` (`crates/aether-data/src/hash.rs`) maps a name to a `MailboxId` one-way. An `FfiActorMailbox<R>` carries only that `u64` (`crates/aether-actor/src/ffi/mailbox.rs`), and `spawn_child` returns only a `MailboxId` (`crates/aether-actor/src/ffi/ctx.rs`). A handle therefore cannot tell you its own name, which is why a child's address cannot be reconstructed from a handle alone — the name has to be carried forward or re-derived.
+- **Resolution is a hash with no inverse.** `mailbox_id_from_name` (`crates/aether-data/src/hash.rs`) maps a name to a `MailboxId` one-way. An `WasmActorMailbox<R>` carries only that `u64` (`crates/aether-actor/src/ffi/mailbox.rs`), and `spawn_child` returns only a `MailboxId` (`crates/aether-actor/src/ffi/ctx.rs`). A handle therefore cannot tell you its own name, which is why a child's address cannot be reconstructed from a handle alone — the name has to be carried forward or re-derived.
 
 The forces we're balancing:
 
@@ -112,7 +112,7 @@ ctx.actor::<(ComponentHost, Camera)>()
 session_handle.actor::<(Room, Player)>()
 ```
 
-Both go through one method, `fn actor<P: ScopePath>(&self) -> FfiActorMailbox<P::Target>`: `ScopePath` is implemented for a bare singleton type (a single segment) and for tuples (a path), so `actor::<R>()` and `actor::<(A, B, C)>()` are the same call shape. The bare comma form `actor::<A, B>()` is not expressible — stable Rust has neither variadic generics nor default type parameters on functions — so the tuple parens are the cost of the single-call sugar, and the chain is the parens-free equivalent.
+Both go through one method, `fn actor<P: ScopePath>(&self) -> WasmActorMailbox<P::Target>`: `ScopePath` is implemented for a bare singleton type (a single segment) and for tuples (a path), so `actor::<R>()` and `actor::<(A, B, C)>()` are the same call shape. The bare comma form `actor::<A, B>()` is not expressible — stable Rust has neither variadic generics nor default type parameters on functions — so the tuple parens are the cost of the single-call sugar, and the chain is the parens-free equivalent.
 
 A path is `[prefix from the seed] + [static singleton segments]`, where the seed is `root` (empty prefix, fully const) or a runtime instance handle (its full runtime name). The resolution rule:
 
@@ -123,7 +123,7 @@ The cost of "the caller declares the chain rather than the framework inferring i
 
 ### 6. Handles stay ids; the name lives in the transient resolver
 
-The path string accumulates only in the **resolver** — the intermediate value a `.actor` chain (or a tuple's `ScopePath`) threads on the stack — never in a long-lived handle. The terminal step hashes once and yields an `FfiActorMailbox<R>` carrying just the `u64`, so handles stay `Copy` and FFI-cheap. The only irreducible runtime touch is **seeding** a chain from a runtime instance, which needs that instance's name; root-seeded chains need nothing and stay fully const.
+The path string accumulates only in the **resolver** — the intermediate value a `.actor` chain (or a tuple's `ScopePath`) threads on the stack — never in a long-lived handle. The terminal step hashes once and yields an `WasmActorMailbox<R>` carrying just the `u64`, so handles stay `Copy` and FFI-cheap. The only irreducible runtime touch is **seeding** a chain from a runtime instance, which needs that instance's name; root-seeded chains need nothing and stay fully const.
 
 A new const helper composes without allocating a joined string: `mailbox_id_from_name_pair(prefix, segment)` hashes `prefix`, then `:`, then `segment`, mirroring `mailbox_id_from_name` and keeping ADR-0029's hash identity (the pair helper over `("a", "b")` hashes identically to the literal `"a:b"`). Each step of the chain applies it.
 
@@ -166,7 +166,7 @@ The recommendation leans **C**: handles stay cheap, and registry validation turn
 - **Scope const on the child type** (`const HOST` / `type Scope = Parent`). Encode the parent statically on the singleton so `ctx.actor::<R>()` composes it. Rejected because a runtime scope (which session?) cannot be a compile-time const, so it only ever serves the static case while bolting parentage onto a type that should stay scope-agnostic (the same component loads under different names/parents). It is the marker-on-the-type smell that signals the model is in the wrong place.
 - **Alias the bare name at registration** (issue #1364 option b). Register a default-name load under its bare `NAMESPACE` as well, so `ctx.actor::<R>()` resolves. Rejected: it reintroduces the bare-name collision surface and gives a component two identities (a trampoline instance and a bare singleton), with no per-scope guarantee.
 - **Per-parent child-naming rules.** Let each parent encode how its children compose (not just the scope, but the join). Rejected as YAGNI — one uniform `{scope}:{segment}` covers every parent in hand; a per-parent rule is speculation until a second rule is forced.
-- **Always-fat handles.** Carry the resolved name in every `FfiActorMailbox`, not just instance seeds. Rejected: it taxes the hot send path with a non-`Copy`, FFI-heavy handle to serve a resolution-time need; §6 confines the name to the transient resolver instead.
+- **Always-fat handles.** Carry the resolved name in every `WasmActorMailbox`, not just instance seeds. Rejected: it taxes the hot send path with a non-`Copy`, FFI-heavy handle to serve a resolution-time need; §6 confines the name to the transient resolver instead.
 - **Infer parentage from the type and walk it.** Have the framework derive a child's scope chain from declared parent types and auto-resolve `ctx.actor::<C>()` to its full path. Rejected for the same reason as the scope const: it only works when every link is static, and it puts runtime lineage where a const can't represent it.
 
 ## Related

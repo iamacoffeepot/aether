@@ -214,7 +214,7 @@ source-resolved value, default, and doc.
 
 A component declares a **config kind** and receives it **at `init`**, exactly as
 a native actor receives `NativeActor::Config`. Concretely: give the guest
-`FfiActor` (currently `fn init<C: Resolver>(ctx: &mut C)`, no config) a
+`WasmActor` (currently `fn init<C: Resolver>(ctx: &mut C)`, no config) a
 `type Config` with `init(config: Self::Config, ctx: …)`, mirroring
 `NativeActor { type Config; fn init(config, ctx) }`. The default is
 `type Config = ()` for components that need none.
@@ -283,7 +283,7 @@ structured log — never a write or a trap.
   Weigh against aether's lean-deps habit — justified here because config parsing,
   layering, and template generation are exactly the battle-tested-crate case, and
   the issue explicitly asked to evaluate external solutions.
-- `FfiActor` gains a `type Config` — a trait change touching the `#[actor]` /
+- `WasmActor` gains a `type Config` — a trait change touching the `#[actor]` /
   `export!` macros and every guest's `init` signature (default `= ()` keeps the
   blast radius to the trait + macro, not every component).
 - Back-compat aliases mean a window where both old and new env names work — extra
@@ -299,7 +299,7 @@ structured log — never a write or a trap.
   under-prefix) is resolved as fields are migrated, behind aliases.
 - Implementation scopes as incremental PRs off this ADR: (a) adopt the crate +
   migrate one subsystem as the pattern, (b) sweep remaining subsystems, (c) the
-  `FfiActor::Config` + delivery glue, (d) `argv` layer + `spawn_substrate`
+  `WasmActor::Config` + delivery glue, (d) `argv` layer + `spawn_substrate`
   wiring, (e) `--config` discovery, (f optional) config file + env deprecation.
 
 ## Alternatives considered

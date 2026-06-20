@@ -1556,7 +1556,7 @@ mod control_plane {
         pub wasm: Vec<u8>,
         pub name: Option<String>,
         /// ADR-0090 (issue 1257): optional init-config bytes handed to
-        /// the guest's typed `FfiActor::init` at instantiate-time. An
+        /// the guest's typed `WasmActor::init` at instantiate-time. An
         /// empty vec means "no config" — the c1 ABI short-circuits it
         /// to `&[]`, which a `Config = ()` guest decodes uniformly via
         /// `impl Kind for ()`. The carrier is raw bytes, not a typed

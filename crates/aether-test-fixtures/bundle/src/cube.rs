@@ -29,7 +29,7 @@
 
 use core::f32::consts::FRAC_PI_4;
 
-use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
+use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::{Camera, DrawTriangle, Tick, Vertex};
@@ -126,10 +126,10 @@ impl Cube {
 }
 
 #[actor]
-impl FfiActor for Cube {
+impl WasmActor for Cube {
     const NAMESPACE: &'static str = "cube";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Cube {
             view_proj: Cube::framing_view_proj(),
         })
@@ -138,7 +138,7 @@ impl FfiActor for Cube {
     /// Subscribe `Tick` so the chassis tick fanout drives `on_tick`.
     /// `init` can't mail (its ctx has no send surface), so the subscribe
     /// lands here in `wire` (mirrors the probe and the reference camera).
-    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
     }
 
@@ -152,7 +152,7 @@ impl FfiActor for Cube {
     /// `capture_frame` taken after one tick shows the centered cube
     /// silhouette.
     #[handler]
-    fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _: Tick) {
         ctx.actor::<RenderCapability>().send(&Camera {
             view_proj: self.view_proj,
         });

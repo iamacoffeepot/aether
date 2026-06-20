@@ -54,7 +54,7 @@ pub use listener::TcpListenerConfig;
 #[cfg(not(target_arch = "wasm32"))]
 pub use session::TcpSessionConfig;
 
-use aether_actor::{Addressable, FfiActorMailbox};
+use aether_actor::{Addressable, WasmActorMailbox};
 use aether_data::{ActorId, Tag, fold_lineage, with_tag};
 // Always-on imports — every kind named in the ext-trait helpers
 // must be reachable from wasm too so the `TcpFfiExt` impl
@@ -165,7 +165,7 @@ pub trait TcpFfiExt {
     /// itself, but the type parameter lets callers address a custom
     /// wrapper that handles a different kind vocabulary on the same
     /// mailbox).
-    fn listener<R: Addressable>(&self, name: &str) -> FfiActorMailbox<'_, R>;
+    fn listener<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R>;
 
     /// Resolve a typed session-instance mailbox for the open session
     /// named `name`. The full mailbox address is
@@ -175,10 +175,10 @@ pub trait TcpFfiExt {
         &self,
         listener_name: &str,
         session_name: &str,
-    ) -> FfiActorMailbox<'_, R>;
+    ) -> WasmActorMailbox<'_, R>;
 }
 
-impl TcpFfiExt for FfiActorMailbox<'_, TcpCapability> {
+impl TcpFfiExt for WasmActorMailbox<'_, TcpCapability> {
     //noinspection DuplicatedCode
     fn bind_listener(&self, addr: &str, name: Option<&str>) {
         self.send(&BindListener {
@@ -209,7 +209,7 @@ impl TcpFfiExt for FfiActorMailbox<'_, TcpCapability> {
         self.session::<TcpSessionActor>(listener_name, session_name)
             .send(&SessionClose::default());
     }
-    fn listener<R: Addressable>(&self, name: &str) -> FfiActorMailbox<'_, R> {
+    fn listener<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
         // ADR-0099 §3: a listener is this cap's child — fold its node
         // onto the cap's carry (the cap is depth-1, so `self`'s id is
         // its carry).
@@ -219,7 +219,7 @@ impl TcpFfiExt for FfiActorMailbox<'_, TcpCapability> {
         &self,
         listener_name: &str,
         session_name: &str,
-    ) -> FfiActorMailbox<'_, R> {
+    ) -> WasmActorMailbox<'_, R> {
         // The session id is folded by a custom scheme rather than by name, so
         // rewrap it with `at`, inheriting this cap handle's ctx binding so the
         // session handle's sends stamp the same origin (issue 1987).
@@ -236,7 +236,7 @@ impl TcpFfiExt for FfiActorMailbox<'_, TcpCapability> {
 /// that returns a [`NativeActorMailbox`]. Same shape as [`TcpFfiExt`]
 /// on the wasm transport — split into two traits because the listener /
 /// session peer resolvers return [`NativeActorMailbox<'a, R>`] here
-/// (with a transport-binding lifetime) vs [`FfiActorMailbox<R>`] on
+/// (with a transport-binding lifetime) vs [`WasmActorMailbox<R>`] on
 /// FFI, and a single trait can't carry both signatures. The precedent
 /// is [`crate::component::ComponentHostFfiExt`] /
 /// [`crate::component::ComponentHostNativeExt`] (issue 654).

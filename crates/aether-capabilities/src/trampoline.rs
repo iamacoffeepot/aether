@@ -116,7 +116,7 @@ mod native {
         pub capabilities: ComponentCapabilities,
         /// ADR-0090 (issue 1257): init-config bytes from the
         /// `aether.component.load` mail, handed to the guest's typed
-        /// `FfiActor::init` via `Component::instantiate`. Empty means
+        /// `WasmActor::init` via `Component::instantiate`. Empty means
         /// "no config" — a `Config = ()` guest decodes `&[]` uniformly.
         pub config: Vec<u8>,
         /// ADR-0096: the selected export's actor-type tag
@@ -301,7 +301,7 @@ mod native {
             if let Some(mut component) = self.component.take() {
                 // Issue 584 Phase 3 (ADR-0079 amended): unwire is the
                 // single pre-shutdown hook — the legacy `on_drop`
-                // retired alongside `FfiActor::on_drop`. Component
+                // retired alongside `WasmActor::on_drop`. Component
                 // drops at end of scope, tearing down linear memory.
                 component.unwire();
             }

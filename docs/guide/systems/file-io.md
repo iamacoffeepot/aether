@@ -119,7 +119,7 @@ receive like any other kind:
 
 ```rust
 #[handler]
-fn on_read_result(&mut self, ctx: &mut FfiCtx<'_>, result: ReadResult) {
+fn on_read_result(&mut self, ctx: &mut WasmCtx<'_>, result: ReadResult) {
     match result {
         ReadResult::Ok { path, bytes, .. } => { /* path tells you which read */ }
         ReadResult::Err { path, error, .. } => { /* branch on error */ }

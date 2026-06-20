@@ -113,7 +113,7 @@ other actors its own module exports
 ([ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md), and the
 [cardinality](#one-or-many-cardinality) section below) — while its own load, drop, and
 replace are driven from outside. The concrete context types differ by host too —
-`FfiCtx` in a component, `NativeCtx` in a capability — but you write handlers against a
+`WasmCtx` in a component, `NativeCtx` in a capability — but you write handlers against a
 shared set of capability traits (`Resolver`, `MailSender`, and friends), so the same
 body works on either.
 
@@ -125,7 +125,7 @@ it handles from the method's **third parameter**:
 
 ```rust
 #[actor]
-impl FfiActor for Hello {
+impl WasmActor for Hello {
     const NAMESPACE: &'static str = "hello";
 
     fn init<C>(ctx: &mut C) -> Result<Self, BootError>
@@ -133,17 +133,17 @@ impl FfiActor for Hello {
         Ok(Hello { pong: ctx.resolve::<Pong>() })
     }
 
-    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
     }
 
     #[handler]
-    fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         ctx.actor::<RenderCapability>().send(&TRIANGLE);   // draw every tick
     }
 
     #[handler]
-    fn on_ping(&mut self, ctx: &mut FfiCtx<'_>, ping: Ping) {
+    fn on_ping(&mut self, ctx: &mut WasmCtx<'_>, ping: Ping) {
         if let Some(sender) = ctx.reply_target() {
             ctx.reply_kind(sender, self.pong, &Pong { seq: ping.seq });
         }
@@ -172,7 +172,7 @@ and the chassis threads a decoded value into `init` as its leading argument:
 
 ```rust
 #[actor]
-impl FfiActor for ProbeWithConfig {
+impl WasmActor for ProbeWithConfig {
     type Config = ProbeConfig;
     const NAMESPACE: &'static str = "probe_with_config";
 
@@ -300,7 +300,7 @@ how it reaches the outside world ([ADR-0074](https://github.com/iamacoffeepot/ae
   capabilities; together they're the chassis.
 - A **component** is an actor *loaded at runtime* as a wasm module, run sandboxed
   behind the wasm wall and reaching the outside world only by mailing capabilities.
-  It implements `FfiActor`, and the substrate drives it through an FFI
+  It implements `WasmActor`, and the substrate drives it through an FFI
   **trampoline**. This is the agent-facing extension path: new behavior with no
   substrate rebuild.
 
@@ -308,7 +308,7 @@ The two traits are deliberately mirror images. Both sit on the shared `Actor`
 super-trait (which owns only `NAMESPACE`). Both have a `type Config`, the same
 `init` / `wire` / `unwire` lifecycle with identical semantics, and the same
 `#[actor]` / `#[handler]` authoring shape. The *only* differences are the context
-type — `NativeCtx<'_>` instead of `FfiCtx<'_>` — and the host machinery underneath.
+type — `NativeCtx<'_>` instead of `WasmCtx<'_>` — and the host machinery underneath.
 A native capability's `wire` looks like a component's `wire`:
 
 ```rust

@@ -17,7 +17,7 @@ Infrastructure (non-actor) crates:
 
 Runtime + chassis (ADR-0073): the shared runtime is **`aether-substrate`**; native capabilities live in **`aether-capabilities`**. All four chassis live in **`aether-substrate-bundle`** as `src/{desktop,headless,hub,test_bench}/` submodules with `src/bin/{desktop,headless,hub,test-bench}.rs` entry points; the hub library (substrate-side client, wire types, MCP coordinator) is `src/hub/`, and the hub channel wire vocabulary (`EngineToHub`, `HubToEngine`, `Hello`, `MailFrame`) is `aether-substrate-bundle::hub::wire`.
 
-The guest/actor SDK is **`aether-actor`** — the `Actor` / `FfiActor` traits, `Mailbox<K>`, `FfiCtx`, the `#[actor]` macro, and `export!` (proc macros in `aether-actor-derive`). See [Writing components](#writing-components).
+The guest/actor SDK is **`aether-actor`** — the `Actor` / `WasmActor` traits, `Mailbox<K>`, `WasmCtx`, the `#[actor]` macro, and `export!` (proc macros in `aether-actor-derive`). See [Writing components](#writing-components).
 
 ## Workflow
 
@@ -110,21 +110,21 @@ Each subsystem's design lives in its ADR; below is the operational surface — w
 
 ## Writing components
 
-A component is an `Actor` whose receive side is declared with the **`#[actor]`** attribute macro on one `impl FfiActor for C` block (ADR-0033 / ADR-0074):
+A component is an `Actor` whose receive side is declared with the **`#[actor]`** attribute macro on one `impl WasmActor for C` block (ADR-0033 / ADR-0074):
 
 ```rust
 #[actor]
-impl FfiActor for CameraComponent {
+impl WasmActor for CameraComponent {
     const NAMESPACE: &'static str = "aether.camera";       // default load name
 
     fn init<C: Resolver>(ctx: &mut C) -> Result<Self, BootError> { /* build state */ }
 
-    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {              // post-init, mail allowed
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {              // post-init, mail allowed
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>(); // subscribe the calling actor
     }
 
     #[handler]
-    fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _t: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _t: Tick) {
         ctx.actor::<RenderCapability>().send(&Camera { view_proj });
     }
 }
@@ -133,8 +133,8 @@ aether_actor::export!(CameraComponent);                    // required; emits wa
 
 One module can carry several actors: `export!(A, B, C)` (ADR-0096) exports each type and makes the first listed the module's **entry** type — the one `load_component` instantiates when no `export` is named.
 
-- **Handlers**: each `#[handler] fn on_x(&mut self, ctx: &mut FfiCtx<'_>, mail: K)` infers the kind from its third parameter — no typelist, no `is::<K>()`. An optional `#[fallback] fn(&mut self, ctx, mail: Mail<'_>)` catches everything else; omit it for a strict receiver. `#[actor]` codegens the dispatch table and emits the `aether.kinds.inputs` custom section that `describe_component` surfaces.
-- **Lifecycle**: `init` (its ctx is `Resolver`-only — no mail yet), `wire` (mail allowed; subscribe to input here), `unwire` (teardown; the old `on_drop` is retired). Hot reload needs no flag (ADR-0101): `on_dehydrate` / `on_rehydrate` are default-no-op methods on `FfiActor` itself, present on every component — override them to carry state across a `replace_component` swap. The dehydrate side persists state through `FfiDropCtx::save_state` / `save_state_kind` (the `Persistence` ctx trait); the rehydrate side reads it back from the `PriorState` argument.
+- **Handlers**: each `#[handler] fn on_x(&mut self, ctx: &mut WasmCtx<'_>, mail: K)` infers the kind from its third parameter — no typelist, no `is::<K>()`. An optional `#[fallback] fn(&mut self, ctx, mail: Mail<'_>)` catches everything else; omit it for a strict receiver. `#[actor]` codegens the dispatch table and emits the `aether.kinds.inputs` custom section that `describe_component` surfaces.
+- **Lifecycle**: `init` (its ctx is `Resolver`-only — no mail yet), `wire` (mail allowed; subscribe to input here), `unwire` (teardown; the old `on_drop` is retired). Hot reload needs no flag (ADR-0101): `on_dehydrate` / `on_rehydrate` are default-no-op methods on `WasmActor` itself, present on every component — override them to carry state across a `replace_component` swap. The dehydrate side persists state through `WasmDropCtx::save_state` / `save_state_kind` (the `Persistence` ctx trait); the rehydrate side reads it back from the `PriorState` argument.
 - **Sends & addressing**: address a known sibling by type — `ctx.actor::<RenderCapability>().send(&kind)` (inherits the handler's causal chain by default, ADR-0080 §7, so a downstream reply settles back into the caller's chain) / `.send_detached(&kind)` (the rare fire-and-forget opt-out that starts a fresh chain) — or hold a `Mailbox<K>` token. The native handle also offers `.send_tracked(&kind) -> MailId` for settlement subscription. This resolves through the ADR-0099 lineage carry, so it stays correct when the target is re-parented. Hand-hashing a name into a `MailboxId` (`mailbox_id_from_name` / `_pair`) bakes in the target being a depth-1 root and duplicates its `NAMESPACE` const, so both are **disallowed-by-default** in `clippy.toml` (`disallowed-methods`): any direct call needs an `#[allow(clippy::disallowed_methods)]` + a one-line reason and is a smell outside the core id/routing API (the const id defs in `aether-data`, the runtime-name escape hatch `resolve_actor` / `send_to_named`, and wire-`Call` forwarding). `Kind::ID` and the typed resolver are compile-time consts, so there is no host round-trip for address resolution. The FFI keeps a `_p32` suffix on pointer-typed exports (`receive_p32`, `on_rehydrate_p32`) for the wasm32 / wasm64 path (ADR-0024).
 - **Config**: a capability configures through the ADR-0090 derive-`Config` path — a `#[derive(aether_substrate::Config)]` struct resolved argv > env > default and handed into `init` — never a naked `std::env::var` / `var_os` read. Both are **disallowed-by-default** in `clippy.toml` (`disallowed-methods`), so a direct env read fails `cargo clippy -- -D warnings` (the CI + `scripts/preflight.sh` gate); a legitimately external read (the config machinery itself, a process-level tuning knob, a `HOME` / `XDG` lookup, a build script, or test code) carries an `#[allow(clippy::disallowed_methods)]` + a one-line reason stating why it is not cap config. See `docs/guide/systems/configuration.md`.
 - **Kind types**: `#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize)]` with `#[kind(name = "…")]`. A component and the peers that talk to it share the kind crate (ADR-0066); under the `runtime` feature the same crate emits the cdylib via `export!`.

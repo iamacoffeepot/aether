@@ -7,7 +7,7 @@
 
 ADR-0109 made a handler's return type its reply contract: `-> R` replies `R`, `-> ()` replies nothing, `-> Pending<R>` replies later. It deliberately kept `ctx.reply` / `ctx.reply_to` as a coexisting second path "for what a return can't express" — a reply redirected to a third party, or one emitted partway through a handler. That second path is the gap this ADR closes.
 
-`ctx.reply` is an ambient capability: it is implemented on the one ctx type every handler receives (`OutboundReply` for `FfiCtx` at `aether-actor/src/ffi/ctx.rs:339`, for `NativeCtx` at `aether-substrate/src/actor/native/ctx.rs:1082`), so any handler can call it regardless of what its return type promises. Three consequences follow:
+`ctx.reply` is an ambient capability: it is implemented on the one ctx type every handler receives (`OutboundReply` for `WasmCtx` at `aether-actor/src/ffi/ctx.rs:339`, for `NativeCtx` at `aether-substrate/src/actor/native/ctx.rs:1082`), so any handler can call it regardless of what its return type promises. Three consequences follow:
 
 1. **`-> ()` does not mean "replies nothing" — it means "the macro replies nothing on your behalf."** A `-> ()` handler can still `ctx.reply(&r)` by hand. The manifest records `reply: None` for it (read off the return type, ADR-0109 §4), which is then a false statement: the handler does reply, the introspection surface says it does not, and the in-harness driver that reads the surface to decode a response is misled.
 
@@ -31,7 +31,7 @@ A handler declares a **reply class**, and the ctx it receives exposes only the r
 
 **single is total.** A single handler that replies, replies — `-> R` and `-> Pending<R>` reply unconditionally; `-> ()` never replies. There is no conditional-reply shape: an optional reply is a concrete reply kind whose schema names the absent case (`enum Lookup { Found(T), Missing }`), never `-> Option<R>` and never a skipped `ctx.reply`. This keeps the manifest's reply at one declared kind and serves a machine caller, which is better handed an explicit "nothing found" reply than intermittent silence.
 
-**The mode is a marker on the ctx type.** One ctx type per target carries a phantom `ReplyMode` parameter — `NativeCtx<'a, M = Single>`, `FfiCtx<'a, M = Single>` (`aether-substrate/src/actor/native/ctx.rs:57`, `aether-actor/src/ffi/ctx.rs:124`). `OutboundReply` (`reply` / `reply_to`, `aether-actor/src/actor/ctx/outbound_reply.rs:21`) is implemented only for `…<Manual>`; the stream `emit` surface only for `…<Stream>`; the shared inherent surface (`ctx.actor::<Cap>()`, logging) for every mode. So `ctx.reply` in a single handler does not compile. The compiler enforces it — there is no lint to suppress or convention to remember.
+**The mode is a marker on the ctx type.** One ctx type per target carries a phantom `ReplyMode` parameter — `NativeCtx<'a, M = Single>`, `WasmCtx<'a, M = Single>` (`aether-substrate/src/actor/native/ctx.rs:57`, `aether-actor/src/ffi/ctx.rs:124`). `OutboundReply` (`reply` / `reply_to`, `aether-actor/src/actor/ctx/outbound_reply.rs:21`) is implemented only for `…<Manual>`; the stream `emit` surface only for `…<Stream>`; the shared inherent surface (`ctx.actor::<Cap>()`, logging) for every mode. So `ctx.reply` in a single handler does not compile. The compiler enforces it — there is no lint to suppress or convention to remember.
 
 **The macro enforces class ↔ ctx agreement.** `#[actor]` reads the class off the marker attribute (an inert marker it parses and strips, so the `::` path never reaches attribute resolution) and generates the dispatch call with that class's ctx view, produced by a downgrade-only coercion from the full ctx the runtime holds (`as_single` / `as_stream` drop capability; there is no escalating `as_manual` a single handler could reach). The written signature must unify with what the macro passes:
 
@@ -55,7 +55,7 @@ Because `M` defaults to `Single`, an unmarked `NativeCtx<'_>` is the single ctx,
 
 ### Negative / limits
 
-- **The ctx gains a type parameter.** `NativeCtx` / `FfiCtx` become `…<M = Single>`, and `OutboundReply` / the stream surface move to per-mode impls. The default keeps the common signature unchanged, but the runtime-facing plumbing (erased dispatch, the `as_*` coercions) carries the marker.
+- **The ctx gains a type parameter.** `NativeCtx` / `WasmCtx` become `…<M = Single>`, and `OutboundReply` / the stream surface move to per-mode impls. The default keeps the common signature unchanged, but the runtime-facing plumbing (erased dispatch, the `as_*` coercions) carries the marker.
 - **A whole-tree migration.** Every handler that replies by hand today (~148 sites) moves to `#[handler] -> R` (the bulk) or `#[handler::manual]` (redirects — the ~33 `reply_to` sites). It is mechanical and behavior-preserving, but large, and lands as a sequence rather than one change.
 - **`manual`'s reply stays undeclared.** A `Manual` handler reports `Manual`, not a kind — the contract a single handler gets is unavailable where the body decides the reply at runtime. That is the price of the escape hatch, narrowed to the handlers that genuinely need it.
 

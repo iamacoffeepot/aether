@@ -721,7 +721,7 @@ fn to_screaming_snake_case(s: &str) -> String {
 // comment — the `# Agent` heading sits alongside `# Safety`/`# Examples`
 // as a conventional reader-specific section.
 
-/// Outer attribute on an `impl FfiActor for X` (or `impl Component for X`)
+/// Outer attribute on an `impl WasmActor for X` (or `impl Component for X`)
 /// block. Reads the `#[handler]` / `#[fallback]` methods inside, then emits:
 ///
 /// - One `impl HandlesKind<K> for X` per handler kind (gates type-driven
@@ -1315,7 +1315,7 @@ pub fn handler(_attr: TokenStream, _item: TokenStream) -> TokenStream {
     // macro expansion and so rust-analyzer doesn't redline it.
     syn::Error::new(
         proc_macro2::Span::call_site(),
-        "#[handler] may only appear inside a `#[actor] impl FfiActor for T` block",
+        "#[handler] may only appear inside a `#[actor] impl WasmActor for T` block",
     )
     .to_compile_error()
     .into()
@@ -1328,7 +1328,7 @@ pub fn fallback(_attr: TokenStream, _item: TokenStream) -> TokenStream {
     // compile-time error.
     syn::Error::new(
         proc_macro2::Span::call_site(),
-        "#[fallback] may only appear inside a `#[actor] impl FfiActor for T` block",
+        "#[fallback] may only appear inside a `#[actor] impl WasmActor for T` block",
     )
     .to_compile_error()
     .into()
@@ -1480,7 +1480,7 @@ fn expand_handlers(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream2>
     if let Some((_, trait_path, _)) = item.trait_.as_ref() {
         // Pattern-match the trait path's last identifier so the macro
         // works regardless of the user's import style — bare
-        // `FfiActor` / `NativeActor`, `aether_actor::FfiActor`,
+        // `WasmActor` / `NativeActor`, `aether_actor::WasmActor`,
         // `aether_substrate::NativeActor`, etc. all resolve here.
         let last = trait_path
             .segments
@@ -1489,9 +1489,9 @@ fn expand_handlers(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream2>
             .unwrap_or_default();
         match last.as_str() {
             "NativeActor" => expand_native_actor_trait(item, opts),
-            // `FfiActor` is the post-552 trait name; `Component` is
+            // `WasmActor` is the post-552 trait name; `Component` is
             // the back-compat alias retained until stage 4.
-            "FfiActor" | "Component" => {
+            "WasmActor" | "Component" => {
                 if opts.skip_markers {
                     return Err(syn::Error::new_spanned(
                         trait_path,
@@ -1504,7 +1504,7 @@ fn expand_handlers(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream2>
             other => Err(syn::Error::new_spanned(
                 trait_path,
                 format!(
-                    "#[actor] expects `impl FfiActor for X`, `impl NativeActor for X`, or \
+                    "#[actor] expects `impl WasmActor for X`, `impl NativeActor for X`, or \
                      `impl Component for X` (back-compat alias) — got `{other}`",
                 ),
             )),
@@ -1517,7 +1517,7 @@ fn expand_handlers(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream2>
         // the `Dispatch` trait itself.
         Err(syn::Error::new_spanned(
             &item.self_ty,
-            "#[actor] expects `impl FfiActor for X`, `impl NativeActor for X`, or \
+            "#[actor] expects `impl WasmActor for X`, `impl NativeActor for X`, or \
              `impl Component for X` (back-compat alias) — inherent `impl X { … }` \
              is no longer supported",
         ))
@@ -1801,9 +1801,9 @@ fn classify_task_reply_mode(sig: &Signature, is_borrow: bool) -> syn::Result<Tas
     }
 }
 
-/// Wasm-actor expansion — `#[actor] impl FfiActor for X` (or
+/// Wasm-actor expansion — `#[actor] impl WasmActor for X` (or
 /// the back-compat `impl Component for X`). Emits the full wasm
-/// surface: dispatch table referencing `aether_actor::FfiCtx<'_>`,
+/// surface: dispatch table referencing `aether_actor::WasmCtx<'_>`,
 /// init wrapper, `aether.kinds.inputs` manifest consts, kind retention
 /// statics, plus the `HandlesKind<K>` and `Addressable` impls common to both
 /// shapes.
@@ -1827,7 +1827,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
     let mut helpers: Vec<syn::ImplItemFn> = Vec::new();
     // Issue 525 Phase 1B: pass-through trait consts (today just
     // NAMESPACE) so each component declares them inside its
-    // `#[actor] impl FfiActor for C` block alongside `init` /
+    // `#[actor] impl WasmActor for C` block alongside `init` /
     // `#[handler]` methods.
     let mut consts: Vec<syn::ImplItemConst> = Vec::new();
     // ADR-0090 (issue 1256): optional `type Config = …` declaration.
@@ -1956,8 +1956,8 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
     let mut init_method = init_method.ok_or_else(|| {
         syn::Error::new_spanned(
             self_ty,
-            "#[actor] requires `fn init(ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError>` \
-             (or, with `type Config = T`, `fn init(config: T, ctx: &mut FfiInitCtx<'_>) -> …`)",
+            "#[actor] requires `fn init(ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError>` \
+             (or, with `type Config = T`, `fn init(config: T, ctx: &mut WasmInitCtx<'_>) -> …`)",
         )
     })?;
 
@@ -2060,8 +2060,8 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
     // init alone — they're expected to spell out the `config` param. If
     // they omitted it, the macro synthesizes `type Config = ();` AND
     // injects a `_config: ()` leading param so the user's pre-#1256 body
-    // (`fn init(ctx: &mut FfiInitCtx<'_>) -> …`) keeps compiling. The emitted shim
-    // always decodes `<Self as FfiActor>::Config` from bytes, so the
+    // (`fn init(ctx: &mut WasmInitCtx<'_>) -> …`) keeps compiling. The emitted shim
+    // always decodes `<Self as WasmActor>::Config` from bytes, so the
     // synthesized `_config: ()` path round-trips uniformly via
     // `impl Kind for ()`.
     let (synthesized_config_type, init_method_emitted) = if config_type.is_some() {
@@ -2076,7 +2076,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
         );
         let config_param: FnArg = syn::parse_quote!(_config: ());
         // Inject at the front of the typed inputs. The init signature
-        // has no `self` receiver (FfiActor::init is associated, not a
+        // has no `self` receiver (WasmActor::init is associated, not a
         // method), so index 0 is the right slot.
         init_method.sig.inputs.insert(0, config_param);
         (Some(synth), init_method)
@@ -2116,10 +2116,10 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
         build_kinds_section_retention_statics(self_ty, &handlers, config_kind_ty);
 
     // Issue 525 Phase 4: trait consts (today just NAMESPACE) live
-    // on the `Addressable` super-trait, not `Component` / `FfiActor`. Route
+    // on the `Addressable` super-trait, not `Component` / `WasmActor`. Route
     // any const items the user declared inside `#[actor] impl
     // Component for X` to a sibling `impl ::aether_actor::Addressable`
-    // block so satisfying `FfiActor: Actor` works without making the
+    // block so satisfying `WasmActor: Actor` works without making the
     // user split the impl manually.
     //
     // Validate the const surface first: `NAMESPACE` is required (the
@@ -2143,7 +2143,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
         } else {
             return Err(syn::Error::new_spanned(
                 c,
-                "#[actor] impl FfiActor for X accepts only \
+                "#[actor] impl WasmActor for X accepts only \
                  `const NAMESPACE: &'static str = …` — the `Addressable` super-trait carries no \
                  other authorable const",
             ));
@@ -2152,7 +2152,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
     if !has_namespace {
         return Err(syn::Error::new_spanned(
             self_ty,
-            "#[actor] impl FfiActor for X must declare \
+            "#[actor] impl WasmActor for X must declare \
              `const NAMESPACE: &'static str = ...` so the marker `impl Addressable` can carry it",
         ));
     }
@@ -2212,7 +2212,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
 
     // ADR-0113: when the author declared `type State`, generate the
     // `on_dehydrate` / `on_rehydrate` hooks from the lifted accessors.
-    // `Self::State` resolves directly inside `impl FfiActor for Self`.
+    // `Self::State` resolves directly inside `impl WasmActor for Self`.
     // `on_dehydrate` snapshots through `self.dehydrate()` and frames the
     // value with `save_state_kind`; `on_rehydrate` decodes via
     // `PriorState::as_kind` and either restores through `self.rehydrate`
@@ -2222,19 +2222,19 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
     // hooks (or its own hand-written ones, carried in `lifecycle_methods`).
     let generated_state_hooks = if state_type.is_some() {
         quote! {
-            fn on_dehydrate(&mut self, __aether_ctx: &mut ::aether_actor::FfiDropCtx<'_>) {
+            fn on_dehydrate(&mut self, __aether_ctx: &mut ::aether_actor::WasmDropCtx<'_>) {
                 let __aether_state = self.dehydrate();
                 ::aether_actor::Persistence::save_state_kind::<
-                    <Self as ::aether_actor::FfiActor>::State,
+                    <Self as ::aether_actor::WasmActor>::State,
                 >(__aether_ctx, 0, &__aether_state);
             }
 
             fn on_rehydrate(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::FfiCtx<'_>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_>,
                 __aether_prior: ::aether_actor::PriorState<'_>,
             ) {
-                match __aether_prior.as_kind::<<Self as ::aether_actor::FfiActor>::State>() {
+                match __aether_prior.as_kind::<<Self as ::aether_actor::WasmActor>::State>() {
                     ::core::option::Option::Some(__aether_state) => {
                         self.rehydrate(__aether_state);
                     }
@@ -2264,9 +2264,9 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
     // iamacoffeepot/aether#2048: the boot lifecycle (`init` / `wire` /
     // `unwire` + `type Config`) lives on the shared `Lifecycle` capability;
     // the hot-swap hooks (`on_dehydrate` / `on_rehydrate`) stay on the
-    // target subtrait `FfiActor`. Route the user's hand-written hooks
+    // target subtrait `WasmActor`. Route the user's hand-written hooks
     // accordingly — boot hooks into `impl Lifecycle`, hot-swap into
-    // `impl FfiActor`. The per-target ctx GATs are pinned to the concrete
+    // `impl WasmActor`. The per-target ctx GATs are pinned to the concrete
     // FFI ctx types here, so a `wire`/`init` body keeps its concrete ctx.
     let (boot_hooks, hotswap_hooks): (Vec<syn::ImplItemFn>, Vec<syn::ImplItemFn>) =
         lifecycle_methods
@@ -2281,8 +2281,8 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
         impl #impl_generics ::aether_actor::Lifecycle for #self_ty #where_clause {
             #config_type_tokens
             type InitError = ::aether_actor::BootError;
-            type InitCtx<'__a> = ::aether_actor::FfiInitCtx<'__a>;
-            type Ctx<'__a> = ::aether_actor::FfiCtx<'__a>;
+            type InitCtx<'__a> = ::aether_actor::WasmInitCtx<'__a>;
+            type Ctx<'__a> = ::aether_actor::WasmCtx<'__a>;
 
             #wrapped_init
 
@@ -2301,7 +2301,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
             #[doc(hidden)]
             pub fn __aether_dispatch(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::FfiCtx<'_, ::aether_actor::Manual>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
                 __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 #dispatch_body
@@ -2320,7 +2320,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
         // `export!(A, B, …)` arm can hold whichever exported type an
         // instance became in one `Slot<Box<dyn ErasedFfiActor>>` and
         // route the FFI shims through it. Forwards to the inherent
-        // dispatch table and the `FfiActor` lifecycle hooks; `init`
+        // dispatch table and the `WasmActor` lifecycle hooks; `init`
         // stays concrete (the `export!` arm tag-matches and boxes).
         impl #impl_generics ::aether_actor::ErasedFfiActor for #self_ty #where_clause {
             fn erased_namespace(&self) -> &'static str {
@@ -2328,31 +2328,31 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
             }
             fn erased_dispatch(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::FfiCtx<'_, ::aether_actor::Manual>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
                 __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 self.__aether_dispatch(__aether_ctx, __aether_mail)
             }
-            // ADR-0112: the lifecycle hooks keep their `FfiCtx<'_>` (= Single)
+            // ADR-0112: the lifecycle hooks keep their `WasmCtx<'_>` (= Single)
             // default signatures; downgrade the carried `Manual` ctx here.
-            fn erased_wire(&mut self, __aether_ctx: &mut ::aether_actor::FfiCtx<'_, ::aether_actor::Manual>) {
+            fn erased_wire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>) {
                 <#self_ty as ::aether_actor::Lifecycle>::wire(self, __aether_ctx.as_single());
             }
-            fn erased_unwire(&mut self, __aether_ctx: &mut ::aether_actor::FfiCtx<'_, ::aether_actor::Manual>) {
+            fn erased_unwire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>) {
                 <#self_ty as ::aether_actor::Lifecycle>::unwire(self, __aether_ctx.as_single());
             }
             fn erased_on_dehydrate(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::FfiDropCtx<'_>,
+                __aether_ctx: &mut ::aether_actor::WasmDropCtx<'_>,
             ) {
-                <#self_ty as ::aether_actor::FfiActor>::on_dehydrate(self, __aether_ctx);
+                <#self_ty as ::aether_actor::WasmActor>::on_dehydrate(self, __aether_ctx);
             }
             fn erased_on_rehydrate(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::FfiCtx<'_, ::aether_actor::Manual>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
                 __aether_prior: ::aether_actor::PriorState<'_>,
             ) {
-                <#self_ty as ::aether_actor::FfiActor>::on_rehydrate(self, __aether_ctx.as_single(), __aether_prior);
+                <#self_ty as ::aether_actor::WasmActor>::on_rehydrate(self, __aether_ctx.as_single(), __aether_prior);
             }
         }
 
@@ -3315,7 +3315,7 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
 
     let tail = if let Some(f) = fallback {
         let method = &f.method.sig.ident;
-        // ADR-0112: a `#[fallback]` keeps its `FfiCtx<'_>` (= Single)
+        // ADR-0112: a `#[fallback]` keeps its `WasmCtx<'_>` (= Single)
         // signature; the dispatch ctx is `Manual`, so downgrade.
         quote! {
             self.#method(__aether_ctx.as_single(), __aether_mail);

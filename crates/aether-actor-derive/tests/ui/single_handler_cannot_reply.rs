@@ -5,7 +5,7 @@
 //! construction). A handler that needs to reply by hand declares
 //! `#[handler::manual]` and takes the `Manual` ctx.
 
-use aether_actor::{FfiCtx, OutboundReply, actor};
+use aether_actor::{WasmCtx, OutboundReply, actor};
 
 #[repr(C)]
 #[derive(
@@ -38,18 +38,18 @@ struct Ack {
 struct SilentProbe;
 
 #[actor]
-impl aether_actor::FfiActor for SilentProbe {
+impl aether_actor::WasmActor for SilentProbe {
     const NAMESPACE: &'static str = "silent_probe";
 
-    fn init(_ctx: &mut aether_actor::FfiInitCtx<'_>) -> Result<Self, aether_actor::BootError>
+    fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::BootError>
     {
         Ok(SilentProbe)
     }
 
     #[handler]
-    fn on_ping(&mut self, ctx: &mut FfiCtx<'_>, ping: Ping) {
+    fn on_ping(&mut self, ctx: &mut WasmCtx<'_>, ping: Ping) {
         // A single-class handler has no reply surface: `OutboundReply` is
-        // not implemented for `FfiCtx<'_, Single>`, so this fails to compile.
+        // not implemented for `WasmCtx<'_, Single>`, so this fails to compile.
         ctx.reply(&Ack { seq: ping.seq });
     }
 }

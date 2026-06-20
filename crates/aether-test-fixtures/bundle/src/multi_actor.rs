@@ -1,4 +1,4 @@
-//! ADR-0096 / ADR-0097 fixture: a multi-actor module. Two `FfiActor`
+//! ADR-0096 / ADR-0097 fixture: a multi-actor module. Two `WasmActor`
 //! types in one crate, exported together via `export!(RootManager,
 //! Panel)`. Proves multi-type coexistence in a single wasm module (no
 //! duplicate-symbol collision, which ADR-0014 §4 previously forbade),
@@ -19,7 +19,7 @@
 // dispatch ABI even when stateless.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, Mail, MailSender, Subname, actor};
+use aether_actor::{BootError, Mail, MailSender, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::Ping;
 use aether_test_fixtures_kinds::{TEST_BENCH_OBSERVER_MAILBOX_NAME, TickObserved};
 
@@ -28,10 +28,10 @@ use aether_test_fixtures_kinds::{TEST_BENCH_OBSERVER_MAILBOX_NAME, TickObserved}
 pub struct RootManager;
 
 #[actor]
-impl FfiActor for RootManager {
+impl WasmActor for RootManager {
     const NAMESPACE: &'static str = "ui.root";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(RootManager)
     }
 
@@ -40,7 +40,7 @@ impl FfiActor for RootManager {
     /// discriminator (`0`, `1`, …); the returned `MailboxId` is
     /// fire-and-forget here.
     #[handler]
-    fn on_ping(&mut self, ctx: &mut FfiCtx<'_>, _ping: Ping) {
+    fn on_ping(&mut self, ctx: &mut WasmCtx<'_>, _ping: Ping) {
         let _ = ctx.spawn_child::<Panel>(Subname::Counter, &());
     }
 }
@@ -53,10 +53,10 @@ impl FfiActor for RootManager {
 pub struct Panel;
 
 #[actor(instanced)]
-impl FfiActor for Panel {
+impl WasmActor for Panel {
     const NAMESPACE: &'static str = "ui.panel";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Panel)
     }
 
@@ -64,7 +64,7 @@ impl FfiActor for Panel {
     /// so a scenario can confirm a spawned `Panel` is addressable and
     /// dispatches mail.
     #[handler]
-    fn on_ping(&mut self, ctx: &mut FfiCtx<'_>, _ping: Ping) {
+    fn on_ping(&mut self, ctx: &mut WasmCtx<'_>, _ping: Ping) {
         ctx.send_to_named::<TickObserved>(
             TEST_BENCH_OBSERVER_MAILBOX_NAME,
             &TickObserved { count: 1 },
@@ -72,5 +72,5 @@ impl FfiActor for Panel {
     }
 
     #[fallback]
-    fn on_other(&mut self, _ctx: &mut FfiCtx<'_>, _mail: Mail<'_>) {}
+    fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
 }

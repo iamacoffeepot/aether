@@ -15,7 +15,7 @@ page and every other subsystem reads as "an actor that receives some kinds."
 that owns some state and talks only by mail. Two kinds: a **capability** is a
 *native* actor compiled into the substrate (render, audio, file I/O, and the
 rest), and a **component** is an actor *loaded at runtime* across the engine's
-FFI boundary (the `FfiActor` ABI) — your logic, and the thing that gets
+FFI boundary (the `WasmActor` ABI) — your logic, and the thing that gets
 hot-swapped. The split is built-in-native vs loaded-guest, **not a specific
 language**: the FFI boundary is target-agnostic by design, and WASM is simply
 the only guest target wired up today. So a component is WASM *right now*, but a

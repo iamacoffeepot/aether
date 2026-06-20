@@ -22,7 +22,7 @@ use crate::ffi::raw;
 /// for schema-shaped kinds — `Kind::encode_into_bytes` already
 /// resolves which). `count` is `1` for a single send and N for a
 /// batch (cast-only — postcard has no efficient batched wire
-/// shape, see `FfiActorMailbox::send_many`).
+/// shape, see `WasmActorMailbox::send_many`).
 ///
 /// `detached` carries the ADR-0080 §7 lineage signal. `false` (the
 /// default `send` path) lets the host stamp the in-flight
@@ -199,7 +199,7 @@ pub fn spawn_sibling(tag: u64, is_counter: bool, subname: &str, config: &[u8]) -
 /// appends a monotonic discriminator) vs a caller-supplied name;
 /// `subname` is the bare `Named` segment (empty for `Counter`). No
 /// config crosses here — the guest runs the child's `init` in-process
-/// (see [`crate::FfiCtx::spawn_inline_child`]). The returned id is the
+/// (see [`crate::WasmCtx::spawn_inline_child`]). The returned id is the
 /// ADR-0099 §3 lineage fold, known synchronously; `0` on a host-side
 /// error.
 #[must_use]

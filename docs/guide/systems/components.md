@@ -23,7 +23,7 @@ because the actor lives across an FFI boundary and is loaded into a running engi
 
 ## `export!` and the FFI boundary
 
-Authoring a component is authoring an actor (`#[actor] impl FfiActor for C`), plus
+Authoring a component is authoring an actor (`#[actor] impl WasmActor for C`), plus
 one line that doesn't exist on the native side:
 
 ```rust
@@ -122,7 +122,7 @@ any `Instanced` actor with `ctx.spawn_child`, a component spawns one of the
 
 ```rust
 #[handler]
-fn on_open_panel(&mut self, ctx: &mut FfiCtx<'_>, _: OpenPanel) {
+fn on_open_panel(&mut self, ctx: &mut WasmCtx<'_>, _: OpenPanel) {
     // -> Result<MailboxId, SpawnError>: the new instance's address
     let panel = ctx.spawn_child::<Panel>(Subname::Counter, &PanelConfig { /* … */ });
 }
@@ -142,7 +142,7 @@ each keeps its own state.
 ## Hot reload
 
 Every component can already be replaced in place — its wasm swapped behind a stable
-mailbox without a drop. State continuity across that swap rides two `FfiActor` hooks,
+mailbox without a drop. State continuity across that swap rides two `WasmActor` hooks,
 `on_dehydrate` and `on_rehydrate`, that default to no-ops ([ADR-0101](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0101-replace-hooks-on-ffiactor.md)). Override them
 to carry state forward: `on_dehydrate` serializes the old instance's state, and
 `on_rehydrate` recovers it on the replacement. There's no `replaceable` flag on
@@ -150,14 +150,14 @@ to carry state forward: `on_dehydrate` serializes the old instance's state, and
 
 ```rust
 #[actor]
-impl FfiActor for MyComponent {
+impl WasmActor for MyComponent {
     // init / wire / #[handler]s as usual …
 
-    fn on_dehydrate(&mut self, ctx: &mut FfiDropCtx<'_>) {
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
         ctx.save_state_kind::<Snapshot>(0, &snapshot);   // hand state to the successor
     }
 
-    fn on_rehydrate(&mut self, ctx: &mut FfiCtx<'_>, prior: PriorState<'_>) {
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
         if let Some(snap) = prior.as_kind::<Snapshot>() { … }
     }
 }

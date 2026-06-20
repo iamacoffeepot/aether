@@ -137,7 +137,7 @@ post-init with mail allowed — the same site as an [input](input.md) subscribe,
 addressing a different cap:
 
 ```rust
-fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
     let lifecycle = ctx.actor::<LifecycleCapability>();
     lifecycle.subscribe::<Tick>();
     lifecycle.subscribe::<Render>();
@@ -156,7 +156,7 @@ Then handle each stage as its kind, like any other mail:
 
 ```rust
 #[handler]
-fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _tick: Tick) { /* advance one frame */ }
+fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) { /* advance one frame */ }
 ```
 
 `aether-kit`'s `camera` export subscribes `Tick` and `Render` this way — it

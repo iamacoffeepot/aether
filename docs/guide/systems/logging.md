@@ -109,7 +109,7 @@ to address, no batch to flush:
 
 ```rust
 #[handler]
-fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _t: Tick) {
+fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _t: Tick) {
     tracing::debug!(frame = self.frame, "advancing");
 }
 ```

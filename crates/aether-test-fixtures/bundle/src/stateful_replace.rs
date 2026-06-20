@@ -1,6 +1,6 @@
 //! ADR-0101 fixture: a multi-actor module whose entry export carries
 //! state across `replace_component` through the `on_dehydrate` /
-//! `on_rehydrate` lifecycle hooks. Those hooks are now `FfiActor`
+//! `on_rehydrate` lifecycle hooks. Those hooks are now `WasmActor`
 //! defaults (no `Replaceable` subtrait, no `export!(X, replaceable)`
 //! flag), so a boxed multi-actor instance preserves state across a swap
 //! exactly as a single-actor one does — the case the multi-actor arm
@@ -21,8 +21,8 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, FfiDropCtx, FfiInitCtx, Mail, Manual, OutboundReply, PriorState,
-    actor,
+    BootError, Mail, Manual, OutboundReply, PriorState, WasmActor, WasmCtx, WasmDropCtx,
+    WasmInitCtx, actor,
 };
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
@@ -33,22 +33,22 @@ pub struct Counter {
 }
 
 #[actor]
-impl FfiActor for Counter {
+impl WasmActor for Counter {
     const NAMESPACE: &'static str = "stateful.counter";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Counter { count: 0 })
     }
 
     /// Increment the in-memory counter.
     #[handler]
-    fn on_bump(&mut self, _ctx: &mut FfiCtx<'_>, _bump: Bump) {
+    fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.count += 1;
     }
 
     /// Reply with the live counter so a test can read it across a swap.
     #[handler::manual]
-    fn on_count_query(&mut self, ctx: &mut FfiCtx<'_, Manual>, _query: CountQuery) {
+    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&CountReport { count: self.count });
         }
@@ -57,14 +57,14 @@ impl FfiActor for Counter {
     /// Save-side hot-swap hook: serialize the live counter so the
     /// replacement instance can pick it up. `CountReport` doubles as the
     /// wire shape of the saved bundle.
-    fn on_dehydrate(&mut self, ctx: &mut FfiDropCtx<'_>) {
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
         ctx.save_state_kind::<CountReport>(0, &CountReport { count: self.count });
     }
 
     /// Restore-side hot-swap hook: recover the counter the predecessor
     /// saved. A fresh load (no prior bundle) never reaches here, so the
     /// counter stays at its `init` zero.
-    fn on_rehydrate(&mut self, _ctx: &mut FfiCtx<'_>, prior: PriorState<'_>) {
+    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
         if let Some(saved) = prior.as_kind::<CountReport>() {
             self.count = saved.count;
         }
@@ -78,13 +78,13 @@ impl FfiActor for Counter {
 pub struct Sidecar;
 
 #[actor(instanced)]
-impl FfiActor for Sidecar {
+impl WasmActor for Sidecar {
     const NAMESPACE: &'static str = "stateful.sidecar";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Sidecar)
     }
 
     #[fallback]
-    fn on_other(&mut self, _ctx: &mut FfiCtx<'_>, _mail: Mail<'_>) {}
+    fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
 }

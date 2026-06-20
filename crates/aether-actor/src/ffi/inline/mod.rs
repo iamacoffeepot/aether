@@ -1,7 +1,7 @@
 //! Inline-child registry + receive membrane (ADR-0114 decisions #2/#3).
 //!
 //! An inline child shares its parent's WASM instance, slot, and
-//! run-token (ADR-0114). [`FfiCtx::spawn_inline_child`] inserts
+//! run-token (ADR-0114). [`WasmCtx::spawn_inline_child`] inserts
 //! the constructed child into the per-component [`InlineRegistry`] the
 //! [`crate::export!`] macro emits as a `static __AETHER_INLINE` (one per
 //! component, mirroring the parent's `static __AETHER_COMPONENT` slot),
@@ -48,7 +48,7 @@ use aether_data::MailboxId;
 
 use crate::ffi::ErasedFfiActor;
 use crate::ffi::bridge::mail;
-use crate::ffi::ctx::FfiCtx;
+use crate::ffi::ctx::WasmCtx;
 use crate::mail::{Mail, NO_REPLY_HANDLE};
 
 mod bundle;
@@ -124,7 +124,7 @@ struct QueuedMail {
     /// half of an in-place send. An in-place dispatch carries `NO_REPLY_HANDLE`
     /// (the local fast path is fire-and-forget), so the host reply table holds
     /// no immediate-sender for it; [`drain_cluster_queue`] instead threads this
-    /// value onto the recipient's [`FfiCtx`] as its inbound source (issue
+    /// value onto the recipient's [`WasmCtx`] as its inbound source (issue
     /// 1987), so the recipient's `ctx.source_mailbox()` resolves it. `0`
     /// (`MailboxId::NONE`) when the sender is unknown.
     sender: u64,
@@ -290,7 +290,7 @@ impl InlineRegistry {
     /// `Box<dyn ErasedFfiActor>` so the child's `Drop` runs. Returns
     /// `true` if a slot was present, `false` if `id` named no inline child
     /// (idempotent — a re-despawn of an already-gone alias is a clean
-    /// `false`, not an error). Backs [`FfiCtx::despawn_inline_child`].
+    /// `false`, not an error). Backs [`WasmCtx::despawn_inline_child`].
     /// O(log n).
     ///
     /// If the child is currently taken out for dispatch (a self-despawn:
@@ -409,7 +409,7 @@ impl InlineRegistry {
     /// `sender` is the sending actor's own folded [`MailboxId`] raw value —
     /// the "from" half. On the `Local` branch it is stored in the
     /// [`QueuedMail`] so [`drain_cluster_queue`] can thread it onto the
-    /// recipient's [`FfiCtx`] as its inbound source (the in-place reply
+    /// recipient's [`WasmCtx`] as its inbound source (the in-place reply
     /// table is empty, so this is the only carrier of an in-place send's
     /// immediate sender). On the `Remote` branch it is threaded to the host
     /// as the send's `from` (issue 1987), so the host stamps origin from the
@@ -487,7 +487,7 @@ impl Default for InlineRegistry {
 /// When the routed recipient is the parent's own mailbox id, dispatch the
 /// parent (`dispatch_own`); otherwise take the inline child the producer
 /// addressed out of `registry`, dispatch it with a ctx self-identified as
-/// the child and carrying the same `registry` ([`FfiCtx::__new`]), and
+/// the child and carrying the same `registry` ([`WasmCtx::__new`]), and
 /// reinsert. An unrecognised recipient falls back to the parent's dispatch
 /// — the existing unmatched path (the parent's `#[fallback]`, or the
 /// `DISPATCH_UNKNOWN_KIND` sentinel for a strict receiver), never a
@@ -522,7 +522,7 @@ where
     let id = MailboxId(recipient);
     match registry.take(id) {
         Some(mut child) => {
-            let mut ctx = FfiCtx::__new(recipient, registry, source);
+            let mut ctx = WasmCtx::__new(recipient, registry, source);
             let rc = child.erased_dispatch(&mut ctx, mail);
             registry.reinsert(id, child);
             rc
@@ -598,7 +598,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{InlineRegistry, RouteDecision, drain_cluster_queue, membrane_dispatch};
-    use crate::FfiCtx;
+    use crate::WasmCtx;
     use crate::actor::ctx::OutboundReply;
     use crate::ffi::ErasedFfiActor;
     use crate::mail::{Mail, PriorState};
@@ -662,17 +662,21 @@ mod tests {
         fn erased_namespace(&self) -> &'static str {
             "test.inline.recording_child"
         }
-        fn erased_dispatch(&mut self, ctx: &mut FfiCtx<'_, crate::Manual>, _mail: Mail<'_>) -> u32 {
+        fn erased_dispatch(
+            &mut self,
+            ctx: &mut WasmCtx<'_, crate::Manual>,
+            _mail: Mail<'_>,
+        ) -> u32 {
             self.dispatches.set(self.dispatches.get() + 1);
             self.observed_source.set(ctx.source_mailbox());
             CHILD_CODE
         }
-        fn erased_wire(&mut self, _ctx: &mut FfiCtx<'_, crate::Manual>) {}
-        fn erased_unwire(&mut self, _ctx: &mut FfiCtx<'_, crate::Manual>) {}
-        fn erased_on_dehydrate(&mut self, _ctx: &mut crate::FfiDropCtx<'_>) {}
+        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
+        fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
         fn erased_on_rehydrate(
             &mut self,
-            _ctx: &mut FfiCtx<'_, crate::Manual>,
+            _ctx: &mut WasmCtx<'_, crate::Manual>,
             _prior: PriorState<'_>,
         ) {
         }
@@ -699,7 +703,11 @@ mod tests {
         fn erased_namespace(&self) -> &'static str {
             "test.inline.self_despawning_child"
         }
-        fn erased_dispatch(&mut self, ctx: &mut FfiCtx<'_, crate::Manual>, _mail: Mail<'_>) -> u32 {
+        fn erased_dispatch(
+            &mut self,
+            ctx: &mut WasmCtx<'_, crate::Manual>,
+            _mail: Mail<'_>,
+        ) -> u32 {
             // Self-despawn mid-dispatch through the threaded registry: this
             // box is currently taken out (held on the membrane's stack), so
             // the ctx's despawn clears the empty slot and the membrane's
@@ -707,12 +715,12 @@ mod tests {
             ctx.despawn_inline_child(self.id);
             CHILD_CODE
         }
-        fn erased_wire(&mut self, _ctx: &mut FfiCtx<'_, crate::Manual>) {}
-        fn erased_unwire(&mut self, _ctx: &mut FfiCtx<'_, crate::Manual>) {}
-        fn erased_on_dehydrate(&mut self, _ctx: &mut crate::FfiDropCtx<'_>) {}
+        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
+        fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
         fn erased_on_rehydrate(
             &mut self,
-            _ctx: &mut FfiCtx<'_, crate::Manual>,
+            _ctx: &mut WasmCtx<'_, crate::Manual>,
             _prior: PriorState<'_>,
         ) {
         }

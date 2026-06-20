@@ -116,7 +116,7 @@ request kind to that mailbox and receive the reply kind like any other mail:
 
 ```rust
 #[handler]
-fn on_set_mode_result(&mut self, ctx: &mut FfiCtx<'_>, result: SetWindowModeResult) {
+fn on_set_mode_result(&mut self, ctx: &mut WasmCtx<'_>, result: SetWindowModeResult) {
     match result {
         SetWindowModeResult::Ok { mode, width, height } => { /* the resolved state */ }
         SetWindowModeResult::Err { error } => { /* nothing changed */ }

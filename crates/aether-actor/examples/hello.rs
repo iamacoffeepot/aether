@@ -21,7 +21,7 @@
 // fine but must keep the signature.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
+use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::{DrawTriangle, Ping, Pong, Tick, Vertex};
@@ -67,15 +67,15 @@ pub struct Hello {}
 /// `aether.ping` with an incrementing `seq` to exercise reply-to-
 /// sender; the matching `aether.pong` lands back at your session.
 #[actor]
-impl FfiActor for Hello {
+impl WasmActor for Hello {
     const NAMESPACE: &'static str = "hello";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Hello {})
     }
 
     //noinspection DuplicatedCode
-    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
     }
 
@@ -86,7 +86,7 @@ impl FfiActor for Hello {
     /// its own tick loop. The effect is visible in `capture_frame`
     /// output.
     #[handler]
-    fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         ctx.actor::<RenderCapability>().send(&TRIANGLE);
     }
 
@@ -99,7 +99,7 @@ impl FfiActor for Hello {
     /// The seq echo lets you pair requests and replies when multiple
     /// are in flight.
     #[handler]
-    fn on_ping(&mut self, _ctx: &mut FfiCtx<'_>, ping: Ping) -> Pong {
+    fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, ping: Ping) -> Pong {
         Pong { seq: ping.seq }
     }
 }
