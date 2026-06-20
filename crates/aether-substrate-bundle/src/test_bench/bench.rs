@@ -38,7 +38,7 @@ use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult};
 use aether_kinds::{LogTail, LogTailResult, Tick};
 // `push_to_mailbox` encodes any sent kind through the descriptor-aware
-// `Kind::encode_into_bytes` (cast or postcard per the kind's shape);
+// `Kind::encode_into_bytes` (cast or structured per the kind's shape);
 // `encode_empty` builds the zero-byte payload for unit lifecycle kinds.
 use aether_actor::Addressable;
 use aether_capabilities::{RenderCapability, fs::NamespaceRoots};
@@ -67,7 +67,7 @@ pub const DEFAULT_WIDTH: u32 = 800;
 pub const DEFAULT_HEIGHT: u32 = 600;
 
 /// Errors `TestBench` API methods surface. `Boot` covers any failure
-/// in the substrate's `build()`; `Decode` covers postcard reply
+/// in the substrate's `build()`; `Decode` covers structured reply
 /// decode failures (rare — implies a kind shape mismatch); `Timeout`
 /// covers replies that never arrive (chassis hung or wrong target);
 /// `Advance` and `Capture` pass through `Err` variants from the
@@ -801,7 +801,7 @@ impl TestBench {
     /// [`super::ExecutionResult::reply`]. Used for the
     /// component load/replace/drop round trips and the `aether.fs`
     /// `Read`/`Write`/`Delete`/`List` replies — every standard
-    /// `*Result` kind is postcard-encoded.
+    /// `*Result` kind is structured-encoded.
     pub(crate) fn send_bytes_and_await(
         &mut self,
         recipient_name: &str,
@@ -1064,7 +1064,7 @@ impl TestBench {
                 kind_name, payload, ..
             } => {
                 // ADR-0100: decode through the kind's declared codec
-                // (cast or postcard), not a hardcoded postcard path.
+                // (cast or structured), not a hardcoded structured path.
                 R::decode_from_bytes(&payload).ok_or_else(|| {
                     TestBenchError::Decode(format!(
                         "{expected} decode failed via Kind::decode_from_bytes (kind={kind_name})"

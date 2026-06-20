@@ -120,7 +120,7 @@ Three checks, cheapest first:
 - **Coverage + schema shape** — `cargo nextest run -p aether-kinds` exercises
   `descriptors.rs`: `covers_every_substrate_kind` proves the kind reaches the
   hub-shipped list, and the shape tests (`signal_kinds_emit_unit`,
-  `cast_kinds_emit_struct_with_repr_c`, the postcard-vs-cast guards) catch a
+  `cast_kinds_emit_struct_with_repr_c`, the structured-vs-cast guards) catch a
   wire-format slip.
 - **Round-trip through the chassis** — drive a `send_and_await` against the
   owning mailbox in the test bench and decode the reply. The pattern is in

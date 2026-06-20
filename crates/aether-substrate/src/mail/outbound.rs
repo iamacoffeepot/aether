@@ -278,7 +278,7 @@ impl EgressBackend for RecordingBackend {
 /// to `EngineToHub` frames and writes them to a TCP socket).
 ///
 /// `send_reply<K>` is a substrate-side encoding convenience — it does
-/// the postcard encoding and dispatches based on `SourceAddr`. Sinks
+/// the wire encoding and dispatches based on `SourceAddr`. Sinks
 /// and capture handlers call it without caring which backend is wired.
 pub struct HubOutbound {
     backend: OnceLock<Arc<dyn EgressBackend>>,
@@ -405,7 +405,7 @@ impl HubOutbound {
     }
 
     /// Encode `result` through the kind's declared codec
-    /// (`Kind::encode_into_bytes`, cast or postcard, ADR-0100) and route
+    /// (`Kind::encode_into_bytes`, cast or structured, ADR-0100) and route
     /// as a reply addressed at `sender`. Forks on the sender variant:
     /// `Session` routes through `egress_to_session`; `EngineMailbox`
     /// routes through `egress_to_engine_mailbox`; `None` and `Component`

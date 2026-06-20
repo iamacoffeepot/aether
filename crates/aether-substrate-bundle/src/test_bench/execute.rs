@@ -101,7 +101,7 @@ impl BenchOp {
 
     /// Fire-and-settle a typed mail (no reply awaited). Encodes `mail`
     /// via [`Kind::encode_into_bytes`] — works for both cast and
-    /// postcard kinds.
+    /// structured kinds.
     #[must_use]
     pub fn send_mail<K: Kind>(recipient: impl Into<String>, mail: &K) -> Self {
         Self::SendMail {
@@ -169,7 +169,7 @@ impl ExecutionResult {
     /// Decode the reply from a [`BenchOp::SendAndAwait`] step as `R`.
     /// `R` is any reply kind (`LoadResult`, `ReplaceResult`,
     /// `WriteResult`, …); the bytes decode through the kind's declared
-    /// codec (cast or postcard) via `Kind::decode_from_bytes`
+    /// codec (cast or structured) via `Kind::decode_from_bytes`
     /// (ADR-0100). Errors with [`ExecutionError::NoSuchReply`] if
     /// `label` didn't run a `SendAndAwait` (or didn't run at all), or
     /// [`ExecutionError::ReplyDecode`] if the bytes don't decode as
@@ -297,7 +297,7 @@ mod tests {
     use super::*;
 
     /// Cast reply kind with a non-`f32` field — its wire image is the
-    /// raw cast bytes, which a postcard reader would misdecode.
+    /// raw cast bytes, which a structured reader would misdecode.
     #[repr(C)]
     #[derive(Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
     struct CastReply {
@@ -322,7 +322,7 @@ mod tests {
     /// ADR-0100: the `SendAndAwait` reply accessor decodes the recorded
     /// bytes through `Kind::decode_from_bytes`, so a cast reply kind
     /// round-trips uncorrupted (its `u32` / `u16` fields survive). A
-    /// postcard decode would have misread the raw cast image.
+    /// structured decode would have misread the raw cast image.
     #[test]
     fn execution_result_reply_decodes_cast_kind() {
         let reply = CastReply {

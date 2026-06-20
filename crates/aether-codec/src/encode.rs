@@ -861,7 +861,7 @@ fn oor(name: &str, ty: &str) -> EncodeError {
 mod tests {
     use super::*;
     use crate::test_fixtures::{
-        cast_struct, named, pending_ok_err_variants, postcard_struct, scalar,
+        cast_struct, named, pending_ok_err_variants, scalar, structured_struct,
     };
     use aether_data::SchemaCell;
     use serde_json::json;
@@ -1149,7 +1149,7 @@ mod tests {
     }
 
     fn pc_string_schema() -> SchemaType {
-        postcard_struct(vec![NamedField {
+        structured_struct(vec![NamedField {
             name: "body".into(),
             ty: SchemaType::String,
         }])
@@ -1180,7 +1180,7 @@ mod tests {
             blob: vec![1, 2, 3, 4, 5],
         };
         let expected = wire::to_vec(&value).expect("test setup: wire reference bytes");
-        let schema = postcard_struct(vec![NamedField {
+        let schema = structured_struct(vec![NamedField {
             name: "blob".into(),
             ty: SchemaType::Bytes,
         }]);
@@ -1194,7 +1194,7 @@ mod tests {
         // The wire codec is strict and canonical: a `Bytes` field accepts
         // only a JSON byte array. String / base64-object ergonomics live in
         // the aether-mcp preprocessor, never in the codec.
-        let schema = postcard_struct(vec![NamedField {
+        let schema = structured_struct(vec![NamedField {
             name: "blob".into(),
             ty: SchemaType::Bytes,
         }]);
@@ -1208,7 +1208,7 @@ mod tests {
 
     #[test]
     fn wire_option_some_and_none() {
-        let schema = postcard_struct(vec![NamedField {
+        let schema = structured_struct(vec![NamedField {
             name: "name".into(),
             ty: SchemaType::Option(SchemaCell::owned(SchemaType::String)),
         }]);
@@ -1237,7 +1237,7 @@ mod tests {
             tags: vec!["alpha".into(), "beta".into(), "gamma".into()],
         };
         let expected = wire::to_vec(&value).expect("test setup: wire reference vec<string>");
-        let schema = postcard_struct(vec![NamedField {
+        let schema = structured_struct(vec![NamedField {
             name: "tags".into(),
             ty: SchemaType::Vec(SchemaCell::owned(SchemaType::String)),
         }]);
@@ -1252,11 +1252,11 @@ mod tests {
             items: vec![Inner { seq: 1 }, Inner { seq: 256 }, Inner { seq: 0xDEAD }],
         };
         let expected = wire::to_vec(&value).expect("test setup: wire reference vec<inner>");
-        let inner_schema = postcard_struct(vec![NamedField {
+        let inner_schema = structured_struct(vec![NamedField {
             name: "seq".into(),
             ty: SchemaType::Scalar(Primitive::U32),
         }]);
-        let schema = postcard_struct(vec![NamedField {
+        let schema = structured_struct(vec![NamedField {
             name: "items".into(),
             ty: SchemaType::Vec(SchemaCell::owned(inner_schema)),
         }]);
@@ -1343,7 +1343,7 @@ mod tests {
         // `wire` serde adapter — that's the wire shape every receiving
         // substrate will decode into. Sender input is unsorted to lock in
         // the sort-by-encoded-key step.
-        let schema = postcard_struct(vec![NamedField {
+        let schema = structured_struct(vec![NamedField {
             name: "headers".into(),
             ty: map_schema(SchemaType::String, SchemaType::String),
         }]);
@@ -1490,7 +1490,7 @@ mod tests {
         // `mailbox` field carrying a tagged `mbx-...` string lands as
         // a fixed `u64` little-endian — wire-identical to a raw `u64`
         // field.
-        let schema = postcard_struct(vec![NamedField {
+        let schema = structured_struct(vec![NamedField {
             name: "mailbox".into(),
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
@@ -1507,7 +1507,7 @@ mod tests {
     fn type_id_wire_accepts_raw_number_for_back_compat() {
         // Pre-ADR-0065 callers passing a JSON number still work — the
         // codec falls through to the back-compat `as_unsigned` path.
-        let schema = postcard_struct(vec![NamedField {
+        let schema = structured_struct(vec![NamedField {
             name: "mailbox".into(),
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
@@ -1524,7 +1524,7 @@ mod tests {
         // A `KindId`-tagged string passed to a `MailboxId` field
         // surfaces a typed `OutOfRange` so the agent learns the field
         // expected `mbx-...` rather than corrupting the wire.
-        let schema = postcard_struct(vec![NamedField {
+        let schema = structured_struct(vec![NamedField {
             name: "mailbox".into(),
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
@@ -1564,7 +1564,7 @@ mod tests {
         // A schema declaring a `TypeId(...)` value the codec doesn't
         // recognise must surface `UnsupportedSchema` rather than
         // corrupt the wire or silently fall through.
-        let schema = postcard_struct(vec![NamedField {
+        let schema = structured_struct(vec![NamedField {
             name: "mystery".into(),
             ty: SchemaType::TypeId(0xdead_beef_cafe_f00d),
         }]);

@@ -3,7 +3,7 @@
 //! three request kinds (`aether.dag.submit` / `cancel` / `status`),
 //! their reply kinds, and the structured `DagError` set.
 //!
-//! These kinds are postcard-shaped — `Vec<Node>` / `Vec<Edge>` make
+//! These kinds are structured — `Vec<Node>` / `Vec<Edge>` make
 //! the descriptor non-cast — and register in the substrate descriptor
 //! inventory through `#[derive(Kind)]` exactly like the other reply
 //! enums (`LoadResult`, `ReadResult`).
@@ -150,7 +150,7 @@ pub struct DagDescriptor {
 
 /// One self-describing element of a [`Bundle`] — a single correlated
 /// reply, tagged with its own `kind_id`. The `payload` is opaque
-/// postcard bytes the element's own kind decodes downstream.
+/// wire bytes the element's own kind decodes downstream.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Schema)]
 pub struct BundleElement {
     pub kind_id: KindId,

@@ -46,7 +46,7 @@ pub trait OutboundReply: MailSender {
     fn source_mailbox(&self) -> Option<MailboxId>;
 
     /// Reply to the originator of the mail currently being dispatched.
-    /// No-op when there's no reply target. Wire shape (cast or postcard)
+    /// No-op when there's no reply target. Wire shape (cast or structured)
     /// follows `Kind::encode_into_bytes` (ADR-0100), so a reply needs
     /// only `K: Kind` — a `Pod`-without-`Serialize` cast kind is
     /// repliable.

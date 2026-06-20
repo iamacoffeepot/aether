@@ -60,7 +60,7 @@ pub struct Nanos(pub u64);
 /// the guided walk (`trace_walk`) joins them to the originating `Sent`
 /// by the mail-id key while stitching the per-actor ring slices.
 ///
-/// Wire shape: postcard. The dispatcher delivers this through normal
+/// Wire shape: structured. The dispatcher delivers this through normal
 /// mail routing; no cast-shape optimisation because the variant tag +
 /// `Option<MailId>` would force padding gymnastics anyway.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Schema)]

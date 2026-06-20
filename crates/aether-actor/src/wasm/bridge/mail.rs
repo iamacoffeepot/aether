@@ -18,10 +18,10 @@
 use crate::wasm::raw;
 
 /// Push a typed payload at `recipient`. `bytes` is the wire
-/// encoding of the payload (cast for `#[repr(C)]` kinds, postcard
+/// encoding of the payload (cast for `#[repr(C)]` kinds, structured
 /// for schema-shaped kinds — `Kind::encode_into_bytes` already
 /// resolves which). `count` is `1` for a single send and N for a
-/// batch (cast-only — postcard has no efficient batched wire
+/// batch (cast-only — structured kinds have no efficient batched wire
 /// shape, see `WasmActorMailbox::send_many`).
 ///
 /// `detached` carries the ADR-0080 §7 lineage signal. `false` (the

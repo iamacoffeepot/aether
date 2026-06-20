@@ -24,7 +24,7 @@ use bytemuck::{Pod, Zeroable};
 /// into the FFI build.
 pub const TEST_BENCH_OBSERVER_MAILBOX_NAME: &str = "aether.test_bench.observer";
 
-/// Broadcast payload emitted on each tick. Postcard-shaped — schema
+/// Broadcast payload emitted on each tick. Structured-shaped — schema
 /// rides in the wasm's `aether.kinds` custom section, so the bench's
 /// loopback decoder can record the kind name without the test
 /// pre-registering anything.
@@ -106,7 +106,7 @@ pub struct ConfigEcho {
 }
 
 /// Driver kind for the typed-config fixture: request a `ConfigEcho`
-/// describing the cached config. Postcard-shaped (unit struct) so the
+/// describing the cached config. Structured-shaped (unit struct) so the
 /// fixture exercises the full schema-driven dispatch path even on the
 /// no-payload query side.
 #[derive(
@@ -124,7 +124,7 @@ pub struct ConfigQuery;
 /// Trigger for the `mat4_source` fixture (issue 1472). A DAG `Source`
 /// dispatches this no-payload trigger to the loaded `mat4_source`
 /// component, whose reply (`Mat4Apply`) feeds the `mat4_apply` transform
-/// downstream. Postcard-shaped unit struct — the trigger carries no
+/// downstream. Structured-shaped unit struct — the trigger carries no
 /// fields, so its `encode_into_bytes` is the descriptor `Source.payload`.
 /// `Default` lets the descriptor build that payload from one instance.
 #[derive(
@@ -146,7 +146,7 @@ pub struct Mat4SourceTrigger;
 /// inner kind id is `Vec4::ID`, which the Transform→Observer edge
 /// type-check matches against the transform's `output_kind_id`.
 ///
-/// Postcard-shaped: the `Ref<Vec4>` field serializes through the
+/// Structured-shaped: the `Ref<Vec4>` field serializes through the
 /// hand-written `impl<K: Kind> Serialize/Deserialize for Ref<K>`
 /// (ADR-0100), which needs only `Vec4: Kind` — no `Vec4` serde.
 #[derive(
@@ -165,7 +165,7 @@ pub struct Vec4Observed {
 
 /// Driver kind for the stateful multi-actor replace fixture (ADR-0101):
 /// each `Bump` increments the fixture's in-memory counter by one.
-/// Postcard-shaped unit struct.
+/// Structured-shaped unit struct.
 #[derive(
     aether_data::Kind,
     aether_data::Schema,
@@ -179,7 +179,7 @@ pub struct Vec4Observed {
 pub struct Bump;
 
 /// Query kind for the stateful replace fixture: request the live counter.
-/// The fixture replies with a `CountReport`. Postcard-shaped unit struct.
+/// The fixture replies with a `CountReport`. Structured-shaped unit struct.
 #[derive(
     aether_data::Kind,
     aether_data::Schema,
@@ -243,7 +243,7 @@ pub struct UiWidgetConfig {
 /// address; the recipient replies an [`InlineEcho`] tagged with `who`
 /// handled it, so the `FleetBench` scenario proves the membrane demuxed
 /// the mail to the child (not the parent) and a control to the parent's
-/// own address is unaffected. Postcard-shaped unit struct.
+/// own address is unaffected. Structured-shaped unit struct.
 #[derive(
     aether_data::Kind,
     aether_data::Schema,
@@ -258,7 +258,7 @@ pub struct InlineProbe;
 
 /// Reply to [`InlineProbe`] — `who` names the actor that handled the
 /// query so the test can assert the demux landed on the child vs the
-/// parent. Postcard-shaped.
+/// parent. Structured-shaped.
 #[derive(
     aether_data::Kind,
     aether_data::Schema,
@@ -286,7 +286,7 @@ pub const INLINE_WHO_CHILD: u32 = 2;
 /// parent (which tears down its stored child via `ctx.despawn_inline_child`)
 /// or to the child's alias (which despawns itself mid-dispatch). Carries no
 /// payload — the recipient address selects which actor tears the child
-/// down. Postcard-shaped unit struct.
+/// down. Structured-shaped unit struct.
 #[derive(
     aether_data::Kind,
     aether_data::Schema,
@@ -384,7 +384,7 @@ pub struct RunMatrix {
 /// which matrix cell the recipient records (one of the `MATRIX_CELL_*`
 /// markers); `fan_out` (set only on the parent → child a ping) instructs the
 /// receiving child to drive the child-origin cells (child → parent, child →
-/// sibling, child → self) and the cross-cluster send. Postcard-shaped.
+/// sibling, child → self) and the cross-cluster send. Structured-shaped.
 #[derive(
     aether_data::Kind,
     aether_data::Schema,
@@ -411,7 +411,7 @@ pub struct MatrixPing {
 /// Issue 1977 report query for the `matrix_sweep` fixture. Sent to the
 /// parent over the wire *after* `RunMatrix` settles; the parent reads the
 /// cluster's shared observation log and replies a [`MatrixReport`].
-/// Postcard-shaped unit struct.
+/// Structured-shaped unit struct.
 #[derive(
     aether_data::Kind,
     aether_data::Schema,
@@ -430,7 +430,7 @@ pub struct CollectMatrix;
 /// raw `MailboxId` the recipient read from `ctx.source_mailbox()` for that
 /// cell (`0` for none). The cross-cluster cell is observed out-of-band by the
 /// separate observer component (read via `log_tail`), so it carries no field
-/// here. Postcard-shaped.
+/// here. Structured-shaped.
 #[derive(
     aether_data::Kind,
     aether_data::Schema,
@@ -484,7 +484,7 @@ mod tests {
 
     use super::Vec4Observed;
 
-    /// The `Ref<Vec4>` slot survives a postcard round-trip through the
+    /// The `Ref<Vec4>` slot survives a wire round-trip through the
     /// ADR-0100 hand-written `Ref<K>` serde: an inline `Vec4` encodes
     /// then decodes unchanged. Guards the #1475-backed derive the
     /// `vec4_observer` fixture rests on (the observer reads its

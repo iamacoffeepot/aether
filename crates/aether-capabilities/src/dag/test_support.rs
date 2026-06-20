@@ -389,12 +389,12 @@ mod test_deferred_call {
     }
 }
 
-/// A postcard-shape number kind — the transform fixtures' input +
-/// output (ADR-0048 §3, iamacoffeepot/aether#1012). Postcard (serde)
+/// A structured-shape number kind — the transform fixtures' input +
+/// output (ADR-0048 §3, iamacoffeepot/aether#1012). Structured (serde)
 /// rather than cast because `ctx.reply` requires `Serialize`; the
-/// transform's decode / encode picks postcard automatically from the
-/// non-`#[repr(C)]` shape, so source bytes and transform input bytes
-/// agree.
+/// transform's decode / encode picks the structured path automatically
+/// from the non-`#[repr(C)]` shape, so source bytes and transform input
+/// bytes agree.
 #[derive(
     Copy,
     Clone,

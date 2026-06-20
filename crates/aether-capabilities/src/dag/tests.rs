@@ -135,7 +135,7 @@ fn enqueue<K: Kind>(registry: &Registry, mailbox_name: &str, payload: &K, sender
 }
 
 /// Drain egress until a `ToSession` reply of kind `K` arrives, decoding
-/// it via postcard. Panics on timeout.
+/// it via the wire format. Panics on timeout.
 fn await_session_reply<K: Kind>(rx: &Receiver<EgressEvent>, timeout: Duration) -> K {
     let deadline = Instant::now() + timeout;
     loop {

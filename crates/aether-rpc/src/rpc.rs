@@ -1,7 +1,7 @@
 //! `aether.rpc` wire vocabulary + the `Call` client primitive (issues
 //! 750 / 763, extracted to `aether-rpc` per ADR-0102).
 //!
-//! Length-prefix postcard frames carrying [`WireFrame`] bodies, layered
+//! Length-prefix frames carrying [`WireFrame`] bodies, layered
 //! over the generic stream helpers in `aether-codec::frame` (ADR-0072).
 //! `RpcServerCapability` (in `aether-capabilities`) speaks this wire over
 //! a TCP socket; the wire is intentionally type-erased — endpoints are
@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 pub const WIRE_VERSION: u32 = 1;
 
 /// One frame on the wire. Length-prefix-framed via
-/// [`aether_codec::frame`]; postcard-encoded body.
+/// [`aether_codec::frame`]; wire-encoded body.
 ///
 /// `cid` correlates a `Call` to its replies. `Call { cid: None }` is
 /// fire-and-forget; `Call { cid: Some(n) }` expects zero or more

@@ -188,9 +188,9 @@ mod native {
         /// calls this on the first `send_mail` for an unknown kind
         /// name, then reuses the cached vocabulary until the next miss
         /// (no TTL, no background poll). The schema rides as opaque
-        /// wire bytes (`schema_postcard`) because `SchemaType` has
+        /// wire bytes (`schema_wire`) because `SchemaType` has
         /// no `Schema` impl of its own; decode it with
-        /// `wire::from_bytes::<SchemaType>(&desc.schema_postcard)`.
+        /// `wire::from_bytes::<SchemaType>(&desc.schema_wire)`.
         #[handler]
         fn on_list_kinds(&mut self, _ctx: &mut NativeCtx<'_>, _mail: ListKinds) -> ListKindsResult {
             let kinds = self
@@ -203,12 +203,12 @@ mod native {
                     // serialization is infallible for `SchemaType`
                     // (no `Map<String, _>` non-string-key edge cases
                     // because every nested field is a derive output).
-                    let schema_postcard = wire::to_vec(&desc.schema)
+                    let schema_wire = wire::to_vec(&desc.schema)
                         .expect("SchemaType always wire-encodes (ADR-0118 canonical form)");
                     KindDescriptorWire {
                         id: KindId(kind_id_from_parts(&desc.name, &desc.schema)),
                         name: desc.name,
-                        schema_postcard,
+                        schema_wire,
                     }
                 })
                 .collect();
@@ -414,7 +414,7 @@ mod native {
         /// — emulating the `register_or_match_all` path
         /// `ComponentHostCapability::handle_load` follows — shows up in
         /// the reply with the matching `KindId`, name, and a
-        /// postcard-encoded `SchemaType` that decodes back to the
+        /// wire-encoded `SchemaType` that decodes back to the
         /// original schema. This is the live-projection ADR-0091
         /// requires: the same `Arc<Registry>` `component.rs` mutates is
         /// what the cap reads on every call.
@@ -456,8 +456,8 @@ mod native {
                     )
                 });
             assert_eq!(entry.id, expected_id, "id matches kind_id_from_parts");
-            let schema: SchemaType = wire::from_bytes(&entry.schema_postcard)
-                .expect("schema_postcard round-trips through wire");
+            let schema: SchemaType =
+                wire::from_bytes(&entry.schema_wire).expect("schema_wire round-trips through wire");
             assert!(
                 matches!(schema, SchemaType::String),
                 "schema decodes back to the originally registered SchemaType",

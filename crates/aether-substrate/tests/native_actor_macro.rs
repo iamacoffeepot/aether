@@ -38,8 +38,8 @@ use aether_substrate::{
 };
 use std::thread;
 
-/// Postcard-shape kind via the derive — exercises the
-/// `decode_from_bytes` postcard path the macro's dispatch arm uses.
+/// Structured-shape kind via the derive — exercises the
+/// `decode_from_bytes` structured path the macro's dispatch arm uses.
 #[derive(
     Clone,
     Debug,
@@ -54,7 +54,7 @@ struct Greet {
     tag: u32,
 }
 
-/// Cast-shape kind so both arms (postcard + cast) get exercised
+/// Cast-shape kind so both arms (structured + cast) get exercised
 /// through one cap.
 #[repr(C)]
 #[derive(
@@ -98,7 +98,7 @@ impl NativeActor for MacroProbeCap {
         })
     }
 
-    /// Handles postcard-shape `Greet` mail.
+    /// Handles structured-shape `Greet` mail.
     #[aether_data::handler]
     fn on_greet(&self, _ctx: &mut NativeCtx<'_>, mail: Greet) {
         self.greet_total.fetch_add(mail.tag, AtomicOrdering::SeqCst);
@@ -165,7 +165,7 @@ fn wait_for(target: u32, counter: &AtomicU32, budget: Duration) -> bool {
 }
 
 #[test]
-fn macro_emitted_cap_routes_postcard_kind_through_dispatch() {
+fn macro_emitted_cap_routes_structured_kind_through_dispatch() {
     let (registry, mailer) = fresh_substrate();
     let greet_total = Arc::new(AtomicU32::new(0));
     let ping_total = Arc::new(AtomicU32::new(0));
@@ -854,8 +854,8 @@ struct KickS {
 }
 
 /// The deferred reply kind — what the `&TaskDone -> EchoReply` completion
-/// returns and the macro sends via `resolve_value`. Postcard-shape so the
-/// reply (postcard-encoded by `Mailer::send_reply`) round-trips through
+/// returns and the macro sends via `resolve_value`. Structured-shape so the
+/// reply (wire-encoded by `Mailer::send_reply`) round-trips through
 /// `EchoReply::decode_from_bytes`.
 #[derive(
     Clone,

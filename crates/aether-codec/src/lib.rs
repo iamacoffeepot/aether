@@ -10,17 +10,17 @@
 //!      under it): `#[repr(C)]` byte layout. Decode is `bytemuck::cast`
 //!      on the substrate side; encode walks the schema and writes the
 //!      same layout.
-//!   2. Postcard (everything else): postcard 1.x wire format, written
-//!      and read directly to match the format byte-for-byte.
+//!   2. Structured (everything else): the `aether_data::wire` format,
+//!      written and read directly to match the format byte-for-byte.
 //!
-//! - **Stream framing** ([`frame`]): length-prefixed postcard for
+//! - **Stream framing** ([`frame`]): length-prefixed frames for
 //!   serde-derived enum types. The hub channel (`aether_hub::wire`)
 //!   is the first consumer; ADR-0072 placed framing here because the
 //!   helpers are codec-shaped and generic over `<T: Serialize>`.
 //!
 //! Future formats (msgpack, protobuf, save-format adapters) land as
 //! sibling modules. Future framing variants subdivide [`frame`] under
-//! `frame::postcard` / `frame::protobuf`.
+//! `frame::wire` / `frame::protobuf`.
 
 mod cast;
 #[cfg(test)]

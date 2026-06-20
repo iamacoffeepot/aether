@@ -1,12 +1,12 @@
 //! ADR-0065 typed id newtypes — `MailboxId`, `KindId`, `HandleId`.
 //!
-//! Each type is `#[repr(transparent)]` over a `u64` (postcard
-//! wire-identical to a raw u64; cast-shape kinds keep their
+//! Each type is `#[repr(transparent)]` over a `u64` (wire-identical
+//! to a raw u64; cast-shape kinds keep their
 //! `#[repr(C)]` layout) and exposes a `pub const TYPE_ID: u64`
 //! that downstream `Schema` impls (in `aether-data`) emit as
 //! `SchemaType::TypeId(Self::TYPE_ID)`. The hub's encoder/decoder
 //! dispatch on the `TYPE_ID` value to translate JSON (tagged-string
-//! form per ADR-0064) ↔ postcard (u64 varint) at the wire boundary.
+//! form per ADR-0064) ↔ the structured wire (u64 varint) at the wire boundary.
 //!
 //! The underlying `u64` carries the ADR-0064 tag bits (4-bit type
 //! discriminator in the high nibble + 60-bit FNV-1a hash in the low
@@ -35,7 +35,7 @@ fn fmt_tagged(id: u64, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 
 /// Shared serde body for typed-id types. Branches on the
 /// serializer's `is_human_readable` flag so binary backends
-/// (postcard, the substrate's wire format) get a raw `u64` varint
+/// (the substrate's wire format) get a raw `u64` varint
 /// while text backends (JSON, the MCP wire) get the ADR-0064
 /// tagged-string form. Falls back to a raw `u64` for reserved-tag
 /// sentinels (e.g. `MailboxId::NONE = 0`) so the encoder doesn't
@@ -54,7 +54,7 @@ fn serialize_id<S: Serializer>(id: u64, s: S) -> Result<S::Ok, S::Error> {
 /// Shared serde body for typed-id types. For human-readable
 /// formats (JSON), accepts either a tagged string or a raw u64
 /// number (back-compat for callers that haven't migrated). For
-/// binary formats (postcard), reads a raw u64 varint — the
+/// binary formats (the structured wire), reads a raw u64 varint — the
 /// substrate wire is byte-identical to a `u64` field.
 fn deserialize_id<'de, D: Deserializer<'de>>(d: D, expected: Tag) -> Result<u64, D::Error> {
     use serde::de::{self, Visitor};
@@ -155,7 +155,7 @@ impl MailboxId {
     /// Stable type id — FNV-1a of `TYPE_DOMAIN ++ TYPE_NAME`. The
     /// `Schema` impl (in `aether-data`) emits this as
     /// `SchemaType::TypeId(...)`; the hub's codec arms key on it to
-    /// pick the JSON/postcard translation.
+    /// pick the JSON/structured translation.
     pub const TYPE_ID: u64 = fnv1a_64_prefixed(TYPE_DOMAIN, b"aether.mailbox_id");
 
     /// Canonical name used to compute `TYPE_ID`. Surfaced by

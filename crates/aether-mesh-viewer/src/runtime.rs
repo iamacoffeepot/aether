@@ -331,7 +331,7 @@ impl WasmActor for MeshViewer {
     ///
     /// # Agent
     /// `namespace` is the short prefix with no `://` — `"save"`,
-    /// `"assets"`, `"config"`. `path` points at a postcard-encoded
+    /// `"assets"`, `"config"`. `path` points at a wire-encoded
     /// `CorridorGraph` (write it via `aether.fs.write`). Send-and-await
     /// the `aether.corridor.load_result` reply to learn whether the load
     /// succeeded. After a successful load, `aether.corridor.scrub` to
@@ -734,7 +734,7 @@ impl MeshViewer {
         LoadOutcome::ok()
     }
 
-    /// Decode a postcard `CorridorGraph` (issue 1858) from corridor-load
+    /// Decode a wire-encoded `CorridorGraph` (issue 1858) from corridor-load
     /// bytes, build a `ScrubIndex` over it, and replace the cached
     /// corridor datum (issue 1869). The scrub cursor clamps to the new
     /// graph's tick span. A decode failure leaves the prior datum intact,
@@ -1445,7 +1445,7 @@ mod tests {
         }
     }
 
-    /// A single-inside-sample `ScalarField` postcard-encoded the way an
+    /// A single-inside-sample `ScalarField` wire-encoded the way an
     /// agent writes it via `aether.fs.write`.
     fn single_voxel_field_bytes() -> Vec<u8> {
         let mut values = vec![0u32; 3 * 3 * 3];
@@ -1459,7 +1459,7 @@ mod tests {
         field.encode_into_bytes()
     }
 
-    /// Issue 1868: a `.field` load decodes a postcard `ScalarField`,
+    /// Issue 1868: a `.field` load decodes a wire-encoded `ScalarField`,
     /// meshes it, and replaces the cache with a non-empty triangle list,
     /// reporting `ok: true`. The single-voxel field meshes to the
     /// 12-triangle closed cube the mesher's own test asserts.
@@ -1481,7 +1481,7 @@ mod tests {
     }
 
     /// Issue 1868: a malformed `.field` buffer keeps the prior cache and
-    /// reports `ok: false`. A non-postcard byte run fails to decode; the
+    /// reports `ok: false`. A non-wire byte run fails to decode; the
     /// previously-loaded triangles survive.
     #[test]
     fn malformed_field_keeps_prior_cache() {
@@ -1926,7 +1926,7 @@ mod tests {
         );
     }
 
-    /// A good corridor load decodes the postcard bytes, builds the index,
+    /// A good corridor load decodes the wire bytes, builds the index,
     /// caches it, and reports `ok`. The scrub cursor clamps into the graph's
     /// tick span.
     #[test]

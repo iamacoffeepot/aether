@@ -9,7 +9,7 @@
 // sidecar: type paths, field names, variant names).
 //
 // Record formats (ADR-0118: the bytes are the owned aether-wire
-// encoding, not postcard, since issue 1984):
+// encoding, since issue 1984):
 //   `aether.kinds`         — [0x05] [wire(KindShape)]
 //   `aether.kinds.labels`  — [0x04] [wire(KindLabels)]
 //
@@ -70,7 +70,7 @@ pub const LABELS_SECTION: &str = "aether.kinds.labels";
 /// declares `Component::NAMESPACE` and `export!()` pins the bytes
 /// here; substrate's `load_component` reads the section as the default
 /// recipient name when the load payload omits an explicit `name`. The
-/// payload is the raw UTF-8 bytes — no version prefix, no postcard
+/// payload is the raw UTF-8 bytes — no version prefix, no wire
 /// wrapper, since it's a single fixed-shape string with no anticipated
 /// evolution.
 pub const NAMESPACE_SECTION: &str = "aether.namespace";
@@ -81,7 +81,7 @@ pub const NAMESPACE_SECTION: &str = "aether.namespace";
 /// byte. v0x04 (issue 640) shrunk the per-record framing back to just
 /// `[version_byte][canonical_bytes]` after the v0x03 trailing
 /// `is_stream` byte retired with the auto-subscribe path. v0x05
-/// (ADR-0118 / issue 1984) re-encoded the canonical body from postcard
+/// (ADR-0118 / issue 1984) moved the canonical body
 /// onto the owned aether-wire format (fixed little-endian selectors /
 /// ids / counts), so every `KindId` regenerates; v0x02 / v0x03 / v0x04
 /// are no longer accepted — a loud rebuild-required boundary, same as
@@ -97,7 +97,7 @@ const KINDS_VERSION: u8 = 0x05;
 /// Wire versions accepted in `aether.kinds.labels`. v0x03 added
 /// `kind_id` to `KindLabels`, making records self-identifying so the
 /// reader pairs by id rather than by declaration order. v0x04 (ADR-0118
-/// / issue 1984) re-encoded the record from postcard onto the owned
+/// / issue 1984) moved the record onto the owned
 /// aether-wire format. v0x02 / v0x03 are no longer accepted — a loud
 /// rebuild-required boundary.
 const LABELS_SUPPORTED_VERSIONS: &[u8] = &[0x04];
@@ -1012,7 +1012,7 @@ mod tests {
     }
 
     // ADR-0033: `aether.kinds.inputs` reader. The macro emits
-    // `[INPUTS_SECTION_VERSION][postcard(InputsRecord)]` back to back;
+    // `[INPUTS_SECTION_VERSION][wire(InputsRecord)]` back to back;
     // these tests pin the classifier that turns those records into
     // `ComponentCapabilities`.
 

@@ -809,7 +809,7 @@ mod tests {
         );
     }
 
-    /// The settlement-notice payload postcard-decodes back to the
+    /// The settlement-notice payload decodes back to the
     /// subscribed root — direct check of the wire contract.
     #[test]
     fn mail_payload_decodes_to_root() {

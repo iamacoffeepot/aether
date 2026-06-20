@@ -1,6 +1,6 @@
 //! Cross-test `SchemaType` builders shared between `decode` and
 //! `encode` test modules. Both module-local copies of `scalar`,
-//! `cast_struct`, `postcard_struct`, and `pending_ok_err_variants`
+//! `cast_struct`, `structured_struct`, and `pending_ok_err_variants`
 //! moved here so adding a new schema test only declares the helper
 //! once. Kept in its own `#[cfg(test)]` module so production builds
 //! don't pull in the helpers and so the `pub(crate)` visibility
@@ -35,11 +35,9 @@ pub fn cast_struct(fields: Vec<NamedField>) -> SchemaType {
     }
 }
 
-/// `Struct { repr_c: false, fields }` — the postcard-shape struct
-/// builder, for the everything-else wire variant. Decode and encode
-/// modules historically named this `pc_struct` / `postcard_struct`
-/// respectively; the shared name is `postcard_struct`.
-pub fn postcard_struct(fields: Vec<NamedField>) -> SchemaType {
+/// `Struct { repr_c: false, fields }` — the structured-shape struct
+/// builder, for the everything-else wire variant.
+pub fn structured_struct(fields: Vec<NamedField>) -> SchemaType {
     SchemaType::Struct {
         fields: fields.into(),
         repr_c: false,

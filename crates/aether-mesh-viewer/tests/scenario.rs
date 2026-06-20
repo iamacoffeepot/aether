@@ -162,7 +162,7 @@ fn dsl_box_loads_and_renders() {
     differs_from_background(&img, 5).expect("captured frame should diverge from clear color");
 }
 
-/// Issue 1868 render-path smoke: a `.field` load decodes a postcard
+/// Issue 1868 render-path smoke: a `.field` load decodes a wire-encoded
 /// `ScalarField`, surface-nets it, and replays the triangles to
 /// `aether.render` every frame — `aether.draw_triangle` is observed.
 /// Asserts mesh structure (triangles flow), not pixels, per the GPU-test

@@ -93,7 +93,7 @@ fn reshaped_state_kind_misses_decode_with_bytes_present() {
     let (_, buf) = ctx.saved.expect("dehydrate deposits a bundle");
 
     // The reshaped kind has a different `Kind::ID`, so the leading-id
-    // compare in `as_kind` rejects before postcard runs.
+    // compare in `as_kind` rejects before the structured decode runs.
     assert_ne!(
         CounterState::ID,
         CounterStateReshaped::ID,

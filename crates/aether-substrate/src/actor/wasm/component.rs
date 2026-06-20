@@ -600,10 +600,10 @@ pub const DISPATCH_DROPPED_OVERSIZE: u32 = 2;
 /// `recipient: u64` — the mailbox id the substrate routed this mail to
 /// (the actor's own id for a normal actor; an inline-child alias for
 /// the membrane). The `byte_len: u32` parameter (added
-/// to support postcard-shaped receivers per ADR-0033's "any declared
+/// to support structured-shaped receivers per ADR-0033's "any declared
 /// kind" intent) is the total payload size the substrate wrote at
 /// `ptr`, sourced from `mail.payload.len()`. Cast decoders sanity-
-/// check it against `size_of::<K>() * count`; postcard decoders use
+/// check it against `size_of::<K>() * count`; structured decoders use
 /// it as the exact slice length so a parser bug or a corrupted frame
 /// can't read past the substrate-written bytes into adjacent linear
 /// memory. ADR-0015 + issue 584 add optional `wire`, `unwire`,

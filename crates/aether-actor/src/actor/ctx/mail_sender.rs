@@ -31,7 +31,7 @@ use crate::actor::{HandlesKind, Singleton};
 /// is resolved through `R::resolve(caller_carry)` (ADR-0099 §5) — the
 /// same lineage-aware path `ctx.actor::<R>()` walks — so a non-root
 /// receiver routes to the lineage-folded id, not the flat
-/// `hash(R::NAMESPACE)`. Wire shape (cast or postcard) follows
+/// `hash(R::NAMESPACE)`. Wire shape (cast or structured) follows
 /// `Kind::encode_into_bytes` (issue #240).
 pub trait MailSender {
     /// Send a single payload of kind `K` to the singleton instance of
@@ -50,7 +50,7 @@ pub trait MailSender {
         K: Kind;
 
     /// Send a slice of cast-shape payloads as a contiguous batch.
-    /// Cast-only — postcard has no efficient batched wire shape.
+    /// Cast-only — structured kinds have no efficient batched wire shape.
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Singleton + HandlesKind<K>,
