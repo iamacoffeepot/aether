@@ -23,7 +23,7 @@ aether-data = { path = "../aether-data" }
 # Trace vocabulary the guided walk reconstructs (`TraceRingEntry`,
 # `MailNodeWire`, `DescribeTreeResult`, `TraceEvent`, `Nanos`).
 aether-kinds = { path = "../aether-kinds" }
-# Length-prefix postcard stream framing the `Call` client reads/writes
+# Length-prefix stream framing the `Call` client reads/writes
 # (ADR-0072). Reached only by the native-only client; harmless in the
 # wasm-header build (`aether-capabilities` already pulls it there).
 aether-codec = { path = "../aether-codec" }

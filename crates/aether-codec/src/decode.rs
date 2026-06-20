@@ -109,7 +109,7 @@ impl error::Error for DecodeError {}
 
 /// Decode-side allocation budget, in the spirit of `frame.rs`'s
 /// `MAX_FRAME_SIZE`: a wire-decoded length must never drive the decoder
-/// into an unbounded allocation. Every postcard node charges one value
+/// into an unbounded allocation. Every structured node charges one value
 /// against a per-decode budget sized from the input length, so a crafted
 /// length — or a zero-wire-byte-element collection (`Unit`, field-less
 /// `Struct`) whose decode loop allocates per iteration without consuming
@@ -679,7 +679,7 @@ impl<'a> Cursor<'a> {
 mod tests {
     use super::*;
     use crate::encode_schema;
-    use crate::test_fixtures::{cast_struct, pending_ok_err_variants, postcard_struct, scalar};
+    use crate::test_fixtures::{cast_struct, pending_ok_err_variants, scalar, structured_struct};
     use aether_data::SchemaCell;
     use aether_data::tagged_id;
     use serde_json::json;
@@ -687,7 +687,7 @@ mod tests {
     /// Local alias preserving the decode-side spelling that the test
     /// bodies below already use.
     fn pc_struct(fields: Vec<NamedField>) -> SchemaType {
-        postcard_struct(fields)
+        structured_struct(fields)
     }
 
     /// Encode → decode → assert equal. The single most load-bearing
@@ -815,10 +815,10 @@ mod tests {
         assert!(matches!(err, DecodeError::Truncated { .. }));
     }
 
-    // Postcard path — primitives
+    // Structured path — primitives
 
     #[test]
-    fn postcard_bool_field() {
+    fn structured_bool_field() {
         roundtrip(
             json!({"flag": true}),
             &pc_struct(vec![NamedField {
@@ -836,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn postcard_invalid_bool_byte_errors() {
+    fn structured_invalid_bool_byte_errors() {
         let schema = pc_struct(vec![NamedField {
             name: "flag".into(),
             ty: SchemaType::Bool,
@@ -846,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn postcard_string_field() {
+    fn structured_string_field() {
         roundtrip(
             json!({"body": "hello world"}),
             &pc_struct(vec![NamedField {
@@ -857,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn postcard_string_invalid_utf8_errors() {
+    fn structured_string_invalid_utf8_errors() {
         let schema = pc_struct(vec![NamedField {
             name: "body".into(),
             ty: SchemaType::String,
@@ -869,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn postcard_bytes_field() {
+    fn structured_bytes_field() {
         roundtrip(
             json!({"blob": [1u8, 2, 3, 4, 5]}),
             &pc_struct(vec![NamedField {
@@ -880,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn postcard_option_some_and_none() {
+    fn structured_option_some_and_none() {
         let schema = pc_struct(vec![NamedField {
             name: "name".into(),
             ty: SchemaType::Option(SchemaCell::owned(SchemaType::String)),
@@ -890,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn postcard_vec_of_strings() {
+    fn structured_vec_of_strings() {
         let schema = pc_struct(vec![NamedField {
             name: "tags".into(),
             ty: SchemaType::Vec(SchemaCell::owned(SchemaType::String)),
@@ -899,7 +899,7 @@ mod tests {
     }
 
     #[test]
-    fn postcard_vec_of_nested_structs() {
+    fn structured_vec_of_nested_structs() {
         let inner = pc_struct(vec![scalar("seq", Primitive::U32)]);
         let schema = pc_struct(vec![NamedField {
             name: "items".into(),
@@ -918,12 +918,12 @@ mod tests {
     }
 
     #[test]
-    fn postcard_enum_unit_variant_decodes_as_string_tag() {
+    fn structured_enum_unit_variant_decodes_as_string_tag() {
         roundtrip(json!("Pending"), &sum_schema());
     }
 
     #[test]
-    fn postcard_enum_tuple_single_field_decodes_unwrapped() {
+    fn structured_enum_tuple_single_field_decodes_unwrapped() {
         // Encoder accepts both `{"Ok": 42}` and `{"Ok": [42]}` for
         // single-field tuples; decoder normalizes to the unwrapped
         // form so round-trip from `{"Ok": 42}` is byte-equal.
@@ -931,12 +931,12 @@ mod tests {
     }
 
     #[test]
-    fn postcard_enum_struct_variant() {
+    fn structured_enum_struct_variant() {
         roundtrip(json!({"Err": {"reason": "kind conflict"}}), &sum_schema());
     }
 
     #[test]
-    fn postcard_enum_unknown_discriminant_errors() {
+    fn structured_enum_unknown_discriminant_errors() {
         // discriminant 99 isn't in the schema; the u32 selector is
         // little-endian.
         let schema = sum_schema();
@@ -1030,7 +1030,7 @@ mod tests {
     #[test]
     fn map_inside_struct_field_roundtrip() {
         // The expected shape for the named v1 use case: a map field
-        // inside a postcard struct (HTTP-header-style descriptor).
+        // inside a structured struct (HTTP-header-style descriptor).
         let schema = pc_struct(vec![NamedField {
             name: "headers".into(),
             ty: map_schema(SchemaType::String, SchemaType::String),
@@ -1063,7 +1063,7 @@ mod tests {
     // ADR-0065: typed-id round-trips through both wire shapes.
 
     #[test]
-    fn type_id_postcard_round_trips_as_tagged_string() {
+    fn type_id_structured_round_trips_as_tagged_string() {
         // JSON in: tagged string. Wire: u64 varint. JSON out: same
         // tagged string. The post-migration shape an agent sees end
         // to end.

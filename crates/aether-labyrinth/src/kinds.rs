@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 // itself is a pair of native `#[transform]`s in this crate.
 // A family of follow-on field passes (corridor extraction, windowed
 // re-solve, agent populations) all consume `ScalarField`, so the
-// representation lands here once. Postcard-shaped, `Vec`-bearing like
+// representation lands here once. Structured-shaped, `Vec`-bearing like
 // `CreateTexture`.
 
 /// A dense scalar field over a 2D grid and an integer tick axis — the
@@ -147,7 +147,7 @@ pub struct ReachabilityMargin {
 // (priced at the sublevel-filtration threshold of `V` at which raising
 // `B` would merge them), and the inter-tick "flow" edges between
 // components an affordable one-tick stencil step links. A flat,
-// postcard-friendly DAG built by the `build_corridor_graph` transform
+// structured-friendly DAG built by the `build_corridor_graph` transform
 // in this crate: nodes carry summaries, not cell sets, so
 // the graph stays orders of magnitude smaller than `V`, and components
 // are re-derivable from `V` + `B` + the [`MovementStencil`] (all
@@ -252,7 +252,7 @@ pub struct TrajectorySet {
 /// untraveled, and how through-boundary ("punch") traffic splits by
 /// whether punching beat the affordable detour around it.
 ///
-/// A flat, postcard-friendly reduction keyed by the graph's node / edge
+/// A flat, structured-friendly reduction keyed by the graph's node / edge
 /// indices so a consumer joins it back to the graph by index:
 /// `edge_traffic[i]` is the traffic over `CorridorGraph.edges[i]`, and
 /// `node_traffic[i]` the visits to `CorridorGraph.nodes[i]`. The output
@@ -1090,7 +1090,7 @@ mod tests {
         }
 
         #[test]
-        fn traffic_density_postcard_round_trips() {
+        fn traffic_density_structured_round_trips() {
             use aether_data::Kind;
             let density = TrafficDensity {
                 path_count: 3,

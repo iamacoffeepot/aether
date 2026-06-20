@@ -142,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn gemini_requests_are_postcard_schemas() {
+    fn gemini_requests_are_structured_schemas() {
         // ADR-0050: both generate kinds carry String/Vec/Option fields.
         let descs = all();
         for name in [NanobananaGenerate::NAME, LyriaGenerate::NAME] {
@@ -153,7 +153,7 @@ mod tests {
             let SchemaType::Struct { repr_c, .. } = &d.schema else {
                 panic!("{name} should be Struct, got {:?}", d.schema);
             };
-            assert!(!*repr_c, "{name} contains String/Vec, must be postcard");
+            assert!(!*repr_c, "{name} contains String/Vec, must be structured");
         }
     }
 
@@ -174,10 +174,10 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_requests_are_postcard_schemas() {
+    fn anthropic_requests_are_structured_schemas() {
         // ADR-0050: the two send kinds carry String/Vec/Option fields,
-        // so they must serialize as non-cast (postcard) structs — the
-        // hub builds them from agent params via the postcard encoder.
+        // so they must serialize as non-cast (structured) structs — the
+        // hub builds them from agent params via the wire encoder.
         let descs = all();
         for name in [MessagesSend::NAME, CliSend::NAME] {
             let d = descs
@@ -187,7 +187,7 @@ mod tests {
             let SchemaType::Struct { repr_c, .. } = &d.schema else {
                 panic!("{name} should be Struct, got {:?}", d.schema);
             };
-            assert!(!*repr_c, "{name} contains String/Vec, must be postcard");
+            assert!(!*repr_c, "{name} contains String/Vec, must be structured");
         }
     }
 
@@ -208,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn io_requests_are_postcard_schemas() {
+    fn io_requests_are_structured_schemas() {
         // ADR-0041 §1: request kinds carry `String` namespace + path
         // (and `Vec<u8>` bytes on `Write`), so they must serialize as
         // non-cast structs. Catches an accidental `#[repr(C)]` +
@@ -222,7 +222,7 @@ mod tests {
             let SchemaType::Struct { repr_c, .. } = &d.schema else {
                 panic!("{name} should be Struct, got {:?}", d.schema);
             };
-            assert!(!*repr_c, "{name} contains String/Vec, must be postcard");
+            assert!(!*repr_c, "{name} contains String/Vec, must be structured");
         }
     }
 
@@ -250,11 +250,11 @@ mod tests {
     }
 
     #[test]
-    fn control_kinds_are_postcard_schemas() {
+    fn control_kinds_are_structured_schemas() {
         // ADR-0019: control-plane kinds ship as `Struct{repr_c:false,..}`
         // (LoadComponent, DropComponent, ReplaceComponent) or `Enum{..}`
         // (the *Result variants). Hub builds them from agent params
-        // via the postcard encoder.
+        // via the wire encoder.
         let descs = all();
         for name in [
             LoadComponent::NAME,
@@ -268,7 +268,7 @@ mod tests {
             let SchemaType::Struct { repr_c, .. } = &d.schema else {
                 panic!("{name} should be Struct, got {:?}", d.schema);
             };
-            assert!(!*repr_c, "{name} contains String/Vec, must be postcard");
+            assert!(!*repr_c, "{name} contains String/Vec, must be structured");
         }
         for name in [LoadResult::NAME, DropResult::NAME, ReplaceResult::NAME] {
             let d = descs
@@ -387,7 +387,7 @@ mod tests {
         // `aether_math` primitives directly (`#[repr(C)]` + `Pod`), so
         // its schema is a cast struct whose fields are the nested `Mat4`
         // and `Vec4` cast structs, not flattened `[f32; N]` arrays. A
-        // stray loss of `#[repr(C)]` (flipping it to postcard) is a
+        // stray loss of `#[repr(C)]` (flipping it to structured) is a
         // wire-format mismatch this catches.
         let descs = all();
         let d = descs
@@ -397,7 +397,7 @@ mod tests {
         let SchemaType::Struct { fields, repr_c } = &d.schema else {
             panic!("{} should be Struct, got {:?}", Mat4Apply::NAME, d.schema);
         };
-        assert!(*repr_c, "Mat4Apply must be cast, not postcard");
+        assert!(*repr_c, "Mat4Apply must be cast, not structured");
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].name, "matrix");
         assert_eq!(fields[1].name, "vector");
@@ -488,10 +488,10 @@ mod tests {
         }
     }
 
-    /// `TrajectoryLog` is a postcard-shaped `Struct` (it carries a
+    /// `TrajectoryLog` is a structured `Struct` (it carries a
     /// `Vec<TrajectorySampleEntry>` field, so `repr_c` must be false).
     #[test]
-    fn trajectory_log_is_postcard_struct() {
+    fn trajectory_log_is_structured_struct() {
         let descs = all();
         let d = descs
             .iter()
@@ -502,7 +502,7 @@ mod tests {
         };
         assert!(
             !*repr_c,
-            "TrajectoryLog contains Vec — must be postcard, not cast"
+            "TrajectoryLog contains Vec — must be structured, not cast"
         );
     }
 

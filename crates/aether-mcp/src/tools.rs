@@ -1692,7 +1692,7 @@ impl Mcp {
             return;
         };
 
-        // Decode each `schema_postcard` back into a `SchemaType` via
+        // Decode each `schema_wire` back into a `SchemaType` via
         // `wire::from_bytes`; an entry whose schema fails to decode is
         // dropped (the substrate's wire form is canonical, so a decode
         // failure is a substrate / aether-data version mismatch —
@@ -1700,7 +1700,7 @@ impl Mcp {
         let fresh: Vec<KindDescriptor> = kinds
             .into_iter()
             .filter_map(|wire| {
-                let schema = wire::from_bytes::<SchemaType>(&wire.schema_postcard).ok()?;
+                let schema = wire::from_bytes::<SchemaType>(&wire.schema_wire).ok()?;
                 Some(KindDescriptor {
                     name: wire.name,
                     schema,
@@ -4292,7 +4292,7 @@ mod tests {
                 )
             });
         let decoded_schema: SchemaType =
-            wire::from_bytes(&entry.schema_postcard).expect("schema_postcard decodes");
+            wire::from_bytes(&entry.schema_wire).expect("schema_wire decodes");
         assert!(
             matches!(decoded_schema, SchemaType::String),
             "the registered schema round-trips through the wire",

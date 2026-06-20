@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 /// rather than misparse. Pre-1.0 this is a wipe, not a migrate.
 pub const SCHEMA_VERSION: u8 = 4;
 
-/// Postcard-encoded sidecar describing one persistent handle. Written
+/// Wire-encoded sidecar describing one persistent handle. Written
 /// atomically next to the handle's `<hash>.bin` payload; the boot scan
 /// reads it to rebuild the sparse disk index without loading the bytes.
 ///
@@ -137,7 +137,7 @@ mod tests {
     use aether_data::wire;
 
     #[test]
-    fn index_snapshot_postcard_round_trips() {
+    fn index_snapshot_structured_round_trips() {
         let mut entries = HashMap::new();
         entries.insert(
             0x1111_2222_3333_4444,

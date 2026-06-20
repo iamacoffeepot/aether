@@ -28,7 +28,7 @@ use crate::{EngineId, MailboxId, Schema, SessionToken};
 /// "no inbound mail" is structurally distinct from "chassis as sender".
 ///
 /// Serde-serializable so the ADR-0080 `TraceEvent` (and its
-/// postcard-shaped `TraceRingEntry`, the per-actor ring's wire element)
+/// structured `TraceRingEntry`, the per-actor ring's wire element)
 /// can carry `MailId` when a trace ring is queried over the wire. The
 /// substrate's host-side `Envelope` and `Mail` types do not serialize,
 /// so the field additions on those remain wire-free.

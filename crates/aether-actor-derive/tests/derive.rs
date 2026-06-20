@@ -8,7 +8,7 @@
 //     correctly across `#[repr(C)]` / non-repr / nested-substructure
 //     cases.
 //   - `#[derive(Schema)]` produces the right `SchemaType` for unit,
-//     tuple, named-field, cast-eligible, postcard-shaped, and
+//     tuple, named-field, cast-eligible, structured-shaped, and
 //     enum-shaped inputs.
 //   - The `Vec<u8>` field-level specialization lands as `Bytes`, not
 //     `Vec(Scalar(U8))`.
@@ -116,7 +116,7 @@ fn cast_eligible_propagates_through_array_of_substruct() {
 }
 
 #[test]
-fn postcard_struct_marks_repr_c_false_and_specializes_bytes() {
+fn structured_struct_marks_repr_c_false_and_specializes_bytes() {
     const { assert!(!<Note as CastEligible>::ELIGIBLE) };
     let SchemaType::Struct { repr_c, fields } = &<Note as Schema>::SCHEMA else {
         panic!("expected Struct schema");
@@ -200,7 +200,7 @@ fn enum_emits_each_variant_shape_with_sequential_discriminants() {
 // aether-data dispatches through the existing trait. These tests
 // pin that integration: a struct with a `Ref<K>` field gets a
 // `SchemaType::Ref` arm in its layout, the parent's CastEligible
-// flips to false (refs force postcard), and the wire roundtrips
+// flips to false (refs force structured), and the wire roundtrips
 // for both Inline and Handle variants.
 
 #[derive(Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
@@ -216,7 +216,7 @@ fn ref_field_lands_as_schema_ref_pointing_at_inner_kind() {
     let SchemaType::Struct { fields, repr_c } = &<HeldNote as Schema>::SCHEMA else {
         panic!("expected Struct schema");
     };
-    // Ref<K> forces postcard — a parent with a Ref field can't
+    // Ref<K> forces structured — a parent with a Ref field can't
     // claim `repr_c: true` no matter how the rest of the fields
     // look. ADR-0045 §1.
     assert!(!*repr_c);
@@ -298,7 +298,7 @@ fn ref_schema_cell_uses_static_pointer_for_const_construction() {
 fn cast_eligible_blocked_by_non_pod_field_even_with_repr_c() {
     // A struct with `#[repr(C)]` but a non-eligible field type must
     // still report `ELIGIBLE = false`. Catching this is what stops
-    // the substrate from misclassifying a postcard kind as cast-able.
+    // the substrate from misclassifying a structured kind as cast-able.
     //
     // Kind derive is intentionally omitted here — the autodetect rule
     // (cast iff `#[repr(C)]`) would emit a `decode_cast` body that

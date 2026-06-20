@@ -426,8 +426,8 @@ fn expand_schema_struct(fields: &[FieldInfo]) -> syn::Result<TokenStream2> {
         let name = match &f.ident {
             Some(id) => id.to_string(),
             // Tuple struct field — name positionally so the hub still
-            // has something to render in `describe_kinds`. Postcard
-            // doesn't care; field names are advisory metadata.
+            // has something to render in `describe_kinds`. The wire
+            // format doesn't care; field names are advisory metadata.
             None => idx.to_string(),
         };
         let ty_expr = field_type_schema_expr(&f.ty);
@@ -2729,7 +2729,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
             // Slice handler — payload is `count * size_of::<K>()`
             // contiguous bytes (ADR-0019 batch wire). Cast to `&[K]`
             // for the handler. Only meaningful for cast-shape kinds;
-            // postcard kinds have no batched wire shape.
+            // structured kinds have no batched wire shape.
             quote! {
                 if __aether_kind.0 == <#kind_ty as ::aether_data::Kind>::ID.0 {
                     if let Some(__aether_decoded) =
@@ -3104,7 +3104,7 @@ fn validate_native_fallback_sig(sig: &Signature) -> syn::Result<()> {
 ///     contiguous `&[K]` slice via `decode_cast_slice` so a single
 ///     envelope with `count > 1` (`Mailbox::send_many`, ADR-0019)
 ///     reaches the handler intact. Only meaningful for cast-shape
-///     kinds; postcard kinds have no batch wire.
+///     kinds; structured kinds have no batch wire.
 ///
 /// Issue 629 / Phase B: `&mut self` is now allowed alongside `&self`.
 /// The dispatcher owns the cap as `Box<A>` and calls each handler
@@ -3266,7 +3266,7 @@ fn validate_fallback_sig(sig: &Signature) -> syn::Result<()> {
 /// Synthesized body of `__aether_dispatch`. Compares `mail.kind()`
 /// against each `<K as Kind>::ID` const (ADR-0030 Phase 2); on match,
 /// decodes via `Mail::decode_kind::<K>()` and calls the inherent-impl
-/// handler method. Wire shape (cast vs postcard) is picked at K's
+/// handler method. Wire shape (cast vs structured) is picked at K's
 /// `Kind` derive site, not here — `Kind::decode_from_bytes` carries
 /// the per-K body — so this dispatcher never sees the wire choice.
 /// Returns `DISPATCH_HANDLED` on a match or when the `#[fallback]`
@@ -3414,7 +3414,7 @@ fn build_inputs_manifest_consts(
                     );
                 // Per-record section version byte, bumped to 0x05 by
                 // ADR-0118 (issue 1984) — the record is now the owned
-                // aether-wire encoding rather than postcard. Keep in
+                // aether-wire encoding. Keep in
                 // lockstep with `INPUTS_SECTION_VERSION`.
                 out[pos] = 0x05;
                 pos += 1;

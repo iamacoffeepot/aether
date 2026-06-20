@@ -135,7 +135,7 @@ impl<'a, R> NativeActorMailbox<'a, R> {
 
 impl<R: Addressable> NativeActorMailbox<'_, R> {
     /// Send a single payload of kind `K` to actor `R`. Compile-checked
-    /// against `R: HandlesKind<K>`. Wire shape (cast or postcard)
+    /// against `R: HandlesKind<K>`. Wire shape (cast or structured)
     /// follows `Kind::encode_into_bytes`.
     ///
     /// Inherits the handler's in-flight causal chain by default

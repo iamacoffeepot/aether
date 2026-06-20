@@ -136,7 +136,7 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
     /// back into the caller's chain. Reach for [`Self::send_detached`]
     /// for the rare fire-and-forget send that should start its own chain.
     ///
-    /// Wire shape (cast or postcard) follows `Kind::encode_into_bytes`
+    /// Wire shape (cast or structured) follows `Kind::encode_into_bytes`
     /// — same single source of truth as the kind-typed sends per
     /// issue #240.
     pub fn send<K>(&self, payload: &K)

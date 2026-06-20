@@ -67,8 +67,8 @@ Because `ID` and `SCHEMA` are `const`, there is no host round-trip to learn a
 kind's identity or shape — `Kind::ID` is a compile-time value. And because the
 schema travels with the type, the wire layer can encode a kind from JSON and a
 recipient can decode it without a shared header ([ADR-0019](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0019-unified-mail-encoding.md)). On the wire a
-`#[repr(C)]` plain-data kind rides as a raw byte cast; everything else as
-postcard — the derive autodetects from the type's layout, so a single
+`#[repr(C)]` plain-data kind rides as a raw byte cast; everything else as a
+structured encoding — the derive autodetects from the type's layout, so a single
 `send` / `reply` call site handles both.
 
 **What feeds the id — and what doesn't.** The `KindId` hash takes `name +
@@ -106,12 +106,12 @@ worth knowing beyond "it's a type tree":
 
 - **Two wire shapes, and what picks them.** A struct encodes as a raw
   `#[repr(C)]` byte cast (`repr_c = true`) *only if* it is `#[repr(C)]` **and**
-  every field is cast-eligible, recursively; otherwise it encodes as postcard.
+  every field is cast-eligible, recursively; otherwise it encodes as structured.
   Cast-eligible means a scalar primitive, a typed-id newtype (`MailboxId` and
   friends are `#[repr(transparent)]` over `u64`), a fixed `[T; N]` array of
   cast-eligible elements, or a nested all-cast-eligible `#[repr(C)]` struct. A
   single `String`, `Bytes`, `Vec`, `Option`, `Map`, `Enum`, or `Ref` field
-  anywhere short-circuits the whole struct to postcard. You don't choose this —
+  anywhere short-circuits the whole struct to structured. You don't choose this —
   the derive computes it at compile time (`CastEligible::ELIGIBLE` ANDs every
   field) — but it's why two similar-looking kinds can have different wire
   encodings, and it's the `encode` vs `encode_struct` split in the SDK.
@@ -119,12 +119,12 @@ worth knowing beyond "it's a type tree":
   scalar, or `Bool` — the `BTreeMap<K: Ord, V>` bound rules out `f32`/`f64`/
   `Vec`/`Option` at the type level and the codec rejects them defensively.
   Entries serialize in key-sorted order, and a map (being variable-length)
-  always forces its parent struct onto the postcard path.
+  always forces its parent struct onto the structured path.
 - **The canonical bytes are positional-only.** When a schema is serialized for
   hashing and for the `aether.kinds` manifest, field and variant names are
   dropped; a separate labels sidecar (`aether.kinds.labels`) carries them for
   consumers that want human-readable reconstruction, like `describe_kinds`
-  ([ADR-0032](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0032-canonical-schema-bytes-and-labels-sidecar.md)). The wire never carries names — postcard fields are positional.
+  ([ADR-0032](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0032-canonical-schema-bytes-and-labels-sidecar.md)). The wire never carries names — structured fields are positional.
 - **`Ref` is a schema arm.** A field whose type is `Ref<K>` is a *handle-or-
   inline* slot — see *Handles* below. The
   schema wraps the inner kind's shape, so a recipient decodes the resolved value
@@ -158,7 +158,7 @@ cases that surprise people live at the schema-arm level. Holding the
 - **A same-size type swap** — `{ a: u32 }` ≠ `{ a: i32 }`, and `{ a: u64 }` ≠
   `{ a: MailboxId }` even though both are eight wire bytes: a typed-id field is a
   distinct `TypeId` arm, not a `Scalar`.
-- **Flipping `#[repr(C)]`** when it changes the cast/postcard choice — `repr_c`
+- **Flipping `#[repr(C)]`** when it changes the cast/structured choice — `repr_c`
   is part of the canonical bytes, so the same fields under a different wire
   format are a different kind.
 - **Wrapping a field** — `{ a: u32 }`, `{ a: Option<u32> }`, and `{ a: Ref<u32> }`

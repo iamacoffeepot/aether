@@ -544,7 +544,7 @@ pub struct Camera {
 
 // `aether.camera.*` control kinds (CameraCreate / CameraDestroy /
 // CameraSetActive / CameraSetMode / CameraOrbitSet / CameraTopdownSet)
-// live in `mod control_plane` below — they're postcard-shaped because
+// live in `mod control_plane` below — they're structured because
 // every one carries a `String` name and `Option<...>` per-field
 // deltas, so they can't ride the cast-shaped path.
 
@@ -752,9 +752,9 @@ pub struct MonitorNotice {
 // these kinds inline rather than dispatching to a component — the
 // namespace itself is the routing discriminator. ADR-0019 PR 5 turned
 // these from Opaque markers into real schema-described types: their
-// fields are postcard-encoded on the wire, hub-encodable from agent
+// fields are structured-encoded on the wire, hub-encodable from agent
 // params (no more `payload_bytes` workaround), and the substrate
-// decodes them with `postcard::from_bytes` against the same types
+// decodes them with `wire::from_bytes` against the same types
 // that ship as the kind.
 //
 // Gated behind `descriptors` because the types use `String`/`Vec`/
@@ -916,7 +916,7 @@ mod tcp {
     /// `aether.tcp.session_data` — broadcast emitted by a
     /// `TcpSessionActor` on each chunk read from its peer. Carries
     /// the session subname (`conn-N`), the peer address as a string,
-    /// and the bytes received in one `read()` call. Postcard-shaped
+    /// and the bytes received in one `read()` call. Structured-shaped
     /// (variable-length payload) — agents drain via `receive_mail`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.tcp.session_data")]
@@ -2061,7 +2061,7 @@ mod control_plane {
     // `aether.render` mailbox compose the generic texture surface text /
     // sprites / HUD images share: register an RGBA8 texture, overwrite a
     // sub-rect of one, and draw a batch of textured alpha-blended quads
-    // in either projection. Postcard-shaped — `CreateTexture` /
+    // in either projection. Structured-shaped — `CreateTexture` /
     // `UpdateTexture` carry `Vec<u8>` pixels, `DrawTexturedQuads` carries
     // a `space` enum and a `Vec` of quads.
 
@@ -2212,7 +2212,7 @@ mod control_plane {
     // ADR-0105 text surface. The `aether.text` capability composes the
     // textured-quad surface above into glyphs: load a TTF off the hot
     // path under a session-scoped `font_id`, then draw a string every
-    // frame in immediate mode. Postcard-shaped; `space` reuses
+    // frame in immediate mode. Structured-shaped; `space` reuses
     // `QuadSpace` so a screen-space HUD string and a world-anchored
     // label ride the same discriminant.
 
@@ -2560,7 +2560,7 @@ mod control_plane {
     // ADR-0104 scheduled note events. One `aether.audio.schedule` mail
     // carries a whole tune as a batch of timed note events; the audio cap
     // schedules them against its own sample clock so relative timing is
-    // sample-accurate. Postcard-shaped — the batch is a `Vec`, not a
+    // sample-accurate. Structured-shaped — the batch is a `Vec`, not a
     // cast-eligible `#[repr(C)]` body.
 
     /// One note action in a scheduled batch (ADR-0104). The payload
@@ -2624,7 +2624,7 @@ mod control_plane {
     // ADR-0103 track playback. The audio cap plays a decoded audio asset
     // (music, ambience) in its own mixer lane, addressed by fs namespace
     // + path the way the rest of the substrate addresses files (ADR-0041).
-    // Postcard-shaped because every field is a `String` / `f32` / `bool`,
+    // Structured-shaped because every field is a `String` / `f32` / `bool`,
     // not a cast-eligible `#[repr(C)]` body like `NoteOn`.
 
     /// `aether.audio.play_track` — fetch, decode, and play an audio asset
@@ -2704,7 +2704,7 @@ mod control_plane {
     // pitched samples at runtime, appends it to the instrument registry
     // past the compiled-in built-ins, and plays it through the unchanged
     // `note_on` / `note_off` surface (a third voice kernel beside the
-    // oscillator and partial-bank patches). Postcard-shaped — the request
+    // oscillator and partial-bank patches). Structured-shaped — the request
     // carries `String` namespace/path, the reply a numeric id + name.
 
     /// `aether.audio.load_instrument` — load a sampled instrument bank
@@ -2752,8 +2752,8 @@ mod control_plane {
     // ADR-0041 substrate file I/O. Four request kinds on the
     // `"aether.fs"` mailbox (read / write / delete / list), paired
     // 1:1 with reply kinds
-    // that carry a structured `FsError` on failure. All postcard-
-    // shaped because every request carries String namespace/path
+    // that carry a structured `FsError` on failure. All structured
+    // because every request carries String namespace/path
     // fields and writes carry `Vec<u8>` bytes.
     //
     // `namespace` is the logical prefix without the `://`: mail
@@ -3114,24 +3114,24 @@ mod control_plane {
 
     /// One kind in a [`ListKindsResult`] (ADR-0091). `id` is the
     /// substrate's authoritative [`KindId`](aether_data::KindId) for the
-    /// kind; `name` is its declared `Kind::NAME`; `schema_postcard` is
-    /// the kind's [`SchemaType`](aether_data::SchemaType) postcard-
-    /// serialized (the wire enum carries the full nominal shape).
+    /// kind; `name` is its declared `Kind::NAME`; `schema_wire` is
+    /// the kind's [`SchemaType`](aether_data::SchemaType) encoded with
+    /// the wire format (the wire enum carries the full nominal shape).
     ///
-    /// The schema rides as opaque postcard bytes rather than a directly
+    /// The schema rides as opaque wire bytes rather than a directly
     /// embedded `SchemaType` because `SchemaType` itself has no
     /// `Schema` impl (it *is* the schema vocabulary, not a value in
     /// it); shipping it as `Bytes` keeps `KindDescriptorWire` and the
     /// whole reply derivable via [`aether_data::Schema`] without a
-    /// hand-roll, at the cost of one extra `postcard::from_bytes` on
-    /// the harness side. Cap encodes via `postcard::to_allocvec`
+    /// hand-roll, at the cost of one extra `wire::from_bytes` on
+    /// the harness side. Cap encodes via `wire::to_vec`
     /// against `descriptor.schema`; client decodes via
-    /// `postcard::from_bytes`.
+    /// `wire::from_bytes`.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct KindDescriptorWire {
         pub id: aether_data::KindId,
         pub name: String,
-        pub schema_postcard: Vec<u8>,
+        pub schema_wire: Vec<u8>,
     }
 
     /// `aether.inventory.kinds` — request the running substrate's
@@ -3272,7 +3272,7 @@ mod control_plane {
 
     // ADR-0043 substrate HTTP egress. One request kind + one reply
     // kind on the `"aether.http"` sink, plus supporting `HttpMethod`,
-    // `HttpHeader`, and `HttpError` shapes. All postcard-shaped
+    // `HttpHeader`, and `HttpError` shapes. All structured
     // (Strings, Vecs, Option<u32>).
     //
     // Reply correlation follows the ADR-0041 pattern: the reply
@@ -3788,7 +3788,7 @@ mod control_plane {
     }
 
     /// One environment variable pair carried in [`Spawn::env`]. Pairs
-    /// rather than a `HashMap` because postcard-shaped wire kinds
+    /// rather than a `HashMap` because structured wire kinds
     /// don't have a `Schema` impl for tuple element types and a
     /// keyed-collection schema isn't load-bearing here — duplicate
     /// keys aren't expected and last-write-wins matches the env
@@ -3890,7 +3890,7 @@ mod control_plane {
     // reply with a `*_result` Ok/Err enum carrying the shared `Usage`
     // accounting (also consumed by the `aether.gemini` media kinds,
     // issue 1015) on `Ok` and a provider-specific `AnthropicError` on
-    // `Err`. All postcard-shaped — every request carries `String` /
+    // `Err`. All structured — every request carries `String` /
     // `Vec` / `Option` fields.
 
     /// Conversation role on a [`Message`]. The Messages API only
@@ -4370,7 +4370,7 @@ mod tests {
 
     #[test]
     fn spawn_engine_roundtrip_carries_boot_manifest() {
-        // The spawn kind rides the wire (postcard path — non-`repr(C)`
+        // The spawn kind rides the wire (structured path — non-`repr(C)`
         // struct with a nested `BinarySelector`, `Vec<String>`, and
         // `Option<String>`). Both `Some` (a spawn carrying a component
         // list) and `None` (a bare spawn) must survive the engines-cap
@@ -4422,7 +4422,7 @@ mod tests {
     #[test]
     fn binary_store_kinds_roundtrip() {
         // The hub binary-store registry kinds (ADR-0115, issue 1953) ride
-        // the postcard path — `Option<String>` + `Vec<String>` + a nested
+        // the structured path — `Option<String>` + `Vec<String>` + a nested
         // `Schema` manifest struct. The request, the tagged result, and the
         // list reply with its embedded `BinaryEntry`/`BinaryManifest` must
         // all survive the engines-cap encode/decode.
@@ -4488,7 +4488,7 @@ mod tests {
     #[test]
     fn component_store_kinds_roundtrip() {
         // The hub component-store registry kinds (ADR-0116, issue 1956) ride
-        // the postcard path — `Option<String>` + `Vec`s + a nested `Schema`
+        // the structured path — `Option<String>` + `Vec`s + a nested `Schema`
         // manifest carrying `KindId`s and the wasm bytes. The upload, the
         // resolve carrying the wasm + manifest + export, and the list reply
         // with its embedded `ComponentEntry`/`ComponentManifest` must all
@@ -4591,7 +4591,7 @@ mod tests {
         // `EngineDied` gained a `reason` field — the proxy's self-death
         // paths tag the cause (`Crashed` for a `Bye`, `Evicted` for a
         // heartbeat miss). Both the id and the tagged reason must survive
-        // the postcard encode/decode the proxy → cap mail rides.
+        // the structured encode/decode the proxy → cap mail rides.
         use alloc::string::ToString;
 
         let died = EngineDied {
@@ -5021,7 +5021,7 @@ mod tests {
         fn capture_frame_similarity_check_roundtrip() {
             // A `CaptureFrame` that carries a similarity check and a
             // `CaptureFrameResult::Ok` with populated score + pass survive
-            // a postcard roundtrip (iamacoffeepot/aether#1780).
+            // a structured roundtrip (iamacoffeepot/aether#1780).
             let frame = CaptureFrame {
                 mails: vec![],
                 after_mails: vec![],
@@ -5917,7 +5917,7 @@ mod tests {
         #[test]
         fn load_component_roundtrips_config_bytes() {
             // ADR-0090 c2: the optional init-config carrier must survive
-            // the postcard wire path intact so the substrate hands the
+            // the structured wire path intact so the substrate hands the
             // exact bytes to the guest's typed `init`.
             let load = LoadComponent {
                 wasm: vec![0x00, 0x61, 0x73, 0x6d],
@@ -5957,7 +5957,7 @@ mod tests {
             // fieldless request and a `names: Vec<String>` reply, both on the
             // `aether.component.list` family. They must register in the
             // descriptor inventory (so `describe_kinds(prefix="aether.component")`
-            // surfaces them) and survive the postcard wire path.
+            // surfaces them) and survive the structured wire path.
             assert_eq!(ListComponents::NAME, "aether.component.list");
             assert_eq!(ListComponentsResult::NAME, "aether.component.list_result");
 

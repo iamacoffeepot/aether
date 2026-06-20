@@ -48,7 +48,7 @@ Two layers: infrastructure (describes and moves typed bytes) and runtime
 | Crate | Role |
 |---|---|
 | `aether-data` | The universal data layer (`no_std`). Typed-id newtypes (`MailboxId`, `KindId`, `HandleId`), wire identity, the schema vocabulary (`SchemaType`, `KindShape`), the `Kind` / `Schema` traits, `Ref<K>`, encode/decode, and the native descriptor/transform inventories. Everything that describes typed bytes depends on it. |
-| `aether-codec` | Schema-driven JSON ↔ wire bytes (`encode_schema` / `decode_schema`) plus postcard stream framing ([ADR-0072](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0072-fold-hub-protocol-into-codec-and-hub.md)). |
+| `aether-codec` | Schema-driven JSON ↔ wire bytes (`encode_schema` / `decode_schema`) plus length-prefix stream framing ([ADR-0072](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0072-fold-hub-protocol-into-codec-and-hub.md)). |
 | `aether-kinds` | The substrate kind vocabulary — `Tick`, `Key`, `WindowSize`, `DrawTriangle`, and the `aether.{audio,fs,render,window,input,component,camera,log,handle,dag}.*` families. |
 | `aether-math` | `Vec2/3/4`, `Mat4`, `Quat`, `Aabb` — column-major, right-handed Y-up, `f32`, `no_std`. Reach here before hand-rolling vector math. |
 

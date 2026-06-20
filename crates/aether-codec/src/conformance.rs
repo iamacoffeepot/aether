@@ -30,7 +30,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use crate::test_fixtures::{named, postcard_struct, scalar};
+use crate::test_fixtures::{named, scalar, structured_struct};
 use crate::{decode_schema, encode_schema};
 
 /// The conformance law for one `(value, schema, json)` fixture: the
@@ -77,7 +77,7 @@ struct Scalars {
 }
 
 fn scalars_schema() -> SchemaType {
-    postcard_struct(vec![
+    structured_struct(vec![
         scalar("a", Primitive::U8),
         scalar("b", Primitive::U16),
         scalar("c", Primitive::U32),
@@ -142,7 +142,7 @@ struct Collections {
 }
 
 fn collections_schema() -> SchemaType {
-    postcard_struct(vec![
+    structured_struct(vec![
         named(
             "tags",
             SchemaType::Vec(SchemaCell::owned(SchemaType::String)),
@@ -165,7 +165,7 @@ fn collections_schema() -> SchemaType {
         named("blob", SchemaType::Bytes),
         named(
             "nested",
-            postcard_struct(vec![scalar("seq", Primitive::U32)]),
+            structured_struct(vec![scalar("seq", Primitive::U32)]),
         ),
     ])
 }
@@ -294,7 +294,7 @@ impl Kind for Leaf {
 }
 
 fn leaf_schema() -> SchemaType {
-    postcard_struct(vec![
+    structured_struct(vec![
         scalar("code", Primitive::U32),
         named("tag", SchemaType::String),
     ])
@@ -307,7 +307,7 @@ struct RefHolder {
 }
 
 fn ref_holder_schema() -> SchemaType {
-    postcard_struct(vec![
+    structured_struct(vec![
         named("held", SchemaType::Ref(SchemaCell::owned(leaf_schema()))),
         scalar("seq", Primitive::U32),
     ])

@@ -2622,7 +2622,7 @@ mod tests {
 
     /// Wire-shape `Struct { repr_c: false, fields }` builder
     /// shared by the test schemas in this module.
-    fn postcard_struct(fields: Vec<NamedField>) -> SchemaType {
+    fn structured_struct(fields: Vec<NamedField>) -> SchemaType {
         SchemaType::Struct {
             fields: Cow::Owned(fields),
             repr_c: false,
@@ -2649,7 +2649,7 @@ mod tests {
     }
 
     fn note_schema() -> SchemaType {
-        postcard_struct(vec![named("body", SchemaType::String), seq_field()])
+        structured_struct(vec![named("body", SchemaType::String), seq_field()])
     }
 
     #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug, Clone)]
@@ -2672,7 +2672,7 @@ mod tests {
     }
 
     fn held_note_schema() -> SchemaType {
-        postcard_struct(vec![
+        structured_struct(vec![
             named("held", SchemaType::Ref(SchemaCell::owned(note_schema()))),
             seq_field(),
         ])
@@ -2726,7 +2726,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_contains_ref_returns_false_for_pure_postcard_struct() {
+    fn schema_contains_ref_returns_false_for_pure_structured_struct() {
         assert!(!schema_contains_ref(&note_schema()));
     }
 

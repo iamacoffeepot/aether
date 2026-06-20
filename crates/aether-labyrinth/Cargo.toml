@@ -40,7 +40,7 @@ aether-kinds = { path = "../aether-kinds" }
 # `aether-substrate`-gated, so the bare crate carries only the markers.
 aether-actor = { path = "../aether-actor" }
 # Issue 1914: the relocated `aether.reach.*` / `aether.corridor.*` kinds
-# derive `Serialize` / `Deserialize` over their postcard wire shapes, and
+# derive `Serialize` / `Deserialize` over their structured wire shapes, and
 # the cast-shaped `CrossingQueryParams` derives `bytemuck::Pod` /
 # `Zeroable`. Same dep specs the kinds carried in `aether-kinds`.
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }

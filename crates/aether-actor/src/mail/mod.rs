@@ -90,7 +90,7 @@ pub struct Mail<'a> {
     // sources from `mail.payload.len()` and threads through the
     // receive ABI as a frame parameter (sibling of `kind`/`count`/
     // `sender`). Cast decoders sanity-check against
-    // `size_of::<K>() * count`; postcard decoders use it as the
+    // `size_of::<K>() * count`; structured decoders use it as the
     // exact slice length so the parser can't run past the substrate-
     // written bytes into adjacent linear memory.
     byte_len: u32,
@@ -173,7 +173,7 @@ impl Mail<'_> {
 
     /// Total bytes the substrate placed at `ptr` for this delivery.
     /// Cast decoders treat this as a sanity check
-    /// (`size_of::<K>() * count`); postcard decoders use it as the
+    /// (`size_of::<K>() * count`); structured decoders use it as the
     /// exact slice length so the parser is bounded by the substrate-
     /// written region rather than reading into adjacent memory.
     #[must_use]
@@ -211,7 +211,7 @@ impl Mail<'_> {
 
     /// Decode a single inbound `K` via the wire shape `K`'s `Kind`
     /// derive baked into `Kind::decode_from_bytes` — cast for
-    /// `#[repr(C)]` + `Pod` types, postcard for schema-shaped types.
+    /// `#[repr(C)]` + `Pod` types, structured for schema-shaped types.
     /// This is the canonical receive-side decode and what the
     /// `#[actor]` dispatcher calls on every typed handler.
     ///
@@ -221,7 +221,7 @@ impl Mail<'_> {
     /// Returns `None` on kind mismatch, on `count != 1`, or when
     /// `K::decode_from_bytes` itself returns `None` — which can be
     /// either the default body for hand-rolled `Kind` impls that
-    /// didn't override, a cast-size mismatch, or a postcard decode
+    /// didn't override, a cast-size mismatch, or a structured decode
     /// error.
     #[must_use]
     pub fn decode_kind<K: Kind>(&self) -> Option<K> {
@@ -232,7 +232,7 @@ impl Mail<'_> {
         // substrate's receive ABI; the substrate guarantees
         // `self.byte_len` bytes valid at `self.ptr` for this `Mail`'s
         // lifetime. Bounding the slice by `byte_len` keeps
-        // `K::decode_from_bytes` (cast or postcard) from running past
+        // `K::decode_from_bytes` (cast or structured) from running past
         // the substrate-written region into adjacent linear memory.
         let bytes = unsafe { slice::from_raw_parts(self.ptr as *const u8, self.byte_len as usize) };
         K::decode_from_bytes(bytes)
@@ -358,12 +358,12 @@ mod tests {
         const ID: DataKindId = DataKindId(0xDEAD_BEEF_0001_0001);
     }
 
-    /// Postcard-shape kind for the schema-driven `decode_kind` path.
+    /// Structured-shape kind for the schema-driven `decode_kind` path.
     #[derive(
         ::aether_data::Kind, ::aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq,
     )]
-    #[kind(name = "test.fake_postcard")]
-    struct FakePostcard {
+    #[kind(name = "test.fake_structured")]
+    struct FakeStructured {
         tag: String,
         ids: Vec<u32>,
     }
@@ -441,8 +441,8 @@ mod tests {
     }
 
     #[test]
-    fn mail_decode_kind_postcard_roundtrip() {
-        let value = FakePostcard {
+    fn mail_decode_kind_structured_roundtrip() {
+        let value = FakeStructured {
             tag: String::from("greet"),
             ids: alloc::vec![1, 2, 3, 4],
         };
@@ -451,7 +451,7 @@ mod tests {
         // `mail`; its `(addr, len)` pair is valid for the rest of the body.
         let mail = unsafe {
             Mail::__from_ptr(
-                FakePostcard::ID.0,
+                FakeStructured::ID.0,
                 bytes.as_ptr().addr(),
                 bytes.len() as u32,
                 1,
@@ -459,7 +459,7 @@ mod tests {
                 0,
             )
         };
-        let out = mail.decode_kind::<FakePostcard>().expect("decode");
+        let out = mail.decode_kind::<FakeStructured>().expect("decode");
         assert_eq!(out, value);
     }
 
@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn mail_decode_kind_wrong_kind_returns_none() {
-        let value = FakePostcard {
+        let value = FakeStructured {
             tag: String::from("x"),
             ids: alloc::vec![],
         };
@@ -515,12 +515,12 @@ mod tests {
                 0,
             )
         };
-        assert!(mail.decode_kind::<FakePostcard>().is_none());
+        assert!(mail.decode_kind::<FakeStructured>().is_none());
     }
 
     #[test]
     fn mail_decode_kind_wrong_count_returns_none() {
-        let value = FakePostcard {
+        let value = FakeStructured {
             tag: String::from("x"),
             ids: alloc::vec![],
         };
@@ -529,7 +529,7 @@ mod tests {
         // valid for `bytes.len()` bytes for the rest of the body.
         let mail = unsafe {
             Mail::__from_ptr(
-                FakePostcard::ID.0,
+                FakeStructured::ID.0,
                 bytes.as_ptr().addr(),
                 bytes.len() as u32,
                 2,
@@ -537,12 +537,12 @@ mod tests {
                 0,
             )
         };
-        assert!(mail.decode_kind::<FakePostcard>().is_none());
+        assert!(mail.decode_kind::<FakeStructured>().is_none());
     }
 
     #[test]
     fn mail_decode_kind_truncated_bytes_returns_none() {
-        let value = FakePostcard {
+        let value = FakeStructured {
             tag: String::from("longer"),
             ids: alloc::vec![1, 2, 3],
         };
@@ -555,7 +555,7 @@ mod tests {
         // valid even though it's deliberately a truncation.
         let mail = unsafe {
             Mail::__from_ptr(
-                FakePostcard::ID.0,
+                FakeStructured::ID.0,
                 bytes.as_ptr().addr(),
                 2,
                 1,
@@ -563,7 +563,7 @@ mod tests {
                 0,
             )
         };
-        assert!(mail.decode_kind::<FakePostcard>().is_none());
+        assert!(mail.decode_kind::<FakeStructured>().is_none());
     }
 
     #[test]

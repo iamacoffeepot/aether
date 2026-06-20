@@ -14,11 +14,11 @@
 //! exactly as the decoder emits it (so the round-trip is byte-for-byte,
 //! not merely structurally, equal).
 //!
-//! The two cast/postcard wire shapes both get coverage: a struct is
+//! The two cast/structured wire shapes both get coverage: a struct is
 //! generated with `repr_c: true` only when every field is cast-eligible
 //! (mirroring the encoder's own eligibility rule, [`cast_eligible`]), so
 //! the generator produces both the `bytemuck`-cast image and the
-//! postcard image. Values that the JSON layer cannot carry losslessly
+//! structured image. Values that the JSON layer cannot carry losslessly
 //! are excluded at the source — floats are finite and `f32`-representable
 //! (`serde_json` drops `NaN`/`Inf` to null), and `Map` keys honor the
 //! proto3-style `String` / integer-scalar / `Bool` restriction.

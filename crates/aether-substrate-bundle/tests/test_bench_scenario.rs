@@ -84,7 +84,7 @@ const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
 
 /// Build a `MailEnvelope` for a `CaptureFrame` mail bundle. Uses
 /// the kind's wire encoding (`encode_into_bytes`) so any K — cast
-/// or postcard — packs correctly.
+/// or structured — packs correctly.
 fn envelope<K: Kind>(recipient: &str, mail: &K) -> MailEnvelope {
     MailEnvelope {
         recipient_name: recipient.to_owned(),

@@ -13,7 +13,7 @@
 //!     zero-copy to `&T` or `&[T]`. Used for vertex streams, fixed-
 //!     layout structs, anything where throughput or zero-copy matters.
 //!   - Structural: `serde::Serialize + DeserializeOwned` types. Encoded
-//!     with postcard (Rust-native, varint-compact, no_std-friendly).
+//!     with the structured wire format (Rust-native, varint-compact, no_std-friendly).
 //!     Used for small control messages with Option/Vec/enum shape.
 //!
 //! A type picks one tier — not both — as part of its contract.
@@ -30,7 +30,7 @@
 //! - **`Ref<K>`** (ADR-0045): typed handle reference for fields that
 //!   may inline a value or carry a handle into the substrate's store.
 //! - **Encode / decode helpers**: the `encode` / `decode` family for
-//!   POD and postcard kinds.
+//!   POD and structured kinds.
 //! - **`__inventory`** (issue #243): native-only auto-collection of
 //!   `#[derive(Kind)]` types into the substrate's descriptor list.
 
@@ -114,7 +114,7 @@ pub trait Kind {
 
     /// Decode a single instance from substrate-supplied bytes. The
     /// `Kind` derive auto-implements this with the right body for the
-    /// type's wire shape (cast for `#[repr(C)]` + `Pod`, postcard
+    /// type's wire shape (cast for `#[repr(C)]` + `Pod`, structured
     /// otherwise). Hand-rolled `Kind` impls that don't participate in
     /// `#[actor]` receive dispatch can leave the default — it
     /// returns `None`, which the SDK surfaces as a strict-receiver
@@ -136,7 +136,7 @@ pub trait Kind {
     /// Encode `self` into a fresh byte buffer in the wire shape this
     /// kind was declared with. The `Kind` derive auto-implements this
     /// using the same `#[repr(C)]` autodetect as `decode_from_bytes`
-    /// (cast for `#[repr(C)]` + `NoUninit`, postcard otherwise), so a
+    /// (cast for `#[repr(C)]` + `NoUninit`, structured otherwise), so a
     /// single `Sink::send` / `Ctx::reply` call site dispatches both
     /// wire shapes without the caller picking the encoder.
     ///
@@ -150,7 +150,7 @@ pub trait Kind {
     fn encode_into_bytes(&self) -> Vec<u8> {
         panic!(
             "aether-data: Kind::encode_into_bytes called on `{}` whose impl does not override \
-             it. Use `#[derive(Kind)]` (which emits the body for cast or postcard kinds based \
+             it. Use `#[derive(Kind)]` (which emits the body for cast or structured kinds based \
              on `#[repr(C)]`) or hand-roll an override before sending.",
             Self::NAME,
         );
@@ -216,7 +216,7 @@ impl Kind for () {
 /// whose fields are all `CastEligible` is itself eligible *iff* it
 /// also carries `#[repr(C)]`. Anything containing a `String`, `Vec`,
 /// `Option`, enum, or non-`#[repr(C)]` substruct short-circuits to
-/// `false`, which forces the postcard wire path on the descriptor.
+/// `false`, which forces the structured wire path on the descriptor.
 pub trait CastEligible {
     const ELIGIBLE: bool;
 }
@@ -420,7 +420,7 @@ mod ref_serde {
     }
 
     /// Externally-tagged variant discriminant. Binary serializers (the
-    /// postcard wire) read it as `varint` → `visit_u64`; self-describing
+    /// structured wire) read it as `varint` → `visit_u64`; self-describing
     /// ones read the variant name → `visit_str`.
     enum VariantTag {
         Inline,

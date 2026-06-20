@@ -152,7 +152,7 @@ serde_json = { workspace = true }
 # `test_helpers` module through `crate::test_bench::{visual,
 # test_helpers}` directly (post-issue-821, formerly via
 # `aether-scenario`).
-# Length-prefix postcard frame helpers (`aether_codec::frame::{read_frame,
+# Length-prefix frame helpers (`aether_codec::frame::{read_frame,
 # write_frame}`) used by the RPC engine-routing + FleetBench integration
 # tests; no `src/` consumer, so it rides dev-dependencies only.
 aether-codec = { path = "../aether-codec" }

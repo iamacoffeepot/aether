@@ -19,7 +19,7 @@ use core::ops::Deref;
 
 /// One entry in `Hello.kinds`: a kind-name plus its schema. The hub
 /// uses the schema to encode agent-supplied params into the exact
-/// bytes the engine expects (cast-shaped or postcard, ADR-0019).
+/// bytes the engine expects (cast-shaped or structured, ADR-0019).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KindDescriptor {
     pub name: String,
@@ -75,7 +75,7 @@ pub enum MailboxCategory {
 /// kind's payload in enough detail for the hub to encode it from
 /// agent-supplied params and the substrate to decode it into a typed
 /// value. `Struct.repr_c = true` selects the cast-shaped wire format
-/// (raw `#[repr(C)]` bytes); everything else is postcard.
+/// (raw `#[repr(C)]` bytes); everything else is structured.
 ///
 /// Restrictions on `repr_c = true` (enforced by the SDK derive, not
 /// the wire format): only legal when every field is itself
@@ -118,7 +118,7 @@ pub enum SchemaType {
     /// inline value, so existing decoders only need to learn
     /// the new tag at the field-walk step.
     Ref(SchemaCell),
-    /// Issue #232: keyed lookup table. Wire form is postcard's
+    /// Issue #232: keyed lookup table. Wire form is the structured
     /// `BTreeMap<K, V>` — `varint(len) + (k, v)` pairs in
     /// key-sorted order. Key types are restricted to `String`,
     /// integer `Scalar`s, and `Bool` (proto3-style stringify
@@ -136,7 +136,7 @@ pub enum SchemaType {
     /// disjoint `TYPE_DOMAIN` prefix). The codec's `TypeId` arm
     /// hard-codes the per-id encode/decode logic — for v1, the three
     /// known type ids are `MailboxId`, `KindId`, `HandleId`, all of
-    /// which are u64 varint on postcard and tagged-string on JSON.
+    /// which are u64 varint on the structured wire and tagged-string on JSON.
     /// Cast-shape size/align is 8 bytes, 8-byte align — same as a
     /// `u64`, so a typed-id field embedded in a `repr_c: true`
     /// struct keeps the parent's cast-eligibility.
@@ -147,7 +147,7 @@ pub enum SchemaType {
 /// (ADR-0031). `Static(&'static SchemaType)` is the const-literal arm —
 /// derives and hand-rolled impls reference the nested type's
 /// `<T as Schema>::SCHEMA` through this variant at compile time.
-/// `Owned(Box<SchemaType>)` is the wire arm — the hub's postcard
+/// `Owned(Box<SchemaType>)` is the wire arm — the hub's wire
 /// decoder allocates one `Box` per recursive node. Both `Deref` to
 /// `&SchemaType`, so walkers don't observe which variant carries the
 /// value. `Cow<'static, SchemaType>` would infinite-size through its
@@ -227,7 +227,7 @@ pub struct NamedField {
 /// One variant of a `SchemaType::Enum`. Discriminants are explicit
 /// `u32`s so the wire encoding doesn't depend on declaration order —
 /// adding a variant later (without renumbering existing ones) is
-/// forward-compatible at the postcard level.
+/// forward-compatible at the wire level.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnumVariant {
     Unit {
@@ -247,7 +247,7 @@ pub enum EnumVariant {
 }
 
 impl EnumVariant {
-    /// Variant's wire name — matches the `#[postcard(...)]` rename (if
+    /// Variant's wire name — matches the `#[serde(rename)]` rename (if
     /// any) or the bare Rust variant identifier. Used on both the
     /// encode and decode sides for lookup and error reporting.
     #[must_use]
@@ -257,7 +257,7 @@ impl EnumVariant {
         }
     }
 
-    /// Postcard discriminant — the varint written on the wire before
+    /// Wire discriminant — the varint written on the wire before
     /// the variant body. Assigned by the derive at schema-build time
     /// and stable for the life of the kind vocabulary.
     #[must_use]
@@ -292,10 +292,10 @@ pub enum Primitive {
 /// ordering, but with every name field stripped (ADR-0032). This is the
 /// wire shape of the hashed `aether.kinds` manifest section and the
 /// input that `fnv1a_64_prefixed` chews on (after the `KIND_DOMAIN`
-/// prefix) to produce `Kind::ID`. Postcard-
+/// prefix) to produce `Kind::ID`. Wire-
 /// compatible with `SchemaType` at the subset of bytes they share — the
 /// canonical serializer emits bytes that deserialize cleanly into
-/// `SchemaShape` via `postcard::from_bytes`.
+/// `SchemaShape` via `wire::from_bytes`.
 ///
 /// Not const-constructible. Lives purely on the decode side of the
 /// wire: hub parses manifest bytes into `SchemaShape`, then merges
@@ -351,11 +351,11 @@ pub enum VariantShape {
 }
 
 /// Kind-level canonical record — the name-plus-positional-schema pair
-/// the `aether.kinds` section carries (ADR-0032). Postcard-compatible
+/// the `aether.kinds` section carries (ADR-0032). Wire-compatible
 /// with `KindDescriptor` at the `name` field (both serialize as
 /// length-prefixed UTF-8), and with the canonical schema bytes at the
 /// `schema` field. The hub decodes one `KindShape` per section record
-/// via `postcard::take_from_bytes`.
+/// via `wire::take_from_bytes`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KindShape {
     pub name: Cow<'static, str>,
@@ -365,7 +365,7 @@ pub struct KindShape {
 /// Labels sidecar — parallel-shape tree of nominal information
 /// (ADR-0032). Required at the hub; the canonical schema carries no
 /// names, so the hub needs the labels section to map MCP JSON params
-/// to postcard positions and to render `describe_kinds` output.
+/// to wire positions and to render `describe_kinds` output.
 ///
 /// Arms mirror `SchemaType`'s structure so a walker can step both
 /// trees in lockstep. `Anonymous` covers primitives, `String`, and
@@ -557,7 +557,7 @@ impl Eq for LabelNode {}
 impl Serialize for LabelNode {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         // Hand-rolled to match the wire shape of `#[derive(Serialize)]`
-        // over the same variants — postcard treats each enum arm by
+        // over the same variants — the wire format treats each enum arm by
         // position + body.
         use serde::ser::SerializeStructVariant;
         use serde::ser::SerializeTupleVariant;
@@ -616,7 +616,7 @@ impl Serialize for LabelNode {
 impl<'de> Deserialize<'de> for LabelNode {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         // Mirror `LabelNode::Serialize`'s variant tagging. Matches
-        // postcard's enum encoding: varint discriminant, then body.
+        // the structured enum encoding: varint discriminant, then body.
         #[derive(Serialize, Deserialize)]
         enum LabelNodeDe {
             Anonymous,
@@ -808,7 +808,7 @@ pub struct KindLabels {
 /// surfaces this so a caller reads the real reply shape, not a `None`
 /// that lies for a handler that replies by hand.
 ///
-/// **Variant order is the postcard discriminant** — `None` = 0,
+/// **Variant order is the wire discriminant** — `None` = 0,
 /// `One` = 1, `Stream` = 2, `Manual` = 3. The const-fn encoders in
 /// [`crate::canonical`] and the macro emission depend on it; do not
 /// reorder.
@@ -923,7 +923,7 @@ pub enum InputsRecord {
     /// config records, so the reader can group the flat record stream
     /// back into per-type capability sets. `namespace` is the type's
     /// `Addressable::NAMESPACE`; the first boundary names the entry type.
-    /// Appended last so its postcard variant tag stays additive — a
+    /// Appended last so its wire variant tag stays additive — a
     /// single-actor module emits no boundary and decodes byte-identically
     /// under the existing reader, so no section-version bump is needed.
     ActorBoundary { namespace: Cow<'static, str> },
@@ -943,8 +943,8 @@ pub const INPUTS_SECTION: &str = "aether.kinds.inputs";
 /// `Handler` variant; v0x04 (ADR-0112 / issue 1850) widened that field
 /// from `Option<KindId>` to [`ReplyContract`] so a handler's reply
 /// *class* (single / manual / stream) is reported, not just a single
-/// reply kind; v0x05 (ADR-0118 / issue 1984) re-encoded every record
-/// from postcard onto the owned aether-wire format (fixed little-endian
+/// reply kind; v0x05 (ADR-0118 / issue 1984) moved every record
+/// onto the owned aether-wire format (fixed little-endian
 /// selectors / ids / counts). A component built before any of these and
 /// a substrate after would otherwise disagree on the record shape, so
 /// the reader rejects an older version byte loudly — a hard rebuild

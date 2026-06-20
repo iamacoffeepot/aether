@@ -221,7 +221,7 @@ mod native {
         /// and replies `LoadResult::Ok { mailbox_id, name,
         /// capabilities }` where `name` is the full trampoline
         /// address — agents send subsequent mail to that name.
-        /// Errors (bad postcard, kind conflict, name conflict,
+        /// Errors (bad wire bytes, kind conflict, name conflict,
         /// invalid wasm, instantiation trap) come back as
         /// `LoadResult::Err`.
         #[handler]

@@ -2,7 +2,7 @@
 //!
 //! Singleton actor. Binds a `TcpListener` on the configured addr at
 //! init, runs a sidecar accept thread that spawns one reader thread
-//! per accepted connection. Reader threads frame postcard
+//! per accepted connection. Reader threads read
 //! length-prefix frames via [`aether_codec::frame`] and push them
 //! through an internal mpsc; an `RpcInboundReady` wake mail tells the
 //! cap's dispatcher to drain.
@@ -1599,7 +1599,7 @@ mod tests {
     /// variant — protects the wire shape against accidental rename /
     /// re-ordering.
     #[test]
-    fn rpc_error_frame_too_large_postcard_roundtrips() {
+    fn rpc_error_frame_too_large_structured_roundtrips() {
         use crate::rpc::RpcError;
         use aether_data::wire;
         let err = RpcError::FrameTooLarge {

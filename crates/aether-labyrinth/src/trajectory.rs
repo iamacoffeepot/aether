@@ -15,7 +15,7 @@
 //! - `on_sample` — fire-and-forget: append `(tick, x, y, value)` to the
 //!   buffer for `seed`, creating the buffer on first sample for that seed.
 //! - `on_end` — build a `TrajectoryLog { seed, samples, end_reason }`,
-//!   postcard-encode it via `encode_into_bytes`, publish it to the handle
+//!   wire-encode it via `encode_into_bytes`, publish it to the handle
 //!   store via `next_ephemeral` → `put` → `inc_ref`, drop the in-memory
 //!   buffer, and return `RecordResult` (ADR-0112 return-type reply form).
 
