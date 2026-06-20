@@ -128,9 +128,8 @@ it handles from the method's **third parameter**:
 impl WasmActor for Hello {
     const NAMESPACE: &'static str = "hello";
 
-    fn init<C>(ctx: &mut C) -> Result<Self, BootError>
-    where C: Resolver {
-        Ok(Hello { pong: ctx.resolve::<Pong>() })
+    fn init<C: Resolver>(_ctx: &mut C) -> Result<Self, BootError> {
+        Ok(Hello)
     }
 
     fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
@@ -142,10 +141,10 @@ impl WasmActor for Hello {
         ctx.actor::<RenderCapability>().send(&TRIANGLE);   // draw every tick
     }
 
-    #[handler]
-    fn on_ping(&mut self, ctx: &mut WasmCtx<'_>, ping: Ping) {
+    #[handler::manual]
+    fn on_ping(&mut self, ctx: &mut WasmCtx<'_, Manual>, ping: Ping) {
         if let Some(sender) = ctx.reply_target() {
-            ctx.reply_kind(sender, self.pong, &Pong { seq: ping.seq });
+            ctx.reply_to(sender, &Pong { seq: ping.seq });
         }
     }
 }

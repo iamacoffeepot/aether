@@ -17,7 +17,7 @@
 use core::marker::PhantomData;
 
 use aether_actor::{Addressable, HandlesKind};
-use aether_data::{ActorId, Kind, MailId, Tag, fold_lineage, mailbox_id_from_name, with_tag};
+use aether_data::{ActorId, Kind, MailId, Tag, fold_lineage, with_tag};
 
 use crate::actor::native::binding::NativeBinding;
 
@@ -109,32 +109,6 @@ impl<'a, R> NativeActorMailbox<'a, R> {
         self.binding
     }
 
-    /// Resolve a sibling mailbox on the same binding, addressed by
-    /// `name`. Same FNV-hash name resolution as
-    /// [`NativeCtx::resolve_actor`](crate::actor::native::ctx::NativeCtx) —
-    /// `name` must be the peer's **full
-    /// registered name** (flat ADR-0029 hash). A caller that needs a
-    /// lineage-folded child id (ADR-0099 §3) uses
-    /// [`Self::resolve_peer_scoped`] instead. Kept as an inherent method
-    /// so cap-owned ext traits (which only have a mailbox in hand, not a
-    /// ctx) can hand back peer handles without rethreading the ctx.
-    /// Threads the existing `'a` binding ref, so the returned handle
-    /// inherits the parent mailbox's borrow lifetime.
-    // Runtime-name escape hatch (the by-name peer-resolution counterpart of
-    // `NativeCtx::resolve_actor`): the peer name is supplied at runtime.
-    #[must_use]
-    #[allow(clippy::disallowed_methods)]
-    pub fn resolve_peer<Peer: Addressable>(&self, name: &str) -> NativeActorMailbox<'a, Peer> {
-        // Carry this handle's captured lineage onto the peer handle so a
-        // send from it stays in the caller's chain (ADR-0080 §7).
-        NativeActorMailbox::__new_in_flight(
-            mailbox_id_from_name(name).0,
-            self.binding,
-            self.parent,
-            self.root,
-        )
-    }
-
     /// Resolve a child mailbox of *this* actor, where the child is the
     /// instanced node `scope:segment` (ADR-0099 §3). The child's id folds
     /// that node's `ActorId` onto this actor's lineage carry, so a cap
@@ -142,7 +116,7 @@ impl<'a, R> NativeActorMailbox<'a, R> {
     /// component, a socket listener reaching a session — composes the
     /// registered fold id without allocating a name. `self.mailbox` is
     /// the parent carry (exact for a root-pinned cap, depth-1). Threads
-    /// the existing `'a` binding ref like [`Self::resolve_peer`].
+    /// the existing `'a` binding ref from the parent handle.
     #[must_use]
     pub fn resolve_peer_scoped<Peer: Addressable>(
         &self,

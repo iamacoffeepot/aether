@@ -16,8 +16,7 @@
 //!
 //! The trait is sealed through a private supertrait so a guest crate
 //! cannot add a fourth mode — the closed set of three is what the
-//! `#[actor]` macro's downgrade-only coercions (`as_single` /
-//! `as_stream`) rely on.
+//! `#[actor]` macro's downgrade-only coercion (`as_single`) relies on.
 
 mod sealed {
     /// Private supertrait sealing [`super::ReplyMode`] — only the three
