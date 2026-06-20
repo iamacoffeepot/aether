@@ -5,7 +5,7 @@
 //! the root and the runtime actors in [`runtime`]. The systems are
 //! [`runtime::Locomotion`] (tile-grid movement on a fixed-point ground
 //! plane — the module entry) and [`runtime::camera::CameraComponent`]
-//! (the multi-camera driver, selected by the `aether_kit@camera`
+//! (the multi-camera driver, selected by the `aether_kit@aether.camera`
 //! export, ADR-0096). The camera's `aether.camera.*` driver kinds live
 //! in [`camera`].
 //!

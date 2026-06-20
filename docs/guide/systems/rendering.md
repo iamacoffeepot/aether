@@ -149,8 +149,8 @@ frame.
   — for adding cameras and poking their parameters live. A new mode (follow,
   cinematic, free-fly) is a new `view_proj` computation in a camera component;
   the renderer needs no change because it only ever applies the matrix it's
-  handed. Loaded by the `aether_kit@camera` selector, the camera answers at
-  `aether.component/aether.embedded:camera` — the address `LoadResult.name` hands
+  handed. Loaded by the `aether_kit@aether.camera` selector, the camera answers at
+  `aether.component/aether.embedded:aether.camera` — the address `LoadResult.name` hands
   back.
 - **A new drawing component** subscribes the `Render` stage and emits
   `DrawTriangle`s in world space, with `z` chosen against the depth convention

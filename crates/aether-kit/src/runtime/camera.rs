@@ -256,7 +256,7 @@ pub struct CameraComponent {
 /// Use `capture_frame` between sends to verify each change.
 #[actor]
 impl FfiActor for CameraComponent {
-    const NAMESPACE: &'static str = "camera";
+    const NAMESPACE: &'static str = "aether.camera";
 
     fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         let mut cameras = HashMap::new();

@@ -359,7 +359,7 @@ pub struct Locomotion {
 
 #[actor]
 impl FfiActor for Locomotion {
-    const NAMESPACE: &'static str = "locomotion";
+    const NAMESPACE: &'static str = "aether.locomotion";
 
     fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         let mover = Mover {

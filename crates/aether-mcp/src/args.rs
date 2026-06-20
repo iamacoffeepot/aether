@@ -385,7 +385,7 @@ pub struct ActorLogsArgs {
     /// Engine UUID to pull from (from `list_engines`).
     pub engine_id: String,
     /// Mailbox name of the actor to query (e.g. `"aether.audio"`,
-    /// `"aether.component/aether.embedded:camera"`). The substrate's
+    /// `"aether.component/aether.embedded:aether.camera"`). The substrate's
     /// dispatch loop services `aether.log.tail` for every actor
     /// automatically; agents don't need to know which actor
     /// implements the handler.
@@ -450,7 +450,7 @@ pub struct ActorCostArgs {
     /// Engine UUID to pull from (from `list_engines`).
     pub engine_id: String,
     /// Mailbox name of the actor to query (e.g. `"aether.audio"`,
-    /// `"aether.component/aether.embedded:camera"`). Every actor serves
+    /// `"aether.component/aether.embedded:aether.camera"`). Every actor serves
     /// `aether.cost.tail` via the substrate's framework dispatch arm.
     pub mailbox_name: String,
     /// Optional kind-id filter (tagged `knd-XXXX-XXXX-XXXX` or raw

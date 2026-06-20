@@ -232,7 +232,7 @@ struct ScrubIndex {
 /// same path.
 #[actor]
 impl FfiActor for MeshViewer {
-    const NAMESPACE: &'static str = "mesh_viewer";
+    const NAMESPACE: &'static str = "aether.mesh_viewer";
 
     fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(MeshViewer {

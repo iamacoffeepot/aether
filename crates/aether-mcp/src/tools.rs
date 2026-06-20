@@ -1052,7 +1052,7 @@ impl Mcp {
                        Sends aether.log.tail to the named mailbox and decodes aether.log.tail_result. \
                        Every actor — native or wasm trampoline — serves this kind via the substrate's \
                        framework dispatch arm, so any mailbox is queryable (e.g. \"aether.audio\", \
-                       \"aether.component/aether.embedded:camera\"). `max` defaults to 100 and clamps to 1000; \
+                       \"aether.component/aether.embedded:aether.camera\"). `max` defaults to 100 and clamps to 1000; \
                        pass `level` (`trace|debug|info|warn|error`) for server-side filtering; pass \
                        `since` (the prior call's `next_since`) to walk past already-seen entries without \
                        double-reading. `truncated_before` in the reply is `Some(seq)` when the ring \
@@ -1534,7 +1534,7 @@ impl Mcp {
                 engine: Some(engine),
                 // ADR-0099 §4: resolve the recipient by the parse → fold,
                 // so a `/`-rendered hosted / nested actor name
-                // (`aether.component/aether.component/aether.embedded:camera`)
+                // (`aether.component/aether.component/aether.embedded:aether.camera`)
                 // reaches its lineage-folded id. A root-cap name is a
                 // single segment and folds to the same id `hash(name)`
                 // gives.
