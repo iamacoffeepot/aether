@@ -131,6 +131,47 @@ fn spawn_cap() -> Duration {
     ))
 }
 
+/// Interval between [`poll_until`] attempts — short enough to settle
+/// promptly, long enough not to busy-spin while a forked engine boots.
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Default in-test poll budget (seconds): how long a registration /
+/// liveness wait — a forked engine appearing in `ListEngines`, a
+/// boot-manifest component registering, a log entry surfacing — is
+/// given before it is called a failure. Generous over a debug-build
+/// cold start under a saturated `nextest --workspace` run, the same
+/// CPU-pressure regime [`DEFAULT_SPAWN_CAP_SECS`] covers, so a
+/// slow-but-healthy fork that registers late is not called dead.
+/// Overridable via `AETHER_FLEETBENCH_POLL_SECS`.
+const DEFAULT_POLL_SECS: u64 = 30;
+
+/// Resolve the in-test poll budget from `AETHER_FLEETBENCH_POLL_SECS`
+/// (default [`DEFAULT_POLL_SECS`]; `0` → wait forever).
+fn poll_budget() -> Duration {
+    cap_from_secs(env_secs("AETHER_FLEETBENCH_POLL_SECS", DEFAULT_POLL_SECS))
+}
+
+/// Poll `predicate` every [`POLL_INTERVAL`] until it returns `true` or
+/// the [`poll_budget`] elapses; returns whether it became true. Replaces
+/// the per-test `for _ in 0..N { … sleep }` loops whose fixed iteration
+/// counts flake under CI contention: the budget is wall-clock and
+/// generous, so a starved fork that registers late still passes, while a
+/// genuinely dead one still fails within the bound. `predicate` is
+/// `FnMut` so a caller can capture the matched value out through it.
+pub fn poll_until(mut predicate: impl FnMut() -> bool) -> bool {
+    let budget = poll_budget();
+    let start = Instant::now();
+    loop {
+        if predicate() {
+            return true;
+        }
+        if start.elapsed() >= budget {
+            return false;
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
 /// Read a `u64` seconds knob from the environment, falling back to
 /// `default` when unset or unparseable — a test harness tolerates a
 /// typo'd override rather than aborting the run.
