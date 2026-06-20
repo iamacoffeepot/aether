@@ -17,6 +17,11 @@ license.workspace = true
 # the wasm FFI into the linker.
 [dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
+# The actor-SDK attribute macros (`actor`, `bridge`, `capability`, `fallback`,
+# `handler`, `local`) are sourced directly here now that `aether-data` no
+# longer re-exports them (ADR-0077 / issue 552 consolidated them into this
+# crate for compile cost; aether-data forwards only the data-layer derives).
+aether-actor-derive = { path = "../aether-actor-derive" }
 # ADR-0030 Phase 2: `InitCtx::subscribe_input` self-addresses
 # `aether.input.subscribe` for every `K::IS_INPUT` handler kind.
 # The wasm-shim helpers in `wasm::{io, net, log}` (folded in by issue
