@@ -11,8 +11,7 @@ mod tests {
     use std::env;
     use std::fs;
     use std::process;
-    use std::thread;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use aether_actor::Addressable;
     use aether_capabilities::WasmTrampoline;
@@ -22,7 +21,7 @@ mod tests {
         UploadComponentResult,
     };
 
-    use crate::fleetbench::{FleetBench, component_wasm_path, dist_manifest_present};
+    use crate::fleetbench::{FleetBench, component_wasm_path, dist_manifest_present, poll_until};
 
     /// The probe fixture's declared `Addressable::NAMESPACE` (distinct from the
     /// `probe` wasm stem).
@@ -280,14 +279,8 @@ mod tests {
         // exactly when it is loaded and registered — no log-ring side channel
         // and no racing a fixed liveness budget.
         let expected = probe_lineage_addr();
-        let mut registered = false;
-        for _ in 0..30 {
-            if bench.list_components(engine).iter().any(|n| n == &expected) {
-                registered = true;
-                break;
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
+        let registered =
+            poll_until(|| bench.list_components(engine).iter().any(|n| n == &expected));
         assert!(
             registered,
             "the boot-manifest probe should come up and register at {expected}",

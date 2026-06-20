@@ -6,36 +6,39 @@
 mod fleetbench;
 
 mod tests {
-    use crate::fleetbench::FleetBench;
+    use crate::fleetbench::{FleetBench, poll_until};
     use aether_kinds::DeathReason;
 
-    /// Spawn two headless substrates and assert both appear in
-    /// `ListEngines` with fresh heartbeats — the standalone
-    /// `list_engines` row: the hub's fleet table round-trips the
-    /// spawned set, not just a single engine.
+    /// Spawn two headless substrates and assert both round-trip through
+    /// `ListEngines` — the standalone `list_engines` row: the hub's fleet
+    /// table reflects the spawned set, not just a single engine.
     #[test]
     fn fleetbench_lists_the_spawned_engine_set() {
         let mut bench = FleetBench::start();
         let first = bench.spawn_headless();
         let second = bench.spawn_headless();
+        let wanted = [first.0.to_string(), second.0.to_string()];
 
-        let engines = bench.list_engines();
-        for engine in [first, second] {
-            let engine_id = engine.0.to_string();
-            let descriptor = engines
+        // Assert both spawned engines appear in the fleet table. Registration
+        // is synchronous with the spawn reply (the hub holds
+        // `SpawnEngineResult::Ok` until its proxy connects), so the poll just
+        // absorbs any async slack under load rather than depending on a wall
+        // clock. Heartbeat freshness is deliberately not asserted here:
+        // FleetBench runs with the heartbeat disabled (`EngineConfig`
+        // default), so `last_heartbeat_age_millis` only measures time since
+        // registration, not liveness — the pong-refresh / miss-eviction logic
+        // is covered deterministically by the `engine::proxy` unit tests.
+        let listed = poll_until(|| {
+            let engines = bench.list_engines();
+            wanted
                 .iter()
-                .find(|e| e.engine_id == engine_id)
-                .unwrap_or_else(|| {
-                    panic!("spawned engine {engine_id} should appear in ListEngines: {engines:?}")
-                });
-            // Freshly spawned ⇒ recently seen; the cap evicts only at
-            // the miss limit (default 5s × 3), far above this bound.
-            assert!(
-                descriptor.last_heartbeat_age_millis < 10_000,
-                "freshly spawned engine should have a near-zero heartbeat age, got {}ms",
-                descriptor.last_heartbeat_age_millis,
-            );
-        }
+                .all(|id| engines.iter().any(|e| &e.engine_id == id))
+        });
+        assert!(
+            listed,
+            "both spawned engines should round-trip through ListEngines: {:?}",
+            bench.list_engines(),
+        );
     }
 
     /// Spawn one headless substrate, confirm it is supervised, then

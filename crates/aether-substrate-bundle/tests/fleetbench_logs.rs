@@ -7,20 +7,9 @@
 mod fleetbench;
 
 mod tests {
-    use std::thread;
-    use std::time::Duration;
-
     use aether_kinds::LogTailResult;
 
-    use crate::fleetbench::{FleetBench, dist_manifest_present};
-
-    /// Up to ~3s of bounded polling closes the wire→first-tick race:
-    /// the headless chassis auto-ticks at 60Hz, so the probe's first
-    /// tick (which emits the entry) fires within a few frames of
-    /// `wire`, and the lone entry is never evicted from a 100-slot
-    /// ring.
-    const POLL_ATTEMPTS: usize = 30;
-    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+    use crate::fleetbench::{FleetBench, dist_manifest_present, poll_until};
 
     /// `info` in the `0 = trace .. 4 = error` level mapping shared
     /// across `aether.log.*`.
@@ -42,7 +31,7 @@ mod tests {
 
         let mut last_reply = None;
         let mut found = None;
-        for _ in 0..POLL_ATTEMPTS {
+        poll_until(|| {
             let reply = bench.log_tail(engine, &addr, None);
             if let LogTailResult::Ok {
                 entries,
@@ -54,16 +43,17 @@ mod tests {
                     .find(|e| e.message == "typed_send_alive" && e.level == LEVEL_INFO)
             {
                 found = Some((entry.clone(), *next_since));
-                break;
+                true
+            } else {
+                last_reply = Some(reply);
+                false
             }
-            last_reply = Some(reply);
-            thread::sleep(POLL_INTERVAL);
-        }
+        });
 
         let (entry, next_since) = found.unwrap_or_else(|| {
             panic!(
-                "probe's `typed_send_alive` info entry never appeared after {POLL_ATTEMPTS} \
-                     polls; last reply: {last_reply:?}",
+                "probe's `typed_send_alive` info entry never appeared within the poll \
+                 budget; last reply: {last_reply:?}",
             )
         });
 
