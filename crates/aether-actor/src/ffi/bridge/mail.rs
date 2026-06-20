@@ -121,7 +121,7 @@ pub fn prev_correlation() -> u64 {
     // SAFETY: `raw::prev_correlation` takes no arguments and reads
     // a host-side scalar set on the most recent `send_mail`; no
     // ABI invariants to uphold beyond "we are the FFI guest", which
-    // the `#[cfg(target_arch = "wasm32")]` import gate enforces
+    // the `#[cfg(target_family = "wasm")]` import gate enforces
     // (the host-target stub panics rather than returning garbage).
     unsafe { raw::prev_correlation() }
 }
@@ -140,7 +140,7 @@ pub fn prev_correlation() -> u64 {
 /// Only callable from wasm32 — installed as the [`crate::log::LogSink`]
 /// by the guest runtime (`export!`) and invoked from
 /// [`crate::log::ForwardingSubscriber::event`].
-#[cfg(target_arch = "wasm32")]
+#[cfg(target_family = "wasm")]
 pub fn emit_log_event(level: u8, target: &str, message: &str) {
     let target_bytes = target.as_bytes();
     let message_bytes = message.as_bytes();

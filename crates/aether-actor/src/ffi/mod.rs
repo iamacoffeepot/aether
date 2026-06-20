@@ -37,7 +37,7 @@
 //! contract substrate's wasm runtime expects.
 //!
 //! No FFI imports are pulled in unconditionally — the host-fn externs
-//! in [`raw`] live behind a `#[cfg(target_arch = "wasm32")]` block and
+//! in [`raw`] live behind a `#[cfg(target_family = "wasm")]` block and
 //! the native-target stubs panic if invoked, so the crate compiles
 //! for `cargo test --workspace` on the host without dragging the FFI
 //! surface into the linker.
@@ -260,7 +260,7 @@ pub trait ErasedFfiActor {
 /// init shims so the byte-staging boilerplate isn't repeated at each
 /// construction site. wasm32-only — the host build carries no FFI
 /// surface.
-#[cfg(target_arch = "wasm32")]
+#[cfg(target_family = "wasm")]
 #[doc(hidden)]
 pub fn stage_init_failure(message: &str) {
     let bytes = message.as_bytes();
@@ -280,7 +280,7 @@ pub fn stage_init_failure(message: &str) {
 /// from inside the crate; the subscriber itself stays target-blind in
 /// [`crate::log`]. Shared by the `export!` shims so the wiring isn't
 /// repeated per init shim.
-#[cfg(target_arch = "wasm32")]
+#[cfg(target_family = "wasm")]
 #[doc(hidden)]
 pub fn install_guest_logging() {
     crate::log::install_log_sink(bridge::mail::emit_log_event);
@@ -561,7 +561,7 @@ macro_rules! __export_internal {
         // transitive rlib pulls of a `#[actor]`-using crate, which
         // would otherwise stack duplicate Component records and fail
         // the substrate's manifest reader.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[used]
         #[unsafe(link_section = "aether.kinds.inputs")]
         static __AETHER_INPUTS_SECTION: [u8; <$component>::__AETHER_INPUTS_MANIFEST_LEN] =
@@ -571,7 +571,7 @@ macro_rules! __export_internal {
         // into a sibling `aether.namespace` custom section. The
         // substrate reads this at load time as the default mailbox
         // name when the load payload omits an explicit `name`.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[used]
         #[unsafe(link_section = "aether.namespace")]
         static __AETHER_NAMESPACE_SECTION: [u8; <$component as $crate::Addressable>::NAMESPACE.len()] = {
@@ -603,7 +603,7 @@ macro_rules! __export_internal {
         /// Returns `0` on success and non-zero when the actor's `init`
         /// returned `Err(BootError)` or its `Config::decode_from_bytes`
         /// produced `None`.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[unsafe(export_name = "init_with_config_p32")]
         pub unsafe extern "C" fn init_with_config(
             mailbox_id: u64,
@@ -686,7 +686,7 @@ macro_rules! __export_internal {
         /// `Config = ()`); a typed-config actor returns an
         /// `init_failed` here, which is the right behavior for a host
         /// too old to thread config bytes through.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
             // SAFETY: forwarding to `init_with_config` with `config_len = 0`
@@ -706,7 +706,7 @@ macro_rules! __export_internal {
         /// Issue 703: uses `FfiCtx` (the send-capable runtime ctx) so
         /// `Subscriber::subscribe_input::<K>()` resolves; `FfiInitCtx`
         /// carries no send surface and can't mail.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn wire(mailbox_id: u64) -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
@@ -729,7 +729,7 @@ macro_rules! __export_internal {
         /// (on a replace) or the instance drop, on the dying instance
         /// (issue 584 Phase 2b, ADR-0079 amended). Mail-allowed — live
         /// peers are still addressable; sends to a dead peer warn-drop.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn unwire(mailbox_id: u64) -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
@@ -746,7 +746,7 @@ macro_rules! __export_internal {
         /// the `_p32` suffix per ADR-0024 Phase 1; the trailing
         /// `recipient: u64` (ADR-0114 decision #1) widens like the other
         /// frame slots on the wasm path.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[unsafe(export_name = "receive_p32")]
         pub unsafe extern "C" fn receive(
             kind: u64,
@@ -836,7 +836,7 @@ macro_rules! __export_internal {
         /// # Safety
         /// Called by the substrate per the layout contract; see
         /// [`$crate::ffi::guest_alloc::realloc_bytes`].
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[unsafe(export_name = "realloc_p32")]
         pub unsafe extern "C" fn realloc_p32(
             old_ptr: u32,
@@ -862,7 +862,7 @@ macro_rules! __export_internal {
         /// immediately before a `replace_component` swap. Forwards to
         /// [`$crate::FfiActor::on_dehydrate`], a no-op unless the actor
         /// overrides it.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn on_dehydrate() -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
@@ -899,7 +899,7 @@ macro_rules! __export_internal {
         /// Exported under the `_p32` suffix per ADR-0024 Phase 1.
         /// Forwards to [`$crate::FfiActor::on_rehydrate`], a no-op unless
         /// the actor overrides it.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[unsafe(export_name = "on_rehydrate_p32")]
         pub unsafe extern "C" fn on_rehydrate(version: u32, ptr: u32, len: u32) -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
@@ -1023,7 +1023,7 @@ macro_rules! __export_multi_internal {
         // stream into one capability set per type. The entry type is
         // first. A single-actor `export!` never reaches this arm, so
         // the boundary-free single-actor layout stays byte-identical.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         const __AETHER_MULTI_INPUTS_LEN: usize = 0usize $(
             + 1
             + $crate::__macro_internals::canonical::inputs_actor_boundary_len(
@@ -1032,7 +1032,7 @@ macro_rules! __export_multi_internal {
             + <$component>::__AETHER_INPUTS_MANIFEST_LEN
         )+;
 
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[used]
         #[unsafe(link_section = "aether.kinds.inputs")]
         static __AETHER_INPUTS_SECTION: [u8; __AETHER_MULTI_INPUTS_LEN] = {
@@ -1078,7 +1078,7 @@ macro_rules! __export_multi_internal {
             out
         };
 
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[used]
         #[unsafe(link_section = "aether.namespace")]
         static __AETHER_NAMESPACE_SECTION: [u8; <$entry as $crate::Addressable>::NAMESPACE.len()] = {
@@ -1094,7 +1094,7 @@ macro_rules! __export_multi_internal {
 
         /// # Safety
         /// Existing 3-arg init ABI; constructs the entry (first) export.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[unsafe(export_name = "init_with_config_p32")]
         pub unsafe extern "C" fn init_with_config(
             mailbox_id: u64,
@@ -1118,7 +1118,7 @@ macro_rules! __export_multi_internal {
 
         /// # Safety
         /// ADR-0090 legacy zero-config init; forwards to the entry type.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
             unsafe { init_with_config(mailbox_id, 0, 0) }
@@ -1127,7 +1127,7 @@ macro_rules! __export_multi_internal {
         /// # Safety
         /// ADR-0096 typed init: `type_tag` selects which exported type
         /// to construct (its `mailbox_id_from_name(NAMESPACE)`).
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[unsafe(export_name = "init_typed_p32")]
         pub unsafe extern "C" fn init_typed(
             mailbox_id: u64,
@@ -1163,7 +1163,7 @@ macro_rules! __export_multi_internal {
             1
         }
 
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn wire(mailbox_id: u64) -> u32 {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
@@ -1180,7 +1180,7 @@ macro_rules! __export_multi_internal {
             0
         }
 
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn unwire(mailbox_id: u64) -> u32 {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
@@ -1198,7 +1198,7 @@ macro_rules! __export_multi_internal {
         /// `ErasedFfiActor`. Self-mailbox id derived from the live
         /// instance's namespace. The trailing `recipient: u64` (ADR-0114
         /// decision #1) carries the routed mailbox through to `Mail`.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[unsafe(export_name = "receive_p32")]
         pub unsafe extern "C" fn receive(
             kind: u64,
@@ -1274,7 +1274,7 @@ macro_rules! __export_multi_internal {
         ///
         /// # Safety
         /// Called by the substrate per the layout contract.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[unsafe(export_name = "realloc_p32")]
         pub unsafe extern "C" fn realloc_p32(
             old_ptr: u32,
@@ -1298,7 +1298,7 @@ macro_rules! __export_multi_internal {
         /// immediately before a `replace_component` swap. Routes through
         /// the boxed `ErasedFfiActor` to the live type's
         /// [`$crate::FfiActor::on_dehydrate`] (ADR-0101).
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn on_dehydrate() -> u32 {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
@@ -1333,7 +1333,7 @@ macro_rules! __export_multi_internal {
         /// Routes through the boxed `ErasedFfiActor` to the live type's
         /// [`$crate::FfiActor::on_rehydrate`] (ADR-0101). Self-mailbox id
         /// derived from the live instance's namespace.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[unsafe(export_name = "on_rehydrate_p32")]
         pub unsafe extern "C" fn on_rehydrate(version: u32, ptr: u32, len: u32) -> u32 {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {

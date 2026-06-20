@@ -8,7 +8,7 @@
 //!
 //! Pre-issue-442 the macro emitted N separate `#[link_section]`
 //! statics, one per handler/fallback/component-doc record, gated on
-//! `target_arch = "wasm32"`. That gate fired for both the cdylib
+//! `target_family = "wasm"`. That gate fired for both the cdylib
 //! root and any transitive wasm32 rlib pull, so a cdylib that
 //! depended on a sibling `cdylib + rlib` crate's rlib output would
 //! see both crates' Component records stack in its

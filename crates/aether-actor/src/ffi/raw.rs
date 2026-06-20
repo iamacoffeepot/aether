@@ -10,7 +10,7 @@
 // for `cargo test --workspace` on the host — actors can still be
 // unit-tested for pure logic there, they just can't cross the FFI.
 //
-// The `target_arch = "wasm32"` cfg gate matches the only FFI host
+// The `target_family = "wasm"` cfg gate matches the only FFI host
 // the substrate ships today. A future C / OS-process host would
 // either pick a different gate or drop the cfg entirely; the
 // import surface itself is target-agnostic.
@@ -22,7 +22,7 @@
 // the suffix through every call site — `#[link_name]` does the
 // remap.
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(target_family = "wasm")]
 #[link(wasm_import_module = "aether")]
 unsafe extern "C" {
     /// `detached` is the ADR-0080 §7 lineage signal: `0` inherits the
@@ -137,7 +137,7 @@ unsafe extern "C" {
 /// # Panics
 /// Always panics — fail-fast per ADR-0063: the host build of the SDK
 /// has no FFI host to call, so any invocation is a bug.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 #[must_use]
 pub unsafe fn send_mail(
     _recipient: u64,
@@ -160,7 +160,7 @@ pub unsafe fn send_mail(
 /// # Panics
 /// Always panics — fail-fast per ADR-0063: the host build of the SDK
 /// has no FFI host to call, so any invocation is a bug.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 #[must_use]
 pub unsafe fn reply_mail(
     _sender: u32,
@@ -182,7 +182,7 @@ pub unsafe fn reply_mail(
 /// # Panics
 /// Always panics — fail-fast per ADR-0063: the host build of the SDK
 /// has no FFI host to call, so any invocation is a bug.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 #[must_use]
 pub unsafe fn save_state(_version: u32, _ptr: u32, _len: u32) -> u32 {
     panic!("aether-actor: save_state called outside the FFI guest");
@@ -197,7 +197,7 @@ pub unsafe fn save_state(_version: u32, _ptr: u32, _len: u32) -> u32 {
 /// # Panics
 /// Always panics — fail-fast per ADR-0063: the host build of the SDK
 /// has no FFI host to call, so any invocation is a bug.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 #[must_use]
 pub unsafe fn prev_correlation() -> u64 {
     panic!("aether-actor: prev_correlation called outside the FFI guest");
@@ -212,7 +212,7 @@ pub unsafe fn prev_correlation() -> u64 {
 /// # Panics
 /// Always panics — fail-fast per ADR-0063: the host build of the SDK
 /// has no FFI host to call, so any invocation is a bug.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub unsafe fn init_failed(_ptr: u32, _len: u32) {
     panic!("aether-actor: init_failed called outside the FFI guest");
 }
@@ -226,7 +226,7 @@ pub unsafe fn init_failed(_ptr: u32, _len: u32) {
 /// # Panics
 /// Always panics — fail-fast per ADR-0063: the host build of the SDK
 /// has no FFI host to call, so any invocation is a bug.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub unsafe fn log_event(
     _level: u32,
     _target_ptr: u32,
@@ -246,7 +246,7 @@ pub unsafe fn log_event(
 /// # Panics
 /// Always panics — fail-fast per ADR-0063: the host build of the SDK
 /// has no FFI host to call, so any invocation is a bug.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 #[must_use]
 pub unsafe fn spawn_sibling(
     _tag: u64,
@@ -269,7 +269,7 @@ pub unsafe fn spawn_sibling(
 /// # Panics
 /// Always panics — fail-fast per ADR-0063: the host build of the SDK
 /// has no FFI host to call, so any invocation is a bug.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 #[must_use]
 pub unsafe fn spawn_inline_child(_is_counter: u32, _subname_ptr: u32, _subname_len: u32) -> u64 {
     panic!("aether-actor: spawn_inline_child called outside the FFI guest");

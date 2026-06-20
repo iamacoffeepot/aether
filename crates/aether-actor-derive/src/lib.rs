@@ -208,7 +208,7 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
         // `[version_byte][canonical_bytes]`, where the canonical bytes are
         // now the owned aether-wire encoding (issue 1984) — so every
         // `Kind::ID` regenerates, gated loudly behind this version byte.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[used]
         #[unsafe(link_section = "aether.kinds")]
         static #kind_static_ident: [u8; #canonical_len_ident + 1] = {
@@ -222,7 +222,7 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
             out
         };
 
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         #[used]
         #[unsafe(link_section = "aether.kinds.labels")]
         static #kind_labels_static_ident: [u8; #labels_len_ident + 1] = {
@@ -246,7 +246,7 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
         // `KindDescriptor` list by iterating these inventory entries.
         // Cfg-gated to non-wasm targets because `inventory` doesn't
         // link on `wasm32-unknown-unknown`.
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(target_family = "wasm"))]
         ::aether_data::__inventory::inventory::submit! {
             ::aether_data::__inventory::DescriptorEntry {
                 name: <#name as ::aether_data::Kind>::NAME,
@@ -1141,12 +1141,12 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
     // `mod native` then key on `feature = "X"` too.
     let (stub_cfg, native_cfg) = match feature.as_deref() {
         None => (
-            quote! { #[cfg(target_arch = "wasm32")] },
-            quote! { #[cfg(not(target_arch = "wasm32"))] },
+            quote! { #[cfg(target_family = "wasm")] },
+            quote! { #[cfg(not(target_family = "wasm"))] },
         ),
         Some(feat) => (
-            quote! { #[cfg(any(target_arch = "wasm32", not(feature = #feat)))] },
-            quote! { #[cfg(all(not(target_arch = "wasm32"), feature = #feat))] },
+            quote! { #[cfg(any(target_family = "wasm", not(feature = #feat)))] },
+            quote! { #[cfg(all(not(target_family = "wasm"), feature = #feat))] },
         ),
     };
     let stub_and_reexport = quote! {
@@ -1281,7 +1281,7 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
 
     // Reassemble the mod with the rewritten contents and prepend the
     // cfg gate. `native_cfg` keys on the optional feature too — without
-    // a feature it's the original `not(target_arch = "wasm32")`; with
+    // a feature it's the original `not(target_family = "wasm")`; with
     // one it adds `feature = "X"` so the inner `mod native` only
     // compiles when both the target and the feature say to.
     item_mod.content = Some((brace, items));
@@ -1424,7 +1424,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into();
     }
     let mut item = parse_macro_input!(item as syn::ItemStruct);
-    // Issue 552 stage 4: gate fields on `not(target_arch = "wasm32")`
+    // Issue 552 stage 4: gate fields on `not(target_family = "wasm")`
     // to match the macro-emitted `NativeActor` / `NativeDispatch`
     // impls. Wasm builds see the cap struct with no fields (a pure
     // marker), which is what typed `ctx.actor::<R>().send(...)` needs;
@@ -1436,7 +1436,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
                 if !already_cfg {
                     field
                         .attrs
-                        .push(syn::parse_quote!(#[cfg(not(target_arch = "wasm32"))]));
+                        .push(syn::parse_quote!(#[cfg(not(target_family = "wasm"))]));
                 }
             }
         }
@@ -1446,7 +1446,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
                 if !already_cfg {
                     field
                         .attrs
-                        .push(syn::parse_quote!(#[cfg(not(target_arch = "wasm32"))]));
+                        .push(syn::parse_quote!(#[cfg(not(target_family = "wasm"))]));
                 }
             }
         }
@@ -2919,7 +2919,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                 quote! { ::core::option::Option::None }
             };
             quote! {
-                #[cfg(not(target_arch = "wasm32"))]
+                #[cfg(not(target_family = "wasm"))]
                 ::aether_data::name_inventory::inventory::submit! {
                     ::aether_data::name_inventory::HandlerEntry {
                         namespace: <#self_ty as ::aether_actor::Addressable>::NAMESPACE,
@@ -2938,7 +2938,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     // Issue 552 stage 4: NativeActor + NativeDispatch + the inherent
     // handler-method impl all reach for `::aether_substrate::*` paths
     // and native-only types in their bodies. They're emitted under
-    // `#[cfg(not(target_arch = "wasm32"))]` so `aether-capabilities`
+    // `#[cfg(not(target_family = "wasm"))]` so `aether-capabilities`
     // can compile for `wasm32-unknown-unknown` without the substrate
     // dep — wasm consumers see only the always-on Addressable +
     // HandlesKind markers, which is enough for typed
@@ -2960,7 +2960,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         // `unwire` + `type Config`) lives on the shared `Lifecycle`
         // capability, with the per-target ctx GATs pinned to the concrete
         // native ctx types so an `init`/`wire` body keeps its concrete ctx.
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(target_family = "wasm"))]
         impl #impl_generics ::aether_actor::Lifecycle for #self_ty #where_clause {
             #config_type
             type InitError = ::aether_substrate::BootError;
@@ -2973,10 +2973,10 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         // `NativeActor` is now the empty composition `Actor +
         // Lifecycle<InitError = BootError>`; per-kind dispatch lives on the
         // sibling `NativeDispatch` impl below.
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(target_family = "wasm"))]
         impl #impl_generics #trait_path for #self_ty #where_clause {}
 
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(target_family = "wasm"))]
         impl #impl_generics ::aether_substrate::NativeDispatch for #self_ty #where_clause {
             // ADR-0112: the dispatch seam carries the most-permissive
             // `Manual` ctx; the arms downgrade per handler class.
@@ -2996,7 +2996,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
             #capabilities_override
         }
 
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(target_family = "wasm"))]
         impl #impl_generics #self_ty #where_clause {
             #(#handler_methods)*
             #(#task_handler_methods)*
@@ -3657,7 +3657,7 @@ fn build_kinds_section_retention_statics(
             // (ADR-0118 / issue 1984: the owned aether-wire encoding) so
             // retention records (when this kind lives in a dependency
             // rlib) pair cleanly with the primary records by id.
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(target_family = "wasm")]
             #[used]
             #[unsafe(link_section = "aether.kinds")]
             static #section_ident: [u8; #len_ident + 1] = {
@@ -3702,7 +3702,7 @@ fn build_kinds_section_retention_statics(
                 ::aether_actor::__macro_internals::canonical::canonical_serialize_labels::<#labels_len_ident>(
                     &#labels_static_ident,
                 );
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(target_family = "wasm")]
             #[used]
             #[unsafe(link_section = "aether.kinds.labels")]
             static #labels_section_ident: [u8; #labels_len_ident + 1] = {

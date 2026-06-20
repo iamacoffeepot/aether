@@ -40,7 +40,7 @@ tracing = { workspace = true, default-features = false }
 # typed `ctx.actor::<R>()` calls (issue 575) — needs the cap markers
 # in scope. Pulls `native` so caps' `mod native` blocks compile (they
 # import `aether_substrate` types and are gated on the bridge's
-# default `cfg(not(target_arch = "wasm32"))`, not on the `native`
+# default `cfg(not(target_family = "wasm"))`, not on the `native`
 # feature). `aether-substrate` deps back on `aether-actor`, but cargo
 # permits dev-dep cycles for the test-target build graph.
 aether-capabilities = { path = "../aether-capabilities", features = ["render"] }
