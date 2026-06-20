@@ -31,7 +31,7 @@ use crate::actor::native::{
 use crate::chassis::Chassis;
 use crate::chassis::ctx::MailboxSender;
 use crate::chassis::ctx::MailboxWakeSlot;
-use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim};
+use crate::chassis::ctx::{ChassisCtx, DropOnShutdownClaim, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::MailboxId;
@@ -49,6 +49,7 @@ use aether_actor::Addressable;
 #[cfg(test)]
 use aether_actor::HandlesKind;
 use aether_actor::local::ActorSlots;
+use aether_actor::{Instanced, validate_namespace_segment};
 
 use crate::actor::native::local;
 use crate::mail::cost::CostCells;
@@ -508,191 +509,401 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         ctx: &mut ChassisCtx<'_>,
         handles: &mut ExportedHandles,
     ) -> Result<(), BootError> {
-        let BootState::Claimed { resources, config } =
-            mem::replace(&mut self.state, BootState::Transitioning)
+        boot_init::<A>(&mut self.state, ctx, handles)
+    }
+
+    fn wire(&mut self) -> Result<(), BootError> {
+        boot_wire::<A>(&mut self.state)
+    }
+
+    fn spawn(self: Box<Self>, ctx: &mut ChassisCtx<'_>) -> Result<Box<dyn DynShutdown>, BootError> {
+        boot_spawn::<A>(self.state, ctx)
+    }
+
+    fn cleanup_after_failure(self: Box<Self>, ctx: &mut ChassisCtx<'_>) {
+        boot_cleanup::<A>(self.state, ctx);
+    }
+}
+
+/// Shared `init` phase body for both [`NativeActorBoot`] and
+/// [`InstancedActorBoot`] (ADR-0120 §6): the two boots differ only in
+/// the `claim` phase's id source, so `init` / `wire` / `spawn` /
+/// `cleanup_after_failure` operate on the common [`BootState`] /
+/// [`ClaimResources`] and are factored out here verbatim.
+///
+/// Constructs the actor instance via `A::init`, registers its ADR-0033
+/// receive-side capabilities + per-handler cost cells, and advances the
+/// state to [`BootState::Initialized`]. On `A::init` failure it inlines
+/// the same release [`boot_cleanup`] would perform for the `Claimed`
+/// variant (since `A::init` consumed the config, the `Claimed` variant
+/// can't be restored) and leaves the state `Transitioning`.
+fn boot_init<A: NativeActor + NativeDispatch>(
+    state: &mut BootState<A>,
+    ctx: &mut ChassisCtx<'_>,
+    handles: &mut ExportedHandles,
+) -> Result<(), BootError> {
+    let BootState::Claimed { resources, config } = mem::replace(state, BootState::Transitioning)
+    else {
+        panic!("PassiveBoot::init called in non-Claimed state");
+    };
+
+    // ADR-0081: wrap `init` in `local::with_stamped` so any
+    // `tracing::*` event the cap fires lands in its per-actor
+    // `ActorLogRing`. The pre-ADR `with_actor_dispatch` +
+    // `drain_buffer` flush hop retired alongside `LogBatch`.
+    let init_result = {
+        let mailer_clone = ctx.mail_send_handle();
+        let mut init_ctx = NativeInitCtx::new(&resources.transport, handles, mailer_clone);
+        local::with_stamped(&resources.slots, || A::init(config, &mut init_ctx))
+    };
+    let actor = match init_result {
+        Ok(a) => a,
+        Err(e) => {
+            // A::init consumed `config`, so we can't restore the
+            // Claimed variant. Inline the same cleanup
+            // `cleanup_after_failure` would do for Claimed: release
+            // the mailbox + namespace claim, then let `resources`
+            // drop at end of scope (closing transport + sender).
+            ctx.unclaim_mailbox(resources.mailbox_id);
+            ctx.spawner_arc()
+                .actor_registry()
+                .release_namespace(A::NAMESPACE, TypeId::of::<A>());
+            drop(resources);
+            // State stays `Transitioning` — no further work for
+            // the rollback loop to do.
+            return Err(e);
+        }
+    };
+
+    // iamacoffeepot/aether#1037: register this native cap's ADR-0033
+    // receive-side capabilities (handler kinds + `#[fallback]`
+    // presence) into the queryable `CapabilityRegistry`, the same
+    // population path a wasm component's load takes. `A` is a
+    // `NativeDispatch`, whose `__aether_capabilities` the `#[actor]`
+    // macro overrides to enumerate the cap's handlers; the default
+    // (empty) covers any cap the macro didn't touch.
+    let capabilities = A::__aether_capabilities();
+    ctx.mail_send_handle().capability_registry().register(
+        resources.mailbox_id,
+        MailboxCaps::from_component_capabilities(&capabilities),
+    );
+
+    // iamacoffeepot/aether#1128: seed this native cap's per-handler
+    // cost cells into the global `CostTable` (same hook as the
+    // cap-registry accept-set above), then stamp the same `Arc`s
+    // into the actor's per-actor `CostCells` cache. Unlike the wasm
+    // load path (cap-thread, can't reach the trampoline's slots), a
+    // native cap's `slots` are right here — wrap the cache seed in
+    // `with_stamped(&resources.slots, ...)` exactly like the `init`
+    // wrap above so both indexes share the same neutral cells.
+    let handler_kinds: Vec<aether_data::KindId> =
+        capabilities.handlers.iter().map(|h| h.id).collect();
+    let seeded = ctx
+        .mail_send_handle()
+        .cost_table()
+        .seed(resources.mailbox_id, &handler_kinds);
+    local::with_stamped(&resources.slots, || {
+        use aether_actor::Local as _;
+        CostCells::try_with_mut(|cells| cells.seed(seeded));
+    });
+
+    // Issue 629 / Phase A: dispatcher takes Box<A> ownership.
+    *state = BootState::Initialized {
+        resources,
+        actor: Box::new(actor),
+    };
+    Ok(())
+}
+
+/// Shared `wire` phase body — see [`boot_init`] for why the non-`claim`
+/// phases are factored out. Runs `A::wire` under the actor's stamped
+/// slots and advances to [`BootState::Wired`].
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "shared body for the PassiveBoot::wire trait method, whose signature returns Result<(), BootError>"
+)]
+fn boot_wire<A: NativeActor + NativeDispatch>(state: &mut BootState<A>) -> Result<(), BootError> {
+    let BootState::Initialized {
+        resources,
+        mut actor,
+    } = mem::replace(state, BootState::Transitioning)
+    else {
+        panic!("PassiveBoot::wire called in non-Initialized state");
+    };
+
+    // Issue 584 Phase 2a (ADR-0079 amended): post-init mail-allowed
+    // hook. The wire pass runs after the chassis's claim + init
+    // passes, so every peer mailbox is published and addressable;
+    // wire-emitted mail queues in recipient inboxes (no dispatcher
+    // is running yet — spawn pass is next). Wrapped in the same
+    // `with_stamped` envelope as `init` and per-envelope dispatch
+    // so `Local<T>` and `tracing::*` route into this actor's
+    // `ActorLogRing` identically.
+    local::with_stamped(&resources.slots, || {
+        let mut wire_ctx = NativeCtx::new(
+            &resources.transport,
+            aether_data::Source::NONE,
+            aether_data::MailId::NONE,
+            aether_data::MailId::NONE,
+        );
+        actor.wire(&mut wire_ctx);
+    });
+
+    *state = BootState::Wired { resources, actor };
+    Ok(())
+}
+
+/// Shared `spawn` phase body — see [`boot_init`]. Registers the
+/// dispatcher slot with the chassis worker pool and returns a
+/// [`PooledActorShutdown`] handle (every actor is pool-dispatched since
+/// issue 1187), so a boot-seeded instance tears down on the singleton
+/// path rather than the runtime `instanced_slots` path.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "shared body for the PassiveBoot::spawn trait method, whose signature returns Result<Box<dyn DynShutdown>, BootError>"
+)]
+fn boot_spawn<A: NativeActor + NativeDispatch>(
+    state: BootState<A>,
+    ctx: &mut ChassisCtx<'_>,
+) -> Result<Box<dyn DynShutdown>, BootError> {
+    let BootState::Wired { resources, actor } = state else {
+        panic!("PassiveBoot::spawn called in non-Wired state");
+    };
+    let ClaimResources {
+        mailbox_id,
+        transport,
+        mailbox_sender,
+        wake_slot,
+        slots,
+    } = resources;
+
+    // Register a `DispatcherSlot` with the chassis worker pool. No
+    // per-actor thread (issue 635 Phase 3 made `Pooled` the only
+    // path; issue 1187 removed the `Dedicated` opt-out). The
+    // `wake_slot` in the mailbox closure fires the pool wake hook on
+    // every accepted send.
+    let actor_registry = Arc::clone(ctx.spawner_arc().actor_registry());
+    let mailer_clone = ctx.mail_send_handle();
+    let slot = DispatcherSlot::<A>::new(
+        actor,
+        Arc::clone(&transport),
+        slots,
+        actor_registry,
+        mailer_clone,
+        mailbox_id,
+    );
+    let slot_dyn: Arc<dyn Drainable> = slot.clone();
+    let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
+    // iamacoffeepot/aether#1135: surface the seize handle on this
+    // actor's `Inbox` entry so the blob demuxer can dispatch its
+    // fan-out in place rather than depositing + repop'ing through the
+    // inbox. Same `(state, weak)` pair the wake handle carries; the
+    // registry owns the strong slot ref, so the demuxer's `Weak`
+    // upgrade fails cleanly after teardown.
+    ctx.registry().install_seize_handle(
+        mailbox_id,
+        SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn)),
+    );
+    drop(slot_dyn);
+    let wake = WakeHandle::new(Arc::clone(slot.state()), weak, ctx.wake_sink().clone());
+    // Issue 697 multi-pass: mail addressed at this actor during the
+    // wire pass landed in its inbox before the wake hook was
+    // installed, so the closure-side wake fired against an empty
+    // `wake_slot`. Fire one wake here so a populated inbox enters the
+    // ready queue. Mirrors the same fix `Spawner::spawn_actor`'s
+    // Pooled branch carries (issue 635 Phase 3).
+    let manual_wake = wake.clone();
+    wake_slot.set(Arc::new(move || {
+        // Inbox-sender hook — same fire-and-forget shape as the
+        // spawn.rs analogue: scheduler deduplicates the CAS, so the
+        // bool is irrelevant here.
+        let _ = wake.wake();
+    }));
+    let _ = manual_wake.wake();
+    Ok(Box::new(PooledActorShutdown::<A> {
+        slot: Some(slot),
+        mailbox_sender: Some(mailbox_sender),
+    }) as Box<dyn DynShutdown>)
+}
+
+/// Shared `cleanup_after_failure` phase body — see [`boot_init`].
+/// Releases the mailbox + namespace claim for any past-claim state.
+/// Runs only when the whole boot aborts, so any `actor_registry` `Live`
+/// entry an instanced seed inserted drops with the unwinding registry.
+fn boot_cleanup<A: NativeActor + NativeDispatch>(state: BootState<A>, ctx: &mut ChassisCtx<'_>) {
+    match state {
+        // Pre-claim or mid-method failure that already cleaned up
+        // inline — no chassis-side state to release.
+        BootState::Pending { .. } | BootState::Transitioning => {}
+        // Any past-claim variant: release the mailbox + namespace
+        // claims. `resources` (and any held actor) drop at the end
+        // of this match arm — dropping `transport` closes the
+        // installed receiver, dropping `mailbox_sender` closes the
+        // channel.
+        BootState::Claimed { resources, .. }
+        | BootState::Initialized { resources, .. }
+        | BootState::Wired { resources, .. } => {
+            ctx.unclaim_mailbox(resources.mailbox_id);
+            ctx.spawner_arc()
+                .actor_registry()
+                .release_namespace(A::NAMESPACE, TypeId::of::<A>());
+        }
+    }
+}
+
+/// ADR-0120 §6: the boot-time, declaration-order seed for an instanced
+/// actor (a keyed [`aether_actor::Many`] resolver) at a fixed subname —
+/// the passive-boot analog of `spawn_child`. Reuses [`NativeActorBoot`]'s
+/// `init` / `wire` / `spawn` / `cleanup_after_failure` phase bodies
+/// ([`boot_init`] et al.); the only materially different phase is
+/// `claim`, which targets the **depth-1 subname id** (ADR-0099 §3) — the
+/// no-parent lineage fixed point, identical to a chassis-level
+/// `spawn_actor` and to `mailbox_id_from_name("{NAMESPACE}:{subname}")` —
+/// rather than `A`'s bare singleton id, and inserts an `actor_registry`
+/// `Live` entry so the instance is enumerable by `resolve_actor`.
+///
+/// Boot instances are always named (`Subname::Counter` is a runtime
+/// concept), so the builder API takes `&str`.
+struct InstancedActorBoot<A: Instanced + NativeActor + NativeDispatch> {
+    /// The instance subname; the seed registers at
+    /// `"{A::NAMESPACE}:{subname}"`.
+    subname: String,
+    state: BootState<A>,
+}
+
+impl<A: Instanced + NativeActor + NativeDispatch> InstancedActorBoot<A> {
+    fn new(subname: &str, config: A::Config) -> Self {
+        Self {
+            subname: subname.to_owned(),
+            state: BootState::Pending { config },
+        }
+    }
+}
+
+impl<A: Instanced + NativeActor + NativeDispatch> PassiveBoot for InstancedActorBoot<A> {
+    fn claim(&mut self, ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
+        let BootState::Pending { config } = mem::replace(&mut self.state, BootState::Transitioning)
         else {
-            panic!("PassiveBoot::init called in non-Claimed state");
+            panic!("PassiveBoot::claim called in non-Pending state");
         };
 
-        // ADR-0081: wrap `init` in `local::with_stamped` so any
-        // `tracing::*` event the cap fires lands in its per-actor
-        // `ActorLogRing`. The pre-ADR `with_actor_dispatch` +
-        // `drain_buffer` flush hop retired alongside `LogBatch`.
-        let init_result = {
-            let mailer_clone = ctx.mail_send_handle();
-            let mut init_ctx = NativeInitCtx::new(&resources.transport, handles, mailer_clone);
-            local::with_stamped(&resources.slots, || A::init(config, &mut init_ctx))
-        };
-        let actor = match init_result {
-            Ok(a) => a,
+        // Same subname validation the runtime spawn path (`spawn.rs`)
+        // applies before composing `{NAMESPACE}:{subname}`. No
+        // chassis-side resources held yet, so the state stays
+        // `Transitioning` and `cleanup_after_failure` does nothing.
+        if let Err(e) = validate_namespace_segment(&self.subname) {
+            return Err(BootError::Other(Box::new(io::Error::other(format!(
+                "with_instance subname {:?} for namespace {:?} is invalid: {e:?}",
+                self.subname,
+                A::NAMESPACE
+            )))));
+        }
+
+        // Claim namespace ownership for `A`. Idempotent per `TypeId`
+        // (registry.rs), so multiple `with_instance` subnames of one type
+        // share one namespace claim; subname uniqueness falls out of the
+        // distinct mailbox ids below.
+        if ctx
+            .spawner_arc()
+            .actor_registry()
+            .try_claim_namespace(A::NAMESPACE, TypeId::of::<A>())
+            .is_err()
+        {
+            // State stays `Transitioning` (no resources held);
+            // cleanup_after_failure sees that and does nothing.
+            return Err(BootError::Other(Box::new(io::Error::other(format!(
+                "namespace {:?} already owned by a different TypeId — fix the conflicting actor's NAMESPACE const",
+                A::NAMESPACE
+            )))));
+        }
+
+        // ADR-0099 §3: the depth-1 subname id — the no-parent lineage
+        // fixed point. `ActorId::instanced(..).0` is already
+        // `Tag::Mailbox`-tagged, so `with_tag` is idempotent; this equals
+        // a chassis-level `spawn_actor`'s top-level id and
+        // `mailbox_id_from_name("{NAMESPACE}:{subname}")`. A boot-seeded
+        // instance is the root of its own lineage.
+        let mailbox_id = MailboxId(aether_data::with_tag(
+            aether_data::Tag::Mailbox,
+            aether_data::ActorId::instanced(A::NAMESPACE, &self.subname).0,
+        ));
+        let full_name = format!("{}:{}", A::NAMESPACE, self.subname);
+
+        // Claim the mailbox AT that id (not `A`'s singleton id),
+        // registering both the inbox sink and the `actor_registry` `Live`
+        // entry so `resolve_actor` / `resolve_actors` enumerate it. A
+        // duplicate subname collides here as `MailboxAlreadyClaimed`.
+        let claim = match ctx.claim_instanced_mailbox_drop_on_shutdown(
+            mailbox_id,
+            full_name,
+            self.subname.clone(),
+            TypeId::of::<A>(),
+        ) {
+            Ok(c) => c,
             Err(e) => {
-                // A::init consumed `config`, so we can't restore the
-                // Claimed variant. Inline the same cleanup
-                // `cleanup_after_failure` would do for Claimed: release
-                // the mailbox + namespace claim, then let `resources`
-                // drop at end of scope (closing transport + sender).
-                ctx.unclaim_mailbox(resources.mailbox_id);
+                // Release the namespace claim we just made so a later cap
+                // with a different `TypeId` can claim it. The whole boot
+                // aborts on this Err, so a sibling subname that shared the
+                // claim is torn down by its own `cleanup_after_failure`.
                 ctx.spawner_arc()
                     .actor_registry()
                     .release_namespace(A::NAMESPACE, TypeId::of::<A>());
-                drop(resources);
-                // State stays `Transitioning` — no further work for
-                // the rollback loop to do.
                 return Err(e);
             }
         };
 
-        // iamacoffeepot/aether#1037: register this native cap's ADR-0033
-        // receive-side capabilities (handler kinds + `#[fallback]`
-        // presence) into the queryable `CapabilityRegistry`, the same
-        // population path a wasm component's load takes. `A` is a
-        // `NativeDispatch`, whose `__aether_capabilities` the `#[actor]`
-        // macro overrides to enumerate the cap's handlers; the default
-        // (empty) covers any cap the macro didn't touch.
-        let capabilities = A::__aether_capabilities();
-        ctx.mail_send_handle().capability_registry().register(
-            resources.mailbox_id,
-            MailboxCaps::from_component_capabilities(&capabilities),
-        );
+        let DropOnShutdownClaim {
+            id,
+            receiver,
+            mailbox_sender,
+            wake_slot,
+        } = claim;
 
-        // iamacoffeepot/aether#1128: seed this native cap's per-handler
-        // cost cells into the global `CostTable` (same hook as the
-        // cap-registry accept-set above), then stamp the same `Arc`s
-        // into the actor's per-actor `CostCells` cache. Unlike the wasm
-        // load path (cap-thread, can't reach the trampoline's slots), a
-        // native cap's `slots` are right here — wrap the cache seed in
-        // `with_stamped(&resources.slots, ...)` exactly like the `init`
-        // wrap above so both indexes share the same neutral cells.
-        let handler_kinds: Vec<aether_data::KindId> =
-            capabilities.handlers.iter().map(|h| h.id).collect();
-        let seeded = ctx
-            .mail_send_handle()
-            .cost_table()
-            .seed(resources.mailbox_id, &handler_kinds);
-        local::with_stamped(&resources.slots, || {
-            use aether_actor::Local as _;
-            CostCells::try_with_mut(|cells| cells.seed(seeded));
-        });
+        // Per-cap transport + ring-seeded slots, built exactly as
+        // `NativeActorBoot::claim` does. `from_ctx` seeds the carry at
+        // `id.0` — the depth-1 fixed point — so children this instance
+        // spawns fold onto it correctly.
+        let transport = Arc::new(NativeBinding::from_ctx(ctx, id));
+        transport.install_inbox(receiver);
+        let slots = Box::new(ActorSlots::new());
+        let ring_caps = ctx.spawner_arc().ring_caps();
+        slots.seed(ActorLogRing::with_capacity(ring_caps.log));
+        slots.seed(ActorTraceRing::with_growth(
+            ring_caps.trace,
+            ring_caps.trace_max,
+        ));
 
-        // Issue 629 / Phase A: dispatcher takes Box<A> ownership.
-        self.state = BootState::Initialized {
-            resources,
-            actor: Box::new(actor),
+        self.state = BootState::Claimed {
+            resources: ClaimResources {
+                mailbox_id: id,
+                transport,
+                mailbox_sender,
+                wake_slot,
+                slots,
+            },
+            config,
         };
         Ok(())
+    }
+
+    fn init(
+        &mut self,
+        ctx: &mut ChassisCtx<'_>,
+        handles: &mut ExportedHandles,
+    ) -> Result<(), BootError> {
+        boot_init::<A>(&mut self.state, ctx, handles)
     }
 
     fn wire(&mut self) -> Result<(), BootError> {
-        let BootState::Initialized {
-            resources,
-            mut actor,
-        } = mem::replace(&mut self.state, BootState::Transitioning)
-        else {
-            panic!("PassiveBoot::wire called in non-Initialized state");
-        };
-
-        // Issue 584 Phase 2a (ADR-0079 amended): post-init mail-allowed
-        // hook. The wire pass runs after the chassis's claim + init
-        // passes, so every peer mailbox is published and addressable;
-        // wire-emitted mail queues in recipient inboxes (no dispatcher
-        // is running yet — spawn pass is next). Wrapped in the same
-        // `with_stamped` envelope as `init` and per-envelope dispatch
-        // so `Local<T>` and `tracing::*` route into this actor's
-        // `ActorLogRing` identically.
-        local::with_stamped(&resources.slots, || {
-            let mut wire_ctx = NativeCtx::new(
-                &resources.transport,
-                aether_data::Source::NONE,
-                aether_data::MailId::NONE,
-                aether_data::MailId::NONE,
-            );
-            actor.wire(&mut wire_ctx);
-        });
-
-        self.state = BootState::Wired { resources, actor };
-        Ok(())
+        boot_wire::<A>(&mut self.state)
     }
 
     fn spawn(self: Box<Self>, ctx: &mut ChassisCtx<'_>) -> Result<Box<dyn DynShutdown>, BootError> {
-        let BootState::Wired { resources, actor } = self.state else {
-            panic!("PassiveBoot::spawn called in non-Wired state");
-        };
-        let ClaimResources {
-            mailbox_id,
-            transport,
-            mailbox_sender,
-            wake_slot,
-            slots,
-        } = resources;
-
-        // Register a `DispatcherSlot` with the chassis worker pool. No
-        // per-actor thread (issue 635 Phase 3 made `Pooled` the only
-        // path; issue 1187 removed the `Dedicated` opt-out). The
-        // `wake_slot` in the mailbox closure fires the pool wake hook on
-        // every accepted send.
-        let actor_registry = Arc::clone(ctx.spawner_arc().actor_registry());
-        let mailer_clone = ctx.mail_send_handle();
-        let slot = DispatcherSlot::<A>::new(
-            actor,
-            Arc::clone(&transport),
-            slots,
-            actor_registry,
-            mailer_clone,
-            mailbox_id,
-        );
-        let slot_dyn: Arc<dyn Drainable> = slot.clone();
-        let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
-        // iamacoffeepot/aether#1135: surface the seize handle on this
-        // actor's `Inbox` entry so the blob demuxer can dispatch its
-        // fan-out in place rather than depositing + repop'ing through the
-        // inbox. Same `(state, weak)` pair the wake handle carries; the
-        // registry owns the strong slot ref, so the demuxer's `Weak`
-        // upgrade fails cleanly after teardown.
-        ctx.registry().install_seize_handle(
-            mailbox_id,
-            SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn)),
-        );
-        drop(slot_dyn);
-        let wake = WakeHandle::new(Arc::clone(slot.state()), weak, ctx.wake_sink().clone());
-        // Issue 697 multi-pass: mail addressed at this actor during the
-        // wire pass landed in its inbox before the wake hook was
-        // installed, so the closure-side wake fired against an empty
-        // `wake_slot`. Fire one wake here so a populated inbox enters the
-        // ready queue. Mirrors the same fix `Spawner::spawn_actor`'s
-        // Pooled branch carries (issue 635 Phase 3).
-        let manual_wake = wake.clone();
-        wake_slot.set(Arc::new(move || {
-            // Inbox-sender hook — same fire-and-forget shape as the
-            // spawn.rs analogue: scheduler deduplicates the CAS, so the
-            // bool is irrelevant here.
-            let _ = wake.wake();
-        }));
-        let _ = manual_wake.wake();
-        Ok(Box::new(PooledActorShutdown::<A> {
-            slot: Some(slot),
-            mailbox_sender: Some(mailbox_sender),
-        }) as Box<dyn DynShutdown>)
+        boot_spawn::<A>(self.state, ctx)
     }
 
     fn cleanup_after_failure(self: Box<Self>, ctx: &mut ChassisCtx<'_>) {
-        match self.state {
-            // Pre-claim or mid-method failure that already cleaned up
-            // inline — no chassis-side state to release.
-            BootState::Pending { .. } | BootState::Transitioning => {}
-            // Any past-claim variant: release the mailbox + namespace
-            // claims. `resources` (and any held actor) drop at the end
-            // of this match arm — dropping `transport` closes the
-            // installed receiver, dropping `mailbox_sender` closes the
-            // channel.
-            BootState::Claimed { resources, .. }
-            | BootState::Initialized { resources, .. }
-            | BootState::Wired { resources, .. } => {
-                ctx.unclaim_mailbox(resources.mailbox_id);
-                ctx.spawner_arc()
-                    .actor_registry()
-                    .release_namespace(A::NAMESPACE, TypeId::of::<A>());
-            }
-        }
+        boot_cleanup::<A>(self.state, ctx);
     }
 }
 
@@ -867,6 +1078,28 @@ impl<C: Chassis> Builder<C, NoDriver> {
         self
     }
 
+    /// ADR-0120 §6: seed an instanced actor (a keyed [`aether_actor::Many`]
+    /// resolver) at `subname` as a declaration-order chassis-boot decision —
+    /// the passive-boot analog of `spawn_child`, with no live parent ctx. The
+    /// instance claims the **depth-1 subname id** (ADR-0099 §3,
+    /// `"{A::NAMESPACE}:{subname}"`), so it is addressable at exactly the
+    /// `MailboxId` a chassis-level `resolve_actor::<A>(subname)` produces,
+    /// dispatches mail, and tears down on chassis shutdown like any other
+    /// cap. Two `with_instance::<A>` calls for distinct subnames of one
+    /// type coexist (the namespace claim is idempotent per `TypeId`); a
+    /// duplicate subname fails boot with [`BootError::MailboxAlreadyClaimed`].
+    ///
+    /// Boot order is declaration order, like [`Self::with_actor`].
+    #[must_use]
+    pub fn with_instance<A>(mut self, subname: &str, config: A::Config) -> Self
+    where
+        A: Instanced + NativeActor + NativeDispatch,
+    {
+        self.passives
+            .push(Box::new(InstancedActorBoot::<A>::new(subname, config)));
+        self
+    }
+
     /// Supply the chassis's driver. Transitions to [`HasDriver`] —
     /// further `.driver(_)` calls are forbidden by the type system.
     /// Per ADR-0071 the driver type is fixed by `C::Driver`, so the
@@ -944,6 +1177,20 @@ impl<C: Chassis> Builder<C, HasDriver> {
     {
         self.passives
             .push(Box::new(NativeActorBoot::<A>::new(config)));
+        self
+    }
+
+    /// Mirror of [`Builder::with_instance`][Builder<C, NoDriver>::with_instance]
+    /// for the post-driver state — same semantics, accepted because
+    /// declaration-order before/after `.driver(_)` doesn't change boot
+    /// order (passives boot before the driver regardless). ADR-0120 §6.
+    #[must_use]
+    pub fn with_instance<A>(mut self, subname: &str, config: A::Config) -> Self
+    where
+        A: Instanced + NativeActor + NativeDispatch,
+    {
+        self.passives
+            .push(Box::new(InstancedActorBoot::<A>::new(subname, config)));
         self
     }
 
@@ -1393,10 +1640,7 @@ impl<C: Chassis> BuiltChassis<C> {
     /// }
     /// ```
     #[must_use]
-    pub fn resolve_actor<A: aether_actor::Instanced + NativeActor>(
-        &self,
-        subname: &str,
-    ) -> Option<MailboxId> {
+    pub fn resolve_actor<A: Instanced + NativeActor>(&self, subname: &str) -> Option<MailboxId> {
         // ADR-0099 §3: a nested actor's id is its lineage fold, not
         // `hash(NAMESPACE:subname)`, so resolve by the *registered* id —
         // walk the live instances of `A` and match the subname — rather
@@ -1421,9 +1665,7 @@ impl<C: Chassis> BuiltChassis<C> {
     /// driver / `TestBench` / scenario inspection step, not from
     /// production cap state. ADR-0079 supervisor-as-cap pattern.
     #[must_use]
-    pub fn resolve_actors<A: aether_actor::Instanced + NativeActor>(
-        &self,
-    ) -> Vec<(String, MailboxId)> {
+    pub fn resolve_actors<A: Instanced + NativeActor>(&self) -> Vec<(String, MailboxId)> {
         self.booted.actor_registry.live_subnames_of_type::<A>()
     }
 
@@ -1439,7 +1681,7 @@ impl<C: Chassis> BuiltChassis<C> {
         config: A::Config,
     ) -> crate::SpawnBuilder<'a, A>
     where
-        A: aether_actor::Instanced + NativeActor + NativeDispatch,
+        A: Instanced + NativeActor + NativeDispatch,
     {
         crate::SpawnBuilder::new(
             Arc::clone(&self.booted.spawner),
@@ -1561,10 +1803,7 @@ impl<C: Chassis> PassiveChassis<C> {
     /// }
     /// ```
     #[must_use]
-    pub fn resolve_actor<A: aether_actor::Instanced + NativeActor>(
-        &self,
-        subname: &str,
-    ) -> Option<MailboxId> {
+    pub fn resolve_actor<A: Instanced + NativeActor>(&self, subname: &str) -> Option<MailboxId> {
         // ADR-0099 §3: a nested actor's id is its lineage fold, not
         // `hash(NAMESPACE:subname)`, so resolve by the *registered* id —
         // walk the live instances of `A` and match the subname — rather
@@ -1583,9 +1822,7 @@ impl<C: Chassis> PassiveChassis<C> {
     /// that supervise a fleet hold their own cap-local map; this is
     /// for tests and chassis-level introspection only.
     #[must_use]
-    pub fn resolve_actors<A: aether_actor::Instanced + NativeActor>(
-        &self,
-    ) -> Vec<(String, MailboxId)> {
+    pub fn resolve_actors<A: Instanced + NativeActor>(&self) -> Vec<(String, MailboxId)> {
         self.booted.actor_registry.live_subnames_of_type::<A>()
     }
 
@@ -1600,7 +1837,7 @@ impl<C: Chassis> PassiveChassis<C> {
         config: A::Config,
     ) -> crate::SpawnBuilder<'a, A>
     where
-        A: aether_actor::Instanced + NativeActor + NativeDispatch,
+        A: Instanced + NativeActor + NativeDispatch,
     {
         crate::SpawnBuilder::new(
             Arc::clone(&self.booted.spawner),
@@ -3854,5 +4091,201 @@ mod tests {
                 ran: Arc::clone(&ran),
             });
         assert_eq!(builder.workers, Some(3));
+    }
+
+    /// Issue 2101 / ADR-0120 §6: boot-time instanced-actor seeding via
+    /// `Builder::with_instance`. Nested so the shared `Seeded` / `Poke`
+    /// fixtures carry their own atomic imports without colliding with the
+    /// sibling tests' local imports.
+    mod with_instance {
+        use super::*;
+        use crate::mail::registry::MailboxEntry;
+        use aether_data::{Kind, KindId as DataKindId};
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        /// An instanced test cap (`Resolver = Many`) seeded by
+        /// `Builder::with_instance`. Counts the `Poke`s it dispatches so
+        /// the boot -> address -> dispatch chain is observable.
+        struct Seeded {
+            poked: Arc<AtomicU32>,
+        }
+        impl Addressable for Seeded {
+            const NAMESPACE: &'static str = "test.with_instance.seeded";
+            type Resolver = aether_actor::Many;
+        }
+        impl HandlesKind<Poke> for Seeded {}
+        impl aether_actor::Lifecycle for Seeded {
+            type Config = Arc<AtomicU32>;
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self { poked: config })
+            }
+        }
+        impl NativeActor for Seeded {}
+        impl NativeDispatch for Seeded {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut NativeCtx<'_, crate::Manual>,
+                kind: KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == <Poke as Kind>::ID.0 {
+                    let _ = <Poke as Kind>::decode_from_bytes(payload)?;
+                    self.poked.fetch_add(1, Ordering::SeqCst);
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Poke {
+            tag: u32,
+        }
+        impl Kind for Poke {
+            const NAME: &'static str = "test.with_instance.poke";
+            const ID: DataKindId = DataKindId(0xA1A2_A3A4_A5A6_A7A8);
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+        }
+
+        /// The depth-1 subname id (ADR-0099 §3) a `with_instance::<A>(subname)`
+        /// seed claims — the no-parent lineage fixed point, identical to a
+        /// chassis-level `spawn_actor`'s top-level id and to the flat
+        /// `{NAMESPACE}:{subname}` name hash.
+        fn depth_one_id(namespace: &str, subname: &str) -> MailboxId {
+            MailboxId(aether_data::with_tag(
+                aether_data::Tag::Mailbox,
+                aether_data::ActorId::instanced(namespace, subname).0,
+            ))
+        }
+
+        /// A `with_instance` seed boots an instanced actor at the depth-1
+        /// subname id, is `is_live` + enumerable via `resolve_actor`, is
+        /// reachable by its registered `{NAMESPACE}:{subname}` name (the
+        /// wire `recipient_name` path #2098 relies on), and dispatches
+        /// mail — all with no runtime parent.
+        #[test]
+        fn seeds_addressable_dispatching_instance() {
+            let (registry, mailer) = fresh_substrate();
+            let poked = Arc::new(AtomicU32::new(0));
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_instance::<Seeded>("assets", Arc::clone(&poked))
+                .build_passive()
+                .expect("with_instance seed boots");
+
+            let ns = <Seeded as Addressable>::NAMESPACE;
+            let id = depth_one_id(ns, "assets");
+
+            // The seed is Live at the depth-1 subname id, no runtime parent.
+            assert!(
+                chassis.actor_registry().is_live(id),
+                "boot-seeded instance should be Live at the depth-1 subname id"
+            );
+
+            // It is registered under its flat `{NAMESPACE}:{subname}` name,
+            // so the registry-name / wire `recipient_name` path resolves to
+            // the same id (the reachability #2098 relies on). NB: a depth-1
+            // root is reached by this name, NOT by `Many::resolve(0, ..)`,
+            // which folds the instanced node onto a phantom carry-0 root.
+            assert_eq!(
+                registry.lookup(&format!("{ns}:assets")),
+                Some(id),
+                "the seed is registered under its flat {{NAMESPACE}}:{{subname}} name"
+            );
+
+            // Chassis-level resolve_actor (the Done criterion) returns the
+            // same id by enumerating the live instance under its subname.
+            assert_eq!(
+                chassis.resolve_actor::<Seeded>("assets"),
+                Some(id),
+                "resolve_actor returns the boot-seeded instance's id"
+            );
+
+            // Dispatch a Poke through the registered sink and observe it land.
+            let MailboxEntry::Inbox { handler, .. } =
+                registry.entry(id).expect("seed sink registered")
+            else {
+                panic!("expected an Inbox mailbox entry for the seeded instance");
+            };
+            let bytes = (Poke { tag: 7 }).encode_into_bytes();
+            handler.enqueue(registry::test_owned_dispatch(
+                <Poke as Kind>::ID,
+                Poke::NAME,
+                &bytes,
+                1,
+            ));
+
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while poked.load(Ordering::SeqCst) < 1 && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(
+                poked.load(Ordering::SeqCst),
+                1,
+                "the boot-seeded instance dispatched the Poke"
+            );
+
+            drop(chassis);
+        }
+
+        /// Two `with_instance::<A>` seeds for distinct subnames of one type
+        /// coexist — the namespace claim is idempotent per `TypeId`, and the
+        /// distinct subname ids keep them addressable apart.
+        #[test]
+        fn two_subnames_one_type_coexist() {
+            let (registry, mailer) = fresh_substrate();
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_instance::<Seeded>("a", Arc::new(AtomicU32::new(0)))
+                .with_instance::<Seeded>("b", Arc::new(AtomicU32::new(0)))
+                .build_passive()
+                .expect("two distinct subnames of one type boot");
+
+            let ns = <Seeded as Addressable>::NAMESPACE;
+            let id_a = depth_one_id(ns, "a");
+            let id_b = depth_one_id(ns, "b");
+            assert_ne!(id_a, id_b, "distinct subnames have distinct ids");
+            assert!(chassis.actor_registry().is_live(id_a), "a is Live");
+            assert!(chassis.actor_registry().is_live(id_b), "b is Live");
+            assert_eq!(chassis.resolve_actor::<Seeded>("a"), Some(id_a));
+            assert_eq!(chassis.resolve_actor::<Seeded>("b"), Some(id_b));
+
+            let mut subnames: Vec<String> = chassis
+                .resolve_actors::<Seeded>()
+                .into_iter()
+                .map(|(name, _id)| name)
+                .collect();
+            subnames.sort();
+            assert_eq!(subnames, vec!["a".to_owned(), "b".to_owned()]);
+
+            drop(chassis);
+        }
+
+        /// Two `with_instance` seeds at the same subname fail boot with the
+        /// `SubnameInUse`-shaped error ([`BootError::MailboxAlreadyClaimed`])
+        /// rather than silently colliding — the boot-path analog of the
+        /// runtime `SpawnError::SubnameInUse` guard.
+        #[test]
+        fn duplicate_subname_fails_boot() {
+            let (registry, mailer) = fresh_substrate();
+            let result = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_instance::<Seeded>("a", Arc::new(AtomicU32::new(0)))
+                .with_instance::<Seeded>("a", Arc::new(AtomicU32::new(0)))
+                .build_passive();
+            assert!(
+                matches!(result, Err(BootError::MailboxAlreadyClaimed { .. })),
+                "a duplicate boot subname must fail with MailboxAlreadyClaimed, got {result:?}"
+            );
+        }
     }
 }

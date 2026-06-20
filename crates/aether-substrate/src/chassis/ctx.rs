@@ -5,6 +5,7 @@
 //! live in `chassis::error`; the cross-flavour [`Envelope`] shape lives
 //! in `actor::native::envelope`.
 
+use std::any::TypeId;
 use std::sync::mpsc;
 use std::sync::{Arc, Weak};
 
@@ -514,6 +515,93 @@ impl<'a> ChassisCtx<'a> {
         self.claimed_actor_mailboxes.push(id);
         Ok(DropOnShutdownClaim {
             id,
+            receiver: rx,
+            mailbox_sender: MailboxSender::new(tx),
+            wake_slot,
+        })
+    }
+
+    /// ADR-0099 §3 / ADR-0120 §6: claim an instanced actor's mailbox at
+    /// an explicit, caller-computed lineage `id` — the depth-1 subname
+    /// fixed point a [`crate::chassis::builder::Builder::with_instance`]
+    /// seed sits at — rather than at `hash(name)`. Like
+    /// [`Self::claim_mailbox_drop_on_shutdown_with_override`] it returns a
+    /// strong [`MailboxSender`] for the channel-drop shutdown lifecycle,
+    /// but it registers the inbox sink under the supplied `id`
+    /// ([`Registry::try_register_inbox_with_id`]) and inserts an
+    /// [`crate::ActorRegistry`] `Live` entry under `subname` — the same
+    /// registration the runtime spawn path
+    /// ([`crate::actor::native::spawn`]) performs — so chassis-level
+    /// `resolve_actor` / `resolve_actors` enumerate a boot-seeded instance
+    /// exactly like a runtime-spawned one.
+    ///
+    /// A second seed at the same `id` (a duplicate subname of one type)
+    /// fails at [`Registry::try_register_inbox_with_id`] with a
+    /// [`BootError::MailboxAlreadyClaimed`] — the boot-path analog of the
+    /// runtime `SpawnError::SubnameInUse` guard.
+    pub fn claim_instanced_mailbox_drop_on_shutdown(
+        &mut self,
+        id: MailboxId,
+        name: String,
+        subname: String,
+        type_id: TypeId,
+    ) -> Result<DropOnShutdownClaim, BootError> {
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        // Strong Arc rides on `DropOnShutdownClaim.mailbox_sender` and a
+        // clone lives in the actor-registry `Live` entry; the sink closure
+        // holds only a `Weak` (ADR-0079), so a send racing teardown
+        // upgrades while either strong handle is alive.
+        let tx = Arc::new(tx);
+        let weak = Arc::downgrade(&tx);
+        let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
+        let wake_for_handler = Arc::clone(&wake_slot);
+        let registered_id = self.registry.try_register_inbox_with_id(
+            id,
+            name,
+            // Same shared upgrade -> send -> wake core (`relay_or_transfer`)
+            // every production inbox closure routes through, with both
+            // ADR-0094 transfer seams.
+            Arc::new(move |dispatch: OwnedDispatch| {
+                match relay_or_transfer(dispatch, &weak, &wake_for_handler) {
+                    RelayOutcome::Delivered => {}
+                    RelayOutcome::SenderGone { kind_name } => {
+                        tracing::warn!(
+                            target: "aether_substrate::capability",
+                            kind = %kind_name,
+                            "instanced boot mailbox sender dropped — mail discarded"
+                        );
+                    }
+                    RelayOutcome::ReceiverGone { kind_name } => {
+                        tracing::warn!(
+                            target: "aether_substrate::capability",
+                            kind = %kind_name,
+                            "instanced boot mailbox receiver dropped — mail discarded"
+                        );
+                    }
+                }
+            }),
+        )?;
+        // ADR-0079: insert the `Live` actor-registry entry so chassis-level
+        // `resolve_actor` / `resolve_actors` enumerate the instance by
+        // subname.
+        if self
+            .spawner
+            .actor_registry()
+            .insert_live(registered_id, Arc::clone(&tx), type_id, subname)
+            .is_err()
+        {
+            // Effectively unreachable — `try_register_inbox_with_id` above
+            // already rejects a duplicate id — but a stray `Live` slot at
+            // this id means the sink we just registered must not linger.
+            // Remove it and surface the collision.
+            self.registry.remove_closure(registered_id);
+            return Err(BootError::MailboxAlreadyClaimed {
+                name: format!("actor-registry id {registered_id:?} already live"),
+            });
+        }
+        self.claimed_actor_mailboxes.push(registered_id);
+        Ok(DropOnShutdownClaim {
+            id: registered_id,
             receiver: rx,
             mailbox_sender: MailboxSender::new(tx),
             wake_slot,
