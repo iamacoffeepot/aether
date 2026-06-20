@@ -86,7 +86,7 @@ struct ProbeConfig {
     ping_total: Arc<AtomicU32>,
 }
 
-#[aether_data::actor]
+#[aether_actor::actor]
 impl NativeActor for MacroProbeCap {
     type Config = ProbeConfig;
     const NAMESPACE: &'static str = "test.macro_native_actor.probe";
@@ -99,13 +99,13 @@ impl NativeActor for MacroProbeCap {
     }
 
     /// Handles structured-shape `Greet` mail.
-    #[aether_data::handler]
+    #[aether_actor::handler]
     fn on_greet(&self, _ctx: &mut NativeCtx<'_>, mail: Greet) {
         self.greet_total.fetch_add(mail.tag, AtomicOrdering::SeqCst);
     }
 
     /// Handles cast-shape `Ping` mail.
-    #[aether_data::handler]
+    #[aether_actor::handler]
     fn on_ping(&self, _ctx: &mut NativeCtx<'_>, mail: Ping) {
         self.ping_total.fetch_add(mail.seq, AtomicOrdering::SeqCst);
     }
@@ -640,7 +640,7 @@ struct TaskRouteCap {
     obs: TaskObservations,
 }
 
-#[aether_data::actor]
+#[aether_actor::actor]
 impl NativeActor for TaskRouteCap {
     type Config = TaskObservations;
     const NAMESPACE: &'static str = "test.macro_native_actor.task_route";
@@ -651,7 +651,7 @@ impl NativeActor for TaskRouteCap {
 
     /// Dispatch a worker that produces a `ResultA`. The completion routes
     /// to `on_result_a` by output type.
-    #[aether_data::handler]
+    #[aether_actor::handler]
     fn on_kick_a(&self, ctx: &mut NativeCtx<'_>, mail: KickA) {
         self.obs.dispatched.fetch_add(1, AtomicOrdering::SeqCst);
         let seed = mail.seed;
@@ -663,7 +663,7 @@ impl NativeActor for TaskRouteCap {
     }
 
     /// Dispatch a worker that produces a `ResultB`.
-    #[aether_data::handler]
+    #[aether_actor::handler]
     fn on_kick_b(&self, ctx: &mut NativeCtx<'_>, mail: KickB) {
         self.obs.dispatched.fetch_add(1, AtomicOrdering::SeqCst);
         let seed = mail.seed;
@@ -672,7 +672,7 @@ impl NativeActor for TaskRouteCap {
 
     /// `ResultA` completion handler. Records the value + a call so the
     /// test can confirm only the `ResultA` dispatch reached it.
-    #[aether_data::handler(task)]
+    #[aether_actor::handler(task)]
     fn on_result_a(&self, ctx: &mut NativeCtx<'_>, done: TaskDone<ResultA>) {
         self.obs
             .a_value
@@ -685,7 +685,7 @@ impl NativeActor for TaskRouteCap {
     }
 
     /// `ResultB` completion handler.
-    #[aether_data::handler(task)]
+    #[aether_actor::handler(task)]
     fn on_result_b(&self, ctx: &mut NativeCtx<'_>, done: TaskDone<ResultB>) {
         self.obs
             .b_tag
@@ -721,7 +721,7 @@ struct Pong {
 /// submits a link-time `HandlerEntry` declaring `Greet -> Pong`.
 struct ReplyMacroCap;
 
-#[aether_data::actor]
+#[aether_actor::actor]
 impl NativeActor for ReplyMacroCap {
     type Config = ();
     const NAMESPACE: &'static str = "test.macro_native_actor.reply";
@@ -735,7 +735,7 @@ impl NativeActor for ReplyMacroCap {
     /// `HandlerEntry` (not handler behaviour) is what this cap exists to
     /// exercise.
     #[allow(clippy::unused_self)]
-    #[aether_data::handler]
+    #[aether_actor::handler]
     fn on_greet_reply(&self, _ctx: &mut NativeCtx<'_>, mail: Greet) -> Pong {
         Pong { echoed: mail.tag }
     }
@@ -914,7 +914,7 @@ struct DeferredReplyCap {
     obs: DeferredObs,
 }
 
-#[aether_data::actor]
+#[aether_actor::actor]
 impl NativeActor for DeferredReplyCap {
     type Config = DeferredObs;
     const NAMESPACE: &'static str = "test.macro_native_actor.deferred";
@@ -927,7 +927,7 @@ impl NativeActor for DeferredReplyCap {
     /// kind on the request signature and arms an `EchoReply` worker; the
     /// macro sends nothing now.
     #[allow(clippy::unused_self)]
-    #[aether_data::handler]
+    #[aether_actor::handler]
     fn on_kick_p(&self, ctx: &mut NativeCtx<'_>, mail: KickP) -> Pending<EchoReply> {
         let seed = mail.seed;
         ctx.dispatch_blocking(move || EchoReply { value: seed })
@@ -935,7 +935,7 @@ impl NativeActor for DeferredReplyCap {
 
     /// Borrow-form completion: returns the reply; the macro calls
     /// `resolve_value` with it and releases the hold.
-    #[aether_data::handler(task)]
+    #[aether_actor::handler(task)]
     fn on_echo_done(&self, _ctx: &mut NativeCtx<'_>, done: &TaskDone<EchoReply>) -> EchoReply {
         self.obs.echo_calls.fetch_add(1, AtomicOrdering::SeqCst);
         EchoReply {
@@ -946,7 +946,7 @@ impl NativeActor for DeferredReplyCap {
     /// No-reply path: returns `()`, so it dispatches via
     /// `dispatch_blocking_with` (no `Pending<R>` contract to declare).
     #[allow(clippy::unused_self)]
-    #[aether_data::handler]
+    #[aether_actor::handler]
     fn on_kick_s(&self, ctx: &mut NativeCtx<'_>, mail: KickS) {
         let seed = mail.seed;
         ctx.dispatch_blocking_with((), move || Silent { value: seed });
@@ -954,7 +954,7 @@ impl NativeActor for DeferredReplyCap {
 
     /// Borrow-form no-reply completion: returns `()`, so the macro calls
     /// `release_no_reply` — the hold releases with no reply sent.
-    #[aether_data::handler(task)]
+    #[aether_actor::handler(task)]
     fn on_silent_done(&self, _ctx: &mut NativeCtx<'_>, done: &TaskDone<Silent>) {
         self.obs
             .silent_value
@@ -1004,7 +1004,7 @@ struct ManualAck {
 /// `-> R` return value.
 struct ManualReplyCap;
 
-#[aether_data::actor]
+#[aether_actor::actor]
 impl NativeActor for ManualReplyCap {
     const NAMESPACE: &'static str = "test.macro_native_actor.manual_reply";
     type Config = ();
@@ -1013,7 +1013,7 @@ impl NativeActor for ManualReplyCap {
         Ok(Self)
     }
 
-    #[aether_data::handler::manual]
+    #[aether_actor::handler::manual]
     #[allow(clippy::unused_self)]
     fn on_ping(&mut self, ctx: &mut NativeCtx<'_, Manual>, ping: ManualPing) {
         ctx.reply(&ManualAck { seq: ping.seq });
