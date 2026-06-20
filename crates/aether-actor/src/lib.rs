@@ -1,20 +1,16 @@
-//! aether-actor: transport-agnostic actor SDK shared by FFI guests
-//! (today: wasm components) and native capabilities. Issue 552 stage 0
+//! aether-actor: wasm guest SDK and transport-agnostic actor primitives.
+//! Shared by wasm components and native capabilities. Issue 552 stage 0
 //! folded the prior `aether-component` crate's guest shim in here so
-//! the SDK and its FFI binding layer share one home; issue 663 then
-//! renamed the binding layer from `wasm` to `ffi` to reflect that any
-//! host satisfying the `_p32` import surface can drive an actor
-//! through it (the wasm runtime in `aether_substrate::actor::wasm` is
-//! one consumer; future C / OS-process hosts would be others).
+//! the SDK and its wasm binding layer share one home.
 //!
 //! ADR-0074 §Decision settled the actor model: components and
 //! capabilities collapse into one actor primitive — one mpsc inbox,
 //! one OS thread, one `MailboxId`. Issue 665 retired the unifying
-//! `MailTransport` trait that originally tied the FFI and native
+//! `MailTransport` trait that originally tied the wasm and native
 //! halves together — the cross-target abstraction is now the
 //! per-stage capability traits in [`actor::ctx`]; the per-target
-//! dispatch surfaces are [`ffi::bridge`] (FFI: `ffi::bridge::mail`,
-//! `ffi::bridge::persist`) and the inherent methods on
+//! dispatch surfaces are [`wasm::bridge`] (wasm: `wasm::bridge::mail`,
+//! `wasm::bridge::persist`) and the inherent methods on
 //! `aether_substrate::actor::native::binding::NativeBinding`.
 //!
 //! Public surface:
@@ -25,20 +21,20 @@
 //!     route through each ctx's send methods, not through the mailbox
 //!     itself.
 //!   - [`actor::ctx`] — per-stage capability traits ([`MailSender`],
-//!     [`OutboundReply`], [`Persistence`]). FFI ctxs in [`ffi::ctx`]
+//!     [`OutboundReply`], [`Persistence`]). Wasm ctxs in [`wasm::ctx`]
 //!     and substrate's `NativeCtx` family impl the relevant subset.
 //!   - [`Slot`] — single-instance backing store the consumer's
 //!     [`export!`] macro emits as a `static`.
-//!   - [`ffi`] — FFI binding layer: [`ffi::bridge`] dispatch ZSTs +
-//!     [`WasmActor`] trait (with the `on_dehydrate` / `on_rehydrate`
-//!     hot-swap hooks, ADR-0101) +
+//!   - [`wasm`] — wasm guest binding layer: [`wasm::bridge`] dispatch
+//!     functions + [`WasmActor`] trait (with the `on_dehydrate` /
+//!     `on_rehydrate` hot-swap hooks, ADR-0101) +
 //!     [`WasmActorMailbox`] for the actor-typed sender chain +
 //!     the [`export!`] macro that pins `init` / `receive` /
 //!     lifecycle FFI exports plus the `aether.kinds.inputs` /
 //!     `aether.namespace` custom-section statics.
 //!
 //! No FFI imports are pulled in unconditionally — the host-fn externs
-//! in [`ffi::raw`] live behind a `#[cfg(target_family = "wasm")]`
+//! in [`wasm::raw`] live behind a `#[cfg(target_family = "wasm")]`
 //! block and the native-target stubs panic if invoked, so the crate
 //! compiles for `cargo test --workspace` on the host without dragging
 //! the FFI surface into the linker.
@@ -55,11 +51,11 @@ extern crate alloc;
 extern crate self as aether_actor;
 
 pub mod actor;
-pub mod ffi;
 pub mod local;
 pub mod log;
 pub mod mail;
 pub mod trace_ring;
+pub mod wasm;
 
 pub use actor::ctx::{MailSender, Manual, OutboundReply, Persistence, ReplyMode, Single, Stream};
 pub use actor::slot::Slot;
@@ -72,24 +68,24 @@ pub use local::Local;
 // Issue 665: `Mailbox<K, T>` and `ActorMailbox<'_, R, T>` retired; the
 // surviving [`mail::mailbox::Mailbox<K>`] is a transport-free
 // addressing token. Per-side actor-typed mailboxes live next to their
-// transport: [`ffi::WasmActorMailbox<R>`] for FFI guests and
+// transport: [`wasm::WasmActorMailbox<R>`] for wasm guests and
 // `aether_substrate::actor::native::NativeActorMailbox<'a, R>` for
 // native actors.
 pub use mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyHandle};
 
-// FFI surface promoted to the crate root so consumers see
+// Wasm surface promoted to the crate root so consumers see
 // `aether_actor::WasmCtx<'_>` / `aether_actor::WasmActor` / etc. without
-// an extra `ffi::` segment.
-pub use ffi::{
-    BootError, ErasedFfiActor, RelativeMailbox, SpawnError, WasmActor, WasmActorMailbox, WasmCtx,
+// an extra `wasm::` segment.
+pub use wasm::{
+    BootError, ErasedWasmActor, RelativeMailbox, SpawnError, WasmActor, WasmActorMailbox, WasmCtx,
     WasmDropCtx, WasmInitCtx,
 };
 
 // Issue 665 retired `MailTransport` and its `MailTransportTrait`
 // alias. Per-stage capability traits in `actor::ctx` are the
 // cross-target abstraction; per-target dispatch lives in
-// `ffi::bridge::*` (FFI) and `NativeBinding`'s inherent methods
+// `wasm::bridge::*` (wasm) and `NativeBinding`'s inherent methods
 // (native).
 
 /// Return code the `#[actor]`-synthesized dispatcher sends back up
@@ -118,7 +114,7 @@ pub mod __macro_internals {
     pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
     pub use aether_data::{Kind, Schema, mailbox_id_from_name};
     // ADR-0096: the multi-actor `export!` arm stores the instance as
-    // `Box<dyn ErasedFfiActor>`; re-export `Box` so the emitted code
+    // `Box<dyn ErasedWasmActor>`; re-export `Box` so the emitted code
     // doesn't depend on the guest crate's prelude exposing `alloc`.
     pub use alloc::boxed::Box;
     // ADR-0113: the `#[actor]`-generated `on_rehydrate` warns through

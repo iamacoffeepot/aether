@@ -46,10 +46,10 @@ use core::cell::{Cell, UnsafeCell};
 
 use aether_data::MailboxId;
 
-use crate::ffi::ErasedFfiActor;
-use crate::ffi::bridge::mail;
-use crate::ffi::ctx::WasmCtx;
 use crate::mail::{Mail, NO_REPLY_HANDLE};
+use crate::wasm::ErasedWasmActor;
+use crate::wasm::bridge::mail;
+use crate::wasm::ctx::WasmCtx;
 
 mod bundle;
 pub mod compose;
@@ -88,7 +88,7 @@ struct InlineSlot {
     /// guest cannot reproduce a relative's id by folding; it looks the
     /// recorded id up instead).
     parent: u64,
-    actor: Option<Box<dyn ErasedFfiActor>>,
+    actor: Option<Box<dyn ErasedWasmActor>>,
 }
 
 /// A cloneable snapshot of one resident inline child's reconstruct
@@ -229,7 +229,7 @@ impl InlineRegistry {
         full_subname: String,
         is_counter: bool,
         parent: u64,
-        actor: Box<dyn ErasedFfiActor>,
+        actor: Box<dyn ErasedWasmActor>,
     ) {
         // SAFETY: single-threaded guest + serialized delivery — no other
         // live borrow of the cell (the `Sync` argument). The borrow is
@@ -261,7 +261,7 @@ impl InlineRegistry {
     /// or never registered). The borrow drops before the returned box is
     /// dispatched, so a child may re-enter the registry mid-dispatch.
     /// O(log n).
-    pub(crate) fn take(&self, id: MailboxId) -> Option<Box<dyn ErasedFfiActor>> {
+    pub(crate) fn take(&self, id: MailboxId) -> Option<Box<dyn ErasedWasmActor>> {
         // SAFETY: see [`Self::insert_child`].
         let map = unsafe { &mut *self.inner.get() };
         map.get_mut(&id).and_then(|s| s.actor.take())
@@ -277,7 +277,7 @@ impl InlineRegistry {
     /// back to, so the live box drops at end of scope rather than
     /// re-entering the registry. This no-op is what makes self-despawn
     /// fall out for free (ADR-0114) — no pending-removal flag. O(log n).
-    pub(crate) fn reinsert(&self, id: MailboxId, actor: Box<dyn ErasedFfiActor>) {
+    pub(crate) fn reinsert(&self, id: MailboxId, actor: Box<dyn ErasedWasmActor>) {
         // SAFETY: see [`Self::insert_child`].
         let map = unsafe { &mut *self.inner.get() };
         if let Some(slot) = map.get_mut(&id) {
@@ -287,7 +287,7 @@ impl InlineRegistry {
 
     /// Tear down the inline child registered under `id` (ADR-0114
     /// teardown): remove its slot, dropping the resident
-    /// `Box<dyn ErasedFfiActor>` so the child's `Drop` runs. Returns
+    /// `Box<dyn ErasedWasmActor>` so the child's `Drop` runs. Returns
     /// `true` if a slot was present, `false` if `id` named no inline child
     /// (idempotent — a re-despawn of an already-gone alias is a clean
     /// `false`, not an error). Backs [`WasmCtx::despawn_inline_child`].
@@ -336,7 +336,7 @@ impl InlineRegistry {
     pub(crate) fn with_child_mut<R>(
         &self,
         id: MailboxId,
-        f: impl FnOnce(&mut dyn ErasedFfiActor) -> R,
+        f: impl FnOnce(&mut dyn ErasedWasmActor) -> R,
     ) -> Option<R> {
         // SAFETY: see [`Self::insert_child`].
         let map = unsafe { &mut *self.inner.get() };
@@ -600,8 +600,8 @@ mod tests {
     use super::{InlineRegistry, RouteDecision, drain_cluster_queue, membrane_dispatch};
     use crate::WasmCtx;
     use crate::actor::ctx::OutboundReply;
-    use crate::ffi::ErasedFfiActor;
     use crate::mail::{Mail, PriorState};
+    use crate::wasm::ErasedWasmActor;
     use aether_data::MailboxId;
     use alloc::boxed::Box;
     use alloc::rc::Rc;
@@ -618,7 +618,7 @@ mod tests {
     const OWN_CODE: u32 = 0xA0;
     const CHILD_CODE: u32 = 0xC0;
 
-    /// Minimal `ErasedFfiActor` for the membrane tests: bumps a
+    /// Minimal `ErasedWasmActor` for the membrane tests: bumps a
     /// test-local dispatch counter (shared via [`Rc`] so the test reads it
     /// back without a process-global), records the `ctx.source_mailbox()`
     /// it observed on the most recent dispatch (the in-place "from" half),
@@ -658,7 +658,7 @@ mod tests {
         }
     }
 
-    impl ErasedFfiActor for RecordingChild {
+    impl ErasedWasmActor for RecordingChild {
         fn erased_namespace(&self) -> &'static str {
             "test.inline.recording_child"
         }
@@ -699,7 +699,7 @@ mod tests {
         }
     }
 
-    impl ErasedFfiActor for SelfDespawningChild {
+    impl ErasedWasmActor for SelfDespawningChild {
         fn erased_namespace(&self) -> &'static str {
             "test.inline.self_despawning_child"
         }

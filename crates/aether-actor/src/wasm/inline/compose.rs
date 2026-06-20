@@ -25,11 +25,11 @@ use alloc::vec::Vec;
 
 use aether_data::{Kind, MailboxId};
 
-use crate::ffi::ctx::{CapturedState, NO_INBOUND_SOURCE, WasmDropCtx, WasmInitCtx};
-use crate::ffi::inline::InlineRegistry;
-use crate::ffi::inline::bundle::{self, ChildEntry};
-use crate::ffi::{ErasedFfiActor, WasmActor, WasmCtx};
 use crate::mail::PriorState;
+use crate::wasm::ctx::{CapturedState, NO_INBOUND_SOURCE, WasmDropCtx, WasmInitCtx};
+use crate::wasm::inline::InlineRegistry;
+use crate::wasm::inline::bundle::{self, ChildEntry};
+use crate::wasm::{ErasedWasmActor, WasmActor, WasmCtx};
 
 /// Run the parent's `on_dehydrate` and every inline child's, packing one
 /// composite migration bundle (ADR-0114 §5).
@@ -188,7 +188,7 @@ pub fn reconstruct_one_child<A>(
     to_reconstruct: &InlineChildToReconstruct<'_>,
 ) -> bool
 where
-    A: WasmActor + ErasedFfiActor,
+    A: WasmActor + ErasedWasmActor,
 {
     // The child's config isn't part of the migration bundle; re-`init`
     // from empty config bytes, the same shape the legacy zero-config
@@ -238,10 +238,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{InlineRegistry, compose_dehydrate, reconstruct_inline_children};
-    use crate::ffi::ctx::WasmDropCtx;
-    use crate::ffi::inline::bundle;
-    use crate::ffi::{ErasedFfiActor, WasmCtx};
     use crate::mail::{Mail, PriorState};
+    use crate::wasm::ctx::WasmDropCtx;
+    use crate::wasm::inline::bundle;
+    use crate::wasm::{ErasedWasmActor, WasmCtx};
     use aether_data::MailboxId;
     use alloc::boxed::Box;
     use alloc::string::String;
@@ -255,7 +255,7 @@ mod tests {
         tag: u32,
     }
 
-    impl ErasedFfiActor for SavingChild {
+    impl ErasedWasmActor for SavingChild {
         fn erased_namespace(&self) -> &'static str {
             "test.inline.saving_child"
         }
@@ -347,7 +347,7 @@ mod tests {
         // Build a composite with a parent blob + two children directly
         // through the bundle helpers. The callback only records, so the
         // registry threaded in is never inserted into here.
-        use crate::ffi::inline::bundle::{ChildEntry, compose};
+        use crate::wasm::inline::bundle::{ChildEntry, compose};
 
         const TAG_KNOWN: u64 = 0xBEEF;
         const TAG_UNKNOWN: u64 = 0xDEAD;

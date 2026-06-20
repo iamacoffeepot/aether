@@ -50,7 +50,7 @@ pub use native::InputConfig;
 /// `.send(&SubscribeInput { .. })` so component code stops
 /// reconstructing the kind struct at every call site. Same shape and
 /// rationale as [`crate::fs::FsMailboxExt`]
-/// (issue 580) and [`crate::component::ComponentHostFfiExt`] (issue
+/// (issue 580) and [`crate::component::ComponentHostWasmExt`] (issue
 /// 654) — the cap module owns receive-side ([`InputCapability`]) AND
 /// send-side ([`InputMailboxExt`]) so future kind additions land both
 /// surfaces in one place.

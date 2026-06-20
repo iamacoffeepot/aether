@@ -15,7 +15,7 @@
 //! handler can match the reply to the request it sent. It's a property
 //! of the outbound mail, so it lives in this module.
 
-use crate::ffi::raw;
+use crate::wasm::raw;
 
 /// Push a typed payload at `recipient`. `bytes` is the wire
 /// encoding of the payload (cast for `#[repr(C)]` kinds, postcard

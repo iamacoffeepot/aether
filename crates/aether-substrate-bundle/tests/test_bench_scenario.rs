@@ -216,7 +216,7 @@ fn input_subscription_yields_one_tick_observed_per_advance() {
 
 /// ADR-0096: a multi-actor module loads through the unmodified host,
 /// instantiating its entry export — the first type in the `export!`
-/// list, `Probe` — via the boxed `ErasedFfiActor` path. Omitting `name`
+/// list, `Probe` — via the boxed `ErasedWasmActor` path. Omitting `name`
 /// exercises the `aether.namespace` section, which carries the entry
 /// type's `NAMESPACE` (`test_fixture_probe`), and the `LoadResult`
 /// capabilities come from the entry type's `aether.kinds.inputs`
@@ -1175,7 +1175,7 @@ fn replace_component_preserves_mailbox_identity() {
 /// the `stateful_replace` fixture (`export!(Counter, Sidecar)`), bumps
 /// the entry `Counter`'s in-memory count to 3, replaces the wasm at the
 /// same mailbox id with the same binary, then re-queries the count.
-/// Because the boxed `ErasedFfiActor` now forwards the hooks, the count
+/// Because the boxed `ErasedWasmActor` now forwards the hooks, the count
 /// survives the swap — before this change the multi-actor arm shipped
 /// the hooks as no-ops and the replacement booted fresh at 0.
 #[test]

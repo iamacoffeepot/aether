@@ -2318,11 +2318,11 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
 
         // ADR-0096: object-safe erasure so a multi-actor module's
         // `export!(A, B, …)` arm can hold whichever exported type an
-        // instance became in one `Slot<Box<dyn ErasedFfiActor>>` and
+        // instance became in one `Slot<Box<dyn ErasedWasmActor>>` and
         // route the FFI shims through it. Forwards to the inherent
         // dispatch table and the `WasmActor` lifecycle hooks; `init`
         // stays concrete (the `export!` arm tag-matches and boxes).
-        impl #impl_generics ::aether_actor::ErasedFfiActor for #self_ty #where_clause {
+        impl #impl_generics ::aether_actor::ErasedWasmActor for #self_ty #where_clause {
             fn erased_namespace(&self) -> &'static str {
                 <#self_ty as ::aether_actor::Addressable>::NAMESPACE
             }

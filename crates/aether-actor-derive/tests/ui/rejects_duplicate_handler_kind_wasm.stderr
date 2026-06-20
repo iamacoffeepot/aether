@@ -1,5 +1,5 @@
 error: two #[handler] methods accept the same mail kind `Ping` (also on `on_first`) — each kind routes to exactly one handler. Give each handler a distinct kind.
-  --> tests/ui/rejects_duplicate_handler_kind_ffi.rs:39:8
+  --> tests/ui/rejects_duplicate_handler_kind_wasm.rs:39:8
    |
 39 |     fn on_second(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, _ping: Ping) {}
    |        ^^^^^^^^^

@@ -7,10 +7,10 @@
 //! token: a (mailbox id, kind id) pair that callers thread around but
 //! that doesn't carry its own dispatch path. Sends go through each
 //! ctx's inherent / trait-provided `send` methods (FFI: bodies call
-//! `crate::ffi::bridge::mail::send_mail`; native: bodies hit
+//! `crate::wasm::bridge::mail::send_mail`; native: bodies hit
 //! `NativeBinding`'s inherent `send_mail`).
 //!
-//! Per-side actor-typed mailboxes ([`crate::ffi::WasmActorMailbox<R>`],
+//! Per-side actor-typed mailboxes ([`crate::wasm::WasmActorMailbox<R>`],
 //! `aether_substrate::actor::native::NativeActorMailbox<'a, R>`)
 //! replaced the parametric `ActorMailbox<'a, R, T>` for the
 //! `ctx.actor::<R>().send(&payload)` chain — they're per-target so

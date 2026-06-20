@@ -25,19 +25,19 @@ fn ui() {
     // `aether-substrate` dev-dep, so a native *pass* / type-error fixture
     // can't link the substrate types — the existing native fixtures here
     // are all macro-level diagnostics that fire before path resolution).
-    t.pass("tests/ui/accepts_manual_handler_ffi.rs");
-    t.compile_fail("tests/ui/rejects_duplicate_handler_kind_ffi.rs");
+    t.pass("tests/ui/accepts_manual_handler_wasm.rs");
+    t.compile_fail("tests/ui/rejects_duplicate_handler_kind_wasm.rs");
     t.compile_fail("tests/ui/rejects_duplicate_handler_kind_native.rs");
-    t.compile_fail("tests/ui/rejects_missing_namespace_ffi.rs");
+    t.compile_fail("tests/ui/rejects_missing_namespace_wasm.rs");
     t.compile_fail("tests/ui/rejects_missing_namespace_native.rs");
-    t.compile_fail("tests/ui/rejects_stray_const_ffi.rs");
+    t.compile_fail("tests/ui/rejects_stray_const_wasm.rs");
     t.compile_fail("tests/ui/rejects_stray_const_native.rs");
     // ADR-0112: `#[handler::stream]` is reserved (a macro error, so the
-    // native fixture works too); an FFI marker / class disagreement fails
+    // native fixture works too); a wasm marker / class disagreement fails
     // to unify.
-    t.compile_fail("tests/ui/rejects_stream_reserved_ffi.rs");
+    t.compile_fail("tests/ui/rejects_stream_reserved_wasm.rs");
     t.compile_fail("tests/ui/rejects_stream_reserved_native.rs");
-    t.compile_fail("tests/ui/rejects_manual_marker_mismatch_ffi.rs");
+    t.compile_fail("tests/ui/rejects_manual_marker_mismatch_wasm.rs");
     // ADR-0112 (single-locked): a single-class `#[handler]` body has no
     // reply surface (`OutboundReply` is not impl'd for the `Single` ctx),
     // so a hand-call to `ctx.reply` is a compile error — `-> ()` is

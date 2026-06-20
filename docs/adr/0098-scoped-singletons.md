@@ -36,7 +36,7 @@ The constraints carried in:
 
 - **ADR-0029.** `MailboxId` is a 64-bit hash of the mailbox name. Whatever we compose for a scoped name must hash through the existing function — wire format unchanged.
 - **ADR-0079.** Cardinality axis, the `:` structural separator, name uniqueness enforced globally, tombstone-on-close. This ADR revises §1's "singleton NAMESPACE = full name" and extends the resolution surface; everything else in 0079 stands.
-- **Resolution is a hash with no inverse.** `mailbox_id_from_name` (`crates/aether-data/src/hash.rs`) maps a name to a `MailboxId` one-way. An `WasmActorMailbox<R>` carries only that `u64` (`crates/aether-actor/src/ffi/mailbox.rs`), and `spawn_child` returns only a `MailboxId` (`crates/aether-actor/src/ffi/ctx.rs`). A handle therefore cannot tell you its own name, which is why a child's address cannot be reconstructed from a handle alone — the name has to be carried forward or re-derived.
+- **Resolution is a hash with no inverse.** `mailbox_id_from_name` (`crates/aether-data/src/hash.rs`) maps a name to a `MailboxId` one-way. An `WasmActorMailbox<R>` carries only that `u64` (`crates/aether-actor/src/wasm/mailbox.rs`), and `spawn_child` returns only a `MailboxId` (`crates/aether-actor/src/wasm/ctx.rs`). A handle therefore cannot tell you its own name, which is why a child's address cannot be reconstructed from a handle alone — the name has to be carried forward or re-derived.
 
 The forces we're balancing:
 

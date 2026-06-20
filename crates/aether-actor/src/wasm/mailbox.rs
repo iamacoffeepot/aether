@@ -14,8 +14,8 @@
 //! cannot be stored past the handler, so it can never carry a stale
 //! origin.
 //!
-//! Built via [`crate::ffi::ctx::WasmCtx::actor`] /
-//! [`crate::ffi::ctx::WasmCtx::resolve_actor`]. The compile-time
+//! Built via [`crate::wasm::ctx::WasmCtx::actor`] /
+//! [`crate::wasm::ctx::WasmCtx::resolve_actor`]. The compile-time
 //! `R: HandlesKind<K>` gate is the same as the prior parametric form:
 //! `ctx.actor::<RenderCapability>().send(&triangle)` compiles only when
 //! `RenderCapability: HandlesKind<DrawTriangle>`.
@@ -25,13 +25,13 @@ use core::marker::PhantomData;
 use aether_data::{ActorId, Kind, Tag, fold_lineage, mailbox_id_from_name, with_tag};
 
 use crate::actor::{Addressable, HandlesKind};
-use crate::ffi::inline::InlineRegistry;
+use crate::wasm::inline::InlineRegistry;
 
 /// Phantom-typed receiver-actor handle for FFI guests, built by
-/// [`crate::ffi::WasmCtx::actor`] / [`crate::ffi::WasmCtx::resolve_actor`].
+/// [`crate::wasm::WasmCtx::actor`] / [`crate::wasm::WasmCtx::resolve_actor`].
 ///
 /// Issue 1987 made it a ctx-bound transient (mirroring the native
-/// `NativeActorMailbox<'a, R>` and the in-cluster [`crate::ffi::RelativeMailbox`]):
+/// `NativeActorMailbox<'a, R>` and the in-cluster [`crate::wasm::RelativeMailbox`]):
 /// it carries the resolving actor's own folded id as the `sender` (the "from"
 /// half every send stamps as origin) plus a borrow of the per-component inline
 /// registry the send routes through. The `'a` borrow is what keeps origin a
@@ -51,7 +51,7 @@ pub struct WasmActorMailbox<'a, R> {
     /// dispatches in place, any other recipient hands off to the host. A typed
     /// peer / cap recipient is always cross-cluster, so this resolves to the
     /// host send — the registry borrow only keeps the routing path uniform with
-    /// the in-cluster [`crate::ffi::RelativeMailbox`].
+    /// the in-cluster [`crate::wasm::RelativeMailbox`].
     inline: &'a InlineRegistry,
     _r: PhantomData<fn() -> R>,
 }
@@ -98,7 +98,7 @@ impl<'a, R> WasmActorMailbox<'a, R> {
 
     /// Resolve a sibling mailbox on the same transport, addressed by
     /// `name`. Same FNV-hash name resolution as
-    /// [`crate::ffi::WasmCtx::resolve_actor`] — `name` must be the peer's
+    /// [`crate::wasm::WasmCtx::resolve_actor`] — `name` must be the peer's
     /// **full registered name** (flat ADR-0029 hash). A caller that needs
     /// a lineage-folded child id (ADR-0099 §3) uses
     /// [`Self::resolve_peer_scoped`] instead. Kept as an inherent

@@ -60,7 +60,7 @@ pub use native::ComponentHostConfig;
 /// as today's `WasmCtx::resolve_actor` surface). Type-checks at the
 /// send site — `peer.send::<K>(&mail)` compiles only when
 /// `R: HandlesKind<K>`.
-pub trait ComponentHostFfiExt {
+pub trait ComponentHostWasmExt {
     /// Resolve a typed peer-component mailbox for the loaded component
     /// named `name`. The full mailbox address is
     /// `format!("{}:{}", WasmTrampoline::NAMESPACE, name)`. The resolved
@@ -69,7 +69,7 @@ pub trait ComponentHostFfiExt {
     fn loaded<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R>;
 }
 
-impl ComponentHostFfiExt for WasmActorMailbox<'_, ComponentHostCapability> {
+impl ComponentHostWasmExt for WasmActorMailbox<'_, ComponentHostCapability> {
     fn loaded<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
         self.resolve_peer_scoped::<R>(WasmTrampoline::NAMESPACE, name)
     }
@@ -77,7 +77,7 @@ impl ComponentHostFfiExt for WasmActorMailbox<'_, ComponentHostCapability> {
 
 /// Sender-side facade for native cap-to-cap callers addressing a
 /// loaded peer component through [`ComponentHostCapability`]. Same
-/// shape as [`ComponentHostFfiExt`] for the native transport — the
+/// shape as [`ComponentHostWasmExt`] for the native transport — the
 /// returned handle inherits the parent mailbox's `'a` binding ref so
 /// `.send::<K>(&mail)` dispatches through the same `NativeBinding`
 /// without re-threading the ctx.
@@ -108,7 +108,7 @@ impl ComponentHostNativeExt for NativeActorMailbox<'_, ComponentHostCapability> 
 /// `aether.component` carry, read only from its owner
 /// [`ComponentHostCapability`]. Equal by construction to a component's own
 /// `type Resolver = Embedded` and to the by-name verb
-/// [`loaded::<R>(name)`](ComponentHostFfiExt::loaded), so bare-type and
+/// [`loaded::<R>(name)`](ComponentHostWasmExt::loaded), so bare-type and
 /// by-name addressing agree. Available on every target — a wasm peer resolves
 /// an embeddable the same way a native one does, no transport branch
 /// (ADR-0029 client-side no-lookup).
@@ -557,11 +557,11 @@ mod tests {
     // trampoline-address fold against the flat name hash — the primitive is
     // the reference value under test, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
-    use aether_actor::ffi::inline::InlineRegistry;
+    use aether_actor::wasm::inline::InlineRegistry;
     use aether_actor::{Addressable, WasmActorMailbox};
     use aether_data::{ActorId, MailboxId, Tag, fold_lineage, mailbox_id_from_name, with_tag};
 
-    use super::{ComponentHostCapability, ComponentHostFfiExt};
+    use super::{ComponentHostCapability, ComponentHostWasmExt};
     use crate::trampoline::WasmTrampoline;
 
     /// A loaded component's id is the ADR-0099 §3 lineage fold over

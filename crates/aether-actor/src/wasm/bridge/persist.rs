@@ -14,7 +14,7 @@
 //! path — only wasm components do. The native ctx structs deliberately
 //! do not impl [`crate::actor::ctx::Persistence`].
 
-use crate::ffi::raw;
+use crate::wasm::raw;
 
 /// Deposit a migration bundle for the substrate to hand to the
 /// replacement instance via `on_rehydrate` (ADR-0016). Bytes are

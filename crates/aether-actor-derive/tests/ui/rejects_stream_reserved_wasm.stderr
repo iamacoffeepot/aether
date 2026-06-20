@@ -1,11 +1,11 @@
 error: #[handler::stream] is reserved and not yet implemented (ADR-0112)
-  --> tests/ui/rejects_stream_reserved_ffi.rs:32:5
+  --> tests/ui/rejects_stream_reserved_wasm.rs:32:5
    |
 32 |     #[handler::stream]
    |     ^^^^^^^^^^^^^^^^^^
 
 warning: unused imports: `Stream` and `WasmCtx`
- --> tests/ui/rejects_stream_reserved_ffi.rs:5:20
+ --> tests/ui/rejects_stream_reserved_wasm.rs:5:20
   |
 5 | use aether_actor::{WasmCtx, Stream, actor};
   |                    ^^^^^^^  ^^^^^^
