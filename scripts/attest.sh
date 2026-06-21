@@ -40,6 +40,10 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
+# Canonical check set (CANONICAL_STEPS / canonical_cmd), shared with the verifier.
+# shellcheck source=scripts/checks.sh
+source "$ROOT/scripts/checks.sh"
+
 # shellcheck disable=SC2153
 SIGN_KEY="${AETHER_ATTEST_KEY:-$HOME/.ssh/id_ed25519}"
 
@@ -96,9 +100,7 @@ trap cleanup EXIT
 OUTDIR="$(git rev-parse --git-dir)/aether-attestations/$HEAD_SHA"
 rm -rf "$OUTDIR"; mkdir -p "$OUTDIR"
 
-# Canonical check set. MUST mirror scripts/preflight.sh and .github/workflows/
-# ci.yml — the attestation is only meaningful if it runs the same gates CI does.
-# (Unifying these onto one shared definition is a follow-up.)
+# attest_step runs one canonical check (scripts/checks.sh) under witness.
 attest_step() {
     local name="$1"; shift
     echo "[attest] -> $name"
@@ -124,15 +126,19 @@ attest_step() {
     fi
 }
 
-attest_step fmt    cargo fmt --all -- --check
-attest_step clippy cargo clippy --workspace --all-targets -- -D warnings
-attest_step doc    env RUSTDOCFLAGS="-D rustdoc::redundant_explicit_links -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links" cargo doc --workspace --no-deps
-attest_step dist   cargo xtask dist --no-bins
-attest_step test   env AETHER_REQUIRE_RUNTIME=1 cargo nextest run --workspace --all-features --profile ci
+# Run each canonical step in order, adding the per-run wrappers each needs.
 # qodana runs last: its .qodana/ output is untracked (not gitignored), so a step
-# after it would see a dirty tree. The clone gives it the full history it needs
+# after it would see a dirty tree; the clone gives it the full history it needs
 # to diff-scope to the origin/main merge-base.
-attest_step qodana qodana scan --diff-start "$QODANA_BASE" -u root
+for step in $CANONICAL_STEPS; do
+    read -ra cmd <<< "$(canonical_cmd "$step")"
+    case "$step" in
+        doc)    attest_step "$step" env RUSTDOCFLAGS="-D rustdoc::redundant_explicit_links -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links" "${cmd[@]}" ;;
+        test)   attest_step "$step" env AETHER_REQUIRE_RUNTIME=1 "${cmd[@]}" ;;
+        qodana) attest_step "$step" "${cmd[@]}" --diff-start "$QODANA_BASE" -u root ;;
+        *)      attest_step "$step" "${cmd[@]}" ;;
+    esac
+done
 
 echo "[attest] OK — $(ls "$OUTDIR"/*.json | wc -l | tr -d ' ') signed attestations for $HEAD_SHA"
 echo "[attest] $OUTDIR"
