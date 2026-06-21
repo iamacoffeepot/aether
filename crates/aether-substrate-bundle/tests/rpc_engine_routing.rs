@@ -140,6 +140,84 @@ fn call_round_trip<K: Kind>(
     }
 }
 
+/// Open a fresh TCP connection to the hub at `hub_port`, perform the
+/// `Hello`/`HelloAck` handshake, and return the connected stream. Returns
+/// `None` on any error so the reaper guard can use it best-effort.
+fn connect_and_shake(hub_port: u16) -> Option<TcpStream> {
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{hub_port}")).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    write_frame(
+        &mut stream,
+        &WireFrame::Hello(Hello {
+            wire_version: WIRE_VERSION,
+            peer: PeerKind::Client {
+                client_name: "rpc-engine-routing-test".into(),
+                client_version: "0.0.1".into(),
+            },
+        }),
+    )
+    .ok()?;
+    match read_frame(&mut stream).ok()? {
+        WireFrame::HelloAck(_) => Some(stream),
+        _ => None,
+    }
+}
+
+/// RAII guard that best-effort terminates a spawned engine on drop so a
+/// panic between spawn and the explicit terminate doesn't leave the forked
+/// headless substrate child running. Opens a fresh connection on drop —
+/// the guard must not hold `&mut` the test's stream (borrow conflict).
+/// Disarm with [`SubstrateReaper::disarm`] once the engine is explicitly
+/// terminated.
+struct SubstrateReaper {
+    hub_port: u16,
+    engine_id: Option<String>,
+}
+
+impl SubstrateReaper {
+    fn disarm(&mut self) {
+        self.engine_id = None;
+    }
+}
+
+impl Drop for SubstrateReaper {
+    fn drop(&mut self) {
+        let Some(engine_id) = self.engine_id.take() else {
+            return;
+        };
+        let Some(mut stream) = connect_and_shake(self.hub_port) else {
+            return;
+        };
+        let req = TerminateEngine { engine_id };
+        if write_frame(
+            &mut stream,
+            &WireFrame::Call {
+                cid: Some(99),
+                envelope: MailEnvelope {
+                    to: MailboxAddress {
+                        engine: None,
+                        mailbox: mailbox_id_from_name("aether.engine"),
+                    },
+                    from: None,
+                    kind: TerminateEngine::ID,
+                    correlation_id: None,
+                    payload: req.encode_into_bytes(),
+                },
+            },
+        )
+        .is_err()
+        {
+            return;
+        }
+        loop {
+            match read_frame(&mut stream) {
+                Ok(WireFrame::ReplyEnd { cid: 99, result: _ }) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    }
+}
+
 mod tests {
     use super::*;
 
@@ -229,6 +307,10 @@ mod tests {
             None => panic!("undecodable SpawnEngineResult"),
         };
         let engine_id = EngineId(Uuid::parse_str(&engine_id).expect("engine_id parses"));
+        let mut reaper = SubstrateReaper {
+            hub_port,
+            engine_id: Some(engine_id.0.to_string()),
+        };
 
         // 2. engine = Some(_): a ROUTED call. The hub forwards it through
         //    aether.engine -> proxy -> (RPC) -> the substrate's aether.fs
@@ -261,6 +343,7 @@ mod tests {
             },
         );
         assert_eq!(term_kind, <aether_kinds::TerminateEngineResult as Kind>::ID);
+        reaper.disarm();
 
         let _ = fs::remove_dir_all(&bin_store);
         let _ = fs::remove_dir_all(&root);

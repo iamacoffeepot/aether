@@ -176,6 +176,59 @@ fn drive<K: Kind, T>(
     }
 }
 
+/// RAII guard that best-effort terminates a spawned engine on drop so a
+/// panic between spawn and the explicit terminate doesn't leave the forked
+/// headless substrate child running. Disarm with [`EngineReaper::disarm`]
+/// once the engine is explicitly terminated; the guard then no-ops on drop
+/// (a double-terminate is harmless but wastes a round trip on the happy path).
+struct EngineReaper {
+    mailer: Arc<Mailer>,
+    cells: ReplyCells,
+    engine_id: Option<String>,
+}
+
+impl EngineReaper {
+    fn disarm(&mut self) {
+        self.engine_id = None;
+    }
+}
+
+impl Drop for EngineReaper {
+    fn drop(&mut self) {
+        let Some(engine_id) = self.engine_id.take() else {
+            return;
+        };
+        let server = mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE);
+        let sink = mailbox_id_from_name(<ReplySink as Addressable>::NAMESPACE);
+        self.mailer.push(
+            Mail::new(
+                server,
+                TerminateEngine::ID,
+                TerminateEngine { engine_id }.encode_into_bytes(),
+                1,
+            )
+            .with_reply_to(Source::with_correlation(SourceAddr::Component(sink), 1)),
+        );
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            if self
+                .cells
+                .terminate
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take())
+                .is_some()
+            {
+                break;
+            }
+            if Instant::now() >= until {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+}
+
 mod tests {
     use super::*;
 
@@ -232,6 +285,11 @@ mod tests {
             }
             SpawnEngineResult::Err { error } => panic!("spawn failed: {error}"),
         };
+        let mut reaper = EngineReaper {
+            mailer: Arc::clone(&mailer),
+            cells: cells.clone(),
+            engine_id: Some(engine_id.clone()),
+        };
 
         // List: the freshly-spawned engine shows up in the cap's table.
         let list = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
@@ -266,6 +324,7 @@ mod tests {
             matches!(terminate, TerminateEngineResult::Ok),
             "terminate of a live engine should succeed: {terminate:?}",
         );
+        reaper.disarm();
 
         // After terminate, the engine is gone from the table.
         let list_after = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
