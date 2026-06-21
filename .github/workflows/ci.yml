@@ -15,6 +15,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       qodana: ${{ steps.filter.outputs.qodana }}
+      attested: ${{ steps.attest.outputs.attested }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -37,6 +38,27 @@ jobs:
               - 'rust-toolchain.toml'
               - '.github/workflows/**'
               - 'qodana.yaml'
+      # A collaborator opts into the attested path by publishing
+      # refs/attestations/<head-sha> before opening the PR. Only someone with
+      # push access can create that ref, so its presence is an authenticated
+      # opt-in; when present, the heavy jobs below skip and the `verify` check
+      # (a separate workflow) validates the attestation and gates the merge
+      # instead. With no ref the author did not opt in, so the heavy jobs run
+      # and gate as usual. Push events have no PR head, so the canary on `main`
+      # always runs the heavy jobs.
+      - name: Detect attestation opt-in
+        id: attest
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [[ -n "${HEAD_SHA:-}" ]] \
+             && git ls-remote --exit-code origin "refs/attestations/$HEAD_SHA" >/dev/null 2>&1; then
+            echo "attested=true" >> "$GITHUB_OUTPUT"
+            echo "attestation ref present for $HEAD_SHA; heavy jobs skip, verify gates"
+          else
+            echo "attested=false" >> "$GITHUB_OUTPUT"
+            echo "no attestation opt-in; heavy jobs run"
+          fi
 
   fmt:
     name: Format
@@ -65,7 +87,7 @@ jobs:
   clippy:
     name: Clippy
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.attested != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -81,7 +103,7 @@ jobs:
   docs:
     name: Docs
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.attested != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -112,7 +134,7 @@ jobs:
   test:
     name: Test (workspace, linux)
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.attested != 'true'
     runs-on: ubuntu-latest
     # A warm-cache run is ~13 min (cargo xtask dist + the lightweight
     # build/run + the heavy serial pass), so the old 15-min cap left
@@ -220,7 +242,7 @@ jobs:
   qodana:
     name: Qodana scan
     needs: changes
-    if: needs.changes.outputs.qodana == 'true'
+    if: needs.changes.outputs.qodana == 'true' && needs.changes.outputs.attested != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write

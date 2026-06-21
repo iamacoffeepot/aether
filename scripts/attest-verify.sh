@@ -40,12 +40,11 @@ expected_cmd() {
 
 fail() { echo "::error::attest-verify: $*"; exit 1; }
 
-# 1. Classify the author. Only a write-collaborator can produce a verifiable
-#    attestation — they sign with a key GitHub binds to their identity — so they
-#    are the only author class this gate holds to the attested path. A
-#    non-collaborator (typically a fork PR) has no such key relationship, so the
-#    gate passes through and the real CI jobs gate their PR instead. The fork is
-#    on membership, not on whether an attestation happens to be present.
+# 1. The author must be a write-collaborator. Only someone with push access can
+#    publish the attestation ref this gate reads, so a present ref is already an
+#    authenticated opt-in by a collaborator; this check is the matching guard on
+#    the PR author. A non-collaborator (typically a fork PR) cannot opt in, so
+#    the gate passes through and the real CI jobs gate their PR instead.
 perm="$(gh api "repos/$REPO/collaborators/$PR_AUTHOR/permission" -q .permission 2>/dev/null)" \
     || fail "cannot read collaborator permission for $PR_AUTHOR"
 case "$perm" in
@@ -53,9 +52,13 @@ case "$perm" in
     *) echo "attest-verify: $PR_AUTHOR is not a write-collaborator (permission=$perm); deferring to real CI."; exit 0 ;;
 esac
 
-# 2. Fetch the attestation side ref the producer published for this commit.
+# 2. Attestation is opt-in. The author opts into the attested path by publishing
+#    refs/attestations/<sha>; with no such ref they did not opt in, so the gate
+#    passes through and real CI gates the PR. That ref's presence is also what
+#    makes the heavy CI jobs skip (see ci.yml's `changes` job), so validating it
+#    here is the matching gate for the path the author chose.
 git fetch --quiet origin "+refs/attestations/$HEAD_SHA:refs/attestations/incoming" 2>/dev/null \
-    || fail "no attestations published at refs/attestations/$HEAD_SHA"
+    || { echo "attest-verify: no attestation published for $HEAD_SHA; author did not opt into the attested path, deferring to real CI."; exit 0; }
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
