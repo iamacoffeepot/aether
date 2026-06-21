@@ -22,21 +22,14 @@ set -euo pipefail
 
 : "${REPO:?}"; : "${PR_AUTHOR:?}"; : "${HEAD_SHA:?}"
 
-# Canonical checks. The expected-command fragment binds each attestation to the
-# real check, so an attestation that ran `true` under the name "clippy" is
-# rejected. Keep in lockstep with scripts/attest.sh / .github/workflows/ci.yml.
-REQUIRED_STEPS=(fmt clippy doc dist test qodana)
-expected_cmd() {
-    case "$1" in
-        fmt)    echo "cargo fmt --all -- --check" ;;
-        clippy) echo "cargo clippy --workspace --all-targets -- -D warnings" ;;
-        doc)    echo "cargo doc --workspace --no-deps" ;;
-        dist)   echo "cargo xtask dist --no-bins" ;;
-        test)   echo "cargo nextest run --workspace --all-features --profile ci" ;;
-        qodana) echo "qodana scan" ;;
-        *)      return 1 ;;
-    esac
-}
+# Canonical check set: shared with the producer (scripts/attest.sh) via
+# scripts/checks.sh, so the command each attestation records and the fragment
+# this verifier matches against cannot drift. The fragment binds each attestation
+# to the real check, so one that ran `true` under the name "clippy" is rejected.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/checks.sh
+source "$SCRIPT_DIR/checks.sh"
+read -ra REQUIRED_STEPS <<< "$CANONICAL_STEPS"
 
 fail() { echo "::error::attest-verify: $*"; exit 1; }
 
@@ -130,7 +123,7 @@ PY
         || fail "step '$step' attests commit $v_commit, not the PR head $HEAD_SHA"
     [[ "$v_dirty" == "0" ]] \
         || fail "step '$step' ran on a dirty tree ($v_dirty modified/untracked files); result does not reflect the committed code"
-    [[ "$v_cmd" == *"$(expected_cmd "$step")"* ]] \
+    [[ "$v_cmd" == *"$(canonical_cmd "$step")"* ]] \
         || fail "step '$step' attested the wrong command: $v_cmd"
     echo "  ✓ $step — signed by $PR_AUTHOR, ran on a clean checkout of $HEAD_SHA, command verified"
 done
