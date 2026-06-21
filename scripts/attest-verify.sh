@@ -49,7 +49,7 @@ case "$perm" in
 esac
 
 # 2. Fetch the attestation side ref the producer published for this commit.
-git fetch --quiet origin "refs/attestations/$HEAD_SHA:refs/attestations/incoming" 2>/dev/null \
+git fetch --quiet origin "+refs/attestations/$HEAD_SHA:refs/attestations/incoming" 2>/dev/null \
     || fail "no attestations published at refs/attestations/$HEAD_SHA"
 
 work="$(mktemp -d)"
@@ -72,6 +72,11 @@ done < <(curl -fsSL "https://github.com/$PR_AUTHOR.keys")
 (( nkeys > 0 )) || fail "$PR_AUTHOR has no registered SSH keys to verify against"
 keys_json="${keys_json%,}"; funcs_json="${funcs_json%,}"
 
+# Each attestation binds to the commit through a product subject whose digest is
+# sha256(head_sha) — the producer writes the sha into that file. Reconstruct the
+# digest to pass as the verified subject.
+subject_digest="$(printf '%s' "$HEAD_SHA" | openssl dgst -sha256 | awk '{print $NF}')"
+
 # 4. Verify each required step: present, signed by one of the author's keys,
 #    bound to this commit, and recording the canonical command.
 for step in "${REQUIRED_STEPS[@]}"; do
@@ -85,7 +90,8 @@ for step in "${REQUIRED_STEPS[@]}"; do
   "steps": { "$step": { "name":"$step", "functionaries":[ $funcs_json ],
     "attestations":[
       {"type":"https://witness.dev/attestations/material/v0.1","regopolicies":[]},
-      {"type":"https://witness.dev/attestations/command-run/v0.1","regopolicies":[]}]}}}
+      {"type":"https://witness.dev/attestations/command-run/v0.1","regopolicies":[]},
+      {"type":"https://witness.dev/attestations/product/v0.1","regopolicies":[]}]}}}
 EOF
     # The policy is signed with an ephemeral key (integrity within this run); its
     # trust is its content — the functionaries are the author's GitHub keys.
@@ -94,7 +100,7 @@ EOF
     witness sign -f "$work/policy.json" -k "$work/eph.pem" -o "$work/policy.signed.json" \
         -t https://witness.testifysec.com/policy/v0.1 2>/dev/null
 
-    witness verify -p "$work/policy.signed.json" -k "$work/eph.pub" -a "$att" --subjects "$HEAD_SHA" \
+    witness verify -p "$work/policy.signed.json" -k "$work/eph.pub" -a "$att" --subjects "$subject_digest" \
         >/dev/null 2>&1 \
         || fail "step '$step' failed verification (not signed by $PR_AUTHOR, tampered, or wrong commit)"
 

@@ -13,10 +13,11 @@
 # already on the author's GitHub account, so nothing new is registered.
 #
 # PII: the witness environment attestor (username / hostname / env vars) is
-# dropped (`-a git`); each step's stdout/stderr is redirected to a local log so
-# the command-run attestor records no `$HOME` paths; materials/products are
-# repo-relative. Build output is kept out of the walked tree via an external
-# CARGO_TARGET_DIR, so materials stay source-only.
+# dropped (`-a ''`); each step's stdout/stderr is redirected to a local log so
+# the command-run attestor records no `$HOME` paths; materials are repo-relative
+# and the only product is the commit-binding subject. Build output is kept out
+# of the walked tree via an external CARGO_TARGET_DIR, so materials stay
+# source-only.
 #
 # Prerequisites on PATH:
 #   witness     — go install github.com/in-toto/witness@latest
@@ -50,18 +51,11 @@ command -v witness    >/dev/null 2>&1 || die "witness not on PATH (go install gi
 command -v sshpk-conv >/dev/null 2>&1 || die "sshpk-conv not on PATH (npm i -g sshpk)"
 [[ -f "$SIGN_KEY" ]] || die "signing key not found: $SIGN_KEY"
 
-# The attestation must reflect a committed tree: the git attestor records the
-# commit, and a dirty worktree would let materials diverge from it.
+# The attestation must reflect a committed tree: each step binds to HEAD via a
+# product subject derived from the commit sha (below), and a dirty worktree
+# would let the recorded materials diverge from that commit.
 [[ -z "$(git status --porcelain)" ]] || die "worktree is dirty; commit or stash before attesting"
 HEAD_SHA="$(git rev-parse HEAD)"
-
-# The verifier binds each attestation to HEAD through witness's git attestor,
-# which can't read commit metadata in a linked worktree (the .git pointer file
-# defeats it) — it would emit attestations with no commit subject to bind. Fail
-# loudly rather than publish proofs the verifier can never accept.
-if [[ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]]; then
-    die "running in a linked worktree; attest from a normal checkout (the commit binding needs the main .git)"
-fi
 
 # Keep build artifacts out of the witnessed working tree so the material
 # attestor walks source only (fast, no target/ pollution). Persisted across
@@ -72,8 +66,14 @@ mkdir -p "$CARGO_TARGET_DIR"
 # Ephemeral PKCS8 signing key in a private temp dir; shredded on exit.
 KEYDIR="$(mktemp -d)"
 LOGDIR="$(mktemp -d)"
+# The commit-binding subject: a tree-local file each step's witnessed command
+# fills with the head sha, recorded by the product attestor. Its digest is
+# sha256(head_sha), which the verifier reconstructs — so binding needs no git
+# metadata and works in a linked worktree. Removed after each step and on exit.
+SUBJECT="$ROOT/.aether-attest-subject"
 cleanup() {
     [[ -f "$KEYDIR/key.pem" ]] && { command -v shred >/dev/null 2>&1 && shred -u "$KEYDIR/key.pem" 2>/dev/null || rm -f "$KEYDIR/key.pem"; }
+    rm -f "$SUBJECT"
     rm -rf "$KEYDIR" "$LOGDIR"
 }
 trap cleanup EXIT
@@ -89,22 +89,30 @@ rm -rf "$OUTDIR"; mkdir -p "$OUTDIR"
 attest_step() {
     local name="$1"; shift
     echo "[attest] -> $name"
-    # The log path rides in the environment, never as a command argument: the
-    # command-run attestor records the `cmd` array verbatim, so an arg would
-    # publish the (machine-identifying) tmp path. The environment attestor is
-    # off (`-a git`), so the env value is recorded nowhere. The inner shell
-    # redirects the step's stdout/stderr to that log, keeping cargo's `$HOME`
-    # paths out of the attestation while the real command stays visible in `cmd`.
-    if ! ATTEST_STEP_LOG="$LOGDIR/$name.log" witness run \
+    # One witnessed shell does both binding and PII-scrubbing before exec'ing the
+    # real command:
+    #   * writes the head sha to the tree-local subject file, scoped as the only
+    #     product (--attestor-product-include-glob) — a commit-bound subject that
+    #     needs no git metadata, so this works in a linked worktree.
+    #   * redirects the step's stdout/stderr to a tmpfs log. The log path rides in
+    #     the environment, never as a `cmd` arg, so the command-run attestor's
+    #     verbatim `cmd` carries no machine-identifying path while the real
+    #     command stays visible.
+    # `-a ''` drops the environment attestor (PII) and the git attestor (unused).
+    if ! ATTEST_SHA="$HEAD_SHA" ATTEST_SUBJECT="$SUBJECT" ATTEST_STEP_LOG="$LOGDIR/$name.log" \
+            witness run \
             --step "$name" \
-            -a git \
+            -a '' \
+            --attestor-product-include-glob "$(basename "$SUBJECT")" \
             --signer-file-key-path "$KEYDIR/key.pem" \
             -o "$OUTDIR/$name.json" \
-            -- bash -c 'exec >"$ATTEST_STEP_LOG" 2>&1; exec "$@"' attest "$@"; then
+            -- bash -c 'printf %s "$ATTEST_SHA" > "$ATTEST_SUBJECT"; exec >"$ATTEST_STEP_LOG" 2>&1; exec "$@"' attest "$@"; then
+        rm -f "$SUBJECT"
         echo "[attest] step '$name' FAILED:" >&2
         tail -40 "$LOGDIR/$name.log" >&2 || true
         die "attestation aborted at step '$name'"
     fi
+    rm -f "$SUBJECT"
 }
 
 attest_step fmt    cargo fmt --all -- --check
