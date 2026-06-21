@@ -19,6 +19,13 @@
 # of the PR head — not just a self-declared sha. Running in a clone also gives
 # qodana the history it needs to diff-scope.
 #
+# On success the same `.git/aether-preflight-passed` stamp `scripts/preflight.sh`
+# writes is stamped here too: attest runs a superset of preflight's checks on the
+# committed HEAD, so the stamp is earned, and the pre-push hooks
+# (`.githooks/pre-push`, `.claude/hooks/check-pre-push.sh`) then skip a redundant
+# pre-flight — including this script's own `--publish` push of the attestation
+# ref.
+#
 # PII: only the git attestor is added (`-a git`) — it records commit metadata
 # (author / committer / remote), already public in the PR, and no machine, env,
 # or username data; the environment attestor stays off. Each step's stdout/stderr
@@ -142,6 +149,18 @@ done
 
 echo "[attest] OK — $(ls "$OUTDIR"/*.json | wc -l | tr -d ' ') signed attestations for $HEAD_SHA"
 echo "[attest] $OUTDIR"
+
+# All canonical checks passed on this committed HEAD, so stamp the pre-flight
+# marker the pre-push hooks read — the same file scripts/preflight.sh writes.
+# attest ran a superset of preflight's checks on HEAD_SHA, so the stamp is
+# earned; writing it before the publish push below also lets this script's own
+# `git push` of the attestation ref pass the hook's stamp short-circuit instead
+# of re-triggering pre-flight. Refuse to stamp if HEAD moved since the run
+# started, mirroring preflight's stamp_pass guard.
+now="$(git rev-parse HEAD)"
+[[ "$now" == "$HEAD_SHA" ]] || die "HEAD moved during the run ($HEAD_SHA -> $now) — re-run attest."
+echo "$HEAD_SHA $(date -u +%s)" > "$(git rev-parse --git-dir)/aether-preflight-passed"
+echo "[attest] stamped pre-flight marker for $HEAD_SHA"
 
 # Publish onto a side ref keyed by the commit sha — refs/attestations/<sha>.
 # The attestations become git objects pushed under their own ref namespace; the

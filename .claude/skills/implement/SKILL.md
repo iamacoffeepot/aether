@@ -90,6 +90,7 @@ The sweep never auto-confirms and never dispatches the serial tail (push / PR / 
 /implement <issue>                       scoped run (defaults: retry-cap=3, wall=30min)
 /implement --sweep                       enumerate every phase:ready issue, pack per-agent queues, confirm, dispatch
 /implement <issue> --quick               ad-hoc fix: skip the phase:ready gate (body must carry a complete fix)
+/implement <issue> --attest              validate via attest.sh --publish; heavy CI skips, `verify` gates (see Attested path)
 /implement <issue> --retry-cap <N>       override retry cap
 /implement <issue> --wall-clock <mins>   override wall-clock budget
 /implement <issue> --resume              continue an in-flight execution (rare)
@@ -111,6 +112,31 @@ The sweep never auto-confirms and never dispatches the serial tail (push / PR / 
 
 - **Body ambiguous or missing the fix** → refuse: *"`--quick` needs a complete fix in the body. Run `/scope <issue>` to design it."* Don't guess.
 - **Fix looks design-bearing** (new public API, wire-format change, ADR-worthy choice) → refuse: *"This needs design, not a quick fix. Run `/scope <issue>`."* `--quick` is for mechanical work only (the old `/delegate` bar).
+
+**`--attest` adds its own preconditions** — checked before Execute, refused early with no silent fallback (the user asked for the attested path explicitly). See [Attested path (`--attest`)](#attested-path---attest) for the full list and behavior; the flag is orthogonal to `--quick` and applies only to the in-session serial tail.
+
+## Attested path (`--attest`)
+
+`--attest` swaps `/implement`'s local validation from `scripts/preflight.sh` to `scripts/attest.sh --publish`, opting the PR into the **attested CI path**: a write-collaborator's signed local run of the canonical checks stands in for the runner re-running the heavy jobs. `attest.sh` runs the same canonical check set (`scripts/checks.sh`) as preflight under `witness`, signs each step with the author's GitHub-registered key, and publishes `refs/attestations/<head-sha>`. `ci.yml`'s `changes` job detects that ref and **skips** the heavy jobs (clippy, docs, test, desktop, qodana); the separate `verify` required check (`attest-verify.yml`) validates the signed proof and gates the merge in their place. The path is opt-in per PR by design — default `/implement` (no flag) is unchanged.
+
+**Preconditions** (checked before Execute step 1; refuse early with the stated message, no silent fallback to the unattested path):
+
+| Check | Refusal |
+|-------|---------|
+| `witness` on PATH | "`--attest` needs `witness` (go install github.com/in-toto/witness@latest)." |
+| `sshpk-conv` on PATH | "`--attest` needs `sshpk-conv` (npm i -g sshpk)." |
+| Docker available (attest runs qodana) | "`--attest` runs qodana, which needs Docker. Start Docker or drop `--attest`." |
+| An unencrypted ed25519 signing key (`AETHER_ATTEST_KEY` or `~/.ssh/id_ed25519`) whose public key is registered on the author's GitHub account | "`--attest` signing key not found / not registered on GitHub. attest signs with a key already on your account so `verify` can resolve it." |
+| Author is a write-collaborator on the repo | "`--attest` is collaborator-only — only a write-collaborator can publish the attestation ref and have `verify` accept it." |
+
+**Where it changes the flow** (everything else is the normal in-session run):
+
+- **Validation (Execute step 3):** run `scripts/attest.sh --publish` against the committed HEAD instead of `scripts/preflight.sh`. attest writes the same `.git/aether-preflight-passed` stamp on success, so the branch push in step 4 passes the pre-push gate unchanged.
+- **Done-condition (Refine loop):** `CI pass` going green is necessary but not sufficient — also require the `verify` check-run `success` over REST (the heavy jobs skip, so `CI pass` is green on skipped results while `verify` is the real gate `wave-status.sh` does not watch).
+- **Re-attest on each fix push:** every fix is a new head sha, so re-run `attest.sh --publish` before each Refine-loop push; skipping it degrades gracefully (heavy CI just runs for that sha).
+- **Qodana is local, not deferred:** attest runs and attests qodana, so the "sole `Qodana scan` red held for `/land`" branch does not apply — qodana is covered by the attestation and gated by `verify`.
+
+**Serial-tail only.** `--attest` lives in the in-session serial tail (where preflight, push, and the PR open already live) — it is **never** handed to a dispatched background agent, which must not push the attestation ref, consistent with the rule that push / PR / CI stay in-session. In hybrid background-agent / `--sweep` runs the parent owns the attest-and-publish step the same way it owns preflight and the push.
 
 ## Worktree setup
 
@@ -142,6 +168,8 @@ Type comes from the issue's `type:*` label. Slug is the issue title sanitized: l
    - wasm32 cross-build for component crates (`cargo metadata` → packages with `crate-type = cdylib` and `aether-actor` dep)
    - `scripts/preflight.sh` if present (writes the stamp file expected by the pre-push hook). Qodana is **not** run here — it is a required CI gate (`Qodana scan`, in `ci-pass`) resolved at `/land` from the `qodana-report` artifact, so a sole `Qodana scan` red holds the draft for `/land` rather than blocking the push (see the Refine loop's CI-green branch)
 
+   **Under `--attest`**, this step runs `scripts/attest.sh --publish` against the committed HEAD *instead of* `scripts/preflight.sh` — attest is a strict superset (the same canonical checks plus the git attestor, signing, and the `refs/attestations/<sha>` publish that opts the PR into the attested CI path), so it is one or the other, never both. attest writes the same pre-flight stamp on success, so the branch push in step 4 passes the pre-push gate as usual. Qodana **is** run and attested here (attest runs the full canonical set, including qodana — needs Docker), so the "sole `Qodana scan` red held for `/land`" branch below does not apply on this path. See [Attested path (`--attest`)](#attested-path---attest).
+
 4. Push the branch, then open the PR over REST (`gh pr create` is GraphQL-backed; `POST …/pulls` is REST and takes `draft: true` directly). Write the PR body to a file first so backticks / `$` in the template aren't shell-expanded, and pass it with `-F body=@<file>`:
    ```bash
    git push -u origin <branch>
@@ -169,6 +197,8 @@ After PR open, enter the loop. On each iteration:
 
 2. **CI green** → goto "Done condition" below. **Or green except a sole `Qodana scan` red** — the failing required checks minus `CI pass` are exactly `{Qodana scan}`: also goto "Done condition". A sole Qodana red is not fixed or Stalled here; it is held at `phase:refine` for `/land` to resolve from the `qodana-report` artifact. (Any other red alongside it is a real failure — go to step 3.)
 
+   **Under `--attest`**, `wave-status.sh --wait` watching `CI pass` is not sufficient: the heavy jobs *skip*, so `CI pass` goes green on skipped results while the real gate is the separate `verify` required check (`attest-verify.yml`), which `wave-status.sh` does not watch. After `wave-status.sh --wait` returns 0, also confirm the `verify` check-run is `success` over REST (`repos/iamacoffeepot/aether/commits/<head-sha>/check-runs`, select `.name == "verify"`); treat green only when both are satisfied. The qodana-only-red branch does not apply on this path (qodana is attested locally). A red `verify` is a real failure — go to step 3.
+
 3. **CI failed** (a non-Qodana required check is red) → pull logs (`gh run view <run-id> --log-failed`), classify, act:
 
    ```
@@ -186,7 +216,7 @@ After PR open, enter the loop. On each iteration:
                                      Phase=Stalled, exit
    ```
 
-4. If real failure, fix in the worktree, push to the same branch, increment attempt counter, goto step 1.
+4. If real failure, fix in the worktree, push to the same branch, increment attempt counter, goto step 1. **Under `--attest`**, each fix is a new head sha, so re-run `scripts/attest.sh --publish` before the push to re-validate and re-publish the attestation ref against the new sha; skipping it degrades gracefully (the new sha has no ref, so the heavy CI jobs simply run for that push).
 
 5. Swap the `phase:*` label to `phase:refine` during fix-and-wait, back to `phase:executing` when pushing the fix (see [Phase label reconcile](#phase-label-reconcile)). (Flicker is intentional — gives honest visibility into the in-flight state.) No per-attempt comments — the PR's own commit and check history is the attempt record; track the attempt counter in-session.
 
