@@ -47,11 +47,15 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
-# Per-machine config: a gitignored repo-root .env, sourced like
-# scripts/ensure-tunnel.sh so per-machine settings (e.g. AETHER_ATTEST_BASE)
-# apply however the script is invoked — interactive, non-interactive, or from an
-# agent — without depending on the user's shell profile being sourced.
-[[ -f "$ROOT/.env" ]] && . "$ROOT/.env"
+# Per-machine config: a gitignored .env at the MAIN checkout root, sourced so
+# per-machine settings (e.g. AETHER_ATTEST_BASE) apply however the script is
+# invoked — interactive, non-interactive, or from an agent — without depending
+# on the user's shell profile. Resolve the main checkout from any linked worktree
+# via the common git dir: a gitignored .env is absent from a fresh worktree
+# checkout (where $ROOT points), and attest's primary caller runs it inside an
+# issue worktree, so sourcing $ROOT/.env would miss it.
+MAIN_ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+[[ -f "$MAIN_ROOT/.env" ]] && . "$MAIN_ROOT/.env"
 
 # Canonical check set (CANONICAL_STEPS / canonical_cmd), shared with the verifier.
 # shellcheck source=scripts/checks.sh
