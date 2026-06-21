@@ -13,13 +13,11 @@
 
 extern crate alloc;
 
-pub mod dag;
 pub mod descriptors;
 pub mod keycode;
 pub mod text_metrics;
 pub mod trace;
 
-pub use dag::*;
 pub use text_metrics::{CachedFontMetrics, scale_units};
 
 use aether_math::{Mat4, Vec4};
@@ -563,7 +561,7 @@ pub struct Camera {
 /// Cast-shaped (`#[repr(C)]` + `Pod`, like `Vec4` and `Camera`),
 /// composing the math primitives directly rather than flattening them
 /// to raw `[f32; N]` arrays. The `Kind` canonical encode/decode keeps
-/// the node boundary consistent: a DAG `Source` encodes its output and
+/// the transform boundary consistent: a source encodes its output and
 /// the transform decodes its input through the same shape-agnostic
 /// `Kind` path, so cast bytes agree on both sides.
 #[repr(C)]
@@ -4445,8 +4443,8 @@ mod trajectory {
     /// minted handle id + kind id of the published `TrajectoryLog` in
     /// the handle store; `Err` is returned when `seed` has no in-flight
     /// session (unknown or already terminated). Mirrors the shape of
-    /// `HandlePublishResult` so a caller can chain the handle id into a
-    /// DAG `Source` or store it for offline replay.
+    /// `HandlePublishResult` so a caller can stash the handle id for
+    /// offline replay.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.trajectory.record_result")]
     pub enum RecordResult {

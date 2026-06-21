@@ -49,7 +49,6 @@ pub mod boot;
 pub mod capture;
 pub mod chassis;
 pub mod config;
-pub mod dag;
 pub mod handle_store;
 pub mod mail;
 pub mod pid_lock;
@@ -59,6 +58,7 @@ pub mod runtime;
 pub mod scheduler;
 #[cfg(test)]
 mod test_util;
+pub mod transform;
 
 pub use actor::monitor::MonitorHandle;
 pub use actor::native::binding::NativeBinding;

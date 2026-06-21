@@ -143,8 +143,8 @@ doing nothing and can deadlock a reply chain (the actor you're waiting on may
 have *its* next mail queued behind you). A long *compute* handler is tolerated
 (it ties up only its own worker), but anything that *waits on the outside
 world* is not: await a reply through the framework so the scheduler can run
-other work meanwhile, or hand heavy/async work to a computation DAG, off the
-actor thread entirely. The full treatment — the await/hold primitives and how
+other work meanwhile, or hand heavy/async work off the actor thread entirely
+through the sanctioned offload primitives. The full treatment — the await/hold primitives and how
 to reason about concurrency here — is its own topic (forthcoming). The rule to
 carry now: **don't block in a handler.**
 

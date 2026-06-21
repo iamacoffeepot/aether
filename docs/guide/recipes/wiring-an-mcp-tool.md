@@ -167,9 +167,8 @@ mis-serves the agent.
   question. Spell out in the doc comment what each null means.
 - **Cheap synchronous verdict, async execution polled separately.** When the op is
   slow, the tool returns immediately with a cheap result (a validation verdict, an
-  id to poll) and the work runs in the background, queried by a second tool. The
-  `submit_dag` → `dag_status` / `dag_cancel` split is the worked example;
-  `actor_cost` is a fast read, so it answers in one call.
+  id to poll) and the work runs in the background, queried by a second tool.
+  `actor_cost`, by contrast, is a fast read, so it answers in one call.
 - **The description and the doc comments are the contract.** The agent picks and
   fills the tool from its schema alone. Write the `description` and every field's
   doc comment as the instructions they are — state the units, the defaults, and

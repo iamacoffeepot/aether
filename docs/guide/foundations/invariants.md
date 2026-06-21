@@ -130,8 +130,8 @@ each lists its **tell**.
 wait, or busy-spin. Scheduling is cooperative: a blocked handler pins a worker
 doing nothing and can deadlock a reply chain (the actor you're waiting on may
 have *its* next mail queued behind you). Await a reply through the framework, or
-hand blocking/async work off the actor thread (a computation DAG, or the
-sanctioned spawn primitives). *Tell:* a hang with no progress and, often, no
+hand blocking/async work off the actor thread through the sanctioned spawn
+primitives. *Tell:* a hang with no progress and, often, no
 actor named — the worst diagnostic shape the runtime offers. Full treatment in
 [Concurrency & blocking](../systems/concurrency.md).
 

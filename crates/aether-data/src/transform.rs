@@ -9,10 +9,10 @@
 //! crate, which `aether-data` cannot itself be — a proc-macro crate
 //! can't export runtime items).
 //!
-//! There is no FFI shim, no `extern "C"`, no `aether.dag.transforms`
-//! custom section — the original wasm-export design was deferred before
-//! implementation (ADR-0048 revision 2026-05-20). A transform is plain
-//! native Rust collected at link time through [`TransformEntry`].
+//! There is no FFI shim, no `extern "C"`, no wasm custom section — the
+//! original wasm-export design was deferred before implementation
+//! (ADR-0048 revision 2026-05-20). A transform is plain native Rust
+//! collected at link time through [`TransformEntry`].
 
 use alloc::vec::Vec;
 use core::fmt;
