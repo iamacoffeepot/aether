@@ -1,0 +1,42 @@
+name: Attestation verify
+
+# Runs on pull_request_target so the gate logic always comes from the trusted
+# base branch, never the PR head. The job only reads the attestation side ref
+# and the author's public keys — it never checks out or runs PR-head code, so
+# the usual pull_request_target risk (executing untrusted code with a write
+# token) does not apply here.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: attest-verify-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out base (trusted verifier logic)
+        uses: actions/checkout@v4
+
+      - name: Install witness
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/in-toto/witness/v0.11.0/install-witness.sh \
+            | bash -s -- -b /usr/local/bin -v v0.11.0
+          witness version
+
+      - name: Install sshpk-conv
+        run: npm install -g sshpk@1.18.0
+
+      - name: Verify attestations
+        env:
+          REPO: ${{ github.repository }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/attest-verify.sh

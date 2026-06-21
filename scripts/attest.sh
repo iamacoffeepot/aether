@@ -55,6 +55,14 @@ command -v sshpk-conv >/dev/null 2>&1 || die "sshpk-conv not on PATH (npm i -g s
 [[ -z "$(git status --porcelain)" ]] || die "worktree is dirty; commit or stash before attesting"
 HEAD_SHA="$(git rev-parse HEAD)"
 
+# The verifier binds each attestation to HEAD through witness's git attestor,
+# which can't read commit metadata in a linked worktree (the .git pointer file
+# defeats it) — it would emit attestations with no commit subject to bind. Fail
+# loudly rather than publish proofs the verifier can never accept.
+if [[ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]]; then
+    die "running in a linked worktree; attest from a normal checkout (the commit binding needs the main .git)"
+fi
+
 # Keep build artifacts out of the witnessed working tree so the material
 # attestor walks source only (fast, no target/ pollution). Persisted across
 # runs so the producer stays incrementally warm.
