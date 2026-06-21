@@ -24,7 +24,28 @@ jobs:
       - name: Check out base (trusted verifier logic)
         uses: actions/checkout@v4
 
+      # An attestation only stands in for the heavy CI jobs, so it is only
+      # required when those jobs would run. This mirrors ci.yml's `changes`
+      # filter (the union that triggers any heavy job, qodana included): a
+      # docs-only / scripts-only / config-only PR produces no code to attest, so
+      # the steps below skip and the job concludes success — `verify` passes
+      # through exactly as clippy/test/qodana skip in ci.yml. Keep this set in
+      # lockstep with ci.yml's `changes` filter.
+      - name: Detect code-producing changes
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.github/workflows/**'
+              - 'qodana.yaml'
+
       - name: Install witness
+        if: steps.filter.outputs.code == 'true'
         run: |
           cd "$(mktemp -d)"
           base=https://github.com/in-toto/witness/releases/download/v0.11.0
@@ -36,6 +57,7 @@ jobs:
           witness version
 
       - name: Install sshpk-conv
+        if: steps.filter.outputs.code == 'true'
         # `sudo` so npm can write its global man-page symlinks under
         # /usr/local/share/man — the default runner user can't, which fails the
         # plain `-g` install (EACCES) on the Node 24 runner image. Mirrors the
@@ -44,9 +66,14 @@ jobs:
         run: sudo npm install -g sshpk@1.18.0
 
       - name: Verify attestations
+        if: steps.filter.outputs.code == 'true'
         env:
           REPO: ${{ github.repository }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GH_TOKEN: ${{ github.token }}
         run: scripts/attest-verify.sh
+
+      - name: No code-producing changes
+        if: steps.filter.outputs.code != 'true'
+        run: echo "no code-producing changes; attestation not required, deferring to the light CI checks"
