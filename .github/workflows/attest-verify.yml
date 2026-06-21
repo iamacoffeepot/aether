@@ -26,8 +26,13 @@ jobs:
 
       - name: Install witness
         run: |
-          curl -sSfL https://raw.githubusercontent.com/in-toto/witness/v0.11.0/install-witness.sh \
-            | bash -s -- -b /usr/local/bin -v v0.11.0
+          cd "$(mktemp -d)"
+          base=https://github.com/in-toto/witness/releases/download/v0.11.0
+          curl -sSL -O "$base/witness_0.11.0_linux_amd64.tar.gz"
+          curl -sSL -O "$base/witness_0.11.0_checksums.txt"
+          grep ' witness_0.11.0_linux_amd64.tar.gz$' witness_0.11.0_checksums.txt | sha256sum -c -
+          tar xzf witness_0.11.0_linux_amd64.tar.gz witness
+          sudo install witness /usr/local/bin/witness
           witness version
 
       - name: Install sshpk-conv
