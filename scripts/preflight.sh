@@ -25,6 +25,11 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
+# Canonical check set (CANONICAL_STEPS / canonical_cmd), shared with the
+# attestation producer + verifier so the commands stay in step.
+# shellcheck source=scripts/checks.sh
+source "$ROOT/scripts/checks.sh"
+
 # iamacoffeepot/aether#1156: pin the sha the checks actually run against.
 # `stamp_pass` stamps *this* value and refuses to write if HEAD has moved
 # since, so a rebase / amend / concurrent op / worktree churn mid-run can't
@@ -142,22 +147,26 @@ run_step() {
     "$@"
 }
 
-run_step "cargo fmt --all -- --check" \
-    cargo fmt --all -- --check
+read -ra fmt_cmd <<< "$(canonical_cmd fmt)"
+run_step "$(canonical_cmd fmt)" \
+    "${fmt_cmd[@]}"
 
-run_step "cargo clippy --workspace --all-targets -- -D warnings" \
-    cargo clippy --workspace --all-targets -- -D warnings
+read -ra clippy_cmd <<< "$(canonical_cmd clippy)"
+run_step "$(canonical_cmd clippy)" \
+    "${clippy_cmd[@]}"
 
-run_step "cargo doc --workspace --no-deps (rustdoc lints denied)" \
+read -ra doc_cmd <<< "$(canonical_cmd doc)"
+run_step "$(canonical_cmd doc) (rustdoc lints denied)" \
     env RUSTDOCFLAGS="-D rustdoc::redundant_explicit_links -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links" \
-    cargo doc --workspace --no-deps
+    "${doc_cmd[@]}"
 
 # Wasm32 component cross-build mirrors CI's pre-test step. `xtask dist`
 # discovers component crates structurally (cdylib lib + example targets
 # gated on the `aether-actor` dep, issue #439) and cross-builds each
 # per-package. `--no-bins` keeps the preflight fast path wasm-only.
-run_step "cargo xtask dist --no-bins (component wasm cross-build)" \
-    cargo xtask dist --no-bins
+read -ra dist_cmd <<< "$(canonical_cmd dist)"
+run_step "$(canonical_cmd dist) (component wasm cross-build)" \
+    "${dist_cmd[@]}"
 
 # Slowest Rust step. The whole suite runs at full parallelism — the
 # `aether-substrate-bundle` integration tests that fork real substrates carry
@@ -165,9 +174,10 @@ run_step "cargo xtask dist --no-bins (component wasm cross-build)" \
 # fork contention stretches their wall-clock without tripping the steady-state
 # cap. AETHER_REQUIRE_RUNTIME=1 mirrors CI so a missing wasm artifact fails
 # loudly rather than skipping silently.
-run_step "cargo nextest run (workspace, parallel)" \
+read -ra test_cmd <<< "$(canonical_cmd test)"
+run_step "$(canonical_cmd test) (workspace, parallel)" \
     env AETHER_REQUIRE_RUNTIME=1 \
-    cargo nextest run --workspace --all-features --profile ci
+    "${test_cmd[@]}"
 
 # Qodana mirrors CI's required scan locally, so a passing pre-flight covers
 # the full `CI pass` set rather than skipping the one gate cargo can't run.
@@ -205,8 +215,9 @@ if [[ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]]; th
     git -C "$qodana_clone/scan" -c advice.detachedHead=false checkout --quiet "$HEAD_AT_START"
     qodana_dir="$qodana_clone/scan"
 fi
-run_step "qodana scan (diff-scoped to origin/main merge-base)" \
-    bash -c 'cd "$1" && qodana scan --diff-start "$2" -u root' _ "$qodana_dir" "$qodana_base"
+read -ra qodana_cmd <<< "$(canonical_cmd qodana)"
+run_step "$(canonical_cmd qodana) (diff-scoped to origin/main merge-base)" \
+    bash -c 'cd "$1"; shift; exec "$@"' _ "$qodana_dir" "${qodana_cmd[@]}" --diff-start "$qodana_base" -u root
 [[ -n "$qodana_clone" ]] && rm -rf "$qodana_clone"
 
 stamp_pass
