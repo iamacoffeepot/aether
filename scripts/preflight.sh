@@ -218,7 +218,17 @@ fi
 read -ra qodana_cmd <<< "$(canonical_cmd qodana)"
 run_step "$(canonical_cmd qodana) (diff-scoped to origin/main merge-base)" \
     bash -c 'cd "$1"; shift; exec "$@"' _ "$qodana_dir" "${qodana_cmd[@]}" --diff-start "$qodana_base" -u root
-[[ -n "$qodana_clone" ]] && rm -rf "$qodana_clone"
+# Reap the clone. Qodana ran the container as root (`-u root`), so on a
+# non-rootless Docker daemon the build artifacts it wrote under the clone are
+# owned by host root and a plain `rm` as the host user fails — which under
+# `set -e` would abort before `stamp_pass`. Fall back to a throwaway root
+# container (Docker is already required for the qodana step) to delete its own
+# droppings; no host sudo. The fast path is untouched on rootless hosts and CI.
+if [[ -n "$qodana_clone" ]]; then
+    rm -rf "$qodana_clone" 2>/dev/null \
+        || docker run --rm -v "$(dirname "$qodana_clone"):/c" alpine \
+            rm -rf "/c/$(basename "$qodana_clone")"
+fi
 
 stamp_pass
 echo "[preflight] OK."
