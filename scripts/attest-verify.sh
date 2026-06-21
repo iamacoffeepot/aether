@@ -40,12 +40,17 @@ expected_cmd() {
 
 fail() { echo "::error::attest-verify: $*"; exit 1; }
 
-# 1. The author must be a write-collaborator on this repo.
+# 1. Classify the author. Only a write-collaborator can produce a verifiable
+#    attestation — they sign with a key GitHub binds to their identity — so they
+#    are the only author class this gate holds to the attested path. A
+#    non-collaborator (typically a fork PR) has no such key relationship, so the
+#    gate passes through and the real CI jobs gate their PR instead. The fork is
+#    on membership, not on whether an attestation happens to be present.
 perm="$(gh api "repos/$REPO/collaborators/$PR_AUTHOR/permission" -q .permission 2>/dev/null)" \
     || fail "cannot read collaborator permission for $PR_AUTHOR"
 case "$perm" in
     admin|write|maintain) ;;
-    *) fail "$PR_AUTHOR is not a write-collaborator (permission=$perm)" ;;
+    *) echo "attest-verify: $PR_AUTHOR is not a write-collaborator (permission=$perm); deferring to real CI."; exit 0 ;;
 esac
 
 # 2. Fetch the attestation side ref the producer published for this commit.
