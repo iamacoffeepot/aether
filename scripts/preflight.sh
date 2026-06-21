@@ -188,8 +188,26 @@ if [[ -z "$qodana_base" ]]; then
     echo "[preflight] run 'git fetch origin main' and retry." >&2
     exit 1
 fi
+
+# `--diff-start` only counts *new* findings if Qodana can read git history. In a
+# linked worktree the `.git` pointer references a gitdir outside the tree that
+# Qodana's analysis container can't reach (`fatal: not a git repository`), so it
+# silently fails to diff and flags every pre-existing finding in a changed file.
+# Scan a throwaway self-contained clone of HEAD (real `.git` + full history)
+# under a Docker-shared path ($HOME, not $TMPDIR's /var/folders) so the diff
+# scoping behaves exactly as CI's full checkout does.
+qodana_dir="$ROOT"
+qodana_clone=""
+if [[ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]]; then
+    mkdir -p "$HOME/.cache"
+    qodana_clone="$(mktemp -d "$HOME/.cache/aether-qodana.XXXXXX")"
+    git clone --quiet "$ROOT" "$qodana_clone/scan"
+    git -C "$qodana_clone/scan" -c advice.detachedHead=false checkout --quiet "$HEAD_AT_START"
+    qodana_dir="$qodana_clone/scan"
+fi
 run_step "qodana scan (diff-scoped to origin/main merge-base)" \
-    qodana scan --diff-start "$qodana_base" -u root
+    bash -c 'cd "$1" && qodana scan --diff-start "$2" -u root' _ "$qodana_dir" "$qodana_base"
+[[ -n "$qodana_clone" ]] && rm -rf "$qodana_clone"
 
 stamp_pass
 echo "[preflight] OK."
