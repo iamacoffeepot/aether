@@ -30,8 +30,8 @@ use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
     DagCapability, FsCapability, GeminiCapability, GeminiConfig, HandleCapability, HttpCapability,
     HttpServerCapability, HttpServerConfig, InputCapability, InputConfig, InventoryCapability,
-    LifecycleConfig, NfsInstance, TcpCapability, TextCapability, UiCapability, fs::NamespaceRoots,
-    http::HttpConfig, nfs::NfsRoot, trace::TraceDispatchCapability,
+    LifecycleConfig, NfsCapability, TcpCapability, TextCapability, UiCapability,
+    fs::NamespaceRoots, http::HttpConfig, nfs::NfsRoot, trace::TraceDispatchCapability,
 };
 use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
 // The `aether.trajectory` recorder cap moved to `aether-labyrinth` (issue
@@ -479,7 +479,7 @@ pub struct CommonBoot {
 /// boot ordering is needed for logging anymore.
 pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Builder<C> {
     // Clone the assets root before `namespace_roots` is consumed by
-    // `with_actor::<FsCapability>` below, so the `NfsInstance` boot
+    // `with_actor::<FsCapability>` below, so the `NfsCapability` boot
     // declaration can reference the same resolved path.
     let assets_root = boot.namespace_roots.assets.clone();
     builder
@@ -493,16 +493,13 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_actor::<InputCapability>(boot.input_config)
         .with_actor::<ComponentHostCapability>(boot.component_host_config)
         .with_actor::<FsCapability>(boot.namespace_roots)
-        // ADR-0120 decision 1+6: boot-declare the `aether.nfs:assets` instance
-        // pointing at the same assets directory as `aether.fs`. Read-only —
-        // no write-cutover coordination needed for this parallel-run slice.
-        .with_instance::<NfsInstance>(
-            "assets",
-            NfsRoot {
-                root: assets_root,
-                writable: false,
-            },
-        )
+        // `aether.nfs` singleton serving the same assets directory as
+        // `aether.fs`, read-only — runs in parallel, no write-cutover.
+        // (Sharding into per-namespace instances parked; ADR-0120 overturned.)
+        .with_actor::<NfsCapability>(NfsRoot {
+            root: assets_root,
+            writable: false,
+        })
         .with_actor::<TextCapability>(())
         .with_actor::<UiCapability>(())
         .with_actor::<InventoryCapability>(())
@@ -531,7 +528,7 @@ pub fn common_cap_namespaces() -> Vec<&'static str> {
         <InputCapability as Addressable>::NAMESPACE,
         <ComponentHostCapability as Addressable>::NAMESPACE,
         <FsCapability as Addressable>::NAMESPACE,
-        <NfsInstance as Addressable>::NAMESPACE,
+        <NfsCapability as Addressable>::NAMESPACE,
         <TextCapability as Addressable>::NAMESPACE,
         <UiCapability as Addressable>::NAMESPACE,
         <InventoryCapability as Addressable>::NAMESPACE,

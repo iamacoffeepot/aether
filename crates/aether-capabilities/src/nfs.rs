@@ -1,44 +1,37 @@
-//! `aether.nfs` — sharded filesystem actor (ADR-0120 floor, issue 2098).
+//! `aether.nfs` — filesystem actor (issue 2098).
 //!
-//! First slice: a single read-only `NfsInstance` addressed at
-//! `aether.nfs:assets`, declared at chassis boot via
-//! `Builder::with_instance`. The instance serves the same assets directory
-//! as the `aether.fs` monolith, running in parallel with no write-cutover
-//! coordination required. No handles, copy, or cache instance yet — later
-//! focused issues under ADR-0120.
+//! A single read-only [`NfsCapability`] singleton addressed at `aether.nfs`,
+//! declared at chassis boot via `Builder::with_actor`. It serves the same
+//! assets directory as the `aether.fs` monolith, running in parallel with no
+//! write-cutover coordination required. No handles, copy, or cache yet.
 //!
 //! ## Design
 //!
-//! [`NfsInstance`] is an [`Instanced`](aether_actor::Instanced) actor
-//! (`Resolver = Many`). Each instance holds one [`LocalFileAdapter`](crate::fs::LocalFileAdapter)
-//! and routes `Read`/`List` against it directly — no `AdapterRegistry`,
-//! no namespace dispatch. The instance IS the namespace. Path-normalization
-//! sandboxing (rejecting `..` and absolute prefixes) is carried from
-//! ADR-0041 §2 through the adapter, unchanged.
+//! [`NfsCapability`] is a singleton (`Resolver = One`) holding one
+//! [`LocalFileAdapter`](crate::fs::LocalFileAdapter), routing `Read`/`List`
+//! against it directly — no `AdapterRegistry`, no namespace dispatch.
+//! Path-normalization sandboxing (rejecting `..` and absolute prefixes) is
+//! carried from ADR-0041 §2 through the adapter, unchanged.
 //!
-//! ## Boot declaration
-//!
-//! `with_common_caps` calls
-//! `Builder::with_instance::<NfsInstance>("assets", NfsRoot { root, writable: false })`
-//! (decision 6 of ADR-0120: the instance set is a chassis boot decision).
-//! Individual instances are addressable as `aether.nfs:assets` (the
-//! `recipient_name` path) via the ADR-0099 depth-1 subname id.
+//! Sharding `aether.nfs` into per-namespace instances was explored and parked
+//! (ADR-0120, overturned) — to revisit as an optimization when shard-level
+//! concurrency is actually needed.
 
-// Handler-signature kinds imported at file root so the `#[bridge(instanced)]`-
-// emitted `impl HandlesKind<K> for NfsInstance {}` markers compile on
+// Handler-signature kinds imported at file root so the `#[bridge(singleton)]`-
+// emitted `impl HandlesKind<K> for NfsCapability {}` markers compile on
 // wasm targets (where `mod native` is cfg-stripped).
 use aether_kinds::{List, Read};
 
-/// Boot configuration for one [`NfsInstance`]. Carried through
-/// `Builder::with_instance`; `init` hands it to
+/// Boot configuration for [`NfsCapability`]. Carried through
+/// `Builder::with_actor`; `init` hands it to
 /// [`LocalFileAdapter::new`](crate::fs::LocalFileAdapter::new).
 ///
-/// `writable: false` for the assets instance — it is the value the chassis
-/// passes at this slice; a future writable instance would set `true`.
+/// `writable: false` for the assets root at this slice; a future writable
+/// configuration would set `true`.
 #[cfg(not(target_family = "wasm"))]
 pub use native::NfsRoot;
 
-#[aether_actor::bridge(instanced)]
+#[aether_actor::bridge(singleton)]
 mod native {
     use std::path::PathBuf;
 
@@ -49,28 +42,25 @@ mod native {
 
     use crate::fs::{FileAdapter, LocalFileAdapter};
 
-    /// Boot configuration for one [`NfsInstance`]. See module-level docs.
+    /// Boot configuration for [`NfsCapability`]. See module-level docs.
     pub struct NfsRoot {
         pub root: PathBuf,
         pub writable: bool,
     }
 
-    /// Sharded filesystem actor — one [`LocalFileAdapter`] per instance.
+    /// Filesystem actor — a singleton holding one [`LocalFileAdapter`].
     ///
-    /// Addressed as `aether.nfs:{subname}` (e.g. `aether.nfs:assets`).
-    /// The boot-declared `aether.nfs:assets` instance is the first
-    /// concrete case of ADR-0120 decision 1 (sharded instances) and
-    /// decision 6 (chassis boot declaration).
-    pub struct NfsInstance {
+    /// Addressed as `aether.nfs`. Serves the assets root read-only, in
+    /// parallel with the `aether.fs` monolith.
+    pub struct NfsCapability {
         adapter: LocalFileAdapter,
     }
 
     #[actor]
-    impl NativeActor for NfsInstance {
+    impl NativeActor for NfsCapability {
         type Config = NfsRoot;
 
-        /// Instance namespace prefix (ADR-0120 decision 1). Individual
-        /// instances address as `{NAMESPACE}:{subname}`.
+        /// Singleton namespace. Addressed as `aether.nfs`.
         const NAMESPACE: &'static str = "aether.nfs";
 
         fn init(config: NfsRoot, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
@@ -79,15 +69,15 @@ mod native {
             tracing::info!(
                 target: "aether_substrate::nfs",
                 root = %adapter.root().display(),
-                "nfs instance initialized",
+                "nfs capability initialized",
             );
             Ok(Self { adapter })
         }
 
-        /// Read bytes from a path relative to this instance's root.
+        /// Read bytes from a path relative to the configured root.
         ///
         /// Mirrors `FsCapability::on_read` but resolves against the single
-        /// instance adapter. Path sandboxing (ADR-0041 §2) rejects `..` and
+        /// adapter. Path sandboxing (ADR-0041 §2) rejects `..` and
         /// leading `/` with `FsError::Forbidden`.
         ///
         /// # Agent
@@ -108,10 +98,10 @@ mod native {
             }
         }
 
-        /// List entries under a path prefix relative to this instance's root.
+        /// List entries under a path prefix relative to the configured root.
         ///
         /// Mirrors `FsCapability::on_list` but resolves against the single
-        /// instance adapter.
+        /// adapter.
         ///
         /// # Agent
         /// Reply: `ListResult`. Echoes namespace + prefix on both arms.
@@ -133,11 +123,11 @@ mod native {
     }
 
     #[cfg(test)]
-    impl NfsInstance {
+    impl NfsCapability {
         /// Test-only direct constructor. Production boots through
-        /// `Builder::with_instance::<NfsInstance>(subname, config)` which
-        /// calls `init`; tests that want to drive handlers without spinning
-        /// up a full chassis hand a pre-built adapter directly.
+        /// `Builder::with_actor::<NfsCapability>(config)` which calls `init`;
+        /// tests that drive handlers without a full chassis hand a pre-built
+        /// adapter directly.
         pub(super) fn from_adapter(adapter: LocalFileAdapter) -> Self {
             Self { adapter }
         }
@@ -170,7 +160,7 @@ mod native {
 
         use crate::test_chassis::{TestChassis, cleanup, scratch_dir, test_mailer_and_rx};
 
-        use super::{LocalFileAdapter, NfsInstance, NfsRoot};
+        use super::{LocalFileAdapter, NfsCapability, NfsRoot};
 
         fn scratch_root(tag: &str) -> PathBuf {
             scratch_dir("aether-nfs-cap", tag)
@@ -183,7 +173,7 @@ mod native {
         /// Minimal test fixture for direct handler calls — skips the full
         /// chassis boot path. Mirrors the `TestFixture` pattern in fs.rs.
         struct TestFixture {
-            nfs: NfsInstance,
+            nfs: NfsCapability,
             transport: Arc<NativeBinding>,
         }
 
@@ -194,7 +184,7 @@ mod native {
                 let (mailer, _rx) = test_mailer_and_rx();
                 let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
                 Self {
-                    nfs: NfsInstance::from_adapter(adapter),
+                    nfs: NfsCapability::from_adapter(adapter),
                     transport,
                 }
             }
@@ -343,7 +333,7 @@ mod native {
             cleanup(&root);
         }
 
-        /// Integration test: boot a chassis with `with_instance::<NfsInstance>`,
+        /// Integration test: boot a chassis with `with_actor::<NfsCapability>`,
         /// dispatch `Read` + `List` via the mailbox, assert round-trip
         /// `ReadResult::Ok` / `ListResult::Ok`, and confirm a `..`-escaping
         /// path produces `FsError::Forbidden`. Mirrors `fs.rs:1064`.
@@ -355,21 +345,18 @@ mod native {
 
             let (registry, mailer, rx) = fresh_substrate_with_egress();
             let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_instance::<NfsInstance>(
-                    "assets",
-                    NfsRoot {
-                        root: root.clone(),
-                        writable: false,
-                    },
-                )
+                .with_actor::<NfsCapability>(NfsRoot {
+                    root: root.clone(),
+                    writable: false,
+                })
                 .build_passive()
-                .expect("nfs instance chassis boots");
+                .expect("nfs capability chassis boots");
 
             let id = registry
-                .lookup("aether.nfs:assets")
-                .expect("aether.nfs:assets mailbox registered");
+                .lookup("aether.nfs")
+                .expect("aether.nfs mailbox registered");
             let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("entry") else {
-                panic!("expected Inbox entry for aether.nfs:assets");
+                panic!("expected Inbox entry for aether.nfs");
             };
             let session = Source::to(SourceAddr::Session(SessionToken(Uuid::nil())));
 
