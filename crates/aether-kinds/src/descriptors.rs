@@ -55,10 +55,10 @@ mod tests {
         Fetch, FetchResult, Key, LifecycleUnsubscribeAll, List, ListResult, LoadComponent,
         LoadResult, LyriaGenerate, LyriaGenerateResult, Mat4Apply, MessagesSend,
         MessagesSendResult, MouseButton, MouseMove, NanobananaGenerate, NanobananaGenerateResult,
-        NoteOff, NoteOn, Ping, Pong, ProcessExited, Read, ReadResult, RecordResult,
-        ReplaceComponent, ReplaceResult, SetMasterGain, Spawn, SpawnResult, SubscribeInput,
-        SubscribeInputResult, Terminate, TerminateResult, Tick, TrajectoryEnd, TrajectoryLog,
-        TrajectorySample, UnsubscribeAll, UnsubscribeInput, Write, WriteResult,
+        NfsFetch, NfsFetchResult, NoteOff, NoteOn, Ping, Pong, ProcessExited, Read, ReadResult,
+        RecordResult, ReplaceComponent, ReplaceResult, SetMasterGain, Spawn, SpawnResult,
+        SubscribeInput, SubscribeInputResult, Terminate, TerminateResult, Tick, TrajectoryEnd,
+        TrajectoryLog, TrajectorySample, UnsubscribeAll, UnsubscribeInput, Write, WriteResult,
     };
 
     #[test]
@@ -126,6 +126,8 @@ mod tests {
         assert!(names.contains(&ListResult::NAME));
         assert!(names.contains(&Fetch::NAME));
         assert!(names.contains(&FetchResult::NAME));
+        assert!(names.contains(&NfsFetch::NAME));
+        assert!(names.contains(&NfsFetchResult::NAME));
         assert!(names.contains(&Spawn::NAME));
         assert!(names.contains(&SpawnResult::NAME));
         assert!(names.contains(&Terminate::NAME));

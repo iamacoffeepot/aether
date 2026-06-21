@@ -2953,6 +2953,123 @@ mod control_plane {
         },
     }
 
+    // `aether.nfs.*` — the NFS actor's fetch verb (issue 2121). Reads a
+    // file through an ordered transform pipeline and replies with the
+    // folded output bytes. An empty transform list short-circuits to the
+    // raw file bytes. Three supporting schema types carry the structured
+    // error cases:
+    //
+    //   - `NfsFoldError` — chain-validation errors (unknown id, non-linear
+    //     arity, kind mismatch between adjacent transforms).
+    //   - `NfsTransformError` — runtime invocation errors (decode failure,
+    //     arity mismatch, output overflow) from a single transform stage.
+    //   - `NfsFetchError` — the outer error envelope: file I/O failure,
+    //     chain validation failure, single-stage invocation failure, or a
+    //     transform that panicked.
+
+    /// Structured chain-validation error for `aether.nfs.fetch`. Returned
+    /// before any transform runs — a `Fold` reply is always a logic bug in
+    /// the caller's chain construction, not a runtime data error.
+    ///
+    /// `at_index` is 0-based into the `transforms` list the caller
+    /// supplied; `expected` / `found` are `KindId`s for `KindMismatch`
+    /// so the caller can surface the exact type-mismatch without re-
+    /// inspecting the chain.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub enum NfsFoldError {
+        /// No transform with this `TransformId` is registered in the
+        /// link-time inventory.
+        UnknownTransform(aether_data::TransformId),
+        /// The transform at `at_index` has more than one input slot —
+        /// it cannot sit in a linear fold where only one input is
+        /// available.
+        NonLinearArity { at_index: u64, arity: u64 },
+        /// The output kind of the transform at `at_index - 1` does not
+        /// match the input kind of the transform at `at_index`.
+        KindMismatch {
+            at_index: u64,
+            expected: aether_data::KindId,
+            found: aether_data::KindId,
+        },
+    }
+
+    /// Structured runtime-invocation error for a single transform stage
+    /// in `aether.nfs.fetch`. Returned when the transform's thunk itself
+    /// fails — decode, arity, or output overflow — after the chain was
+    /// already validated.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub enum NfsTransformError {
+        /// One input slice didn't decode against its declared input kind.
+        /// `slot` is the 0-based slot index.
+        InputDecode { slot: u64 },
+        /// The number of supplied input slices didn't match the transform's
+        /// declared input arity.
+        InputArity { expected: u64, actual: u64 },
+        /// The encoded output exceeded the executor's output-byte cap.
+        OutputOverflow { limit: u64, actual: u64 },
+    }
+
+    /// Structured failure reason for `aether.nfs.fetch_result::Err`.
+    ///
+    /// - `Fs` — the underlying file read failed; the inner `FsError`
+    ///   carries the same variants as `aether.fs.read`.
+    /// - `Fold` — the transform chain failed validation before any
+    ///   compute ran; the inner `NfsFoldError` names the exact rule
+    ///   violated.
+    /// - `Transform` — a single stage's thunk returned an error during
+    ///   inline execution.
+    /// - `Panicked` — a transform function panicked; the message is the
+    ///   best-effort string extracted from the panic payload.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub enum NfsFetchError {
+        Fs(FsError),
+        Fold(NfsFoldError),
+        Transform(NfsTransformError),
+        Panicked(String),
+    }
+
+    /// `aether.nfs.fetch` — read a file NFS owns and run an ordered
+    /// transform pipeline over its bytes, replying with the folded
+    /// output. An empty `transforms` list returns the raw file bytes
+    /// immediately (`output_kind: None`). Mailed to the `"aether.nfs"`
+    /// mailbox; reply lands via `reply_mail` as `NfsFetchResult`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.nfs.fetch")]
+    pub struct NfsFetch {
+        pub namespace: String,
+        pub path: String,
+        /// Ordered list of transforms to apply. Each `TransformId` names
+        /// a link-time `#[transform]` entry (ADR-0048); the chain is
+        /// validated for linear composition before any compute runs.
+        pub transforms: Vec<aether_data::TransformId>,
+    }
+
+    /// Reply to `NfsFetch`. Both arms echo `namespace` + `path` for
+    /// correlation. `Ok` carries the folded output bytes (`data`) and
+    /// the `output_kind` of the last transform (`None` when `transforms`
+    /// was empty, i.e. a raw-read). `Err` carries a structured
+    /// `NfsFetchError`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.nfs.fetch_result")]
+    pub enum NfsFetchResult {
+        Ok {
+            namespace: String,
+            path: String,
+            /// `None` when the transform list was empty (raw read);
+            /// `Some(k)` is the output kind of the last transform in
+            /// the chain.
+            output_kind: Option<aether_data::KindId>,
+            /// Wire-encoded output: raw file bytes when `output_kind` is
+            /// `None`, or the last transform's encoded output value.
+            data: Vec<u8>,
+        },
+        Err {
+            namespace: String,
+            path: String,
+            error: NfsFetchError,
+        },
+    }
+
     // ADR-0088 §6 reverse-lookup inventory actor. The `aether.inventory`
     // mailbox serves the per-build reverse-lookup inventory over mail so
     // an out-of-process observer (the MCP harness) reads the running
@@ -4803,6 +4920,8 @@ mod tests {
         assert_eq!(ListResult::NAME, "aether.fs.list_result");
         assert_eq!(Copy::NAME, "aether.fs.copy");
         assert_eq!(CopyResult::NAME, "aether.fs.copy_result");
+        assert_eq!(NfsFetch::NAME, "aether.nfs.fetch");
+        assert_eq!(NfsFetchResult::NAME, "aether.nfs.fetch_result");
         assert_eq!(Manifest::NAME, "aether.inventory.manifest");
         assert_eq!(ManifestResult::NAME, "aether.inventory.manifest_result");
         assert_eq!(Resolve::NAME, "aether.inventory.resolve");
@@ -5601,6 +5720,143 @@ mod tests {
                     assert_eq!(error, FsError::NotFound);
                 }
                 DeleteResult::Ok { .. } => panic!("expected Err"),
+            }
+        }
+    }
+
+    // NFS fetch kind roundtrips. `NfsFetch` carries String + `Vec<TransformId>`;
+    // `NfsFetchResult` is an Ok/Err enum. Both arms roundtrip through the kind
+    // codec. Error arms exercise each `NfsFetchError` variant.
+    mod nfs_roundtrips {
+        use super::*;
+        use aether_data::wire;
+        use alloc::string::ToString;
+        use alloc::vec;
+
+        #[test]
+        fn nfs_fetch_request_roundtrip() {
+            let r = NfsFetch {
+                namespace: "assets".to_string(),
+                path: "model.glb".to_string(),
+                transforms: vec![],
+            };
+            let bytes = r.encode_into_bytes();
+            let back: NfsFetch = NfsFetch::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes NfsFetch");
+            assert_eq!(back.namespace, r.namespace);
+            assert_eq!(back.path, r.path);
+            assert!(back.transforms.is_empty());
+        }
+
+        #[test]
+        fn nfs_fetch_result_ok_raw_roundtrip() {
+            let r = NfsFetchResult::Ok {
+                namespace: "assets".to_string(),
+                path: "raw.bin".to_string(),
+                output_kind: None,
+                data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            };
+            let bytes = r.encode_into_bytes();
+            let back: NfsFetchResult = NfsFetchResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes NfsFetchResult::Ok(raw)");
+            match back {
+                NfsFetchResult::Ok {
+                    namespace,
+                    path,
+                    output_kind,
+                    data,
+                } => {
+                    assert_eq!(namespace, "assets");
+                    assert_eq!(path, "raw.bin");
+                    assert!(output_kind.is_none());
+                    assert_eq!(data, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+                }
+                NfsFetchResult::Err { .. } => panic!("expected Ok"),
+            }
+        }
+
+        #[test]
+        fn nfs_fetch_result_ok_with_kind_roundtrip() {
+            use aether_data::KindId;
+            let r = NfsFetchResult::Ok {
+                namespace: "assets".to_string(),
+                path: "decoded.bin".to_string(),
+                output_kind: Some(KindId(0xABCD_1234_0000_0001)),
+                data: vec![1, 2, 3],
+            };
+            let bytes = r.encode_into_bytes();
+            let back: NfsFetchResult = NfsFetchResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes NfsFetchResult::Ok(with kind)");
+            match back {
+                NfsFetchResult::Ok {
+                    output_kind, data, ..
+                } => {
+                    assert_eq!(output_kind, Some(KindId(0xABCD_1234_0000_0001)));
+                    assert_eq!(data, vec![1, 2, 3]);
+                }
+                NfsFetchResult::Err { .. } => panic!("expected Ok"),
+            }
+        }
+
+        #[test]
+        fn nfs_fetch_result_err_fs_roundtrip() {
+            let r = NfsFetchResult::Err {
+                namespace: "assets".to_string(),
+                path: "missing.bin".to_string(),
+                error: NfsFetchError::Fs(FsError::NotFound),
+            };
+            let bytes = r.encode_into_bytes();
+            let back: NfsFetchResult = NfsFetchResult::decode_from_bytes(&bytes)
+                .expect("test setup: kind codec decodes NfsFetchResult::Err(Fs)");
+            match back {
+                NfsFetchResult::Err {
+                    namespace,
+                    path,
+                    error,
+                } => {
+                    assert_eq!(namespace, "assets");
+                    assert_eq!(path, "missing.bin");
+                    assert_eq!(error, NfsFetchError::Fs(FsError::NotFound));
+                }
+                NfsFetchResult::Ok { .. } => panic!("expected Err"),
+            }
+        }
+
+        #[test]
+        fn nfs_fetch_error_fold_roundtrip() {
+            use aether_data::KindId;
+            use aether_data::wire;
+            let e = NfsFetchError::Fold(NfsFoldError::KindMismatch {
+                at_index: 1,
+                expected: KindId(0x1111_1111_1111_1111),
+                found: KindId(0x2222_2222_2222_2222),
+            });
+            let bytes = wire::to_vec(&e).expect("test setup: wire encodes NfsFetchError");
+            let back: NfsFetchError =
+                wire::from_bytes(&bytes).expect("test setup: wire decodes NfsFetchError");
+            match back {
+                NfsFetchError::Fold(NfsFoldError::KindMismatch {
+                    at_index,
+                    expected,
+                    found,
+                }) => {
+                    assert_eq!(at_index, 1);
+                    assert_eq!(expected, KindId(0x1111_1111_1111_1111));
+                    assert_eq!(found, KindId(0x2222_2222_2222_2222));
+                }
+                other => panic!("expected Fold(KindMismatch), got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn nfs_fetch_error_panicked_roundtrip() {
+            let e = NfsFetchError::Panicked("the transform panicked".to_string());
+            let bytes = wire::to_vec(&e).expect("test setup: wire encodes NfsFetchError");
+            let back: NfsFetchError =
+                wire::from_bytes(&bytes).expect("test setup: wire decodes NfsFetchError");
+            match back {
+                NfsFetchError::Panicked(msg) => assert_eq!(msg, "the transform panicked"),
+                other => panic!("expected Panicked, got {other:?}"),
             }
         }
     }

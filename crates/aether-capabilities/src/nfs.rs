@@ -20,7 +20,7 @@
 // Handler-signature kinds imported at file root so the `#[bridge(singleton)]`-
 // emitted `impl HandlesKind<K> for NfsCapability {}` markers compile on
 // wasm targets (where `mod native` is cfg-stripped).
-use aether_kinds::{List, Read};
+use aether_kinds::{List, NfsFetch, Read};
 
 /// Boot configuration for [`NfsCapability`]. Carried through
 /// `Builder::with_actor`; `init` hands it to
@@ -33,12 +33,19 @@ pub use native::NfsRoot;
 
 #[aether_actor::bridge(singleton)]
 mod native {
+    use std::any::Any;
+    use std::panic::{self, AssertUnwindSafe};
     use std::path::PathBuf;
 
     use aether_actor::actor;
-    use aether_kinds::{List, ListResult, Read, ReadResult};
+    use aether_data::TransformError;
+    use aether_kinds::{
+        List, ListResult, NfsFetch, NfsFetchError, NfsFetchResult, NfsFoldError, NfsTransformError,
+        Read, ReadResult,
+    };
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
+    use aether_substrate::dag::transform_registry::{FoldError, TransformRegistry};
 
     use crate::fs::{FileAdapter, LocalFileAdapter};
 
@@ -54,6 +61,10 @@ mod native {
     /// parallel with the `aether.fs` monolith.
     pub struct NfsCapability {
         adapter: LocalFileAdapter,
+        /// Link-time native-transform registry (ADR-0048 §2). Built once
+        /// at `init`; immutable thereafter. Used by `on_fetch` to resolve
+        /// and validate the caller's transform chain before running it.
+        registry: TransformRegistry,
     }
 
     #[actor]
@@ -66,12 +77,14 @@ mod native {
         fn init(config: NfsRoot, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             let adapter = LocalFileAdapter::new(config.root, config.writable)
                 .map_err(|e| BootError::Other(Box::new(e)))?;
+            let registry = TransformRegistry::from_inventory();
             tracing::info!(
                 target: "aether_substrate::nfs",
                 root = %adapter.root().display(),
+                transforms = registry.len(),
                 "nfs capability initialized",
             );
-            Ok(Self { adapter })
+            Ok(Self { adapter, registry })
         }
 
         /// Read bytes from a path relative to the configured root.
@@ -120,6 +133,132 @@ mod native {
                 },
             }
         }
+
+        /// Read a file and run an ordered transform pipeline over its bytes,
+        /// replying with the folded output (issue 2121).
+        ///
+        /// An empty `transforms` list short-circuits to the raw file bytes
+        /// (`output_kind: None`). A non-empty chain is validated for linear
+        /// composition (each adjacent pair must compose) before any compute
+        /// runs. The fold executes synchronously on NFS's run-token; a
+        /// heavy fold blocks the run-token until it returns (an off-run-token
+        /// compute pool is the recorded future optimization).
+        ///
+        /// The whole fold runs under one `panic::catch_unwind` — a panicking
+        /// transform maps to `FetchError::Panicked` rather than unwinding
+        /// through the actor dispatch.
+        ///
+        /// # Agent
+        /// Reply: `NfsFetchResult`. Echoes namespace + path on both arms.
+        #[handler]
+        fn on_fetch(&self, _ctx: &mut NativeCtx<'_>, mail: NfsFetch) -> NfsFetchResult {
+            let bytes = match self.adapter.read(&mail.path) {
+                Ok(b) => b,
+                Err(e) => {
+                    return NfsFetchResult::Err {
+                        namespace: mail.namespace,
+                        path: mail.path,
+                        error: NfsFetchError::Fs(e),
+                    };
+                }
+            };
+
+            if mail.transforms.is_empty() {
+                return NfsFetchResult::Ok {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    output_kind: None,
+                    data: bytes,
+                };
+            }
+
+            let output_kind = match self.registry.validate_fold(&mail.transforms) {
+                Ok(Some(k)) => k,
+                Ok(None) => unreachable!("transforms is non-empty; validate_fold returns Some"),
+                Err(fold_err) => {
+                    return NfsFetchResult::Err {
+                        namespace: mail.namespace,
+                        path: mail.path,
+                        error: NfsFetchError::Fold(map_fold_error(&fold_err)),
+                    };
+                }
+            };
+
+            let registry = &self.registry;
+            let transforms = &mail.transforms;
+            let fold_result = panic::catch_unwind(AssertUnwindSafe(|| {
+                let mut buf = bytes;
+                for &id in transforms {
+                    let t = registry
+                        .lookup(id)
+                        .expect("validate_fold succeeded; every id is guaranteed to resolve");
+                    buf = (t.invoke)(&[&buf])?;
+                }
+                Ok::<Vec<u8>, TransformError>(buf)
+            }));
+
+            match fold_result {
+                Ok(Ok(data)) => NfsFetchResult::Ok {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    output_kind: Some(output_kind),
+                    data,
+                },
+                Ok(Err(transform_err)) => NfsFetchResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    error: NfsFetchError::Transform(map_transform_error(&transform_err)),
+                },
+                Err(payload) => NfsFetchResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    error: NfsFetchError::Panicked(panic_message(payload.as_ref())),
+                },
+            }
+        }
+    }
+
+    fn map_fold_error(e: &FoldError) -> NfsFoldError {
+        match e {
+            FoldError::UnknownTransform(id) => NfsFoldError::UnknownTransform(*id),
+            FoldError::NonLinearArity { at_index, arity } => NfsFoldError::NonLinearArity {
+                at_index: *at_index as u64,
+                arity: *arity as u64,
+            },
+            FoldError::KindMismatch {
+                at_index,
+                expected,
+                found,
+            } => NfsFoldError::KindMismatch {
+                at_index: *at_index as u64,
+                expected: *expected,
+                found: *found,
+            },
+        }
+    }
+
+    fn map_transform_error(e: &TransformError) -> NfsTransformError {
+        match e {
+            TransformError::InputDecode { slot } => {
+                NfsTransformError::InputDecode { slot: *slot as u64 }
+            }
+            TransformError::InputArity { expected, actual } => NfsTransformError::InputArity {
+                expected: *expected as u64,
+                actual: *actual as u64,
+            },
+            TransformError::OutputOverflow { limit, actual } => NfsTransformError::OutputOverflow {
+                limit: *limit as u64,
+                actual: *actual as u64,
+            },
+        }
+    }
+
+    fn panic_message(payload: &(dyn Any + Send)) -> String {
+        payload
+            .downcast_ref::<&'static str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_owned())
     }
 
     #[cfg(test)]
@@ -129,7 +268,10 @@ mod native {
         /// tests that drive handlers without a full chassis hand a pre-built
         /// adapter directly.
         pub(super) fn from_adapter(adapter: LocalFileAdapter) -> Self {
-            Self { adapter }
+            Self {
+                adapter,
+                registry: TransformRegistry::from_inventory(),
+            }
         }
     }
 
@@ -144,10 +286,14 @@ mod native {
         use aether_data::{Kind, MailId, MailboxId, SessionToken, Uuid};
         use aether_kinds::descriptors;
         use aether_kinds::trace::Nanos;
-        use aether_kinds::{FsError, List, ListResult, Read, ReadResult};
+        use aether_kinds::{
+            FsError, List, ListResult, NfsFetch, NfsFetchError, NfsFetchResult, NfsFoldError, Read,
+            ReadResult,
+        };
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::actor::native::ctx::NativeCtx;
         use aether_substrate::chassis::builder::Builder;
+        use aether_substrate::dag::transform_registry::TransformRegistry;
         use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
@@ -158,6 +304,9 @@ mod native {
 
         use std::sync::Arc;
 
+        use crate::dag::test_support::{
+            TestNumber, boom_transform_id, double_transform_id, seed_transform_id,
+        };
         use crate::test_chassis::{TestChassis, cleanup, scratch_dir, test_mailer_and_rx};
 
         use super::{LocalFileAdapter, NfsCapability, NfsRoot};
@@ -433,6 +582,286 @@ mod native {
                 ),
                 "expected Forbidden for .. path, got {result:?}",
             );
+
+            drop(chassis);
+            cleanup(&root);
+        }
+
+        /// Unit test: `on_fetch` with empty transforms returns raw file bytes.
+        #[test]
+        fn on_fetch_empty_transforms_returns_raw_bytes() {
+            let root = scratch_root("fetch-raw");
+            fs::write(root.join("data.bin"), b"raw payload").expect("test setup: seed data.bin");
+            let fix = TestFixture::new(&root);
+            let mut ctx = fix.ctx(session_sender());
+            let result = fix.nfs.on_fetch(
+                &mut ctx,
+                NfsFetch {
+                    namespace: "assets".to_string(),
+                    path: "data.bin".to_string(),
+                    transforms: vec![],
+                },
+            );
+            match result {
+                NfsFetchResult::Ok {
+                    namespace,
+                    path,
+                    output_kind,
+                    data,
+                } => {
+                    assert_eq!(namespace, "assets");
+                    assert_eq!(path, "data.bin");
+                    assert!(
+                        output_kind.is_none(),
+                        "empty transform list → output_kind is None"
+                    );
+                    assert_eq!(data, b"raw payload");
+                }
+                NfsFetchResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
+            }
+            cleanup(&root);
+        }
+
+        /// Unit test: `on_fetch` with a single transform returns the folded
+        /// output tagged with the transform's output `KindId`.
+        ///
+        /// Uses the `double` test transform (`TestNumber` → `TestNumber`) from
+        /// `aether-capabilities::dag::test_support`.
+        #[test]
+        fn on_fetch_single_transform_returns_folded_output() {
+            let root = scratch_root("fetch-transform");
+            let input = TestNumber { value: 7, tag: 0 };
+            let encoded = input.encode_into_bytes();
+            fs::write(root.join("number.bin"), &encoded).expect("test setup: seed number.bin");
+
+            let fix = TestFixture::new(&root);
+            let mut ctx = fix.ctx(session_sender());
+            let double_id = double_transform_id();
+
+            let reg = TransformRegistry::from_inventory();
+            let double_t = reg.lookup(double_id).expect("double registered");
+            let expected_output_kind = double_t.output_kind_id;
+
+            let result = fix.nfs.on_fetch(
+                &mut ctx,
+                NfsFetch {
+                    namespace: "assets".to_string(),
+                    path: "number.bin".to_string(),
+                    transforms: vec![double_id],
+                },
+            );
+            match result {
+                NfsFetchResult::Ok {
+                    output_kind, data, ..
+                } => {
+                    assert_eq!(
+                        output_kind,
+                        Some(expected_output_kind),
+                        "output_kind should be double's output kind"
+                    );
+                    let out: TestNumber =
+                        TestNumber::decode_from_bytes(&data).expect("output decodes as TestNumber");
+                    assert_eq!(out.value, 14, "double(7) == 14");
+                }
+                NfsFetchResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
+            }
+            cleanup(&root);
+        }
+
+        /// Unit test: a non-composing chain returns `FetchError::Fold` before
+        /// any transform runs. Seeds a file but uses two transforms whose
+        /// output/input kinds don't compose.
+        #[test]
+        fn on_fetch_non_composing_chain_returns_fold_error() {
+            let root = scratch_root("fetch-fold-err");
+            fs::write(root.join("data.bin"), b"ignored").expect("test setup: seed data.bin");
+            let fix = TestFixture::new(&root);
+            let mut ctx = fix.ctx(session_sender());
+
+            // `double`: TestNumber → TestNumber; `seed`: () → TestNumber.
+            // `seed` takes ZERO inputs (arity 0), so placing it at index 1
+            // (where one input is expected for a linear fold) should fire
+            // NonLinearArity at index 1.
+            let double_id = double_transform_id();
+            let seed_id = seed_transform_id();
+
+            let result = fix.nfs.on_fetch(
+                &mut ctx,
+                NfsFetch {
+                    namespace: "assets".to_string(),
+                    path: "data.bin".to_string(),
+                    transforms: vec![double_id, seed_id],
+                },
+            );
+            match result {
+                NfsFetchResult::Err { error, .. } => {
+                    assert!(
+                        matches!(
+                            error,
+                            NfsFetchError::Fold(NfsFoldError::NonLinearArity { at_index: 1, .. })
+                        ),
+                        "expected Fold(NonLinearArity at 1), got {error:?}",
+                    );
+                }
+                NfsFetchResult::Ok { .. } => panic!("expected Err(Fold), got Ok"),
+            }
+            cleanup(&root);
+        }
+
+        /// Unit test: a chain whose first transform can't decode the file's
+        /// bytes returns `FetchError::Transform`. Writes arbitrary bytes that
+        /// are not a valid `TestNumber` encoding, then applies `double`.
+        #[test]
+        fn on_fetch_transform_decode_failure_returns_transform_error() {
+            let root = scratch_root("fetch-transform-err");
+            // A single 0xFF byte cannot decode as TestNumber { value: u64, tag: u32 }.
+            fs::write(root.join("garbage.bin"), [0xFF_u8]).expect("test setup: seed garbage.bin");
+            let fix = TestFixture::new(&root);
+            let mut ctx = fix.ctx(session_sender());
+            let double_id = double_transform_id();
+
+            let result = fix.nfs.on_fetch(
+                &mut ctx,
+                NfsFetch {
+                    namespace: "assets".to_string(),
+                    path: "garbage.bin".to_string(),
+                    transforms: vec![double_id],
+                },
+            );
+            match result {
+                NfsFetchResult::Err { error, .. } => {
+                    assert!(
+                        matches!(error, NfsFetchError::Transform(_)),
+                        "expected Transform error, got {error:?}",
+                    );
+                }
+                NfsFetchResult::Ok { .. } => panic!("expected Err(Transform), got Ok"),
+            }
+            cleanup(&root);
+        }
+
+        /// Unit test: a panicking transform produces `FetchError::Panicked`.
+        #[test]
+        fn on_fetch_panicking_transform_returns_panicked_error() {
+            let root = scratch_root("fetch-panic");
+            let input = TestNumber { value: 1, tag: 0 };
+            let encoded = input.encode_into_bytes();
+            fs::write(root.join("number.bin"), &encoded).expect("test setup: seed number.bin");
+            let fix = TestFixture::new(&root);
+            let mut ctx = fix.ctx(session_sender());
+            let boom_id = boom_transform_id();
+
+            let result = fix.nfs.on_fetch(
+                &mut ctx,
+                NfsFetch {
+                    namespace: "assets".to_string(),
+                    path: "number.bin".to_string(),
+                    transforms: vec![boom_id],
+                },
+            );
+            match result {
+                NfsFetchResult::Err { error, .. } => {
+                    assert!(
+                        matches!(error, NfsFetchError::Panicked(_)),
+                        "expected Panicked error, got {error:?}",
+                    );
+                }
+                NfsFetchResult::Ok { .. } => panic!("expected Err(Panicked), got Ok"),
+            }
+            cleanup(&root);
+        }
+
+        /// Integration test: dispatch `NfsFetch` through the `aether.nfs`
+        /// mailbox and decode `NfsFetchResult`, mirroring
+        /// `integration_chassis_read_list_and_sandbox`.
+        #[test]
+        fn integration_chassis_fetch_through_mailbox() {
+            let root = scratch_root("fetch-integration");
+            let input = TestNumber { value: 5, tag: 0 };
+            let encoded = input.encode_into_bytes();
+            fs::write(root.join("n.bin"), &encoded).expect("test setup: seed n.bin");
+
+            let (registry, mailer, rx) = fresh_substrate_with_egress();
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_actor::<NfsCapability>(NfsRoot {
+                    root: root.clone(),
+                    writable: false,
+                })
+                .build_passive()
+                .expect("nfs capability chassis boots");
+
+            let id = registry
+                .lookup("aether.nfs")
+                .expect("aether.nfs mailbox registered");
+            let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("entry") else {
+                panic!("expected Inbox entry for aether.nfs");
+            };
+            let session = Source::to(SourceAddr::Session(SessionToken(Uuid::nil())));
+
+            // Empty chain — should return raw bytes.
+            let payload = dispatch_and_drain(
+                &handler,
+                &rx,
+                &NfsFetch {
+                    namespace: "assets".to_string(),
+                    path: "n.bin".to_string(),
+                    transforms: vec![],
+                },
+                session,
+                "fetch-raw",
+            );
+            let result =
+                NfsFetchResult::decode_from_bytes(&payload).expect("NfsFetchResult decodes");
+            match result {
+                NfsFetchResult::Ok {
+                    path,
+                    output_kind,
+                    data,
+                    ..
+                } => {
+                    assert_eq!(path, "n.bin");
+                    assert!(output_kind.is_none());
+                    assert_eq!(data, encoded);
+                }
+                NfsFetchResult::Err { error, .. } => {
+                    panic!("expected Ok for empty chain, got Err({error:?})")
+                }
+            }
+
+            // Single transform chain — double(5) == 10.
+            let double_id = double_transform_id();
+            let reg = TransformRegistry::from_inventory();
+            let expected_kind = reg
+                .lookup(double_id)
+                .expect("double registered")
+                .output_kind_id;
+
+            let payload = dispatch_and_drain(
+                &handler,
+                &rx,
+                &NfsFetch {
+                    namespace: "assets".to_string(),
+                    path: "n.bin".to_string(),
+                    transforms: vec![double_id],
+                },
+                session,
+                "fetch-double",
+            );
+            let result =
+                NfsFetchResult::decode_from_bytes(&payload).expect("NfsFetchResult decodes");
+            match result {
+                NfsFetchResult::Ok {
+                    output_kind, data, ..
+                } => {
+                    assert_eq!(output_kind, Some(expected_kind));
+                    let out: TestNumber =
+                        TestNumber::decode_from_bytes(&data).expect("output decodes as TestNumber");
+                    assert_eq!(out.value, 10, "double(5) == 10");
+                }
+                NfsFetchResult::Err { error, .. } => {
+                    panic!("expected Ok for double chain, got Err({error:?})")
+                }
+            }
 
             drop(chassis);
             cleanup(&root);

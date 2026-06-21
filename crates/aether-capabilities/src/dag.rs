@@ -256,7 +256,7 @@ pub fn dag_mailbox_id() -> aether_data::MailboxId {
 // registers them in `aether_kinds::descriptors::all()` for the test
 // substrate's registry walk. Whole module is `#[cfg(test)]`.
 #[cfg(test)]
-mod test_support;
+pub mod test_support;
 
 #[cfg(test)]
 mod tests;

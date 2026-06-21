@@ -17,6 +17,25 @@ use std::collections::HashMap;
 
 use aether_data::{KindId, TransformEntry, TransformId};
 
+/// Why a linear-fold chain fails validation (issue 2121). Returned by
+/// [`TransformRegistry::validate_fold`] before any transform runs so
+/// the caller gets a clean structural error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FoldError {
+    /// No transform with this id is in the link-time inventory.
+    UnknownTransform(TransformId),
+    /// The transform at `at_index` has more than one input slot — it
+    /// cannot sit in a linear fold where only one input is threaded.
+    NonLinearArity { at_index: usize, arity: usize },
+    /// The output kind of transform `at_index - 1` does not match the
+    /// input kind of transform `at_index`.
+    KindMismatch {
+        at_index: usize,
+        expected: KindId,
+        found: KindId,
+    },
+}
+
 /// A registered native transform's static metadata + invocation thunk
 /// (ADR-0048 §2). A thin borrow over the link-time [`TransformEntry`] —
 /// every field is `'static`.
@@ -111,5 +130,146 @@ impl TransformRegistry {
     /// ADR-0048 §2 names).
     pub fn iter(&self) -> impl Iterator<Item = (TransformId, RegisteredTransform)> + '_ {
         self.by_id.iter().map(|(id, t)| (*id, *t))
+    }
+
+    /// Validate that `chain` forms a composable linear fold (issue 2121).
+    ///
+    /// - Empty chain → `Ok(None)` (short-circuit; no kind anchoring
+    ///   needed).
+    /// - Non-empty chain → each id must resolve; each transform must
+    ///   have exactly one input slot; each adjacent pair must compose
+    ///   (the prior transform's `output_kind_id` == the next's
+    ///   `input_kind_ids[0]`). Returns `Ok(Some(output_kind_id))` of
+    ///   the last transform.
+    ///
+    /// Validation is a pure scan — no transform is invoked.
+    pub fn validate_fold(&self, chain: &[TransformId]) -> Result<Option<KindId>, FoldError> {
+        if chain.is_empty() {
+            return Ok(None);
+        }
+        let mut prev_output: Option<KindId> = None;
+        for (i, &id) in chain.iter().enumerate() {
+            let t = self.lookup(id).ok_or(FoldError::UnknownTransform(id))?;
+            if t.input_kind_ids.len() != 1 {
+                return Err(FoldError::NonLinearArity {
+                    at_index: i,
+                    arity: t.input_kind_ids.len(),
+                });
+            }
+            if let Some(expected) = prev_output {
+                let found = t.input_kind_ids[0];
+                if expected != found {
+                    return Err(FoldError::KindMismatch {
+                        at_index: i,
+                        expected,
+                        found,
+                    });
+                }
+            }
+            prev_output = Some(t.output_kind_id);
+        }
+        Ok(prev_output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use aether_data::TransformError;
+
+    use super::*;
+
+    #[allow(clippy::unnecessary_wraps)]
+    fn noop_invoke(_: &[&[u8]]) -> Result<Vec<u8>, TransformError> {
+        Ok(vec![])
+    }
+
+    fn make_registry(entries: &[(TransformId, &'static [KindId], KindId)]) -> TransformRegistry {
+        let mut reg = TransformRegistry::empty();
+        for &(id, inputs, output) in entries {
+            reg.by_id.insert(
+                id,
+                RegisteredTransform {
+                    input_kind_ids: inputs,
+                    output_kind_id: output,
+                    name: "test::noop",
+                    invoke: noop_invoke,
+                },
+            );
+        }
+        reg
+    }
+
+    const A_ID: TransformId = TransformId(0xBEEF_0001_0000_0001);
+    const B_ID: TransformId = TransformId(0xBEEF_0001_0000_0002);
+    const MULTI_ID: TransformId = TransformId(0xBEEF_0001_0000_0003);
+
+    const K1: KindId = KindId(0x1111_1111_1111_0001);
+    const K2: KindId = KindId(0x1111_1111_1111_0002);
+    const K3: KindId = KindId(0x1111_1111_1111_0003);
+
+    const A_INPUTS: &[KindId] = &[K1];
+    const B_INPUTS: &[KindId] = &[K2];
+    const B_WRONG_INPUTS: &[KindId] = &[K3];
+    const MULTI_INPUTS: &[KindId] = &[K1, K2];
+
+    #[test]
+    fn empty_chain_returns_none() {
+        let reg = make_registry(&[(A_ID, A_INPUTS, K2)]);
+        assert_eq!(reg.validate_fold(&[]), Ok(None));
+    }
+
+    #[test]
+    fn empty_chain_on_empty_registry_returns_none() {
+        let reg = TransformRegistry::empty();
+        assert_eq!(reg.validate_fold(&[]), Ok(None));
+    }
+
+    #[test]
+    fn single_transform_returns_its_output_kind() {
+        let reg = make_registry(&[(A_ID, A_INPUTS, K2)]);
+        assert_eq!(reg.validate_fold(&[A_ID]), Ok(Some(K2)));
+    }
+
+    #[test]
+    fn composed_pair_returns_final_output_kind() {
+        let reg = make_registry(&[(A_ID, A_INPUTS, K2), (B_ID, B_INPUTS, K3)]);
+        assert_eq!(reg.validate_fold(&[A_ID, B_ID]), Ok(Some(K3)));
+    }
+
+    #[test]
+    fn unknown_id_returns_error() {
+        let reg = TransformRegistry::empty();
+        let bogus = TransformId(0xDEAD_DEAD_DEAD_DEAD);
+        assert_eq!(
+            reg.validate_fold(&[bogus]),
+            Err(FoldError::UnknownTransform(bogus)),
+        );
+    }
+
+    #[test]
+    fn arity_gt_one_returns_non_linear_arity() {
+        let reg = make_registry(&[(MULTI_ID, MULTI_INPUTS, K3)]);
+        assert_eq!(
+            reg.validate_fold(&[MULTI_ID]),
+            Err(FoldError::NonLinearArity {
+                at_index: 0,
+                arity: 2
+            }),
+        );
+    }
+
+    #[test]
+    fn mismatched_pair_returns_kind_mismatch_at_index_one() {
+        // A: K1 → K2; B_WRONG: K3 → K3. A's output (K2) ≠ B_WRONG's
+        // input (K3) → KindMismatch at index 1.
+        let reg = make_registry(&[(A_ID, A_INPUTS, K2), (B_ID, B_WRONG_INPUTS, K3)]);
+        assert_eq!(
+            reg.validate_fold(&[A_ID, B_ID]),
+            Err(FoldError::KindMismatch {
+                at_index: 1,
+                expected: K2,
+                found: K3,
+            }),
+        );
     }
 }
