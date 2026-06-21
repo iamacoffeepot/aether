@@ -121,7 +121,28 @@ attest_step clippy cargo clippy --workspace --all-targets -- -D warnings
 attest_step doc    env RUSTDOCFLAGS="-D rustdoc::redundant_explicit_links -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links" cargo doc --workspace --no-deps
 attest_step dist   cargo xtask dist --no-bins
 attest_step test   env AETHER_REQUIRE_RUNTIME=1 cargo nextest run --workspace --all-features --profile ci
-attest_step qodana qodana scan --diff-start "$(git merge-base HEAD origin/main)" -u root
+
+# Qodana only counts *new* findings when it can read git history. In a linked
+# worktree the `.git` pointer references a gitdir the analysis container can't
+# reach, so it mis-scopes and flags the whole pre-existing backlog as new. When
+# in a worktree, scan a throwaway self-contained clone of HEAD (real `.git`)
+# under a Docker-shared path ($HOME, not $TMPDIR's /var/folders); the main
+# checkout scans in place. The scan dir rides in the environment, never as a
+# `cmd` arg, so the command-run attestor records no machine-identifying path —
+# the same PII discipline as the per-step log redirect.
+qodana_base="$(git merge-base HEAD origin/main)"
+qodana_dir="$ROOT"
+qodana_clone=""
+if [[ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]]; then
+    mkdir -p "$HOME/.cache"
+    qodana_clone="$(mktemp -d "$HOME/.cache/aether-qodana.XXXXXX")"
+    git clone --quiet "$ROOT" "$qodana_clone/scan"
+    git -C "$qodana_clone/scan" -c advice.detachedHead=false checkout --quiet "$HEAD_SHA"
+    qodana_dir="$qodana_clone/scan"
+fi
+export ATTEST_QODANA_DIR="$qodana_dir" ATTEST_QODANA_BASE="$qodana_base"
+attest_step qodana bash -c 'cd "$ATTEST_QODANA_DIR" && qodana scan --diff-start "$ATTEST_QODANA_BASE" -u root'
+[[ -n "$qodana_clone" ]] && rm -rf "$qodana_clone"
 
 echo "[attest] OK — $(ls "$OUTDIR"/*.json | wc -l | tr -d ' ') signed attestations for $HEAD_SHA"
 echo "[attest] $OUTDIR"
