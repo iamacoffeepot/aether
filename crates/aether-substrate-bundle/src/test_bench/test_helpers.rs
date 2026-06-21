@@ -94,16 +94,19 @@ pub fn has_wgpu_adapter() -> bool {
 /// integration-test binaries (`crates/<crate>/tests/...`), so the
 /// workspace root is always two levels up.
 #[must_use]
+// Test-only: CARGO_TARGET_DIR is the standard cargo build-output override, not
+// cap config — honor it so wasm built into an out-of-tree target dir (e.g. the
+// attestation producer's) is found.
+#[allow(clippy::disallowed_methods)]
 pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
         .expect("workspace root reachable from CARGO_MANIFEST_DIR");
+    let target_root =
+        env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
     for profile in ["release", "debug"] {
-        let base = workspace
-            .join("target")
-            .join("wasm32-unknown-unknown")
-            .join(profile);
+        let base = target_root.join("wasm32-unknown-unknown").join(profile);
         // Top-level cdylib crates land directly under the profile dir.
         let top_level = base.join(format!("{crate_name}.wasm"));
         if top_level.exists() {
