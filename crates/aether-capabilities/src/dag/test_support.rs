@@ -21,7 +21,7 @@
 
 use std::hint::spin_loop;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
@@ -134,6 +134,45 @@ pub struct TestCallReply {
 /// payloads into, so the test thread can assert what the observer saw.
 pub type Recorder<T> = Arc<Mutex<Vec<T>>>;
 
+/// Poison-tolerant helpers for [`Recorder<T>`].
+///
+/// Recovers the `MutexGuard` via `unwrap_or_else(|p| p.into_inner())`
+/// so a deliberately-panicked actor (e.g. the `boom_transform` fixture)
+/// cannot cascade its poison into further panics on every subsequent
+/// recorder access. The recorded `Vec` is valid after an unrelated
+/// panic — its only mutation is an infallible `push` — so recovering
+/// the guard is correct.
+pub trait RecorderExt<T: Clone> {
+    /// Push `item` into the recorder, tolerating a poisoned mutex.
+    fn record(&self, item: T);
+    /// Clone and return the current contents.
+    fn snapshot(&self) -> Vec<T>;
+    /// Return the number of recorded items.
+    fn recorded_len(&self) -> usize;
+    /// Clear the recorder contents.
+    fn clear_recorded(&self);
+}
+
+impl<T: Clone> RecorderExt<T> for Recorder<T> {
+    fn record(&self, item: T) {
+        self.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(item);
+    }
+
+    fn snapshot(&self) -> Vec<T> {
+        self.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    fn recorded_len(&self) -> usize {
+        self.lock().unwrap_or_else(PoisonError::into_inner).len()
+    }
+
+    fn clear_recorded(&self) {
+        self.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    }
+}
+
 /// Config for [`TestCallActor`]: how many correlated replies to emit
 /// before the handler returns (so the chain settles), or `never` to
 /// spin a worker thread that holds the chain open forever (the
@@ -182,7 +221,7 @@ mod test_source {
 
 #[aether_actor::bridge(singleton)]
 mod test_observer {
-    use super::{Recorder, TestObserved};
+    use super::{Recorder, RecorderExt, TestObserved};
     use aether_actor::actor;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
@@ -206,17 +245,14 @@ mod test_observer {
         #[allow(clippy::needless_pass_by_value)]
         #[handler]
         fn on_observed(&mut self, _ctx: &mut NativeCtx<'_>, mail: TestObserved) {
-            self.recorder
-                .lock()
-                .expect("recorder mutex poisoned")
-                .push(mail);
+            self.recorder.record(mail);
         }
     }
 }
 
 #[aether_actor::bridge(singleton)]
 mod test_parallel_observer {
-    use super::{Recorder, TestObserved2};
+    use super::{Recorder, RecorderExt, TestObserved2};
     use aether_actor::actor;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
@@ -240,17 +276,14 @@ mod test_parallel_observer {
         #[allow(clippy::needless_pass_by_value)]
         #[handler]
         fn on_observed2(&mut self, _ctx: &mut NativeCtx<'_>, mail: TestObserved2) {
-            self.recorder
-                .lock()
-                .expect("recorder mutex poisoned")
-                .push(mail);
+            self.recorder.record(mail);
         }
     }
 }
 
 #[aether_actor::bridge(singleton)]
 mod test_bundle_observer {
-    use super::{Recorder, TestBundleObserved};
+    use super::{Recorder, RecorderExt, TestBundleObserved};
     use aether_actor::actor;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
@@ -274,10 +307,7 @@ mod test_bundle_observer {
         #[allow(clippy::needless_pass_by_value)]
         #[handler]
         fn on_bundle_observed(&mut self, _ctx: &mut NativeCtx<'_>, mail: TestBundleObserved) {
-            self.recorder
-                .lock()
-                .expect("recorder mutex poisoned")
-                .push(mail);
+            self.recorder.record(mail);
         }
     }
 }
@@ -555,7 +585,7 @@ mod test_number_source {
 
 #[aether_actor::bridge(singleton)]
 mod test_number_observer {
-    use super::{Recorder, TestNumberObserved};
+    use super::{Recorder, RecorderExt, TestNumberObserved};
     use aether_actor::actor;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
@@ -581,10 +611,7 @@ mod test_number_observer {
         #[allow(clippy::needless_pass_by_value)]
         #[handler]
         fn on_number_observed(&mut self, _ctx: &mut NativeCtx<'_>, mail: TestNumberObserved) {
-            self.recorder
-                .lock()
-                .expect("recorder mutex poisoned")
-                .push(mail);
+            self.recorder.record(mail);
         }
     }
 }

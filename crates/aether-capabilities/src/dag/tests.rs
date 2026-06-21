@@ -45,11 +45,12 @@ use aether_substrate::mail::{MailRef, Source, SourceAddr};
 
 use super::DagCapability;
 use super::test_support::{
-    Recorder, SLOW_TRANSFORM_GATE, TestBundleObserverActor, TestCallActor, TestCallConfig,
-    TestCallReply, TestDeferredCallActor, TestNumber, TestNumberObserved, TestNumberObserverActor,
-    TestNumberRequest, TestNumberSourceActor, TestObserved, TestObserved2, TestObserverActor,
-    TestParallelObserverActor, TestReadResult, TestSourceActor, big_output_transform_id,
-    boom_transform_id, double_transform_id, seed_transform_id, slow_transform_id,
+    Recorder, RecorderExt, SLOW_TRANSFORM_GATE, TestBundleObserverActor, TestCallActor,
+    TestCallConfig, TestCallReply, TestDeferredCallActor, TestNumber, TestNumberObserved,
+    TestNumberObserverActor, TestNumberRequest, TestNumberSourceActor, TestObserved, TestObserved2,
+    TestObserverActor, TestParallelObserverActor, TestReadResult, TestSourceActor,
+    big_output_transform_id, boom_transform_id, double_transform_id, seed_transform_id,
+    slow_transform_id,
 };
 use crate::test_chassis::TestChassis;
 use crate::trace::TraceDispatchCapability;
@@ -265,11 +266,10 @@ fn dag_executor_runs_two_node_dag() {
     let dag_id = submit_ok(&registry, &rx, descriptor, 1);
 
     assert!(
-        poll_until(Duration::from_secs(5), || recorder.lock().unwrap().len()
-            == 1),
+        poll_until(Duration::from_secs(5), || recorder.recorded_len() == 1),
         "observer never received the source reply",
     );
-    let observed = recorder.lock().unwrap()[0].clone();
+    let observed = recorder.snapshot()[0].clone();
     assert_eq!(
         observed.input,
         aether_data::Ref::Inline(TestReadResult::Ok { value: 42 })
@@ -331,8 +331,7 @@ fn dag_executor_parks_observer_until_source_resolves() {
     };
 
     assert!(
-        poll_until(Duration::from_secs(5), || recorder.lock().unwrap().len()
-            == 1),
+        poll_until(Duration::from_secs(5), || recorder.recorded_len() == 1),
         "observer never ran",
     );
     assert_eq!(store.parked_count(source_handle), 0);
@@ -389,11 +388,10 @@ fn dag_executor_runs_parallel_sources() {
     let _dag = submit_ok(&registry, &rx, descriptor, 1);
 
     assert!(
-        poll_until(Duration::from_secs(5), || recorder.lock().unwrap().len()
-            == 1),
+        poll_until(Duration::from_secs(5), || recorder.recorded_len() == 1),
         "two-slot observer never ran",
     );
-    let observed = recorder.lock().unwrap()[0].clone();
+    let observed = recorder.snapshot()[0].clone();
     assert_eq!(
         observed.a,
         aether_data::Ref::Inline(TestReadResult::Ok { value: 10 })
@@ -443,11 +441,10 @@ fn dag_executor_propagates_source_err_as_observer_input() {
     let _dag = submit_ok(&registry, &rx, descriptor, 1);
 
     assert!(
-        poll_until(Duration::from_secs(5), || recorder.lock().unwrap().len()
-            == 1),
+        poll_until(Duration::from_secs(5), || recorder.recorded_len() == 1),
         "observer never received the Err source reply",
     );
-    let observed = recorder.lock().unwrap()[0].clone();
+    let observed = recorder.snapshot()[0].clone();
     match observed.input {
         aether_data::Ref::Inline(TestReadResult::Err { message }) => {
             assert!(message.contains("failed"), "got {message}");
@@ -500,7 +497,7 @@ fn dag_executor_cancels_running_dag() {
                 query_status(&registry, &rx, dag_id, 100),
                 StatusResult::Failed { ref error, .. } if error == "cancelled"
             )));
-            assert_eq!(recorder.lock().unwrap().len(), 0);
+            assert_eq!(recorder.recorded_len(), 0);
         }
         CancelResult::Ok { cancelled: false } => {
             assert!(matches!(
@@ -509,9 +506,7 @@ fn dag_executor_cancels_running_dag() {
             ));
             // DAG completed normally; observer mail may be in flight.
             // Settle it before chassis drop.
-            let _ = poll_until(Duration::from_secs(5), || {
-                recorder.lock().unwrap().len() == 1
-            });
+            let _ = poll_until(Duration::from_secs(5), || recorder.recorded_len() == 1);
         }
         CancelResult::Err { error } => panic!("cancel errored: {error}"),
     }
@@ -572,9 +567,7 @@ fn dag_executor_status_reports_running() {
     // The observer dispatch is fire-and-forget after `Complete`; wait for
     // it to land before tearing down so no armed OwnedDispatch is dropped
     // inside a worker's TLS destructor (ADR-0094 settlement-obligation).
-    let _ = poll_until(Duration::from_secs(5), || {
-        recorder.lock().unwrap().len() == 1
-    });
+    let _ = poll_until(Duration::from_secs(5), || recorder.recorded_len() == 1);
 
     drop(chassis);
 }
@@ -625,9 +618,7 @@ fn dag_executor_status_reports_complete_then_reaps() {
         StatusResult::Complete { .. }
     )));
     // Settle the observer mail before retention expiry triggers the reap.
-    let _ = poll_until(Duration::from_secs(5), || {
-        recorder.lock().unwrap().len() == 1
-    });
+    let _ = poll_until(Duration::from_secs(5), || recorder.recorded_len() == 1);
 
     thread::sleep(Duration::from_millis(120));
     let unknown = poll_until(Duration::from_secs(5), || {
@@ -758,7 +749,7 @@ fn dag_executor_call_times_out_nonsettling_cap() {
         )
     });
     assert!(failed, "non-settling Call should fail on timeout");
-    assert_eq!(recorder.lock().unwrap().len(), 0);
+    assert_eq!(recorder.recorded_len(), 0);
 
     // SAFETY: nextest runs each test in its own process; no sibling
     // thread reads this env var concurrently.
@@ -848,11 +839,10 @@ fn run_call_dag_to(
 ) -> Bundle {
     let _dag = submit_call_dag(registry, rx, call_mbx);
     assert!(
-        poll_until(Duration::from_secs(8), || recorder.lock().unwrap().len()
-            == 1),
+        poll_until(Duration::from_secs(8), || recorder.recorded_len() == 1),
         "bundle observer never ran",
     );
-    let observed = recorder.lock().unwrap()[0].clone();
+    let observed = recorder.snapshot()[0].clone();
     match observed.input {
         aether_data::Ref::Inline(bundle) => bundle,
         aether_data::Ref::Handle { .. } => panic!("bundle slot should be resolved inline"),
@@ -936,11 +926,10 @@ fn transform_invoke_resolves_handle() {
     );
 
     assert!(
-        poll_until(Duration::from_secs(5), || recorder.lock().unwrap().len()
-            == 1),
+        poll_until(Duration::from_secs(5), || recorder.recorded_len() == 1),
         "observer never received the transform output",
     );
-    let observed = recorder.lock().unwrap()[0].clone();
+    let observed = recorder.snapshot()[0].clone();
     assert_eq!(
         observed.input,
         aether_data::Ref::Inline(TestNumber { value: 42, tag: 0 }),
@@ -977,7 +966,7 @@ fn transform_panic_fails_node() {
     });
     assert!(failed, "panicking transform should fail the node");
     assert_eq!(
-        recorder.lock().unwrap().len(),
+        recorder.recorded_len(),
         0,
         "downstream observer must not run on a failed transform",
     );
@@ -994,7 +983,7 @@ fn transform_panic_fails_node() {
         query_status(&registry, &rx, dag2, 101),
         StatusResult::Complete { .. }
     )));
-    assert_eq!(recorder2.lock().unwrap().len(), 1);
+    assert_eq!(recorder2.recorded_len(), 1);
 
     drop(chassis);
 }
@@ -1139,26 +1128,24 @@ fn transform_skips_invoke_on_cache_hit() {
     // so it is NOT part of the submit chain `Complete` gates on — poll for
     // its async effect rather than asserting it the instant Complete lands.
     assert!(
-        poll_until(Duration::from_secs(5), || recorder.lock().unwrap().len()
-            == 1),
+        poll_until(Duration::from_secs(5), || recorder.recorded_len() == 1),
         "first seed DAG observer should run",
     );
 
     // Second DAG: same transform, same (empty) inputs -> same
     // content-address -> cache hit -> no second invoke.
-    recorder.lock().unwrap().clear();
+    recorder.clear_recorded();
     let dag2 = submit_ok(&registry, &rx, seed_dag(), 2);
     assert!(poll_until(Duration::from_secs(5), || matches!(
         query_status(&registry, &rx, dag2, 101),
         StatusResult::Complete { .. }
     )));
     assert!(
-        poll_until(Duration::from_secs(5), || recorder.lock().unwrap().len()
-            == 1),
+        poll_until(Duration::from_secs(5), || recorder.recorded_len() == 1),
         "second seed DAG observer should still resolve from cache",
     );
     assert_eq!(
-        recorder.lock().unwrap()[0].input,
+        recorder.snapshot()[0].input,
         aether_data::Ref::Inline(TestNumber { value: 7, tag: 0 }),
     );
 
@@ -1225,7 +1212,7 @@ fn transform_runs_off_executor_thread() {
         "the executor must advance a sibling DAG while a transform blocks off-thread",
     );
     assert_eq!(
-        recorder.lock().unwrap()[0].input,
+        recorder.snapshot()[0].input,
         aether_data::Ref::Inline(TestNumber { value: 8, tag: 0 }),
     );
 
