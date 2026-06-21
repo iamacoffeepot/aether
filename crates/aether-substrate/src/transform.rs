@@ -7,10 +7,10 @@
 //! lifetime — a transform set is a build-time property, not a load-time
 //! one.
 //!
-//! The validator's dispatchability phase cross-checks each
-//! `Transform { transform_id, output_kind_id }` node against this
-//! registry (unknown id → `DagError::UnknownTransform`, output-kind
-//! mismatch → `DagError::TransformOutputMismatch`). Post-validation
+//! The `aether.nfs` `fetch` verb cross-checks a caller's fold chain
+//! against this registry via [`TransformRegistry::validate_fold`]
+//! (unknown id, non-linear arity, or an adjacent-pair kind mismatch →
+//! a structured [`FoldError`]) before any transform runs. Post-validation
 //! lookup is an infallible hashmap hit.
 
 use std::collections::HashMap;
@@ -94,7 +94,7 @@ impl TransformRegistry {
         };
         if let Some(prior) = by_id.insert(entry.transform_id, registered) {
             tracing::warn!(
-                target: "aether::dag::transform_registry",
+                target: "aether::transform",
                 transform_id = %entry.transform_id,
                 kept = prior.name,
                 dropped = entry.name,

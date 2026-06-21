@@ -30,20 +30,19 @@ use aether_data::MailId;
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::wire;
 use aether_data::{
-    DagId, EngineId, HandleId, Kind, KindDescriptor, KindId, MailboxId, ScopePathError, Tag, Uuid,
-    mailbox_id_from_name, mailbox_id_from_path, tagged_id, validate_scope_path,
+    EngineId, HandleId, Kind, KindDescriptor, KindId, MailboxId, ScopePathError, Tag, Uuid,
+    mailbox_id_from_path, tagged_id, validate_scope_path,
 };
 use aether_data::{EnumVariant, Primitive, SchemaType};
-use aether_kinds::dag::{DagDescriptor, Edge, Node, NodeId};
 use aether_kinds::{
-    BinarySelector, Cancel, CancelResult, CaptureFrame, CaptureFrameResult, ComponentCapabilities,
-    ComponentSelector, CostTail, CostTailResult, DeathReason, FrameCheck, FrameReduction,
-    ListComponentBinaries, ListComponentBinariesResult, ListComponents, ListComponentsResult,
-    ListEngineBinaries, ListEngineBinariesResult, ListEngines, ListEnginesResult, ListKinds,
-    ListKindsResult, LoadComponent, LoadResult, NamedMail, ReplaceComponent, ReplaceResult,
-    ResolveComponent, ResolveComponentResult, SimilarityCheck, SpawnEngine, SpawnEngineResult,
-    Status, StatusResult, Submit, SubmitResult, TerminateEngine, TerminateEngineResult,
-    UploadBinary, UploadBinaryResult, UploadComponent, UploadComponentResult,
+    BinarySelector, CaptureFrame, CaptureFrameResult, ComponentCapabilities, ComponentSelector,
+    CostTail, CostTailResult, DeathReason, FrameCheck, FrameReduction, ListComponentBinaries,
+    ListComponentBinariesResult, ListComponents, ListComponentsResult, ListEngineBinaries,
+    ListEngineBinariesResult, ListEngines, ListEnginesResult, ListKinds, ListKindsResult,
+    LoadComponent, LoadResult, NamedMail, ReplaceComponent, ReplaceResult, ResolveComponent,
+    ResolveComponentResult, SimilarityCheck, SpawnEngine, SpawnEngineResult, TerminateEngine,
+    TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent,
+    UploadComponentResult,
     trace::{
         DescribeTreeResult, DispatchTraced, DispatchTracedAck, MailNodeWire, TRACE_MAILBOX_NAME,
         TraceTail, TraceTailResult,
@@ -62,13 +61,12 @@ use crate::args::ActorLogsArgs;
 use crate::args::ActorLogsResponse;
 use crate::args::{ActorCostArgs, ActorCostResponse, ActorCostRow};
 use crate::args::{
-    CaptureCheckSpec, CaptureFrameArgs, CaptureMailSpec, ComponentSpec, DagCancelArgs,
-    DagDescriptorArg, DagStatusArgs, DeadEngineInfo, DescribeComponentArgs, DescribeHandlersArgs,
-    DescribeHandlersResponse, DescribeHandlesArgs, DescribeHandlesResponse, DescribeKindsArgs,
-    EngineInfo, HandleSummaryJson, KindSummary, ListBinariesArgs, ListComponentsArgs,
-    ListEnginesResponse, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, MailStatus,
-    NativeCapHandlers, NativeHandlerJson, NodeArg, ReplaceComponentArgs, ReplyEventJson,
-    SendMailArgs, SendMailTracedArgs, SendMailTracedResponse, SpawnSubstrateArgs, SubmitDagArgs,
+    CaptureCheckSpec, CaptureFrameArgs, CaptureMailSpec, ComponentSpec, DeadEngineInfo,
+    DescribeComponentArgs, DescribeHandlersArgs, DescribeHandlersResponse, DescribeHandlesArgs,
+    DescribeHandlesResponse, DescribeKindsArgs, EngineInfo, HandleSummaryJson, KindSummary,
+    ListBinariesArgs, ListComponentsArgs, ListEnginesResponse, LoadComponentArgs, MailIdJson,
+    MailNodeJson, MailSpec, MailStatus, NativeCapHandlers, NativeHandlerJson, ReplaceComponentArgs,
+    ReplyEventJson, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse, SpawnSubstrateArgs,
     TerminateSubstrateArgs, TracedMailSpec, TransformListing, UploadBinaryArgs,
     UploadComponentArgs,
 };
@@ -102,8 +100,6 @@ const COMPONENT_CAP: &str = "aether.component";
 const RENDER_CAP: &str = "aether.render";
 /// Mailbox name of a substrate's handle-store cap (ADR-0045 / ADR-0049).
 const HANDLE_CAP: &str = "aether.handle";
-/// Mailbox name of a substrate's DAG-executor cap (ADR-0047).
-const DAG_CAP: &str = "aether.dag";
 /// Mailbox name of a substrate's reverse-lookup inventory cap
 /// (ADR-0088 §6) — the `aether.inventory.manifest` / `resolve` target.
 const INVENTORY_CAP: &str = "aether.inventory";
@@ -1240,122 +1236,6 @@ impl Mcp {
         };
         json(&response)
     }
-
-    #[tool(
-        description = "Submit a computation DAG to a substrate (ADR-0047). Validation runs SYNCHRONOUSLY on this call: returns {dag_id, output_handles:[{node_id, handle_id}]} once the descriptor passes, or {error: <DagError>} immediately on a bad descriptor (cycle, unknown sink/recipient, kind-not-accepted, etc.) — no dag_id minted, nothing dispatched. Sources execute asynchronously AFTER this ack; the returned output_handles are the per-node handle ids (allocated at submit) you can stamp into downstream Ref<K> slots before their values resolve. Poll dag_status for execution state. The descriptor is JSON encoded against the aether.dag.descriptor kind schema (see describe_kinds): each Source carries a virtual `payload_path` (a filesystem path readable by this process) that submit_dag reads and substitutes into the wire `payload` bytes — so large source payloads stage to a file instead of bloating the tool call. timeout_ms (default 5000) guards a hung validator, not normal latency."
-    )]
-    pub async fn submit_dag(
-        &self,
-        Parameters(args): Parameters<SubmitDagArgs>,
-    ) -> Result<String, McpError> {
-        let engine = parse_engine_id(&args.engine_id)?;
-        // Build the wire descriptor from the typed arg, reading each
-        // Source's `payload_path` into the wire `payload` bytes. A read
-        // failure surfaces as a clean invalid-params error and never
-        // touches the wire.
-        let descriptor = build_descriptor(args.descriptor)
-            .await
-            .map_err(|e| McpError::invalid_params(format!("submit_dag descriptor: {e}"), None))?;
-        // Encode via the kind's wire encode — ids serialize in their u64
-        // form, matching the substrate's decode.
-        let payload = Submit { descriptor }.encode_into_bytes();
-        let envelope = MailEnvelope {
-            to: MailboxAddress {
-                engine: Some(engine),
-                // Runtime-name routing: the out-of-process MCP harness addresses
-                // the dag cap by its well-known wire name (no in-process actor
-                // type to resolve through).
-                #[allow(clippy::disallowed_methods)]
-                mailbox: mailbox_id_from_name(DAG_CAP),
-            },
-            from: None,
-            kind: Submit::ID,
-            correlation_id: None,
-            payload,
-        };
-        let timeout_ms = args.timeout_ms.unwrap_or(5000);
-        let reply = match time::timeout(
-            Duration::from_millis(u64::from(timeout_ms)),
-            self.session.call_one(envelope),
-        )
-        .await
-        {
-            Ok(Ok(reply)) => reply,
-            Ok(Err(e)) => return Err(internal(e)),
-            Err(_) => {
-                return Err(internal_msg(
-                    "submit_dag timed out waiting for the validation verdict",
-                ));
-            }
-        };
-        match SubmitResult::decode_from_bytes(&reply.payload) {
-            Some(SubmitResult::Ok {
-                dag_id,
-                output_handles,
-            }) => {
-                let handles: Vec<serde_json::Value> = output_handles
-                    .iter()
-                    .map(|h| {
-                        serde_json::json!({
-                            "node_id": h.node_id.0,
-                            "handle_id": tagged_id::encode(h.handle_id.0)
-                                .unwrap_or_else(|| h.handle_id.0.to_string()),
-                        })
-                    })
-                    .collect();
-                json(&serde_json::json!({
-                    "dag_id": tagged_id::encode(dag_id.0)
-                        .unwrap_or_else(|| dag_id.0.to_string()),
-                    "output_handles": handles,
-                }))
-            }
-            Some(SubmitResult::Err { error }) => json(&serde_json::json!({ "error": error })),
-            None => Err(internal_msg("undecodable SubmitResult")),
-        }
-    }
-
-    #[tool(
-        description = "Poll a submitted DAG's execution status by its dag_id (ADR-0047). Returns the discriminated-union variant directly: \"Pending\" (acked, no source dispatched yet — transient), {\"Running\": {progress:[{node_id, state}]}}, {\"Complete\": {outputs:[{node_id, handle_id}]}}, or {\"Failed\": {node_id, error}}. Validation failures already came back synchronously on submit_dag, so this only ever reports execution-time failures (a source/Call timeout, a malformed reply) — or, for an unknown/reaped dag_id, a Failed with error \"unknown dag …\"."
-    )]
-    pub async fn dag_status(
-        &self,
-        Parameters(args): Parameters<DagStatusArgs>,
-    ) -> Result<String, McpError> {
-        let engine = parse_engine_id(&args.engine_id)?;
-        let dag_id = parse_dag_id(&args.dag_id)?;
-        let reply = self
-            .session
-            .call_one(engine_envelope(engine, DAG_CAP, &Status { dag_id }))
-            .await
-            .map_err(internal)?;
-        StatusResult::decode_from_bytes(&reply.payload).map_or_else(
-            || Err(internal_msg("undecodable StatusResult")),
-            |result| json(&result),
-        )
-    }
-
-    #[tool(
-        description = "Cancel an in-flight DAG by its dag_id (ADR-0047 §5). Returns {\"cancelled\": true} for a still-running DAG (its parked downstream mail is dropped; in-flight cap calls complete server-side but their results discard), {\"cancelled\": false} if it had already completed, or an error for an unknown dag_id."
-    )]
-    pub async fn dag_cancel(
-        &self,
-        Parameters(args): Parameters<DagCancelArgs>,
-    ) -> Result<String, McpError> {
-        let engine = parse_engine_id(&args.engine_id)?;
-        let dag_id = parse_dag_id(&args.dag_id)?;
-        let reply = self
-            .session
-            .call_one(engine_envelope(engine, DAG_CAP, &Cancel { dag_id }))
-            .await
-            .map_err(internal)?;
-        match CancelResult::decode_from_bytes(&reply.payload) {
-            Some(CancelResult::Ok { cancelled }) => {
-                json(&serde_json::json!({ "cancelled": cancelled }))
-            }
-            Some(CancelResult::Err { error }) => Err(internal_msg(&error)),
-            None => Err(internal_msg("undecodable CancelResult")),
-        }
-    }
 }
 
 impl Mcp {
@@ -1795,8 +1675,8 @@ impl Mcp {
     /// the ids that the static map misses, resolves them in one batched
     /// `aether.inventory.resolve` query, then renders each `MailNodeWire`
     /// through the now-populated map — falling back to the ADR-0064 hex
-    /// tag for any id that resolves to nothing. `Handle` / `Dag` ids stay
-    /// hex (they never enter the reverse map).
+    /// tag for any id that resolves to nothing. `Handle` ids stay hex
+    /// (they never enter the reverse map).
     async fn render_mail_nodes(
         &self,
         engine: EngineId,
@@ -2092,14 +1972,6 @@ fn parse_mailbox_id(s: &str) -> Result<MailboxId, McpError> {
         .map_err(|e| McpError::invalid_params(format!("mailbox_id: {e}"), None))
 }
 
-/// Parse a tagged DAG-id string (`dag-…`, ADR-0064/0065) into a
-/// `DagId`.
-fn parse_dag_id(s: &str) -> Result<DagId, McpError> {
-    tagged_id::decode_with_tag(s, Tag::Dag)
-        .map(DagId)
-        .map_err(|e| McpError::invalid_params(format!("dag_id: {e}"), None))
-}
-
 /// Parse a kind-id string for the `actor_cost` filter: a tagged
 /// `knd-…` id (ADR-0064) or a raw decimal `u64`. The raw form is
 /// accepted because a cost row's id round-trips back through this
@@ -2262,86 +2134,6 @@ fn decode_traced_ack(events: &[MailEnvelope]) -> Result<MailId, McpError> {
 fn strip_ack(events: &[MailEnvelope]) -> &[MailEnvelope] {
     events.get(1..).unwrap_or(&[])
 }
-
-/// Build the wire [`DagDescriptor`] from the typed tool arg, reading each
-/// `Source`'s `payload_path` into the wire `payload` bytes. The wire kind
-/// never learns about filesystem paths — the path is a tool-layer
-/// convenience resolved here; `payload_path` takes precedence over an
-/// inline `payload`. The tagged-string ids were already parsed into their
-/// typed `MailboxId` / `KindId` / `TransformId` form during arg
-/// deserialization, so this is a straight move + a file read.
-async fn build_descriptor(arg: DagDescriptorArg) -> anyhow::Result<DagDescriptor> {
-    let mut nodes = Vec::with_capacity(arg.nodes.len());
-    for node in arg.nodes {
-        let wire = match node {
-            NodeArg::Source {
-                id,
-                mailbox,
-                kind_id,
-                payload_path,
-                payload,
-            } => {
-                let payload = match payload_path {
-                    Some(path) => fs::read(&path)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("reading payload_path {path:?}: {e}"))?,
-                    None => payload.unwrap_or_default(),
-                };
-                Node::Source {
-                    id: NodeId(id),
-                    mailbox,
-                    kind_id,
-                    payload,
-                }
-            }
-            NodeArg::Transform {
-                id,
-                transform_id,
-                output_kind_id,
-                timeout_ms,
-            } => Node::Transform {
-                id: NodeId(id),
-                transform_id,
-                output_kind_id,
-                timeout_ms,
-            },
-            NodeArg::Call {
-                id,
-                recipient,
-                kind_id,
-            } => Node::Call {
-                id: NodeId(id),
-                recipient,
-                kind_id,
-            },
-            NodeArg::Observer {
-                id,
-                recipient,
-                kind_id,
-            } => Node::Observer {
-                id: NodeId(id),
-                recipient,
-                kind_id,
-            },
-        };
-        nodes.push(wire);
-    }
-    let edges = arg
-        .edges
-        .into_iter()
-        .map(|e| Edge {
-            from: NodeId(e.from),
-            to: NodeId(e.to),
-            slot: e.slot,
-        })
-        .collect();
-    Ok(DagDescriptor {
-        version: arg.version,
-        nodes,
-        edges,
-    })
-}
-
 impl Mcp {
     /// Encode a `send_mail_traced` batch into the same `NamedMail`
     /// shape `CaptureFrame` carries: name-level addressing + schema-
@@ -2983,7 +2775,7 @@ fn level_to_str(level: u8) -> &'static str {
 
 #[cfg(test)]
 // Test-setup unwraps (tagged-id encode of literal ids, JSON build) panic
-// on failure, which is the assertion; the DAG-tool fixtures lean on them.
+// on failure, which is the assertion.
 // Test fixtures derive taggable mailbox ids by name to exercise the
 // tagged-string wire round-trip — reference id derivation, not sibling-cap
 // addressing.
@@ -3001,11 +2793,16 @@ mod tests {
     };
     use aether_capabilities::trace::TraceDispatchCapability;
     use aether_capabilities::{EngineConfig, EngineServer};
+    use aether_data::{mailbox_id_from_name, with_tag};
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::handle_store::HandleStore;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
+    use std::path::PathBuf;
+    use std::process;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{env as std_env, fs as std_fs};
 
     use crate::args::ActorLogsArgs;
     use crate::args::DescribeHandlesArgs;
@@ -3056,7 +2853,7 @@ mod tests {
 
     /// Write `bytes` to a unique temp file for the `$file` embed tests.
     /// The `std_env` / `std_fs` aliases avoid shadowing the module's
-    /// `tokio::fs`; same pattern as `stage_temp_file`.
+    /// `tokio::fs`.
     fn stage_blob_file(tag: &str, bytes: &[u8]) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -4106,263 +3903,6 @@ mod tests {
             result.is_err(),
             "a malformed engine_id should be a tool error"
         );
-    }
-
-    // DAG tools (issue 977).
-
-    use crate::args::{DagCancelArgs, DagStatusArgs, SubmitDagArgs};
-    use aether_data::with_tag;
-    use aether_kinds::{DagDescriptor, Edge, Node, NodeId, Submit};
-    use std::path::PathBuf;
-    use std::process;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use std::{env as std_env, fs as std_fs};
-
-    /// Write `bytes` to a unique temp file and return its path. nextest's
-    /// process-per-test isolation keeps the filename collision-free
-    /// across the suite; the `pid + nanos` suffix guards within a process.
-    fn stage_temp_file(tag: &str, bytes: &[u8]) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let path = std_env::temp_dir().join(format!(
-            "aether-mcp-dag-{tag}-{}-{nanos}.bin",
-            process::id()
-        ));
-        std_fs::write(&path, bytes).expect("stage temp file");
-        path
-    }
-
-    /// The typed-arg path (`DagDescriptorArg` deserialize + `payload_path`
-    /// file read + native `encode_into_bytes`) produces the exact same
-    /// canonical bytes as a direct `#[derive(Kind)]` encode of the same
-    /// descriptor with the bytes inlined. Locks against encoding skew.
-    #[tokio::test]
-    async fn submit_dag_encodes_descriptor() {
-        let source_mbx = mailbox_id_from_name("aether.fs");
-        let observer_mbx = mailbox_id_from_name("aether.render");
-        // Use real registered kind ids so the tagged-string round-trip is
-        // exercised against the actual TypeId encode arm.
-        let source_kind = aether_kinds::Read::ID;
-        let observer_kind = aether_kinds::DrawTriangle::ID;
-        let payload_bytes = vec![0x01u8, 0x02, 0x03, 0xFF, 0x00, 0x42];
-
-        // Expected: a typed DagDescriptor with the payload inlined,
-        // wrapped in Submit and encoded via the Kind derive.
-        let expected_descriptor = DagDescriptor {
-            version: 1,
-            nodes: vec![
-                Node::Source {
-                    id: NodeId(0),
-                    mailbox: source_mbx,
-                    kind_id: source_kind,
-                    payload: payload_bytes.clone(),
-                },
-                Node::Observer {
-                    id: NodeId(1),
-                    recipient: observer_mbx,
-                    kind_id: observer_kind,
-                },
-            ],
-            edges: vec![Edge {
-                from: NodeId(0),
-                to: NodeId(1),
-                slot: 0,
-            }],
-        };
-        let expected = Submit {
-            descriptor: expected_descriptor,
-        }
-        .encode_into_bytes();
-
-        // Tool path: typed descriptor with a `payload_path` virtual field
-        // on the source, externally-tagged variants, tagged-string ids,
-        // and plain-integer node ids (no `{ "0": n }` schema wrapping).
-        let path = stage_temp_file("encode", &payload_bytes);
-        let descriptor_json = serde_json::json!({
-            "version": 1,
-            "nodes": [
-                { "Source": {
-                    "id": 0,
-                    "mailbox": tagged_id::encode(source_mbx.0).unwrap(),
-                    "kind_id": tagged_id::encode(source_kind.0).unwrap(),
-                    "payload_path": path.to_str().unwrap(),
-                }},
-                { "Observer": {
-                    "id": 1,
-                    "recipient": tagged_id::encode(observer_mbx.0).unwrap(),
-                    "kind_id": tagged_id::encode(observer_kind.0).unwrap(),
-                }},
-            ],
-            "edges": [ { "from": 0, "to": 1, "slot": 0 } ],
-        });
-        let arg: DagDescriptorArg =
-            serde_json::from_value(descriptor_json).expect("descriptor deserializes");
-        let actual = Submit {
-            descriptor: build_descriptor(arg).await.expect("payload_path resolves"),
-        }
-        .encode_into_bytes();
-
-        std_fs::remove_file(&path).ok();
-        assert_eq!(
-            actual, expected,
-            "typed tool path + native encode must match the binary inline-bytes encode",
-        );
-    }
-
-    /// A `Source` carrying an inline `payload` byte array (no
-    /// `payload_path`) is left untouched by `resolve_payload_paths` and
-    /// encodes identically to the typed form.
-    #[tokio::test]
-    async fn submit_dag_inline_payload_encodes() {
-        let source_mbx = mailbox_id_from_name("aether.fs");
-        let source_kind = aether_kinds::Read::ID;
-        let payload_bytes = vec![9u8, 8, 7];
-        let expected = Submit {
-            descriptor: DagDescriptor {
-                version: 1,
-                nodes: vec![Node::Source {
-                    id: NodeId(0),
-                    mailbox: source_mbx,
-                    kind_id: source_kind,
-                    payload: payload_bytes.clone(),
-                }],
-                edges: vec![],
-            },
-        }
-        .encode_into_bytes();
-
-        let descriptor_json = serde_json::json!({
-            "version": 1,
-            "nodes": [
-                { "Source": {
-                    "id": 0,
-                    "mailbox": tagged_id::encode(source_mbx.0).unwrap(),
-                    "kind_id": tagged_id::encode(source_kind.0).unwrap(),
-                    "payload": payload_bytes,
-                }},
-            ],
-            "edges": [],
-        });
-        let arg: DagDescriptorArg =
-            serde_json::from_value(descriptor_json).expect("descriptor deserializes");
-        let actual = Submit {
-            descriptor: build_descriptor(arg).await.expect("inline payload builds"),
-        }
-        .encode_into_bytes();
-        assert_eq!(actual, expected);
-    }
-
-    /// A cast-only kind — `#[repr(C)]` + `bytemuck::Pod`, no
-    /// `serde::Serialize` impl (`LifecycleSubscribe`) — rides the send
-    /// builders, which bound `K: Kind` (not `K: Kind + Serialize`) and
-    /// encode via the descriptor-aware `encode_into_bytes`. The payload
-    /// is the kind's cast image (length == `size_of`, distinct from a
-    /// wire varint encode of these `u64`s) and round-trips through
-    /// `Kind::decode_from_bytes`. Compiling at all is the bound check:
-    /// the old `serde::Serialize` bound would reject this kind.
-    #[test]
-    fn send_builders_encode_a_cast_only_kind() {
-        let mail = aether_kinds::LifecycleSubscribe {
-            stage: u64::MAX,
-            mailbox: 0x0102_0304_0506_0708,
-        };
-        let cast_bytes = mail.encode_into_bytes();
-        assert_eq!(
-            cast_bytes.len(),
-            size_of::<aether_kinds::LifecycleSubscribe>(),
-            "cast image is the fixed struct size, not a wire varint encode",
-        );
-
-        let local = local_envelope("aether.lifecycle", &mail);
-        assert_eq!(local.kind, aether_kinds::LifecycleSubscribe::ID);
-        assert_eq!(local.payload, cast_bytes);
-        assert_eq!(
-            aether_kinds::LifecycleSubscribe::decode_from_bytes(&local.payload),
-            Some(mail),
-        );
-
-        let engine = EngineId(Uuid::from_u128(0x1232_dead_beef));
-        let by_id = engine_envelope_by_id(engine, mailbox_id_from_name("aether.lifecycle"), &mail);
-        assert_eq!(by_id.kind, aether_kinds::LifecycleSubscribe::ID);
-        assert_eq!(by_id.payload, cast_bytes);
-        assert_eq!(
-            aether_kinds::LifecycleSubscribe::decode_from_bytes(&by_id.payload),
-            Some(mail),
-        );
-    }
-
-    /// `submit_dag` with a `payload_path` that doesn't exist returns a
-    /// structured tool error before any call hits the engine.
-    #[tokio::test]
-    async fn submit_dag_rejects_missing_payload_path() {
-        let (_chassis, port) = boot_hub();
-        let mcp = connect_mcp(port);
-        let source_mbx = mailbox_id_from_name("aether.fs");
-        let descriptor: DagDescriptorArg = serde_json::from_value(serde_json::json!({
-            "version": 1,
-            "nodes": [
-                { "Source": {
-                    "id": 0,
-                    "mailbox": tagged_id::encode(source_mbx.0).unwrap(),
-                    "kind_id": tagged_id::encode(aether_kinds::Read::ID.0).unwrap(),
-                    "payload_path": "/nonexistent/aether-dag-source.bin",
-                }},
-            ],
-            "edges": [],
-        }))
-        .expect("descriptor deserializes");
-        let result = mcp
-            .submit_dag(Parameters(SubmitDagArgs {
-                engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
-                descriptor,
-                timeout_ms: None,
-            }))
-            .await;
-        assert!(
-            result.is_err(),
-            "a missing payload_path should be a tool error before any RPC",
-        );
-    }
-
-    /// `dag_status` / `dag_cancel` reject a malformed (non-`dag-…`)
-    /// `dag_id` at the tool boundary, before any RPC.
-    #[tokio::test]
-    async fn dag_status_and_cancel_reject_bad_dag_id() {
-        let (_chassis, port) = boot_hub();
-        let mcp = connect_mcp(port);
-        let status = mcp
-            .dag_status(Parameters(DagStatusArgs {
-                engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
-                dag_id: "not-a-dag-id".to_owned(),
-            }))
-            .await;
-        assert!(status.is_err(), "malformed dag_id is a tool error");
-        let cancel = mcp
-            .dag_cancel(Parameters(DagCancelArgs {
-                engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
-                dag_id: "mbx-aaaa-aaaa-aaaa".to_owned(),
-            }))
-            .await;
-        assert!(
-            cancel.is_err(),
-            "a mailbox-tagged id is not a dag id — tool error",
-        );
-    }
-
-    /// `dag_status` / `dag_cancel` reject a malformed `engine_id` at the
-    /// tool boundary.
-    #[tokio::test]
-    async fn dag_tools_reject_bad_engine_id() {
-        let (_chassis, port) = boot_hub();
-        let mcp = connect_mcp(port);
-        let status = mcp
-            .dag_status(Parameters(DagStatusArgs {
-                engine_id: "not-a-uuid".to_owned(),
-                dag_id: tagged_id::encode(with_tag(Tag::Dag, 1)).unwrap(),
-            }))
-            .await;
-        assert!(status.is_err(), "malformed engine_id is a tool error");
     }
 
     /// Issue 1242 / 1246: `decode_reply_events` transcodes a correlated

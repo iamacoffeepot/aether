@@ -108,8 +108,8 @@ to narrow the listing to a kind family. Pass `full: true` to get the full nested
 `SchemaType` (useful for codec-exact work); combine with `prefix` to keep the payload
 bounded. `describe_component` reports a loaded component's handler kinds, their docs,
 whether it has a fallback, and its boot-config kind. `describe_transforms` lists the
-native transforms a DAG can wire; `describe_handles` inspects the persistent handle
-store.
+native transforms registered at link time; `describe_handles` inspects the persistent
+handle store.
 
 **Components.** `load_component` and `replace_component` take a filesystem **path** to
 the `.wasm` — the tool reads the bytes; you never inline a wasm buffer through a tool
@@ -129,19 +129,14 @@ re-reading. Only in-actor `tracing::*` events reach a ring — see
 (mean and MAD in nanoseconds, plus a sample count); pass a `kind_id` to filter to
 one handler.
 
-**Computation DAG.** `submit_dag` validates a descriptor synchronously (you get the
-verdict and the output handle ids immediately) and then executes the sources
-asynchronously; `dag_status` polls execution, `dag_cancel` stops an in-flight DAG.
-
 ## Conventions that bite
 
 - **Mailbox vs kind.** `recipient_name` is the mailbox; `kind_name` is the payload.
   They route independently even when they share a prefix — send the kind
   `aether.audio.note_on` to the mailbox `aether.audio`. See
   [Mail, kinds & scheduling](systems/mail-and-kinds.md).
-- **Paths, not bytes.** `load_component`, `replace_component`, and a DAG source's
-  payload take a filesystem path the harness reads. Tool JSON never carries the wasm
-  or payload buffer itself.
+- **Paths, not bytes.** `load_component` and `replace_component` take a filesystem
+  path the harness reads. Tool JSON never carries the wasm buffer itself.
 - **Wire ids are tagged strings.** Mailbox, kind, and handle ids come back as
   `mbx-…`, `knd-…`, `hdl-…` — hand them back verbatim, don't reformat or parse them.
   See [The type system](foundations/type-system.md).
@@ -163,7 +158,6 @@ asynchronously; `dag_status` polls execution, `dag_cancel` stops an in-flight DA
 - The ids and schemas the tools hand around — [The type system](foundations/type-system.md).
 - Loading, replacing, and inspecting components — [Components & lifecycle](systems/components.md).
 - Settlement and the trace tree behind `send_mail_traced` — [Tracing & settlement](systems/tracing-and-settlement.md).
-- The computation DAG the `*_dag` tools drive — [The computation DAG](systems/dag.md).
 - The handle store `describe_handles` inspects — [Handles](systems/handles.md).
 - Adding your own tool to this surface — [Wiring an MCP tool](recipes/wiring-an-mcp-tool.md).
 - The operational reference — ports, env overrides, `restart-hub` — `CLAUDE.md`.

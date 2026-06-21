@@ -28,7 +28,7 @@ use aether_capabilities::lifecycle::LifecycleGraphData;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
-    DagCapability, FsCapability, GeminiCapability, GeminiConfig, HandleCapability, HttpCapability,
+    FsCapability, GeminiCapability, GeminiConfig, HandleCapability, HttpCapability,
     HttpServerCapability, HttpServerConfig, InputCapability, InputConfig, InventoryCapability,
     LifecycleConfig, NfsCapability, TcpCapability, TextCapability, UiCapability,
     fs::NamespaceRoots, http::HttpConfig, nfs::NfsRoot, trace::TraceDispatchCapability,
@@ -488,7 +488,6 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_ring_caps(boot.ring_caps)
         .with_actor::<HandleCapability>(())
         .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<DagCapability>(())
         .with_actor::<TrajectoryRecorderCapability>(())
         .with_actor::<InputCapability>(boot.input_config)
         .with_actor::<ComponentHostCapability>(boot.component_host_config)
@@ -523,7 +522,6 @@ pub fn common_cap_namespaces() -> Vec<&'static str> {
     vec![
         <HandleCapability as Addressable>::NAMESPACE,
         <TraceDispatchCapability as Addressable>::NAMESPACE,
-        <DagCapability as Addressable>::NAMESPACE,
         <TrajectoryRecorderCapability as Addressable>::NAMESPACE,
         <InputCapability as Addressable>::NAMESPACE,
         <ComponentHostCapability as Addressable>::NAMESPACE,

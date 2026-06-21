@@ -45,8 +45,6 @@ pub mod contentgen;
 // fns are tiny pure-Rust dead code on non-native builds.
 mod config_env;
 
-// `aether.dag` computation-DAG executor cap (ADR-0047, issue 976).
-pub mod dag;
 pub mod engine;
 pub mod fs;
 // `aether.nfs` filesystem actor (issue 2098). A read-only singleton standing
@@ -108,10 +106,11 @@ pub mod trampoline;
 // First-party native `#[transform]`s (ADR-0048, issue 1464). The
 // link-time inventory submission populates both the headless
 // `TransformRegistry` and `describe_transforms` — both native. Native-
-// only: the DAG executor that runs transforms is non-wasm, and the
-// `#[transform]` inventory entry is itself `cfg(not(wasm32))`-gated, so
-// on a wasm-header-only build the fn would be dead. No wasm consumer
-// runs transforms, so gate the whole module rather than carry it dead.
+// only: the `aether.nfs` `fetch` verb that runs transforms is non-wasm,
+// and the `#[transform]` inventory entry is itself `cfg(not(wasm32))`-
+// gated, so on a wasm-header-only build the fn would be dead. No wasm
+// consumer runs transforms, so gate the whole module rather than carry
+// it dead.
 // Holds only the generic `mat4_apply`; the space-time reachability
 // certifier transforms + their solver / corridor / counterfactual /
 // traffic / escapability cores moved to `aether-labyrinth` (issue 1908).
@@ -128,7 +127,6 @@ pub use audio::AudioConfig;
 #[cfg(not(target_arch = "wasm32"))]
 pub use anthropic::{AnthropicCapability, AnthropicConfig};
 pub use component::{ComponentHostCapability, resolve_embedded};
-pub use dag::DagCapability;
 // ADR-0050 §2 shared content-gen infrastructure. Native-only — the two
 // provider caps (issue 1014 / 1015) embed these.
 #[cfg(not(target_arch = "wasm32"))]

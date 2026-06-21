@@ -10,11 +10,12 @@
 
 // Force-link `aether-labyrinth` into this engine binary so its certifier
 // `#[transform]`s register in the link-time `aether_data::transforms()`
-// inventory the headless chassis's `DagCapability` builds its
-// `TransformRegistry` from (issue 1908). The bundle lib references only the
-// recorder cap (a different codegen member), so without this the linker
-// drops the transforms member and a reachability DAG fails validation with
-// no compile error. `as _` is the side-effect-linkage form, and the
+// inventory the chassis's `TransformRegistry` is built from (issue 1908) —
+// the registry the `aether.nfs` `fetch` verb resolves a caller's transform
+// chain against. The bundle lib references only the recorder cap (a
+// different codegen member), so without this the linker drops the
+// transforms member and those transforms silently vanish from the registry
+// with no compile error. `as _` is the side-effect-linkage form, and the
 // directive must live in this final-artifact root — it does not propagate
 // in from the bundle lib's own `extern crate`.
 extern crate aether_labyrinth as _;

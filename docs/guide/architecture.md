@@ -105,7 +105,7 @@ Two cross-cutting systems watch this flow without it opting in:
 
 The agent never touches the substrate directly. It calls MCP tools
 (`mcp__aether-hub__*`) — `spawn_substrate`, `load_component`, `send_mail`,
-`capture_frame`, `submit_dag`, and the introspection trio (`describe_kinds`,
+`capture_frame`, and the introspection trio (`describe_kinds`,
 `describe_component`, `describe_transforms`). The tunnel keeps the MCP session
 alive across hub restarts, so the agent can rebuild and relaunch the engine
 mid-task without re-initialising. The full tool list and the operational

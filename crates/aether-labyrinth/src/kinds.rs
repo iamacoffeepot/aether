@@ -716,8 +716,8 @@ mod tests {
         fn corridor_graph_schema_is_struct_of_two_vecs() {
             // The corridor graph is a flat DAG: a `Vec<CorridorNode>` and a
             // `Vec<CorridorEdge>`, both recursing into their element
-            // structs. A `Struct` schema (not a cast) is what the DAG
-            // validator and the hub codec read for the transform output.
+            // structs. A `Struct` schema (not a cast) is what the hub codec
+            // reads for the transform output.
             let SchemaType::Struct { fields, .. } = &<CorridorGraph as Schema>::SCHEMA else {
                 panic!("expected Struct");
             };
@@ -739,8 +739,7 @@ mod tests {
             // The resolution-depth result is a flat reduction: a scalar
             // `max_resolution_depth` and a `Vec<ForkDepth>`, the fork struct
             // recursing into two `u32` fields. A `Struct` schema (not a
-            // cast) is what the DAG validator and the hub codec read for the
-            // transform output.
+            // cast) is what the hub codec reads for the transform output.
             let SchemaType::Struct { fields, .. } = &<ResolutionDepth as Schema>::SCHEMA else {
                 panic!("expected Struct");
             };
@@ -769,8 +768,9 @@ mod tests {
         fn resolution_depth_id_distinct_from_corridor_kinds() {
             use aether_data::Kind;
             // The resolution-depth output shares no id with the corridor /
-            // reach kinds it composes with in a DAG — a collision would
-            // alias the transform's `Ref<ResolutionDepth>` output slot.
+            // reach kinds it composes with through `Ref<K>` slots — a
+            // collision would alias the transform's `Ref<ResolutionDepth>`
+            // output slot.
             let ids = [
                 ResolutionDepth::ID,
                 CorridorGraph::ID,
@@ -788,8 +788,8 @@ mod tests {
         fn corridor_graph_id_distinct_from_reach_kinds() {
             use aether_data::Kind;
             // The corridor output shares no id with the reachability kinds
-            // it composes with in a DAG — a collision would alias the
-            // transform's `Ref<CorridorGraph>` output slot.
+            // it composes with through `Ref<K>` slots — a collision would
+            // alias the transform's `Ref<CorridorGraph>` output slot.
             let ids = [
                 CorridorGraph::ID,
                 ScalarField::ID,
@@ -845,8 +845,8 @@ mod tests {
         fn crossing_classification_schema_is_struct_of_one_vec() {
             // A flat Vec-bearing struct (modeled on `CorridorGraph`): one
             // `Vec<CrossingVerdict>`, recursing into the verdict struct. A
-            // `Struct` schema (not a cast) is what the DAG validator and the
-            // hub codec read for the transform output.
+            // `Struct` schema (not a cast) is what the hub codec reads for
+            // the transform output.
             let SchemaType::Struct { fields, .. } = &<CrossingClassification as Schema>::SCHEMA
             else {
                 panic!("expected Struct");
@@ -876,8 +876,9 @@ mod tests {
         fn crossing_kinds_resolve_distinctly_from_reach_kinds() {
             use aether_data::Kind;
             // The two new crossing-query kinds share no id with the
-            // reachability / trajectory kinds they compose with in a DAG — a
-            // collision would alias the transform's Ref slots.
+            // reachability / trajectory kinds they compose with through
+            // `Ref<K>` slots — a collision would alias the transform's Ref
+            // slots.
             let ids = [
                 CrossingQueryParams::ID,
                 CrossingClassification::ID,
@@ -1004,8 +1005,8 @@ mod tests {
         #[test]
         fn traffic_density_schema_is_struct() {
             // The density is a flat reduction: three `Vec<u32>` plus three
-            // scalar `u32`s — a `Struct` schema the hub codec and DAG
-            // validator read for the transform output.
+            // scalar `u32`s — a `Struct` schema the hub codec reads for the
+            // transform output.
             let SchemaType::Struct { fields, .. } = &<TrafficDensity as Schema>::SCHEMA else {
                 panic!("expected Struct");
             };

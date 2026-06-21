@@ -5,7 +5,7 @@
 //! submission populates both surfaces with no extra wiring.
 //!
 //! These ship in the production binaries — they are not `#[cfg(test)]`
-//! like the DAG executor's `double` / `seed` fixtures.
+//! like the `aether.nfs` fetch fixtures' `double` / `seed` transforms.
 //!
 //! `mat4_apply` is ADR-0048's first first-party transform — a generic
 //! linear-algebra node, unrelated to reachability. The space-time

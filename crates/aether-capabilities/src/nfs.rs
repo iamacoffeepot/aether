@@ -45,7 +45,7 @@ mod native {
     };
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
-    use aether_substrate::dag::transform_registry::{FoldError, TransformRegistry};
+    use aether_substrate::transform::{FoldError, TransformRegistry};
 
     use crate::fs::{FileAdapter, LocalFileAdapter};
 
@@ -293,7 +293,6 @@ mod native {
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::actor::native::ctx::NativeCtx;
         use aether_substrate::chassis::builder::Builder;
-        use aether_substrate::dag::transform_registry::TransformRegistry;
         use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
@@ -301,15 +300,89 @@ mod native {
             InboxHandler, MailboxEntry, OwnedDispatch, Registry,
         };
         use aether_substrate::mail::{MailRef, Source, SourceAddr};
+        use aether_substrate::transform::TransformRegistry;
 
         use std::sync::Arc;
 
-        use crate::dag::test_support::{
-            TestNumber, boom_transform_id, double_transform_id, seed_transform_id,
-        };
         use crate::test_chassis::{TestChassis, cleanup, scratch_dir, test_mailer_and_rx};
 
+        use serde::{Deserialize, Serialize};
+
+        use aether_data::transform;
+
         use super::{LocalFileAdapter, NfsCapability, NfsRoot};
+
+        /// Structured number kind — the fetch-fold fixtures' transform
+        /// input + output. The extra `tag: u32` makes the `{ u64, u32 }`
+        /// shape canonically distinct from the test vocabulary's other
+        /// single-`u64` kinds so the resolved output `KindId` is unique.
+        #[derive(
+            Copy,
+            Clone,
+            Debug,
+            Default,
+            PartialEq,
+            Eq,
+            Serialize,
+            Deserialize,
+            aether_data::Kind,
+            aether_data::Schema,
+        )]
+        #[kind(name = "aether.nfs.test.number")]
+        struct TestNumber {
+            value: u64,
+            tag: u32,
+        }
+
+        /// Pure transform: double the wrapped value (`TestNumber` →
+        /// `TestNumber`). The single-transform fold fixtures' compute.
+        #[transform]
+        fn double(x: TestNumber) -> TestNumber {
+            TestNumber {
+                value: x.value.wrapping_mul(2),
+                tag: x.tag,
+            }
+        }
+
+        /// Panicking transform — exercises the panic-is-failure path
+        /// (`FetchError::Panicked`).
+        #[transform]
+        fn boom(_x: TestNumber) -> TestNumber {
+            panic!("boom");
+        }
+
+        /// Zero-input transform (arity 0) — placing it mid-chain trips
+        /// `FoldError::NonLinearArity`.
+        #[transform]
+        fn seed() -> TestNumber {
+            TestNumber { value: 7, tag: 0 }
+        }
+
+        /// Resolve the `double` transform's global id from the link-time
+        /// inventory.
+        fn double_transform_id() -> aether_data::TransformId {
+            transform_id_by_name("double")
+        }
+
+        /// Resolve the `boom` transform's id.
+        fn boom_transform_id() -> aether_data::TransformId {
+            transform_id_by_name("boom")
+        }
+
+        /// Resolve the zero-input `seed` transform's id.
+        fn seed_transform_id() -> aether_data::TransformId {
+            transform_id_by_name("seed")
+        }
+
+        /// Look up a registered transform's id by its fn-name tail.
+        fn transform_id_by_name(tail: &str) -> aether_data::TransformId {
+            let Some(entry) =
+                aether_data::transforms().find(|t| t.name.ends_with(&format!("::{tail}")))
+            else {
+                panic!("transform `{tail}` not registered in link-time inventory");
+            };
+            entry.transform_id
+        }
 
         fn scratch_root(tag: &str) -> PathBuf {
             scratch_dir("aether-nfs-cap", tag)
@@ -625,8 +698,7 @@ mod native {
         /// Unit test: `on_fetch` with a single transform returns the folded
         /// output tagged with the transform's output `KindId`.
         ///
-        /// Uses the `double` test transform (`TestNumber` → `TestNumber`) from
-        /// `aether-capabilities::dag::test_support`.
+        /// Uses the `double` test transform (`TestNumber` → `TestNumber`).
         #[test]
         fn on_fetch_single_transform_returns_folded_output() {
             let root = scratch_root("fetch-transform");

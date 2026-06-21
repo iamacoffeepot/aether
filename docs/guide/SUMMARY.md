@@ -36,7 +36,6 @@
   - [Logging](systems/logging.md)
   - [Configuration](systems/configuration.md)
   - [Handles](systems/handles.md)
-  - [The computation DAG](systems/dag.md)
 
 # Building with aether
 

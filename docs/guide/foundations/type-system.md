@@ -5,8 +5,7 @@
 > schema + canonical bytes / labels sidecar), [ADR-0045](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0045-computation-dag-and-typed-handles.md)/[ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)/[ADR-0049](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0049-persistent-handle-store.md) (handles,
 > transforms, the handle store), [ADR-0064](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0064-type-tagged-opaque-ids-on-the-mcp-wire.md)/[ADR-0065](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0065-typed-id-newtypes-and-first-class-type-ids-in-the-schema.md) (type-tagged wire ids +
 > first-class id types). The type vocabulary is **stable** — the wire format
-> depends on it. The DAG composition surface that handles and transforms feed is
-> **shipped and settling** (its 0.4 stack merged).
+> depends on it.
 
 Everything the engine moves is typed, and the vocabulary is small. Four kinds of
 thing carry types — **kinds** (payloads), **mailboxes** (addresses), **handles**
@@ -227,20 +226,18 @@ has to know which form arrived.
 Handle ids are **content-addressed** (the id is derived from the bytes, so two
 producers of the same value get the same handle and the store deduplicates,
 [ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)), and the store is **persistent** with a disk budget ([ADR-0049](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0049-persistent-handle-store.md) —
-inspect it with `describe_handles`). Handles are how the computation DAG passes
-values between steps without round-tripping them through an actor's memory; the
-store, its tiers, and what persists are their own subject —
-[Handles](../systems/handles.md).
+inspect it with `describe_handles`). Handles let a value travel by reference
+between steps without round-tripping it through an actor's memory; the store, its
+tiers, and what persists are their own subject — [Handles](../systems/handles.md).
 
 ## Transforms — typed pure functions
 
-A **transform** is a pure function the DAG runs between steps — `#[transform] fn
+A **transform** is a pure function over typed values — `#[transform] fn
 foo(input: A) -> B`, registered at build time with a `TransformId` and typed by
 its input and output kinds ([ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)). Where a kind is a value and a mailbox is
-an address, a transform is a typed *edge*: it takes a resolved handle of one kind
-and writes a new handle of another. Inspect the linked set with
-`describe_transforms`. The DAG that wires sources, transforms, and outputs into a
-job is its own subject — [The computation DAG](../systems/dag.md).
+an address, a transform is a typed *edge*: it takes a value of one kind and
+produces a value of another. The `aether.nfs` `fetch` verb runs a fold chain of
+them over a file's bytes; inspect the linked set with `describe_transforms`.
 
 ## Typed ids — the naming layer
 
@@ -253,7 +250,6 @@ Every typed thing is named by a newtype over a hash, not a bare integer:
 | `MailboxId` | `u64` | the actor's lineage — a hash chain of `ActorId`s, root → leaf; a root actor's equals its name hash ([ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md)/[ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md)) |
 | `HandleId` | `u64` | the stored bytes (content-addressed, [ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)) |
 | `TransformId` | `u64` | the transform's identity ([ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)) |
-| `DagId` | `u64` | an in-flight DAG job |
 | `EngineId`, `SessionToken` | `Uuid` | wire identity of an engine / session |
 
 Two properties keep these from being foot-guns:
@@ -286,4 +282,3 @@ built on.
 - The contracts these types enforce — [Invariants & guarantees](invariants.md).
 - Addresses vs payloads, in depth — [Mail, kinds & scheduling](../systems/mail-and-kinds.md).
 - Handles and the store they live in — [Handles](../systems/handles.md).
-- Transforms and the DAG that runs them — [The computation DAG](../systems/dag.md).
