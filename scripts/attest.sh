@@ -47,6 +47,12 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
+# Per-machine config: a gitignored repo-root .env, sourced like
+# scripts/ensure-tunnel.sh so per-machine settings (e.g. AETHER_ATTEST_BASE)
+# apply however the script is invoked — interactive, non-interactive, or from an
+# agent — without depending on the user's shell profile being sourced.
+[[ -f "$ROOT/.env" ]] && . "$ROOT/.env"
+
 # Canonical check set (CANONICAL_STEPS / canonical_cmd), shared with the verifier.
 # shellcheck source=scripts/checks.sh
 source "$ROOT/scripts/checks.sh"
@@ -78,17 +84,24 @@ HEAD_SHA="$(git rev-parse HEAD)"
 # clone below.
 QODANA_BASE="$(git merge-base HEAD origin/main)"
 
+# Base dir for all attest working artifacts — the target cache below and the
+# per-run clone further down both derive from it. Defaults to $HOME/.cache;
+# override via .env (AETHER_ATTEST_BASE) to relocate onto a larger filesystem.
+# Must stay a Docker-shared path (qodana's container mounts the clone).
+AETHER_ATTEST_BASE="${AETHER_ATTEST_BASE:-$HOME/.cache}"
+
 # Keep build artifacts out of the clone the git attestor walks, so its tree
 # status stays clean and the material walk stays source-only. Persisted across
 # runs so the producer stays incrementally warm.
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/aether-attest-target}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$AETHER_ATTEST_BASE/aether-attest-target}"
 mkdir -p "$CARGO_TARGET_DIR"
 
-# A fresh clone of HEAD with a real `.git`, under a Docker-shared path ($HOME,
-# for qodana's container). Every step runs here: witness's git attestor reads
+# A fresh clone of HEAD with a real `.git`, under a Docker-shared path
+# (AETHER_ATTEST_BASE, $HOME/.cache by default — it must stay accessible to
+# qodana's container). Every step runs here: witness's git attestor reads
 # this repo to bind each step to the commit and record a clean tree, and qodana
 # gets the history it needs to diff-scope. Removed on exit.
-RUNDIR="$(mktemp -d "$HOME/.cache/aether-attest-run.XXXXXX")"
+RUNDIR="$(mktemp -d "$AETHER_ATTEST_BASE/aether-attest-run.XXXXXX")"
 RUN="$RUNDIR/scan"
 git clone --quiet "$ROOT" "$RUN"
 git -C "$RUN" -c advice.detachedHead=false checkout --quiet "$HEAD_SHA"
