@@ -2,10 +2,11 @@
 # Local attestation producer: runs the CI-equivalent checks under `witness`,
 # emitting one signed in-toto attestation per step, bound to the current commit.
 #
-# The verifier (a GitHub Action, separate change) resolves each attestation's
-# signing key against the PR author's `github.com/<author>.keys` and confirms
-# the author is a write-collaborator, so the cheap signed proof can stand in for
-# re-running the expensive checks on the runner.
+# The verifier (scripts/attest-verify.sh, run by the attest-verify workflow)
+# resolves each attestation's signing key against the PR author's
+# `github.com/<author>.keys` and confirms the author is a write-collaborator, so
+# the cheap signed proof can stand in for re-running the expensive checks on the
+# runner.
 #
 # Signing reuses the author's existing SSH key. `witness`'s file signer reads
 # PEM; the OpenSSH key is repacked to PKCS8 with `sshpk-conv` (the published
