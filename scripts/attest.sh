@@ -110,8 +110,22 @@ git -C "$RUN" -c advice.detachedHead=false checkout --quiet "$HEAD_SHA"
 KEYDIR="$(mktemp -d)"
 LOGDIR="$(mktemp -d)"
 cleanup() {
-    [[ -f "$KEYDIR/key.pem" ]] && { command -v shred >/dev/null 2>&1 && shred -u "$KEYDIR/key.pem" 2>/dev/null || rm -f "$KEYDIR/key.pem"; }
-    rm -rf "$KEYDIR" "$LOGDIR" "$RUNDIR"
+    # Capture the triggering status first: a cleanup failure must never mask a
+    # failed run as exit 0 (a failing `rm` in the EXIT trap used to do exactly
+    # that on a non-rootless Docker host).
+    local rc=$?
+    if [[ -f "$KEYDIR/key.pem" ]]; then
+        command -v shred >/dev/null 2>&1 && shred -u "$KEYDIR/key.pem" 2>/dev/null || rm -f "$KEYDIR/key.pem"
+    fi
+    rm -rf "$KEYDIR" "$LOGDIR" 2>/dev/null || true
+    # The qodana step removes its own root-owned droppings, but on a non-rootless
+    # Docker host a stray root-owned file could remain; fall back to a throwaway
+    # root container (Docker is already required for the qodana step) so a failed
+    # plain `rm` can't abort cleanup. Mirrors scripts/preflight.sh's post-#2143 reap.
+    rm -rf "$RUNDIR" 2>/dev/null \
+        || docker run --rm -v "$(dirname "$RUNDIR"):/c" alpine rm -rf "/c/$(basename "$RUNDIR")" 2>/dev/null \
+        || true
+    exit "$rc"
 }
 trap cleanup EXIT
 ( umask 077; sshpk-conv -p -t pkcs8 -f "$SIGN_KEY" > "$KEYDIR/key.pem" 2>/dev/null ) \
@@ -139,7 +153,7 @@ attest_step() {
             witness run --step "$name" -a git \
             --signer-file-key-path "$KEYDIR/key.pem" \
             -o "$OUTDIR/$name.json" \
-            -- bash -c 'exec >"$ATTEST_STEP_LOG" 2>&1; exec "$@"' attest "$@" ); then
+            -- bash -c 'exec >"$ATTEST_STEP_LOG" 2>&1; "$@"; rc=$?; [ -n "${ATTEST_POST:-}" ] && eval "$ATTEST_POST"; exit "$rc"' attest "$@" ); then
         echo "[attest] step '$name' FAILED:" >&2
         tail -40 "$LOGDIR/$name.log" >&2 || true
         die "attestation aborted at step '$name'"
@@ -155,7 +169,21 @@ for step in $CANONICAL_STEPS; do
     case "$step" in
         doc)    attest_step "$step" env RUSTDOCFLAGS="-D rustdoc::redundant_explicit_links -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links" "${cmd[@]}" ;;
         test)   attest_step "$step" env AETHER_REQUIRE_RUNTIME=1 "${cmd[@]}" ;;
-        qodana) attest_step "$step" "${cmd[@]}" --diff-start "$QODANA_BASE" -u root ;;
+        qodana)
+            # qodana runs `-u root` in a container that does not inherit our
+            # CARGO_TARGET_DIR, so it builds into the clone's root-owned `target/`
+            # (and writes `.qodana/`). witness's product attestor always hashes the
+            # post-command file diff — it cannot be disabled, and the exclude-glob
+            # only drops files as in-toto subjects, not from the walk — so it would
+            # die `permission denied` on those root-owned files (and the EXIT
+            # cleanup could not remove them either). Remove them via a throwaway
+            # root container as the step's last action, before the product attestor
+            # walks, so the diff records no root-owned products. Build artifacts are
+            # not products worth attesting, and the verifier reads only the
+            # material/command-run/git attestations.
+            export ATTEST_POST='docker run --rm -v "$PWD":/c alpine rm -rf /c/target /c/.qodana 2>/dev/null || true'
+            attest_step "$step" "${cmd[@]}" --diff-start "$QODANA_BASE" -u root
+            unset ATTEST_POST ;;
         *)      attest_step "$step" "${cmd[@]}" ;;
     esac
 done
