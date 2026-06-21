@@ -36,7 +36,12 @@ jobs:
           witness version
 
       - name: Install sshpk-conv
-        run: npm install -g sshpk@1.18.0
+        # `sudo` so npm can write its global man-page symlinks under
+        # /usr/local/share/man — the default runner user can't, which fails the
+        # plain `-g` install (EACCES) on the Node 24 runner image. Mirrors the
+        # `sudo install` used for witness above. `ssh-keygen` can't substitute:
+        # its PKCS8 export rejects ed25519, the key type this gate signs with.
+        run: sudo npm install -g sshpk@1.18.0
 
       - name: Verify attestations
         env:
