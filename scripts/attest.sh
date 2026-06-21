@@ -13,12 +13,18 @@
 # `sshpk` tool) into tmpfs, used to sign, and shredded — the same public key is
 # already on the author's GitHub account, so nothing new is registered.
 #
-# PII: the witness environment attestor (username / hostname / env vars) is
-# dropped (`-a ''`); each step's stdout/stderr is redirected to a local log so
-# the command-run attestor records no `$HOME` paths; materials are repo-relative
-# and the only product is the commit-binding subject. Build output is kept out
-# of the walked tree via an external CARGO_TARGET_DIR, so materials stay
-# source-only.
+# Each step runs in a fresh clone of HEAD so witness's git attestor has a real
+# repository to read: it binds the step to the commit (`commithash`) and records
+# the tree status, so the verifier can prove each check ran on a clean checkout
+# of the PR head — not just a self-declared sha. Running in a clone also gives
+# qodana the history it needs to diff-scope.
+#
+# PII: only the git attestor is added (`-a git`) — it records commit metadata
+# (author / committer / remote), already public in the PR, and no machine, env,
+# or username data; the environment attestor stays off. Each step's stdout/stderr
+# is redirected to a local log so the command-run attestor records no `$HOME`
+# paths, and an external CARGO_TARGET_DIR keeps build output out of the clone the
+# git attestor walks.
 #
 # Prerequisites on PATH:
 #   witness     — go install github.com/in-toto/witness@latest
@@ -41,7 +47,7 @@ publish=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --publish) publish=1; shift ;;
-        -h|--help) sed -n '2,28p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '2,36p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "attest: unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -52,30 +58,36 @@ command -v witness    >/dev/null 2>&1 || die "witness not on PATH (go install gi
 command -v sshpk-conv >/dev/null 2>&1 || die "sshpk-conv not on PATH (npm i -g sshpk)"
 [[ -f "$SIGN_KEY" ]] || die "signing key not found: $SIGN_KEY"
 
-# The attestation must reflect a committed tree: each step binds to HEAD via a
-# product subject derived from the commit sha (below), and a dirty worktree
-# would let the recorded materials diverge from that commit.
+# The attestation must reflect a committed tree, so refuse a dirty worktree up
+# front; the git attestor and verifier enforce the clean-tree claim per step too.
 [[ -z "$(git status --porcelain)" ]] || die "worktree is dirty; commit or stash before attesting"
 HEAD_SHA="$(git rev-parse HEAD)"
+# Computed here in the real checkout (which has origin/main) for qodana's
+# diff-scope; the merge-base is an ancestor of HEAD, so it is present in the
+# clone below.
+QODANA_BASE="$(git merge-base HEAD origin/main)"
 
-# Keep build artifacts out of the witnessed working tree so the material
-# attestor walks source only (fast, no target/ pollution). Persisted across
+# Keep build artifacts out of the clone the git attestor walks, so its tree
+# status stays clean and the material walk stays source-only. Persisted across
 # runs so the producer stays incrementally warm.
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/aether-attest-target}"
 mkdir -p "$CARGO_TARGET_DIR"
 
+# A fresh clone of HEAD with a real `.git`, under a Docker-shared path ($HOME,
+# for qodana's container). Every step runs here: witness's git attestor reads
+# this repo to bind each step to the commit and record a clean tree, and qodana
+# gets the history it needs to diff-scope. Removed on exit.
+RUNDIR="$(mktemp -d "$HOME/.cache/aether-attest-run.XXXXXX")"
+RUN="$RUNDIR/scan"
+git clone --quiet "$ROOT" "$RUN"
+git -C "$RUN" -c advice.detachedHead=false checkout --quiet "$HEAD_SHA"
+
 # Ephemeral PKCS8 signing key in a private temp dir; shredded on exit.
 KEYDIR="$(mktemp -d)"
 LOGDIR="$(mktemp -d)"
-# The commit-binding subject: a tree-local file each step's witnessed command
-# fills with the head sha, recorded by the product attestor. Its digest is
-# sha256(head_sha), which the verifier reconstructs — so binding needs no git
-# metadata and works in a linked worktree. Removed after each step and on exit.
-SUBJECT="$ROOT/.aether-attest-subject"
 cleanup() {
     [[ -f "$KEYDIR/key.pem" ]] && { command -v shred >/dev/null 2>&1 && shred -u "$KEYDIR/key.pem" 2>/dev/null || rm -f "$KEYDIR/key.pem"; }
-    rm -f "$SUBJECT"
-    rm -rf "$KEYDIR" "$LOGDIR"
+    rm -rf "$KEYDIR" "$LOGDIR" "$RUNDIR"
 }
 trap cleanup EXIT
 ( umask 077; sshpk-conv -p -t pkcs8 -f "$SIGN_KEY" > "$KEYDIR/key.pem" 2>/dev/null ) \
@@ -90,30 +102,26 @@ rm -rf "$OUTDIR"; mkdir -p "$OUTDIR"
 attest_step() {
     local name="$1"; shift
     echo "[attest] -> $name"
-    # One witnessed shell does both binding and PII-scrubbing before exec'ing the
-    # real command:
-    #   * writes the head sha to the tree-local subject file, scoped as the only
-    #     product (--attestor-product-include-glob) — a commit-bound subject that
-    #     needs no git metadata, so this works in a linked worktree.
-    #   * redirects the step's stdout/stderr to a tmpfs log. The log path rides in
-    #     the environment, never as a `cmd` arg, so the command-run attestor's
-    #     verbatim `cmd` carries no machine-identifying path while the real
-    #     command stays visible.
-    # `-a ''` drops the environment attestor (PII) and the git attestor (unused).
-    if ! ATTEST_SHA="$HEAD_SHA" ATTEST_SUBJECT="$SUBJECT" ATTEST_STEP_LOG="$LOGDIR/$name.log" \
-            witness run \
-            --step "$name" \
-            -a '' \
-            --attestor-product-include-glob "$(basename "$SUBJECT")" \
+    # Reset the clone to a pristine HEAD checkout so the git attestor records a
+    # clean tree (build output is in the external CARGO_TARGET_DIR; this only
+    # clears stray untracked files such as qodana's .qodana/).
+    git -C "$RUN" reset -q --hard HEAD
+    git -C "$RUN" clean -qfd
+    # Run inside the clone (CWD = the real-`.git` checkout) so `-a git` binds the
+    # step to the commit and records the tree status. `-a git` adds only the git
+    # attestor — no environment attestor, so no machine/env PII. stdout/stderr go
+    # to a tmpfs log whose path rides in the environment, never a `cmd` arg, so
+    # the command-run attestor records no machine path while the command stays
+    # visible.
+    if ! ( cd "$RUN" && ATTEST_STEP_LOG="$LOGDIR/$name.log" \
+            witness run --step "$name" -a git \
             --signer-file-key-path "$KEYDIR/key.pem" \
             -o "$OUTDIR/$name.json" \
-            -- bash -c 'printf %s "$ATTEST_SHA" > "$ATTEST_SUBJECT"; exec >"$ATTEST_STEP_LOG" 2>&1; exec "$@"' attest "$@"; then
-        rm -f "$SUBJECT"
+            -- bash -c 'exec >"$ATTEST_STEP_LOG" 2>&1; exec "$@"' attest "$@" ); then
         echo "[attest] step '$name' FAILED:" >&2
         tail -40 "$LOGDIR/$name.log" >&2 || true
         die "attestation aborted at step '$name'"
     fi
-    rm -f "$SUBJECT"
 }
 
 attest_step fmt    cargo fmt --all -- --check
@@ -121,28 +129,10 @@ attest_step clippy cargo clippy --workspace --all-targets -- -D warnings
 attest_step doc    env RUSTDOCFLAGS="-D rustdoc::redundant_explicit_links -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links" cargo doc --workspace --no-deps
 attest_step dist   cargo xtask dist --no-bins
 attest_step test   env AETHER_REQUIRE_RUNTIME=1 cargo nextest run --workspace --all-features --profile ci
-
-# Qodana only counts *new* findings when it can read git history. In a linked
-# worktree the `.git` pointer references a gitdir the analysis container can't
-# reach, so it mis-scopes and flags the whole pre-existing backlog as new. When
-# in a worktree, scan a throwaway self-contained clone of HEAD (real `.git`)
-# under a Docker-shared path ($HOME, not $TMPDIR's /var/folders); the main
-# checkout scans in place. The scan dir rides in the environment, never as a
-# `cmd` arg, so the command-run attestor records no machine-identifying path —
-# the same PII discipline as the per-step log redirect.
-qodana_base="$(git merge-base HEAD origin/main)"
-qodana_dir="$ROOT"
-qodana_clone=""
-if [[ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]]; then
-    mkdir -p "$HOME/.cache"
-    qodana_clone="$(mktemp -d "$HOME/.cache/aether-qodana.XXXXXX")"
-    git clone --quiet "$ROOT" "$qodana_clone/scan"
-    git -C "$qodana_clone/scan" -c advice.detachedHead=false checkout --quiet "$HEAD_SHA"
-    qodana_dir="$qodana_clone/scan"
-fi
-export ATTEST_QODANA_DIR="$qodana_dir" ATTEST_QODANA_BASE="$qodana_base"
-attest_step qodana bash -c 'cd "$ATTEST_QODANA_DIR" && qodana scan --diff-start "$ATTEST_QODANA_BASE" -u root'
-[[ -n "$qodana_clone" ]] && rm -rf "$qodana_clone"
+# qodana runs last: its .qodana/ output is untracked (not gitignored), so a step
+# after it would see a dirty tree. The clone gives it the full history it needs
+# to diff-scope to the origin/main merge-base.
+attest_step qodana qodana scan --diff-start "$QODANA_BASE" -u root
 
 echo "[attest] OK — $(ls "$OUTDIR"/*.json | wc -l | tr -d ' ') signed attestations for $HEAD_SHA"
 echo "[attest] $OUTDIR"
