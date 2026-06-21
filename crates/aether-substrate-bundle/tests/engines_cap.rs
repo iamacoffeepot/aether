@@ -190,6 +190,16 @@ mod tests {
             .map_or(0, |d| d.as_nanos());
         let store_dir =
             env::temp_dir().join(format!("aether-engcap-binstore-{}-{nanos}", process::id()));
+        let root = env::temp_dir().join(format!("aether-engcap-store-{}-{nanos}", process::id()));
+        // SAFETY: nextest runs each test in its own process, so the env
+        // mutation here doesn't race sibling tests. `AETHER_ENGINE_STORE_ROOT`
+        // must be set before `boot()` so the cap's `engine_store_root()`
+        // resolves to this unique per-run dir instead of the shared default
+        // (`~/.local/share/aether/engines`), which would collide with any
+        // sibling test, leaked orphan, or live MCP engine on id 0…01.
+        unsafe {
+            env::set_var("AETHER_ENGINE_STORE_ROOT", &root);
+        }
 
         let (_chassis, mailer, cells) = boot(bootstrap_store_config(&store_dir, headless));
 
@@ -271,6 +281,7 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&store_dir);
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// Two engines spawned via the cap coexist with persistence on: each
