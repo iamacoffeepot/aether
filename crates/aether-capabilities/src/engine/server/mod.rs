@@ -37,12 +37,27 @@
 // Handler-signature kinds must be importable at file root — the
 // `#[bridge]` macro emits `impl HandlesKind<K>` markers as siblings of
 // the mod.
+use crate::engine::kinds::{EngineAlive, EngineDied, RouteEnvelope};
 use aether_kinds::{
-    EngineAlive, EngineDied, ListComponentBinaries, ListEngineBinaries, ListEngines,
-    ResolveComponent, RouteEnvelope, SpawnEngine, TerminateEngine, UploadBinary, UploadComponent,
+    ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SpawnEngine,
+    TerminateEngine, UploadBinary, UploadComponent,
 };
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
+
+// The engines cap's implementation, split along its seams (ADR-0121):
+// `config` (the ADR-0090 config struct + parsers), `artifacts` (the
+// content-addressed store resolution / ingestion the handlers delegate
+// to), and `fleet` (free-port allocation, routed-call settlement, and
+// spawn-dir resolution). All three are native-only — the cap forks
+// processes and owns sockets — so they elide on wasm alongside the
+// bridge mod.
+#[cfg(not(target_arch = "wasm32"))]
+mod artifacts;
+#[cfg(not(target_arch = "wasm32"))]
+mod config;
+#[cfg(not(target_arch = "wasm32"))]
+mod fleet;
 
 // `EngineConfig` (+ its derive-emitted `EngineOverlay`) ride through
 // file root for the hub chassis bin, which flattens the overlay into
@@ -50,25 +65,28 @@ use std::sync::{Arc, Mutex};
 // `with_actor::<EngineServer>(cfg)` (ADR-0090). Native-only re-export —
 // the engines cap is native-only, so the config has no wasm consumer.
 #[cfg(not(target_arch = "wasm32"))]
-pub use server_native::{EngineConfig, EngineOverlay};
+pub use config::{EngineConfig, EngineOverlay};
 
 #[aether_actor::bridge(singleton)]
 mod server_native {
+    use super::artifacts::{
+        bootstrap_ingest, ingest_binary, ingest_component, realize_executable, resolve_component,
+        resolve_selector,
+    };
+    use super::config::EngineConfig;
+    use super::fleet::{engine_store_root, free_local_port, settle_err};
     use super::{
         EngineAlive, EngineDied, ListComponentBinaries, ListEngineBinaries, ListEngines,
         ResolveComponent, RouteEnvelope, SpawnEngine, TerminateEngine, UploadBinary,
         UploadComponent,
     };
+    use crate::engine::kinds::ForwardEnvelope;
     use crate::engine::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams};
-    use crate::store::{
-        ArtifactKind, ArtifactStore, DEFAULT_DISK_BUDGET_BYTES, LAYOUT_VERSION_DIR, Selector,
-        StoredArtifact, StoredManifest, component_manifest,
-    };
+    use crate::store::{ArtifactStore, LAYOUT_VERSION_DIR};
     use aether_actor::actor;
     use aether_data::{EngineId, Kind, MailboxId, Uuid};
     use aether_kinds::{
-        BinaryManifest, BinarySelector, CallSettled, ComponentSelector, DeadEngineDescriptor,
-        DeathReason, EngineDescriptor, ForwardEnvelope, ListComponentBinariesResult,
+        DeadEngineDescriptor, DeathReason, EngineDescriptor, ListComponentBinariesResult,
         ListEngineBinariesResult, ListEnginesResult, ResolveComponentResult, SpawnEngineResult,
         TerminateEngineResult, UploadBinaryResult, UploadComponentResult,
     };
@@ -76,260 +94,14 @@ mod server_native {
     use aether_substrate::Subname;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
+    use aether_substrate::mail::SourceAddr;
     use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::{Source, SourceAddr};
     use std::collections::HashMap;
-    use std::collections::HashSet;
     use std::collections::VecDeque;
-    use std::convert::Infallible;
-    use std::env;
-    use std::fs;
-    use std::io;
-    use std::net::TcpListener;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-
-    /// Env override for the parent directory under which the cap
-    /// allocates per-engine handle-store dirs (issue 1274). Absent →
-    /// fall through to `dirs::data_dir().join("aether/engines")`, then
-    /// to `std::env::temp_dir().join("aether-engines")` if no data dir
-    /// is resolvable.
-    const ENV_ENGINE_STORE_ROOT: &str = "AETHER_ENGINE_STORE_ROOT";
-
-    /// The chassis a `default` selector (an empty [`BinarySelector::query`]
-    /// with no attribute filters) resolves to (ADR-0115): `headless` has no
-    /// window and runs on any host, so a bare spawn is self-sufficient.
-    const DEFAULT_CHASSIS: &str = "headless";
-
-    /// Default heartbeat ping cadence (issue 1339). 5 s × the miss
-    /// limit is the detection-latency vs. flap-tolerance tradeoff.
-    const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 5;
-    /// Default consecutive-miss threshold before an engine is declared
-    /// dead. Small N tolerates a transient hiccup / GC pause.
-    const DEFAULT_HEARTBEAT_MISS_LIMIT: u32 = 3;
-
-    /// Default total time a freshly-forked substrate's proxy keeps
-    /// retrying its startup dial before giving up (issue 2072). A debug
-    /// cold start fork+exec+bind can stretch well past a healthy
-    /// localhost dial when many substrates come up at once and
-    /// oversubscribe the cores (e.g. a concurrent `FleetBench` fleet), so
-    /// the budget is generous — far longer than a single cold start
-    /// needs, comfortably under the `FleetBench` client's own spawn cap so
-    /// the hub returns a clean `Err` first rather than the client
-    /// tripping its backstop. `0` is the wait-forever sentinel.
-    const DEFAULT_PROXY_CONNECT_BUDGET_SECS: u64 = 30;
-
-    /// Resolved engines-cap configuration (ADR-0090, issue 1339): the
-    /// liveness-heartbeat tuning plus the hub binary store's layout dir,
-    /// disk budget, and bootstrap list (ADR-0115, #1954 — these last three
-    /// moved onto the config off their pre-ADR-0090 naked `env::var`
-    /// readers). The inline `AETHER_ENGINE_STORE_ROOT` reader
-    /// (`engine_store_root`) is a separate, still-inline knob.
-    ///
-    /// `#[derive(aether_substrate::Config)]` emits the env-shaped
-    /// `EngineConfigLayer`, the clap-shaped `EngineOverlay`, and the
-    /// inherent `from_env` / `from_argv_then_env` shims (argv beats env
-    /// beats the literal default). The hub chassis resolves it with
-    /// `EngineConfig::from_argv_then_env(cli.engine.into_layer())` and
-    /// hands it to `with_actor::<EngineServer>(cfg)`; tests build it
-    /// directly. `env_prefix = "AETHER_HUB"` + the `heartbeat_*` /
-    /// `binary_disk_budget_bytes` field names compose the
-    /// `AETHER_HUB_HEARTBEAT_*` / `AETHER_HUB_BINARY_DISK_BUDGET_BYTES`
-    /// env keys and `--hub-*` flags; `binary_store_dir` / `binary_bootstrap`
-    /// pin the unprefixed `AETHER_BINARY_STORE_DIR` / `AETHER_BINARY_BOOTSTRAP`
-    /// keys via per-field `env` overrides. `Default` (the test constructor)
-    /// resolves the heartbeat to `0/0` (disabled) and the store fields to
-    /// unset / `16 GiB`; production picks up the `default = 5/3` / `16 GiB`
-    /// literals and the env layers through `from_argv_then_env`.
-    #[derive(Clone, Debug, aether_substrate::Config)]
-    #[config(env_prefix = "AETHER_HUB", cli_prefix = "hub")]
-    pub struct EngineConfig {
-        /// Heartbeat ping cadence in seconds
-        /// (`AETHER_HUB_HEARTBEAT_INTERVAL_SECS` /
-        /// `--hub-heartbeat-interval-secs`). `0` disables the heartbeat
-        /// entirely (engines are then only evicted on a
-        /// connection-close, never on a wedge).
-        #[config(default = 5, parse = parse_heartbeat_interval_secs)]
-        pub heartbeat_interval_secs: u64,
-        /// Consecutive missed pings that mark an engine dead
-        /// (`AETHER_HUB_HEARTBEAT_MISS_LIMIT` /
-        /// `--hub-heartbeat-miss-limit`). Small N tolerates a transient
-        /// hiccup; `0` also disables the heartbeat. Detection latency is
-        /// `miss_limit × interval_secs`.
-        #[config(default = 3, parse = parse_heartbeat_miss_limit)]
-        pub heartbeat_miss_limit: u32,
-        /// Total seconds a freshly-forked substrate's proxy keeps
-        /// retrying its startup dial before the spawn fails
-        /// (`AETHER_HUB_PROXY_CONNECT_BUDGET_SECS` /
-        /// `--hub-proxy-connect-budget-secs`, issue 2072). Generous by
-        /// default so a debug cold start under fork contention isn't
-        /// called dead prematurely; `0` is the wait-forever sentinel
-        /// (retry until the dial succeeds or hits a terminal error).
-        #[config(default = 30, parse = parse_proxy_connect_budget_secs)]
-        pub proxy_connect_budget_secs: u64,
-        /// Layout-root override for the hub's content-addressed binary
-        /// store (`AETHER_BINARY_STORE_DIR`, unprefixed — the ops escape
-        /// hatch and the fleet tests' per-process isolation knob). Unset
-        /// (`None`) → the computed default `data_dir/aether/binaries/v1`
-        /// (`ArtifactStore::default_root`). A bare `Option<String>` (not a
-        /// `PathBuf`) keeps that runtime-computed default in `init`, so
-        /// `EngineConfig` needs no `skip_from_layer`; `EngineServer::init`
-        /// joins the store's layout-version dir to a set override.
-        #[config(env = "AETHER_BINARY_STORE_DIR")]
-        pub binary_store_dir: Option<String>,
-        /// On-disk byte budget for the binary store
-        /// (`AETHER_HUB_BINARY_DISK_BUDGET_BYTES`, derived from the
-        /// `AETHER_HUB` prefix / `--hub-binary-disk-budget-bytes`). Default
-        /// 16 GiB (`DEFAULT_DISK_BUDGET_BYTES`); LRU eviction over unpinned,
-        /// unnamed entries holds it.
-        #[config(default = 17_179_869_184u64, parse = parse_binary_disk_budget)]
-        pub binary_disk_budget_bytes: u64,
-        /// Chassis bins to bootstrap-ingest at init so a `default` / `name`
-        /// selector resolves in a fresh or `restart-hub`'d hub
-        /// (`AETHER_BINARY_BOOTSTRAP`, unprefixed, comma-separated). Each is
-        /// ingested content-addressed and named by its file stem;
-        /// idempotent via content dedup. `ensure-tunnel.sh` exports the
-        /// freshly-built chassis bins here.
-        #[config(
-            env = "AETHER_BINARY_BOOTSTRAP",
-            default = [],
-            parse = parse_binary_bootstrap,
-            csv_set
-        )]
-        pub binary_bootstrap: HashSet<String>,
-    }
-
-    impl Default for EngineConfig {
-        /// The test constructor: heartbeat disabled (`0/0`) but a real
-        /// `DEFAULT_DISK_BUDGET_BYTES` budget — `0` is inert for the
-        /// heartbeat (no pinging) yet destructive for the store (it would
-        /// evict every unnamed upload), so the budget can't share the
-        /// heartbeat's zero. Store dir unset (the computed default) and an
-        /// empty bootstrap. Production resolves all five through the layer
-        /// (`from_argv_then_env`); this matches the prior `from_env()`
-        /// store budget every `EngineConfig::default()` consumer saw.
-        fn default() -> Self {
-            Self {
-                heartbeat_interval_secs: 0,
-                heartbeat_miss_limit: 0,
-                // A real budget (not the heartbeat's inert `0`): tests fork
-                // real substrates, so the proxy needs a generous-but-finite
-                // startup-dial budget — `0` would mean wait-forever and
-                // hang on a genuinely dead substrate.
-                proxy_connect_budget_secs: DEFAULT_PROXY_CONNECT_BUDGET_SECS,
-                binary_store_dir: None,
-                binary_disk_budget_bytes: DEFAULT_DISK_BUDGET_BYTES,
-                binary_bootstrap: HashSet::new(),
-            }
-        }
-    }
-
-    impl EngineConfig {
-        /// The [`HeartbeatParams`] to arm each proxy with, or `None`
-        /// when the heartbeat is disabled (`0` interval or miss limit).
-        fn heartbeat_params(&self) -> Option<HeartbeatParams> {
-            if self.heartbeat_interval_secs == 0 || self.heartbeat_miss_limit == 0 {
-                None
-            } else {
-                Some(HeartbeatParams {
-                    interval: Duration::from_secs(self.heartbeat_interval_secs),
-                    miss_limit: self.heartbeat_miss_limit,
-                })
-            }
-        }
-
-        /// The startup-dial connect budget to arm each spawned proxy
-        /// with (issue 2072). `Some(d)` caps the retry; `None` (the `0`
-        /// sentinel) means wait forever.
-        fn connect_budget(&self) -> Option<Duration> {
-            (self.proxy_connect_budget_secs != 0)
-                .then(|| Duration::from_secs(self.proxy_connect_budget_secs))
-        }
-    }
-
-    // confique's `parse_env` contract is `fn(&str) -> Result<T, impl
-    // Error>`; these total helpers carry a `Result` they never fill with
-    // `Err` — an unparseable value folds back to the default (soft, like
-    // the DAG validator's caps; the ADR-0090 §4 strict/erroring variant
-    // is a follow-up). Hence the `unnecessary_wraps` allow.
-
-    /// Parse the heartbeat interval; unparseable → the default.
-    #[allow(clippy::unnecessary_wraps)]
-    fn parse_heartbeat_interval_secs(s: &str) -> Result<u64, Infallible> {
-        Ok(s.trim().parse().unwrap_or(DEFAULT_HEARTBEAT_INTERVAL_SECS))
-    }
-
-    /// Parse the heartbeat miss limit; unparseable → the default.
-    #[allow(clippy::unnecessary_wraps)]
-    fn parse_heartbeat_miss_limit(s: &str) -> Result<u32, Infallible> {
-        Ok(s.trim().parse().unwrap_or(DEFAULT_HEARTBEAT_MISS_LIMIT))
-    }
-
-    /// Parse the proxy connect budget seconds; unparseable → the default.
-    #[allow(clippy::unnecessary_wraps)]
-    fn parse_proxy_connect_budget_secs(s: &str) -> Result<u64, Infallible> {
-        Ok(s.trim()
-            .parse()
-            .unwrap_or(DEFAULT_PROXY_CONNECT_BUDGET_SECS))
-    }
-
-    /// Parse the binary-store disk budget; unparseable → the default
-    /// `DEFAULT_DISK_BUDGET_BYTES` (mirrors the heartbeat parsers).
-    #[allow(clippy::unnecessary_wraps)]
-    fn parse_binary_disk_budget(s: &str) -> Result<u64, Infallible> {
-        Ok(s.trim().parse().unwrap_or(DEFAULT_DISK_BUDGET_BYTES))
-    }
-
-    /// Split a comma-separated bootstrap path list, trimming and dropping
-    /// empties (mirrors the http allowlist's `parse_allowlist`). Total —
-    /// never errors.
-    #[allow(clippy::unnecessary_wraps)]
-    fn parse_binary_bootstrap(s: &str) -> Result<HashSet<String>, Infallible> {
-        Ok(s.split(',')
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .map(str::to_string)
-            .collect())
-    }
-
-    #[cfg(test)]
-    mod config_tests {
-        use super::*;
-
-        /// The connect budget resolves a non-zero seconds value to a
-        /// finite `Duration`, and `0` to the wait-forever sentinel `None`.
-        #[test]
-        fn connect_budget_maps_zero_to_wait_forever() {
-            let finite = EngineConfig {
-                proxy_connect_budget_secs: 12,
-                ..EngineConfig::default()
-            };
-            assert_eq!(finite.connect_budget(), Some(Duration::from_secs(12)));
-            let forever = EngineConfig {
-                proxy_connect_budget_secs: 0,
-                ..EngineConfig::default()
-            };
-            assert_eq!(forever.connect_budget(), None);
-        }
-
-        /// The default budget is generous and finite — never the
-        /// wait-forever sentinel — so a debug cold start under fork
-        /// contention isn't called dead prematurely, while a genuinely
-        /// dead substrate still fails the spawn rather than hanging.
-        #[test]
-        fn default_connect_budget_is_generous_and_finite() {
-            let budget = EngineConfig::default()
-                .connect_budget()
-                .expect("default budget is finite, not wait-forever");
-            assert_eq!(
-                budget,
-                Duration::from_secs(DEFAULT_PROXY_CONNECT_BUDGET_SECS)
-            );
-            assert!(budget >= Duration::from_secs(30), "default stays generous");
-        }
-    }
 
     /// How many recently-died engines [`EngineServer`] retains for
     /// `list_engines`' `recently_died` sidecar (issue 1906). A small
@@ -896,365 +668,6 @@ mod server_native {
             }
         }
     }
-
-    /// Fork `binary_path --describe` and parse the JSON manifest it prints
-    /// (ADR-0115, issue 1953). The one-time capture of what a binary *is* —
-    /// its chassis kind, linked caps, and build provenance — without the
-    /// hub linking the chassis crate. `stdin` is nulled so a describe can't
-    /// block on input.
-    fn describe_binary(binary_path: &str) -> Result<BinaryManifest, String> {
-        let output = Command::new(binary_path)
-            .arg("--describe")
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| format!("forking {binary_path:?} --describe: {e}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "{binary_path:?} --describe exited {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim(),
-            ));
-        }
-        serde_json::from_slice(&output.stdout)
-            .map_err(|e| format!("parsing {binary_path:?} --describe manifest JSON: {e}"))
-    }
-
-    /// Ingest the binary at `path` into `store` content-addressed,
-    /// capturing its manifest via a one-time `<path> --describe` fork
-    /// (ADR-0115, issue 1953). Shared by the `on_upload_binary` handler and
-    /// the [`bootstrap_ingest`] boot path. Returns the stored content hash,
-    /// or a human-readable error for an unreadable path or a `--describe`
-    /// that failed / yielded no parseable manifest. Idempotent — identical
-    /// bytes dedup to the same hash.
-    fn ingest_binary(
-        store: &mut ArtifactStore,
-        path: &str,
-        name: Option<String>,
-    ) -> Result<String, String> {
-        let bytes = fs::read(path).map_err(|e| format!("reading binary path {path:?}: {e}"))?;
-        let manifest = describe_binary(path)?;
-        Ok(store.upload(
-            &bytes,
-            ArtifactKind::Binary,
-            StoredManifest::Binary(manifest),
-            name,
-        ))
-    }
-
-    /// Bootstrap-ingest each chassis bin in `paths` into `store`, naming
-    /// each by its file stem so a `default` / `name` selector resolves in a
-    /// fresh or `restart-hub`'d hub (ADR-0115, issue 1954). The list rides
-    /// `EngineConfig`'s `binary_bootstrap` field (its `AETHER_BINARY_BOOTSTRAP`
-    /// env layer, ADR-0090). A path that can't be read or `--describe`d is
-    /// logged and skipped — a bad bootstrap entry must not fail hub boot.
-    /// Idempotent via content dedup.
-    pub(super) fn bootstrap_ingest(store: &mut ArtifactStore, paths: &HashSet<String>) {
-        for path_str in paths {
-            let name = Path::new(path_str)
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(str::to_owned);
-            match ingest_binary(store, path_str, name) {
-                Ok(hash) => tracing::info!(
-                    target: "aether_substrate::engine_server",
-                    path = path_str.as_str(),
-                    hash = %hash,
-                    "binary bootstrap: ingested a chassis bin",
-                ),
-                Err(error) => tracing::warn!(
-                    target: "aether_substrate::engine_server",
-                    path = path_str.as_str(),
-                    error = %error,
-                    "binary bootstrap: skipping a bin that failed to ingest",
-                ),
-            }
-        }
-    }
-
-    /// Ingest the component wasm at `path` into `store` content-addressed,
-    /// reading its manifest straight from the wasm (ADR-0116, issue 1956) —
-    /// no execution step. Returns the stored content hash, or a
-    /// human-readable error for an unreadable path or an unparseable wasm.
-    /// Idempotent — identical bytes dedup to the same hash.
-    fn ingest_component(
-        store: &mut ArtifactStore,
-        path: &str,
-        name: Option<String>,
-    ) -> Result<String, String> {
-        let bytes = fs::read(path).map_err(|e| format!("reading component path {path:?}: {e}"))?;
-        let manifest = component_manifest(&bytes)
-            .map_err(|e| format!("reading component manifest from {path:?}: {e}"))?;
-        Ok(store.upload(
-            &bytes,
-            ArtifactKind::Component,
-            StoredManifest::Component(manifest),
-            name,
-        ))
-    }
-
-    /// Resolve a [`ComponentSelector`] against `store` to its wasm bytes +
-    /// manifest (ADR-0116, issue 1956). Resolution order mirrors the binary
-    /// selector: an exact `query` token wins first (`hash` > `module@actor`
-    /// > `name@version` (latest in v1) > `name`); absent a token, the
-    /// `namespace` / `handled_kind` attribute query resolves, where a query
-    /// matching more than one component is a clean ambiguity error (never a
-    /// silent pick). A `module@actor` token's `@actor` part populates the
-    /// reply `export` so the forwarded `LoadComponent` instantiates that
-    /// actor type (ADR-0096). Returns `Err` for no match / ambiguity.
-    fn resolve_component(
-        store: &mut ArtifactStore,
-        selector: &ComponentSelector,
-    ) -> ResolveComponentResult {
-        // An exact token, with the `@actor` half (if any) split off as the
-        // export selector forwarded to the substrate.
-        if let Some(token) = selector
-            .query
-            .as_deref()
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-        {
-            return resolve_component_token(store, token);
-        }
-        // No exact token: a namespace / handled-kind attribute query. A
-        // match-more-than-one is a clean ambiguity error.
-        let mut matches = store.list_components(&ListComponentBinaries {
-            namespace: selector.namespace.clone(),
-            handled_kind: selector.handled_kind,
-        });
-        match matches.len() {
-            0 => ResolveComponentResult::Err {
-                error: format!(
-                    "no stored component matches the attribute query (namespace = {:?}, handled_kind = {:?})",
-                    selector.namespace, selector.handled_kind,
-                ),
-            },
-            1 => {
-                let hash = matches.remove(0).hash;
-                stored_component_reply(store, &hash, None)
-            }
-            n => ResolveComponentResult::Err {
-                error: format!(
-                    "the attribute query (namespace = {:?}, handled_kind = {:?}) matches {n} components — narrow it to a single component (by hash or name)",
-                    selector.namespace, selector.handled_kind,
-                ),
-            },
-        }
-    }
-
-    /// Resolve an exact component selector token to a [`ResolveComponentResult`]
-    /// (ADR-0116). A `module@actor` token splits into the `module`
-    /// hash/name and the `@actor` export selector; a `name@version` token
-    /// is treated as `name` (latest) — v1 keeps no per-name version index;
-    /// a bare token resolves as a hash first, then a name.
-    fn resolve_component_token(store: &mut ArtifactStore, token: &str) -> ResolveComponentResult {
-        // `module@actor` (ADR-0096) takes precedence: the `@actor` half is a
-        // component `Addressable::NAMESPACE`, distinct from a binary `name@version`
-        // build id. Resolve the module half (hash, then name), forward the
-        // actor half as `export`.
-        if let Some((module, actor)) = token.split_once('@') {
-            // A hash never contains `@`, so the module half resolves as a
-            // hash first, then a name (latest). The actor half is the export.
-            if store.contains(module) {
-                return stored_component_reply(store, module, Some(actor.to_owned()));
-            }
-            if let Some(found) = store.get(&Selector::Name(module.to_owned())) {
-                return stored_component_reply(store, &found.hash, Some(actor.to_owned()));
-            }
-            return ResolveComponentResult::Err {
-                error: format!("no stored component matches the selector {token:?}"),
-            };
-        }
-        // A bare token: an exact hash wins, else a name (latest).
-        if store.contains(token) {
-            return stored_component_reply(store, token, None);
-        }
-        if let Some(found) = store.get(&Selector::Name(token.to_owned())) {
-            return stored_component_reply(store, &found.hash, None);
-        }
-        ResolveComponentResult::Err {
-            error: format!("no stored component matches the selector {token:?}"),
-        }
-    }
-
-    /// Read the stored component `hash`'s wasm bytes + manifest off disk and
-    /// build a `ResolveComponentResult::Ok` (ADR-0116). `export` threads a
-    /// `module@actor` selector's actor half through to the forwarded
-    /// `LoadComponent.export`. An entry that isn't a component (a binary
-    /// hash) or whose bytes can't be read is a clean `Err`.
-    fn stored_component_reply(
-        store: &mut ArtifactStore,
-        hash: &str,
-        export: Option<String>,
-    ) -> ResolveComponentResult {
-        let Some(found) = store.get(&Selector::Hash(hash.to_owned())) else {
-            return ResolveComponentResult::Err {
-                error: format!("no stored artifact has hash {hash:?}"),
-            };
-        };
-        let Some(manifest) = found.manifest.as_component().cloned() else {
-            return ResolveComponentResult::Err {
-                error: format!("artifact {hash:?} is not a component"),
-            };
-        };
-        let wasm = match fs::read(&found.path) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                return ResolveComponentResult::Err {
-                    error: format!("reading stored component bytes for {hash:?}: {e}"),
-                };
-            }
-        };
-        ResolveComponentResult::Ok {
-            hash: found.hash,
-            wasm,
-            name: found.name,
-            manifest,
-            export,
-        }
-    }
-
-    /// Resolve a [`BinarySelector`] against `store` to the stored content
-    /// bytes the spawn forks (ADR-0115). Resolution order: an exact `query`
-    /// token wins first (`hash` > `name@version` > `name`); absent a token,
-    /// the `chassis` / `caps` / `target` attribute query resolves, and with
-    /// no attribute filters either, `default` = the [`DEFAULT_CHASSIS`]
-    /// binary. `None` when nothing matched.
-    pub(super) fn resolve_selector(
-        store: &mut ArtifactStore,
-        selector: &BinarySelector,
-    ) -> Option<StoredArtifact> {
-        if let Some(token) = selector
-            .query
-            .as_deref()
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-        {
-            // Exact hash wins outright.
-            if let Some(found) = store.get(&Selector::Hash(token.to_owned())) {
-                return Some(found);
-            }
-            // `name@version`: the binary's self-reported build id (the
-            // manifest `git_sha`) pins a specific entry of a name.
-            if let Some((name, version)) = token.split_once('@') {
-                let hash = pick_versioned(store, name, version)?;
-                return store.get(&Selector::Hash(hash));
-            }
-            // A bare name points at the latest hash uploaded under it.
-            return store.get(&Selector::Name(token.to_owned()));
-        }
-        // No exact token: an attribute query, else `default` = headless.
-        let hash = store
-            .list_binaries(&attribute_filter(selector))
-            .into_iter()
-            .map(|entry| entry.hash)
-            .min()?;
-        store.get(&Selector::Hash(hash))
-    }
-
-    /// The store filter for a tokenless [`BinarySelector`]: the explicit
-    /// `chassis` / `caps` / `target` attribute query, or — when none is
-    /// set — the `default` filter selecting the [`DEFAULT_CHASSIS`]
-    /// chassis.
-    fn attribute_filter(selector: &BinarySelector) -> ListEngineBinaries {
-        if selector.chassis.is_none() && selector.caps.is_empty() && selector.target.is_none() {
-            ListEngineBinaries {
-                chassis: Some(DEFAULT_CHASSIS.to_owned()),
-                caps: Vec::new(),
-                target: None,
-            }
-        } else {
-            ListEngineBinaries {
-                chassis: selector.chassis.clone(),
-                caps: selector.caps.clone(),
-                target: selector.target.clone(),
-            }
-        }
-    }
-
-    /// The content hash of the entry named `name` whose manifest build id
-    /// (`git_sha`) is `version` — the `name@version` selector (ADR-0115).
-    /// `None` when no current entry matches both.
-    fn pick_versioned(store: &ArtifactStore, name: &str, version: &str) -> Option<String> {
-        store
-            .list_binaries(&ListEngineBinaries::default())
-            .into_iter()
-            .find(|entry| entry.name.as_deref() == Some(name) && entry.manifest.git_sha == version)
-            .map(|entry| entry.hash)
-    }
-
-    /// Copy the content bytes at `src` to `dest` and mark `dest`
-    /// executable (`0o755` on Unix; the `from_mode` precedent in
-    /// `anthropic/cli.rs`), creating `dest`'s parent dir. The
-    /// realize-to-exec step for spawn: stored bytes aren't directly
-    /// fork-exec'able (ADR-0115 §Execution).
-    fn realize_executable(src: &Path, dest: &Path) -> io::Result<()> {
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(src, dest)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(dest, fs::Permissions::from_mode(0o755))?;
-        }
-        Ok(())
-    }
-
-    /// Push a `CallSettled::Err` back to `target` (correlation
-    /// preserved) so a routed call that the cap can't satisfy — bad
-    /// `engine_id`, unknown engine — closes with a wire `ReplyEnd`
-    /// instead of leaving the RPC client hanging.
-    fn settle_err(mailer: &Arc<Mailer>, target: MailboxId, correlation: u64, error: String) {
-        mailer.push(
-            Mail::new(
-                target,
-                <CallSettled as Kind>::ID,
-                CallSettled::Err { error }.encode_into_bytes(),
-                1,
-            )
-            .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
-        );
-    }
-
-    /// Bind `127.0.0.1:0`, read the OS-assigned port, drop the
-    /// listener. A tiny TOCTOU window exists before the substrate
-    /// rebinds the port, but on localhost it's negligible — and this
-    /// sidesteps both a wire change to report an ephemeral port back
-    /// from the substrate and an un-recycled incrementing port pool.
-    fn free_local_port() -> io::Result<u16> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        let port = listener.local_addr()?.port();
-        drop(listener);
-        Ok(port)
-    }
-
-    /// Parent directory under which the cap allocates per-engine
-    /// handle-store dirs (issue 1274). Priority:
-    ///
-    /// 1. `AETHER_ENGINE_STORE_ROOT` env override (ops escape hatch).
-    /// 2. `dirs::data_dir().join("aether/engines")` (cross-platform
-    ///    default — `~/Library/Application Support/aether/engines` on
-    ///    macOS, `$XDG_DATA_HOME/aether/engines` on Linux, etc.).
-    /// 3. `std::env::temp_dir().join("aether-engines")` if no data
-    ///    dir is resolvable.
-    // External ops escape hatch (AETHER_ENGINE_STORE_ROOT) for the per-engine
-    // spawn-dir parent — the directory forked substrates and their handle
-    // stores live under, resolved in a static spawn helper. #1968 deliberately
-    // kept this knob inline (separate from the binary-artifact store, which it
-    // moved onto EngineConfig); it is a process-level deployment override, not
-    // a cap config field.
-    #[allow(clippy::disallowed_methods)]
-    fn engine_store_root() -> PathBuf {
-        if let Ok(raw) = env::var(ENV_ENGINE_STORE_ROOT)
-            && !raw.is_empty()
-        {
-            return PathBuf::from(raw);
-        }
-        if let Some(data) = dirs::data_dir() {
-            return data.join("aether").join("engines");
-        }
-        env::temp_dir().join("aether-engines")
-    }
 }
 
 // The sink's handler-signature kinds must be importable at file root
@@ -1335,13 +748,14 @@ mod tests {
     // for fixture wiring — reference id derivation, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
     use super::{EngineConfig, EngineServer, ReplyCells, ReplySink};
+    use crate::engine::kinds::{EngineAlive, EngineDied};
     use crate::test_chassis::TestChassis;
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
     use aether_kinds::descriptors;
     use aether_kinds::{
-        BinarySelector, DeathReason, EngineAlive, EngineDied, ListEngines, SpawnEngine,
-        SpawnEngineResult, TerminateEngine, TerminateEngineResult,
+        BinarySelector, DeathReason, ListEngines, SpawnEngine, SpawnEngineResult, TerminateEngine,
+        TerminateEngineResult,
     };
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::mail::mailer::Mailer;
@@ -1496,7 +910,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bootstrap_populates_and_default_resolves_to_headless() {
-        use super::server_native::{bootstrap_ingest, resolve_selector};
+        use super::artifacts::{bootstrap_ingest, resolve_selector};
         use crate::store::{ArtifactStore, DEFAULT_DISK_BUDGET_BYTES};
         use std::collections::HashSet;
         use std::fs;
