@@ -15,7 +15,7 @@
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
-use aether_kinds::{Close, ConnectionReady};
+use super::kinds::{Close, ConnectionReady};
 
 // `TcpListenerConfig` carries `std::net::TcpListener` (native-only) so
 // it lives inside the bridge mod. Re-export at file root for the cap

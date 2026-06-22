@@ -32,7 +32,7 @@
 
 // Handler-signature kinds need to be importable at file root for
 // the `#[bridge]`-emitted `HandlesKind` markers.
-use aether_kinds::{SessionClose, SessionDataReady, SessionWrite};
+use super::kinds::{SessionClose, SessionDataReady, SessionWrite};
 
 // `TcpSessionActor` is auto-re-exported by `#[bridge]` at file
 // root; only `TcpSessionConfig` needs the manual re-export.
