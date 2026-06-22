@@ -58,7 +58,12 @@ native = [
 # Empty bodies on purpose: the markers compile from pure-Rust sources
 # already pulled in unconditionally (`aether-actor`, `aether-kinds`).
 render = []
-audio = []
+# ADR-0121: the audio cap owns its kinds in `audio/kinds.rs`. The
+# cast-shaped triggers (`NoteOn` / `NoteOff` / `SetMasterGain`) are
+# `#[repr(C)]` + `Pod`/`Zeroable`, so the marker-only build needs
+# `bytemuck` (with `derive`) — gated on this feature, not unconditional,
+# so wasm guests using a non-Pod marker (render / text / ui) don't pull it.
+audio = ["dep:bytemuck"]
 # ADR-0105 `aether.text` cap marker. CPU-only (no GPU dep) — it composes
 # the render texture surface entirely by mail — but gated the same two-
 # layer way so a wasm component can address it via
@@ -109,7 +114,7 @@ serde = { workspace = true, default-features = false, features = ["derive"] }
 # Native-only: gated behind the `native` feature so wasm builds
 # don't drag in wasmtime / cpal / wgpu transitively.
 aether-substrate = { path = "../aether-substrate", optional = true }
-bytemuck = { workspace = true, optional = true }
+bytemuck = { workspace = true, optional = true, features = ["derive"] }
 # ADR-0090 unit g (iamacoffeepot/aether#1264): the `Config` derive
 # emits per-cap `*Overlay` structs (`#[derive(clap::Args)]`) next to
 # the domain struct, retiring the hand-rolled overlays that used to
@@ -159,6 +164,13 @@ hound = { workspace = true, optional = true }
 # layout metrics for the `aether.text` cap. Rides the `text-native`
 # feature so wasm / marker-only builds skip it.
 fontdue = { version = "0.9", optional = true }
+
+# ADR-0121: the `Kind` derive (now used by the audio cap's owned kinds
+# in `audio/kinds.rs`) emits a `cfg(not(target_arch = "wasm32"))`-gated
+# `inventory::submit!` per kind, so native builds need `inventory`
+# reachable. Wasm guests don't (the derive's gate skips emission).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = { workspace = true }
 
 [dev-dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }

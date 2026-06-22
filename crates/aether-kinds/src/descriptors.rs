@@ -55,10 +55,10 @@ mod tests {
         Fetch, FetchResult, FsFetch, FsFetchResult, Key, LifecycleUnsubscribeAll, List, ListResult,
         LoadComponent, LoadResult, LyriaGenerate, LyriaGenerateResult, Mat4Apply, MessagesSend,
         MessagesSendResult, MouseButton, MouseMove, NanobananaGenerate, NanobananaGenerateResult,
-        NoteOff, NoteOn, Ping, Pong, ProcessExited, Read, ReadResult, RecordResult,
-        ReplaceComponent, ReplaceResult, SetMasterGain, Spawn, SpawnResult, SubscribeInput,
-        SubscribeInputResult, Terminate, TerminateResult, Tick, TrajectoryEnd, TrajectoryLog,
-        TrajectorySample, UnsubscribeAll, UnsubscribeInput, Write, WriteResult,
+        Ping, Pong, ProcessExited, Read, ReadResult, RecordResult, ReplaceComponent, ReplaceResult,
+        Spawn, SpawnResult, SubscribeInput, SubscribeInputResult, Terminate, TerminateResult, Tick,
+        TrajectoryEnd, TrajectoryLog, TrajectorySample, UnsubscribeAll, UnsubscribeInput, Write,
+        WriteResult,
     };
 
     #[test]
@@ -113,9 +113,6 @@ mod tests {
         assert!(names.contains(&UnsubscribeAll::NAME));
         assert!(names.contains(&LifecycleUnsubscribeAll::NAME));
         assert!(names.contains(&SubscribeInputResult::NAME));
-        assert!(names.contains(&NoteOn::NAME));
-        assert!(names.contains(&NoteOff::NAME));
-        assert!(names.contains(&SetMasterGain::NAME));
         assert!(names.contains(&Read::NAME));
         assert!(names.contains(&ReadResult::NAME));
         assert!(names.contains(&Write::NAME));
@@ -294,9 +291,6 @@ mod tests {
             DrawTriangle::NAME,
             Ping::NAME,
             Pong::NAME,
-            NoteOn::NAME,
-            NoteOff::NAME,
-            SetMasterGain::NAME,
         ] {
             let d = descs
                 .iter()
