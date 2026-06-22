@@ -77,13 +77,11 @@ use std::collections::{BinaryHeap, VecDeque};
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
+use aether_capabilities::render::{Camera, DrawTriangle, Vertex};
 use aether_capabilities::{
     InputCapability, LifecycleCapability, RenderCapability, UiBar, UiCapability, UiPanel,
 };
-use aether_kinds::{
-    Camera, DrawTriangle, Key, KeyRelease, MouseButton, MouseMove, Render, Tick, Vertex,
-    WindowSize, keycode,
-};
+use aether_kinds::{Key, KeyRelease, MouseButton, MouseMove, Render, Tick, WindowSize, keycode};
 use aether_math::{Mat4, Vec3};
 
 use crate::arena::{Arena, HH, HW, SUB, ShapeClass};

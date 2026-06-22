@@ -31,13 +31,13 @@ mod native {
 
     use aether_actor::actor;
     use aether_data::MailboxId;
-    use aether_kinds::{DrawSolidQuads, QuadSpace, SolidQuad};
+    use aether_kinds::QuadSpace;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
 
     use crate::input::{InputCapability, InputMailboxExt};
     use crate::lifecycle::{LifecycleCapability, LifecycleMailboxExt};
-    use crate::render::RenderCapability;
+    use crate::render::{DrawSolidQuads, RenderCapability, SolidQuad};
     use crate::text::{DrawText, TextCapability};
 
     use super::{MouseButton, MouseMove, Tick, UiBar, UiButton, UiClicked, UiLabel, UiPanel};
@@ -285,9 +285,9 @@ mod native {
         use std::sync::mpsc::Receiver;
         use std::time::Duration;
 
+        use crate::render::DrawSolidQuads;
         use crate::text::DrawText;
         use aether_data::{Kind, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
-        use aether_kinds::DrawSolidQuads;
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::mail::outbound::EgressEvent;
 

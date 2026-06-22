@@ -6,10 +6,10 @@
 
 use std::path::Path;
 
-use aether_kinds::{DrawTexturedQuads, FontMetrics, GlyphAdvance, QuadSpace, TexturedQuad};
+use aether_kinds::{FontMetrics, GlyphAdvance, QuadSpace};
 use aether_substrate::actor::native::NativeCtx;
 
-use crate::render::RenderCapability;
+use crate::render::{DrawTexturedQuads, RenderCapability, TexturedQuad};
 
 use super::atlas::AtlasEntry;
 

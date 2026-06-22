@@ -51,7 +51,7 @@ mod tests {
     use aether_data::{Primitive, SchemaType};
 
     use crate::{
-        Delete, DeleteResult, DrawTriangle, DropComponent, DropResult, FsFetch, FsFetchResult, Key,
+        Delete, DeleteResult, DropComponent, DropResult, FsFetch, FsFetchResult, Key,
         LifecycleUnsubscribeAll, List, ListResult, LoadComponent, LoadResult, Mat4Apply,
         MouseButton, MouseMove, Ping, Pong, ProcessExited, Read, ReadResult, RecordResult,
         ReplaceComponent, ReplaceResult, Spawn, SpawnResult, Terminate, TerminateResult, Tick,
@@ -96,7 +96,6 @@ mod tests {
         assert!(names.contains(&Key::NAME));
         assert!(names.contains(&MouseButton::NAME));
         assert!(names.contains(&MouseMove::NAME));
-        assert!(names.contains(&DrawTriangle::NAME));
         assert!(names.contains(&Ping::NAME));
         assert!(names.contains(&Pong::NAME));
         assert!(names.contains(&LoadComponent::NAME));
@@ -202,13 +201,7 @@ mod tests {
     #[test]
     fn cast_kinds_emit_struct_with_repr_c() {
         let descs = all();
-        for name in [
-            Key::NAME,
-            MouseMove::NAME,
-            DrawTriangle::NAME,
-            Ping::NAME,
-            Pong::NAME,
-        ] {
+        for name in [Key::NAME, MouseMove::NAME, Ping::NAME, Pong::NAME] {
             let d = descs
                 .iter()
                 .find(|d| d.name == name)
@@ -264,33 +257,9 @@ mod tests {
         assert_eq!(fields[1].ty, SchemaType::Scalar(Primitive::F32));
     }
 
-    #[test]
-    fn draw_triangle_recurses_into_vertex() {
-        let descs = all();
-        let dt = descs
-            .iter()
-            .find(|d| d.name == DrawTriangle::NAME)
-            .expect("test setup: DrawTriangle kind is registered in descriptor inventory");
-        let SchemaType::Struct { fields, repr_c } = &dt.schema else {
-            panic!("expected Struct")
-        };
-        assert!(*repr_c);
-        assert_eq!(fields.len(), 1);
-        assert_eq!(fields[0].name, "verts");
-        let SchemaType::Array { element, len } = &fields[0].ty else {
-            panic!("expected Array");
-        };
-        assert_eq!(*len, 3);
-        let SchemaType::Struct {
-            repr_c: nested_repr,
-            fields: nested_fields,
-        } = &**element
-        else {
-            panic!("expected nested Struct");
-        };
-        assert!(*nested_repr);
-        assert_eq!(nested_fields.len(), 6);
-    }
+    // `draw_triangle_recurses_into_vertex` re-homed with `DrawTriangle`
+    // to `aether_capabilities::render::kinds` (ADR-0121); its descriptor
+    // submission now links from `aether-capabilities`, not this crate.
 
     #[test]
     fn mat4_apply_is_registered_cast_schema() {

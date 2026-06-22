@@ -54,8 +54,11 @@ native = [
 # the feature gates the cap module so its always-on `Actor` /
 # `Singleton` / `HandlesKind` impls + wasm-stub `pub struct` are
 # reachable, without dragging the GPU / audio native deps in.
-# Empty bodies on purpose: the markers compile from pure-Rust sources
-# already pulled in unconditionally (`aether-actor`, `aether-kinds`).
+# Empty body: the render cap's cast-shaped kinds (`DrawTriangle` /
+# `Vertex` / `Camera`) derive `bytemuck::Pod` + `Zeroable`, but `bytemuck`
+# is already an unconditional dependency (the always-on `aether.input`
+# cast kinds pull it), so a marker-only guest sees the kind types with no
+# extra feature wiring.
 render = []
 # ADR-0121: the audio cap owns its kinds in `audio/kinds.rs`. Its
 # cast-shaped triggers (`NoteOn` / `NoteOff` / `SetMasterGain`) are
@@ -67,8 +70,10 @@ audio = []
 # the render texture surface entirely by mail — but gated the same two-
 # layer way so a wasm component can address it via
 # `ctx.actor::<TextCapability>()` without dragging `fontdue` into the wasm
-# graph.
-text = []
+# graph. Pulls the `render` marker because the text cap receives the
+# render-owned `CreateTextureResult` reply kind (ADR-0121) and addresses
+# the render texture/quad kinds — both now live in `crate::render`.
+text = ["render"]
 # ADR-0107 `aether.ui` cap marker. CPU-only — it composes the render
 # solid-quad and text surfaces entirely by mail — gated the same two-
 # layer way so a wasm component can address it via

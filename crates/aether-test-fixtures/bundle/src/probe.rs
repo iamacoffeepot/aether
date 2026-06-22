@@ -63,8 +63,9 @@ use aether_actor::{
 };
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
+use aether_capabilities::render::{DrawTriangle, Vertex};
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
-use aether_kinds::{DrawTriangle, Key, Tick, Vertex};
+use aether_kinds::{Key, Tick};
 use aether_test_fixtures_kinds::{
     ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig, SetRender, TEST_BENCH_OBSERVER_MAILBOX_NAME,
     TickObserved,

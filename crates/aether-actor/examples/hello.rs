@@ -23,8 +23,9 @@
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
+use aether_capabilities::render::{DrawTriangle, Vertex};
 use aether_capabilities::{LifecycleCapability, RenderCapability};
-use aether_kinds::{DrawTriangle, Ping, Pong, Tick, Vertex};
+use aether_kinds::{Ping, Pong, Tick};
 
 static TRIANGLE: DrawTriangle = DrawTriangle {
     verts: [
