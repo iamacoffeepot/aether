@@ -82,6 +82,7 @@ dependencies = [
  "fontdue",
  "hound",
  "httparse",
+ "inventory",
  "serde",
  "serde_json",
  "sha2",
