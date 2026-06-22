@@ -21,7 +21,7 @@ use std::sync::Arc;
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
 use aether_actor::WasmActorMailbox;
-use aether_kinds::{Copy, CopyResult, Delete, FsError, List, NamespaceAddr, Read, Write};
+use aether_kinds::{Copy, CopyResult, Delete, FsError, FsFetch, List, NamespaceAddr, Read, Write};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 use std::fs;
@@ -454,14 +454,22 @@ mod native {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
+    use std::any::Any;
+    use std::panic::{self, AssertUnwindSafe};
+
     use super::{
-        AdapterRegistry, Copy, CopyResult, Delete, FsError, List, NamespaceRoots,
+        AdapterRegistry, Copy, CopyResult, Delete, FsError, FsFetch, List, NamespaceRoots,
         NamespaceRootsLayer, Read, Write, build_registry, fs_error_from_std,
     };
     use aether_actor::actor;
-    use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
+    use aether_data::TransformError;
+    use aether_kinds::{
+        DeleteResult, FsFetchError, FsFetchResult, FsFoldError, FsTransformError, ListResult,
+        ReadResult, WriteResult,
+    };
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
+    use aether_substrate::transform::{FoldError, TransformRegistry};
     use std::env;
     #[cfg(feature = "native")]
     use std::error::Error;
@@ -543,12 +551,18 @@ mod native {
     impl Error for EmptyDir {}
 
     /// `aether.fs` mailbox cap. Owns the resolved adapter registry +
-    /// namespace roots. The dispatcher thread holds an `Arc<Self>` and
-    /// routes envelopes through the macro-emitted `NativeDispatch` impl;
-    /// replies are returned directly from `#[handler]` methods (ADR-0112)
-    /// and dispatched through the substrate's `Mailer::send_reply`.
+    /// namespace roots, plus the link-time native-transform registry
+    /// (ADR-0048 §2) used by `on_fetch` to resolve and validate
+    /// transform chains before running them. The dispatcher thread holds
+    /// an `Arc<Self>` and routes envelopes through the macro-emitted
+    /// `NativeDispatch` impl; replies are returned directly from
+    /// `#[handler]` methods (ADR-0112) and dispatched through the
+    /// substrate's `Mailer::send_reply`.
     pub struct FsCapability {
         registry: Arc<AdapterRegistry>,
+        /// Link-time native-transform registry (ADR-0048 §2). Built once
+        /// at `init`; immutable thereafter.
+        transforms: TransformRegistry,
     }
 
     #[actor]
@@ -568,14 +582,19 @@ mod native {
         fn init(roots: NamespaceRoots, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             let (registry, roots) =
                 build_registry(roots).map_err(|e| BootError::Other(Box::new(e)))?;
+            let transforms = TransformRegistry::from_inventory();
             tracing::info!(
                 target: "aether_substrate::fs",
                 save = %roots.save.display(),
                 assets = %roots.assets.display(),
                 config = %roots.config.display(),
+                transforms = transforms.len(),
                 "adapters registered",
             );
-            Ok(Self { registry })
+            Ok(Self {
+                registry,
+                transforms,
+            })
         }
 
         /// Read bytes from a logical namespace path.
@@ -727,6 +746,140 @@ mod native {
                 },
             }
         }
+
+        /// Read a file from a namespace and run an ordered transform
+        /// pipeline over its bytes, replying with the folded output
+        /// (issue 2132).
+        ///
+        /// An empty `transforms` list short-circuits to the raw file
+        /// bytes (`output_kind: None`). A non-empty chain is validated
+        /// for linear composition before any compute runs. The fold
+        /// executes synchronously on `aether.fs`'s run-token; a heavy
+        /// fold blocks the run-token until it returns.
+        ///
+        /// The whole fold runs under one `panic::catch_unwind` — a
+        /// panicking transform maps to `FsFetchError::Panicked` rather
+        /// than unwinding through the actor dispatch.
+        ///
+        /// # Agent
+        /// Reply: `FsFetchResult`. Echoes namespace + path on both arms.
+        #[handler]
+        fn on_fetch(&self, _ctx: &mut NativeCtx<'_>, mail: FsFetch) -> FsFetchResult {
+            let Some(adapter) = self.registry.get(&mail.namespace) else {
+                return FsFetchResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    error: FsFetchError::Fs(FsError::UnknownNamespace),
+                };
+            };
+
+            let bytes = match adapter.read(&mail.path) {
+                Ok(b) => b,
+                Err(e) => {
+                    return FsFetchResult::Err {
+                        namespace: mail.namespace,
+                        path: mail.path,
+                        error: FsFetchError::Fs(e),
+                    };
+                }
+            };
+
+            if mail.transforms.is_empty() {
+                return FsFetchResult::Ok {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    output_kind: None,
+                    data: bytes,
+                };
+            }
+
+            let output_kind = match self.transforms.validate_fold(&mail.transforms) {
+                Ok(Some(k)) => k,
+                Ok(None) => unreachable!("transforms is non-empty; validate_fold returns Some"),
+                Err(fold_err) => {
+                    return FsFetchResult::Err {
+                        namespace: mail.namespace,
+                        path: mail.path,
+                        error: FsFetchError::Fold(map_fold_error(&fold_err)),
+                    };
+                }
+            };
+
+            let transforms = &self.transforms;
+            let ids = &mail.transforms;
+            let fold_result = panic::catch_unwind(AssertUnwindSafe(|| {
+                let mut buf = bytes;
+                for &id in ids {
+                    let t = transforms
+                        .lookup(id)
+                        .expect("validate_fold succeeded; every id is guaranteed to resolve");
+                    buf = (t.invoke)(&[&buf])?;
+                }
+                Ok::<Vec<u8>, TransformError>(buf)
+            }));
+
+            match fold_result {
+                Ok(Ok(data)) => FsFetchResult::Ok {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    output_kind: Some(output_kind),
+                    data,
+                },
+                Ok(Err(transform_err)) => FsFetchResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    error: FsFetchError::Transform(map_transform_error(&transform_err)),
+                },
+                Err(payload) => FsFetchResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    error: FsFetchError::Panicked(panic_message(payload.as_ref())),
+                },
+            }
+        }
+    }
+
+    fn map_fold_error(e: &FoldError) -> FsFoldError {
+        match e {
+            FoldError::UnknownTransform(id) => FsFoldError::UnknownTransform(*id),
+            FoldError::NonLinearArity { at_index, arity } => FsFoldError::NonLinearArity {
+                at_index: *at_index as u64,
+                arity: *arity as u64,
+            },
+            FoldError::KindMismatch {
+                at_index,
+                expected,
+                found,
+            } => FsFoldError::KindMismatch {
+                at_index: *at_index as u64,
+                expected: *expected,
+                found: *found,
+            },
+        }
+    }
+
+    fn map_transform_error(e: &TransformError) -> FsTransformError {
+        match e {
+            TransformError::InputDecode { slot } => {
+                FsTransformError::InputDecode { slot: *slot as u64 }
+            }
+            TransformError::InputArity { expected, actual } => FsTransformError::InputArity {
+                expected: *expected as u64,
+                actual: *actual as u64,
+            },
+            TransformError::OutputOverflow { limit, actual } => FsTransformError::OutputOverflow {
+                limit: *limit as u64,
+                actual: *actual as u64,
+            },
+        }
+    }
+
+    fn panic_message(payload: &(dyn Any + Send)) -> String {
+        payload
+            .downcast_ref::<&'static str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_owned())
     }
 
     #[cfg(test)]
@@ -736,7 +889,10 @@ mod native {
         /// tests that want to drive handlers without spinning up a full
         /// chassis hand a pre-built registry directly.
         pub(crate) fn from_registry(registry: Arc<AdapterRegistry>) -> Self {
-            Self { registry }
+            Self {
+                registry,
+                transforms: TransformRegistry::from_inventory(),
+            }
         }
     }
 
@@ -1532,6 +1688,311 @@ mod native {
                 ),
                 "expected Forbidden for traversal path, got {result:?}",
             );
+            cleanup(&root);
+        }
+
+        // `aether.fs.fetch` handler tests (issue 2132). Migrated from the
+        // retired `aether.nfs` capability. The transform fixtures (`double`,
+        // `boom`, `seed`) are local to this test module; `TestNumber` is
+        // the shared input/output kind wired through the `double` transform.
+
+        use aether_data::transform;
+        use serde::{Deserialize, Serialize};
+
+        /// Structured number kind — the fetch-fold fixtures' transform
+        /// input + output. The extra `tag: u32` makes the `{ u64, u32 }`
+        /// shape canonically distinct from the test vocabulary's other
+        /// single-`u64` kinds so the resolved output `KindId` is unique.
+        #[derive(
+            Copy,
+            Clone,
+            Debug,
+            Default,
+            PartialEq,
+            Eq,
+            Serialize,
+            Deserialize,
+            aether_data::Kind,
+            aether_data::Schema,
+        )]
+        #[kind(name = "aether.fs.test.number")]
+        struct TestNumber {
+            value: u64,
+            tag: u32,
+        }
+
+        /// Pure transform: double the wrapped value (`TestNumber` →
+        /// `TestNumber`). The single-transform fold fixtures' compute.
+        #[transform]
+        fn double_fs(x: TestNumber) -> TestNumber {
+            TestNumber {
+                value: x.value.wrapping_mul(2),
+                tag: x.tag,
+            }
+        }
+
+        /// Panicking transform — exercises the panic-is-failure path
+        /// (`FsFetchError::Panicked`).
+        #[transform]
+        fn boom_fs(_x: TestNumber) -> TestNumber {
+            panic!("boom");
+        }
+
+        /// Zero-input transform (arity 0) — placing it mid-chain trips
+        /// `FsFoldError::NonLinearArity`.
+        #[transform]
+        fn seed_fs() -> TestNumber {
+            TestNumber { value: 7, tag: 0 }
+        }
+
+        fn transform_id_by_name(tail: &str) -> aether_data::TransformId {
+            let Some(entry) =
+                aether_data::transforms().find(|t| t.name.ends_with(&format!("::{tail}")))
+            else {
+                panic!("transform `{tail}` not registered in link-time inventory");
+            };
+            entry.transform_id
+        }
+
+        fn double_fs_transform_id() -> aether_data::TransformId {
+            transform_id_by_name("double_fs")
+        }
+
+        fn boom_fs_transform_id() -> aether_data::TransformId {
+            transform_id_by_name("boom_fs")
+        }
+
+        fn seed_fs_transform_id() -> aether_data::TransformId {
+            transform_id_by_name("seed_fs")
+        }
+
+        use aether_data::Kind;
+        use aether_kinds::{FsFetch, FsFetchError, FsFetchResult, FsFoldError};
+        use aether_substrate::transform::TransformRegistry;
+
+        /// Unit test: `on_fetch` with empty transforms returns raw file bytes.
+        #[test]
+        fn on_fetch_empty_transforms_returns_raw_bytes() {
+            let root = scratch_root("fetch-raw");
+            let assets = root.join("assets");
+            fs::create_dir_all(&assets).expect("test setup: assets dir creates");
+            fs::write(assets.join("data.bin"), b"raw payload").expect("test setup: seed data.bin");
+            let reg = build_two_namespace_registry(&root, true);
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+            let result = fix.cap.on_fetch(
+                &mut ctx,
+                FsFetch {
+                    namespace: "assets".to_string(),
+                    path: "data.bin".to_string(),
+                    transforms: vec![],
+                },
+            );
+            match result {
+                FsFetchResult::Ok {
+                    namespace,
+                    path,
+                    output_kind,
+                    data,
+                } => {
+                    assert_eq!(namespace, "assets");
+                    assert_eq!(path, "data.bin");
+                    assert!(
+                        output_kind.is_none(),
+                        "empty transform list → output_kind is None"
+                    );
+                    assert_eq!(data, b"raw payload");
+                }
+                FsFetchResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
+            }
+            cleanup(&root);
+        }
+
+        /// Unit test: `on_fetch` with an unknown namespace returns
+        /// `FsFetchError::Fs(FsError::UnknownNamespace)`.
+        #[test]
+        fn on_fetch_unknown_namespace_returns_unknown_namespace() {
+            let root = scratch_root("fetch-ns-unknown");
+            let reg = build_save_only_registry(&root, true);
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+            let result = fix.cap.on_fetch(
+                &mut ctx,
+                FsFetch {
+                    namespace: "nope".to_string(),
+                    path: "x.bin".to_string(),
+                    transforms: vec![],
+                },
+            );
+            assert!(
+                matches!(
+                    result,
+                    FsFetchResult::Err {
+                        error: FsFetchError::Fs(FsError::UnknownNamespace),
+                        ..
+                    }
+                ),
+                "expected Err(Fs(UnknownNamespace)), got {result:?}",
+            );
+            cleanup(&root);
+        }
+
+        /// Unit test: `on_fetch` with a single transform returns the folded
+        /// output tagged with the transform's output `KindId`.
+        ///
+        /// Uses the `double_fs` test transform (`TestNumber` → `TestNumber`).
+        #[test]
+        fn on_fetch_single_transform_returns_folded_output() {
+            let root = scratch_root("fetch-transform");
+            let assets = root.join("assets");
+            fs::create_dir_all(&assets).expect("test setup: assets dir creates");
+            let input = TestNumber { value: 7, tag: 0 };
+            let encoded = input.encode_into_bytes();
+            fs::write(assets.join("number.bin"), &encoded).expect("test setup: seed number.bin");
+
+            let reg = build_two_namespace_registry(&root, true);
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+            let double_id = double_fs_transform_id();
+
+            let transform_reg = TransformRegistry::from_inventory();
+            let double_t = transform_reg
+                .lookup(double_id)
+                .expect("double_fs registered");
+            let expected_output_kind = double_t.output_kind_id;
+
+            let result = fix.cap.on_fetch(
+                &mut ctx,
+                FsFetch {
+                    namespace: "assets".to_string(),
+                    path: "number.bin".to_string(),
+                    transforms: vec![double_id],
+                },
+            );
+            match result {
+                FsFetchResult::Ok {
+                    output_kind, data, ..
+                } => {
+                    assert_eq!(
+                        output_kind,
+                        Some(expected_output_kind),
+                        "output_kind should be double_fs's output kind"
+                    );
+                    let out: TestNumber =
+                        TestNumber::decode_from_bytes(&data).expect("output decodes as TestNumber");
+                    assert_eq!(out.value, 14, "double_fs(7) == 14");
+                }
+                FsFetchResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
+            }
+            cleanup(&root);
+        }
+
+        /// Unit test: a non-composing chain returns `FsFetchError::Fold`
+        /// before any transform runs.
+        #[test]
+        fn on_fetch_non_composing_chain_returns_fold_error() {
+            let root = scratch_root("fetch-fold-err");
+            let assets = root.join("assets");
+            fs::create_dir_all(&assets).expect("test setup: assets dir creates");
+            fs::write(assets.join("data.bin"), b"ignored").expect("test setup: seed data.bin");
+            let reg = build_two_namespace_registry(&root, true);
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+
+            // `double_fs`: TestNumber → TestNumber; `seed_fs`: () → TestNumber.
+            // `seed_fs` takes ZERO inputs (arity 0), so placing it at index 1
+            // (where one input is expected for a linear fold) fires
+            // NonLinearArity at index 1.
+            let double_id = double_fs_transform_id();
+            let seed_id = seed_fs_transform_id();
+
+            let result = fix.cap.on_fetch(
+                &mut ctx,
+                FsFetch {
+                    namespace: "assets".to_string(),
+                    path: "data.bin".to_string(),
+                    transforms: vec![double_id, seed_id],
+                },
+            );
+            match result {
+                FsFetchResult::Err { error, .. } => {
+                    assert!(
+                        matches!(
+                            error,
+                            FsFetchError::Fold(FsFoldError::NonLinearArity { at_index: 1, .. })
+                        ),
+                        "expected Fold(NonLinearArity at 1), got {error:?}",
+                    );
+                }
+                FsFetchResult::Ok { .. } => panic!("expected Err(Fold), got Ok"),
+            }
+            cleanup(&root);
+        }
+
+        /// Unit test: a chain whose first transform can't decode the file's
+        /// bytes returns `FsFetchError::Transform`.
+        #[test]
+        fn on_fetch_transform_decode_failure_returns_transform_error() {
+            let root = scratch_root("fetch-transform-err");
+            let assets = root.join("assets");
+            fs::create_dir_all(&assets).expect("test setup: assets dir creates");
+            fs::write(assets.join("garbage.bin"), [0xFF_u8]).expect("test setup: seed garbage.bin");
+            let reg = build_two_namespace_registry(&root, true);
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+            let double_id = double_fs_transform_id();
+
+            let result = fix.cap.on_fetch(
+                &mut ctx,
+                FsFetch {
+                    namespace: "assets".to_string(),
+                    path: "garbage.bin".to_string(),
+                    transforms: vec![double_id],
+                },
+            );
+            match result {
+                FsFetchResult::Err { error, .. } => {
+                    assert!(
+                        matches!(error, FsFetchError::Transform(_)),
+                        "expected Transform error, got {error:?}",
+                    );
+                }
+                FsFetchResult::Ok { .. } => panic!("expected Err(Transform), got Ok"),
+            }
+            cleanup(&root);
+        }
+
+        /// Unit test: a panicking transform produces `FsFetchError::Panicked`.
+        #[test]
+        fn on_fetch_panicking_transform_returns_panicked_error() {
+            let root = scratch_root("fetch-panic");
+            let assets = root.join("assets");
+            fs::create_dir_all(&assets).expect("test setup: assets dir creates");
+            let input = TestNumber { value: 1, tag: 0 };
+            let encoded = input.encode_into_bytes();
+            fs::write(assets.join("number.bin"), &encoded).expect("test setup: seed number.bin");
+            let reg = build_two_namespace_registry(&root, true);
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+            let boom_id = boom_fs_transform_id();
+
+            let result = fix.cap.on_fetch(
+                &mut ctx,
+                FsFetch {
+                    namespace: "assets".to_string(),
+                    path: "number.bin".to_string(),
+                    transforms: vec![boom_id],
+                },
+            );
+            match result {
+                FsFetchResult::Err { error, .. } => {
+                    assert!(
+                        matches!(error, FsFetchError::Panicked(_)),
+                        "expected Panicked error, got {error:?}",
+                    );
+                }
+                FsFetchResult::Ok { .. } => panic!("expected Err(Panicked), got Ok"),
+            }
             cleanup(&root);
         }
     }

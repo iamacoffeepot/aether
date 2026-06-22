@@ -236,7 +236,7 @@ A **transform** is a pure function over typed values — `#[transform] fn
 foo(input: A) -> B`, registered at build time with a `TransformId` and typed by
 its input and output kinds ([ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)). Where a kind is a value and a mailbox is
 an address, a transform is a typed *edge*: it takes a value of one kind and
-produces a value of another. The `aether.nfs` `fetch` verb runs a fold chain of
+produces a value of another. The `aether.fs` `fetch` verb runs a fold chain of
 them over a file's bytes; inspect the linked set with `describe_transforms`.
 
 ## Typed ids — the naming layer

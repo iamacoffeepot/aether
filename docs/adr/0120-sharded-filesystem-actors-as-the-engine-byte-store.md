@@ -4,13 +4,15 @@
 - **Date:** 2026-06-20
 
 > **Overturned.** The sharded-actor structure this ADR proposes was reversed
-> before the floor stabilized: `aether.nfs` ships as a single actor, and the
-> instanced-singleton machinery it relied on (`Builder::with_instance`) was
-> reverted with it. Sharding is parked as a future optimization lever, to
-> revisit when shard-level concurrency is actually needed — this ADR is kept as
-> the recorded design for that point. The byte-ownership goals it serves (one
-> owner of engine bytes, handles-first, load-by-transform) carry forward on the
-> single actor.
+> before the floor stabilized: `aether.nfs` shipped briefly as a single actor,
+> and the instanced-singleton machinery it relied on (`Builder::with_instance`)
+> was reverted with it. `aether.nfs` itself was subsequently retired entirely
+> (issue 2132): its `fetch` verb folded onto `aether.fs` as `aether.fs.fetch`,
+> and the `NfsCapability` struct, mailbox, and kinds were deleted. Sharding is
+> parked as a future optimization lever, to revisit when shard-level
+> concurrency is actually needed — this ADR is kept as the recorded design for
+> that point. The byte-ownership goals it serves (one owner of engine bytes,
+> handles-first, load-by-transform) carry forward on `aether.fs`.
 
 ## Context
 

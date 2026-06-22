@@ -11,7 +11,7 @@
 // Force-link `aether-labyrinth` into this engine binary so its certifier
 // `#[transform]`s register in the link-time `aether_data::transforms()`
 // inventory the chassis's `TransformRegistry` is built from (issue 1908) —
-// the registry the `aether.nfs` `fetch` verb resolves a caller's transform
+// the registry the `aether.fs` `fetch` verb resolves a caller's transform
 // chain against. The bundle lib references only the recorder cap (a
 // different codegen member), so without this the linker drops the
 // transforms member and those transforms silently vanish from the registry

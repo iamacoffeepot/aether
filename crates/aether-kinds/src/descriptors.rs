@@ -52,13 +52,13 @@ mod tests {
 
     use crate::{
         CliSend, CliSendResult, Delete, DeleteResult, DrawTriangle, DropComponent, DropResult,
-        Fetch, FetchResult, Key, LifecycleUnsubscribeAll, List, ListResult, LoadComponent,
-        LoadResult, LyriaGenerate, LyriaGenerateResult, Mat4Apply, MessagesSend,
+        Fetch, FetchResult, FsFetch, FsFetchResult, Key, LifecycleUnsubscribeAll, List, ListResult,
+        LoadComponent, LoadResult, LyriaGenerate, LyriaGenerateResult, Mat4Apply, MessagesSend,
         MessagesSendResult, MouseButton, MouseMove, NanobananaGenerate, NanobananaGenerateResult,
-        NfsFetch, NfsFetchResult, NoteOff, NoteOn, Ping, Pong, ProcessExited, Read, ReadResult,
-        RecordResult, ReplaceComponent, ReplaceResult, SetMasterGain, Spawn, SpawnResult,
-        SubscribeInput, SubscribeInputResult, Terminate, TerminateResult, Tick, TrajectoryEnd,
-        TrajectoryLog, TrajectorySample, UnsubscribeAll, UnsubscribeInput, Write, WriteResult,
+        NoteOff, NoteOn, Ping, Pong, ProcessExited, Read, ReadResult, RecordResult,
+        ReplaceComponent, ReplaceResult, SetMasterGain, Spawn, SpawnResult, SubscribeInput,
+        SubscribeInputResult, Terminate, TerminateResult, Tick, TrajectoryEnd, TrajectoryLog,
+        TrajectorySample, UnsubscribeAll, UnsubscribeInput, Write, WriteResult,
     };
 
     #[test]
@@ -126,8 +126,8 @@ mod tests {
         assert!(names.contains(&ListResult::NAME));
         assert!(names.contains(&Fetch::NAME));
         assert!(names.contains(&FetchResult::NAME));
-        assert!(names.contains(&NfsFetch::NAME));
-        assert!(names.contains(&NfsFetchResult::NAME));
+        assert!(names.contains(&FsFetch::NAME));
+        assert!(names.contains(&FsFetchResult::NAME));
         assert!(names.contains(&Spawn::NAME));
         assert!(names.contains(&SpawnResult::NAME));
         assert!(names.contains(&Terminate::NAME));

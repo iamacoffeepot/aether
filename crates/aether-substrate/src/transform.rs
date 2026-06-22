@@ -7,7 +7,7 @@
 //! lifetime — a transform set is a build-time property, not a load-time
 //! one.
 //!
-//! The `aether.nfs` `fetch` verb cross-checks a caller's fold chain
+//! The `aether.fs` `fetch` verb cross-checks a caller's fold chain
 //! against this registry via [`TransformRegistry::validate_fold`]
 //! (unknown id, non-linear arity, or an adjacent-pair kind mismatch →
 //! a structured [`FoldError`]) before any transform runs. Post-validation
