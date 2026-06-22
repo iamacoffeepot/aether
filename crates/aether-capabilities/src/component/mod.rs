@@ -1,7 +1,7 @@
 //! `aether.component` cap (issue 603, renamed in issue 638 phase 3
 //! from `aether.control`). The wasm-component lifecycle endpoint:
 //! receives [`LoadComponent`] mail and spawns a per-component
-//! [`WasmTrampoline`] (issue 634 Phase 4 PR 1) addressed at
+//! `WasmTrampoline` (issue 634 Phase 4 PR 1) addressed at
 //! `aether.embedded:NAME`. [`DropComponent`] and
 //! [`ReplaceComponent`] mail flow through the cap as well — it
 //! forwards each to the addressed trampoline preserving the
@@ -23,129 +23,56 @@
 //! issue 565 pattern. Plain fields (no `Arc<Inner>` wrapper) per
 //! ADR-0078 — the cap is single-threaded, every handler runs on the
 //! cap's dispatcher thread.
+//!
+//! The implementation is split into three files:
+//! - `mod.rs` — this file: the bridge module, struct, config, and
+//!   four thin lifecycle handlers.
+//! - `route.rs` — the send-side peer-addressing facades
+//!   ([`ComponentHostWasmExt`], [`ComponentHostNativeExt`],
+//!   [`resolve_embedded`]).
+//! - `load.rs` — the `handle_load` sequence; fields on
+//!   [`ComponentHostCapability`] carry `pub(in crate::component)`
+//!   so this sibling module can access them.
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the
 // decoded bytes so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
 
-use aether_actor::{Addressable, WasmActorMailbox};
+mod route;
+#[cfg(not(target_arch = "wasm32"))]
+pub use route::ComponentHostNativeExt;
+pub use route::{ComponentHostWasmExt, resolve_embedded};
+
+#[cfg(not(target_arch = "wasm32"))]
+mod load;
+
 use aether_kinds::{DropComponent, ListComponents, LoadComponent, ReplaceComponent};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_kinds::{LifecycleUnsubscribeAll, UnsubscribeAll};
-#[cfg(not(target_arch = "wasm32"))]
-use aether_substrate::actor::native::NativeActorMailbox;
-
-use crate::trampoline::WasmTrampoline;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::ComponentHostConfig;
 
-/// Sender-side facade for FFI guests addressing a loaded peer
-/// component through [`ComponentHostCapability`].
-///
-/// "Sending mail to a loaded component" isn't a SDK primitive — it
-/// only exists *because* this cap loaded a wasm component and gave it
-/// a trampoline address. So the helper lives here, attached to the
-/// cap's FFI mailbox, mirroring [`crate::fs::FsMailboxExt`]'s
-/// cap-owned facade pattern (issue 580).
-///
-/// `.loaded::<R>(name)` resolves a typed peer handle. The trampoline
-/// prefix lives in exactly one place in the workspace —
-/// [`WasmTrampoline::NAMESPACE`] (issue 654) — and this method reads
-/// from it, so a future rename of the convention touches one constant
-/// and propagates everywhere.
-///
-/// `R: Addressable` is the peer's actor type, supplied by the caller (same
-/// as today's `WasmCtx::resolve_actor` surface). Type-checks at the
-/// send site — `peer.send::<K>(&mail)` compiles only when
-/// `R: HandlesKind<K>`.
-pub trait ComponentHostWasmExt {
-    /// Resolve a typed peer-component mailbox for the loaded component
-    /// named `name`. The full mailbox address is
-    /// `format!("{}:{}", WasmTrampoline::NAMESPACE, name)`. The resolved
-    /// handle inherits this handle's ctx binding (`sender` + inline
-    /// registry), so its sends stamp the same origin (issue 1987).
-    fn loaded<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R>;
-}
-
-impl ComponentHostWasmExt for WasmActorMailbox<'_, ComponentHostCapability> {
-    fn loaded<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
-        self.resolve_peer_scoped::<R>(WasmTrampoline::NAMESPACE, name)
-    }
-}
-
-/// Sender-side facade for native cap-to-cap callers addressing a
-/// loaded peer component through [`ComponentHostCapability`]. Same
-/// shape as [`ComponentHostWasmExt`] for the native transport — the
-/// returned handle inherits the parent mailbox's `'a` binding ref so
-/// `.send::<K>(&mail)` dispatches through the same `NativeBinding`
-/// without re-threading the ctx.
-#[cfg(not(target_arch = "wasm32"))]
-pub trait ComponentHostNativeExt {
-    /// Resolve a typed peer-component mailbox for the loaded component
-    /// named `name`. The full mailbox address is
-    /// `format!("{}:{}", WasmTrampoline::NAMESPACE, name)`.
-    fn loaded<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R>;
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl ComponentHostNativeExt for NativeActorMailbox<'_, ComponentHostCapability> {
-    fn loaded<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R> {
-        self.resolve_peer_scoped::<R>(WasmTrampoline::NAMESPACE, name)
-    }
-}
-
-/// Resolve the [`MailboxId`](aether_data::MailboxId) of the embeddable
-/// component loaded under `name`, by folding the instance node
-/// `aether.embedded:<name>` (the [`Embedded`](aether_actor::Embedded)
-/// resolver) onto the `aether.component` host cap's carry (ADR-0099 §5/§6,
-/// ADR-0119).
-///
-/// This is the by-name carry-supplier. `aether-actor`'s `Embedded` resolver
-/// owns the fold and the reserved scope
-/// ([`EMBEDDED_SCOPE`](aether_actor::EMBEDDED_SCOPE)); this fn supplies the
-/// `aether.component` carry, read only from its owner
-/// [`ComponentHostCapability`]. Equal by construction to a component's own
-/// `type Resolver = Embedded` and to the by-name verb
-/// [`loaded::<R>(name)`](ComponentHostWasmExt::loaded), so bare-type and
-/// by-name addressing agree. Available on every target — a wasm peer resolves
-/// an embeddable the same way a native one does, no transport branch
-/// (ADR-0029 client-side no-lookup).
-#[must_use]
-pub fn resolve_embedded(name: &str) -> aether_data::MailboxId {
-    use aether_actor::{Addressable, Embedded, Resolve};
-    Embedded::resolve(
-        <ComponentHostCapability as Addressable>::resolve(0, ()).0,
-        name,
-        (),
-    )
-}
-
 #[aether_actor::bridge(singleton)]
 mod native {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::AtomicU64;
 
-    use aether_actor::Addressable;
     use aether_actor::actor;
     use aether_data::Kind;
     use aether_data::MailboxCategory;
-    use aether_kinds::{ComponentCapabilities, ListComponentsResult, LoadResult};
-    use wasmtime::{Engine, Linker, Module};
+    use aether_kinds::{ListComponentsResult, LoadResult};
+    use wasmtime::{Engine, Linker};
 
     use super::{
         DropComponent, LifecycleUnsubscribeAll, ListComponents, LoadComponent, ReplaceComponent,
         UnsubscribeAll,
     };
 
-    use aether_substrate::actor::native::spawn::Subname;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::actor::wasm::component::ComponentCtx;
-    use aether_substrate::actor::wasm::kind_manifest;
     use aether_substrate::chassis::error::BootError;
-    use aether_substrate::mail::capability::MailboxCaps;
-    use aether_substrate::mail::helpers::register_or_match_all;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
@@ -153,7 +80,6 @@ mod native {
 
     use crate::input::InputCapability;
     use crate::lifecycle::LifecycleCapability;
-    use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
 
     /// Configuration for [`ComponentHostCapability`]. `engine` and
     /// `linker` are the wasmtime instances every load instantiates
@@ -175,18 +101,22 @@ mod native {
     /// (post-issue-640) — the cap doesn't carry an `input_mailbox`
     /// field; `ctx.actor::<InputCapability>().send(...)` resolves it
     /// inline at the call site.
+    ///
+    /// Fields carry `pub(in crate::component)` so the `load` submodule
+    /// (which holds `handle_load`) can access them as a sibling rather
+    /// than a child of `mod native`.
     pub struct ComponentHostCapability {
-        engine: Arc<Engine>,
-        linker: Arc<Linker<ComponentCtx>>,
-        registry: Arc<Registry>,
-        mailer: Arc<Mailer>,
-        outbound: Arc<HubOutbound>,
+        pub(in crate::component) engine: Arc<Engine>,
+        pub(in crate::component) linker: Arc<Linker<ComponentCtx>>,
+        pub(in crate::component) registry: Arc<Registry>,
+        pub(in crate::component) mailer: Arc<Mailer>,
+        pub(in crate::component) outbound: Arc<HubOutbound>,
         /// Monotonic counter for `component_N` default names when an
         /// agent passes `name: None` and the wasm doesn't declare an
         /// `aether.namespace`. `AtomicU64` because the bridge macro
         /// emits handlers behind `&self` for some patterns; the
         /// counter is fine either way.
-        default_name_counter: AtomicU64,
+        pub(in crate::component) default_name_counter: AtomicU64,
     }
 
     #[actor]
@@ -325,196 +255,6 @@ mod native {
     }
 
     impl ComponentHostCapability {
-        #[allow(
-            clippy::too_many_lines,
-            reason = "one cohesive load sequence: parse + register kinds, resolve the export, \
-                      compile, name, spawn the trampoline, register caps, announce. Splitting it \
-                      would thread the load payload + registry/engine handles through a helper \
-                      for no clarity gain."
-        )]
-        fn handle_load(&mut self, ctx: &mut NativeCtx<'_>, payload: LoadComponent) -> LoadResult {
-            // 1. Parse + register kind descriptors (ADR-0028).
-            let descriptors = match kind_manifest::read_from_bytes(&payload.wasm) {
-                Ok(d) => d,
-                Err(error) => return LoadResult::Err { error },
-            };
-            if let Err(error) = register_or_match_all(&self.registry, &descriptors) {
-                return LoadResult::Err { error };
-            }
-
-            // 2. Parse the per-actor capability manifest (ADR-0033 /
-            //    ADR-0096) and resolve which exported type to load.
-            //    `export: None` selects the entry (first) type — the
-            //    only type a single-actor module has — so the legacy
-            //    load is unchanged. A named selector must match one of
-            //    the module's `ActorBoundary` namespaces, else the load
-            //    fails cleanly. The selected type's `type_tag` drives
-            //    `init_typed_p32` at instantiate; `None` keeps the
-            //    legacy entry-init path.
-            let actors = match kind_manifest::read_actor_inputs_from_bytes(&payload.wasm) {
-                Ok(a) => a,
-                Err(error) => return LoadResult::Err { error },
-            };
-            let (capabilities, type_tag, selected_namespace): (
-                ComponentCapabilities,
-                Option<u64>,
-                Option<String>,
-            ) = if let Some(requested) = &payload.export {
-                let Some(group) = actors
-                    .iter()
-                    .find(|a| a.namespace.as_deref() == Some(requested.as_str()))
-                else {
-                    let available: Vec<&str> = actors
-                        .iter()
-                        .filter_map(|a| a.namespace.as_deref())
-                        .collect();
-                    return LoadResult::Err {
-                        error: format!(
-                            "export {requested:?} not found in module; exported types: {available:?}"
-                        ),
-                    };
-                };
-                (
-                    group.capabilities.clone(),
-                    // Runtime-name routing: `requested` is the export namespace
-                    // from the wire load request, resolved to its actor-type tag.
-                    #[allow(clippy::disallowed_methods)]
-                    Some(aether_data::mailbox_id_from_name(requested).0),
-                    Some(requested.clone()),
-                )
-            } else {
-                let entry = actors.first();
-                (
-                    entry.map(|a| a.capabilities.clone()).unwrap_or_default(),
-                    None,
-                    entry.and_then(|a| a.namespace.clone()),
-                )
-            };
-
-            // 3. Compile module.
-            let module = match Module::new(&self.engine, &payload.wasm) {
-                Ok(m) => m,
-                Err(e) => {
-                    return LoadResult::Err {
-                        error: format!("invalid wasm module: {e}"),
-                    };
-                }
-            };
-
-            // 4. Resolve the component name. Caller > selected export's
-            // namespace > wasm-declared entry namespace > monotonic
-            // default. A non-entry export defaults its mailbox name to
-            // the selected type's namespace, the multi-actor analog of
-            // the single-actor `aether.namespace` fallback.
-            let name = match payload.name {
-                Some(n) => n,
-                None => match selected_namespace {
-                    Some(ns) => ns,
-                    None => match kind_manifest::read_namespace_from_bytes(&payload.wasm) {
-                        Ok(Some(declared)) => declared,
-                        Ok(None) => {
-                            let n = self.default_name_counter.fetch_add(1, Ordering::Relaxed);
-                            format!("component_{n}")
-                        }
-                        Err(error) => return LoadResult::Err { error },
-                    },
-                },
-            };
-
-            // 5. Spawn the trampoline. The framework spawn machinery
-            // claims the namespace, registers the closure-bound
-            // mailbox at `aether.embedded:NAME`, runs
-            // `WasmTrampoline::init` (which instantiates `Component`
-            // against the trampoline's binding), and starts the
-            // dispatcher thread. The returned id is the trampoline's
-            // mailbox.
-            let trampoline_config = WasmTrampolineConfig {
-                engine: Arc::clone(&self.engine),
-                linker: Arc::clone(&self.linker),
-                module,
-                registry: Arc::clone(&self.registry),
-                outbound: Arc::clone(&self.outbound),
-                capabilities: capabilities.clone(),
-                // ADR-0090 (issue 1257): carry the load mail's init-config
-                // bytes into the trampoline; `WasmTrampoline::init` hands
-                // them to the guest's typed `init`.
-                config: payload.config,
-                // ADR-0096: the selected export's actor-type tag, threaded
-                // through to `Component::instantiate` so it calls
-                // `init_typed_p32`. `None` = entry type (single-actor
-                // modules and unselected loads keep the legacy init path).
-                type_tag,
-                // ADR-0097: the full per-type capability map, so a guest
-                // `spawn_child::<Sibling>` can register the spawned
-                // sibling's own handler set (looked up by actor-type tag).
-                actor_caps: actors,
-            };
-            let mailbox_id = match ctx
-                .spawn_child::<WasmTrampoline>(Subname::Named(&name), trampoline_config)
-                .finish()
-            {
-                Ok(id) => id,
-                Err(e) => {
-                    return LoadResult::Err {
-                        error: format!("trampoline spawn failed: {e:?}"),
-                    };
-                }
-            };
-
-            // 6. iamacoffeepot/aether#1037: register the trampoline's
-            // ADR-0033 receive-side capabilities into the queryable
-            // `CapabilityRegistry` so the DAG validator can ask
-            // "does this mailbox accept kind K?". Same registry the
-            // native-cap-boot path populates — one source of truth for
-            // both transport flavours. `aether.component.replace`
-            // re-registers (same mailbox id); `aether.component.drop`
-            // clears.
-            self.mailer.capability_registry().register(
-                mailbox_id,
-                MailboxCaps::from_component_capabilities(&capabilities),
-            );
-
-            // iamacoffeepot/aether#1128: the per-handler cost cells are
-            // seeded inside `WasmTrampoline::init` (run just above, under
-            // the spawn path's `with_stamped`), from the same
-            // `capabilities` — both the global `CostTable` and the
-            // trampoline's per-actor cache, over one shared `Arc`. Nothing
-            // to seed cap-side here: `init` has the `ActorSlots` stamp this
-            // thread does not.
-
-            // ADR-0081 retired the chassis-pushed `ConfigureLogDrain`
-            // mail. The freshly-spawned trampoline owns its own
-            // `ActorLogRing` like every other actor; no drain
-            // configuration is needed.
-
-            // 7. Announce the new kind vocabulary AND mailbox inventory
-            // upstream so the hub (and attached MCP sessions) see the
-            // post-load surface. Mailboxes ship symmetrically with
-            // kinds (issue iamacoffeepot/aether#730) — every load adds
-            // exactly one trampoline mailbox at
-            // `aether.embedded:NAME`, and the snapshot
-            // gives the hub the freshly-published name + category.
-            self.outbound
-                .egress_kinds_changed(self.registry.list_kind_descriptors());
-            self.outbound
-                .egress_mailboxes_changed(self.registry.list_mailbox_descriptors());
-
-            LoadResult::Ok {
-                mailbox_id,
-                // ADR-0099 §3/§4: report the name the spawn machinery
-                // actually registered — the `/`-rendered lineage
-                // (`aether.component/aether.embedded:NAME`) —
-                // read back from the registry so `LoadResult.name` can
-                // never disagree with the live entry. The id is the
-                // lineage fold, not `hash(name)`.
-                name: self
-                    .registry
-                    .mailbox_name(mailbox_id)
-                    .unwrap_or_else(|| format!("{}:{}", WasmTrampoline::NAMESPACE, name)),
-                capabilities,
-            }
-        }
-
         /// Forward an arbitrary kind to a trampoline's mailbox,
         /// preserving the original `reply_to` so the trampoline's
         /// reply lands at the agent (not the cap). Used for
