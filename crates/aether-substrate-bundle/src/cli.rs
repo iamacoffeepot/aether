@@ -44,7 +44,7 @@ pub use aether_capabilities::audio::AudioOverlay;
 pub use aether_capabilities::fs::NamespaceRootsOverlay as FsOverlay;
 pub use aether_capabilities::gemini::GeminiOverlay;
 pub use aether_capabilities::http::HttpOverlay;
-pub use aether_capabilities::http_server::HttpServerOverlay;
+pub use aether_capabilities::http::HttpServerOverlay;
 
 /// Argv overlay shared by every full-stack chassis (desktop +
 /// headless). Captures every cap whose config layer is the same on

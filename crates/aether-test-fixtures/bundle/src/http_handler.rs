@@ -21,7 +21,7 @@
 #![allow(clippy::needless_pass_by_value, clippy::unused_self)]
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_kinds::{HttpServerRequest, HttpServerResponse};
+use aether_capabilities::http::kinds::{HttpServerRequest, HttpServerResponse};
 
 pub struct HttpHandler;
 
