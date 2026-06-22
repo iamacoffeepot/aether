@@ -6,7 +6,7 @@
 //! failure modes inline. Keeping the status table here keeps the
 //! provider-compat translation in one place per ADR-0050 §4.
 
-use aether_kinds::AnthropicError;
+use crate::anthropic::kinds::AnthropicError;
 
 use crate::anthropic::cli::{CLI_NOT_FOUND, TIMEOUT_SENTINEL};
 use crate::contentgen::shared::{parse_status_prefix, snippet};
@@ -70,7 +70,7 @@ pub fn status_to_error(status: u16, retry_after_ms: Option<u32>, body: &str) -> 
 mod tests {
     use super::{adapter_error_to_typed, status_to_error};
     use crate::anthropic::cli::TIMEOUT_SENTINEL;
-    use aether_kinds::AnthropicError;
+    use crate::anthropic::kinds::AnthropicError;
 
     #[test]
     fn timeout_sentinel_maps_to_timeout() {
