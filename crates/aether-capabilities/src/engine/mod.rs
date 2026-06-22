@@ -9,9 +9,13 @@
 //!
 //! See issue 763 for the full design.
 
+pub mod kinds;
 pub mod proxy;
 pub mod server;
 
+pub use kinds::{
+    CallSettled, EngineAlive, EngineDied, EngineHeartbeatTick, ForwardEnvelope, RouteEnvelope,
+};
 pub use proxy::EngineProxy;
 #[cfg(not(target_arch = "wasm32"))]
 pub use proxy::EngineProxyConfig;

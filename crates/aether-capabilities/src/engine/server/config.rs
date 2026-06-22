@@ -1,0 +1,239 @@
+//! Engines-cap configuration (ADR-0090) — the liveness-heartbeat
+//! tuning plus the hub binary store's layout dir, disk budget, and
+//! bootstrap list. Native-only: resolved by the hub chassis and handed
+//! into [`EngineServer::init`](super::EngineServer) via
+//! `with_actor::<EngineServer>(cfg)`.
+
+use crate::engine::proxy::HeartbeatParams;
+use crate::store::DEFAULT_DISK_BUDGET_BYTES;
+use std::collections::HashSet;
+use std::convert::Infallible;
+use std::time::Duration;
+
+/// Default heartbeat ping cadence (issue 1339). 5 s × the miss
+/// limit is the detection-latency vs. flap-tolerance tradeoff.
+const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 5;
+/// Default consecutive-miss threshold before an engine is declared
+/// dead. Small N tolerates a transient hiccup / GC pause.
+const DEFAULT_HEARTBEAT_MISS_LIMIT: u32 = 3;
+
+/// Default total time a freshly-forked substrate's proxy keeps
+/// retrying its startup dial before giving up (issue 2072). A debug
+/// cold start fork+exec+bind can stretch well past a healthy
+/// localhost dial when many substrates come up at once and
+/// oversubscribe the cores (e.g. a concurrent `FleetBench` fleet), so
+/// the budget is generous — far longer than a single cold start
+/// needs, comfortably under the `FleetBench` client's own spawn cap so
+/// the hub returns a clean `Err` first rather than the client
+/// tripping its backstop. `0` is the wait-forever sentinel.
+pub(super) const DEFAULT_PROXY_CONNECT_BUDGET_SECS: u64 = 30;
+
+/// Resolved engines-cap configuration (ADR-0090, issue 1339): the
+/// liveness-heartbeat tuning plus the hub binary store's layout dir,
+/// disk budget, and bootstrap list (ADR-0115, #1954 — these last three
+/// moved onto the config off their pre-ADR-0090 naked `env::var`
+/// readers). The inline `AETHER_ENGINE_STORE_ROOT` reader
+/// (`engine_store_root`) is a separate, still-inline knob.
+///
+/// `#[derive(aether_substrate::Config)]` emits the env-shaped
+/// `EngineConfigLayer`, the clap-shaped `EngineOverlay`, and the
+/// inherent `from_env` / `from_argv_then_env` shims (argv beats env
+/// beats the literal default). The hub chassis resolves it with
+/// `EngineConfig::from_argv_then_env(cli.engine.into_layer())` and
+/// hands it to `with_actor::<EngineServer>(cfg)`; tests build it
+/// directly. `env_prefix = "AETHER_HUB"` + the `heartbeat_*` /
+/// `binary_disk_budget_bytes` field names compose the
+/// `AETHER_HUB_HEARTBEAT_*` / `AETHER_HUB_BINARY_DISK_BUDGET_BYTES`
+/// env keys and `--hub-*` flags; `binary_store_dir` / `binary_bootstrap`
+/// pin the unprefixed `AETHER_BINARY_STORE_DIR` / `AETHER_BINARY_BOOTSTRAP`
+/// keys via per-field `env` overrides. `Default` (the test constructor)
+/// resolves the heartbeat to `0/0` (disabled) and the store fields to
+/// unset / `16 GiB`; production picks up the `default = 5/3` / `16 GiB`
+/// literals and the env layers through `from_argv_then_env`.
+#[derive(Clone, Debug, aether_substrate::Config)]
+#[config(env_prefix = "AETHER_HUB", cli_prefix = "hub")]
+pub struct EngineConfig {
+    /// Heartbeat ping cadence in seconds
+    /// (`AETHER_HUB_HEARTBEAT_INTERVAL_SECS` /
+    /// `--hub-heartbeat-interval-secs`). `0` disables the heartbeat
+    /// entirely (engines are then only evicted on a
+    /// connection-close, never on a wedge).
+    #[config(default = 5, parse = parse_heartbeat_interval_secs)]
+    pub heartbeat_interval_secs: u64,
+    /// Consecutive missed pings that mark an engine dead
+    /// (`AETHER_HUB_HEARTBEAT_MISS_LIMIT` /
+    /// `--hub-heartbeat-miss-limit`). Small N tolerates a transient
+    /// hiccup; `0` also disables the heartbeat. Detection latency is
+    /// `miss_limit × interval_secs`.
+    #[config(default = 3, parse = parse_heartbeat_miss_limit)]
+    pub heartbeat_miss_limit: u32,
+    /// Total seconds a freshly-forked substrate's proxy keeps
+    /// retrying its startup dial before the spawn fails
+    /// (`AETHER_HUB_PROXY_CONNECT_BUDGET_SECS` /
+    /// `--hub-proxy-connect-budget-secs`, issue 2072). Generous by
+    /// default so a debug cold start under fork contention isn't
+    /// called dead prematurely; `0` is the wait-forever sentinel
+    /// (retry until the dial succeeds or hits a terminal error).
+    #[config(default = 30, parse = parse_proxy_connect_budget_secs)]
+    pub proxy_connect_budget_secs: u64,
+    /// Layout-root override for the hub's content-addressed binary
+    /// store (`AETHER_BINARY_STORE_DIR`, unprefixed — the ops escape
+    /// hatch and the fleet tests' per-process isolation knob). Unset
+    /// (`None`) → the computed default `data_dir/aether/binaries/v1`
+    /// (`ArtifactStore::default_root`). A bare `Option<String>` (not a
+    /// `PathBuf`) keeps that runtime-computed default in `init`, so
+    /// `EngineConfig` needs no `skip_from_layer`; `EngineServer::init`
+    /// joins the store's layout-version dir to a set override.
+    #[config(env = "AETHER_BINARY_STORE_DIR")]
+    pub binary_store_dir: Option<String>,
+    /// On-disk byte budget for the binary store
+    /// (`AETHER_HUB_BINARY_DISK_BUDGET_BYTES`, derived from the
+    /// `AETHER_HUB` prefix / `--hub-binary-disk-budget-bytes`). Default
+    /// 16 GiB (`DEFAULT_DISK_BUDGET_BYTES`); LRU eviction over unpinned,
+    /// unnamed entries holds it.
+    #[config(default = 17_179_869_184u64, parse = parse_binary_disk_budget)]
+    pub binary_disk_budget_bytes: u64,
+    /// Chassis bins to bootstrap-ingest at init so a `default` / `name`
+    /// selector resolves in a fresh or `restart-hub`'d hub
+    /// (`AETHER_BINARY_BOOTSTRAP`, unprefixed, comma-separated). Each is
+    /// ingested content-addressed and named by its file stem;
+    /// idempotent via content dedup. `ensure-tunnel.sh` exports the
+    /// freshly-built chassis bins here.
+    #[config(
+        env = "AETHER_BINARY_BOOTSTRAP",
+        default = [],
+        parse = parse_binary_bootstrap,
+        csv_set
+    )]
+    pub binary_bootstrap: HashSet<String>,
+}
+
+impl Default for EngineConfig {
+    /// The test constructor: heartbeat disabled (`0/0`) but a real
+    /// `DEFAULT_DISK_BUDGET_BYTES` budget — `0` is inert for the
+    /// heartbeat (no pinging) yet destructive for the store (it would
+    /// evict every unnamed upload), so the budget can't share the
+    /// heartbeat's zero. Store dir unset (the computed default) and an
+    /// empty bootstrap. Production resolves all five through the layer
+    /// (`from_argv_then_env`); this matches the prior `from_env()`
+    /// store budget every `EngineConfig::default()` consumer saw.
+    fn default() -> Self {
+        Self {
+            heartbeat_interval_secs: 0,
+            heartbeat_miss_limit: 0,
+            // A real budget (not the heartbeat's inert `0`): tests fork
+            // real substrates, so the proxy needs a generous-but-finite
+            // startup-dial budget — `0` would mean wait-forever and
+            // hang on a genuinely dead substrate.
+            proxy_connect_budget_secs: DEFAULT_PROXY_CONNECT_BUDGET_SECS,
+            binary_store_dir: None,
+            binary_disk_budget_bytes: DEFAULT_DISK_BUDGET_BYTES,
+            binary_bootstrap: HashSet::new(),
+        }
+    }
+}
+
+impl EngineConfig {
+    /// The [`HeartbeatParams`] to arm each proxy with, or `None`
+    /// when the heartbeat is disabled (`0` interval or miss limit).
+    pub(super) fn heartbeat_params(&self) -> Option<HeartbeatParams> {
+        if self.heartbeat_interval_secs == 0 || self.heartbeat_miss_limit == 0 {
+            None
+        } else {
+            Some(HeartbeatParams {
+                interval: Duration::from_secs(self.heartbeat_interval_secs),
+                miss_limit: self.heartbeat_miss_limit,
+            })
+        }
+    }
+
+    /// The startup-dial connect budget to arm each spawned proxy
+    /// with (issue 2072). `Some(d)` caps the retry; `None` (the `0`
+    /// sentinel) means wait forever.
+    pub(super) fn connect_budget(&self) -> Option<Duration> {
+        (self.proxy_connect_budget_secs != 0)
+            .then(|| Duration::from_secs(self.proxy_connect_budget_secs))
+    }
+}
+
+// confique's `parse_env` contract is `fn(&str) -> Result<T, impl
+// Error>`; these total helpers carry a `Result` they never fill with
+// `Err` — an unparseable value folds back to the default (soft, like
+// the DAG validator's caps; the ADR-0090 §4 strict/erroring variant
+// is a follow-up). Hence the `unnecessary_wraps` allow.
+
+/// Parse the heartbeat interval; unparseable → the default.
+#[allow(clippy::unnecessary_wraps)]
+fn parse_heartbeat_interval_secs(s: &str) -> Result<u64, Infallible> {
+    Ok(s.trim().parse().unwrap_or(DEFAULT_HEARTBEAT_INTERVAL_SECS))
+}
+
+/// Parse the heartbeat miss limit; unparseable → the default.
+#[allow(clippy::unnecessary_wraps)]
+fn parse_heartbeat_miss_limit(s: &str) -> Result<u32, Infallible> {
+    Ok(s.trim().parse().unwrap_or(DEFAULT_HEARTBEAT_MISS_LIMIT))
+}
+
+/// Parse the proxy connect budget seconds; unparseable → the default.
+#[allow(clippy::unnecessary_wraps)]
+fn parse_proxy_connect_budget_secs(s: &str) -> Result<u64, Infallible> {
+    Ok(s.trim()
+        .parse()
+        .unwrap_or(DEFAULT_PROXY_CONNECT_BUDGET_SECS))
+}
+
+/// Parse the binary-store disk budget; unparseable → the default
+/// `DEFAULT_DISK_BUDGET_BYTES` (mirrors the heartbeat parsers).
+#[allow(clippy::unnecessary_wraps)]
+fn parse_binary_disk_budget(s: &str) -> Result<u64, Infallible> {
+    Ok(s.trim().parse().unwrap_or(DEFAULT_DISK_BUDGET_BYTES))
+}
+
+/// Split a comma-separated bootstrap path list, trimming and dropping
+/// empties (mirrors the http allowlist's `parse_allowlist`). Total —
+/// never errors.
+#[allow(clippy::unnecessary_wraps)]
+fn parse_binary_bootstrap(s: &str) -> Result<HashSet<String>, Infallible> {
+    Ok(s.split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    /// The connect budget resolves a non-zero seconds value to a
+    /// finite `Duration`, and `0` to the wait-forever sentinel `None`.
+    #[test]
+    fn connect_budget_maps_zero_to_wait_forever() {
+        let finite = EngineConfig {
+            proxy_connect_budget_secs: 12,
+            ..EngineConfig::default()
+        };
+        assert_eq!(finite.connect_budget(), Some(Duration::from_secs(12)));
+        let forever = EngineConfig {
+            proxy_connect_budget_secs: 0,
+            ..EngineConfig::default()
+        };
+        assert_eq!(forever.connect_budget(), None);
+    }
+
+    /// The default budget is generous and finite — never the
+    /// wait-forever sentinel — so a debug cold start under fork
+    /// contention isn't called dead prematurely, while a genuinely
+    /// dead substrate still fails the spawn rather than hanging.
+    #[test]
+    fn default_connect_budget_is_generous_and_finite() {
+        let budget = EngineConfig::default()
+            .connect_budget()
+            .expect("default budget is finite, not wait-forever");
+        assert_eq!(
+            budget,
+            Duration::from_secs(DEFAULT_PROXY_CONNECT_BUDGET_SECS)
+        );
+        assert!(budget >= Duration::from_secs(30), "default stays generous");
+    }
+}

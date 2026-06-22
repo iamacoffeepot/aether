@@ -37,6 +37,7 @@ use aether_rpc::rpc::PeerKind;
 mod server_native {
     use super::{PeerKind, RpcInboundReady, Settled};
     use crate::engine::EngineServer;
+    use crate::engine::kinds::{CallSettled, RouteEnvelope};
     use crate::rpc::{
         Hello, HelloAck, MailEnvelope, MailboxAddress, RpcError, WIRE_VERSION, WireFrame,
     };
@@ -44,7 +45,6 @@ mod server_native {
     use aether_codec::frame::FrameError;
     use aether_codec::frame::{read_frame, write_frame};
     use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
-    use aether_kinds::{CallSettled, RouteEnvelope};
     use aether_substrate::Mail;
     use aether_substrate::actor::native::envelope::Envelope;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};

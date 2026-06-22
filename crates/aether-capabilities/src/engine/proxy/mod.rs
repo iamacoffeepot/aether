@@ -37,37 +37,50 @@
 // Handler-signature kinds must be importable at file root — the
 // `#[bridge]` macro emits `impl HandlesKind<K>` markers as siblings of
 // the mod.
-use aether_kinds::{EngineHeartbeatTick, ForwardEnvelope, RpcInboundReady, TerminateEngine};
+use crate::engine::kinds::{EngineHeartbeatTick, ForwardEnvelope};
+use aether_kinds::{RpcInboundReady, TerminateEngine};
+
+// The proxy's implementation, split along its seams (ADR-0121):
+// `config` (the init config + heartbeat tuning), `connect` (the
+// startup-dial bring-up), `heartbeat` (the liveness-timer sidecar), and
+// `sinks` (the test-only capture actors). All are native-only — the
+// proxy owns a `TcpStream` and OS threads — so they elide on wasm
+// alongside the bridge mod.
+#[cfg(not(target_arch = "wasm32"))]
+mod config;
+#[cfg(not(target_arch = "wasm32"))]
+mod connect;
+#[cfg(not(target_arch = "wasm32"))]
+mod heartbeat;
+#[cfg(test)]
+mod sinks;
 
 // `EngineProxyConfig` / `HeartbeatParams` carry only wasm-safe types,
-// but they live inside the bridge mod (which the macro elides on wasm),
-// so the re-export is gated like `TcpListenerConfig`.
+// but the proxy that consumes them is native-only, so the re-export is
+// gated like `TcpListenerConfig`.
 #[cfg(not(target_arch = "wasm32"))]
-pub use proxy_native::{EngineProxyConfig, HeartbeatParams};
+pub use config::{EngineProxyConfig, HeartbeatParams};
 
 #[aether_actor::bridge(instanced, one_per = "engine")]
 mod proxy_native {
+    use super::config::EngineProxyConfig;
+    use super::connect::connect_proxy;
+    use super::heartbeat::{HeartbeatHandle, spawn_heartbeat};
     use super::{EngineHeartbeatTick, ForwardEnvelope, RpcInboundReady, TerminateEngine};
     use crate::engine::EngineServer;
-    use crate::rpc::{
-        MailEnvelope, MailboxAddress, PeerKind, RpcClient, RpcClientError, RpcConnection, RpcError,
-        WireFrame,
-    };
+    use crate::engine::kinds::{CallSettled, EngineAlive, EngineDied};
+    use crate::rpc::{MailEnvelope, MailboxAddress, RpcConnection, RpcError, WireFrame};
     use aether_actor::{Addressable, actor};
     use aether_data::{EngineId, Kind, KindId, MailboxId, mailbox_id_from_name};
-    use aether_kinds::{CallSettled, DeathReason, EngineAlive, EngineDied};
+    use aether_kinds::DeathReason;
     use aether_substrate::Mail;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::{Source, SourceAddr};
     use std::collections::HashMap;
-    use std::io::ErrorKind;
     use std::process::Child;
     use std::sync::Arc;
-    use std::sync::mpsc;
-    use std::thread::{self, JoinHandle};
-    use std::time::{Duration, Instant};
 
     /// Mailbox of the engines cap (`aether.engine`) — where a proxy
     /// reports its own liveness transitions (`EngineAlive` / `EngineDied`,
@@ -80,79 +93,6 @@ mod proxy_native {
     #[allow(clippy::disallowed_methods)]
     fn engine_cap_mailbox() -> MailboxId {
         mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE)
-    }
-
-    /// Pause between dial attempts within the connect budget.
-    const PROXY_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(50);
-
-    /// Init config for [`EngineProxy`]. `engine_id` is the proxy's
-    /// engine identity (also the per-instance subname — full address
-    /// `aether.engine.proxy:<engine_id>`); `rpc_addr` is the
-    /// substrate's `RpcServerCapability` bind address the proxy dials
-    /// at init.
-    ///
-    /// `spawned` is `Some` when the engines cap (`aether.engine`)
-    /// fork+exec'd the substrate and handed its child handle here —
-    /// the proxy then owns that process: it retries the startup dial
-    /// (the substrate may not have bound its port yet), kills it on a
-    /// failed boot, and SIGKILLs + reaps it on `Drop`. `None` for an
-    /// adopted / externally-running substrate, whose lifetime the
-    /// proxy doesn't manage.
-    ///
-    /// `heartbeat` is the liveness-probe tuning the cap resolved from
-    /// its [`EngineConfig`](crate::engine::server) (issue 1339). `None`
-    /// disables the heartbeat (the engine is then only evicted on a
-    /// connection-close `Bye`, never on a wedge); `Some` arms the
-    /// timer sidecar.
-    ///
-    /// `connect_budget` is the total time the startup dial keeps
-    /// retrying a refused connection while a freshly-forked substrate
-    /// comes up, resolved from the cap's `EngineConfig`. `Some(d)` caps
-    /// the retry at `d`; `None` is the wait-forever sentinel (retry
-    /// until the dial succeeds or hits a terminal error). Only consulted
-    /// when the proxy forked the substrate (`spawned.is_some()`) — an
-    /// adopted substrate is dialed once.
-    pub struct EngineProxyConfig {
-        pub engine_id: EngineId,
-        pub rpc_addr: String,
-        pub spawned: Option<Child>,
-        pub heartbeat: Option<HeartbeatParams>,
-        pub connect_budget: Option<Duration>,
-    }
-
-    /// Resolved liveness-heartbeat tuning for one proxy (issue 1339).
-    /// `interval` is the ping cadence; `miss_limit` is how many
-    /// consecutive unanswered pings mark the engine dead — a small N
-    /// tolerates a transient hiccup without flapping. Detection latency
-    /// is `miss_limit × interval`. Built by the engines cap from its
-    /// `EngineConfig` and handed down via [`EngineProxyConfig`].
-    #[derive(Clone, Copy, Debug)]
-    pub struct HeartbeatParams {
-        pub interval: Duration,
-        pub miss_limit: u32,
-    }
-
-    /// Owns the per-proxy heartbeat timer thread (issue 1339). The
-    /// thread sleeps `interval` on a `recv_timeout` over the stop
-    /// channel and fires an [`EngineHeartbeatTick`] wake-mail at the
-    /// proxy's own mailbox each interval — the same sidecar-wake shape
-    /// the RPC reader uses. `Drop` disconnects the channel (so the
-    /// thread's `recv_timeout` returns `Disconnected` and it breaks)
-    /// then joins, mirroring `RpcReaderHandle`'s orderly teardown.
-    struct HeartbeatHandle {
-        stop: Option<mpsc::Sender<()>>,
-        thread: Option<JoinHandle<()>>,
-    }
-
-    impl Drop for HeartbeatHandle {
-        fn drop(&mut self) {
-            // Dropping the sender disconnects the channel; the thread's
-            // next `recv_timeout` returns `Disconnected` and it exits.
-            drop(self.stop.take());
-            if let Some(t) = self.thread.take() {
-                let _ = t.join();
-            }
-        }
     }
 
     /// Per-engine proxy: one outbound RPC connection to one substrate,
@@ -429,113 +369,6 @@ mod proxy_native {
         }
     }
 
-    /// Spawn the per-proxy heartbeat timer thread. It sleeps `interval`
-    /// on a `recv_timeout` over the returned handle's stop channel and
-    /// pushes an [`EngineHeartbeatTick`] wake-mail at `self_mailbox`
-    /// each interval — the empty-payload wake shape the RPC reader
-    /// sidecar uses (the timer carries no data, only the schedule). The
-    /// handle's `Drop` stops + joins the thread.
-    fn spawn_heartbeat(
-        mailer: Arc<Mailer>,
-        self_mailbox: MailboxId,
-        interval: Duration,
-    ) -> HeartbeatHandle {
-        let (stop_tx, stop_rx) = mpsc::channel::<()>();
-        let tick_kind = KindId(<EngineHeartbeatTick as Kind>::ID.0);
-        // Infra timer thread below the mail layer — like the RPC reader
-        // sidecar it only fires a wake-mail (no inbound chain to inherit,
-        // so no settlement umbrella to honor), and the proxy is instanced
-        // so `spawn_detached` (Singleton-only) doesn't apply.
-        #[allow(clippy::disallowed_methods)]
-        let thread = thread::Builder::new()
-            .name("aether-engine-heartbeat".into())
-            .spawn(move || {
-                // `recv_timeout` returns `Timeout` each interval (fire a
-                // tick); a stop signal or a disconnected channel (the
-                // proxy dropped the sender) returns otherwise and ends
-                // the loop.
-                while stop_rx.recv_timeout(interval) == Err(mpsc::RecvTimeoutError::Timeout) {
-                    mailer.push(Mail::new(
-                        self_mailbox,
-                        tick_kind,
-                        EngineHeartbeatTick::default().encode_into_bytes(),
-                        1,
-                    ));
-                }
-            })
-            .expect("spawn aether-engine-heartbeat thread");
-        HeartbeatHandle {
-            stop: Some(stop_tx),
-            thread: Some(thread),
-        }
-    }
-
-    /// Dial the substrate's `RpcServerCapability`, building a fresh
-    /// `on_frame` wake closure per attempt. When `retry` is set, a
-    /// connection-refused / reset error is retried (after a short
-    /// pause) until the connect `budget` elapses — a freshly-forked
-    /// substrate may not have bound its port yet. `budget` of `None` is
-    /// the wait-forever sentinel: retry until the dial succeeds or hits
-    /// a terminal error. Handshake / frame errors are always terminal:
-    /// the peer answered, just wrongly.
-    fn connect_proxy(
-        addr: &str,
-        mailer: &Arc<Mailer>,
-        self_mailbox: MailboxId,
-        wake_kind: KindId,
-        retry: bool,
-        budget: Option<Duration>,
-    ) -> Result<RpcConnection, RpcClientError> {
-        // `None` budget → no deadline (wait forever); `Some(d)` → stop
-        // retrying once `d` has elapsed.
-        let deadline = budget.map(|d| Instant::now() + d);
-        loop {
-            // The reader sidecar fires `RpcInboundReady` at the proxy's
-            // own mailbox after every inbound frame so
-            // `on_inbound_ready` drains `conn.inbound` on the
-            // dispatcher thread. `RpcClient::connect` consumes the
-            // closure, so a retry needs a fresh one.
-            let wake_mailer = Arc::clone(mailer);
-            let on_frame = move || {
-                wake_mailer.push(Mail::new(
-                    self_mailbox,
-                    wake_kind,
-                    RpcInboundReady::default().encode_into_bytes(),
-                    1,
-                ));
-            };
-            return match RpcClient::connect(
-                addr,
-                PeerKind::Client {
-                    client_name: "aether.engine.proxy".to_owned(),
-                    client_version: env!("CARGO_PKG_VERSION").to_owned(),
-                },
-                on_frame,
-            ) {
-                Ok(conn) => Ok(conn),
-                Err(e) => {
-                    let within_budget = deadline.is_none_or(|d| Instant::now() < d);
-                    if retry && is_transient_connect_error(&e) && within_budget {
-                        thread::sleep(PROXY_CONNECT_RETRY_INTERVAL);
-                        continue;
-                    }
-                    Err(e)
-                }
-            };
-        }
-    }
-
-    /// `true` for the connection-level errors a still-coming-up
-    /// substrate produces — worth retrying. Handshake / frame errors
-    /// mean the peer answered wrongly: terminal, never retried.
-    fn is_transient_connect_error(e: &RpcClientError) -> bool {
-        matches!(
-            e,
-            RpcClientError::Connect(io)
-                if matches!(io.kind(), ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset)
-        )
-    }
-
     impl Drop for EngineProxy {
         /// SIGKILL + reap the child substrate this proxy forked, so a
         /// terminated proxy (or a chassis teardown) never orphans a
@@ -661,112 +494,9 @@ mod proxy_native {
 }
 
 #[cfg(test)]
-use crate::rpc::test_echo::TestEchoReply;
-// Handler-signature kinds for the test sink below — must be importable
-// at file root so the `#[bridge]` macro's `HandlesKind` markers stay
-// addressable, the same constraint as the proxy's own handler kinds.
+use aether_kinds::DeathReason;
 #[cfg(test)]
-use aether_kinds::{DeathReason, EngineAlive, EngineDied};
-#[cfg(test)]
-use std::sync::{Arc, Mutex};
-
-/// Shared capture cells for [`EngineCapSink`]. Lives at file root (not
-/// inside the bridge mod) like `EngineServer`'s `ReplyCells` — it's the
-/// sink actor's `Config`, so it must be addressable as `super::…` from
-/// the bridge mod. `died` keeps the whole [`EngineDied`] (id + reason) so
-/// the death-path tests can assert the surfaced cause.
-#[cfg(test)]
-#[derive(Clone, Default)]
-pub struct EngineCapCells {
-    pub alive: Arc<Mutex<Vec<String>>>,
-    pub died: Arc<Mutex<Vec<EngineDied>>>,
-}
-
-/// Test-only stand-in for the engines cap, registered at the cap's own
-/// `aether.engine` mailbox so a proxy's `EngineAlive` / `EngineDied`
-/// reports land here without booting the real `EngineServer`. Records
-/// the reported `engine_id`s into shared vecs the heartbeat tests
-/// assert on. Lives at file root for `#[bridge]` marker addressability.
-#[cfg(test)]
-#[aether_actor::bridge(singleton)]
-mod engine_cap_sink {
-    use super::{EngineAlive, EngineCapCells, EngineDied};
-    use aether_actor::actor;
-    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::chassis::error::BootError;
-
-    pub struct EngineCapSink {
-        cells: EngineCapCells,
-    }
-
-    #[actor]
-    impl NativeActor for EngineCapSink {
-        type Config = EngineCapCells;
-        const NAMESPACE: &'static str = "aether.engine";
-
-        fn init(cells: EngineCapCells, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { cells })
-        }
-
-        #[handler]
-        fn on_alive(&mut self, _ctx: &mut NativeCtx<'_>, mail: EngineAlive) {
-            self.cells
-                .alive
-                .lock()
-                .expect("test setup: alive cell mutex poisoned")
-                .push(mail.engine_id);
-        }
-
-        #[handler]
-        fn on_died(&mut self, _ctx: &mut NativeCtx<'_>, mail: EngineDied) {
-            self.cells
-                .died
-                .lock()
-                .expect("test setup: died cell mutex poisoned")
-                .push(mail);
-        }
-    }
-}
-
-/// Test-only sink: records the `value` of every [`TestEchoReply`] it
-/// receives into a shared cell so the round-trip test can observe a
-/// reply routed back through the proxy. Lives at file root (not nested
-/// in `mod tests`) so the `#[bridge]` macro's marker emission stays
-/// addressable.
-#[cfg(test)]
-#[aether_actor::bridge(singleton)]
-mod proxy_reply_sink {
-    use super::TestEchoReply;
-    use aether_actor::actor;
-    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::chassis::error::BootError;
-    use std::sync::{Arc, Mutex};
-
-    pub struct ProxyReplySink {
-        recorded: Arc<Mutex<Option<u64>>>,
-    }
-
-    #[actor]
-    impl NativeActor for ProxyReplySink {
-        type Config = Arc<Mutex<Option<u64>>>;
-        const NAMESPACE: &'static str = "aether.engine.test.reply_sink";
-
-        fn init(
-            recorded: Arc<Mutex<Option<u64>>>,
-            _ctx: &mut NativeInitCtx<'_>,
-        ) -> Result<Self, BootError> {
-            Ok(Self { recorded })
-        }
-
-        #[handler]
-        fn on_reply(&mut self, _ctx: &mut NativeCtx<'_>, reply: TestEchoReply) {
-            *self
-                .recorded
-                .lock()
-                .expect("test setup: recorded mutex poisoned") = Some(reply.value);
-        }
-    }
-}
+use sinks::{EngineCapCells, EngineCapSink, ProxyReplySink};
 
 #[cfg(test)]
 mod tests {
@@ -777,6 +507,7 @@ mod tests {
         DeathReason, EngineCapCells, EngineCapSink, EngineProxy, EngineProxyConfig,
         HeartbeatParams, ProxyReplySink,
     };
+    use crate::engine::kinds::ForwardEnvelope;
     use crate::rpc::server::{RpcServerCapability, RpcServerConfig, RpcServerHandle};
     use crate::rpc::test_echo::{TestEchoActor, TestEchoRequest};
     use crate::rpc::{HelloAck, PeerKind, WIRE_VERSION, WireFrame};
@@ -860,7 +591,7 @@ mod tests {
         // Forge a `ForwardEnvelope` at the proxy, reply-to the sink.
         // `mailer.push` directly (rather than through an actor send) so
         // the test controls the `Source` the proxy parks.
-        let fwd = aether_kinds::ForwardEnvelope {
+        let fwd = ForwardEnvelope {
             mailbox: echo_mailbox,
             kind: <TestEchoRequest as Kind>::ID,
             payload: TestEchoRequest { value: 42 }.encode_into_bytes(),
@@ -868,7 +599,7 @@ mod tests {
         mailer.push(
             Mail::new(
                 proxy_mailbox,
-                <aether_kinds::ForwardEnvelope as Kind>::ID,
+                <ForwardEnvelope as Kind>::ID,
                 fwd.encode_into_bytes(),
                 1,
             )
