@@ -26,8 +26,8 @@ use std::time::Duration;
 #[cfg(feature = "native")]
 #[allow(unused_imports)]
 use crate::config_env::parse_flag;
+use crate::http::kinds::{Fetch, HttpError, HttpHeader, HttpMethod};
 use aether_actor::WasmActorMailbox;
-use aether_kinds::{Fetch, HttpError, HttpHeader, HttpMethod};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 #[cfg(feature = "native")]
@@ -310,8 +310,8 @@ mod native {
         DisabledHttpAdapter, Fetch, FetchRequest, FetchResponse, HttpAdapter, HttpConfig,
         HttpError, HttpHeader, HttpMethod,
     };
+    use crate::http::kinds::FetchResult;
     use aether_actor::actor;
-    use aether_kinds::FetchResult;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use ureq::http::Method;

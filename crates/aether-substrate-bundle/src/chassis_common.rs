@@ -23,7 +23,7 @@ use aether_capabilities::audio::AudioConfigLayer;
 use aether_capabilities::fs::NamespaceRootsLayer;
 use aether_capabilities::gemini::GeminiConfigLayer;
 use aether_capabilities::http::HttpConfigLayer;
-use aether_capabilities::http_server::HttpServerConfigLayer;
+use aether_capabilities::http::HttpServerConfigLayer;
 use aether_capabilities::lifecycle::LifecycleGraphData;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{

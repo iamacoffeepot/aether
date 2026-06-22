@@ -51,12 +51,13 @@ pub mod fs;
 // for the same reason as `anthropic`.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod gemini;
+// The two HTTP capabilities, co-located under one submodule (ADR-0121):
+// the `aether.http` egress client and the `aether.http.server` inbound
+// server (a native singleton modeled on `RpcServerCapability` — binds a
+// port, parses each HTTP/1.1 request into mail to a handler component,
+// writes the handler's reply back as the HTTP response). They own their
+// shared wire kinds in `http/kinds.rs`.
 pub mod http;
-// `aether.http.server` inbound HTTP server cap (ADR-0108, issue 1760).
-// Native singleton modeled on `RpcServerCapability`: binds a port, parses
-// each HTTP/1.1 request into mail to a handler component, writes the
-// handler's reply back as the HTTP response.
-pub mod http_server;
 pub mod input;
 // `aether.inventory` reverse-lookup inventory cap (ADR-0088 §6, issue
 // 1122). Serves the per-build name/template manifest + dynamic-instance
@@ -147,12 +148,12 @@ pub use http::{HttpCapability, HttpConfig};
 // always-on domain struct; the `Config`-derive `HttpServerConfigLayer` /
 // `HttpServerOverlay` and the bound-port `HttpServerHandle` are native-only.
 #[cfg(feature = "native")]
-pub use http_server::HttpServerConfigLayer;
+pub use http::HttpServerConfigLayer;
 #[cfg(not(target_arch = "wasm32"))]
-pub use http_server::HttpServerHandle;
+pub use http::HttpServerHandle;
 #[cfg(feature = "native")]
-pub use http_server::HttpServerOverlay;
-pub use http_server::{HttpServerCapability, HttpServerConfig};
+pub use http::HttpServerOverlay;
+pub use http::{HttpServerCapability, HttpServerConfig};
 pub use input::InputCapability;
 #[cfg(not(target_arch = "wasm32"))]
 pub use input::InputConfig;

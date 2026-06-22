@@ -10,13 +10,13 @@
 //! dispatcher drains the queue.
 //!
 //! On a parsed request the cap dispatches an
-//! [`HttpServerRequest`](aether_kinds::HttpServerRequest) to the configured
+//! [`HttpServerRequest`](crate::http::kinds::HttpServerRequest) to the configured
 //! handler mailbox as a fresh causal chain via
 //! `NativeCtx::send_envelope_as_root` (the wake mail is causally unrelated
 //! to the inbound request), records the open response socket in an
 //! in-flight table keyed by the dispatch's correlation id, and subscribes
 //! to settlement of the dispatched root. The handler replies
-//! [`HttpServerResponse`](aether_kinds::HttpServerResponse); the reply
+//! [`HttpServerResponse`](crate::http::kinds::HttpServerResponse); the reply
 //! routes back to the cap, the
 //! reply-interception fallback formats the HTTP/1.1 response and writes it
 //! to the held socket. A response-less chain settles into `502`, a
@@ -32,7 +32,8 @@
 
 // Handler-signature kinds need to be importable at file root for the
 // `#[bridge]`-emitted `HandlesKind<K>` markers.
-use aether_kinds::{HttpInboundReady, trace::Settled};
+use crate::http::kinds::HttpInboundReady;
+use aether_kinds::trace::Settled;
 
 // confique `parse_env` helpers below never error; their `Result` carries
 // the never-type.
@@ -180,9 +181,9 @@ fn parse_request_timeout_millis(s: &str) -> Result<u64, Infallible> {
 #[aether_actor::bridge(singleton)]
 mod server_native {
     use super::{HttpInboundReady, Settled};
+    use crate::http::kinds::{HttpHeader, HttpMethod, HttpServerRequest, HttpServerResponse};
     use aether_actor::actor;
     use aether_data::{Kind, KindId, MailboxId};
-    use aether_kinds::{HttpHeader, HttpMethod, HttpServerRequest, HttpServerResponse};
     use aether_substrate::Mail;
     use aether_substrate::actor::native::envelope::Envelope;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -1086,7 +1087,7 @@ mod server_native {
     #[cfg(test)]
     mod unit_tests {
         use super::{http_date, parse_http_method, reason_phrase};
-        use aether_kinds::HttpMethod;
+        use crate::http::kinds::HttpMethod;
         use std::time::{Duration, UNIX_EPOCH};
 
         #[test]
@@ -1144,7 +1145,7 @@ mod test_handlers {
     //! Minimal native handler actors behind the server in the integration
     //! tests: one that replies `200` echoing the request, one that drops
     //! the request without replying (the `502` safety-net path).
-    use aether_kinds::{HttpHeader, HttpServerRequest, HttpServerResponse};
+    use crate::http::kinds::{HttpHeader, HttpServerRequest, HttpServerResponse};
 
     /// Replies `200` and echoes the request's method / path / query (as
     /// headers) and body (verbatim), so a test can assert the full request
