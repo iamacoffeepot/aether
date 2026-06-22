@@ -1068,6 +1068,7 @@ mod tests {
         // `load_component` / `describe_kinds`, drops them straight
         // into `subscribe_input.{kind, mailbox}`, and the wire bytes
         // match what the substrate expects.
+        use aether_capabilities::input::SubscribeInput;
         use aether_data::Kind;
         let mailbox = aether_data::MailboxId::from_name("aether.component");
         let mailbox_str =
@@ -1076,15 +1077,12 @@ mod tests {
         let kind_str = tagged_id::encode(kind_id.0).expect("test setup: encode tagged kind id");
         let json_in = json!({ "kind": kind_str, "mailbox": mailbox_str });
 
-        let bytes = encode_schema(
-            &json_in,
-            &<aether_kinds::SubscribeInput as aether_data::Schema>::SCHEMA,
-        )
-        .expect("encode subscribe_input via TypeId schema");
+        let bytes = encode_schema(&json_in, &<SubscribeInput as aether_data::Schema>::SCHEMA)
+            .expect("encode subscribe_input via TypeId schema");
 
         // Substrate decode path — the hub-encoded bytes are byte-identical
         // to `SubscribeInput::encode_into_bytes` (the `wire` image).
-        let decoded = aether_kinds::SubscribeInput::decode_from_bytes(&bytes)
+        let decoded = SubscribeInput::decode_from_bytes(&bytes)
             .expect("wire decode subscribe_input from hub-encoded bytes");
         assert_eq!(decoded.kind, kind_id);
         assert_eq!(decoded.mailbox, mailbox);
@@ -1095,7 +1093,7 @@ mod tests {
         // `with_tag` discipline holds through the schema-bytes
         // change).
         assert_eq!(
-            tagged_id::tag_of(aether_kinds::SubscribeInput::ID.0),
+            tagged_id::tag_of(SubscribeInput::ID.0),
             Some(aether_data::Tag::Kind),
         );
     }

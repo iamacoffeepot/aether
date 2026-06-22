@@ -36,6 +36,11 @@ serde_json = { workspace = true }
 # Production callers don't need any of this — only pulled in for
 # `cargo test`.
 aether-kinds = { path = "../aether-kinds" }
+# `SubscribeInput` moved to `aether-capabilities::input` (ADR-0121);
+# the decode round-trip test references it through the new path.
+# `default-features = false` skips the heavy native (wasmtime/wgpu)
+# deps — the test only needs the always-on kind types.
+aether-capabilities = { path = "../aether-capabilities", default-features = false }
 aether-data = { path = "../aether-data", features = ["derive"] }
 bytemuck = { workspace = true, features = ["derive"] }
 # Issue 1561: the schema-driven round-trip property

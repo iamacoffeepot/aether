@@ -18,12 +18,10 @@
 use std::path::Path;
 
 use aether_actor::Addressable;
+use aether_capabilities::input::{SubscribeInputResult, UnsubscribeInput};
 use aether_capabilities::{ComponentHostCapability, InputCapability};
 use aether_data::{Kind, KindId, MailboxId};
-use aether_kinds::{
-    DropComponent, DropResult, Key, LoadComponent, LoadResult, SubscribeInputResult,
-    UnsubscribeInput,
-};
+use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, LoadResult};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_test_fixtures_kinds::KeyObserved;
 use std::fs;

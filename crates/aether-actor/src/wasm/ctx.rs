@@ -163,8 +163,8 @@ pub enum SpawnError {
 /// Per-receive (and post-init `wire` / pre-shutdown `unwire`)
 /// capability handle for FFI guests. Exposes send, reply, and the
 /// inherent [`mailbox_id`](WasmCtx::mailbox_id) so `wire`-stage explicit
-/// subscribes (sending [`SubscribeInput`](aether_kinds::SubscribeInput)
-/// to the `InputCapability`) can self-address.
+/// subscribes (sending `SubscribeInput` to the `InputCapability`) can
+/// self-address.
 pub struct WasmCtx<'a, M: ReplyMode = Single> {
     mailbox: u64,
     sender: Option<u32>,
@@ -263,9 +263,8 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
 
     /// The component's own mailbox id — the value the substrate uses to
     /// address `receive` calls to this instance. `wire`-stage explicit
-    /// subscribes (sending
-    /// [`SubscribeInput`](aether_kinds::SubscribeInput) to the
-    /// `InputCapability`) self-address through this.
+    /// subscribes (sending `SubscribeInput` to the `InputCapability`)
+    /// self-address through this.
     #[must_use]
     pub fn mailbox_id(&self) -> u64 {
         self.mailbox
