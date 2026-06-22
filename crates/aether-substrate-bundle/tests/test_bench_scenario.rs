@@ -32,13 +32,15 @@
 
 use std::path::Path;
 
+use aether_capabilities::text::{
+    DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult,
+};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
     CachedFontMetrics, Camera, CaptureFrame, CaptureFrameResult, CreateTexture,
-    CreateTextureResult, Delete, DeleteResult, DrawSolidQuads, DrawText, DrawTexturedQuads,
-    DropComponent, DropResult, FontMetricsRequest, FontMetricsResult, FontRef, FrameCheck,
-    FrameCheckResult, FrameReduction, FsError, List, ListComponents, ListComponentsResult,
-    ListResult, LoadComponent, LoadFont, LoadFontResult, LoadResult, NamedMail, Ping, QuadScale,
+    CreateTextureResult, Delete, DeleteResult, DrawSolidQuads, DrawTexturedQuads, DropComponent,
+    DropResult, FrameCheck, FrameCheckResult, FrameReduction, FsError, List, ListComponents,
+    ListComponentsResult, ListResult, LoadComponent, LoadResult, NamedMail, Ping, QuadScale,
     QuadSpace, Read, ReadResult, ReplaceComponent, ReplaceResult, SolidQuad, TexturedQuad, UiBar,
     UiPanel, Write, WriteResult,
 };

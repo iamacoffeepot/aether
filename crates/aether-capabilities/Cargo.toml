@@ -74,7 +74,7 @@ text = []
 # solid-quad and text surfaces entirely by mail — gated the same two-
 # layer way so a wasm component can address it via
 # `ctx.actor::<UiCapability>()` without pulling native deps.
-ui = []
+ui = ["text"]
 
 # Native impl layers — adds the substrate-side runtime + heavy deps
 # atop the marker layer. Chassis bins activate these. Each implies its
