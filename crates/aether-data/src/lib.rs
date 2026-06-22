@@ -21,14 +21,12 @@
 //! ## What lives here
 //!
 //! - **Typed-id newtypes** (ADR-0064 / ADR-0065): `MailboxId`, `KindId`,
-//!   `HandleId`, plus `Tag`, tag-bit constants, and FNV hashing.
+//!   plus `Tag`, tag-bit constants, and FNV hashing.
 //! - **Schema vocabulary** (ADR-0019 / ADR-0031 / ADR-0032): `SchemaType`,
 //!   `LabelNode`, `KindShape`, `KindLabels`, `InputsRecord`, canonical
 //!   bytes encoders.
 //! - **Kind / Schema / `CastEligible` traits** (ADR-0030): the binding
 //!   between a Rust type and its wire form.
-//! - **`Ref<K>`** (ADR-0045): typed handle reference for fields that
-//!   may inline a value or carry a handle into the substrate's store.
 //! - **Encode / decode helpers**: the `encode` / `decode` family for
 //!   POD and structured kinds.
 //! - **`__inventory`** (issue #243): native-only auto-collection of
@@ -56,13 +54,13 @@ pub mod transform;
 pub mod wire;
 pub mod wire_id;
 pub use hash::{
-    HANDLE_DOMAIN, KIND_DOMAIN, MAILBOX_DOMAIN, MAX_SCOPE_PATH_BYTES, MAX_SCOPE_PATH_DEPTH,
-    ScopePathError, THREAD_DOMAIN, TRANSFORM_DOMAIN, TYPE_DOMAIN, content_addressed_handle_id,
-    fnv1a_64_bytes, fnv1a_64_prefixed, fold_lineage, mailbox_id_from_name,
-    mailbox_id_from_name_pair, mailbox_id_from_path, thread_id_from_name, validate_scope_path,
+    KIND_DOMAIN, MAILBOX_DOMAIN, MAX_SCOPE_PATH_BYTES, MAX_SCOPE_PATH_DEPTH, ScopePathError,
+    THREAD_DOMAIN, TRANSFORM_DOMAIN, TYPE_DOMAIN, fnv1a_64_bytes, fnv1a_64_prefixed, fold_lineage,
+    mailbox_id_from_name, mailbox_id_from_name_pair, mailbox_id_from_path, thread_id_from_name,
+    validate_scope_path,
 };
 pub use ids::{
-    ActorId, DagId, HandleId, KindId, MailboxId, ThreadId, TransformId, tag_for_type_id,
+    ActorId, DagId, KindId, MailboxId, ThreadId, TransformId, tag_for_type_id,
     type_name_for_type_id,
 };
 pub use mail::{MailId, Source, SourceAddr};
@@ -229,15 +227,12 @@ macro_rules! cast_eligible_primitive {
 cast_eligible_primitive!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, bool);
 
 // Typed-id newtypes are `#[repr(transparent)]` over `u64`, so a
-// cast-shape struct field typed `MailboxId` / `KindId` / `HandleId`
-// is wire-identical to a `u64` field.
+// cast-shape struct field typed `MailboxId` / `KindId` is wire-identical
+// to a `u64` field.
 impl CastEligible for MailboxId {
     const ELIGIBLE: bool = true;
 }
 impl CastEligible for KindId {
-    const ELIGIBLE: bool = true;
-}
-impl CastEligible for HandleId {
     const ELIGIBLE: bool = true;
 }
 impl CastEligible for DagId {
@@ -271,342 +266,10 @@ impl<T> CastEligible for Vec<T> {
 impl<T> CastEligible for Option<T> {
     const ELIGIBLE: bool = false;
 }
-impl<K> CastEligible for Ref<K> {
-    const ELIGIBLE: bool = false;
-}
 // Issue #232: `BTreeMap<K, V>` is variable-length and disqualifies a
 // parent struct from `repr_c`, same as `Vec`/`String`/`Option`.
 impl<K, V> CastEligible for BTreeMap<K, V> {
     const ELIGIBLE: bool = false;
-}
-
-/// ADR-0045 typed handle reference — wire form for fields that
-/// accept either an inline kind value or a handle pointing into the
-/// substrate's handle store.
-///
-/// `Ref<K>` lets a field carry one of two payloads on the wire:
-///
-/// - `Ref::Inline(K)` — the entire `K` value travels inline. The
-///   substrate dispatches identically to a non-`Ref` field after
-///   the field-walk step substitutes the inline value.
-/// - `Ref::Handle { id, kind_id }` — a reference into the
-///   substrate's handle store. On dispatch the substrate looks up
-///   `id` and either substitutes the resolved value or parks the
-///   mail until the handle resolves (ADR-0045 §4).
-///
-/// `kind_id` on the `Handle` arm MUST equal `<K as Kind>::ID`. The
-/// substrate validates this against the field's expected type
-/// before substitution; a mismatched id is a wire-corruption-class
-/// error, not a recoverable one. Use [`Ref::handle`] instead of
-/// constructing `Handle` directly to pull the id from the kind
-/// system rather than passing it by hand.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Ref<K> {
-    /// Inline value — the whole `K` payload is on the wire.
-    Inline(K),
-    /// Handle reference into the substrate's handle store. `id`
-    /// addresses the entry; `kind_id` carries `<K as Kind>::ID` so
-    /// the substrate validates type compatibility before
-    /// substituting the resolved value.
-    Handle { id: u64, kind_id: u64 },
-}
-
-impl<K: Kind> Ref<K> {
-    /// Construct a `Ref::Handle` with `kind_id` pulled from
-    /// `K::ID`. Preferred over hand-constructing the variant —
-    /// callers can't pass a kind id that disagrees with the type
-    /// parameter.
-    #[must_use]
-    pub const fn handle(id: u64) -> Self {
-        Self::Handle {
-            id,
-            kind_id: K::ID.0,
-        }
-    }
-}
-
-impl<K> Ref<K> {
-    /// Wrap an owned value as `Ref::Inline`. Convenience for call
-    /// sites that have the value but want the field shape.
-    pub const fn inline(value: K) -> Self {
-        Self::Inline(value)
-    }
-
-    /// Returns `true` for `Ref::Inline`, `false` for
-    /// `Ref::Handle`. Cheap predicate for call sites that branch
-    /// on resolution state.
-    pub const fn is_inline(&self) -> bool {
-        matches!(self, Self::Inline(_))
-    }
-
-    /// Returns `true` for `Ref::Handle`, `false` for
-    /// `Ref::Inline`.
-    pub const fn is_handle(&self) -> bool {
-        matches!(self, Self::Handle { .. })
-    }
-
-    /// The wire `id` if this is a `Ref::Handle`, `None` for
-    /// inline. `kind_id` is recoverable via `<K as Kind>::ID` so
-    /// no separate accessor is provided.
-    pub const fn handle_id(&self) -> Option<u64> {
-        match self {
-            Self::Handle { id, .. } => Some(*id),
-            Self::Inline(_) => None,
-        }
-    }
-}
-
-/// Hand-written `serde` for `Ref<K>` (ADR-0100). The inline arm carries
-/// the kind's own codec image — `K::encode_into_bytes`, length-prefixed
-/// — instead of serde-encoding the typed `K`. A cast kind's inline value
-/// stays a cast image, and `Ref<K>` needs only `K: Kind`: no
-/// `Serialize`/`Deserialize` bound on the wrapped kind.
-///
-/// The externally-tagged enum representation is preserved — variant
-/// index 0 = `Inline`, 1 = `Handle` — so a `Ref::Handle` value's wire
-/// bytes are byte-identical to the prior derive and the splice walker's
-/// discriminant semantics are unchanged. Inline wire is
-/// `disc 0 + varint(len) + K::encode_into_bytes` (`len` bytes); handle
-/// wire is `disc 1 + varint(id) + varint(kind_id)`. The handle-store
-/// splice walker and the schema-driven JSON codec share this framing.
-mod ref_serde {
-    use core::fmt;
-    use core::marker::PhantomData;
-
-    use alloc::vec::Vec;
-    use serde::de::{self, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor};
-    use serde::ser::SerializeStructVariant;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    use crate::{Kind, Ref};
-
-    const VARIANTS: &[&str] = &["Inline", "Handle"];
-    const HANDLE_FIELDS: &[&str] = &["id", "kind_id"];
-
-    impl<K: Kind> Serialize for Ref<K> {
-        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            match self {
-                Self::Inline(value) => {
-                    let encoded = value.encode_into_bytes();
-                    serializer.serialize_newtype_variant("Ref", 0, "Inline", &InlineBody(&encoded))
-                }
-                Self::Handle { id, kind_id } => {
-                    let mut sv = serializer.serialize_struct_variant("Ref", 1, "Handle", 2)?;
-                    sv.serialize_field("id", id)?;
-                    sv.serialize_field("kind_id", kind_id)?;
-                    sv.end()
-                }
-            }
-        }
-    }
-
-    /// Forces `serialize_bytes` for the inline body so the wire is
-    /// `varint(len) + raw bytes` — the raw `K::encode_into_bytes` image.
-    /// A plain `Vec<u8>` would serialize as a sequence and two-byte any
-    /// `>= 0x80` element, corrupting a cast image.
-    struct InlineBody<'a>(&'a [u8]);
-
-    impl Serialize for InlineBody<'_> {
-        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            serializer.serialize_bytes(self.0)
-        }
-    }
-
-    impl<'de, K: Kind> Deserialize<'de> for Ref<K> {
-        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            deserializer.deserialize_enum("Ref", VARIANTS, RefVisitor(PhantomData))
-        }
-    }
-
-    /// Externally-tagged variant discriminant. Binary serializers (the
-    /// structured wire) read it as `varint` → `visit_u64`; self-describing
-    /// ones read the variant name → `visit_str`.
-    enum VariantTag {
-        Inline,
-        Handle,
-    }
-
-    impl<'de> Deserialize<'de> for VariantTag {
-        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            deserializer.deserialize_identifier(VariantTagVisitor)
-        }
-    }
-
-    struct VariantTagVisitor;
-
-    impl Visitor<'_> for VariantTagVisitor {
-        type Value = VariantTag;
-
-        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("`Inline` or `Handle` variant")
-        }
-
-        fn visit_u64<E: de::Error>(self, value: u64) -> Result<VariantTag, E> {
-            match value {
-                0 => Ok(VariantTag::Inline),
-                1 => Ok(VariantTag::Handle),
-                _ => Err(de::Error::invalid_value(
-                    de::Unexpected::Unsigned(value),
-                    &self,
-                )),
-            }
-        }
-
-        fn visit_str<E: de::Error>(self, value: &str) -> Result<VariantTag, E> {
-            match value {
-                "Inline" => Ok(VariantTag::Inline),
-                "Handle" => Ok(VariantTag::Handle),
-                _ => Err(de::Error::unknown_variant(value, VARIANTS)),
-            }
-        }
-    }
-
-    struct RefVisitor<K>(PhantomData<K>);
-
-    impl<'de, K: Kind> Visitor<'de> for RefVisitor<K> {
-        type Value = Ref<K>;
-
-        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("a Ref enum (`Inline` or `Handle`)")
-        }
-
-        fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<Ref<K>, A::Error> {
-            match data.variant()? {
-                (VariantTag::Inline, variant) => {
-                    let body: InlineBuf = variant.newtype_variant()?;
-                    K::decode_from_bytes(&body.0)
-                        .map(Ref::Inline)
-                        .ok_or_else(|| {
-                            de::Error::custom("Ref::Inline payload failed Kind::decode_from_bytes")
-                        })
-                }
-                (VariantTag::Handle, variant) => {
-                    variant.struct_variant(HANDLE_FIELDS, HandleVisitor(PhantomData))
-                }
-            }
-        }
-    }
-
-    /// Reads the inline body `InlineBody` wrote — a raw byte buffer.
-    struct InlineBuf(Vec<u8>);
-
-    impl<'de> Deserialize<'de> for InlineBuf {
-        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            deserializer
-                .deserialize_byte_buf(InlineBufVisitor)
-                .map(InlineBuf)
-        }
-    }
-
-    struct InlineBufVisitor;
-
-    impl<'de> Visitor<'de> for InlineBufVisitor {
-        type Value = Vec<u8>;
-
-        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("the inline Ref byte buffer")
-        }
-
-        fn visit_bytes<E: de::Error>(self, value: &[u8]) -> Result<Vec<u8>, E> {
-            Ok(value.to_vec())
-        }
-
-        fn visit_byte_buf<E: de::Error>(self, value: Vec<u8>) -> Result<Vec<u8>, E> {
-            Ok(value)
-        }
-
-        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
-            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-            while let Some(byte) = seq.next_element::<u8>()? {
-                out.push(byte);
-            }
-            Ok(out)
-        }
-    }
-
-    struct HandleVisitor<K>(PhantomData<K>);
-
-    impl<'de, K> Visitor<'de> for HandleVisitor<K> {
-        type Value = Ref<K>;
-
-        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("a Ref::Handle with `id` and `kind_id`")
-        }
-
-        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Ref<K>, A::Error> {
-            let id = seq
-                .next_element::<u64>()?
-                .ok_or_else(|| de::Error::invalid_length(0, &self))?;
-            let kind_id = seq
-                .next_element::<u64>()?
-                .ok_or_else(|| de::Error::invalid_length(1, &self))?;
-            Ok(Ref::Handle { id, kind_id })
-        }
-
-        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Ref<K>, A::Error> {
-            let mut id: Option<u64> = None;
-            let mut kind_id: Option<u64> = None;
-            while let Some(key) = map.next_key::<HandleField>()? {
-                match key {
-                    HandleField::Id => {
-                        if id.is_some() {
-                            return Err(de::Error::duplicate_field("id"));
-                        }
-                        id = Some(map.next_value()?);
-                    }
-                    HandleField::KindId => {
-                        if kind_id.is_some() {
-                            return Err(de::Error::duplicate_field("kind_id"));
-                        }
-                        kind_id = Some(map.next_value()?);
-                    }
-                }
-            }
-            let id = id.ok_or_else(|| de::Error::missing_field("id"))?;
-            let kind_id = kind_id.ok_or_else(|| de::Error::missing_field("kind_id"))?;
-            Ok(Ref::Handle { id, kind_id })
-        }
-    }
-
-    enum HandleField {
-        Id,
-        KindId,
-    }
-
-    impl<'de> Deserialize<'de> for HandleField {
-        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            deserializer.deserialize_identifier(HandleFieldVisitor)
-        }
-    }
-
-    struct HandleFieldVisitor;
-
-    impl Visitor<'_> for HandleFieldVisitor {
-        type Value = HandleField;
-
-        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("`id` or `kind_id`")
-        }
-
-        fn visit_u64<E: de::Error>(self, value: u64) -> Result<HandleField, E> {
-            match value {
-                0 => Ok(HandleField::Id),
-                1 => Ok(HandleField::KindId),
-                _ => Err(de::Error::invalid_value(
-                    de::Unexpected::Unsigned(value),
-                    &self,
-                )),
-            }
-        }
-
-        fn visit_str<E: de::Error>(self, value: &str) -> Result<HandleField, E> {
-            match value {
-                "id" => Ok(HandleField::Id),
-                "kind_id" => Ok(HandleField::KindId),
-                _ => Err(de::Error::unknown_field(value, HANDLE_FIELDS)),
-            }
-        }
-    }
 }
 
 /// ADR-0019 schema producer. Reads `<T as Schema>::SCHEMA` — a compile-
@@ -644,7 +307,7 @@ mod schema_impls {
     use alloc::vec::Vec;
 
     use crate::schema::{LabelCell, LabelNode, Primitive, SchemaCell, SchemaType};
-    use crate::{DagId, HandleId, KindId, MailboxId, Schema, ThreadId, TransformId};
+    use crate::{DagId, KindId, MailboxId, Schema, ThreadId, TransformId};
     use alloc::collections::BTreeMap;
 
     macro_rules! scalar {
@@ -738,12 +401,6 @@ mod schema_impls {
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
 
-    impl Schema for HandleId {
-        const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
-        const LABEL: Option<&'static str> = Some(Self::TYPE_NAME);
-        const LABEL_NODE: LabelNode = LabelNode::Anonymous;
-    }
-
     impl Schema for DagId {
         const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
         const LABEL: Option<&'static str> = Some(Self::TYPE_NAME);
@@ -760,20 +417,6 @@ mod schema_impls {
         const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
         const LABEL: Option<&'static str> = Some(Self::TYPE_NAME);
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
-    }
-
-    // ADR-0045 typed handle reference. `Ref<K>` exposes both the
-    // inline-value path and the handle-id path through one schema
-    // tag — recipients walk fields and dispatch identically once
-    // the substrate has substituted the resolved value. The bound
-    // is `Schema + 'static` (matching `Vec<T>` etc.) rather than
-    // `Kind` because the schema impl only needs the inner
-    // `K::SCHEMA` and `K::LABEL_NODE`; the `Kind` bound on `Ref<K>`
-    // helpers in lib.rs is for `K::ID` access at construction time.
-    impl<K: Schema + 'static> Schema for super::Ref<K> {
-        const SCHEMA: SchemaType = SchemaType::Ref(SchemaCell::Static(&K::SCHEMA));
-        const LABEL: Option<&'static str> = None;
-        const LABEL_NODE: LabelNode = LabelNode::Ref(LabelCell::Static(&K::LABEL_NODE));
     }
 
     // Issue #232: `BTreeMap<K, V>` lands as `SchemaType::Map`. The
@@ -1000,9 +643,7 @@ pub fn encode_empty<T: Kind>() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::string::String;
     use bytemuck::{Pod, Zeroable};
-    use serde::{Deserialize, Serialize};
 
     #[repr(C)]
     #[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]
@@ -1036,24 +677,6 @@ mod tests {
     impl Kind for Vertex {
         const NAME: &'static str = "test.vertex";
         const ID: KindId = KindId(0xDEAD_BEEF_0000_0002);
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    struct TestStruct {
-        tag: u32,
-        label: String,
-    }
-    impl Kind for TestStruct {
-        const NAME: &'static str = "test.struct";
-        const ID: KindId = KindId(0xDEAD_BEEF_0000_0003);
-
-        fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-            __derive_runtime::decode_wire::<Self>(bytes)
-        }
-
-        fn encode_into_bytes(&self) -> Vec<u8> {
-            __derive_runtime::encode_wire::<Self>(self)
-        }
     }
 
     #[test]
@@ -1108,171 +731,6 @@ mod tests {
         );
         assert_eq!(tagged_id::tag_of(a.0), Some(Tag::Mailbox));
         assert_ne!(mailbox_id_from_name(""), MailboxId(0xcbf2_9ce4_8422_2325));
-    }
-
-    #[test]
-    fn ref_handle_pulls_kind_id_from_type_param() {
-        let r: Ref<TestStruct> = Ref::handle(42);
-        match r {
-            Ref::Handle { id, kind_id } => {
-                assert_eq!(id, 42);
-                assert_eq!(kind_id, TestStruct::ID.0);
-            }
-            Ref::Inline(_) => panic!("expected Handle variant"),
-        }
-    }
-
-    #[test]
-    fn ref_inline_wraps_value() {
-        let v = TestStruct {
-            tag: 7,
-            label: String::from("hi"),
-        };
-        let r = Ref::inline(v.clone());
-        match r {
-            Ref::Inline(inner) => assert_eq!(inner, v),
-            Ref::Handle { .. } => panic!("expected Inline variant"),
-        }
-    }
-
-    #[test]
-    fn ref_predicates_and_handle_id() {
-        let inline: Ref<TestStruct> = Ref::Inline(TestStruct {
-            tag: 1,
-            label: String::from("a"),
-        });
-        let handle: Ref<TestStruct> = Ref::handle(99);
-        assert!(inline.is_inline());
-        assert!(!inline.is_handle());
-        assert_eq!(inline.handle_id(), None);
-        assert!(!handle.is_inline());
-        assert!(handle.is_handle());
-        assert_eq!(handle.handle_id(), Some(99));
-    }
-
-    #[test]
-    fn ref_inline_wire_roundtrip() {
-        let v = TestStruct {
-            tag: 42,
-            label: String::from("hello"),
-        };
-        let r = Ref::Inline(v);
-        let bytes = wire::to_vec(&r).expect("test setup: wire encodes Inline Ref");
-        let back: Ref<TestStruct> =
-            wire::from_bytes(&bytes).expect("test setup: wire decodes Inline Ref");
-        assert_eq!(back, r);
-    }
-
-    #[test]
-    fn ref_handle_wire_roundtrip() {
-        let r: Ref<TestStruct> = Ref::Handle {
-            id: 0xdead_beef_cafe_babe,
-            kind_id: 0x1234_5678_9abc_def0,
-        };
-        let bytes = wire::to_vec(&r).expect("test setup: wire encodes Handle Ref");
-        let back: Ref<TestStruct> =
-            wire::from_bytes(&bytes).expect("test setup: wire decodes Handle Ref");
-        assert_eq!(back, r);
-    }
-
-    #[test]
-    fn ref_inline_and_handle_have_distinct_wire_discriminants() {
-        let inline: Ref<TestStruct> = Ref::Inline(TestStruct {
-            tag: 1,
-            label: String::from("x"),
-        });
-        let handle: Ref<TestStruct> = Ref::Handle { id: 1, kind_id: 1 };
-        let inline_bytes = wire::to_vec(&inline).expect("test setup: wire encodes Inline Ref");
-        let handle_bytes = wire::to_vec(&handle).expect("test setup: wire encodes Handle Ref");
-        // Selector is a u32 LE at bytes[0..4] (the image is unversioned,
-        // ADR-0118 §Envelope).
-        assert_eq!(
-            u32::from_le_bytes(
-                inline_bytes[0..4]
-                    .try_into()
-                    .expect("selector slice is always 4 bytes"),
-            ),
-            0,
-            "Inline selector must be 0",
-        );
-        assert_eq!(
-            u32::from_le_bytes(
-                handle_bytes[0..4]
-                    .try_into()
-                    .expect("selector slice is always 4 bytes"),
-            ),
-            1,
-            "Handle selector must be 1",
-        );
-    }
-
-    #[test]
-    fn ref_is_cast_ineligible() {
-        const { assert!(!<Ref<TestStruct> as CastEligible>::ELIGIBLE) };
-    }
-
-    #[test]
-    fn ref_inline_cast_kind_body_is_cast_image() {
-        // ADR-0100: a cast kind's inline body is the raw cast image,
-        // not a wire-encoded image. `TestPod` carries a `u32` field
-        // (`a`), whose cast bytes differ from a wire-encoded u32.
-        let v = TestPod {
-            a: 0x1234_5678,
-            b: 1.5,
-        };
-        let r: Ref<TestPod> = Ref::Inline(v);
-        let bytes = wire::to_vec(&r).expect("test setup: wire encodes Inline Ref<TestPod>");
-        // Selector is a u32 LE at bytes[0..4]; length is a u32 LE at
-        // bytes[4..8] (the image is unversioned, ADR-0118 §Envelope).
-        assert_eq!(
-            u32::from_le_bytes(
-                bytes[0..4]
-                    .try_into()
-                    .expect("selector slice is always 4 bytes"),
-            ),
-            0,
-            "Inline selector",
-        );
-        assert_eq!(
-            u32::from_le_bytes(
-                bytes[4..8]
-                    .try_into()
-                    .expect("length slice is always 4 bytes"),
-            ),
-            8,
-            "u32 LE length prefix of the 8-byte cast image",
-        );
-        assert_eq!(
-            &bytes[8..],
-            bytemuck::bytes_of(&v),
-            "inline body is the cast image, not a wire-encoded image"
-        );
-        let back: Ref<TestPod> =
-            wire::from_bytes(&bytes).expect("test setup: wire decodes Inline Ref<TestPod>");
-        assert_eq!(back, r);
-    }
-
-    #[test]
-    fn ref_handle_cast_kind_roundtrip() {
-        let r: Ref<TestPod> = Ref::Handle {
-            id: 7,
-            kind_id: TestPod::ID.0,
-        };
-        let bytes = wire::to_vec(&r).expect("test setup: wire encodes Handle Ref<TestPod>");
-        // Selector is a u32 LE at bytes[0..4] (the image is unversioned,
-        // ADR-0118 §Envelope).
-        assert_eq!(
-            u32::from_le_bytes(
-                bytes[0..4]
-                    .try_into()
-                    .expect("selector slice is always 4 bytes"),
-            ),
-            1,
-            "Handle selector",
-        );
-        let back: Ref<TestPod> =
-            wire::from_bytes(&bytes).expect("test setup: wire decodes Handle Ref<TestPod>");
-        assert_eq!(back, r);
     }
 
     #[test]

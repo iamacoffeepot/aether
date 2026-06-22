@@ -28,7 +28,6 @@ use rustc_hash::FxHashMap;
 
 use aether_kinds::trace::Nanos;
 
-use crate::handle_store::schema_contains_ref;
 use crate::mail::{KindId, MailId, MailRef, MailboxId, Source};
 use crate::scheduler::SeizeHandle;
 use std::error;
@@ -736,13 +735,10 @@ struct Mailbox {
 }
 
 /// Everything [`Registry::route_lookup`] hands `route_mail` for one
-/// mail, resolved under a single read guard. `ref_schema` is `Some`
-/// only when the kind embeds a `Ref` (its cached `has_ref`); see the
-/// method doc.
+/// mail, resolved under a single read guard.
 pub(crate) struct RouteLookup {
     pub(crate) entry: Option<MailboxEntry>,
     pub(crate) kind_name: String,
-    pub(crate) ref_schema: Option<SchemaType>,
     /// iamacoffeepot/aether#1135: the recipient's
     /// [`SeizeHandle`], resolved under the
     /// same read guard. `Some` only when the recipient is an `Inbox`
@@ -757,11 +753,6 @@ pub(crate) struct RouteLookup {
 struct KindSlot {
     name: String,
     descriptor: KindDescriptor,
-    /// `schema_contains_ref(&descriptor.schema)`, computed once at
-    /// registration. The route path reads this bool instead of cloning
-    /// the descriptor and re-walking the schema tree per mail just to
-    /// decide whether ADR-0045 handle resolution is needed.
-    has_ref: bool,
 }
 
 #[derive(Default)]
@@ -1261,17 +1252,13 @@ impl Registry {
     }
 
     /// Hot-path combined lookup for the mailer's route step: resolves
-    /// the recipient's [`MailboxEntry`], the kind's name, and whether
-    /// the kind needs ADR-0045 handle resolution — all under a single
-    /// read guard, where `route_mail` previously took three separate
-    /// reads (`kind_descriptor` + `entry` + `kind_name`).
+    /// the recipient's [`MailboxEntry`] and the kind's name under a
+    /// single read guard, where `route_mail` previously took separate
+    /// reads (`entry` + `kind_name`).
     ///
     /// Like [`entry`](Self::entry), everything is cloned out so the
     /// caller drops the lock before touching a handler. The common case
-    /// clones only the (cheap) kind name + entry: `ref_schema` is `Some`
-    /// **iff** the kind's schema embeds a `Ref` (the cached `has_ref`),
-    /// so the schema is cloned only on the rare ref-carrying path rather
-    /// than every mail.
+    /// clones only the (cheap) kind name + entry.
     ///
     /// # Panics
     /// Panics if the inner `RwLock` is poisoned — fail-fast per
@@ -1283,9 +1270,6 @@ impl Registry {
             .expect("registry lock poisoned; fail-fast per ADR-0063");
         let kind_slot = inner.kinds.get(&kind);
         let kind_name = kind_slot.map(|s| s.name.clone()).unwrap_or_default();
-        let ref_schema = kind_slot
-            .filter(|s| s.has_ref)
-            .map(|s| s.descriptor.schema.clone());
         let entry = inner.mailboxes.get(&recipient).map(|m| m.entry.clone());
         // iamacoffeepot/aether#1135: hand the demuxer the recipient's
         // seize handle under the same guard. Cloned out of the deferred
@@ -1298,7 +1282,6 @@ impl Registry {
         RouteLookup {
             entry,
             kind_name,
-            ref_schema,
             seize,
         }
     }
@@ -1404,13 +1387,11 @@ impl Registry {
             return Ok(id);
         }
         inner.name_index.insert(descriptor.name.clone(), id);
-        let has_ref = schema_contains_ref(&descriptor.schema);
         inner.kinds.insert(
             id,
             KindSlot {
                 name: descriptor.name.clone(),
                 descriptor,
-                has_ref,
             },
         );
         Ok(id)

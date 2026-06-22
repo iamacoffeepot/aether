@@ -51,8 +51,7 @@ chassis maps the resolved flag to its structural choice —
 `cfg.enabled.then_some(cfg)` for an opt-in cap — keeping the flag the
 single source of the on/off decision. `parse_flag` (in
 `aether-capabilities/src/config_env.rs`) accepts `1` / `true` / `yes` /
-`on`. `PersistConfig` is the one documented exception, for the reasons its
-`config` module doc records.
+`on`.
 
 ## Steps
 

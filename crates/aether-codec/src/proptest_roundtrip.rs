@@ -45,7 +45,7 @@ const MAX_WIDTH: usize = 4;
 /// `Struct` is eligible iff it is itself `repr_c: true` (which, by
 /// construction, already implies its own fields are eligible). Everything
 /// else — `Bool`, `String`, `Bytes`, `Option`, `Vec`, `Enum`, `Map`,
-/// `Unit` — disqualifies the parent. `Ref` / `TypeId` are never generated.
+/// `Unit` — disqualifies the parent. `TypeId` is never generated.
 fn cast_eligible(ty: &SchemaType) -> bool {
     match ty {
         SchemaType::Scalar(_) | SchemaType::TypeId(_) => true,
@@ -389,8 +389,8 @@ fn value_for_schema(schema: &SchemaType) -> BoxedStrategy<Value> {
             Union::new(arms).boxed()
         }
         SchemaType::Map { key, value } => value_for_map(key, value),
-        SchemaType::Ref(_) | SchemaType::TypeId(_) => {
-            unreachable!("arb_schema never generates Ref / TypeId")
+        SchemaType::TypeId(_) => {
+            unreachable!("arb_schema never generates TypeId")
         }
     }
 }

@@ -16,10 +16,6 @@ crate-type = ["rlib"]
 
 [dependencies]
 aether-data = { path = "../../aether-data", features = ["derive"] }
-# Issue 1472: `Vec4Observed { input: Ref<Vec4> }` carries the
-# `aether.math.vec4` kind in its `Ref` slot, so the shared lib needs
-# `Vec4`. `aether-math` is `no_std`, keeping this rlib `no_std`.
-aether-math = { path = "../../aether-math" }
 bytemuck = { workspace = true, default-features = false, features = ["derive"] }
 serde = { workspace = true, default-features = false, features = ["derive"] }
 

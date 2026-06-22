@@ -15,7 +15,6 @@
 
 use std::sync::Arc;
 
-use crate::handle_store::HandleStore;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
 
@@ -23,7 +22,6 @@ use crate::mail::registry::Registry;
 /// tests feed to `Builder::<...>::new` and `NativeBinding::new_for_test`.
 pub fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
     let registry = Arc::new(Registry::new());
-    let store = Arc::new(HandleStore::new(1024 * 1024));
-    let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     (registry, mailer)
 }

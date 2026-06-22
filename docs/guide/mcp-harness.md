@@ -73,7 +73,7 @@ Everything is keyed by `engine_id`. A session has a recognizable arc:
    until the dispatch chain settles and hands you the correlated reply.
 4. **Watch it.** `capture_frame` reads the rendered frame back as a PNG;
    `actor_logs` pulls one actor's log ring; the `describe_*` tools report the
-   engine's types, a component's handlers, the handle store.
+   engine's types and a component's handlers.
 5. **Settle precisely.** `send_mail_traced` when you need to know a whole causal
    chain finished, with its trace tree, rather than a single reply.
 6. **Tear down.** `terminate_substrate(engine_id)` when you're done with an engine.
@@ -108,8 +108,7 @@ to narrow the listing to a kind family. Pass `full: true` to get the full nested
 `SchemaType` (useful for codec-exact work); combine with `prefix` to keep the payload
 bounded. `describe_component` reports a loaded component's handler kinds, their docs,
 whether it has a fallback, and its boot-config kind. `describe_transforms` lists the
-native transforms registered at link time; `describe_handles` inspects the persistent
-handle store.
+native transforms registered at link time.
 
 **Components.** `load_component` and `replace_component` take a filesystem **path** to
 the `.wasm` — the tool reads the bytes; you never inline a wasm buffer through a tool
@@ -158,6 +157,5 @@ one handler.
 - The ids and schemas the tools hand around — [The type system](foundations/type-system.md).
 - Loading, replacing, and inspecting components — [Components & lifecycle](systems/components.md).
 - Settlement and the trace tree behind `send_mail_traced` — [Tracing & settlement](systems/tracing-and-settlement.md).
-- The handle store `describe_handles` inspects — [Handles](systems/handles.md).
 - Adding your own tool to this surface — [Wiring an MCP tool](recipes/wiring-an-mcp-tool.md).
 - The operational reference — ports, env overrides, `restart-hub` — `CLAUDE.md`.

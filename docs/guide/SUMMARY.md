@@ -35,7 +35,6 @@
   - [Tracing & settlement](systems/tracing-and-settlement.md)
   - [Logging](systems/logging.md)
   - [Configuration](systems/configuration.md)
-  - [Handles](systems/handles.md)
 
 # Building with aether
 

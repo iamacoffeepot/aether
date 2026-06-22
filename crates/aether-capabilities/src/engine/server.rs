@@ -526,19 +526,15 @@ mod server_native {
                 }
             };
 
-            // ADR-0049 §7 reserves each handle-store dir to one
-            // substrate via `lock.pid`; two engines pointing at the
-            // same dir is a `LockError::Held`. Allocate a unique
-            // subdirectory per spawned engine so the hub-managed
-            // multi-engine workflow doesn't have to set
-            // `AETHER_HANDLE_STORE_DIR` by hand (issue 1274).
+            // Allocate a unique scratch subdirectory per spawned engine to
+            // hold its materialized executable.
             let engine_id = EngineId(Uuid::from_u128(self.next_engine_seq));
             self.next_engine_seq += 1;
             let engine_store_dir = engine_store_root().join(engine_id.0.simple().to_string());
 
             // Stored bytes are content-addressed and not directly
             // fork-exec'able, so materialize the resolved entry to an
-            // executable temp file under this engine's store dir and fork
+            // executable temp file under this engine's scratch dir and fork
             // that (ADR-0115 §Execution); the caller never sees the path.
             let exec_path = engine_store_dir.join("substrate");
             if let Err(e) = realize_executable(&artifact.path, &exec_path) {
@@ -555,7 +551,6 @@ mod server_native {
             command
                 .args(&mail.args)
                 .env("AETHER_RPC_PORT", rpc_port.to_string())
-                .env("AETHER_HANDLE_STORE_DIR", &engine_store_dir)
                 .stdin(Stdio::null());
             // A spawn carrying a component list rides in as a boot-manifest
             // path; inject it the same way as the RPC port so the spawned
@@ -1349,7 +1344,6 @@ mod tests {
         SpawnEngineResult, TerminateEngine, TerminateEngineResult,
     };
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
-    use aether_substrate::handle_store::HandleStore;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
@@ -1367,8 +1361,7 @@ mod tests {
             let _ = registry.register_kind_with_descriptor(d);
         }
         let (outbound, _rx) = HubOutbound::attached_loopback();
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
         let cells = ReplyCells::default();
         // Point the cap's binary store (ADR-0115) at a per-call temp dir via
         // the ADR-0090 config field so these unit tests never touch the real

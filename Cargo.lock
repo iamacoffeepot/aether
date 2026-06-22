@@ -338,7 +338,6 @@ name = "aether-test-fixtures-kinds"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-data",
- "aether-math",
  "bytemuck",
  "serde",
 ]

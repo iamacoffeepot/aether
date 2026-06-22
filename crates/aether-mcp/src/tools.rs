@@ -30,7 +30,7 @@ use aether_data::MailId;
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::wire;
 use aether_data::{
-    EngineId, HandleId, Kind, KindDescriptor, KindId, MailboxId, ScopePathError, Tag, Uuid,
+    EngineId, Kind, KindDescriptor, KindId, MailboxId, ScopePathError, Tag, Uuid,
     mailbox_id_from_path, tagged_id, validate_scope_path,
 };
 use aether_data::{EnumVariant, Primitive, SchemaType};
@@ -62,13 +62,12 @@ use crate::args::ActorLogsResponse;
 use crate::args::{ActorCostArgs, ActorCostResponse, ActorCostRow};
 use crate::args::{
     CaptureCheckSpec, CaptureFrameArgs, CaptureMailSpec, ComponentSpec, DeadEngineInfo,
-    DescribeComponentArgs, DescribeHandlersArgs, DescribeHandlersResponse, DescribeHandlesArgs,
-    DescribeHandlesResponse, DescribeKindsArgs, EngineInfo, HandleSummaryJson, KindSummary,
-    ListBinariesArgs, ListComponentsArgs, ListEnginesResponse, LoadComponentArgs, MailIdJson,
-    MailNodeJson, MailSpec, MailStatus, NativeCapHandlers, NativeHandlerJson, ReplaceComponentArgs,
-    ReplyEventJson, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse, SpawnSubstrateArgs,
-    TerminateSubstrateArgs, TracedMailSpec, TransformListing, UploadBinaryArgs,
-    UploadComponentArgs,
+    DescribeComponentArgs, DescribeHandlersArgs, DescribeHandlersResponse, DescribeKindsArgs,
+    EngineInfo, KindSummary, ListBinariesArgs, ListComponentsArgs, ListEnginesResponse,
+    LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, MailStatus, NativeCapHandlers,
+    NativeHandlerJson, ReplaceComponentArgs, ReplyEventJson, SendMailArgs, SendMailTracedArgs,
+    SendMailTracedResponse, SpawnSubstrateArgs, TerminateSubstrateArgs, TracedMailSpec,
+    TransformListing, UploadBinaryArgs, UploadComponentArgs,
 };
 use crate::reverse::EngineNames;
 use crate::rpc::RpcSession;
@@ -98,8 +97,6 @@ const ENGINE_CAP: &str = "aether.engine";
 const COMPONENT_CAP: &str = "aether.component";
 /// Mailbox name of a substrate's render cap.
 const RENDER_CAP: &str = "aether.render";
-/// Mailbox name of a substrate's handle-store cap (ADR-0045 / ADR-0049).
-const HANDLE_CAP: &str = "aether.handle";
 /// Mailbox name of a substrate's reverse-lookup inventory cap
 /// (ADR-0088 §6) — the `aether.inventory.manifest` / `resolve` target.
 const INVENTORY_CAP: &str = "aether.inventory";
@@ -1181,61 +1178,6 @@ impl Mcp {
             None => Err(internal_msg("undecodable CostTailResult")),
         }
     }
-
-    #[tool(
-        description = "Summarize a substrate's persistent handle store (ADR-0049 §10). Sends \
-                       aether.handle.describe to the engine's aether.handle cap and decodes \
-                       aether.handle.describe_result. Returns total / in-memory / on-disk / pinned \
-                       entry counts, in-memory + on-disk bytes vs the disk budget, and the top-N \
-                       handles by size and by recency (handle_id + kind_id as tagged-id strings, \
-                       bytes_len, pinned, refcount, created_at_ms). Use it to triage \"why is my \
-                       handle store at the disk-budget cap\" without ssh-ing into the machine. \
-                       `max` defaults to 16, clamps to 256."
-    )]
-    pub async fn describe_handles(
-        &self,
-        Parameters(args): Parameters<DescribeHandlesArgs>,
-    ) -> Result<String, McpError> {
-        let engine = parse_engine_id(&args.engine_id)?;
-        let request = aether_kinds::HandleDescribe {
-            max: args.max.unwrap_or(0),
-        };
-        let reply = self
-            .session
-            .call_one(engine_envelope(engine, HANDLE_CAP, &request))
-            .await
-            .map_err(internal)?;
-        let Some(result) = aether_kinds::HandleDescribeResult::decode_from_bytes(&reply.payload)
-        else {
-            return Err(internal_msg("undecodable HandleDescribeResult"));
-        };
-        let to_json = |s: &aether_kinds::HandleSummary| HandleSummaryJson {
-            // Handle + kind ids are tagged 64-bit ids (ADR-0064); render
-            // them as the tagged-id strings the rest of the MCP wire uses.
-            // Fall back to the raw decimal only if a synthetic id lacks
-            // tag bits (test fixtures), so the tool never panics.
-            handle_id: tagged_id::encode(s.handle_id.0)
-                .unwrap_or_else(|| s.handle_id.0.to_string()),
-            kind_id: tagged_id::encode(s.kind_id.0).unwrap_or_else(|| s.kind_id.0.to_string()),
-            bytes_len: s.bytes_len,
-            pinned: s.pinned,
-            refcount: s.refcount,
-            created_at_ms: s.created_at_ms,
-        };
-        let response = DescribeHandlesResponse {
-            engine_id: args.engine_id,
-            total_entries: result.total_entries,
-            in_memory_entries: result.in_memory_entries,
-            on_disk_entries: result.on_disk_entries,
-            pinned_entries: result.pinned_entries,
-            in_memory_bytes: result.in_memory_bytes,
-            on_disk_bytes: result.on_disk_bytes,
-            on_disk_budget_bytes: result.on_disk_budget_bytes,
-            top_by_size: result.top_by_size.iter().map(to_json).collect(),
-            top_by_recency: result.top_by_recency.iter().map(to_json).collect(),
-        };
-        json(&response)
-    }
 }
 
 impl Mcp {
@@ -1770,7 +1712,6 @@ fn render_shape(ty: &SchemaType) -> String {
             SchemaType::Bytes => "Bytes".to_owned(),
             SchemaType::Option(inner) => format!("Option<{}>", render(inner, depth + 1)),
             SchemaType::Vec(inner) => format!("Vec<{}>", render(inner, depth + 1)),
-            SchemaType::Ref(inner) => format!("Ref<{}>", render(inner, depth + 1)),
             SchemaType::Array { element, len } => {
                 format!("[{}; {}]", render(element, depth + 1), len)
             }
@@ -1814,8 +1755,6 @@ fn render_shape(ty: &SchemaType) -> String {
                     "MailboxId".to_owned()
                 } else if *id == KindId::TYPE_ID {
                     "KindId".to_owned()
-                } else if *id == HandleId::TYPE_ID {
-                    "HandleId".to_owned()
                 } else {
                     format!("TypeId({id:#x})")
                 }
@@ -2464,7 +2403,7 @@ fn resolve_bytes_params<'a>(
                 }
                 other => Ok(other),
             },
-            // Scalars, String, Ref, TypeId, Unit, Bool: no `Bytes` leaf is
+            // Scalars, String, TypeId, Unit, Bool: no `Bytes` leaf is
             // reachable through the embed grammar, so pass through.
             _ => Ok(value),
         }
@@ -2795,7 +2734,6 @@ mod tests {
     use aether_capabilities::{EngineConfig, EngineServer};
     use aether_data::{mailbox_id_from_name, with_tag};
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
-    use aether_substrate::handle_store::HandleStore;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
@@ -2805,7 +2743,6 @@ mod tests {
     use std::{env as std_env, fs as std_fs};
 
     use crate::args::ActorLogsArgs;
-    use crate::args::DescribeHandlesArgs;
     use crate::test_chassis::TestChassis;
     use aether_kinds::descriptors;
 
@@ -3207,8 +3144,7 @@ mod tests {
             let _ = registry.register_kind_with_descriptor(d);
         }
         let (outbound, _rx) = HubOutbound::attached_loopback();
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<EngineServer>(EngineConfig::default())
@@ -3266,8 +3202,7 @@ mod tests {
             let _ = registry.register_kind_with_descriptor(d.clone());
         }
         let (outbound, _rx) = HubOutbound::attached_loopback();
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<EngineServer>(EngineConfig::default())
@@ -3885,24 +3820,6 @@ mod tests {
             }))
             .await;
         assert!(result.is_err(), "an unknown level should be a tool error");
-    }
-
-    /// `describe_handles` with a malformed `engine_id` rejects up front
-    /// without touching the wire.
-    #[tokio::test]
-    async fn describe_handles_bad_engine_id_is_tool_error() {
-        let (_chassis, port) = boot_hub();
-        let mcp = connect_mcp(port);
-        let result = mcp
-            .describe_handles(Parameters(DescribeHandlesArgs {
-                engine_id: "not-a-uuid".to_owned(),
-                max: None,
-            }))
-            .await;
-        assert!(
-            result.is_err(),
-            "a malformed engine_id should be a tool error"
-        );
     }
 
     /// Issue 1242 / 1246: `decode_reply_events` transcodes a correlated

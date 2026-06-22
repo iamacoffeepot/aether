@@ -41,14 +41,11 @@ use aether_data::KindDescriptor;
 use wasmtime::{Engine, Linker};
 
 use crate::actor::native::local as actor_local;
-use crate::handle_store::PersistConfig;
 use crate::mail::registry::MailDispatch;
 use crate::runtime::log_install;
 use crate::runtime::panic_hook;
 use crate::{
-    AETHER_DIAGNOSTICS, ComponentCtx, HubOutbound, Mailer, Registry,
-    actor::wasm::host_fns,
-    handle_store::{HandleStore, KindResolver},
+    AETHER_DIAGNOSTICS, ComponentCtx, HubOutbound, Mailer, Registry, actor::wasm::host_fns,
 };
 use aether_kinds::descriptors;
 
@@ -73,12 +70,6 @@ pub struct SubstrateBoot {
     pub linker: Arc<Linker<ComponentCtx>>,
     pub queue: Arc<Mailer>,
     pub outbound: Arc<HubOutbound>,
-    /// ADR-0045 typed-handle store. Sized from
-    /// `AETHER_HANDLE_STORE_MAX_BYTES` (default 256 MB). Wired into
-    /// `Mailer` so dispatch resolves `Ref::Handle` payloads on the
-    /// way through; chassis-level handlers (PR 3 host-fn shims)
-    /// will publish into it via `Mailer::handle_store()`.
-    pub handle_store: Arc<HandleStore>,
     /// Retained so `connect_hub` / `connect_hub_from_env` can hand
     /// the descriptor list to `HubClient::connect`, the chassis can
     /// log the count, etc. Same `Vec` that was registered with the
@@ -94,27 +85,6 @@ pub struct SubstrateBoot {
 pub struct SubstrateBootBuilder<'a> {
     name: &'a str,
     version: &'a str,
-    /// Whether this chassis enables on-disk handle persistence
-    /// (ADR-0049 §9). Desktop + headless set `true`; the hub leaves it
-    /// `false` (it hosts no handles, so there's nothing to persist).
-    /// Defaults to `false` so a chassis that forgets to opt in stays
-    /// in-memory-only rather than silently writing to the user's data
-    /// dir.
-    persist_enabled: bool,
-    /// Pre-resolved persistence config from a chassis-CLI argv overlay
-    /// (ADR-0090 unit d, issue 1258). When the override has been set
-    /// (`persist_override_set`), `persist_override` is the verdict and
-    /// bypasses `HandleStore::from_env_persistent`'s env-only
-    /// resolution; otherwise env-only resolution runs as before. The
-    /// `Option<PersistConfig>` carries the verdict including
-    /// "persistence off" (`None`). Set via [`Self::persist_config`].
-    persist_override_set: bool,
-    persist_override: Option<PersistConfig>,
-    /// Argv-resolved in-memory byte budget for the handle store
-    /// (ADR-0090 unit d, issue 1258). `None` keeps the env-only
-    /// `AETHER_HANDLE_STORE_MAX_BYTES` resolution. Set via
-    /// [`Self::handle_store_max_bytes`].
-    handle_store_max_bytes: Option<usize>,
 }
 
 impl SubstrateBoot {
@@ -124,50 +94,7 @@ impl SubstrateBoot {
     /// `env!("CARGO_PKG_VERSION")`.
     #[must_use]
     pub fn builder<'a>(name: &'a str, version: &'a str) -> SubstrateBootBuilder<'a> {
-        SubstrateBootBuilder {
-            name,
-            version,
-            persist_enabled: false,
-            persist_override_set: false,
-            persist_override: None,
-            handle_store_max_bytes: None,
-        }
-    }
-}
-
-impl SubstrateBootBuilder<'_> {
-    /// Opt this chassis into ADR-0049 on-disk handle persistence. The
-    /// desktop + headless chassis call this; the hub does not. Whether
-    /// persistence actually activates still depends on the env
-    /// (`AETHER_HANDLE_STORE_PERSIST_DISABLE`, data-dir resolution) —
-    /// this is just the chassis vote.
-    #[must_use]
-    pub fn persist_enabled(mut self, enabled: bool) -> Self {
-        self.persist_enabled = enabled;
-        self
-    }
-
-    /// Inject a pre-resolved persistence config (ADR-0090 unit d,
-    /// issue 1258). When chassis bins have parsed argv overlays, they
-    /// resolve `PersistConfig::from_argv_then_env(...)` themselves and
-    /// hand the result in here, bypassing the env-only resolution baked
-    /// into [`HandleStore::from_env_persistent`].
-    /// `None` means "argv said persistence is off". When not called,
-    /// env-only resolution runs.
-    #[must_use]
-    pub fn persist_config(mut self, config: Option<PersistConfig>) -> Self {
-        self.persist_override_set = true;
-        self.persist_override = config;
-        self
-    }
-
-    /// Inject an argv-resolved handle-store in-memory byte budget
-    /// (ADR-0090 unit d, issue 1258). `None` (or not called) keeps the
-    /// env-only `AETHER_HANDLE_STORE_MAX_BYTES` resolution.
-    #[must_use]
-    pub fn handle_store_max_bytes(mut self, bytes: Option<usize>) -> Self {
-        self.handle_store_max_bytes = bytes;
-        self
+        SubstrateBootBuilder { name, version }
     }
 }
 
@@ -254,48 +181,8 @@ impl SubstrateBootBuilder<'_> {
             }),
         );
 
-        // ADR-0049 §6: the registry (already populated above) drives the
-        // schema-evolution check on the boot scan — a kind whose schema
-        // changed or was retired invalidates its stale on-disk entries.
-        let kind_resolver: Arc<dyn KindResolver> = registry.clone();
-        let handle_store = Arc::new(if self.persist_override_set {
-            // Chassis bin resolved PersistConfig from argv-then-env;
-            // use it verbatim (ADR-0090 unit d). max_bytes follows the
-            // same overlay (argv > env > default).
-            let max_bytes = match self.handle_store_max_bytes {
-                Some(n) => n,
-                None => HandleStore::from_env()?.max_bytes(),
-            };
-            HandleStore::with_persist_validated(
-                max_bytes,
-                self.persist_override,
-                Some(kind_resolver),
-            )
-        } else if let Some(max_bytes) = self.handle_store_max_bytes {
-            // No argv overlay for persist config but max_bytes was
-            // overridden independently; env-only persist resolution.
-            HandleStore::with_persist_validated(
-                max_bytes,
-                PersistConfig::from_env(self.persist_enabled),
-                Some(kind_resolver),
-            )
-        } else {
-            // Pure env-only path — byte-identical to pre-d behaviour.
-            HandleStore::from_env_persistent(self.persist_enabled, Some(kind_resolver))?
-        });
-        // ADR-0049 §7: acquire the single-substrate-per-store lock
-        // before doing any writes. A live conflicting lock aborts boot
-        // with a clear error. No-op when persistence is disabled.
-        handle_store
-            .acquire_lock()
-            .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
-        // ADR-0049 §5: start the background disk-eviction tick. No-op
-        // when persistence is disabled (hub chassis / test fixtures).
-        handle_store.spawn_eviction_thread();
-        let queue = Arc::new(
-            Mailer::new(Arc::clone(&registry), Arc::clone(&handle_store))
-                .with_outbound(Arc::clone(&outbound)),
-        );
+        let queue =
+            Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
 
         let mut linker: Linker<ComponentCtx> = Linker::new(&engine);
         host_fns::register(&mut linker)?;
@@ -307,7 +194,6 @@ impl SubstrateBootBuilder<'_> {
             linker,
             queue,
             outbound,
-            handle_store,
             boot_descriptors,
             name: self.name.to_owned(),
             version: self.version.to_owned(),

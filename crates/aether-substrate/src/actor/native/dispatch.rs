@@ -423,7 +423,6 @@ mod cost_tests {
 )]
 mod free_dispatch_tests {
     use super::*;
-    use crate::handle_store::HandleStore;
     use crate::mail::mailer::Mailer;
     use crate::mail::registry::Registry;
     use crate::mail::{MailRef, Source, SourceAddr};
@@ -441,8 +440,7 @@ mod free_dispatch_tests {
         for d in descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
         }
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        Arc::new(Mailer::new(registry, store))
+        Arc::new(Mailer::new(registry))
     }
 
     fn build_envelope<K: Kind>(payload: &K) -> Envelope {

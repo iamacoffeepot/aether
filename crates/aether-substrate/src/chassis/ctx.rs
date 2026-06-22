@@ -625,7 +625,6 @@ mod tests {
 
     use crate::actor::registry::ActorRegistry;
     use crate::config::RingCapacities;
-    use crate::handle_store::HandleStore;
     use crate::mail::registry::MailboxEntry;
     use crate::mail::{KindId, MailId, MailRef, Source};
     use crate::runtime::lifecycle::PanicAborter;
@@ -650,8 +649,7 @@ mod tests {
         for d in descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
         }
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
         let actor_registry = Arc::new(ActorRegistry::new());
         let pool = Pool::start(PoolConfig::default(), Arc::clone(&aborter));
@@ -718,8 +716,7 @@ mod tests {
         for d in descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
         }
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
         let actor_registry = Arc::new(ActorRegistry::new());
         let pool = Pool::start(PoolConfig::default(), Arc::clone(&aborter));

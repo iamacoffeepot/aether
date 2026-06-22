@@ -287,7 +287,6 @@ mod native {
             MailboxId, SessionToken, ThreadId, Uuid, mailbox_id_from_name, thread_id_from_name,
         };
         use aether_substrate::actor::native::binding::NativeBinding;
-        use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::outbound::HubOutbound;
         use aether_substrate::mail::registry::Registry;
@@ -305,11 +304,8 @@ mod native {
 
         fn fixture() -> Fixture {
             let registry = Arc::new(Registry::new());
-            let store = Arc::new(HandleStore::new(1024 * 1024));
             let (outbound, _rx) = HubOutbound::attached_loopback();
-            let mailer = Arc::new(
-                Mailer::new(Arc::clone(&registry), Arc::clone(&store)).with_outbound(outbound),
-            );
+            let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
             let transport = Arc::new(NativeBinding::new_for_test(
                 Arc::clone(&mailer),
                 MailboxId(0x1117),

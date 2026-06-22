@@ -403,7 +403,6 @@ mod native {
     mod tests {
         use super::*;
         use aether_substrate::actor::native::binding::NativeBinding;
-        use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::{MailId, Source, SourceAddr};
 
@@ -415,10 +414,7 @@ mod native {
         }
 
         fn test_mailer() -> Arc<Mailer> {
-            Arc::new(Mailer::new(
-                Arc::new(Registry::new()),
-                Arc::new(HandleStore::new(1024)),
-            ))
+            Arc::new(Mailer::new(Arc::new(Registry::new())))
         }
 
         /// A `subscribe_self` carrying a `Component` source lands *that*

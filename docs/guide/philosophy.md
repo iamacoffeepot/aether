@@ -21,8 +21,7 @@ Consequences that follow from taking this seriously:
   the agent's session ([ADR-0089](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0089-mcp-hub-lifecycle-tunnel.md)). The agent must be able to rebuild and
   relaunch the volatile backends mid-task and keep its connection.
 - Observation is first-class. The agent can capture a frame, read an actor's
-  logs, trace a mail chain, and inspect handles — because an operator that
-  can't see can't act.
+  logs, and trace a mail chain — because an operator that can't see can't act.
 
 ## 2. Everything is mail
 
@@ -53,7 +52,7 @@ lives **above** it, as actors ([ADR-0034](https://github.com/iamacoffeepot/aethe
 model ([ADR-0074](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0074-unified-actor-model-for-substrate-and-guests.md)):
 
 - **Native chassis capabilities** — render, audio, file I/O, input, the
-  component loader, the handle store. Compiled into the substrate.
+  component loader. Compiled into the substrate.
 - **Wasm components** — your logic, loaded at runtime and hot-swappable.
 
 They are the *same actor model*, addressed the same way. A component talks to
@@ -79,8 +78,7 @@ repetition-tolerant**:
   addressed in a payload, because verbosity is nearly free for a machine
   caller and ambiguity is not.
 - The vocabulary is introspectable live: an agent can ask the engine what
-  kinds exist, what a component handles, what transforms are linked, what
-  handles are stored.
+  kinds exist, what a component handles, and what transforms are linked.
 
 ## 5. ADRs are the memory; tutorials are the proof
 

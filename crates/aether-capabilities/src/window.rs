@@ -103,7 +103,6 @@ mod native {
         use aether_data::{Kind, MailId, Source, SourceAddr};
         use aether_kinds::{FocusWindow, SetWindowMode, SetWindowTitle, WindowMode};
         use aether_substrate::actor::native::binding::NativeBinding;
-        use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::{
             HubOutbound, InboxHandler, MailboxId, NativeDispatch, OwnedDispatch, Registry,
@@ -119,9 +118,7 @@ mod native {
         fn settlement_substrate() -> (Arc<Mailer>, MailboxId, mpsc::Receiver<OwnedDispatch>) {
             let registry = Arc::new(Registry::new());
             let (outbound, _egress_rx) = HubOutbound::attached_loopback();
-            let store = Arc::new(HandleStore::new(1024 * 1024));
-            let mailer =
-                Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
+            let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
             let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
             let caller_mailbox = registry.register_inbox(
                 "test.window.settlement.caller",

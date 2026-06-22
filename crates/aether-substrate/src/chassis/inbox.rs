@@ -378,7 +378,6 @@ mod tests {
     use crate::actor::native::binding::NativeBinding;
     use crate::actor::native::ctx::NativeCtx;
     use crate::chassis::settlement::SettlementRegistry;
-    use crate::handle_store::HandleStore;
     use crate::mail::MailRef;
     use crate::mail::SourceAddr;
     use crate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
@@ -393,8 +392,7 @@ mod tests {
         for d in descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
         }
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let settlement = Arc::new(SettlementRegistry::new());
         mailer.install_settlement_registry(Arc::clone(&settlement));
         mailer

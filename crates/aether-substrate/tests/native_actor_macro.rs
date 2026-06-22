@@ -28,7 +28,6 @@ use aether_actor::OutboundReply;
 use aether_data::{Kind, Source, SourceAddr};
 use aether_kinds::trace::Nanos;
 use aether_substrate::actor::native::{Pending, TaskDone};
-use aether_substrate::handle_store::HandleStore;
 use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
 use aether_substrate::mail::{MailId, MailRef};
 use aether_substrate::{
@@ -127,8 +126,7 @@ impl Chassis for TestChassis {
 fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
     {
         let registry = Arc::new(Registry::new());
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         (registry, mailer)
     }
 }

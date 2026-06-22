@@ -87,10 +87,10 @@ mod tests {
     #[test]
     fn input_and_output_kinds_resolve_distinctly() {
         // The input bundle and the output vector are separate kinds: a
-        // shared kind id would collide in the Ref-slot resolver. Both
-        // also surface through the substrate descriptor inventory (the
-        // hub encodes `Mat4Apply` params; the observer resolves the
-        // `Ref<Vec4>` output).
+        // shared kind id would alias the transform's input and output.
+        // Both also surface through the substrate descriptor inventory
+        // (the hub encodes `Mat4Apply` params; the transform produces the
+        // `Vec4` output).
         assert_ne!(Mat4Apply::ID, Vec4::ID);
         let names: Vec<String> = descriptors::all().into_iter().map(|d| d.name).collect();
         assert!(names.iter().any(|n| n == Mat4Apply::NAME));

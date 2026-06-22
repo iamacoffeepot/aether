@@ -25,7 +25,7 @@
 use core::fmt::Debug;
 
 use aether_data::wire;
-use aether_data::{Kind, KindId, Primitive, Ref, SchemaCell, SchemaType};
+use aether_data::{Primitive, SchemaCell, SchemaType};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -268,76 +268,4 @@ fn map_keys_conform_in_encoded_byte_order() {
     };
     let json = json!({ "1": "one", "256": "two-fifty-six" });
     check(&value, &schema, &json);
-}
-
-// A wire-shaped inner kind for the `Ref` fixtures. Hand-rolled (not
-// derived) so the conformance module stays free of the `Kind` derive's
-// inventory machinery; its codec is `wire`, matching the schema-walker's
-// non-cast path.
-#[derive(Serialize, serde::Deserialize, PartialEq, Debug)]
-struct Leaf {
-    code: u32,
-    tag: String,
-}
-
-impl Kind for Leaf {
-    const NAME: &'static str = "conformance.leaf";
-    const ID: KindId = KindId(0xC0FF_EE00_0000_0001);
-
-    fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-        wire::from_bytes(bytes).ok()
-    }
-
-    fn encode_into_bytes(&self) -> Vec<u8> {
-        wire::to_vec(self).expect("wire encode")
-    }
-}
-
-fn leaf_schema() -> SchemaType {
-    structured_struct(vec![
-        scalar("code", Primitive::U32),
-        named("tag", SchemaType::String),
-    ])
-}
-
-#[derive(Serialize, serde::Deserialize, PartialEq, Debug)]
-struct RefHolder {
-    held: Ref<Leaf>,
-    seq: u32,
-}
-
-fn ref_holder_schema() -> SchemaType {
-    structured_struct(vec![
-        named("held", SchemaType::Ref(SchemaCell::owned(leaf_schema()))),
-        scalar("seq", Primitive::U32),
-    ])
-}
-
-#[test]
-fn ref_inline_conforms_with_nested_versioned_image() {
-    let value = RefHolder {
-        held: Ref::Inline(Leaf {
-            code: 0x0102_0304,
-            tag: "leaf".into(),
-        }),
-        seq: 9,
-    };
-    let json = json!({
-        "held": { "Inline": { "code": 0x0102_0304u32, "tag": "leaf" } },
-        "seq": 9u32,
-    });
-    check(&value, &ref_holder_schema(), &json);
-}
-
-#[test]
-fn ref_handle_conforms() {
-    let value = RefHolder {
-        held: Ref::handle(0x00CA_FE00),
-        seq: 11,
-    };
-    let json = json!({
-        "held": { "Handle": { "id": 0x00CA_FE00u64, "kind_id": Leaf::ID.0 } },
-        "seq": 11u32,
-    });
-    check(&value, &ref_holder_schema(), &json);
 }

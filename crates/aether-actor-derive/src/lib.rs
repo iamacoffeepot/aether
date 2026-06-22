@@ -1395,7 +1395,7 @@ pub fn local(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// structs. Cfg-gates every field with `#[cfg(feature = "native")]`
 /// so the cap's runtime fields disappear from non-native builds (wasm
 /// guests linking the cap's depable rlib for type/marker visibility
-/// don't pay for `cpal::Stream`, `Arc<HandleStore>`, etc.).
+/// don't pay for `cpal::Stream`, etc.).
 ///
 /// Issue 552 stage 0 ships the macro as a thin shim — fields get the
 /// blanket `#[cfg(feature = "native")]` gate and the struct itself

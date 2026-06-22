@@ -16,8 +16,7 @@ const LABEL_VEC: u8 = 2;
 const LABEL_ARRAY: u8 = 3;
 const LABEL_STRUCT: u8 = 4;
 const LABEL_ENUM: u8 = 5;
-const LABEL_REF: u8 = 6;
-const LABEL_MAP: u8 = 7;
+const LABEL_MAP: u8 = 6;
 
 const VARIANT_LABEL_UNIT: u8 = 0;
 const VARIANT_LABEL_TUPLE: u8 = 1;
@@ -33,10 +32,9 @@ pub const fn canonical_len_labels(labels: &KindLabels) -> usize {
 const fn label_node_len(node: &LabelNode) -> usize {
     match node {
         LabelNode::Anonymous => U32_WIDTH,
-        LabelNode::Option(cell)
-        | LabelNode::Vec(cell)
-        | LabelNode::Array(cell)
-        | LabelNode::Ref(cell) => U32_WIDTH + label_cell_len(cell),
+        LabelNode::Option(cell) | LabelNode::Vec(cell) | LabelNode::Array(cell) => {
+            U32_WIDTH + label_cell_len(cell)
+        }
         LabelNode::Struct {
             type_label,
             field_names,
@@ -197,10 +195,6 @@ const fn write_label_node(node: &LabelNode, out: &mut [u8], cursor: usize) -> us
                 pos = write_variant_label(&vs[i], out, pos);
                 i += 1;
             }
-        }
-        LabelNode::Ref(cell) => {
-            pos = write_u32_le(LABEL_REF as u32, out, pos);
-            pos = write_label_cell(cell, out, pos);
         }
         LabelNode::Map { key, value } => {
             pos = write_u32_le(LABEL_MAP as u32, out, pos);

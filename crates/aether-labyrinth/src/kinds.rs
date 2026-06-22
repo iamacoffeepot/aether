@@ -768,9 +768,8 @@ mod tests {
         fn resolution_depth_id_distinct_from_corridor_kinds() {
             use aether_data::Kind;
             // The resolution-depth output shares no id with the corridor /
-            // reach kinds it composes with through `Ref<K>` slots — a
-            // collision would alias the transform's `Ref<ResolutionDepth>`
-            // output slot.
+            // reach kinds a transform composes it with — a collision would
+            // alias the transform's `ResolutionDepth` output.
             let ids = [
                 ResolutionDepth::ID,
                 CorridorGraph::ID,
@@ -788,8 +787,8 @@ mod tests {
         fn corridor_graph_id_distinct_from_reach_kinds() {
             use aether_data::Kind;
             // The corridor output shares no id with the reachability kinds
-            // it composes with through `Ref<K>` slots — a collision would
-            // alias the transform's `Ref<CorridorGraph>` output slot.
+            // a transform composes it with — a collision would alias the
+            // transform's `CorridorGraph` output.
             let ids = [
                 CorridorGraph::ID,
                 ScalarField::ID,
@@ -876,9 +875,8 @@ mod tests {
         fn crossing_kinds_resolve_distinctly_from_reach_kinds() {
             use aether_data::Kind;
             // The two new crossing-query kinds share no id with the
-            // reachability / trajectory kinds they compose with through
-            // `Ref<K>` slots — a collision would alias the transform's Ref
-            // slots.
+            // reachability / trajectory kinds a transform composes them
+            // with — a collision would alias the transform's slots.
             let ids = [
                 CrossingQueryParams::ID,
                 CrossingClassification::ID,

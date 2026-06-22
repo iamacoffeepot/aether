@@ -29,7 +29,7 @@ pub use http_handler::HttpHandler;
 pub use inline_child::{
     InlineDespawnParent, InlineParent, InlineStatefulChild, InlineStatefulParent,
 };
-pub use mat4_source::{MatSource, Vec4Observer};
+pub use mat4_source::MatSource;
 pub use matrix_sweep::{MatrixChild, MatrixParent};
 pub use multi_actor::{Panel, RootManager};
 pub use probe::{Probe, ProbeWithConfig};
@@ -39,8 +39,8 @@ pub use ui_widget::UiWidget;
 
 // `Probe` is listed first so a bare `load` (no `export` selector)
 // instantiates it, preserving the entry-load contract the probe scenarios
-// rely on. The remaining seventeen actors are reachable by their
-// `NAMESPACE` export selector.
+// rely on. The remaining actors are reachable by their `NAMESPACE`
+// export selector.
 aether_actor::export!(
     Probe,
     ProbeWithConfig,
@@ -48,7 +48,6 @@ aether_actor::export!(
     Panel,
     Cube,
     MatSource,
-    Vec4Observer,
     UiWidget,
     HttpHandler,
     SourceObserver,

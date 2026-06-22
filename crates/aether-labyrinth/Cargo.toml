@@ -47,8 +47,8 @@ serde = { workspace = true, default-features = false, features = ["derive", "all
 bytemuck = { workspace = true, features = ["derive"] }
 
 # Native-only: the substrate runtime the recorder cap's `NativeActor`
-# impl reaches for (`NativeCtx`, `HandleStore`, `BootError`). Gated behind
-# `native` so the transform-only consumer never pulls it.
+# impl reaches for (`NativeCtx`, `BootError`). Gated behind `native` so
+# the transform-only consumer never pulls it.
 aether-substrate = { path = "../aether-substrate", optional = true }
 
 [lints]

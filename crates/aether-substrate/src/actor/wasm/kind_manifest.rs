@@ -529,13 +529,6 @@ fn merge_schema(shape: &SchemaShape, label: Option<&LabelNode>) -> SchemaType {
                 variants: Cow::Owned(merged),
             }
         }
-        SchemaShape::Ref(inner) => {
-            let inner_label = match label {
-                Some(LabelNode::Ref(cell)) => Some(&**cell),
-                _ => None,
-            };
-            SchemaType::Ref(SchemaCell::owned(merge_schema(inner, inner_label)))
-        }
         SchemaShape::Map { key, value } => {
             // Issue #232: parallel-walk the labels Map arm so any
             // nominal info inside key/value types (struct field

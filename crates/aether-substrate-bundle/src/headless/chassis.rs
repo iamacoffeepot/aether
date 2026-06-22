@@ -35,9 +35,9 @@ use aether_substrate::{Chassis, SubstrateBoot};
 use super::driver::{HeadlessTimerDriverCapability, parse_tick_hz_env};
 use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use crate::chassis_common::{
-    ActorRingConfig, CommonBoot, PersistOverride, boot_manifest_from_env, chassis_known_keys,
-    maybe_with_http_server, maybe_with_rpc_server, parse_workers_env, resolve_persist_state,
-    tick_only_lifecycle_config, with_common_caps,
+    ActorRingConfig, CommonBoot, boot_manifest_from_env, chassis_known_keys,
+    maybe_with_http_server, maybe_with_rpc_server, parse_workers_env, tick_only_lifecycle_config,
+    with_common_caps,
 };
 use crate::cli::{CommonOverlay, HeadlessCli};
 use crate::hub;
@@ -116,16 +116,6 @@ pub struct HeadlessEnv {
     /// `AETHER_ACTOR_TRACE_RING_SIZE`). Default is
     /// [`RingCapacities::default`] (the `aether-actor` const caps).
     pub ring_caps: RingCapacities,
-    /// ADR-0090 unit d (issue 1258): chassis-bin verdict on handle-
-    /// store persistence. [`PersistOverride::EnvOnly`] (the default,
-    /// what `from_env()` builds) preserves the pre-d env-only path
-    /// byte-identically; [`PersistOverride::Argv`] threads the argv
-    /// overlay through to `SubstrateBoot`.
-    pub persist: PersistOverride,
-    /// ADR-0090 unit d (issue 1258): argv overlay for the handle-store
-    /// in-memory byte budget. `None` falls through to env-only
-    /// `AETHER_HANDLE_STORE_MAX_BYTES`.
-    pub handle_store_max_bytes: Option<usize>,
     /// Components to auto-load on boot, in order. A bundled standalone build
     /// populates this so the components come up with no hub; the normal
     /// headless bin leaves it empty and loads components over the hub instead.
@@ -176,7 +166,6 @@ impl HeadlessEnv {
             fs,
             anthropic,
             gemini,
-            persist,
             workers: cli_workers,
             rpc_port: cli_rpc_port,
             boot_manifest: cli_boot_manifest,
@@ -199,10 +188,6 @@ impl HeadlessEnv {
         let http_server_config =
             HttpServerConfig::try_from_argv_then_env(http_server_overlay.into_layer())?;
         let http_server = http_server_config.enabled.then_some(http_server_config);
-        // Persistence overlay shared with desktop (issue 1258); headless
-        // opts into on-disk persistence per ADR-0049 §9.
-        let persist_state = resolve_persist_state(&persist);
-        let handle_store_max_bytes = persist.max_bytes;
         // Chassis-wide knobs: argv-then-env shadow (ad-hoc, lifted to
         // confique in unit e1). `cli.tick_hz` wins when `Some`, falls
         // through to `AETHER_TICK_HZ` / default otherwise.
@@ -221,15 +206,13 @@ impl HeadlessEnv {
         Ok(Self {
             namespace_roots,
             http,
-            http_server,
             anthropic,
             gemini,
             tick_period,
+            http_server,
             rpc_addr,
             workers,
             ring_caps,
-            persist: persist_state,
-            handle_store_max_bytes,
             autoload,
         })
     }
@@ -254,22 +237,10 @@ impl HeadlessChassis {
             rpc_addr,
             workers,
             ring_caps,
-            persist,
-            handle_store_max_bytes,
             autoload,
         } = env;
 
-        // ADR-0049 §9: headless enables on-disk handle persistence.
-        // ADR-0090 unit d: when the chassis bin parsed an argv overlay
-        // for persist config / max_bytes, those override the env-only
-        // resolution `SubstrateBoot` would otherwise run.
-        let mut boot_builder = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION"))
-            .persist_enabled(true)
-            .handle_store_max_bytes(handle_store_max_bytes);
-        if let PersistOverride::Argv(p) = persist {
-            boot_builder = boot_builder.persist_config(p);
-        }
-        let boot = boot_builder.build()?;
+        let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION")).build()?;
         let component_host_config = ComponentHostConfig {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),

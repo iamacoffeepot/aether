@@ -41,12 +41,9 @@ fn run_headless_capture_with_env(
     let bin = env!("CARGO_BIN_EXE_aether-substrate-headless");
     let mut cmd = Command::new(bin);
     cmd.args(args)
-        // Force every chassis-write off a shared system path so two
-        // children don't race the handle-store lock. `AETHER_TICK_HZ`
-        // is intentionally unset so the env-only fall-through has a
-        // known disposition (default 60 Hz).
+        // `AETHER_TICK_HZ` is intentionally unset so the env-only
+        // fall-through has a known disposition (default 60 Hz).
         .env_remove("AETHER_TICK_HZ")
-        .env("AETHER_HANDLE_STORE_PERSIST_DISABLE", "1")
         .env("RUST_LOG", "info")
         // tracing's default subscriber writes to stderr — explicit
         // here so the boot log line we grep stays observable.

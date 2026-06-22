@@ -1212,7 +1212,6 @@ mod native {
         //! settlement-latency gate, pinned at the unit layer.
         use super::*;
         use aether_kinds::{Present, Render, Shutdown, Tick};
-        use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::registry::Registry;
 
         fn state_with_quit(kind_id: u64, next: u64, quit: Option<u64>) -> LifecycleStateData {
@@ -1237,10 +1236,7 @@ mod native {
                 .start::<Render>()
                 .build()
                 .expect("test setup: graph builds");
-            let mailer = Arc::new(Mailer::new(
-                Arc::new(Registry::default()),
-                Arc::new(HandleStore::new(1024)),
-            ));
+            let mailer = Arc::new(Mailer::new(Arc::new(Registry::default())));
             LifecycleCapability {
                 current_state: graph.start(),
                 graph,
@@ -1388,10 +1384,7 @@ mod native {
                 .start::<Tick>()
                 .build()
                 .expect("test setup: tick graph builds");
-            let mailer = Arc::new(Mailer::new(
-                Arc::new(Registry::default()),
-                Arc::new(HandleStore::new(1024)),
-            ));
+            let mailer = Arc::new(Mailer::new(Arc::new(Registry::default())));
             LifecycleCapability {
                 current_state: graph.start(),
                 graph,

@@ -62,24 +62,6 @@
 //! chassis maps the resolved `bool` to its structural choice at the one
 //! composition site (`cfg.enabled.then_some(cfg)`). The `parse_flag`
 //! helper accepts the usual `1` / `true` / `yes` / `on` spellings.
-//! `PersistConfig` is the documented exception below; every other cap
-//! follows this shape.
-//!
-//! # Why not `PersistConfig` too?
-//!
-//! `aether_substrate::handle_store::PersistConfig::from_argv_then_env`
-//! takes four arguments (`enabled: bool`, `dir: Option<PathBuf>`,
-//! `disable: Option<bool>`, `numeric: <_>::Layer`) because two of its
-//! overlays are *not* confique fields — `enabled` is the chassis's
-//! structural vote (a `false` short-circuits to `None` regardless of
-//! env), and `dir` / `disable` interact with `dirs::data_dir()` lookup
-//! and an `ENV_PERSIST_DISABLE` short-circuit that don't fit confique's
-//! literal-default model. Only the numeric budget / tick knobs flow
-//! through a `Layer`. Forcing it into a `(Layer) -> Self` shape would
-//! mean re-deriving the structural inputs from environment reads inside
-//! the trait body, which is exactly the structure the cap deliberately
-//! kept hand-written. The five other caps benefit from the derive;
-//! `PersistConfig` stays inherent.
 
 use std::collections::HashSet;
 use std::env;
@@ -482,9 +464,8 @@ impl ConfigError {
         }
     }
 
-    /// Build an `UnparseableKnown` from a hand-resolved env read (the
-    /// handle-store `AETHER_HANDLE_STORE_MAX_BYTES` path, which parses
-    /// outside confique).
+    /// Build an `UnparseableKnown` from a hand-resolved env read (a
+    /// value parsed outside confique, e.g. `AETHER_BOOT_MANIFEST`).
     #[must_use]
     pub fn unparseable(
         key: impl Into<String>,
@@ -540,10 +521,8 @@ impl From<ConfigError> for BootError {
 /// not in `known` — a typo or stray var is loud but non-fatal (§4
 /// rejects strict-reject: a stray CI var must not abort boot). The
 /// hard-error half rides the parse path
-/// ([`FromArgvThenEnv::try_from_argv_then_env`] /
-/// [`HandleStore::from_env`](crate::handle_store::HandleStore::from_env)),
-/// not this sweep. Run once per chassis boot after the env layers
-/// load.
+/// ([`FromArgvThenEnv::try_from_argv_then_env`]), not this sweep. Run
+/// once per chassis boot after the env layers load.
 ///
 /// Bare registered keys (e.g. `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`)
 /// that don't carry the `AETHER_` prefix are accepted silently when
@@ -676,9 +655,9 @@ mod tests {
 
     #[test]
     fn config_error_display_names_key_and_value() {
-        let e = ConfigError::unparseable("AETHER_HANDLE_STORE_MAX_BYTES", "lots", an_int_error());
+        let e = ConfigError::unparseable("AETHER_BOOT_MANIFEST", "lots", an_int_error());
         let msg = e.to_string();
-        assert!(msg.contains("AETHER_HANDLE_STORE_MAX_BYTES"));
+        assert!(msg.contains("AETHER_BOOT_MANIFEST"));
         assert!(msg.contains("lots"));
     }
 

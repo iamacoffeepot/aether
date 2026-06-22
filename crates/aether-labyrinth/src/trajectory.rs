@@ -1,23 +1,20 @@
 //! `aether.trajectory` cap. Subscribes to a per-tick stream of a moving
 //! point's grid position plus a scalar accumulator value, accumulating
-//! samples into a typed, seed-keyed `TrajectoryLog` handle (ADR-0049)
-//! that an offline analysis transform can replay.
+//! samples into a typed, seed-keyed `TrajectoryLog` that an offline
+//! analysis transform can replay.
 //!
-//! State is a plain `sessions` `HashMap` plus an `Arc<HandleStore>` cloned
-//! at `init` from `ctx.mailer().handle_store()` — the same pattern as
-//! `HandleCapability`. Every handler runs on the cap's dispatcher thread
-//! (ADR-0078 plain-field, no locks). Registered as `aether.trajectory`
-//! via `with_common_caps` on desktop and headless chassis; the test-bench
-//! chassis adds it explicitly.
+//! State is a plain `sessions` `HashMap`. Every handler runs on the cap's
+//! dispatcher thread (ADR-0078 plain-field, no locks). Registered as
+//! `aether.trajectory` via `with_common_caps` on desktop and headless
+//! chassis; the test-bench chassis adds it explicitly.
 //!
 //! Two handlers:
 //!
 //! - `on_sample` — fire-and-forget: append `(tick, x, y, value)` to the
 //!   buffer for `seed`, creating the buffer on first sample for that seed.
 //! - `on_end` — build a `TrajectoryLog { seed, samples, end_reason }`,
-//!   wire-encode it via `encode_into_bytes`, publish it to the handle
-//!   store via `next_ephemeral` → `put` → `inc_ref`, drop the in-memory
-//!   buffer, and return `RecordResult` (ADR-0112 return-type reply form).
+//!   drop the in-memory buffer, and return it inline in `RecordResult`
+//!   (ADR-0112 return-type reply form).
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the
@@ -29,20 +26,17 @@ use aether_kinds::{TrajectoryEnd, TrajectorySample};
 #[aether_actor::bridge(singleton)]
 mod native {
     use std::collections::HashMap;
-    use std::sync::Arc;
 
     use aether_actor::actor;
-    use aether_data::Kind;
     use aether_kinds::{
         RecordResult, TrajectoryEnd, TrajectoryLog, TrajectorySample, TrajectorySampleEntry,
     };
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
-    use aether_substrate::handle_store::HandleStore;
 
     /// `aether.trajectory` mailbox cap. Accumulates per-tick samples
-    /// from a moving point into a typed `TrajectoryLog` handle (ADR-0049)
-    /// that an offline analysis transform can replay.
+    /// from a moving point into a typed `TrajectoryLog` that an offline
+    /// analysis transform can replay.
     ///
     /// State is plain fields — single-threaded, every handler on the
     /// cap's dispatcher thread (ADR-0078). No locks needed.
@@ -51,9 +45,6 @@ mod native {
         /// `TrajectorySample` for a seed; flushed and removed on the
         /// matching `TrajectoryEnd`.
         sessions: HashMap<u64, Vec<TrajectorySampleEntry>>,
-        /// Shared handle store — cloned from the substrate's mailer at
-        /// `init`, the same as `HandleCapability`.
-        store: Arc<HandleStore>,
     }
 
     #[actor]
@@ -62,14 +53,12 @@ mod native {
 
         /// ADR-0074 §5: chassis-owned mailbox under the `aether.<name>`
         /// namespace. Single-segment name matches the dominant chassis-cap
-        /// convention (`aether.input`, `aether.render`, `aether.handle`).
+        /// convention (`aether.input`, `aether.render`).
         const NAMESPACE: &'static str = "aether.trajectory";
 
-        fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            let store = Arc::clone(ctx.mailer().handle_store());
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self {
                 sessions: HashMap::new(),
-                store,
             })
         }
 
@@ -94,14 +83,11 @@ mod native {
         }
 
         /// Flush the in-flight buffer for `e.seed`, build a
-        /// `TrajectoryLog`, publish it to the handle store, and return
-        /// `RecordResult`.
+        /// `TrajectoryLog`, and return it inline in `RecordResult`.
         ///
         /// # Agent
-        /// Reply: `RecordResult`. `Ok` carries the seed, the minted
-        /// `handle_id`, and `kind_id` (`TrajectoryLog::ID`). Use
-        /// `handle_id` to pass the log to a DAG transform or retrieve it
-        /// later via `describe_handles`. `Err` when `seed` names no
+        /// Reply: `RecordResult`. `Ok` carries the seed and the complete
+        /// `TrajectoryLog` for the session. `Err` when `seed` names no
         /// in-flight session (unknown seed or already terminated).
         #[handler]
         fn on_end(&mut self, _ctx: &mut NativeCtx<'_>, e: TrajectoryEnd) -> RecordResult {
@@ -118,26 +104,7 @@ mod native {
                 end_reason: e.reason,
             };
 
-            let id = self.store.next_ephemeral();
-            let bytes = log.encode_into_bytes();
-            let kind_id = TrajectoryLog::ID;
-
-            match self.store.put(id, kind_id, bytes) {
-                Ok(()) => {
-                    // Hold a reference on behalf of the recorder,
-                    // mirroring `HandleCapability::on_publish`.
-                    self.store.inc_ref(id);
-                    RecordResult::Ok {
-                        seed: e.seed,
-                        handle_id: id,
-                        kind_id,
-                    }
-                }
-                Err(err) => RecordResult::Err {
-                    seed: e.seed,
-                    error: format!("handle store put failed: {err:?}"),
-                },
-            }
+            RecordResult::Ok { seed: e.seed, log }
         }
     }
 
@@ -147,9 +114,10 @@ mod native {
         reason = "test-setup unwraps: fixture construction panic on failure is the assertion"
     )]
     mod tests {
+        use std::sync::Arc;
         use std::sync::mpsc;
 
-        use aether_data::{HandleId, Kind, MailId, MailboxId};
+        use aether_data::{Kind, MailId, MailboxId};
         use aether_kinds::TrajectoryEndReason;
         use aether_kinds::descriptors;
         use aether_kinds::trace::Nanos;
@@ -164,25 +132,16 @@ mod native {
         use aether_actor::Addressable;
         use aether_substrate::chassis::builder::Builder;
 
-        /// Build a substrate where the `Arc<HandleStore>` is also returned
-        /// to the caller. Used by both the direct-call unit tests and the
-        /// heavy dispatcher test.
-        fn fresh_substrate() -> (
-            Arc<HandleStore>,
-            Arc<Mailer>,
-            Arc<Registry>,
-            mpsc::Receiver<EgressEvent>,
-        ) {
-            let store = Arc::new(HandleStore::new(64 * 1024));
+        /// Build a substrate for the direct-call unit tests and the heavy
+        /// dispatcher test.
+        fn fresh_substrate() -> (Arc<Mailer>, Arc<Registry>, mpsc::Receiver<EgressEvent>) {
             let registry = Arc::new(Registry::new());
             for d in descriptors::all() {
                 let _ = registry.register_kind_with_descriptor(d);
             }
             let (outbound, rx) = HubOutbound::attached_loopback();
-            let mailer = Arc::new(
-                Mailer::new(Arc::clone(&registry), Arc::clone(&store)).with_outbound(outbound),
-            );
-            (store, mailer, registry, rx)
+            let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
+            (mailer, registry, rx)
         }
 
         /// Create a session-targeted `Source` for direct handler calls.
@@ -196,25 +155,19 @@ mod native {
         /// Directly-exercised capability fixture (no dispatcher thread).
         struct DirectFixture {
             cap: TrajectoryRecorderCapability,
-            store: Arc<HandleStore>,
             transport: Arc<NativeBinding>,
         }
 
         fn direct_fixture() -> DirectFixture {
-            let (store, mailer, _registry, _rx) = fresh_substrate();
+            let (mailer, _registry, _rx) = fresh_substrate();
             let transport = Arc::new(NativeBinding::new_for_test(
                 Arc::clone(&mailer),
                 MailboxId(0x1862),
             ));
             let cap = TrajectoryRecorderCapability {
                 sessions: HashMap::new(),
-                store: Arc::clone(&store),
             };
-            DirectFixture {
-                cap,
-                store,
-                transport,
-            }
+            DirectFixture { cap, transport }
         }
 
         fn make_ctx(transport: &Arc<NativeBinding>) -> NativeCtx<'_> {
@@ -327,11 +280,10 @@ mod native {
             );
         }
 
-        /// `on_end` publishes a handle containing a `TrajectoryLog` that
-        /// decodes back to the samples in tick order, removes the buffer,
-        /// and returns `RecordResult::Ok`.
+        /// `on_end` returns a `TrajectoryLog` inline carrying the samples
+        /// in tick order, removes the buffer, and returns `RecordResult::Ok`.
         #[test]
-        fn on_end_publishes_decodable_log() {
+        fn on_end_returns_inline_log() {
             let mut fix = direct_fixture();
             let mut ctx = make_ctx(&fix.transport);
 
@@ -367,16 +319,13 @@ mod native {
 
             let RecordResult::Ok {
                 seed: out_seed,
-                handle_id,
-                kind_id,
+                log,
             } = result
             else {
                 panic!("expected RecordResult::Ok, got {result:?}");
             };
 
             assert_eq!(out_seed, seed, "seed echoed");
-            assert_ne!(handle_id, HandleId(0), "handle id is non-zero");
-            assert_eq!(kind_id, TrajectoryLog::ID, "kind id matches TrajectoryLog");
 
             // Verify the session buffer was cleared.
             assert!(
@@ -384,12 +333,7 @@ mod native {
                 "session buffer removed after on_end"
             );
 
-            // Verify the stored bytes decode back to the expected log.
-            let (stored_kind, stored_bytes) =
-                fix.store.get(handle_id).expect("handle exists in store");
-            assert_eq!(stored_kind, TrajectoryLog::ID, "stored kind id matches");
-            let log = TrajectoryLog::decode_from_bytes(&stored_bytes)
-                .expect("stored bytes decode to TrajectoryLog");
+            // The inline log carries the expected samples in tick order.
             assert_eq!(log.seed, seed);
             assert_eq!(log.end_reason, TrajectoryEndReason::Completed);
             assert_eq!(log.samples.len(), 2);
@@ -443,11 +387,11 @@ mod native {
         /// End-to-end through the dispatcher thread: boot the cap via
         /// `boot_test_chassis_with`, enqueue `TrajectorySample`s then a
         /// `TrajectoryEnd`, assert `RecordResult::Ok` arrives on the
-        /// loopback channel, and verify the store holds a decodable
-        /// `TrajectoryLog`. Sleep-polls under a multi-second deadline.
+        /// loopback channel carrying the decodable `TrajectoryLog` inline.
+        /// Sleep-polls under a multi-second deadline.
         #[test]
         fn capability_routes_end_through_dispatcher_thread() {
-            let (store, mailer, registry, rx) = fresh_substrate();
+            let (mailer, registry, rx) = fresh_substrate();
 
             let chassis =
                 boot_test_chassis_with::<TrajectoryRecorderCapability>(&registry, &mailer, ());
@@ -528,22 +472,15 @@ mod native {
             let result = RecordResult::decode_from_bytes(&payload).expect("RecordResult decodes");
             let RecordResult::Ok {
                 seed: out_seed,
-                handle_id,
-                kind_id,
+                log,
             } = result
             else {
                 panic!("expected RecordResult::Ok, got {result:?}");
             };
 
             assert_eq!(out_seed, seed, "seed echoed");
-            assert_ne!(handle_id, HandleId(0), "handle id is non-zero");
-            assert_eq!(kind_id, TrajectoryLog::ID, "kind id matches TrajectoryLog");
 
-            // Verify the handle store holds a decodable log.
-            let (stored_kind, stored_bytes) = store.get(handle_id).expect("handle exists in store");
-            assert_eq!(stored_kind, TrajectoryLog::ID);
-            let log = TrajectoryLog::decode_from_bytes(&stored_bytes)
-                .expect("stored bytes decode to TrajectoryLog");
+            // The reply carries the decodable log inline.
             assert_eq!(log.seed, seed);
             assert_eq!(log.end_reason, TrajectoryEndReason::Completed);
             assert_eq!(log.samples.len(), 2);
@@ -557,7 +494,7 @@ mod native {
             use aether_substrate::chassis::error::BootError;
             use aether_substrate::mail::registry;
 
-            let (_store, mailer, registry_arc, _rx) = fresh_substrate();
+            let (mailer, registry_arc, _rx) = fresh_substrate();
             registry_arc.register_inbox(
                 TrajectoryRecorderCapability::NAMESPACE,
                 registry::noop_handler(),

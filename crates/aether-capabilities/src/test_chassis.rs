@@ -27,7 +27,6 @@ use aether_substrate::actor::native::{NativeActor, NativeDispatch, TaskCompletio
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::handle_store::HandleStore;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
 use aether_substrate::mail::registry::Registry;
@@ -61,8 +60,7 @@ pub fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
         let _ = registry.register_kind_with_descriptor(d);
     }
     let (outbound, _rx) = HubOutbound::attached_loopback();
-    let store = Arc::new(HandleStore::new(1024 * 1024));
-    let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     (registry, mailer)
 }
 
@@ -101,8 +99,7 @@ where
 pub fn test_mailer_and_rx() -> (Arc<Mailer>, Receiver<EgressEvent>) {
     let (outbound, rx) = HubOutbound::attached_loopback();
     let registry = Arc::new(Registry::new());
-    let store = Arc::new(HandleStore::new(1024 * 1024));
-    let mailer = Arc::new(Mailer::new(registry, store).with_outbound(outbound));
+    let mailer = Arc::new(Mailer::new(registry).with_outbound(outbound));
     (mailer, rx)
 }
 
