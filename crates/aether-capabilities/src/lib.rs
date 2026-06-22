@@ -47,10 +47,6 @@ mod config_env;
 
 pub mod engine;
 pub mod fs;
-// `aether.nfs` filesystem actor (issue 2098). A read-only singleton standing
-// beside the `aether.fs` monolith, registered in `with_common_caps` via
-// `Builder::with_actor`. (Sharding parked; ADR-0120 overturned.)
-pub mod nfs;
 // `aether.gemini` content-gen cap (ADR-0050, issue 1015). Native-only
 // for the same reason as `anthropic`.
 #[cfg(not(target_arch = "wasm32"))]
@@ -106,7 +102,7 @@ pub mod trampoline;
 // First-party native `#[transform]`s (ADR-0048, issue 1464). The
 // link-time inventory submission populates both the headless
 // `TransformRegistry` and `describe_transforms` — both native. Native-
-// only: the `aether.nfs` `fetch` verb that runs transforms is non-wasm,
+// only: the `aether.fs` `fetch` verb that runs transforms is non-wasm,
 // and the `#[transform]` inventory entry is itself `cfg(not(wasm32))`-
 // gated, so on a wasm-header-only build the fn would be dead. No wasm
 // consumer runs transforms, so gate the whole module rather than carry
@@ -168,10 +164,6 @@ pub use lifecycle::LifecycleConfig;
 pub use lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 
 pub use fs::FsCapability;
-// `aether.nfs` filesystem actor (issue 2098).
-pub use nfs::NfsCapability;
-#[cfg(not(target_family = "wasm"))]
-pub use nfs::NfsRoot;
 // ADR-0050 `aether.gemini` cap (issue 1015).
 #[cfg(not(target_arch = "wasm32"))]
 pub use gemini::{GeminiCapability, GeminiConfig};
