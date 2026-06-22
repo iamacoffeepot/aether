@@ -68,7 +68,7 @@ pub struct Hello {}
 /// sender; the matching `aether.pong` lands back at your session.
 #[actor]
 impl WasmActor for Hello {
-    const NAMESPACE: &'static str = "hello";
+    const NAMESPACE: &'static str = "example.hello";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Hello {})

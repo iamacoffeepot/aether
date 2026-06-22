@@ -30,7 +30,7 @@ pub struct InputLogger;
 
 #[actor]
 impl WasmActor for InputLogger {
-    const NAMESPACE: &'static str = "input_logger";
+    const NAMESPACE: &'static str = "example.input_logger";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(InputLogger)
