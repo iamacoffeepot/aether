@@ -19,16 +19,18 @@ One constraint bounds the move. `aether-capabilities` depends on `aether-substra
 
 2. **A capability owns its mail kinds in `<cap>/kinds.rs`.** The kind types move out of `aether-kinds` and into the capability's own module, riding the always-on (wasm-safe) layer so guests are unaffected.
 
-3. **The cycle rule — own what you can.** Kinds the substrate core dispatches stay in `aether-kinds`. A capability owns the kinds it can; the core-coupled remainder stays central. The kinds that stay central are:
+3. **Must-stay rules — own what you can.** A capability owns the kinds it can; some stay central for two reasons. **(a) The cycle rule** — kinds the substrate core dispatches stay in `aether-kinds` (moving them would cycle `substrate → capabilities`):
    - **lifecycle** — `Tick` and the stage kinds; the scheduler dispatches `Tick` directly (`actor/native/binding.rs`).
    - **component** — the capability-registration kinds (`ComponentCapabilities`/`HandlerCapability`/`FallbackCapability`) the dispatcher reads (`actor/native/mod.rs`, `mail/capability.rs`).
    - **window** — `SetWindowTitle` is core-dispatched (`actor/native/dispatch.rs`); the six-kind family stays whole rather than split for one stuck kind.
    - **render's `FrameCheck` family** — the verification reductions the substrate's `capture.rs` consumes; the drawing kinds move, the verification kinds stay (a clean drawing-vs-verification line).
    - **`Mat4Apply`** — a math-primitive transform kind composing `aether_math` types, not a capability's mail protocol.
 
+   **(b) The harness rule** — kinds the out-of-process MCP harness (`aether-mcp`) consumes by Rust type stay in `aether-kinds`. `aether-mcp` depends only on `aether-kinds` and is deliberately barred from a production dependency on `aether-capabilities`: a feature flag cannot stop Cargo feature unification from pulling the native/wasmtime stack into the harness. The harness-consumed families are the **engine** request/result/descriptor protocol (`SpawnEngine`/`ListEngines`/`ResolveComponent`/…), the **inventory** family (`Manifest`/`Resolve`/`ListKinds`/…), the **handle** describe family (`HandleDescribe`/`HandleSummary`), the **trace** dispatch kinds (`DispatchTraced`/`DispatchTracedAck`), and **render's capture** kinds (`CaptureFrame`/`CaptureFrameResult`/`SimilarityCheck`). For these the capability migration is the file split alone — the kind family stays whole in `aether-kinds`.
+
 4. **`http` and `http_server` collapse into one `http/` submodule** (`client.rs` + `server.rs`). They remain two distinct capabilities (two mailboxes, two cap structs) co-located under one parent module.
 
-5. **The principle, for future readers:** a kind lives with its contract owner. The substrate core owns the kinds it dispatches; every other capability owns the kinds it exchanges with its callers.
+5. **The principle, for future readers:** a kind lives with its contract owner, in a crate every consumer can depend on. The substrate core owns the kinds it dispatches; a capability owns the kinds it exchanges with its callers — except where a consumer that cannot depend on the capability (the substrate core, or the MCP harness) needs them, which keeps them central.
 
 This amends ADR-0069: `aether-kinds` remains the home of the kinds the substrate core itself dispatches plus shared primitives, rather than the catch-all for every capability's protocol.
 
@@ -40,7 +42,8 @@ This amends ADR-0069: `aether-kinds` remains the home of the kinds the substrate
 - **Guests are unaffected.** They already depend on `aether-capabilities` through the marker features; the kind types move with the always-on, wasm-safe layer.
 - **Wire compatibility holds.** A kind id is `fnv1a_64` over `(KIND_DOMAIN, canonical(name, schema))`; moving a declaration between crates changes neither name nor schema, so ids are unchanged.
 - **`describe_kinds` still surfaces the moved kinds** — the descriptor inventory is global and `aether-capabilities` is linked into the chassis binaries, so the per-kind descriptor submission rides the move.
-- **Ownership is non-uniform** (the cycle rule): a handful of capabilities keep their kinds central. The classification has to be stated and maintained.
+- **Ownership is non-uniform** (the must-stay rules): a handful of capabilities keep their kinds central. The classification has to be stated and maintained.
+- **Harness-facing capabilities mostly only split** (engine, inventory, handle, trace, render's capture surface): their kinds are MCP-consumed and stay central, so the migration is the file decomposition rather than a kind move. The deeper fix — making the wasm-safe layer of `aether-capabilities` dep-isolable so `aether-mcp` can depend on it without the native stack — stays open as a future ADR (the "restructure" alternative), and would unblock full ownership for these caps.
 - **A large mechanical migration:** roughly twenty PRs, one per capability. Each moves a kind family and deletes the corresponding `aether-kinds` lines; `aether-kinds` vocabulary tests update with each.
 
 ## Alternatives considered
