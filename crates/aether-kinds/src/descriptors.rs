@@ -51,11 +51,10 @@ mod tests {
     use aether_data::{Primitive, SchemaType};
 
     use crate::{
-        Delete, DeleteResult, DropComponent, DropResult, FsFetch, FsFetchResult, Key,
-        LifecycleUnsubscribeAll, List, ListResult, LoadComponent, LoadResult, Mat4Apply,
-        MouseButton, MouseMove, Ping, Pong, ProcessExited, Read, ReadResult, RecordResult,
+        DropComponent, DropResult, Key, LifecycleUnsubscribeAll, LoadComponent, LoadResult,
+        Mat4Apply, MouseButton, MouseMove, Ping, Pong, ProcessExited, RecordResult,
         ReplaceComponent, ReplaceResult, Spawn, SpawnResult, Terminate, TerminateResult, Tick,
-        TrajectoryEnd, TrajectoryLog, TrajectorySample, Write, WriteResult,
+        TrajectoryEnd, TrajectoryLog, TrajectorySample,
     };
 
     #[test]
@@ -105,63 +104,11 @@ mod tests {
         assert!(names.contains(&DropResult::NAME));
         assert!(names.contains(&ReplaceResult::NAME));
         assert!(names.contains(&LifecycleUnsubscribeAll::NAME));
-        assert!(names.contains(&Read::NAME));
-        assert!(names.contains(&ReadResult::NAME));
-        assert!(names.contains(&Write::NAME));
-        assert!(names.contains(&WriteResult::NAME));
-        assert!(names.contains(&Delete::NAME));
-        assert!(names.contains(&DeleteResult::NAME));
-        assert!(names.contains(&List::NAME));
-        assert!(names.contains(&ListResult::NAME));
-        assert!(names.contains(&FsFetch::NAME));
-        assert!(names.contains(&FsFetchResult::NAME));
         assert!(names.contains(&Spawn::NAME));
         assert!(names.contains(&SpawnResult::NAME));
         assert!(names.contains(&Terminate::NAME));
         assert!(names.contains(&TerminateResult::NAME));
         assert!(names.contains(&ProcessExited::NAME));
-    }
-
-    #[test]
-    fn io_requests_are_structured_schemas() {
-        // ADR-0041 §1: request kinds carry `String` namespace + path
-        // (and `Vec<u8>` bytes on `Write`), so they must serialize as
-        // non-cast structs. Catches an accidental `#[repr(C)]` +
-        // `Pod` derive that would silently flip the wire format.
-        let descs = all();
-        for name in [Read::NAME, Write::NAME, Delete::NAME, List::NAME] {
-            let d = descs
-                .iter()
-                .find(|d| d.name == name)
-                .expect("test setup: io request kind is registered in descriptor inventory");
-            let SchemaType::Struct { repr_c, .. } = &d.schema else {
-                panic!("{name} should be Struct, got {:?}", d.schema);
-            };
-            assert!(!*repr_c, "{name} contains String/Vec, must be structured");
-        }
-    }
-
-    #[test]
-    fn io_results_are_enum_schemas() {
-        // Each reply kind is an Ok/Err enum; `Err` wraps `FsError`,
-        // `Ok` shape varies per operation.
-        let descs = all();
-        for name in [
-            ReadResult::NAME,
-            WriteResult::NAME,
-            DeleteResult::NAME,
-            ListResult::NAME,
-        ] {
-            let d = descs
-                .iter()
-                .find(|d| d.name == name)
-                .expect("test setup: io result kind is registered in descriptor inventory");
-            assert!(
-                matches!(d.schema, SchemaType::Enum { .. }),
-                "{name} should be Enum, got {:?}",
-                d.schema
-            );
-        }
     }
 
     #[test]

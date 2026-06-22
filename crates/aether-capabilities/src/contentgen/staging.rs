@@ -17,7 +17,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use aether_kinds::FsError;
+use crate::fs::FsError;
 use uuid::Uuid;
 
 use crate::fs::{FileAdapter, LocalFileAdapter};

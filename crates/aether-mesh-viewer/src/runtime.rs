@@ -35,12 +35,12 @@
 use aether_actor::{
     ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
-use aether_capabilities::fs::FsMailboxExt;
+use aether_capabilities::fs::{FsMailboxExt, ReadResult};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::{DrawTriangle, Vertex};
 use aether_capabilities::{FsCapability, LifecycleCapability, RenderCapability};
 use aether_data::Kind;
-use aether_kinds::{MeshLoadResult, ReadResult, Render, TrajectorySampleEntry};
+use aether_kinds::{MeshLoadResult, Render, TrajectorySampleEntry};
 use aether_labyrinth::{CorridorGraph, EdgeKind, ScalarField, TrajectorySet};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
