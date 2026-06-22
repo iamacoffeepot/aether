@@ -38,9 +38,11 @@
 //! to its bound port to wake the blocked accept; the accept returns,
 //! sees the flag, breaks; the dispatcher thread joins.
 
+pub mod kinds;
 mod listener;
 mod session;
 
+pub use kinds::*;
 pub use listener::TcpListenerActor;
 pub use session::TcpSessionActor;
 // `TcpListenerConfig` and `TcpSessionConfig` carry `std::net`
@@ -60,14 +62,7 @@ use aether_data::{ActorId, Tag, fold_lineage, with_tag};
 // must be reachable from wasm too so the `TcpWasmExt` impl
 // compiles under `--target wasm32-unknown-unknown
 // --no-default-features` (issue 832 acceptance criteria).
-use aether_kinds::{
-    BindListener, Close, ListListeners, MonitorNotice, SessionClose, SessionWrite, UnbindListener,
-};
-// Reply / payload kinds only consumed by native handler bodies. Gated to
-// avoid an unused-import warning on wasm32 where the bridge stub doesn't
-// reference them.
-#[cfg(not(target_arch = "wasm32"))]
-use aether_kinds::{BindListenerResult, ListListenersResult, ListenerInfo, UnbindListenerResult};
+use aether_kinds::MonitorNotice;
 #[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
@@ -116,7 +111,7 @@ fn session_mailbox_id(cap_carry: u64, listener_name: &str, session_name: &str) -
 ///
 /// All request methods are fire-and-forget. Replies arrive on the
 /// matching `*Result` kinds (see ADR-0079 + the kind definitions in
-/// `aether_kinds::tcp`). Synchronous wrappers (`bind_listener_sync`
+/// `crate::tcp::kinds`). Synchronous wrappers (`bind_listener_sync`
 /// etc.) were on the original issue 580 sketch — parked as a follow-up
 /// so this PR stays mechanical.
 ///
