@@ -35,8 +35,16 @@
 
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings of
-// the mod (always-on, outside the cfg gate).
-use aether_kinds::{CreateTextureResult, DrawText, FontMetricsRequest, LoadFont, ReadResult};
+// the mod (always-on, outside the cfg gate). The `aether.text` mail kinds
+// (ADR-0121) live in `kinds` and re-export here; the substrate-core kinds
+// (`CreateTextureResult` / `ReadResult`) come from `aether-kinds`.
+use aether_kinds::{CreateTextureResult, ReadResult};
+
+// ADR-0121: the cap owns its mail kinds. Always-on + wasm-safe (only
+// `aether-data` + `serde`), re-exported so callers address them as
+// `aether_capabilities::text::DrawText`.
+mod kinds;
+pub use kinds::*;
 
 // ADR-0105 shelf-packed RGBA8 glyph atlas (`text/atlas.rs`). Native-only —
 // it is pure CPU but only the native cap consumes it, so it rides the same
@@ -44,19 +52,20 @@ use aether_kinds::{CreateTextureResult, DrawText, FontMetricsRequest, LoadFont, 
 #[cfg(all(not(target_arch = "wasm32"), feature = "text-native"))]
 mod atlas;
 
+// Pure layout / rasterization helpers split out of `mod native` (ADR-0121).
+// Same `text-native` gate — they run fontdue off the hot path.
+#[cfg(all(not(target_arch = "wasm32"), feature = "text-native"))]
+mod layout;
+
 #[aether_actor::bridge(singleton, feature = "text-native")]
 mod native {
     use std::collections::HashMap;
     use std::collections::VecDeque;
-    use std::path::Path;
     use std::sync::Arc;
 
     use aether_actor::{OutboundReply, actor};
     use aether_data::Source;
-    use aether_kinds::{
-        CreateTexture, DrawTexturedQuads, FontMetrics, FontMetricsResult, FontRef, GlyphAdvance,
-        LoadFontResult, QuadSpace, Read, TexturedQuad, UpdateTexture,
-    };
+    use aether_kinds::{CreateTexture, QuadSpace, Read, TexturedQuad, UpdateTexture};
     use aether_substrate::Manual;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
     use aether_substrate::chassis::error::BootError;
@@ -65,7 +74,14 @@ mod native {
     use crate::render::RenderCapability;
 
     use super::atlas::{ATLAS_SIZE, Atlas, AtlasEntry, GlyphKey, GlyphSlot};
-    use super::{CreateTextureResult, DrawText, FontMetricsRequest, LoadFont, ReadResult};
+    use super::layout::{
+        build_font_metrics, emit_draw, font_name_from_path, glyph_dimensions, glyph_quad,
+        quantize_size,
+    };
+    use super::{
+        CreateTextureResult, DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont,
+        LoadFontResult, ReadResult,
+    };
 
     /// Which reply shape a parked font request is owed once its font is
     /// resident. `load_font` and the `font_metrics` grab share the
@@ -603,113 +619,6 @@ mod native {
         }
     }
 
-    /// Emit the accumulated quad batch to `aether.render`.
-    fn emit_draw(
-        ctx: &mut NativeCtx<'_>,
-        texture_id: u32,
-        space: QuadSpace,
-        quads: Vec<TexturedQuad>,
-    ) {
-        let draw = DrawTexturedQuads {
-            texture_id,
-            space,
-            quads,
-        };
-        ctx.actor::<RenderCapability>().send(&draw);
-    }
-
-    /// A glyph bitmap's pixel dimensions. fontdue bounds these well below
-    /// `u32::MAX`, so the `usize → u32` narrowing is exact.
-    #[allow(clippy::cast_possible_truncation)]
-    fn glyph_dimensions(metrics: &fontdue::Metrics) -> (u32, u32) {
-        (metrics.width as u32, metrics.height as u32)
-    }
-
-    /// Place a glyph's quad in screen pixels. fontdue uses +y up with
-    /// `ymin` the glyph's bottom above the baseline; screen space is y-down
-    /// with the baseline at `baseline`, so the top row sits at
-    /// `baseline - (ymin + height)` and the left edge at `pen_x + xmin`.
-    /// Glyph extents are small integers, exact in `f32`.
-    #[allow(clippy::cast_precision_loss)]
-    fn glyph_quad(
-        metrics: &fontdue::Metrics,
-        pen_x: f32,
-        baseline: f32,
-        entry: &AtlasEntry,
-        tint: [f32; 4],
-    ) -> TexturedQuad {
-        let top = baseline - (metrics.ymin as f32 + metrics.height as f32);
-        let left = pen_x + metrics.xmin as f32;
-        TexturedQuad {
-            x: left,
-            y: top,
-            width: metrics.width as f32,
-            height: metrics.height as f32,
-            u0: entry.u0,
-            v0: entry.v0,
-            u1: entry.u1,
-            v1: entry.v1,
-            tint,
-        }
-    }
-
-    /// Round a pixel size to its nearest integer for the glyph cache key,
-    /// clamped to at least 1.
-    fn quantize_size(size_pixels: f32) -> u32 {
-        // Caller already checked `size_pixels` is finite and positive.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let rounded = size_pixels.round().max(1.0) as u32;
-        rounded
-    }
-
-    /// The font's display name — the file stem of its path (e.g.
-    /// `fonts/RobotoMono.ttf` → `RobotoMono`), or the whole path when it
-    /// has no stem.
-    fn font_name_from_path(path: &str) -> String {
-        Path::new(path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map_or_else(|| path.to_owned(), ToOwned::to_owned)
-    }
-
-    /// Walk a parsed font into its size-independent [`FontMetrics`] table
-    /// — `units_per_em`, the horizontal line metrics, and every cmap
-    /// glyph's advance, all in font units.
-    ///
-    /// Evaluating fontdue at `px = units_per_em` makes its scale factor
-    /// exactly `1.0`, so each `metrics(..).advance_width` is the raw
-    /// font-unit advance with no rounding — the value a consumer scales
-    /// back up with `aether_kinds::scale_units` to reproduce this cap's
-    /// draw-path advance (`metrics(ch, size).advance_width`) bit-for-bit.
-    fn build_font_metrics(font: &fontdue::Font) -> FontMetrics {
-        let units_per_em = font.units_per_em();
-        let (ascent, descent, line_gap) = font
-            .horizontal_line_metrics(units_per_em)
-            .map_or((0.0, 0.0, 0.0), |line| {
-                (line.ascent, line.descent, line.line_gap)
-            });
-        // Glyph 0 is `.notdef` — the advance the draw path uses for a
-        // codepoint the font has no glyph for.
-        let default_advance = font.metrics_indexed(0, units_per_em).advance_width;
-        let mut advances: Vec<GlyphAdvance> = font
-            .chars()
-            .keys()
-            .map(|&ch| GlyphAdvance {
-                codepoint: u32::from(ch),
-                advance_units: font.metrics(ch, units_per_em).advance_width,
-            })
-            .collect();
-        advances.sort_unstable_by_key(|glyph| glyph.codepoint);
-        FontMetrics {
-            units_per_em,
-            ascent,
-            descent,
-            line_gap,
-            default_advance,
-            advances,
-        }
-    }
-
     #[cfg(test)]
     mod tests {
         #![allow(clippy::unwrap_used)]
@@ -721,7 +630,7 @@ mod native {
         };
         use aether_actor::Addressable;
         use aether_data::{Kind, MailId, SessionToken, SourceAddr, Uuid};
-        use aether_kinds::FsError;
+        use aether_kinds::{DrawTexturedQuads, FsError};
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::mail::outbound::EgressEvent;
@@ -1120,7 +1029,7 @@ mod native {
         /// The raw bytes of [`test_font`], for the read-result tests that
         /// feed the parse path a real TTF.
         fn test_font_bytes() -> &'static [u8] {
-            include_bytes!("../../aether-substrate-bundle/assets/fonts/RobotoMono.ttf")
+            include_bytes!("../../../aether-substrate-bundle/assets/fonts/RobotoMono.ttf")
         }
 
         /// `build_font_metrics`'s table scales back to fontdue's draw-path
