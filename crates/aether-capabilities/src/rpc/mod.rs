@@ -10,7 +10,13 @@
 //!
 //! See issues 750 and 763 for the full design, ADR-0102 for the split.
 
+pub mod kinds;
 pub mod server;
+
+// The cap's own mail vocabulary (`RpcInboundReady`) lives in `kinds`
+// (ADR-0121); re-export at the module root so
+// `aether_capabilities::rpc::RpcInboundReady` resolves unchanged.
+pub use kinds::*;
 
 // Shared round-trip test scaffolding (echo actor + its kinds), used by
 // the `server` test modules and the `engine::proxy` test — `pub(crate)`

@@ -38,7 +38,11 @@
 // `#[bridge]` macro emits `impl HandlesKind<K>` markers as siblings of
 // the mod.
 use crate::engine::kinds::{EngineHeartbeatTick, ForwardEnvelope};
-use aether_kinds::{RpcInboundReady, TerminateEngine};
+use aether_kinds::TerminateEngine;
+// `RpcInboundReady` is owned by the RPC server cap (ADR-0121); the proxy
+// shares the wake-mail kind. Imported at file root for the `#[bridge]`-
+// emitted `HandlesKind<RpcInboundReady>` marker.
+use crate::rpc::RpcInboundReady;
 
 // The proxy's implementation, split along its seams (ADR-0121):
 // `config` (the init config + heartbeat tuning), `connect` (the
