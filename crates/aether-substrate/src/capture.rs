@@ -150,7 +150,6 @@ mod tests {
     use super::*;
     use crate::actor::native::envelope::Envelope;
     use crate::chassis::inbox::SettlingInbox;
-    use crate::handle_store::HandleStore;
     use crate::mail::mailer::Mailer;
     use crate::mail::registry::{OwnedDispatch, Registry};
     use crate::mail::{MailRef, Source};
@@ -165,8 +164,7 @@ mod tests {
     /// route), then drained to the guard.
     fn pending() -> PendingCapture {
         let registry = Arc::new(Registry::new());
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(registry, store));
+        let mailer = Arc::new(Mailer::new(registry));
         let id = MailboxId(0x0CA8);
         let (tx, rx) = mpsc::channel::<Envelope>();
         tx.send(OwnedDispatch::disarmed(

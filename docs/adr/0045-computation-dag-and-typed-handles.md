@@ -1,6 +1,6 @@
 # ADR-0045: Computation DAG and typed handles
 
-- **Status:** Accepted
+- **Status:** Superseded — the computation DAG was removed in #2147 and the handle store / `Ref<K>` it backed in #2137. `aether.fs` is the durable byte layer and `#[transform]` covers `Kind → Kind`.
 - **Date:** 2026-04-24
 
 ## Context

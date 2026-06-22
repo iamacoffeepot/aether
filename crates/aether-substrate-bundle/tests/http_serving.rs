@@ -31,7 +31,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_substrate_bundle::Chassis as _;
-use aether_substrate_bundle::PersistOverride;
 use aether_substrate_bundle::autoload::AutoloadComponent;
 use aether_substrate_bundle::capabilities::http::HttpConfig;
 use aether_substrate_bundle::capabilities::{
@@ -129,8 +128,6 @@ mod tests {
             rpc_addr: None,
             workers: None,
             ring_caps: aether_substrate_bundle::RingCapacities::default(),
-            persist: PersistOverride::Argv(None),
-            handle_store_max_bytes: None,
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),

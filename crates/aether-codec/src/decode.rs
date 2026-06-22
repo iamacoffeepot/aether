@@ -17,8 +17,8 @@
 // 2. Wire (everything else): consume the ADR-0118 `aether_data::wire`
 //    format directly — fixed-width little-endian scalars, `u32`
 //    lengths/selectors, presence bytes, length-prefixed
-//    strings/vecs/bytes, externally-tagged enums, encoded-key-sorted
-//    maps, and the `Ref` arms. The image is unversioned.
+//    strings/vecs/bytes, externally-tagged enums, and encoded-key-sorted
+//    maps. The image is unversioned.
 //
 // We decode the bytes directly rather than going through serde's
 // deserializer because the descriptor is structural (not a typed
@@ -309,8 +309,7 @@ fn alignment_of_schema(ty: &SchemaType) -> Result<usize, DecodeError> {
 // variant. Each arm is short but the arm count adds up — extracting
 // per-type helpers obscures the schema → wire mapping that's the
 // purpose of this fn. Values are bare interior bytes; the leading
-// version byte was stripped by `decode_schema` (and the `Ref` inline
-// arm re-enters `decode_schema` on its own nested versioned image).
+// version byte was stripped by `decode_schema`.
 #[allow(clippy::too_many_lines)]
 fn decode_wire_value(
     cur: &mut Cursor<'_>,
@@ -427,42 +426,6 @@ fn decode_wire_value(
                 obj.insert(key_string, val_value);
             }
             Ok(Value::Object(obj))
-        }
-        SchemaType::Ref(inner) => {
-            // ADR-0045 typed handle, inline arm revised by ADR-0100.
-            // Wire is a `u32` little-endian selector, then either the
-            // inline body (Inline = 0) or `id` (8 LE) + `kind_id` (8 LE)
-            // (Handle = 1). The inline body is the inner kind's own codec
-            // image, `u32`-length-prefixed — read the length, slice it
-            // off, and decode it with the same cast-or-wire dispatch as a
-            // top-level kind (`decode_schema` strips the inner version
-            // byte for a wire inner). Render as externally-tagged JSON to
-            // match the encoder's input shape.
-            let disc = cur.read_count(path)?;
-            match disc {
-                0 => {
-                    let len = cur.read_count(path)? as usize;
-                    let body = cur.take_slice(len, path)?;
-                    let inner_value = decode_schema(body, inner)?;
-                    let mut obj = Map::with_capacity(1);
-                    obj.insert("Inline".into(), inner_value);
-                    Ok(Value::Object(obj))
-                }
-                1 => {
-                    let id = u64::from_le_bytes(cur.take::<8>(&format!("{path}.id"))?);
-                    let kind_id = u64::from_le_bytes(cur.take::<8>(&format!("{path}.kind_id"))?);
-                    let mut handle_obj = Map::with_capacity(2);
-                    handle_obj.insert("id".into(), Value::from(id));
-                    handle_obj.insert("kind_id".into(), Value::from(kind_id));
-                    let mut obj = Map::with_capacity(1);
-                    obj.insert("Handle".into(), Value::Object(handle_obj));
-                    Ok(Value::Object(obj))
-                }
-                _ => Err(DecodeError::UnknownEnumDiscriminant {
-                    path: path.into(),
-                    discriminant: disc,
-                }),
-            }
         }
         SchemaType::TypeId(type_id) => {
             // ADR-0065 typed id. Wire is a `u64` fixed little-endian;
@@ -658,8 +621,8 @@ impl<'a> Cursor<'a> {
     }
 
     /// Read a `u32` little-endian count/length/selector — the `wire`
-    /// framing for string / bytes / vec / map lengths, the enum
-    /// discriminant, and the `Ref` selector.
+    /// framing for string / bytes / vec / map lengths and the enum
+    /// discriminant.
     fn read_count(&mut self, path: &str) -> Result<u32, DecodeError> {
         Ok(u32::from_le_bytes(self.take::<4>(path)?))
     }
@@ -1149,35 +1112,6 @@ mod tests {
         roundtrip(json!({ "mailbox": 0u64 }), &schema);
     }
 
-    #[test]
-    fn ref_inline_cast_inner_wire_is_length_prefixed_cast_image() {
-        // ADR-0100: the inline body of a cast inner kind is the raw
-        // cast image, `u32`-length-prefixed — and no nested version byte
-        // (the cast image is bare).
-        let inner = cast_struct(vec![scalar("code", Primitive::U32)]);
-        let schema = SchemaType::Ref(SchemaCell::owned(inner.clone()));
-        let value = json!({ "Inline": { "code": 0x0102_0304u32 } });
-
-        let bytes = encode_schema(&value, &schema).expect("encode Inline Ref");
-        // The inner image is exactly what `encode_schema` emits for the
-        // inner kind standalone (the cast image, no version byte).
-        let body = encode_schema(&json!({ "code": 0x0102_0304u32 }), &inner).expect("encode inner");
-        assert_eq!(body.len(), 4, "u32 cast image is 4 raw bytes");
-        // u32 inline selector + u32 length + body.
-        let mut expected: Vec<u8> = Vec::new();
-        expected.extend_from_slice(&0u32.to_le_bytes());
-        expected.extend_from_slice(&4u32.to_le_bytes());
-        expected.extend_from_slice(&body);
-        assert_eq!(
-            bytes, expected,
-            "inline wire is u32 sel 0 + u32 len + cast image"
-        );
-
-        // JSON descriptor round-trips through wire and back.
-        let back = decode_schema(&bytes, &schema).expect("decode Inline Ref");
-        assert_eq!(back, value);
-    }
-
     // Issue #1586 — bound `decode_schema` collection allocations. A
     // wire-decoded length must not drive the decoder into an unbounded
     // allocation; the four classes below pin the fix.
@@ -1245,23 +1179,5 @@ mod tests {
     fn vec_of_hundred_units_roundtrips_inside_base_budget() {
         let schema = SchemaType::Vec(SchemaCell::owned(SchemaType::Unit));
         roundtrip(Value::Array(vec![Value::Null; 100]), &schema);
-    }
-
-    #[test]
-    fn ref_handle_wire_is_selector_then_two_le_ids() {
-        let inner = cast_struct(vec![scalar("code", Primitive::U32)]);
-        let schema = SchemaType::Ref(SchemaCell::owned(inner));
-        let value = json!({ "Handle": { "id": 7u64, "kind_id": 42u64 } });
-
-        let bytes = encode_schema(&value, &schema).expect("encode Handle Ref");
-        // u32 selector 1 + id (8 LE) + kind_id (8 LE).
-        let mut expected: Vec<u8> = Vec::new();
-        expected.extend_from_slice(&1u32.to_le_bytes());
-        expected.extend_from_slice(&7u64.to_le_bytes());
-        expected.extend_from_slice(&42u64.to_le_bytes());
-        assert_eq!(bytes, expected);
-
-        let back = decode_schema(&bytes, &schema).expect("decode Handle Ref");
-        assert_eq!(back, value);
     }
 }

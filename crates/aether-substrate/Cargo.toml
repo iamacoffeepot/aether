@@ -42,8 +42,7 @@ aether-derive = { path = "../aether-derive" }
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = { workspace = true }
 # ADR-0090: typed, layered config resolution. Backs the env-shaped
-# `*Layer` structs (`PersistConfig`, the DAG `Caps` + `ExecutorConfig`)
-# that resolve each chassis-resolved config's `from_env`.
+# `*Layer` structs that resolve each chassis-resolved config's `from_env`.
 # `default-features = false` keeps it env-only — no TOML/YAML file
 # parsers until ADR-0090's config-file step. aether-substrate is a
 # native-only crate (wasmtime feature-gated since iamacoffeepot/aether#1275

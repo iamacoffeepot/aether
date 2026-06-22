@@ -10,8 +10,7 @@
 //!
 //! Flag naming is mechanical: strip an `AETHER_` (or top-level)
 //! prefix, lowercase, hyphenate. `AETHER_HTTP_TIMEOUT_MS` →
-//! `--http-timeout-ms`, `GEMINI_API_KEY` → `--gemini-api-key`,
-//! `AETHER_HANDLE_STORE_DISK_BUDGET_BYTES` → `--handle-store-disk-budget-bytes`.
+//! `--http-timeout-ms`, `GEMINI_API_KEY` → `--gemini-api-key`.
 //! Bool flags accept zero or one value (`--http-disable` ⇒ `true`,
 //! `--http-disable=false` ⇒ `false`, absent ⇒ `None`), matching the
 //! env-side `parse_flag` semantics.
@@ -26,15 +25,11 @@
 //! structs now ride the `#[derive(aether_substrate::Config)]` next to
 //! the domain struct in the cap crate. This file re-exports them so
 //! `cli.common.http.into_layer()` call sites stay unchanged; the
-//! `PersistOverlay` + chassis-root CLI structs stay hand-written
-//! because they cover chassis-shape (cross-cap) composition the
-//! derive deliberately doesn't try to model.
+//! chassis-root CLI structs stay hand-written because they cover
+//! chassis-shape (cross-cap) composition the derive deliberately
+//! doesn't try to model.
 
-use std::path::PathBuf;
-
-use aether_substrate::handle_store::PersistConfigLayer;
 use clap::{Args, Parser};
-use confique::{Config, Layer};
 
 // Per-cap overlays are emitted by `#[derive(aether_substrate::Config)]`
 // next to the domain struct in `aether-capabilities`. Re-exporting them
@@ -50,65 +45,6 @@ pub use aether_capabilities::fs::NamespaceRootsOverlay as FsOverlay;
 pub use aether_capabilities::gemini::GeminiOverlay;
 pub use aether_capabilities::http::HttpOverlay;
 pub use aether_capabilities::http_server::HttpServerOverlay;
-
-/// Argv overlay for the ADR-0049 handle-store persistence knobs. The
-/// `dir` / `persist_disable` flags shadow `AETHER_HANDLE_STORE_DIR` /
-/// `AETHER_HANDLE_STORE_PERSIST_DISABLE` directly; `disk_budget_bytes`
-/// / `eviction_tick_secs` ride [`PersistConfigLayer`] and merge with
-/// env via the confique builder. `max_bytes` is the in-memory soft
-/// budget (`AETHER_HANDLE_STORE_MAX_BYTES`), structurally separate
-/// from the on-disk persist config.
-///
-/// Stays hand-written (not derive-emitted) because `PersistConfig`'s
-/// `from_argv_then_env` takes four arguments (chassis vote + dir
-/// lookup + env short-circuit + numeric layer) that don't fit the
-/// derive's `Layer → Self` shape. The `aether-substrate::config`
-/// module docs hold the rationale verbatim.
-#[derive(Args, Debug, Default, Clone)]
-pub struct PersistOverlay {
-    /// `AETHER_HANDLE_STORE_DIR` — on-disk persistence root.
-    #[arg(id = "handle_store_dir", long = "handle-store-dir")]
-    pub dir: Option<PathBuf>,
-    /// `AETHER_HANDLE_STORE_PERSIST_DISABLE` — skip on-disk
-    /// persistence entirely (chassis runs in-memory only).
-    #[arg(id = "handle_store_persist_disable", long = "handle-store-persist-disable", num_args = 0..=1, default_missing_value = "true")]
-    pub persist_disable: Option<bool>,
-    /// `AETHER_HANDLE_STORE_MAX_BYTES` — in-memory soft byte budget.
-    #[arg(id = "handle_store_max_bytes", long = "handle-store-max-bytes")]
-    pub max_bytes: Option<usize>,
-    /// `AETHER_HANDLE_STORE_DISK_BUDGET_BYTES` — on-disk byte budget.
-    #[arg(
-        id = "handle_store_disk_budget_bytes",
-        long = "handle-store-disk-budget-bytes"
-    )]
-    pub disk_budget_bytes: Option<u64>,
-    /// `AETHER_HANDLE_STORE_DISK_EVICTION_TICK_SECS` — eviction tick
-    /// interval.
-    #[arg(
-        id = "handle_store_disk_eviction_tick_secs",
-        long = "handle-store-disk-eviction-tick-secs"
-    )]
-    pub eviction_tick_secs: Option<u64>,
-}
-
-impl PersistOverlay {
-    /// Map the numeric overlay knobs into a partial layer. The
-    /// `dir` / `persist_disable` / `max_bytes` axes are structural —
-    /// they live outside `PersistConfigLayer` and ride the bin's
-    /// composition instead, so [`Self::numeric_layer`] takes `&self`
-    /// rather than consuming the overlay.
-    #[must_use]
-    pub fn numeric_layer(&self) -> <PersistConfigLayer as Config>::Layer {
-        let mut layer = <PersistConfigLayer as Config>::Layer::empty();
-        if let Some(v) = self.disk_budget_bytes {
-            layer.disk_budget_bytes = Some(v);
-        }
-        if let Some(v) = self.eviction_tick_secs {
-            layer.eviction_tick_secs = Some(v);
-        }
-        layer
-    }
-}
 
 /// Argv overlay shared by every full-stack chassis (desktop +
 /// headless). Captures every cap whose config layer is the same on
@@ -126,8 +62,6 @@ pub struct CommonOverlay {
     pub anthropic: AnthropicOverlay,
     #[command(flatten)]
     pub gemini: GeminiOverlay,
-    #[command(flatten)]
-    pub persist: PersistOverlay,
 
     /// `AETHER_WORKERS` — worker pool size override.
     #[arg(long)]

@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use super::{Error, from_bytes, take_from_bytes, to_vec};
 use crate::ids::KindId;
-use crate::{Kind, Ref};
 
 #[test]
 fn scalars_are_fixed_little_endian() {
@@ -136,45 +135,6 @@ fn typed_ids_are_eight_le_bytes() {
     let id = KindId(0x0102_0304_0506_0708);
     assert_eq!(to_vec(&id).unwrap()[..], id.0.to_le_bytes()[..]);
     assert_eq!(from_bytes::<KindId>(&to_vec(&id).unwrap()).unwrap().0, id.0);
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Tiny(u32);
-
-impl Kind for Tiny {
-    const NAME: &'static str = "test.tiny";
-    const ID: KindId = KindId(0xDEAD_BEEF);
-
-    fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-        let arr: [u8; 4] = bytes.try_into().ok()?;
-        Some(Self(u32::from_le_bytes(arr)))
-    }
-
-    fn encode_into_bytes(&self) -> Vec<u8> {
-        self.0.to_le_bytes().to_vec()
-    }
-}
-
-#[test]
-fn ref_inline_is_selector_len_prefix_then_kind_image() {
-    let r = Ref::<Tiny>::inline(Tiny(7));
-    let mut body = Vec::new();
-    body.extend_from_slice(&0u32.to_le_bytes()); // inline selector
-    body.extend_from_slice(&4u32.to_le_bytes()); // length-prefixed body
-    body.extend_from_slice(&7u32.to_le_bytes()); // Tiny::encode_into_bytes image
-    assert_eq!(to_vec(&r).unwrap(), body);
-    assert_eq!(from_bytes::<Ref<Tiny>>(&to_vec(&r).unwrap()).unwrap(), r);
-}
-
-#[test]
-fn ref_handle_is_selector_then_ids() {
-    let r = Ref::<Tiny>::handle(0xCAFE);
-    let mut body = Vec::new();
-    body.extend_from_slice(&1u32.to_le_bytes()); // handle selector
-    body.extend_from_slice(&0xCAFE_u64.to_le_bytes()); // id
-    body.extend_from_slice(&Tiny::ID.0.to_le_bytes()); // kind_id
-    assert_eq!(to_vec(&r).unwrap(), body);
-    assert_eq!(from_bytes::<Ref<Tiny>>(&to_vec(&r).unwrap()).unwrap(), r);
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]

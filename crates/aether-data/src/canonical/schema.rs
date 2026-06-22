@@ -36,9 +36,8 @@ const SCHEMA_VEC: u8 = 6;
 const SCHEMA_ARRAY: u8 = 7;
 const SCHEMA_STRUCT: u8 = 8;
 const SCHEMA_ENUM: u8 = 9;
-const SCHEMA_REF: u8 = 10;
-const SCHEMA_MAP: u8 = 11;
-const SCHEMA_TYPE_ID: u8 = 12;
+const SCHEMA_MAP: u8 = 10;
+const SCHEMA_TYPE_ID: u8 = 11;
 
 const VARIANT_UNIT: u8 = 0;
 const VARIANT_TUPLE: u8 = 1;
@@ -65,9 +64,7 @@ pub const fn canonical_len_schema(schema: &SchemaType) -> usize {
         SchemaType::Unit | SchemaType::Bool | SchemaType::String | SchemaType::Bytes => U32_WIDTH,
         // Selector + the inner `Primitive` as its own `u32` unit-variant index.
         SchemaType::Scalar(_) => U32_WIDTH + U32_WIDTH,
-        SchemaType::Option(cell) | SchemaType::Vec(cell) | SchemaType::Ref(cell) => {
-            U32_WIDTH + canonical_len_cell(cell)
-        }
+        SchemaType::Option(cell) | SchemaType::Vec(cell) => U32_WIDTH + canonical_len_cell(cell),
         SchemaType::Array { element, len: _ } => {
             U32_WIDTH + canonical_len_cell(element) + U32_WIDTH
         }
@@ -231,7 +228,6 @@ fn schema_to_shape(s: &SchemaType) -> SchemaShape {
         SchemaType::Enum { variants } => SchemaShape::Enum {
             variants: variants.iter().map(variant_to_shape).collect(),
         },
-        SchemaType::Ref(cell) => SchemaShape::Ref(Box::new(schema_to_shape(cell))),
         SchemaType::Map { key, value } => SchemaShape::Map {
             key: Box::new(schema_to_shape(key)),
             value: Box::new(schema_to_shape(value)),
@@ -352,10 +348,6 @@ const fn write_schema(schema: &SchemaType, out: &mut [u8], cursor: usize) -> usi
                 pos = write_variant(&slice[i], out, pos);
                 i += 1;
             }
-        }
-        SchemaType::Ref(cell) => {
-            pos = write_u32_le(SCHEMA_REF as u32, out, pos);
-            pos = write_cell(cell, out, pos);
         }
         SchemaType::Map { key, value } => {
             pos = write_u32_le(SCHEMA_MAP as u32, out, pos);

@@ -3532,185 +3532,6 @@ mod control_plane {
     #[kind(name = "aether.http.server.inbound_ready")]
     pub struct HttpInboundReady {}
 
-    // ADR-0045 typed-handle store. Four request kinds on the
-    // `"aether.handle"` sink (`publish` / `release` / `pin` / `unpin`),
-    // paired 1:1 with reply kinds. Components mail `HandlePublish`
-    // with `kind_id` + payload bytes and receive a fresh ephemeral
-    // handle id back in `HandlePublishResult::Ok`; subsequent mail
-    // can carry the handle on the wire as `Ref::Handle { id,
-    // kind_id }`. The substrate's dispatch path resolves the handle
-    // to its `Ref::Inline` form before delivery.
-    //
-    // Mail rather than host fns: keeps the privileged FFI surface
-    // small (ADR-0002), folds capability gating (ADR-0044) into
-    // the existing per-sink permission model, gives Claude
-    // observability into handle traffic for free.
-    //
-    // Reply correlation echoes the operation's identity: `publish`
-    // echoes `kind_id`; `release` / `pin` / `unpin` echo `id`. v1
-    // semantics are mostly idempotent — `release` past zero
-    // saturates, `pin` of a pinned entry is a no-op — so the only
-    // real failure surface is `UnknownHandle` for ops on a missing
-    // id.
-
-    /// Structured failure reason for a handle operation. Mirrors
-    /// `FsError` / `HttpError`'s tagged-enum shape so guests can
-    /// pattern-match on the variant rather than parsing strings.
-    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-    pub enum HandleError {
-        /// No handle entry under the requested id. Surfaces from
-        /// `release` / `pin` / `unpin` against an id the substrate
-        /// has never seen (or has already evicted).
-        UnknownHandle,
-        /// Eviction couldn't free enough room for the publish —
-        /// every existing entry is pinned or refcounted at the
-        /// store's byte cap.
-        EvictionFailed,
-        /// The substrate has no handle store wired (e.g. a
-        /// chassis without handle support). Treated as fatal by
-        /// the SDK; callers see `Ctx::publish` return `None`.
-        NoStore,
-        /// Free-form adapter detail — kind-id mismatch on
-        /// re-publish, internal state, etc. Free-form text for
-        /// the same reasons `FsError::AdapterError` is.
-        AdapterError(String),
-    }
-
-    /// `aether.handle.publish` — request the substrate stash
-    /// `bytes` in the handle store under `kind_id` and reply with
-    /// a fresh ephemeral id. Mailed to the `"aether.handle"` sink;
-    /// reply lands as `HandlePublishResult`.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.handle.publish")]
-    pub struct HandlePublish {
-        pub kind_id: aether_data::KindId,
-        pub bytes: Vec<u8>,
-    }
-
-    /// Reply to `HandlePublish`. Both arms echo the originating
-    /// `kind_id` for correlation; `Ok` carries the minted `id`.
-    /// The request's `bytes` aren't echoed — correlation needs the
-    /// identity of the publish, not its contents.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.handle.publish_result")]
-    pub enum HandlePublishResult {
-        Ok {
-            kind_id: aether_data::KindId,
-            id: aether_data::HandleId,
-        },
-        Err {
-            kind_id: aether_data::KindId,
-            error: HandleError,
-        },
-    }
-
-    /// `aether.handle.release` — drop one reference on `id`. Reply:
-    /// `HandleReleaseResult`. The substrate's `dec_ref` saturates
-    /// at zero, so calling release on an already-released handle
-    /// is a no-op success rather than `UnknownHandle`.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.handle.release")]
-    pub struct HandleRelease {
-        pub id: aether_data::HandleId,
-    }
-
-    /// Reply to `HandleRelease`. Both arms echo the originating
-    /// `id`. `Err` only fires when no entry exists at that id.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.handle.release_result")]
-    pub enum HandleReleaseResult {
-        Ok {
-            id: aether_data::HandleId,
-        },
-        Err {
-            id: aether_data::HandleId,
-            error: HandleError,
-        },
-    }
-
-    /// `aether.handle.pin` — protect `id` from LRU eviction even
-    /// when its refcount drops to zero. Reply: `HandlePinResult`.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.handle.pin")]
-    pub struct HandlePin {
-        pub id: aether_data::HandleId,
-    }
-
-    /// Reply to `HandlePin`. Both arms echo the originating `id`.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.handle.pin_result")]
-    pub enum HandlePinResult {
-        Ok {
-            id: aether_data::HandleId,
-        },
-        Err {
-            id: aether_data::HandleId,
-            error: HandleError,
-        },
-    }
-
-    /// `aether.handle.unpin` — clear the pinned flag on `id`.
-    /// Doesn't drop the entry; only makes it eligible for LRU
-    /// eviction once `refcount == 0`. Reply: `HandleUnpinResult`.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.handle.unpin")]
-    pub struct HandleUnpin {
-        pub id: aether_data::HandleId,
-    }
-
-    /// Reply to `HandleUnpin`. Both arms echo the originating `id`.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.handle.unpin_result")]
-    pub enum HandleUnpinResult {
-        Ok {
-            id: aether_data::HandleId,
-        },
-        Err {
-            id: aether_data::HandleId,
-            error: HandleError,
-        },
-    }
-
-    /// `aether.handle.describe` — ask the substrate's `HandleCapability`
-    /// for a summary of the persistent store (ADR-0049 §10). Reply:
-    /// `HandleDescribeResult`. `max` caps the top-N lists; the cap
-    /// clamps it to a sane ceiling.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.handle.describe")]
-    pub struct HandleDescribe {
-        pub max: u32,
-    }
-
-    /// One handle's summary line in a `HandleDescribeResult`. Carries
-    /// the identity + size + durability fields the operator triages on.
-    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-    pub struct HandleSummary {
-        pub handle_id: aether_data::HandleId,
-        pub kind_id: aether_data::KindId,
-        pub bytes_len: u32,
-        pub pinned: bool,
-        pub refcount: u32,
-        pub created_at_ms: u64,
-    }
-
-    /// Reply to `HandleDescribe` — the store summary (ADR-0049 §10).
-    /// `top_by_size` is descending by `bytes_len`; `top_by_recency` is
-    /// descending by `created_at_ms`. Both are capped at the request's
-    /// (clamped) `max`.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.handle.describe_result")]
-    pub struct HandleDescribeResult {
-        pub total_entries: u32,
-        pub in_memory_entries: u32,
-        pub on_disk_entries: u32,
-        pub pinned_entries: u32,
-        pub in_memory_bytes: u64,
-        pub on_disk_bytes: u64,
-        pub on_disk_budget_bytes: u64,
-        pub top_by_size: Vec<HandleSummary>,
-        pub top_by_recency: Vec<HandleSummary>,
-    }
-
     // ADR-0081 per-actor log storage. Each actor owns an
     // `ActorLogRing` (in `aether-actor::log`); one wire kind pair
     // drives the query path:
@@ -4353,8 +4174,8 @@ mod trajectory {
     /// `TrajectoryRecorderCapability` (`aether.trajectory`) every tick
     /// to record the point's current state. `seed` keys the session:
     /// all samples sharing a seed are accumulated into the same
-    /// `TrajectoryLog` handle, emitted when `TrajectoryEnd` arrives for
-    /// that seed. Fire-and-forget; the recorder has no per-sample reply.
+    /// `TrajectoryLog`, emitted when `TrajectoryEnd` arrives for that
+    /// seed. Fire-and-forget; the recorder has no per-sample reply.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.trajectory.sample")]
     pub struct TrajectorySample {
@@ -4392,9 +4213,9 @@ mod trajectory {
     }
 
     /// Terminal marker for a trajectory session. Signals the
-    /// `TrajectoryRecorderCapability` to build the `TrajectoryLog`
-    /// handle for `seed` from all accumulated `TrajectorySample`s and
-    /// publish it to the handle store. Reply: `RecordResult`.
+    /// `TrajectoryRecorderCapability` to build the `TrajectoryLog` for
+    /// `seed` from all accumulated `TrajectorySample`s and return it
+    /// inline. Reply: `RecordResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.trajectory.end")]
     pub struct TrajectoryEnd {
@@ -4419,11 +4240,11 @@ mod trajectory {
         pub value: u32,
     }
 
-    /// A complete, tick-ordered record of one trajectory session, stored
-    /// in the handle store (ADR-0049) under `aether.trajectory.log`
-    /// (`TrajectoryLog::ID`). Published by `TrajectoryRecorderCapability`
-    /// at terminal time (on `TrajectoryEnd`) as a single immutable handle
-    /// keyed by `seed`. Offline analysis transforms decode this handle to
+    /// A complete, tick-ordered record of one trajectory session
+    /// (`aether.trajectory.log`, `TrajectoryLog::ID`). Built by
+    /// `TrajectoryRecorderCapability` at terminal time (on
+    /// `TrajectoryEnd`) keyed by `seed` and returned inline in
+    /// `RecordResult`. Offline analysis transforms decode this value to
     /// replay the session's path.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.trajectory.log")]
@@ -4439,24 +4260,16 @@ mod trajectory {
         pub end_reason: TrajectoryEndReason,
     }
 
-    /// Reply to `TrajectoryEnd`. `Ok` carries the seed and the freshly
-    /// minted handle id + kind id of the published `TrajectoryLog` in
-    /// the handle store; `Err` is returned when `seed` has no in-flight
-    /// session (unknown or already terminated). Mirrors the shape of
-    /// `HandlePublishResult` so a caller can stash the handle id for
-    /// offline replay.
+    /// Reply to `TrajectoryEnd`. `Ok` carries the seed and the complete
+    /// `TrajectoryLog` for the session inline; `Err` is returned when
+    /// `seed` has no in-flight session (unknown or already terminated).
+    /// An oversized inline reply spills to a file on the MCP side, so the
+    /// caller reads the log back the same way regardless of its size.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.trajectory.record_result")]
     pub enum RecordResult {
-        Ok {
-            seed: u64,
-            handle_id: aether_data::HandleId,
-            kind_id: aether_data::KindId,
-        },
-        Err {
-            seed: u64,
-            error: String,
-        },
+        Ok { seed: u64, log: TrajectoryLog },
+        Err { seed: u64, error: String },
     }
 }
 

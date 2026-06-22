@@ -1,6 +1,6 @@
 # ADR-0049: Persistent handle store across substrate restart
 
-- **Status:** Accepted
+- **Status:** Superseded by #2137 — the handle store was removed once the computation DAG (its only producer) was retired; `aether.fs` is the durable byte layer and `#[transform]` covers `Kind → Kind`.
 - **Date:** 2026-04-25
 
 ## Context

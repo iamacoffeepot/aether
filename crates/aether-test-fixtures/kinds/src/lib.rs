@@ -14,8 +14,6 @@
 
 extern crate alloc;
 
-use aether_data::Ref;
-use aether_math::Vec4;
 use alloc::string::String;
 use bytemuck::{Pod, Zeroable};
 
@@ -138,30 +136,6 @@ pub struct ConfigQuery;
 )]
 #[kind(name = "aether.test_fixtures.mat4_source_trigger")]
 pub struct Mat4SourceTrigger;
-
-/// Observer request for the `vec4_observer` fixture (issue 1472). The
-/// substrate's handle-resolution walk splices the transform's resolved
-/// `Vec4` output into the `input` slot as `Ref::Inline` before dispatch,
-/// so the observer reads the value directly. The `Ref<Vec4>` field's
-/// inner kind id is `Vec4::ID`, which the Transform→Observer edge
-/// type-check matches against the transform's `output_kind_id`.
-///
-/// Structured-shaped: the `Ref<Vec4>` field serializes through the
-/// hand-written `impl<K: Kind> Serialize/Deserialize for Ref<K>`
-/// (ADR-0100), which needs only `Vec4: Kind` — no `Vec4` serde.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    PartialEq,
-)]
-#[kind(name = "aether.test_fixtures.vec4_observed")]
-pub struct Vec4Observed {
-    pub input: Ref<Vec4>,
-}
 
 /// Driver kind for the stateful multi-actor replace fixture (ADR-0101):
 /// each `Bump` increments the fixture's in-memory counter by one.
@@ -476,27 +450,3 @@ pub const MATRIX_CELL_CHILD_TO_PARENT: u32 = 2;
 pub const MATRIX_CELL_CHILD_TO_SIBLING: u32 = 3;
 /// [`MatrixPing::cell`] marker — child a to self (in place).
 pub const MATRIX_CELL_CHILD_TO_SELF: u32 = 4;
-
-#[cfg(test)]
-mod tests {
-    use aether_data::{Kind, Ref};
-    use aether_math::Vec4;
-
-    use super::Vec4Observed;
-
-    /// The `Ref<Vec4>` slot survives a wire round-trip through the
-    /// ADR-0100 hand-written `Ref<K>` serde: an inline `Vec4` encodes
-    /// then decodes unchanged. Guards the #1475-backed derive the
-    /// `vec4_observer` fixture rests on (the observer reads its
-    /// `Ref::Inline(Vec4)` slot the same way).
-    #[test]
-    fn vec4_observed_inline_round_trips() {
-        let original = Vec4Observed {
-            input: Ref::Inline(Vec4::new(7.0, 9.0, 11.0, 1.0)),
-        };
-        let bytes = original.encode_into_bytes();
-        let decoded = Vec4Observed::decode_from_bytes(&bytes)
-            .expect("Vec4Observed decodes from its own encode_into_bytes output");
-        assert_eq!(decoded, original);
-    }
-}

@@ -22,37 +22,26 @@
 // `push(mail)` still resolves the recipient inline on the caller's
 // thread.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use crate::chassis::settlement::SettlementRegistry;
-use crate::handle_store::{self, HandleStore, PutError, WalkOutcome};
 use crate::mail::capability::CapabilityRegistry;
 use crate::mail::cost::CostTable;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{MailDispatch, MailboxEntry, OwnedDispatch, Registry};
-use crate::mail::{Mail, MailRef, Source, SourceAddr};
+use crate::mail::{Mail, Source, SourceAddr};
 use crate::runtime::trace::{SettlementHold, TraceHandle};
 use crate::scheduler::pending_depth;
-use aether_data::{HandleId, Kind, KindId};
+use aether_data::{Kind, KindId};
 use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
 use std::sync::OnceLock;
 
 pub struct Mailer {
     /// Registry handle for resolving recipients on `push`. Owned for
-    /// the `Mailer`'s lifetime; supplied at construction time alongside
-    /// the `HandleStore` (issue 657 collapsed the prior `wire`-after-
-    /// `new` setter pair into a required-pair constructor).
+    /// the `Mailer`'s lifetime; supplied at construction time (issue 657
+    /// collapsed the prior `wire`-after-`new` setter pair into a
+    /// required-argument constructor).
     registry: Arc<Registry>,
-    /// ADR-0045 typed-handle resolver. `route_mail` runs each mail
-    /// through the ref-walker before dispatching; missing handles
-    /// park the mail in the store. Required at construction time —
-    /// `SubstrateBoot::build` builds one with `HandleStore::from_env()`,
-    /// tests pass `Arc::new(HandleStore::new(1024 * 1024))`. Schemas
-    /// with no `Ref` nodes hit the no-op fast path inside `route_mail`,
-    /// so passing a store on tests that don't exercise handles costs
-    /// nothing.
-    handle_store: Arc<HandleStore>,
     /// Hub outbound handle. When set and connected, mail to unknown
     /// mailbox ids bubbles up to the hub-substrate (ADR-0037
     /// Phase 1) instead of being warn-dropped locally. Optional —
@@ -122,16 +111,13 @@ pub struct Mailer {
 }
 
 impl Mailer {
-    /// Construct a `Mailer` against the substrate's registry and
-    /// handle store. `SubstrateBoot::build` is the production caller;
-    /// tests build the same trio with `Registry::new()` and
-    /// `HandleStore::new(1024 * 1024)` (or any byte budget). Call
-    /// [`Self::with_outbound`] to attach a hub outbound if the
-    /// chassis needs ADR-0037 bubble-up.
-    pub fn new(registry: Arc<Registry>, handle_store: Arc<HandleStore>) -> Self {
+    /// Construct a `Mailer` against the substrate's registry.
+    /// `SubstrateBoot::build` is the production caller; tests build the
+    /// same pair with `Registry::new()`. Call [`Self::with_outbound`] to
+    /// attach a hub outbound if the chassis needs ADR-0037 bubble-up.
+    pub fn new(registry: Arc<Registry>) -> Self {
         Self {
             registry,
-            handle_store,
             outbound: None,
             chassis_router: OnceLock::new(),
             settlement_registry: OnceLock::new(),
@@ -316,13 +302,6 @@ impl Mailer {
         self
     }
 
-    /// Borrow the wired `HandleStore`. Read-only handle exposed so
-    /// chassis-side handlers (PR 3 host-fn shims) can publish into
-    /// the same store the dispatch path resolves against.
-    pub fn handle_store(&self) -> &Arc<HandleStore> {
-        &self.handle_store
-    }
-
     /// Borrow the wired [`HubOutbound`], or `None` if no outbound was
     /// attached (the hub chassis, or tests). Surfaced for chassis caps
     /// that thread egress events (replies, log batches, etc.) back to
@@ -373,45 +352,9 @@ impl Mailer {
             mail,
             &self.registry,
             self.outbound.as_ref(),
-            &self.handle_store,
             self.chassis_router.get().map(|b| &**b),
             &self.trace_handle,
         );
-    }
-
-    /// Publish a resolved handle and re-route every mail that was
-    /// parked on it. Each parked mail re-walks against its kind
-    /// schema; if the same payload still references a *different*
-    /// missing handle, the re-walk parks it on that id, otherwise
-    /// dispatch proceeds normally with the spliced-inline payload.
-    ///
-    /// Used by future host-fn shims (PR 3) and by chassis-level code
-    /// that resolves handles synchronously. Returns the `PutError`
-    /// from the underlying store on byte-budget / kind-id conflicts;
-    /// in those cases parked mail stays parked and the caller decides
-    /// how to recover.
-    ///
-    pub fn resolve_handle(
-        &self,
-        handle: HandleId,
-        kind: KindId,
-        bytes: Vec<u8>,
-    ) -> Result<(), PutError> {
-        self.handle_store.put(handle, kind, bytes)?;
-        let parked = self.handle_store.take_parked(handle);
-        let outbound = self.outbound.as_ref();
-        let chassis_router = self.chassis_router.get().map(|b| &**b);
-        for mail in parked {
-            route_mail(
-                mail,
-                &self.registry,
-                outbound,
-                &self.handle_store,
-                chassis_router,
-                &self.trace_handle,
-            );
-        }
-        Ok(())
     }
 
     /// Route a `*Result` reply to `sender` with a single encode and **no
@@ -521,46 +464,19 @@ impl Mailer {
     }
 }
 
-impl Drop for Mailer {
-    fn drop(&mut self) {
-        // The `Mailer` is the terminal owner of parked mail: once the last
-        // `Arc<Mailer>` drops, no routing call can reach `resolve_handle`
-        // and replay a parked entry. Every mail still parked at this point
-        // will never be delivered, so its `Sent` must be balanced with a
-        // `Finished` to settle the caller's chain (ADR-0080 §12 / ADR-0094).
-        //
-        // Parked mail is unarmed — it carries no `OwnedDispatch` obligation
-        // guard — so the settle is the single `record_finished` call, with
-        // no `discharge` half (contrast `InboundMail::drop`, where both
-        // fire). `record_finished` no-ops on `MailId::NONE`, so
-        // lineage-less parked mail is skipped with no double-count.
-        for mail in self.handle_store.drain_all_parked() {
-            self.trace_handle.record_finished(mail.mail_id, mail.root);
-        }
-    }
-}
-
 /// Resolve `mail.recipient` against the registry and dispatch
 /// inline. `Inbox`-bound mailboxes forward to an actor's mpsc on the caller
 /// thread (or fan out via the cap's mpsc, depending on the closure).
 /// Dropped / unknown recipients warn-log and drop the mail.
-///
-/// Mail with a wired `HandleStore` walks through the ADR-0045
-/// ref-resolver before recipient dispatch. Schemas with no `Ref`
-/// nodes hit the no-op fast path; refs with all handles present
-/// splice inline-form bytes into a fresh payload; mail that hits a
-/// missing handle parks in the store and returns immediately
-/// without dispatch.
-// Routing pipeline runs as one function: chassis-mail switch,
-// ref-resolver walk + dispatch, registry lookup, outbound forward.
-// Splitting the steps would scatter the per-mail Vec<u8> buffer reuse
-// and lose the linear "where does this envelope go?" read.
+// Routing pipeline runs as one function: chassis-mail switch, registry
+// lookup, dispatch, outbound forward. Splitting the steps would scatter
+// the per-mail buffer handling and lose the linear "where does this
+// envelope go?" read.
 #[allow(clippy::too_many_lines)]
 fn route_mail(
-    mut mail: Mail,
+    mail: Mail,
     registry: &Registry,
     outbound: Option<&Arc<HubOutbound>>,
-    store: &Arc<HandleStore>,
     chassis_router: Option<&(dyn Fn(Mail) + Send + Sync)>,
     trace_handle: &TraceHandle,
 ) {
@@ -615,7 +531,6 @@ fn route_mail(
                         Mail::new(target, TraceTailResult::ID, payload, 1).with_reply_to(reply_to),
                         registry,
                         outbound,
-                        store,
                         chassis_router,
                         trace_handle,
                     );
@@ -639,60 +554,10 @@ fn route_mail(
     let inbound_mail_id = mail.mail_id;
     let inbound_root = mail.root;
 
-    // One read guard resolves the recipient entry, the kind name, and
-    // whether the kind needs ADR-0045 handle resolution. `route_mail`
-    // previously took three separate registry reads (descriptor + entry
-    // + name) and cloned the whole descriptor every mail just to run the
-    // ref check; the cached `has_ref` behind `route_lookup` keeps the
-    // common no-ref path clone-free.
+    // One read guard resolves the recipient entry and the kind name —
+    // `route_mail` previously took separate registry reads (entry +
+    // name); `route_lookup` keeps them under a single guard.
     let lookup = registry.route_lookup(mail.kind, recipient);
-
-    // ADR-0045: kinds whose schema embeds a `Ref` get their handles
-    // resolved against the store before delivery; everything else flows
-    // through with the original bytes. `ref_schema` is `Some` only on
-    // that ref-carrying path.
-    if let Some(schema) = &lookup.ref_schema {
-        match handle_store::walk_and_resolve(schema, mail.payload.bytes(), store) {
-            Ok(WalkOutcome::Resolved { payload }) => {
-                if let Cow::Owned(bytes) = payload {
-                    mail.payload = MailRef::from(bytes);
-                }
-                // Cow::Borrowed: mail.payload already matches the
-                // resolved bytes (no substitutions happened).
-            }
-            Ok(WalkOutcome::Parked { handle, kind }) => {
-                tracing::debug!(
-                    target: "aether_substrate::handle_store",
-                    handle = %handle,
-                    kind = %kind,
-                    recipient = %mail.recipient,
-                    "parking mail on missing handle",
-                );
-                // A parked mail sits in the store until the handle
-                // resolves (an unbounded window); materialize it to
-                // `Owned` so it never pins a producer ring region for
-                // that whole time (2b, iamacoffeepot/aether#1105).
-                mail.payload = mail.payload.into_owned();
-                store.park(handle, mail);
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "aether_substrate::handle_store",
-                    kind = %mail.kind,
-                    error = ?e,
-                    recipient = %mail.recipient,
-                    "ref-walk failed against registered schema; mail dropped",
-                );
-                // ADR-0080 §2: balance the `Sent` so settlement chains
-                // drain (issue 838). Parked mail (the `Ok(WalkOutcome::Parked)`
-                // arm above) is deliberately NOT finished — it's held
-                // for replay when the handle resolves.
-                trace_handle.record_finished(mail.mail_id, mail.root);
-                return;
-            }
-        }
-    }
 
     match lookup.entry {
         Some(MailboxEntry::Inbox { handler, .. }) => {
@@ -859,7 +724,6 @@ fn route_mail(
                         .with_reply_to(reply_to),
                         registry,
                         outbound,
-                        store,
                         chassis_router,
                         trace_handle,
                     );
@@ -898,13 +762,13 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::handle_store::HandleStore;
     use crate::mail::MailboxId;
     use crate::mail::outbound::EgressEvent;
     use crate::mail::registry::{InboxHandler, InlineHandler};
+    use aether_data::Kind;
     use aether_data::wire;
-    use aether_data::{Kind, Ref};
-    use aether_data::{KindDescriptor, NamedField, Primitive, SchemaCell, SchemaType};
+    use aether_data::{KindDescriptor, NamedField, Primitive, SchemaType};
+    use std::borrow::Cow;
 
     /// ADR-0037 Phase 1: a live outbound + unknown mailbox id
     /// forwards `MailToHubSubstrate` upstream instead of
@@ -914,9 +778,8 @@ mod tests {
     fn unknown_mailbox_with_connected_outbound_bubbles_up() {
         let (outbound, outbound_rx) = HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
-        let store = Arc::new(HandleStore::new(64 * 1024));
 
-        let mailer = Mailer::new(Arc::clone(&registry), store).with_outbound(Arc::clone(&outbound));
+        let mailer = Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound));
 
         let unknown = MailboxId(0xDEAD_BEEF_u64);
         let kind = KindId(0xABCD_u64);
@@ -948,9 +811,7 @@ mod tests {
     #[test]
     fn unknown_mailbox_without_outbound_warn_drops() {
         let registry = Arc::new(Registry::new());
-        let store = Arc::new(HandleStore::new(64 * 1024));
-
-        let mailer = Mailer::new(Arc::clone(&registry), store);
+        let mailer = Mailer::new(Arc::clone(&registry));
         // Deliberately no `with_outbound` — exercises the local
         // warn-drop path (the hub chassis path).
 
@@ -997,8 +858,7 @@ mod tests {
         use aether_kinds::{LogTail, LogTailResult};
 
         let registry = Arc::new(Registry::new());
-        let store = Arc::new(HandleStore::new(64 * 1024));
-        let mailer = Mailer::new(Arc::clone(&registry), store);
+        let mailer = Mailer::new(Arc::clone(&registry));
 
         let (recorder_id, recorded) = record_inline(&registry);
 
@@ -1033,8 +893,7 @@ mod tests {
     #[test]
     fn unknown_mailbox_non_log_tail_still_warn_drops() {
         let registry = Arc::new(Registry::new());
-        let store = Arc::new(HandleStore::new(64 * 1024));
-        let mailer = Mailer::new(Arc::clone(&registry), store);
+        let mailer = Mailer::new(Arc::clone(&registry));
 
         let (recorder_id, recorded) = record_inline(&registry);
 
@@ -1064,8 +923,7 @@ mod tests {
         use aether_kinds::trace::{TraceEvent, TraceTail, TraceTailResult};
 
         let registry = Arc::new(Registry::new());
-        let store = Arc::new(HandleStore::new(64 * 1024));
-        let mailer = Mailer::new(Arc::clone(&registry), store);
+        let mailer = Mailer::new(Arc::clone(&registry));
 
         let (recorder_id, recorded) = record_inline(&registry);
 
@@ -1132,39 +990,12 @@ mod tests {
         }
     }
 
-    #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug, Clone)]
-    struct HeldNote {
-        held: Ref<Note>,
-        seq: u32,
-    }
-    impl Kind for HeldNote {
-        const NAME: &'static str = "test.mailer_held_note";
-        // Stable test sentinel — distinct from real schema-hashed kind ids.
-        const ID: KindId = KindId(0xDEAD_BEEF_0003_0002);
-    }
-
     fn note_schema() -> SchemaType {
         SchemaType::Struct {
             fields: Cow::Owned(vec![
                 NamedField {
                     name: Cow::Borrowed("body"),
                     ty: SchemaType::String,
-                },
-                NamedField {
-                    name: Cow::Borrowed("seq"),
-                    ty: SchemaType::Scalar(Primitive::U32),
-                },
-            ]),
-            repr_c: false,
-        }
-    }
-
-    fn held_note_schema() -> SchemaType {
-        SchemaType::Struct {
-            fields: Cow::Owned(vec![
-                NamedField {
-                    name: Cow::Borrowed("held"),
-                    ty: SchemaType::Ref(SchemaCell::owned(note_schema())),
                 },
                 NamedField {
                     name: Cow::Borrowed("seq"),
@@ -1221,11 +1052,10 @@ mod tests {
         }
     }
 
-    fn make_mailer() -> (Arc<Registry>, Arc<Mailer>, Arc<HandleStore>) {
+    fn make_mailer() -> (Arc<Registry>, Arc<Mailer>) {
         let registry = Arc::new(Registry::new());
-        let store = Arc::new(HandleStore::new(64 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), Arc::clone(&store)));
-        (registry, mailer, store)
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+        (registry, mailer)
     }
 
     /// Cast-shaped reply kind with a non-`f32` field — its
@@ -1252,7 +1082,7 @@ mod tests {
     /// a `Pod`-without-`Serialize` kind is repliable at all.
     #[test]
     fn send_reply_cast_kind_delivers_cast_image() {
-        let (registry, mailer, _store) = make_mailer();
+        let (registry, mailer) = make_mailer();
         let sink = CapturingSink::new();
         let sink_id = registry.register_inbox("test.sink", sink.inbox_handler());
 
@@ -1291,7 +1121,7 @@ mod tests {
         // `OwnedDispatch` the inbox receives.
         type CapturedLineage = Arc<RwLock<Vec<(MailId, MailId, Option<MailId>)>>>;
 
-        let (registry, mailer, _store) = make_mailer();
+        let (registry, mailer) = make_mailer();
         let captured: CapturedLineage = Arc::new(RwLock::new(Vec::new()));
         let captured_for_handler = Arc::clone(&captured);
         let sink_id = registry.register_inbox(
@@ -1356,11 +1186,11 @@ mod tests {
         );
     }
 
-    /// Mail to a sink whose kind has no `Ref` fields takes the
-    /// fast path: no walker invocation, payload delivered verbatim.
+    /// Mail to a registered-kind sink is delivered verbatim — the
+    /// payload bytes the producer pushed reach the handler unchanged.
     #[test]
-    fn ref_free_kind_passes_through_mailer() {
-        let (registry, mailer, _store) = make_mailer();
+    fn registered_kind_passes_through_mailer() {
+        let (registry, mailer) = make_mailer();
         let note_id = registry
             .register_kind_with_descriptor(KindDescriptor {
                 name: Note::NAME.into(),
@@ -1381,100 +1211,6 @@ mod tests {
         assert_eq!(captured, vec![bytes]);
     }
 
-    /// Mail with a `Handle` ref whose handle is missing parks in the
-    /// store. The sink does not see it. After `resolve_handle` lands
-    /// the entry, the parked mail re-routes and the sink receives
-    /// the spliced payload.
-    #[test]
-    fn handle_ref_parks_then_resolves_through_mailer() {
-        let (registry, mailer, store) = make_mailer();
-        let outer_kind_id = registry
-            .register_kind_with_descriptor(KindDescriptor {
-                name: HeldNote::NAME.into(),
-                schema: held_note_schema(),
-            })
-            .unwrap();
-        let inner_kind_id = registry
-            .register_kind_with_descriptor(KindDescriptor {
-                name: Note::NAME.into(),
-                schema: note_schema(),
-            })
-            .unwrap();
-
-        let sink = CapturingSink::new();
-        let sink_id = registry.register_inbox("test.sink", sink.inbox_handler());
-
-        // Push HeldNote mail with `held = Handle(7)`. Handle 7 is
-        // not in the store yet — the mail must park. We construct
-        // `Ref::Handle` directly with the registry-derived
-        // `inner_kind_id` so the walker's debug-assert (stored
-        // kind_id == wire kind_id) holds when the resolve fires.
-        let outer = HeldNote {
-            held: Ref::Handle {
-                id: 7,
-                kind_id: inner_kind_id.0,
-            },
-            seq: 11,
-        };
-        let outer_bytes = wire::to_vec(&outer).unwrap();
-        mailer.push(Mail::new(sink_id, outer_kind_id, outer_bytes, 1));
-        assert_eq!(
-            sink.delivery_count.load(Ordering::SeqCst),
-            0,
-            "mail must not dispatch until handle resolves",
-        );
-        assert_eq!(store.parked_count(HandleId(7)), 1);
-
-        // Resolve handle 7. The mail should now flow to the sink
-        // with the inner Note bytes spliced inline.
-        let inner = Note {
-            body: "resolved".into(),
-            seq: 99,
-        };
-        let inner_bytes = wire::to_vec(&inner).unwrap();
-        mailer
-            .resolve_handle(HandleId(7), inner_kind_id, inner_bytes)
-            .unwrap();
-        assert_eq!(store.parked_count(HandleId(7)), 0);
-        assert_eq!(sink.delivery_count.load(Ordering::SeqCst), 1);
-
-        let captured = sink.captured.read().unwrap();
-        let delivered: HeldNote = wire::from_bytes(&captured[0]).unwrap();
-        assert_eq!(delivered.seq, 11);
-        match delivered.held {
-            Ref::Inline(got) => {
-                assert_eq!(got.body, "resolved");
-                assert_eq!(got.seq, 99);
-            }
-            Ref::Handle { .. } => panic!("walker must replace Handle with Inline"),
-        }
-    }
-
-    /// Mail whose payload is malformed against the registered
-    /// schema (e.g. truncated bytes) gets dropped with a warn log,
-    /// not delivered to the sink. Pin the contract — without this
-    /// guard the sink would receive bytes that don't decode against
-    /// the schema it expects.
-    #[test]
-    fn malformed_ref_payload_drops_mail() {
-        let (registry, mailer, _store) = make_mailer();
-        let kind_id = registry
-            .register_kind_with_descriptor(KindDescriptor {
-                name: HeldNote::NAME.into(),
-                schema: held_note_schema(),
-            })
-            .unwrap();
-
-        let sink = CapturingSink::new();
-        let sink_id = registry.register_inbox("test.sink", sink.inbox_handler());
-
-        // Truncated payload — a lone body byte (the image is unversioned,
-        // ADR-0118), so the walker bails Truncated mid-walk reading the
-        // first field.
-        mailer.push(Mail::new(sink_id, kind_id, vec![0u8], 1));
-        assert_eq!(sink.delivery_count.load(Ordering::SeqCst), 0);
-    }
-
     use aether_data::MailId;
     use crossbeam_channel::Receiver;
 
@@ -1486,8 +1222,8 @@ mod tests {
     /// `Finished` — recorded by whichever `route_mail` arm handles the
     /// mail — drives the `(in_flight, held_open)` zero-transition. The
     /// returned `Receiver` fires iff the chain settles; a path that
-    /// declines to record `Finished` (actor-enqueue `Inbox`, parked mail)
-    /// leaves it silent.
+    /// declines to record `Finished` (actor-enqueue `Inbox`) leaves it
+    /// silent.
     fn settle_probe(mailer: &Mailer, root: MailId) -> Receiver<()> {
         let settle = Arc::new(SettlementRegistry::new());
         mailer
@@ -1496,172 +1232,6 @@ mod tests {
         let rx = settle.subscribe_settlement(root);
         mailer.record_sent(root, root, None, root.sender, MailboxId(0), KindId(0));
         rx
-    }
-
-    /// Issue 838 diff 2: mail that parks on a missing handle does NOT
-    /// settle. The chain stays elevated until the handle is published and
-    /// the mail is replayed through `Mailer::push`, at which point the
-    /// now-resolved walk reaches a terminal arm (Sink here) whose
-    /// `record_finished` drives the zero-transition. Pins "Parked is not
-    /// settled" — semantically distinct from Ref-walk Err (which IS
-    /// terminal and settles, covered by the meta-test below).
-    #[test]
-    fn ref_walk_parked_defers_finished_until_handle_publish() {
-        use aether_data::HandleId;
-
-        let sender = MailboxId(0x8380_0006_0000_0000);
-        let root = MailId::new(sender, 1);
-
-        let (registry, mailer, store) = make_mailer();
-        let rx = settle_probe(&mailer, root);
-        // Register both kinds so the mailer walks the outer schema
-        // and the handle store recognises the inner one. The
-        // registry-derived kind id is what `Ref::Handle.kind_id`
-        // must carry (the walker's debug-assert compares stored
-        // kind_id == wire kind_id) — same pattern as the existing
-        // `handle_ref_parks_then_resolves_through_mailer` test.
-        let outer_kind_id = registry
-            .register_kind_with_descriptor(KindDescriptor {
-                name: HeldNote::NAME.into(),
-                schema: held_note_schema(),
-            })
-            .unwrap();
-        let inner_kind_id = registry
-            .register_kind_with_descriptor(KindDescriptor {
-                name: Note::NAME.into(),
-                schema: note_schema(),
-            })
-            .unwrap();
-        let sink = CapturingSink::new();
-        let sink_id = registry.register_inline("test.838.park_defer", sink.inline_handler());
-
-        // Build a payload that references a handle not yet in the
-        // store — the walker returns `Parked`, mail held.
-        let handle = HandleId(0x1234_5678_9ABC_DEF0);
-        let held: HeldNote = HeldNote {
-            held: Ref::Handle {
-                id: handle.0,
-                kind_id: inner_kind_id.0,
-            },
-            seq: 7,
-        };
-        let payload = wire::to_vec(&held).unwrap();
-
-        let mail = Mail::new(sink_id, outer_kind_id, payload, 1).with_lineage(root, root, None);
-        mailer.push(mail);
-
-        // Handler hasn't run; mail is parked. The chain must NOT settle.
-        assert_eq!(
-            sink.delivery_count.load(Ordering::SeqCst),
-            0,
-            "parked mail must not dispatch"
-        );
-        assert_eq!(
-            store.parked_count(handle),
-            1,
-            "mail should be parked under the missing handle"
-        );
-        assert!(
-            rx.try_recv().is_err(),
-            "parked mail must NOT settle — the chain stays elevated until publish (issue 838)"
-        );
-
-        // Publish the handle with matching `Note` bytes; resolve and
-        // replay through the mailer. The walker reruns, resolves the ref,
-        // and the sink's inline dispatch records `Finished`.
-        let note = Note {
-            body: "hi".into(),
-            seq: 99,
-        };
-        let note_bytes = wire::to_vec(&note).unwrap();
-        mailer
-            .resolve_handle(handle, inner_kind_id, note_bytes)
-            .expect("resolve_handle");
-
-        assert_eq!(
-            sink.delivery_count.load(Ordering::SeqCst),
-            1,
-            "after publish + replay, sink should have dispatched once"
-        );
-        assert!(
-            rx.try_recv().is_ok(),
-            "after publish, the resumed inline dispatch records Finished and the chain settles (issue 838)"
-        );
-    }
-
-    /// Counterpart to `ref_walk_parked_defers_finished_until_handle_publish`:
-    /// when a handle never resolves and the `Mailer` tears down, every
-    /// still-parked mail must settle rather than hanging the chain to the
-    /// 600-second MCP timeout. `Mailer::drop` drains the park table and
-    /// records `Finished` for each entry — the same `record_finished` the
-    /// ref-walk `Err` arm calls, and the same balance `InboundMail::drop`
-    /// records for armed inbox mail (parked mail is unarmed, so there is no
-    /// `discharge` half). No threads, no timing: the `try_recv` after the
-    /// explicit `Mailer` drop is deterministic.
-    #[test]
-    fn parked_mail_settles_at_mailer_teardown() {
-        let sender = MailboxId(0x8380_0007_0000_0000);
-        let root = MailId::new(sender, 1);
-
-        let (registry, mailer, store) = make_mailer();
-        let rx = settle_probe(&mailer, root);
-
-        let outer_kind_id = registry
-            .register_kind_with_descriptor(KindDescriptor {
-                name: HeldNote::NAME.into(),
-                schema: held_note_schema(),
-            })
-            .unwrap();
-        let inner_kind_id = registry
-            .register_kind_with_descriptor(KindDescriptor {
-                name: Note::NAME.into(),
-                schema: note_schema(),
-            })
-            .unwrap();
-        let sink = CapturingSink::new();
-        let sink_id = registry.register_inline("test.teardown.park_settle", sink.inline_handler());
-
-        // Build a payload that references a handle that will never be put
-        // into the store — the walker returns `Parked`, mail held.
-        let never_handle = HandleId(0xDEAD_0000_CAFE_BABE);
-        let held: HeldNote = HeldNote {
-            held: Ref::Handle {
-                id: never_handle.0,
-                kind_id: inner_kind_id.0,
-            },
-            seq: 42,
-        };
-        let payload = wire::to_vec(&held).unwrap();
-
-        let mail = Mail::new(sink_id, outer_kind_id, payload, 1).with_lineage(root, root, None);
-        mailer.push(mail);
-
-        // Mail is parked. Chain must NOT have settled yet.
-        assert_eq!(
-            store.parked_count(never_handle),
-            1,
-            "mail should be parked under the never-resolving handle"
-        );
-        assert!(
-            rx.try_recv().is_err(),
-            "chain must stay elevated while the Mailer is live"
-        );
-
-        // Drop the store Arc first (the Mailer holds the other ref); this
-        // proves settlement fires from the Mailer's drop, not the store's.
-        drop(store);
-        assert!(
-            rx.try_recv().is_err(),
-            "dropping the store Arc alone must not settle the chain"
-        );
-
-        // Drop the Mailer — triggers `impl Drop for Mailer`, which drains
-        // the park table and records `Finished` for the held mail.
-        drop(mailer);
-        assert!(
-            rx.try_recv().is_ok(),
-            "parked mail must settle when the Mailer tears down (issue 1718)"
-        );
     }
 
     /// Issue 838 diff 2 (re-pointed to settlement by ADR-0086 Phase 3c):
@@ -1702,13 +1272,11 @@ mod tests {
         enum Expect {
             /// A terminal `route_mail` arm records `Finished`, balancing
             /// the seeded `Sent` so the chain settles (Inline, Dropped,
-            /// warn-drop, egress, ref-walk-err, chassis router present or
-            /// missing).
+            /// warn-drop, egress, chassis router present or missing).
             Settles,
             /// The Mailer declines to record `Finished` here: actor-enqueue
-            /// `Inbox` (the downstream dispatch loop owns it) or parked
-            /// mail (`HandleStore::park`, replayed later). The chain stays
-            /// elevated.
+            /// `Inbox` (the downstream dispatch loop owns it). The chain
+            /// stays elevated.
             DoesNotSettle,
         }
 
@@ -1719,8 +1287,7 @@ mod tests {
             // (`settle_probe` installs a registry + seeds the chain's
             // `Sent`), drives the path, and returns whether the chain
             // settled. Cases construct their own fixtures so
-            // chassis-router / outbound / handle-store-Parked setups vary
-            // independently.
+            // chassis-router / outbound setups vary independently.
             run: Box<dyn FnOnce() -> bool>,
         }
 
@@ -1738,7 +1305,7 @@ mod tests {
                 run: Box::new(|| {
                     let sender = MailboxId(0x8380_DD01_0000_0000);
                     let mail_id = MailId::new(sender, 1);
-                    let (registry, mailer, _store) = make_mailer();
+                    let (registry, mailer) = make_mailer();
                     let rx = settle_probe(&mailer, mail_id);
                     let sink = CapturingSink::new();
                     let id = registry.register_inline("test.meta.sink", sink.inline_handler());
@@ -1757,7 +1324,7 @@ mod tests {
                 run: Box::new(|| {
                     let sender = MailboxId(0x8380_DD02_0000_0000);
                     let mail_id = MailId::new(sender, 1);
-                    let (registry, mailer, _store) = make_mailer();
+                    let (registry, mailer) = make_mailer();
                     let rx = settle_probe(&mailer, mail_id);
                     let sink = CapturingSink::new();
                     let id = registry.register_inbox("test.meta.closure", sink.inbox_handler());
@@ -1775,7 +1342,7 @@ mod tests {
                 run: Box::new(|| {
                     let sender = MailboxId(0x8380_DD03_0000_0000);
                     let mail_id = MailId::new(sender, 1);
-                    let (registry, mailer, _store) = make_mailer();
+                    let (registry, mailer) = make_mailer();
                     let rx = settle_probe(&mailer, mail_id);
                     let id = registry.register_inbox("test.meta.dropped", Arc::new(|_| {}));
                     let _ = registry.drop_mailbox(id).expect("drop");
@@ -1793,7 +1360,7 @@ mod tests {
                 run: Box::new(|| {
                     let sender = MailboxId(0x8380_DD04_0000_0000);
                     let mail_id = MailId::new(sender, 1);
-                    let (_registry, mailer, _store) = make_mailer();
+                    let (_registry, mailer) = make_mailer();
                     let rx = settle_probe(&mailer, mail_id);
                     mailer.push(
                         Mail::new(MailboxId(0xDEAD_BEEF_0001), KindId(0xFEED), vec![], 1)
@@ -1812,77 +1379,10 @@ mod tests {
                     let mail_id = MailId::new(sender, 1);
                     let (outbound, _rx) = HubOutbound::attached_loopback();
                     let registry = Arc::new(Registry::new());
-                    let store = Arc::new(HandleStore::new(64 * 1024));
-                    let mailer = Mailer::new(registry, store).with_outbound(outbound);
+                    let mailer = Mailer::new(registry).with_outbound(outbound);
                     let rx = settle_probe(&mailer, mail_id);
                     mailer.push(
                         Mail::new(MailboxId(0xDEAD_BEEF_0002), KindId(0xFEED), vec![], 1)
-                            .with_lineage(mail_id, mail_id, None),
-                    );
-                    rx.try_recv().is_ok()
-                }),
-            },
-            // 6. Ref-walk Err (malformed payload, terminal drop) —
-            // Finished only.
-            Case {
-                name: "Ref-walk Err",
-                expect: Expect::Settles,
-                run: Box::new(|| {
-                    let sender = MailboxId(0x8380_DD06_0000_0000);
-                    let mail_id = MailId::new(sender, 1);
-                    let (registry, mailer, _store) = make_mailer();
-                    let rx = settle_probe(&mailer, mail_id);
-                    let kind_id = registry
-                        .register_kind_with_descriptor(KindDescriptor {
-                            name: HeldNote::NAME.into(),
-                            schema: held_note_schema(),
-                        })
-                        .unwrap();
-                    let sink = CapturingSink::new();
-                    let id =
-                        registry.register_inline("test.meta.refwalk_err", sink.inline_handler());
-                    // Truncated payload (1 byte) — walker bails Err.
-                    mailer.push(
-                        Mail::new(id, kind_id, vec![0u8; 1], 1)
-                            .with_lineage(mail_id, mail_id, None),
-                    );
-                    rx.try_recv().is_ok()
-                }),
-            },
-            // 7. Ref-walk Parked (held for handle publish) — neither.
-            Case {
-                name: "Ref-walk Parked",
-                expect: Expect::DoesNotSettle,
-                run: Box::new(|| {
-                    let sender = MailboxId(0x8380_DD07_0000_0000);
-                    let mail_id = MailId::new(sender, 1);
-                    let (registry, mailer, _store) = make_mailer();
-                    let rx = settle_probe(&mailer, mail_id);
-                    let outer_kind_id = registry
-                        .register_kind_with_descriptor(KindDescriptor {
-                            name: HeldNote::NAME.into(),
-                            schema: held_note_schema(),
-                        })
-                        .unwrap();
-                    let inner_kind_id = registry
-                        .register_kind_with_descriptor(KindDescriptor {
-                            name: Note::NAME.into(),
-                            schema: note_schema(),
-                        })
-                        .unwrap();
-                    let sink = CapturingSink::new();
-                    let id =
-                        registry.register_inline("test.meta.refwalk_parked", sink.inline_handler());
-                    let held = HeldNote {
-                        held: Ref::Handle {
-                            id: 0x8888_8888_8888_8888,
-                            kind_id: inner_kind_id.0,
-                        },
-                        seq: 1,
-                    };
-                    let payload = wire::to_vec(&held).unwrap();
-                    mailer.push(
-                        Mail::new(id, outer_kind_id, payload, 1)
                             .with_lineage(mail_id, mail_id, None),
                     );
                     rx.try_recv().is_ok()
@@ -1895,7 +1395,7 @@ mod tests {
                 run: Box::new(|| {
                     let sender = MailboxId(0x8380_DD08_0000_0000);
                     let mail_id = MailId::new(sender, 1);
-                    let (_registry, mailer, _store) = make_mailer();
+                    let (_registry, mailer) = make_mailer();
                     let rx = settle_probe(&mailer, mail_id);
                     mailer.install_chassis_router(Box::new(|_| {}));
                     mailer.push(
@@ -1912,7 +1412,7 @@ mod tests {
                 run: Box::new(|| {
                     let sender = MailboxId(0x8380_DD09_0000_0000);
                     let mail_id = MailId::new(sender, 1);
-                    let (_registry, mailer, _store) = make_mailer();
+                    let (_registry, mailer) = make_mailer();
                     let rx = settle_probe(&mailer, mail_id);
                     mailer.push(
                         Mail::new(MailboxId::CHASSIS_MAILBOX_ID, KindId(0xFEED), vec![], 1)

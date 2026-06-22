@@ -49,7 +49,6 @@ pub mod boot;
 pub mod capture;
 pub mod chassis;
 pub mod config;
-pub mod handle_store;
 pub mod mail;
 pub mod pid_lock;
 #[cfg(feature = "render")]

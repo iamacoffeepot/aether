@@ -3,7 +3,7 @@
 //! [`NativeActor`] — owning its mailbox name, state, and handlers.
 //! The `Builder::with_actor` boot path on `aether-substrate` is the
 //! installation site; chassis mains pick which caps to load
-//! (Log/Handle/Io/Http are universal; Audio + Render gate behind the
+//! (Log/Io/Http are universal; Audio + Render gate behind the
 //! `audio` / `render` features).
 //!
 //! Pre-stage-2e these modules lived under
@@ -51,7 +51,6 @@ pub mod fs;
 // for the same reason as `anthropic`.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod gemini;
-pub mod handle;
 pub mod http;
 // `aether.http.server` inbound HTTP server cap (ADR-0108, issue 1760).
 // Native singleton modeled on `RpcServerCapability`: binds a port, parses
@@ -143,7 +142,6 @@ pub use engine::EngineProxyConfig;
 pub use engine::EngineServer;
 #[cfg(not(target_arch = "wasm32"))]
 pub use engine::{EngineConfig, EngineOverlay};
-pub use handle::HandleCapability;
 pub use http::{HttpCapability, HttpConfig};
 // ADR-0108 `aether.http.server` cap (issue 1760). `HttpServerConfig` is the
 // always-on domain struct; the `Config`-derive `HttpServerConfigLayer` /

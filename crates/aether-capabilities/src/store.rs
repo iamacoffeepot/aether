@@ -2,10 +2,9 @@
 //!
 //! The storage half of the hub artifact registry: somewhere above the
 //! engine layer to keep uploaded binaries content-addressed, ingest one
-//! from a staged host path, and read what each binary *is*. The per-engine
-//! ADR-0049 handle store sits *below* an engine and is keyed on an assigned
-//! `HandleId`; this store is hub-scoped and keyed on a sha256 over the raw
-//! bytes, so an identical re-upload dedups to the same entry.
+//! from a staged host path, and read what each binary *is*. The store is
+//! hub-scoped and keyed on a sha256 over the raw bytes, so an identical
+//! re-upload dedups to the same entry.
 //!
 //! Artifact-generic from the start — an entry is a content blob plus a
 //! type-tagged ([`ArtifactKind`]) manifest — so the registry extraction
@@ -34,13 +33,10 @@
 //! entries that are neither pinned nor named — a named or pinned entry is
 //! kept regardless of recency.
 //!
-//! Modeled on the ADR-0049 handle store's lock / reclaim / budget shape
-//! (`aether_substrate::handle_store`), not its instance: the handle store
-//! is keyed on `HandleId` and lives per-engine. The shared `lock.pid`
-//! acquisition protocol lives in `aether_substrate::pid_lock` and is
-//! consumed by both stores. The `aether.engine` cap is single-threaded
-//! (one dispatcher run-token), so the store holds its index in plain
-//! fields behind `&mut self` rather than an inner lock.
+//! The `lock.pid` acquisition protocol lives in
+//! `aether_substrate::pid_lock`. The `aether.engine` cap is
+//! single-threaded (one dispatcher run-token), so the store holds its
+//! index in plain fields behind `&mut self` rather than an inner lock.
 
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -63,9 +59,9 @@ use sha2::{Digest, Sha256};
 /// on-disk format change can land beside `v1` without a migration.
 pub const LAYOUT_VERSION_DIR: &str = "v1";
 
-/// Default on-disk byte budget. 16 GiB — matches the handle store's disk
-/// budget; binaries are tens of megabytes, so this holds a deep history
-/// before LRU eviction kicks in. `EngineConfig`'s `binary_disk_budget_bytes`
+/// Default on-disk byte budget. 16 GiB; binaries are tens of megabytes,
+/// so this holds a deep history before LRU eviction kicks in.
+/// `EngineConfig`'s `binary_disk_budget_bytes`
 /// carries this as its literal default (`17_179_869_184`) and folds an
 /// unparseable env value back to it.
 pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;

@@ -173,7 +173,7 @@ recipe).
 
 - Chassis mailboxes live under `aether.<name>` (`aether.render`, `aether.fs`,
   `aether.audio`, `aether.input`, `aether.lifecycle`, `aether.window`,
-  `aether.component`, `aether.handle`).
+  `aether.component`).
 - A loaded component registers at `aether.component/aether.embedded:NAME` — use the
   full address `LoadResult.name` hands back.
 - **Bare names** (`"camera"`, `"player"`) are not registered and warn-drop

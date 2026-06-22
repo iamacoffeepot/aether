@@ -18,7 +18,7 @@ Before the table: the rule that everything else assumes. `recipient_name`
 names the **mailbox**; `kind_name` names the **payload shape**. They route
 independently even when they share a prefix. Chassis-owned mailboxes live under
 `aether.<name>` (`aether.render`, `aether.audio`, `aether.fs`, `aether.input`,
-`aether.lifecycle`, `aether.window`, `aether.component`, `aether.handle`). A loaded wasm component
+`aether.lifecycle`, `aether.window`, `aether.component`). A loaded wasm component
 registers at `aether.component/aether.embedded:NAME` — use the full address that
 `LoadResult.name` hands back. **Bare names** (`"camera"`, `"player"`) are not
 registered and warn-drop.
@@ -39,7 +39,6 @@ registered and warn-drop.
 | **Tracing & settlement** | Watch a mail chain to exact completion; trace subtree returned to the agent. | via `send_mail_traced` | 0080, 0086, 0093, 0094 | Settling (eviction, #1048) |
 | **Logging** | Per-actor log rings, queryable by mailbox name. | — (read via `actor_logs`) | 0077, 0081 | Stable |
 | **Configuration** | Layered app config — derive + overlay + argv/env, dumped via `--config`. | — (boot-time + CLI) | 0090 | Settling (rollout across knobs) |
-| **Handles** | Typed references to substrate-held values; a value travels by reference, not by bytes. | `aether.handle` — `publish` / `release` / `pin` / `describe` | 0045, 0048, 0049 | Stable; lightly exercised |
 | **[HTTP egress](systems/http.md)** | Outbound network as a capability. | `aether.http` | 0043 | Stable |
 
 ## How to read an explainer (the shape each page follows)

@@ -26,7 +26,6 @@ use std::thread;
 use std::time::Duration;
 
 use aether_substrate_bundle::Chassis as _;
-use aether_substrate_bundle::PersistOverride;
 use aether_substrate_bundle::autoload::boot_manifest_autoload;
 use aether_substrate_bundle::bundle_pack::{
     ChassisSettings, Pack, PackedComponent, decode_pack, encode_pack,
@@ -84,8 +83,6 @@ mod tests {
             rpc_addr: None,
             workers: None,
             ring_caps: aether_substrate_bundle::RingCapacities::default(),
-            persist: PersistOverride::Argv(None),
-            handle_store_max_bytes: None,
             autoload: decoded
                 .components
                 .into_iter()
@@ -160,8 +157,6 @@ mod tests {
             rpc_addr: None,
             workers: None,
             ring_caps: aether_substrate_bundle::RingCapacities::default(),
-            persist: PersistOverride::Argv(None),
-            handle_store_max_bytes: None,
             autoload,
         };
 

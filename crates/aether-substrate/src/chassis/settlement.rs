@@ -463,7 +463,6 @@ fn wedge(
 #[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
 mod tests {
     use super::*;
-    use crate::handle_store::HandleStore;
     use crate::mail::mailer::Mailer;
     use crate::mail::registry::OwnedDispatch;
     use crate::mail::registry::Registry;
@@ -494,8 +493,7 @@ mod tests {
         sink_name: &str,
     ) -> (Arc<Mailer>, MailboxId, Arc<StdMutex<Vec<CapturedDispatch>>>) {
         let registry = Arc::new(Registry::new());
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let captured: Arc<StdMutex<Vec<CapturedDispatch>>> = Arc::new(StdMutex::new(Vec::new()));
         let captured_clone = Arc::clone(&captured);
         let target = registry.register_inbox(

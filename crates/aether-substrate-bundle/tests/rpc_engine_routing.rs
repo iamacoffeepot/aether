@@ -36,7 +36,6 @@ use aether_kinds::{
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::handle_store::HandleStore;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
@@ -66,8 +65,7 @@ fn boot_hub(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, u16) {
         let _ = registry.register_kind_with_descriptor(d);
     }
     let (outbound, _rx) = HubOutbound::attached_loopback();
-    let store = Arc::new(HandleStore::new(1024 * 1024));
-    let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<EngineServer>(engine_config)

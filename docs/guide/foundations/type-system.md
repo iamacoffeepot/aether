@@ -2,23 +2,22 @@
 
 > **Governing ADRs:** [ADR-0005](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0005-mail-typing-system.md) (mail typing), [ADR-0019](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0019-unified-mail-encoding.md) (unified encoding),
 > [ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md)/[ADR-0030](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0030-hashed-kind-ids.md) (name- and schema-derived ids), [ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md) (actor identity and addressing), [ADR-0031](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0031-const-constructible-schema-representation.md)/[ADR-0032](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0032-canonical-schema-bytes-and-labels-sidecar.md) (const
-> schema + canonical bytes / labels sidecar), [ADR-0045](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0045-computation-dag-and-typed-handles.md)/[ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)/[ADR-0049](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0049-persistent-handle-store.md) (handles,
-> transforms, the handle store), [ADR-0064](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0064-type-tagged-opaque-ids-on-the-mcp-wire.md)/[ADR-0065](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0065-typed-id-newtypes-and-first-class-type-ids-in-the-schema.md) (type-tagged wire ids +
+> schema + canonical bytes / labels sidecar), [ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md) (transforms),
+> [ADR-0064](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0064-type-tagged-opaque-ids-on-the-mcp-wire.md)/[ADR-0065](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0065-typed-id-newtypes-and-first-class-type-ids-in-the-schema.md) (type-tagged wire ids +
 > first-class id types). The type vocabulary is **stable** — the wire format
 > depends on it.
 
-Everything the engine moves is typed, and the vocabulary is small. Four kinds of
-thing carry types — **kinds** (payloads), **mailboxes** (addresses), **handles**
-(references to stored values), and **transforms** (pure functions) — and each is
-named by a **typed id**. This page is the tour: what each one is, how it's
-identified, and how they compose.
+Everything the engine moves is typed, and the vocabulary is small. Three kinds of
+thing carry types — **kinds** (payloads), **mailboxes** (addresses), and
+**transforms** (pure functions) — and each is named by a **typed id**. This page
+is the tour: what each one is, how it's identified, and how they compose.
 
 The reason to care isn't compiler ergonomics. A typed thing here is
 *self-describing*: it carries enough to encode itself from JSON, decode itself
 without a shared header, and answer "what are you?" to a live engine. That's
 what lets the agent driving the engine introspect it — `describe_kinds`,
-`describe_component`, `describe_handles`, `describe_transforms` are all just
-"read the types." Typing is the substrate of observability, not paperwork.
+`describe_component`, `describe_transforms` are all just "read the types."
+Typing is the substrate of observability, not paperwork.
 
 ## Kinds — typed payloads
 
@@ -124,13 +123,9 @@ worth knowing beyond "it's a type tree":
   dropped; a separate labels sidecar (`aether.kinds.labels`) carries them for
   consumers that want human-readable reconstruction, like `describe_kinds`
   ([ADR-0032](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0032-canonical-schema-bytes-and-labels-sidecar.md)). The wire never carries names — structured fields are positional.
-- **`Ref` is a schema arm.** A field whose type is `Ref<K>` is a *handle-or-
-  inline* slot — see *Handles* below. The
-  schema wraps the inner kind's shape, so a recipient decodes the resolved value
-  the same way whether it arrived inline or via the store.
 - **`TypeId` is a schema arm.** A kind can have a field that *is* an id — a
-  `MailboxId`, `KindId`, or `HandleId` as a first-class typed reference, not just
-  a bare `u64` ([ADR-0065](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0065-typed-id-newtypes-and-first-class-type-ids-in-the-schema.md)). These encode as a tagged string on JSON and a varint
+  `MailboxId` or `KindId` as a first-class typed reference, not just a bare
+  `u64` ([ADR-0065](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0065-typed-id-newtypes-and-first-class-type-ids-in-the-schema.md)). These encode as a tagged string on JSON and a varint
   on the wire.
 
 ### What counts as the same kind
@@ -160,8 +155,8 @@ cases that surprise people live at the schema-arm level. Holding the
 - **Flipping `#[repr(C)]`** when it changes the cast/structured choice — `repr_c`
   is part of the canonical bytes, so the same fields under a different wire
   format are a different kind.
-- **Wrapping a field** — `{ a: u32 }`, `{ a: Option<u32> }`, and `{ a: Ref<u32> }`
-  are three distinct kinds; likewise `[u32; 3]` ≠ `[u32; 4]` ≠ `Vec<u32>`.
+- **Wrapping a field** — `{ a: u32 }` and `{ a: Option<u32> }` are distinct
+  kinds; likewise `[u32; 3]` ≠ `[u32; 4]` ≠ `Vec<u32>`.
 - **Changing an enum discriminant** — discriminants are encoded; variant names
   are not.
 
@@ -201,35 +196,6 @@ mailbox-vs-kind distinction — why an address and a payload shape are different
 things even when they share a name prefix — is the
 [Mail, kinds & scheduling](../systems/mail-and-kinds.md) page's subject.
 
-## Handles — references to stored values
-
-Some values are too big to put on the wire (a decoded texture, a model's
-output), or are produced asynchronously by a pipeline. Those live in the
-substrate's **handle store** and travel as a *reference* instead of inline bytes.
-The unifying type is `Ref<K>`:
-
-```rust
-pub enum Ref<K> {
-    Inline(K),                          // the whole value is on the wire
-    Handle { id: u64, kind_id: u64 },   // a reference into the handle store
-}
-```
-
-A kind field typed `Ref<K>` accepts **either** form. A caller that has the value
-passes `Ref::inline(v)`; a caller pointing at a stored value passes
-`Ref::handle(id)`, which stamps `kind_id` from `K::ID` so it can't disagree with
-the type. The substrate resolves a `Handle` to its stored value *before* the
-recipient's handler runs — validating that the stored entry's kind matches
-`K::ID` — so a handler decodes a resolved `K` identically either way and never
-has to know which form arrived.
-
-Handle ids are **content-addressed** (the id is derived from the bytes, so two
-producers of the same value get the same handle and the store deduplicates,
-[ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)), and the store is **persistent** with a disk budget ([ADR-0049](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0049-persistent-handle-store.md) —
-inspect it with `describe_handles`). Handles let a value travel by reference
-between steps without round-tripping it through an actor's memory; the store, its
-tiers, and what persists are their own subject — [Handles](../systems/handles.md).
-
 ## Transforms — typed pure functions
 
 A **transform** is a pure function over typed values — `#[transform] fn
@@ -248,7 +214,6 @@ Every typed thing is named by a newtype over a hash, not a bare integer:
 | `KindId` | `u64` | `name + schema` ([ADR-0030](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0030-hashed-kind-ids.md)) |
 | `ActorId` | `u64` | the actor's `NAMESPACE` (plus `:subname` when instanced) ([ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md)) |
 | `MailboxId` | `u64` | the actor's lineage — a hash chain of `ActorId`s, root → leaf; a root actor's equals its name hash ([ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md)/[ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md)) |
-| `HandleId` | `u64` | the stored bytes (content-addressed, [ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)) |
 | `TransformId` | `u64` | the transform's identity ([ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)) |
 | `EngineId`, `SessionToken` | `Uuid` | wire identity of an engine / session |
 
@@ -262,23 +227,20 @@ Two properties keep these from being foot-guns:
   a root actor's `MailboxId` *is* its `ActorId`, which is what keeps every
   chassis capability's id equal to its name hash.)
 - **Tagged strings on the MCP wire.** Across the agent boundary, ids encode as
-  `<tag>-XXXX-XXXX-XXXX` — `mbx-…` for a mailbox, `knd-…` for a kind, `hdl-…` for
-  a handle ([ADR-0064](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0064-type-tagged-opaque-ids-on-the-mcp-wire.md)). The tag makes an id self-identifying, so a mailbox id and
+  `<tag>-XXXX-XXXX-XXXX` — `mbx-…` for a mailbox, `knd-…` for a kind
+  ([ADR-0064](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0064-type-tagged-opaque-ids-on-the-mcp-wire.md)). The tag makes an id self-identifying, so a mailbox id and
   a kind id can't be silently swapped in a tool call. **Hand these back
   verbatim** — they're opaque tokens, not numbers to parse.
 
 ## How it composes
 
 The pieces stack: a **kind** describes some bytes; a **schema** describes the
-kind; a **mailbox** is where a kind is sent; a **handle** (`Ref<K>`) lets a kind
-travel by reference when it's large or async; a **transform** turns one kind's
-handle into another's; and a **typed id** names each so a live engine can be
-asked what exists. Because every one of them is self-describing, the whole system
-is introspectable from the outside — which is the property the agent harness is
-built on.
+kind; a **mailbox** is where a kind is sent; a **transform** turns one kind into
+another; and a **typed id** names each so a live engine can be asked what exists.
+Because every one of them is self-describing, the whole system is introspectable
+from the outside — which is the property the agent harness is built on.
 
 ## Where to read more
 
 - The contracts these types enforce — [Invariants & guarantees](invariants.md).
 - Addresses vs payloads, in depth — [Mail, kinds & scheduling](../systems/mail-and-kinds.md).
-- Handles and the store they live in — [Handles](../systems/handles.md).

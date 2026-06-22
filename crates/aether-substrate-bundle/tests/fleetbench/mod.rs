@@ -55,17 +55,16 @@ use aether_kinds::descriptors;
 use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME};
 use aether_kinds::{
     BinaryEntry, BinarySelector, ComponentCapabilities, ComponentEntry, ComponentSelector,
-    DeadEngineDescriptor, EngineDescriptor, HandleDescribe, HandleDescribeResult,
-    ListComponentBinaries, ListComponentBinariesResult, ListComponents, ListComponentsResult,
-    ListEngineBinaries, ListEngineBinariesResult, ListEngines, ListEnginesResult, LoadComponent,
-    LoadResult, LogTail, LogTailResult, ReplaceComponent, ReplaceResult, ResolveComponent,
-    ResolveComponentResult, SpawnEngine, SpawnEngineResult, TerminateEngine, TerminateEngineResult,
-    UploadBinary, UploadBinaryResult, UploadComponent, UploadComponentResult,
+    DeadEngineDescriptor, EngineDescriptor, ListComponentBinaries, ListComponentBinariesResult,
+    ListComponents, ListComponentsResult, ListEngineBinaries, ListEngineBinariesResult,
+    ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail, LogTailResult,
+    ReplaceComponent, ReplaceResult, ResolveComponent, ResolveComponentResult, SpawnEngine,
+    SpawnEngineResult, TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult,
+    UploadComponent, UploadComponentResult,
 };
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::handle_store::HandleStore;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
@@ -260,10 +259,10 @@ pub struct FleetBench {
     next_cid: u64,
     spawned: Vec<EngineId>,
     calls: Vec<CallRecord>,
-    /// Per-bench handle-store root the forked substrates write under, so
-    /// their `engines/<id>/v1/lock.pid` locks can't collide with another
-    /// concurrent fork+exec test on the shared default root. Removed on
-    /// [`Drop`].
+    /// Per-bench scratch root the forked substrates materialize their
+    /// per-engine executables under (ADR-0115), so they can't collide with
+    /// another concurrent fork+exec test on the shared default root.
+    /// Removed on [`Drop`].
     store_root: PathBuf,
 }
 
@@ -1060,16 +1059,6 @@ impl FleetBench {
         };
         (root, events)
     }
-
-    /// Summarize `engine`'s persistent handle store (ADR-0049 §10),
-    /// capping each top-N list at `max`. The store's `aether.handle` cap
-    /// answers with a [`HandleDescribeResult`].
-    pub fn describe_handles(&mut self, engine: EngineId, max: u32) -> HandleDescribeResult {
-        let replies = self.call(Some(engine), "aether.handle", &HandleDescribe { max });
-        let payload = single_reply(&replies, "HandleDescribe");
-        HandleDescribeResult::decode_from_bytes(&payload)
-            .expect("test setup: decoding a HandleDescribeResult reply")
-    }
 }
 
 impl Drop for FleetBench {
@@ -1078,21 +1067,16 @@ impl Drop for FleetBench {
         for engine in engines {
             self.terminate_quietly(engine);
         }
-        // Best-effort: reap this bench's per-engine handle-store dirs.
+        // Best-effort: reap this bench's per-engine scratch dirs.
         let _ = fs::remove_dir_all(&self.store_root);
     }
 }
 
-/// Point this bench's forked substrates at a unique per-process
-/// handle-store root, so their `engines/<id>/v1/lock.pid` locks can't
-/// collide with another concurrent fork+exec test (the seed
-/// `rpc_engine_routing` / `engines_cap`) on the shared default
-/// `dirs::data_dir()/aether/engines` root — the issue-1274 lock
-/// collision, here across test processes since the cap mints engine ids
-/// from a fixed sequence. Mirrors `engines_cap`'s `two_engines`: the cap
-/// reads `AETHER_ENGINE_STORE_ROOT` when it forks (priority over the
-/// default), and `AETHER_HANDLE_STORE_DIR` must be unset so the cap's
-/// per-engine injection wins.
+/// Point this bench's forked substrates at a unique per-process scratch
+/// root for their per-engine executable materialization (ADR-0115), so a
+/// concurrent fork+exec test on the shared default
+/// `dirs::data_dir()/aether/engines` root can't collide. The cap reads
+/// `AETHER_ENGINE_STORE_ROOT` when it forks (priority over the default).
 fn isolate_store_root() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1107,7 +1091,6 @@ fn isolate_store_root() -> PathBuf {
     // now, threaded into `boot_hub` from the returned root — not an env var.
     unsafe {
         env::set_var("AETHER_ENGINE_STORE_ROOT", &root);
-        env::remove_var("AETHER_HANDLE_STORE_DIR");
     }
     root
 }
@@ -1125,8 +1108,7 @@ fn boot_hub(binary_store_dir: &Path) -> (PassiveChassis<TestChassis>, u16) {
         let _ = registry.register_kind_with_descriptor(d);
     }
     let (outbound, _rx) = HubOutbound::attached_loopback();
-    let store = Arc::new(HandleStore::new(1024 * 1024));
-    let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<EngineServer>(EngineConfig {

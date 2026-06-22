@@ -75,16 +75,16 @@
 //!
 //! ## Reusing the one router (unchanged from #1135)
 //!
-//! In-place dispatch resolves the recipient's seize handle + ref-schema via
+//! In-place dispatch resolves the recipient's seize handle via
 //! [`Registry::route_lookup`](crate::mail::Registry) and, on a won
-//! `Idle → Running` seize of a ref-free kind, runs
+//! `Idle → Running` seize, runs
 //! [`Drainable::seize_and_run`] → `DispatcherSlot::dispatch_one` (the same
 //! per-envelope wrapper a pooled `run_cycle` runs — `Received` / `Finished`
 //! incl. the #1134 `t_enqueue` / `enqueue_depth`, the `record_finished`
 //! settlement bracket, the `log.tail` / `trace.tail` arms). A busy slot
-//! (lost seize), a non-`Pooled` recipient (no seize handle), or an ADR-0045
-//! ref kind falls back to [`Mailer::push`] → `route_mail`, inheriting that
-//! path's ref-walk / park / settlement / trace unchanged.
+//! (lost seize) or a non-`Pooled` recipient (no seize handle) falls back to
+//! [`Mailer::push`] → `route_mail`, inheriting that path's settlement /
+//! trace unchanged.
 //!
 //! ## Recruitment gate (cost-aware, iamacoffeepot/aether#1178)
 //!
@@ -744,13 +744,9 @@ impl BlobWork {
     /// `t_enqueue`.
     fn dispatch_one(&self, recipient: MailboxId, mail: Mail, budget: BatchBudget, received: Nanos) {
         let lookup = self.mailer.registry().route_lookup(mail.kind, recipient);
-        // Direct-dispatch only a ref-free kind whose recipient is a
-        // `Pooled` slot we win the seize on; everything else deposits.
-        let seized = if lookup.ref_schema.is_some() {
-            None
-        } else {
-            lookup.seize.as_ref().and_then(SeizeHandle::try_seize)
-        };
+        // Direct-dispatch only a recipient that is a `Pooled` slot we win
+        // the seize on; everything else deposits through `route_mail`.
+        let seized = lookup.seize.as_ref().and_then(SeizeHandle::try_seize);
         match seized {
             Some(slot) => {
                 // ADR-0094: the #1135 in-place demux seed is an
@@ -1071,13 +1067,12 @@ fn recruit_extra(outcome: &FlushOutcome, w: usize) -> usize {
 mod tests {
     use super::*;
     use crate::chassis::settlement::SettlementRegistry;
-    use crate::handle_store::HandleStore;
     use crate::mail::Registry;
     use crate::mail::registry::{InboxHandler, OwnedDispatch};
     use crate::mail::{KindId, MailRef};
     use crate::scheduler::{SeizeSeed, SlotState, SpinPark};
     use crate::test_util::fresh_substrate;
-    use aether_data::{KindDescriptor, MailId, SchemaCell, SchemaType};
+    use aether_data::MailId;
     use crossbeam_deque::{Injector, Steal};
     use std::sync::mpsc;
 
@@ -1284,43 +1279,6 @@ mod tests {
         );
     }
 
-    /// An ADR-0045 ref-carrying kind is never dispatched in place even to a
-    /// free `Pooled` recipient — it is deposited so `route_mail` walks it.
-    #[test]
-    fn ref_kind_deposited() {
-        let (registry, mailer) = fresh_substrate();
-        let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
-        let (id, _fix, direct_rx, deposit_rx) = seizable_recipient(&registry, "r");
-        let ref_kind = registry
-            .register_kind_with_descriptor(KindDescriptor {
-                name: "test.blob.ref_kind".to_owned(),
-                schema: SchemaType::Ref(SchemaCell::owned(SchemaType::Bytes)),
-            })
-            .expect("fresh ref kind registers");
-
-        // A valid wire `Ref::Inline(empty)` image (unversioned, ADR-0118
-        // §Envelope): u32 selector 0, u32 inline-length 0. The ref-walk
-        // resolves it (no substitution), and the deposit inbox forwards
-        // the resolved payload's first byte — the inline selector's low
-        // byte (0).
-        let mut ref_payload: Vec<u8> = Vec::new();
-        ref_payload.extend_from_slice(&0u32.to_le_bytes()); // inline selector
-        ref_payload.extend_from_slice(&0u32.to_le_bytes()); // inline length
-        let mut producer = BlobProducer::new(Arc::clone(&mailer), wake_sink(&injector));
-        producer.flush(vec![Mail::new(id, ref_kind, MailRef::from(ref_payload), 1)]);
-        drain_injector(&injector);
-
-        assert!(
-            direct_rx.try_recv().is_err(),
-            "ref kind never dispatched in place"
-        );
-        assert_eq!(
-            deposit_rx.try_recv().ok(),
-            Some(0u8),
-            "ref kind deposited for the ref-walk"
-        );
-    }
-
     /// Two recipients across two flushes: the second flush to a fresh
     /// recipient appends a new group; both deliver exactly once.
     #[test]
@@ -1490,8 +1448,7 @@ mod tests {
     /// drop-settles path need settlement observable.
     fn settlement_env() -> (Arc<Registry>, Arc<Mailer>, Arc<SettlementRegistry>) {
         let registry = Arc::new(Registry::new());
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let settlement = Arc::new(SettlementRegistry::new());
         mailer.install_settlement_registry(Arc::clone(&settlement));
         mailer

@@ -37,9 +37,9 @@ use winit::event_loop::EventLoop;
 use super::driver::{DesktopDriverCapability, parse_window_mode_env};
 use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use crate::chassis_common::{
-    ActorRingConfig, CommonBoot, PersistOverride, boot_manifest_from_env, chassis_known_keys,
+    ActorRingConfig, CommonBoot, boot_manifest_from_env, chassis_known_keys,
     frame_lifecycle_config, maybe_with_http_server, maybe_with_rpc_server, parse_workers_env,
-    resolve_persist_state, with_common_caps,
+    with_common_caps,
 };
 use crate::cli::{CommonOverlay, DesktopCli};
 use crate::hub;
@@ -201,14 +201,6 @@ pub struct DesktopEnv {
     /// `AETHER_ACTOR_TRACE_RING_SIZE`). Default is
     /// [`RingCapacities::default`] (the `aether-actor` const caps).
     pub ring_caps: RingCapacities,
-    /// ADR-0090 unit d (issue 1258): chassis-bin verdict on handle-
-    /// store persistence. See [`PersistOverride`] for variant
-    /// semantics.
-    pub persist: PersistOverride,
-    /// ADR-0090 unit d (issue 1258): argv overlay for the handle-store
-    /// in-memory byte budget. `None` falls through to env-only
-    /// `AETHER_HANDLE_STORE_MAX_BYTES`.
-    pub handle_store_max_bytes: Option<usize>,
     /// Components to auto-load on boot, in order. A bundled standalone build
     /// populates this so the game comes up with no hub; the normal desktop bin
     /// leaves it empty and loads components over the hub instead.
@@ -269,7 +261,6 @@ impl DesktopEnv {
             fs,
             anthropic,
             gemini,
-            persist,
             workers: cli_workers,
             rpc_port: cli_rpc_port,
             boot_manifest: cli_boot_manifest,
@@ -351,28 +342,21 @@ impl DesktopEnv {
         // an unparseable known value, surfaced as `DesktopBootError::Config`).
         let ring_caps = ActorRingConfig::try_from_env()?.to_ring_capacities();
 
-        // Persistence overlay shared with headless (issue 1258); desktop
-        // opts into on-disk persistence per ADR-0049 §9.
-        let persist_state = resolve_persist_state(&persist);
-        let handle_store_max_bytes = persist.max_bytes;
-
         Ok(Self {
             event_loop,
             capture_queue,
             namespace_roots,
             http,
-            http_server,
             anthropic,
             gemini,
             audio,
             boot_mode,
             boot_size,
             boot_title,
+            http_server,
             rpc_addr,
             workers,
             ring_caps,
-            persist: persist_state,
-            handle_store_max_bytes,
             autoload,
         })
     }
@@ -403,22 +387,10 @@ impl DesktopChassis {
             rpc_addr,
             workers,
             ring_caps,
-            persist,
-            handle_store_max_bytes,
             autoload,
         } = env;
 
-        // ADR-0049 §9: desktop enables on-disk handle persistence.
-        // ADR-0090 unit d: when the chassis bin parsed an argv overlay
-        // for persist config / max_bytes, those override the env-only
-        // resolution `SubstrateBoot` would otherwise run.
-        let mut boot_builder = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION"))
-            .persist_enabled(true)
-            .handle_store_max_bytes(handle_store_max_bytes);
-        if let PersistOverride::Argv(p) = persist {
-            boot_builder = boot_builder.persist_config(p);
-        }
-        let boot = boot_builder.build()?;
+        let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION")).build()?;
 
         let component_host_config = ComponentHostConfig {
             engine: Arc::clone(&boot.engine),

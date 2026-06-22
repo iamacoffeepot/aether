@@ -604,7 +604,6 @@ mod cap_native {
         use aether_kinds::descriptors;
         use aether_kinds::trace::Nanos;
         use aether_substrate::chassis::builder::{Builder, PassiveChassis};
-        use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::MailId;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
@@ -618,9 +617,7 @@ mod cap_native {
                 let _ = registry.register_kind_with_descriptor(d);
             }
             let (outbound, rx) = HubOutbound::attached_loopback();
-            let store = Arc::new(HandleStore::new(1024 * 1024));
-            let mailer =
-                Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
+            let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
             (registry, mailer, rx)
         }
 

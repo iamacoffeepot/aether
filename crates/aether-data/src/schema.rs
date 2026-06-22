@@ -54,8 +54,8 @@ pub struct MailboxDescriptor {
 pub enum MailboxCategory {
     /// A chassis cap or framework-level actor (`aether.input`,
     /// `aether.render`, `aether.audio`, `aether.fs`, `aether.log`,
-    /// `aether.handle`, `aether.component`, `aether.diagnostics`,
-    /// etc.). Renders as `actor:NAME`.
+    /// `aether.component`, `aether.diagnostics`, etc.). Renders as
+    /// `actor:NAME`.
     Actor,
     /// A wasm-component trampoline. Full name has the form
     /// `aether.embedded:NAME`. Renders as
@@ -110,14 +110,6 @@ pub enum SchemaType {
     Enum {
         variants: Cow<'static, [EnumVariant]>,
     },
-    /// ADR-0045 typed handle reference. A field whose type is
-    /// `Ref<K>` accepts either an inline `K` value or a
-    /// `Handle { id, kind_id }` pointing into the substrate's
-    /// handle store. The cell wraps the inner kind's schema —
-    /// recipients dispatch identically against the resolved
-    /// inline value, so existing decoders only need to learn
-    /// the new tag at the field-walk step.
-    Ref(SchemaCell),
     /// Issue #232: keyed lookup table. Wire form is the structured
     /// `BTreeMap<K, V>` — `varint(len) + (k, v)` pairs in
     /// key-sorted order. Key types are restricted to `String`,
@@ -134,9 +126,9 @@ pub enum SchemaType {
     /// ADR-0065: a first-class typed reference, identified by a
     /// 64-bit type id (FNV-1a of the type's canonical name with a
     /// disjoint `TYPE_DOMAIN` prefix). The codec's `TypeId` arm
-    /// hard-codes the per-id encode/decode logic — for v1, the three
-    /// known type ids are `MailboxId`, `KindId`, `HandleId`, all of
-    /// which are u64 varint on the structured wire and tagged-string on JSON.
+    /// hard-codes the per-id encode/decode logic — for v1, the known
+    /// type ids are `MailboxId` and `KindId`, both of which are u64
+    /// varint on the structured wire and tagged-string on JSON.
     /// Cast-shape size/align is 8 bytes, 8-byte align — same as a
     /// `u64`, so a typed-id field embedded in a `repr_c: true`
     /// struct keeps the parent's cast-eligibility.
@@ -321,7 +313,6 @@ pub enum SchemaShape {
     Enum {
         variants: Vec<VariantShape>,
     },
-    Ref(Box<Self>),
     Map {
         key: Box<Self>,
         value: Box<Self>,
@@ -392,7 +383,6 @@ pub enum LabelNode {
         type_label: Option<Cow<'static, str>>,
         variants: Cow<'static, [VariantLabel]>,
     },
-    Ref(LabelCell),
     /// Issue #232: parallel labels for `SchemaType::Map`. Both
     /// key and value carry their own cell because either side may
     /// be a struct/enum whose nominal info needs preserving for
@@ -505,7 +495,6 @@ impl Clone for LabelNode {
                 type_label: type_label.clone(),
                 variants: variants.clone(),
             },
-            Self::Ref(c) => Self::Ref(c.clone()),
             Self::Map { key, value } => Self::Map {
                 key: key.clone(),
                 value: value.clone(),
@@ -520,8 +509,7 @@ impl PartialEq for LabelNode {
             (Self::Anonymous, Self::Anonymous) => true,
             (Self::Option(a), Self::Option(b))
             | (Self::Vec(a), Self::Vec(b))
-            | (Self::Array(a), Self::Array(b))
-            | (Self::Ref(a), Self::Ref(b)) => a == b,
+            | (Self::Array(a), Self::Array(b)) => a == b,
             (
                 Self::Struct {
                     type_label: la,
@@ -598,13 +586,8 @@ impl Serialize for LabelNode {
                 s.serialize_field("variants", variants)?;
                 s.end()
             }
-            Self::Ref(cell) => {
-                let mut s = serializer.serialize_tuple_variant("LabelNode", 6, "Ref", 1)?;
-                s.serialize_field(cell)?;
-                s.end()
-            }
             Self::Map { key, value } => {
-                let mut s = serializer.serialize_struct_variant("LabelNode", 7, "Map", 2)?;
+                let mut s = serializer.serialize_struct_variant("LabelNode", 6, "Map", 2)?;
                 s.serialize_field("key", key)?;
                 s.serialize_field("value", value)?;
                 s.end()
@@ -632,7 +615,6 @@ impl<'de> Deserialize<'de> for LabelNode {
                 type_label: Option<Cow<'static, str>>,
                 variants: Vec<VariantLabel>,
             },
-            Ref(LabelCell),
             Map {
                 key: LabelCell,
                 value: LabelCell,
@@ -659,7 +641,6 @@ impl<'de> Deserialize<'de> for LabelNode {
                 type_label,
                 variants: Cow::Owned(variants),
             }),
-            LabelNodeDe::Ref(c) => Ok(Self::Ref(c)),
             LabelNodeDe::Map { key, value } => Ok(Self::Map { key, value }),
         }
     }

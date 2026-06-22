@@ -3196,7 +3196,6 @@ mod native {
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::chassis::error::BootError;
-        use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::registry;
         use aether_substrate::{
             EgressEvent, HubOutbound, InboxHandler, Mailer, OwnedDispatch, Registry,
@@ -4192,8 +4191,7 @@ mod native {
         ) {
             let reg = Arc::new(Registry::new());
             let (outbound, egress_rx) = HubOutbound::attached_loopback();
-            let store = Arc::new(HandleStore::new(1024 * 1024));
-            let mailer = Arc::new(Mailer::new(Arc::clone(&reg), store).with_outbound(outbound));
+            let mailer = Arc::new(Mailer::new(Arc::clone(&reg)).with_outbound(outbound));
             let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
             let caller_mailbox = reg.register_inbox(
                 "test.audio.settlement.caller",

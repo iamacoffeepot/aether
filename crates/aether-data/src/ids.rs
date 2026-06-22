@@ -1,4 +1,4 @@
-//! ADR-0065 typed id newtypes — `MailboxId`, `KindId`, `HandleId`.
+//! ADR-0065 typed id newtypes — `MailboxId`, `KindId`.
 //!
 //! Each type is `#[repr(transparent)]` over a `u64` (wire-identical
 //! to a raw u64; cast-shape kinds keep their
@@ -108,8 +108,6 @@ pub const fn tag_for_type_id(type_id: u64) -> Option<Tag> {
         Some(Tag::Mailbox)
     } else if type_id == KindId::TYPE_ID {
         Some(Tag::Kind)
-    } else if type_id == HandleId::TYPE_ID {
-        Some(Tag::Handle)
     } else if type_id == DagId::TYPE_ID {
         Some(Tag::Dag)
     } else if type_id == TransformId::TYPE_ID {
@@ -130,8 +128,6 @@ pub const fn type_name_for_type_id(type_id: u64) -> Option<&'static str> {
         Some(MailboxId::TYPE_NAME)
     } else if type_id == KindId::TYPE_ID {
         Some(KindId::TYPE_NAME)
-    } else if type_id == HandleId::TYPE_ID {
-        Some(HandleId::TYPE_NAME)
     } else if type_id == DagId::TYPE_ID {
         Some(DagId::TYPE_NAME)
     } else if type_id == TransformId::TYPE_ID {
@@ -300,48 +296,10 @@ impl<'de> Deserialize<'de> for KindId {
     }
 }
 
-/// Substrate-minted reference to a parked value in the handle store
-/// (ADR-0045). Carries the `Tag::Handle` discriminator + a 60-bit
-/// counter masked into the low bits. `#[repr(transparent)]` over
-/// `u64`.
-#[repr(transparent)]
-#[derive(Copy, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
-pub struct HandleId(pub u64);
-
-impl HandleId {
-    pub const TYPE_ID: u64 = fnv1a_64_prefixed(TYPE_DOMAIN, b"aether.handle_id");
-    pub const TYPE_NAME: &'static str = "aether.handle_id";
-}
-
-impl fmt::Display for HandleId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_tagged(self.0, f)
-    }
-}
-
-// Tagged `Debug` — see the note on `MailboxId`'s impl.
-impl fmt::Debug for HandleId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_tagged(self.0, f)
-    }
-}
-
-impl Serialize for HandleId {
-    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        serialize_id(self.0, s)
-    }
-}
-
-impl<'de> Deserialize<'de> for HandleId {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        deserialize_id(d, Tag::Handle).map(HandleId)
-    }
-}
-
 /// Substrate-minted reference to one submitted computation DAG
 /// (ADR-0047 §4). Carries the `Tag::Dag` discriminator + a 60-bit
 /// counter masked into the low bits — monotonic-per-substrate with a
-/// session salt, analogous to [`HandleId`] rather than a name hash.
+/// session salt, rather than a name hash.
 /// `#[repr(transparent)]` over `u64`.
 #[repr(transparent)]
 #[derive(Copy, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]

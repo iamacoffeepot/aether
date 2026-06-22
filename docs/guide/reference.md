@@ -30,7 +30,6 @@ read from a doc, because the engine can't drift from itself:
   kinds and per-handler docs.
 - `describe_transforms` — the native `#[transform]` functions linked at build
   time.
-- `describe_handles(engine_id)` — the persistent handle store's contents.
 - `actor_logs(engine_id, mailbox_name)` — recent entries from one actor's log
   ring.
 

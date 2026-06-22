@@ -21,7 +21,7 @@ pub fn align_of_primitive(p: Primitive) -> usize {
 
 /// Error message reported when a non-cast `SchemaType` variant
 /// (`Bool` / `String` / `Bytes` / `Option` / `Vec` / `Enum` / `Unit` /
-/// `Ref` / `Map`) appears inside a `#[repr(C)]` cast-shaped struct.
+/// `Map`) appears inside a `#[repr(C)]` cast-shaped struct.
 /// Used by both the encode and decode paths so the diagnostic string
 /// stays byte-identical across the two sides.
 pub const NON_CAST_VARIANTS_MSG: &str = "non-cast field inside cast-shaped struct";
@@ -33,7 +33,7 @@ pub const NON_CAST_VARIANTS_MSG: &str = "non-cast field inside cast-shaped struc
 ///
 /// Both the encode and decode paths previously open-coded the same
 /// `Bool | String | Bytes | Option(_) | Vec(_) | Enum { .. } | Unit |
-/// Ref(_) | Map { .. }` OR-pattern with the same error message.
+/// Map { .. }` OR-pattern with the same error message.
 /// Centralising the classification here keeps the exhaustiveness
 /// check (every new `SchemaType` variant forces a decision in this
 /// function) while letting the call sites stay short.
@@ -47,7 +47,6 @@ pub fn non_cast_variant_error(ty: &SchemaType) -> Option<&'static str> {
         | SchemaType::Vec(_)
         | SchemaType::Enum { .. }
         | SchemaType::Unit
-        | SchemaType::Ref(_)
         | SchemaType::Map { .. } => Some(NON_CAST_VARIANTS_MSG),
         SchemaType::Scalar(_)
         | SchemaType::TypeId(_)

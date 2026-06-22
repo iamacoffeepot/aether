@@ -1,6 +1,6 @@
 # ADR-0100: Wire values through the kind codec
 
-- **Status:** Accepted
+- **Status:** Accepted — the general principle (substrate wire surfaces encode through `Kind::encode_into_bytes`) stands; the `Ref<K>` inline-arm application is moot after #2137 removed `Ref<K>`.
 - **Date:** 2026-06-08
 - **Revises:** ADR-0045 §1 (the `Ref<K>` inline-arm wire encoding)
 

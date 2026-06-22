@@ -28,10 +28,8 @@
 //        elements (maps in ascending encoded-key byte order)
 //      - [T; N]: concatenated encoded elements (no count)
 //      - Option<T>: presence byte, then T if Some
-//      - enum / Ref selector: `u32` little-endian (the variant index)
+//      - enum selector: `u32` little-endian (the variant index)
 //      - struct: concatenated field bytes in declaration order
-//      - Ref handle arm: `id` (8 LE) + `kind_id` (8 LE)
-//      - Ref inline arm: `u32` length + a nested kind image
 //
 // We write the bytes directly rather than going through a serde
 // serializer because the JSON-driven encoding is structural — matching
@@ -155,9 +153,7 @@ pub fn encode_schema(params: &Value, schema: &SchemaType) -> Result<Vec<u8>, Enc
 }
 
 /// Recursively encode `value` into the `aether_data::wire` format under
-/// `schema`. The `Ref` inline arm recurses through `encode_schema` to
-/// nest a fresh kind image (length-prefixed). The encoding is
-/// unversioned (ADR-0118 §Envelope).
+/// `schema`. The encoding is unversioned (ADR-0118 §Envelope).
 /// `path` is a dotted breadcrumb (`$.field.subfield[2]`) used to make
 /// error messages locate the offending field in deeply-nested params.
 // One match arm per `SchemaType`; each arm is short but they sum up.
@@ -321,60 +317,6 @@ fn encode_wire_value(
             }
             Ok(())
         }
-        SchemaType::Ref(inner) => {
-            // ADR-0045 typed handle, inline arm revised by ADR-0100.
-            // Externally-tagged JSON matches the Rust enum:
-            // `{"Inline": <inner-K>}` chooses the inline arm;
-            // `{"Handle": {"id": u64, "kind_id": u64}}` chooses the
-            // handle arm. Wire is a `u32` little-endian selector + body.
-            // The inline body is the inner kind's own codec image (cast
-            // or wire, dispatched on `inner` via `encode_schema`)
-            // length-prefixed with a `u32`; the handle body is `id`
-            // (8 LE) + `kind_id` (8 LE).
-            let (tag, body) = decode_enum_tag(value, path)?;
-            match tag {
-                "Inline" => {
-                    out.extend_from_slice(&0u32.to_le_bytes());
-                    // The inner image is the same bytes `Kind::encode_into_bytes`
-                    // produces for the inner kind — `encode_schema` picks
-                    // cast for a `repr_c: true` struct, a wire image
-                    // otherwise.
-                    let body_bytes = encode_schema(body, inner)?;
-                    write_count(out, body_bytes.len(), path)?;
-                    out.extend_from_slice(&body_bytes);
-                    Ok(())
-                }
-                "Handle" => {
-                    out.extend_from_slice(&1u32.to_le_bytes());
-                    let obj = body.as_object().ok_or_else(|| EncodeError::TypeMismatch {
-                        field: path.to_owned(),
-                        expected: "Handle object",
-                    })?;
-                    for key in obj.keys() {
-                        if key != "id" && key != "kind_id" {
-                            return Err(EncodeError::UnexpectedField(format!("{path}.{key}")));
-                        }
-                    }
-                    let id_path = format!("{path}.id");
-                    let kind_id_path = format!("{path}.kind_id");
-                    let id_v = obj
-                        .get("id")
-                        .ok_or_else(|| EncodeError::MissingField(id_path.clone()))?;
-                    let kind_id_v = obj
-                        .get("kind_id")
-                        .ok_or_else(|| EncodeError::MissingField(kind_id_path.clone()))?;
-                    let id = as_unsigned(id_v, &id_path, "u64")?;
-                    let kind_id = as_unsigned(kind_id_v, &kind_id_path, "u64")?;
-                    out.extend_from_slice(&id.to_le_bytes());
-                    out.extend_from_slice(&kind_id.to_le_bytes());
-                    Ok(())
-                }
-                _ => Err(EncodeError::TypeMismatch {
-                    field: path.to_owned(),
-                    expected: "Inline or Handle variant",
-                }),
-            }
-        }
         // ADR-0065 typed id. Wire is a `u64` fixed little-endian; JSON is
         // the ADR-0064 tagged-string form (`mbx-XXXX-XXXX-XXXX` etc.)
         // for the post-migration shape, with a back-compat path that
@@ -533,9 +475,8 @@ fn write_scalar_wire(
 }
 
 /// Write a `u32` little-endian count/length — the `wire` framing for
-/// every string / bytes / vec / map length and the `Ref` inline-body
-/// length. A count past the `u32` ceiling errors (`OutOfRange`) rather
-/// than truncating.
+/// every string / bytes / vec / map length. A count past the `u32`
+/// ceiling errors (`OutOfRange`) rather than truncating.
 fn write_count(out: &mut Vec<u8>, len: usize, name: &str) -> Result<(), EncodeError> {
     let count = u32::try_from(len).map_err(|_| oor(name, "u32 length"))?;
     out.extend_from_slice(&count.to_le_bytes());

@@ -1459,23 +1459,14 @@ impl DriverRunning for DesktopDriverRunning {
             mut app,
             event_loop,
             triangles_rendered,
-            // Bound (not `_boot`) so the teardown snapshot below can reach
-            // the handle store; still held to the end of `run()` so the
-            // scheduler joins workers on drop.
-            _boot: boot,
+            // Held to the end of `run()` so the scheduler joins workers on
+            // drop; the `_` prefix keeps the binding alive without a use.
+            _boot,
         } = *self;
 
         event_loop
             .run_app(&mut app)
             .map_err(|e| RunError::Other(format!("event loop: {e}").into()))?;
-
-        // ADR-0049 §3 boot fast-path (issue #1446): the event loop has
-        // exited cleanly (window closed), so write the `index.bin`
-        // snapshot of the live disk index. The next boot loads it in one
-        // read + decode instead of one `open()` per `.meta` sidecar; a
-        // crash that skips this teardown leaves the directory scan as the
-        // fallback. Best-effort + a no-op when persistence is disabled.
-        boot.handle_store.snapshot_index();
 
         let total = triangles_rendered.load(Ordering::Relaxed);
         let elapsed = app.started.map(|s| s.elapsed()).unwrap_or_default();
@@ -1578,7 +1569,6 @@ mod tests {
         use aether_substrate::actor::native::local::with_stamped;
 
         use aether_substrate::chassis::settlement::SettlementRegistry;
-        use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::Mail;
         use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
         use aether_substrate::mail::{Source, SourceAddr};
@@ -1587,8 +1577,7 @@ mod tests {
         for d in descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
         }
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
 
         // Wire one settlement registry into both seams (the chassis builder
         // does both installs at boot) so an armed Call drains cleanly.
@@ -1683,7 +1672,6 @@ mod tests {
         use aether_kinds::descriptors;
         use aether_substrate::actor::native::local::with_stamped;
 
-        use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::Mail;
         use aether_substrate::mail::registry::{InboxHandler, Registry};
 
@@ -1691,8 +1679,7 @@ mod tests {
         for d in descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
         }
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
 
         let window_mailbox = mailbox_id_from_name(
             <aether_capabilities::HeadlessWindowCapability as Addressable>::NAMESPACE,
@@ -1745,7 +1732,6 @@ mod tests {
         use aether_kinds::descriptors;
 
         use aether_substrate::chassis::settlement::SettlementRegistry;
-        use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::Mail;
         use aether_substrate::mail::registry::{InboxHandler, Registry};
 
@@ -1760,8 +1746,7 @@ mod tests {
         for d in descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
         }
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
 
         // Wire a settlement registry into both seams (the chassis builder
         // does both installs at boot, builder.rs:1119-1122) so the
@@ -1849,12 +1834,10 @@ mod tests {
         use aether_data::MailId;
 
         use aether_substrate::chassis::settlement::SettlementRegistry;
-        use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::registry::{InboxHandler, Registry};
 
         let registry = Arc::new(Registry::new());
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
 
         // Wire one settlement registry into both seams (the chassis builder
         // does both installs at boot) so the counter's zero-transition can
@@ -1957,7 +1940,6 @@ mod tests {
         use aether_data::{KindId, MailId};
         use aether_kinds::trace::Nanos;
         use aether_substrate::capture::PendingCapture;
-        use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::MailRef;
         use aether_substrate::mail::Source;
         use aether_substrate::mail::registry::{OwnedDispatch, Registry};
@@ -1969,8 +1951,7 @@ mod tests {
             // straight onto the `SettlingInbox`'s channel, then drained to
             // the guard.
             let registry = Arc::new(Registry::new());
-            let store = Arc::new(HandleStore::new(1024 * 1024));
-            let mailer = Arc::new(Mailer::new(registry, store));
+            let mailer = Arc::new(Mailer::new(registry));
             let mailbox = MailboxId(0x0CAB);
             let (tx, rx) = mpsc::channel::<Envelope>();
             tx.send(OwnedDispatch::disarmed(
@@ -2059,7 +2040,6 @@ mod tests {
 
         use aether_substrate::capture::PendingCapture;
         use aether_substrate::chassis::settlement::SettlementRegistry;
-        use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::registry::{InboxHandler, Registry};
         use aether_substrate::mail::{Mail, Source, SourceAddr};
 
@@ -2067,8 +2047,7 @@ mod tests {
         for d in descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
         }
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
 
         // One settlement registry wired into both seams (the chassis builder
         // does both installs at boot) so the inbound + reply settle cleanly.

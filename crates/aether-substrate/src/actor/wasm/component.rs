@@ -1350,7 +1350,6 @@ mod tests {
 
     use super::*;
     use crate::actor::wasm::host_fns;
-    use crate::handle_store::HandleStore;
     use crate::mail::MailboxId;
     use crate::mail::mailer::Mailer;
     use crate::mail::outbound::{EgressEvent, HubOutbound};
@@ -1393,11 +1392,10 @@ mod tests {
 
     fn ctx() -> ComponentCtx {
         let registry = Arc::new(Registry::new());
-        let store = Arc::new(HandleStore::new(1024 * 1024));
         ComponentCtx::new(
             MailboxId(0),
             Arc::clone(&registry),
-            Arc::new(Mailer::new(registry, store)),
+            Arc::new(Mailer::new(registry)),
             HubOutbound::disconnected(),
         )
     }
@@ -2263,8 +2261,7 @@ mod tests {
                 schema: SchemaType::Unit,
             })
             .expect("register kind");
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let ctx = ComponentCtx::new(M(0), registry, mailer, outbound);
         (ctx, rx, pong_id)
     }
@@ -2363,8 +2360,7 @@ mod tests {
             })
             .expect("register kind");
 
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let ctx = ComponentCtx::new(
             M(0),
             Arc::clone(&registry),
@@ -2409,10 +2405,8 @@ mod tests {
             .try_register_inbox("client", registry::noop_handler())
             .expect("register client mailbox");
 
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(
-            Mailer::new(Arc::clone(&registry), store).with_outbound(Arc::clone(&outbound)),
-        );
+        let mailer =
+            Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
 
         let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
 
@@ -2452,8 +2446,7 @@ mod tests {
             .try_register_inbox("client", registry::noop_handler())
             .expect("register client mailbox");
 
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         // Deliberately no `with_outbound` — exercises the local warn-drop path.
 
         let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
@@ -2484,8 +2477,7 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let (captured, sink_id) = register_lineage_capture_sink(&registry, "issue_722_sink");
 
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
         let ctx = ComponentCtx::new(
             sender,
@@ -2533,8 +2525,7 @@ mod tests {
         let (captured, sink_id) =
             register_lineage_capture_sink(&registry, "issue_722_fresh_root_sink");
 
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x33));
         let ctx = ComponentCtx::new(
             sender,
@@ -2573,8 +2564,7 @@ mod tests {
         let (captured, sink_id) =
             register_lineage_capture_sink(&registry, "issue_1802_detached_sink");
 
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x55));
         let ctx = ComponentCtx::new(
             sender,
@@ -2683,8 +2673,7 @@ mod tests {
         );
 
         // Mail addressed to the alias lands in the parent slot's inbox.
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Mailer::new(Arc::clone(&registry), store);
+        let mailer = Mailer::new(Arc::clone(&registry));
         mailer.push(Mail::new(
             alias_id,
             aether_data::KindId(0xABCD),
@@ -2706,8 +2695,7 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let (captured, sink_id) =
             register_lineage_capture_sink(&registry, "inline_self_origin_sink");
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
         let ctx = ComponentCtx::new(
             sender,
@@ -2735,8 +2723,7 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let (captured, sink_id) =
             register_lineage_capture_sink(&registry, "inline_alias_origin_sink");
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
         let alias = MailboxId(aether_data::with_tag(Tag::Mailbox, 0xA11A5));
         let ctx = ComponentCtx::new(

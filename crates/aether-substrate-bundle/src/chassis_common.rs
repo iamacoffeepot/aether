@@ -28,10 +28,10 @@ use aether_capabilities::lifecycle::LifecycleGraphData;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
-    FsCapability, GeminiCapability, GeminiConfig, HandleCapability, HttpCapability,
-    HttpServerCapability, HttpServerConfig, InputCapability, InputConfig, InventoryCapability,
-    LifecycleConfig, TcpCapability, TextCapability, UiCapability, fs::NamespaceRoots,
-    http::HttpConfig, trace::TraceDispatchCapability,
+    FsCapability, GeminiCapability, GeminiConfig, HttpCapability, HttpServerCapability,
+    HttpServerConfig, InputCapability, InputConfig, InventoryCapability, LifecycleConfig,
+    TcpCapability, TextCapability, UiCapability, fs::NamespaceRoots, http::HttpConfig,
+    trace::TraceDispatchCapability,
 };
 use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
 // The `aether.trajectory` recorder cap moved to `aether-labyrinth` (issue
@@ -44,20 +44,15 @@ use aether_substrate::chassis::builder::Builder;
 use aether_substrate::config::{
     KnobKind, KnobRecord, KnownKeys, RingCapacities, dump_config, known_keys,
 };
-use aether_substrate::handle_store::{ENV_MAX_BYTES, PersistConfig, PersistConfigLayer};
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::scheduler::SCHEDULER_KNOBS;
 use confique::Config as _;
 use confique::meta::Meta;
 
-use crate::cli::PersistOverlay;
-
 /// Chassis-direct env knobs that aren't `#[derive(Config)]` fields —
 /// the bare-shadowed knobs the chassis bins read inline
 /// (`AETHER_WORKERS`, `AETHER_TICK_HZ`, `AETHER_RPC_PORT`, the desktop
-/// window knobs) plus the handle-store in-memory budget
-/// (`AETHER_HANDLE_STORE_MAX_BYTES`, which `HandleStore::from_env`
-/// parses outside confique). Registered as [`KnobRecord`]s so e1's
+/// window knobs). Registered as [`KnobRecord`]s so e1's
 /// unknown-`AETHER_*` sweep doesn't flag them and e2's `--config`
 /// dump lists them. ADR-0090 §1/§4. The scheduler hot-path knobs are
 /// registered separately by unit b2's `SCHEDULER_KNOBS`.
@@ -98,13 +93,6 @@ pub const CHASSIS_KNOBS: &[KnobRecord] = &[
         env_key: "AETHER_WINDOW_TITLE",
         doc: "Desktop window title text.",
         default: None,
-        kind: KnobKind::HandRegistered,
-    },
-    KnobRecord {
-        env_key: ENV_MAX_BYTES,
-        doc: "Handle-store in-memory soft byte budget (parsed outside confique; \
-              unparseable aborts boot per ADR-0090 §4).",
-        default: Some("268435456"),
         kind: KnobKind::HandRegistered,
     },
 ];
@@ -272,8 +260,8 @@ fn parse_cap_secs(s: &str) -> Result<u64, ParseIntError> {
 }
 
 /// Assemble the chassis-wide [`KnownKeys`] set (ADR-0090 §4): every
-/// migrated `*Layer::META` (http / gemini / anthropic / audio / fs /
-/// persist) plus the hand-registered chassis knobs ([`CHASSIS_KNOBS`])
+/// migrated `*Layer::META` (http / gemini / anthropic / audio / fs)
+/// plus the hand-registered chassis knobs ([`CHASSIS_KNOBS`])
 /// and scheduler hot-path knobs (b2's
 /// `aether_substrate::scheduler::SCHEDULER_KNOBS`). e1's
 /// [`validate_env`](aether_substrate::config::validate_env) sweeps the
@@ -303,7 +291,6 @@ fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
         &AnthropicConfigLayer::META,
         &AudioConfigLayer::META,
         &NamespaceRootsLayer::META,
-        &PersistConfigLayer::META,
         &ActorRingConfigLayer::META,
         &SettlementConfigLayer::META,
     ];
@@ -320,44 +307,6 @@ fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
 pub fn chassis_config_dump() -> String {
     let (metas, records) = chassis_registry();
     dump_config(metas, &records)
-}
-
-/// Chassis-bin verdict on the handle-store persistence config (ADR-0090
-/// unit d, issue 1258). [`EnvOnly`](Self::EnvOnly) keeps the pre-d
-/// `HandleStore::from_env_persistent` resolution; [`Argv`](Self::Argv)
-/// carries the argv-then-env-resolved `PersistConfig` (with the inner
-/// `None` meaning "argv said persistence is off"). The two-variant
-/// enum avoids `Option<Option<_>>` (`clippy::option_option`).
-#[derive(Clone, Debug, Default)]
-pub enum PersistOverride {
-    /// No argv overlay; resolve persistence from env at build time.
-    #[default]
-    EnvOnly,
-    /// Argv overlay resolved: use this verbatim.
-    Argv(Option<PersistConfig>),
-}
-
-/// Resolve the handle-store persistence overlay the desktop and headless
-/// chassis share (issue 1258). When argv sets any persistence field, the
-/// chassis-bin vote `persist_enabled = true` rides into an argv-then-env
-/// resolved [`PersistConfig`]; otherwise persistence falls through to
-/// env-only resolution at build time (ADR-0049 §9).
-#[must_use]
-pub fn resolve_persist_state(persist: &PersistOverlay) -> PersistOverride {
-    let persist_argv_set = persist.dir.is_some()
-        || persist.persist_disable.is_some()
-        || persist.disk_budget_bytes.is_some()
-        || persist.eviction_tick_secs.is_some();
-    if persist_argv_set {
-        PersistOverride::Argv(PersistConfig::from_argv_then_env(
-            true,
-            persist.dir.clone(),
-            persist.persist_disable,
-            persist.numeric_layer(),
-        ))
-    } else {
-        PersistOverride::EnvOnly
-    }
 }
 
 /// Build the single-stage lifecycle config the headless chassis runs
@@ -482,7 +431,6 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_aborter(boot.aborter)
         .with_workers(boot.workers)
         .with_ring_caps(boot.ring_caps)
-        .with_actor::<HandleCapability>(())
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<TrajectoryRecorderCapability>(())
         .with_actor::<InputCapability>(boot.input_config)
@@ -509,7 +457,6 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
 #[must_use]
 pub fn common_cap_namespaces() -> Vec<&'static str> {
     vec![
-        <HandleCapability as Addressable>::NAMESPACE,
         <TraceDispatchCapability as Addressable>::NAMESPACE,
         <TrajectoryRecorderCapability as Addressable>::NAMESPACE,
         <InputCapability as Addressable>::NAMESPACE,

@@ -193,10 +193,9 @@ impl DriverRunning for HeadlessTimerRunning {
             kind_lifecycle_advance,
             tick_period,
             shutdown,
-            // Bound (not `_boot`) so the teardown snapshot below can reach
-            // the handle store; still held to the end of `run()` so the
-            // scheduler joins workers on drop.
-            _boot: boot,
+            // Held to the end of `run()` so the scheduler joins workers on
+            // drop; the `_` prefix keeps the binding alive without a use.
+            _boot,
         } = *self;
 
         // ADR-0080 §6 chassis-root correlation counter (issue
@@ -235,99 +234,9 @@ impl DriverRunning for HeadlessTimerRunning {
         }
 
         // SIGINT/SIGTERM flipped `shutdown` (or a test pre-set it): the
-        // loop broke, so `run()` returns. ADR-0049 §3 boot fast-path
-        // (issue #1446): write the `index.bin` snapshot so the next boot
-        // loads it in one read + decode instead of one `open()` per
-        // `.meta` sidecar; best-effort + a no-op when persistence is
-        // disabled. Symmetric to the desktop seam after `run_app`. Then
-        // the destructured locals drop — `boot` joins the scheduler
-        // workers and `Drop for HandleStore` removes `lock.pid`
-        // (ADR-0049 §7) — the teardown a bare SIGKILL would skip.
-        boot.handle_store.snapshot_index();
+        // loop broke, so `run()` returns. The destructured locals drop —
+        // `boot` joins the scheduler workers — the teardown a bare
+        // SIGKILL would skip.
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    // Tests derive chassis mailbox ids by name to address fixture mail —
-    // reference id derivation, not sibling-cap addressing.
-    #![allow(clippy::disallowed_methods)]
-    use super::*;
-    use std::fs;
-    use std::path::PathBuf;
-    use std::process;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    use aether_substrate::handle_store::PersistConfig;
-
-    /// Unique scratch dir under the system temp dir, mirroring the
-    /// handle-store fast-path tests. PID + millis + a per-call nonce keep
-    /// concurrent test processes from colliding.
-    fn scratch_dir(tag: &str) -> PathBuf {
-        static NONCE: AtomicU64 = AtomicU64::new(0);
-        let pid = process::id();
-        let millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
-        let n = NONCE.fetch_add(1, Ordering::Relaxed);
-        let path =
-            env::temp_dir().join(format!("aether-headless-shutdown-{tag}-{pid}-{millis}-{n}"));
-        fs::create_dir_all(&path).expect("scratch dir creates");
-        path
-    }
-
-    /// A pre-set shutdown flag breaks the run loop immediately, so
-    /// `run()` returns and the teardown unwinds: `lock.pid` is removed
-    /// (ADR-0049 §7 `LockGuard::drop`) and the `index.bin` boot snapshot
-    /// is written (issue #1446). The flag is injected directly rather
-    /// than via a real signal, so the test never hangs on the tick loop.
-    #[test]
-    fn shutdown_flag_breaks_loop_and_runs_teardown() {
-        let root = scratch_dir("teardown");
-        let cfg = PersistConfig {
-            root: root.clone(),
-            disk_budget_bytes: u64::MAX,
-            eviction_tick_secs: 3600,
-        };
-
-        let boot = SubstrateBoot::builder("aether-headless-test", env!("CARGO_PKG_VERSION"))
-            .persist_config(Some(cfg.clone()))
-            .handle_store_max_bytes(Some(64 * 1024 * 1024))
-            .build()
-            .expect("substrate boot");
-
-        // Boot acquired the on-disk lock (ADR-0049 §7).
-        assert!(
-            cfg.lock_path().exists(),
-            "lock.pid written at boot before teardown"
-        );
-
-        let running = Box::new(HeadlessTimerRunning {
-            queue: Arc::clone(&boot.queue),
-            lifecycle_mailbox: mailbox_id_from_name(
-                <LifecycleCapability as Addressable>::NAMESPACE,
-            ),
-            kind_lifecycle_advance: <LifecycleAdvance as Kind>::ID,
-            // Irrelevant — the pre-set flag breaks before the first sleep.
-            tick_period: Duration::from_millis(16),
-            // Pre-set: the `while !shutdown.load(..)` guard is false on the
-            // first check, so the loop body never runs.
-            shutdown: Arc::new(AtomicBool::new(true)),
-            _boot: boot,
-        });
-
-        running.run().expect("run returns on the shutdown flag");
-
-        assert!(
-            !cfg.lock_path().exists(),
-            "lock.pid removed by LockGuard::drop after run() returns"
-        );
-        assert!(
-            cfg.index_path().exists(),
-            "index.bin snapshot written at teardown"
-        );
-
-        let _ = fs::remove_dir_all(&root);
     }
 }

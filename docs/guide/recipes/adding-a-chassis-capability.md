@@ -16,21 +16,21 @@ registration that publishes the mailbox, and the in-process test path.
 
 ## The exemplar
 
-Trace [`crates/aether-capabilities/src/handle.rs`][handle] while you
-read. `HandleCapability` owns the `aether.handle` mailbox: a config-free
-cap that pulls a shared resource off the substrate at `init` and answers
-five request kinds, each with a reply. It's small enough to hold in your
-head and exercises every step below. Verify its names against the current
-source as you go — a capability is a recompile-class recipe, so the
-symbols here rot faster than the explainers (see [the staleness
-rule](#staleness)).
+Trace [`crates/aether-labyrinth/src/trajectory.rs`][traj] while you read.
+`TrajectoryRecorderCapability` owns the `aether.trajectory` mailbox: a
+config-free cap that keeps a little per-session state and answers two
+kinds — a fire-and-forget `TrajectorySample` and a reply-bearing
+`TrajectoryEnd`. It's small enough to hold in your head and exercises
+every step below. Verify its names against the current source as you go —
+a capability is a recompile-class recipe, so the symbols here rot faster
+than the explainers (see [the staleness rule](#staleness)).
 
-[handle]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/handle.rs
+[traj]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-labyrinth/src/trajectory.rs
 
 ## 1. Name the mailbox
 
 A capability's mailbox name is its `NAMESPACE` const. Chassis-owned
-mailboxes live under the `aether.<name>` prefix — `aether.handle`,
+mailboxes live under the `aether.<name>` prefix — `aether.trajectory`,
 `aether.audio`, `aether.fs`. The mailbox id is
 `aether_data::mailbox_id_from_name(NAMESPACE)`, a compile-time const, so
 peers address the cap by type with no host round-trip. Pick a name that
@@ -43,34 +43,36 @@ The capability is a struct plus an `#[actor] impl NativeActor for X`
 block, wrapped in a `#[bridge(singleton)] mod native`:
 
 ```rust
-use aether_kinds::{HandlePublish, HandleRelease /* … the handler kinds */};
+use aether_kinds::{TrajectoryEnd, TrajectorySample /* … the handler kinds */};
 
 #[aether_actor::bridge(singleton)]
 mod native {
+    use std::collections::HashMap;
+
     use aether_actor::actor;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
 
-    use super::{HandlePublish, HandleRelease};
+    use super::{TrajectoryEnd, TrajectorySample};
 
-    pub struct HandleCapability {
-        store: Arc<HandleStore>,
+    pub struct TrajectoryRecorderCapability {
+        sessions: HashMap<u64, Vec<…>>,
     }
 
     #[actor]
-    impl NativeActor for HandleCapability {
+    impl NativeActor for TrajectoryRecorderCapability {
         type Config = ();
-        const NAMESPACE: &'static str = "aether.handle";
+        const NAMESPACE: &'static str = "aether.trajectory";
 
-        fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            let store = Arc::clone(ctx.mailer().handle_store());
-            Ok(Self { store })
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { sessions: HashMap::new() })
         }
 
+        // A reply-bearing handler returns its reply kind (ADR-0112):
         #[handler]
-        fn on_publish(&self, ctx: &mut NativeCtx<'_>, mail: HandlePublish) {
-            // … do the work, then reply:
-            ctx.reply(&HandlePublishResult::Ok { /* … */ });
+        fn on_end(&mut self, _ctx: &mut NativeCtx<'_>, mail: TrajectoryEnd) -> RecordResult {
+            // … flush the session, then return the reply value:
+            RecordResult::Ok { /* … */ }
         }
     }
 }
@@ -94,10 +96,10 @@ The pieces:
   threads it into `init`.
 - **`init(config, ctx)`** builds the struct. The mailbox is already
   claimed; `ctx` is a `NativeInitCtx` exposing `ctx.mailer()` (the shared
-  `Mailer`, which carries the `Registry` and `HandleStore`) for caps that
-  pull a shared resource at boot. `init` runs before the dispatcher
-  starts and before any peer's dispatcher runs — no mail yet. Return
-  `Err(BootError::…)` to abort the chassis build.
+  `Mailer`, which carries the `Registry`) for caps that pull a shared
+  resource at boot — this one just builds plain state. `init` runs before
+  the dispatcher starts and before any peer's dispatcher runs — no mail
+  yet. Return `Err(BootError::…)` to abort the chassis build.
 - **`wire(&mut self, ctx)`** (optional, default no-op) is the post-init
   mail-allowed hook: peers are addressable here, so subscribe to input
   streams or announce yourself from `wire`, not `init`.
@@ -107,9 +109,10 @@ The pieces:
   third parameter. Take `&self` for a read-only or stateless handler,
   `&mut self` to mutate cap state — the dispatcher owns the cap on one
   thread, so state is [plain fields, no locks](../foundations/actor-model.md).
-  The handler receives `mail` by value; reply with `ctx.reply(&result)`.
-  Handlers promise nothing about replies — a fire-and-forget kind simply
-  doesn't call `ctx.reply`.
+  The handler receives `mail` by value. A reply-bearing handler returns
+  its reply kind (`-> R`, ADR-0112); a fire-and-forget handler returns
+  `()`. For an imperative mid-handler reply, `ctx.reply(&result)` is the
+  alternative.
 
 The kinds a handler receives must exist in the substrate kind inventory
 so the dispatcher can decode the wire bytes — that's the *Adding a
@@ -145,7 +148,7 @@ builder is `aether_substrate::chassis::builder::Builder`; you add a cap
 with `with_actor::<X>(config)` ([ADR-0070][adr70] / [ADR-0071][adr71]):
 
 ```rust
-builder.with_actor::<HandleCapability>(())
+builder.with_actor::<TrajectoryRecorderCapability>(())
 ```
 
 Where that line goes depends on which chassis should carry the cap:
@@ -153,7 +156,7 @@ Where that line goes depends on which chassis should carry the cap:
 - **Every full-stack chassis** — add it to `with_common_caps` in
   [`crates/aether-substrate-bundle/src/chassis_common.rs`][common], the
   shared composition desktop, headless, and the embedded test bench all
-  call. `HandleCapability` lives here.
+  call. `TrajectoryRecorderCapability` lives here.
 - **One chassis only** — add it to that chassis's own builder chain:
   `desktop/chassis.rs`, `headless/chassis.rs`, or `hub/chassis.rs` in
   `aether-substrate-bundle`. The desktop renderer
@@ -200,7 +203,7 @@ renderer's wgpu, audio's cpal) gates the inner module behind a cargo
 feature: `#[bridge(singleton, feature = "render-native")]`. The wasm-side
 markers stay always-on (so guests still address the cap by type) while
 the native dep set only enters when the feature is on. A cap with no
-native-only deps — like `HandleCapability` — needs no feature.
+native-only deps — like `TrajectoryRecorderCapability` — needs no feature.
 
 ## 6. Test it in-process
 
@@ -224,7 +227,7 @@ in-crate pattern, in the cap's `#[cfg(test)] mod tests`:
 The cap dispatches on a real pool thread, so a round-trip test that
 sleep-polls the loopback channel under a deadline is timing-sensitive;
 keep that deadline generous so it tolerates a busy machine.
-`HandleCapability`'s `capability_routes_publish_through_dispatcher_thread`
+`TrajectoryRecorderCapability`'s `capability_routes_end_through_dispatcher_thread`
 shows the full round trip; its `duplicate_claim_rejects_with_typed_error`
 asserts the one-claimant guarantee by pre-registering the name and
 expecting `BootError::MailboxAlreadyClaimed`.
@@ -248,7 +251,7 @@ smoke catches what the in-process test can't.
 
 This recipe carries file paths and symbol names, so confirm them against
 the current source before following it. The exemplar is
-[`crates/aether-capabilities/src/handle.rs`][handle] — if a name here
+[`crates/aether-labyrinth/src/trajectory.rs`][traj] — if a name here
 doesn't match what's in the tree, fix the recipe as part of your change.
 The pointer is to the real cap, not a frozen copy, exactly so it tracks
 the code.
