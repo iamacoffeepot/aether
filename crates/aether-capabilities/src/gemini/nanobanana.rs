@@ -7,7 +7,7 @@
 //! [`parse_image_response`] so a fixture-replay test can lock the
 //! response shape (ADR-0050 §4).
 
-use aether_kinds::{AspectRatio, GeminiError, ImageSize};
+use super::{AspectRatio, GeminiError, ImageSize};
 
 /// The three Nano Banana models the cap accepts, with their per-model
 /// support shape. Drives both `UnknownModel` rejection and the
@@ -326,7 +326,7 @@ mod tests {
         ModelShape, ValidationInputs, base64_decode, lookup_model, parse_image_response,
         supported_model_ids, validate,
     };
-    use aether_kinds::{AspectRatio, GeminiError, ImageSize};
+    use crate::gemini::{AspectRatio, GeminiError, ImageSize};
 
     fn nb2() -> &'static ModelShape {
         lookup_model("gemini-3.1-flash-image-preview").expect("NB2 is a supported model")
