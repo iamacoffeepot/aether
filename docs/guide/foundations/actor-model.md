@@ -126,7 +126,7 @@ it handles from the method's **third parameter**:
 ```rust
 #[actor]
 impl WasmActor for Hello {
-    const NAMESPACE: &'static str = "hello";
+    const NAMESPACE: &'static str = "example.hello";
 
     fn init<C: Resolver>(_ctx: &mut C) -> Result<Self, ActorInitError> {
         Ok(Hello)
