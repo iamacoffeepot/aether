@@ -25,7 +25,7 @@ window-less chassis. Trace it end to end through these four files:
   reply `FocusWindowResult`.
 - **Desktop handler** — `crates/aether-substrate-bundle/src/desktop/driver.rs`:
   `apply_window_focus`.
-- **Window-less handler** — `crates/aether-capabilities/src/window.rs`:
+- **Window-less handler** — `crates/aether-capabilities/src/window/mod.rs`:
   `HeadlessWindowCapability::on_focus`.
 - **Coverage guard** — `crates/aether-kinds/src/descriptors.rs`:
   `covers_every_substrate_kind`.
@@ -98,7 +98,7 @@ chassis:
   `desktop/driver.rs` un-minimizes, shows, and raises the window, then replies
   `FocusWindowResult::Ok`.
 - **Headless / test-bench** — `HeadlessWindowCapability::on_focus` in
-  `aether-capabilities/src/window.rs` replies `FocusWindowResult::Err`, so an
+  `aether-capabilities/src/window/mod.rs` replies `FocusWindowResult::Err`, so an
   MCP caller on a window-less chassis fails fast instead of hanging on a reply
   that never comes.
 
