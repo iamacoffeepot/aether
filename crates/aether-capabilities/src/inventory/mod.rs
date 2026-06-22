@@ -54,8 +54,15 @@ use aether_kinds::{
     ResolveResult,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+mod manifest;
+#[cfg(not(target_arch = "wasm32"))]
+mod resolve;
+
 #[aether_actor::bridge(singleton)]
 mod native {
+    use super::manifest::{cardinality_wire, param_kind_wire};
+    use super::resolve::resolve_ids;
     use super::{
         HandlersResult, ListHandlers, ListKinds, ListKindsResult, Manifest, ManifestResult,
         Resolve, ResolveResult,
@@ -64,20 +71,22 @@ mod native {
     use aether_actor::actor;
     use aether_data::KindId;
     use aether_data::canonical::kind_id_from_parts;
-    use aether_data::name_inventory::{
-        Cardinality, ParamKind, handler_entries, name_entries, template_entries,
-    };
-    use aether_data::tagged_id;
+    use aether_data::name_inventory::{handler_entries, name_entries, template_entries};
     use aether_data::wire;
-    use aether_kinds::{
-        CardinalityWire, HandlerEntryWire, KindDescriptorWire, NameEntryWire, ParamKindWire,
-        ResolvedName, TemplateEntryWire,
-    };
+    use aether_kinds::{HandlerEntryWire, KindDescriptorWire, NameEntryWire, TemplateEntryWire};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::registry::Registry;
-    use aether_substrate::runtime::thread_name::resolve_runtime;
     use std::sync::Arc;
+
+    // Used only by the test suite — gate to avoid unused-import warnings in
+    // the non-test build (they flow in via `use super::*` inside `mod tests`).
+    #[cfg(test)]
+    use aether_data::tagged_id;
+    #[cfg(test)]
+    use aether_kinds::{CardinalityWire, ParamKindWire};
+    #[cfg(test)]
+    use aether_substrate::runtime::thread_name::resolve_runtime;
 
     /// `aether.inventory` cap (ADR-0088 §6, widened by ADR-0091 §5). The
     /// `Manifest` and `Resolve` arms read process-global tables (the
@@ -90,32 +99,6 @@ mod native {
     /// without any cross-cap event channel.
     pub struct InventoryCapability {
         registry: Arc<Registry>,
-    }
-
-    /// Project one link-time `ParamKind` onto its wire mirror. `Bounded`
-    /// / `Declared` carry their range / domain so the client expands the
-    /// family locally; `Dynamic` carries only the shape (its instances
-    /// reverse via [`Resolve`]).
-    fn param_kind_wire(param: &ParamKind) -> ParamKindWire {
-        match *param {
-            ParamKind::Bounded { lo, hi } => ParamKindWire::Bounded { lo, hi },
-            ParamKind::Declared { domain } => ParamKindWire::Declared {
-                domain: domain.to_vec(),
-            },
-            ParamKind::Dynamic => ParamKindWire::Dynamic,
-        }
-    }
-
-    /// Project one link-time `Cardinality` onto its wire mirror (ADR-0088
-    /// §4 v2) — the orthogonal how-many axis the client surfaces verbatim.
-    fn cardinality_wire(cardinality: &Cardinality) -> CardinalityWire {
-        match *cardinality {
-            Cardinality::Bounded(count) => CardinalityWire::Bounded { count },
-            Cardinality::OnePer(entity) => CardinalityWire::OnePer {
-                entity: entity.into(),
-            },
-            Cardinality::Unbounded => CardinalityWire::Unbounded,
-        }
     }
 
     #[actor]
@@ -232,18 +215,9 @@ mod native {
         #[allow(clippy::unused_self)]
         #[handler]
         fn on_resolve(&mut self, _ctx: &mut NativeCtx<'_>, mail: Resolve) -> ResolveResult {
-            let resolved = mail
-                .ids
-                .into_iter()
-                .map(|id| {
-                    // A malformed tagged-id string reports `None` rather
-                    // than aborting the batch — one bad id doesn't sink
-                    // its siblings.
-                    let name = tagged_id::decode(&id).ok().and_then(resolve_runtime);
-                    ResolvedName { id, name }
-                })
-                .collect();
-            ResolveResult { resolved }
+            ResolveResult {
+                resolved: resolve_ids(mail.ids),
+            }
         }
 
         /// Reply with the native handler manifest (ADR-0109 §5): every
