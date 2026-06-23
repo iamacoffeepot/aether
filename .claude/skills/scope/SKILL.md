@@ -104,6 +104,7 @@ For each sub-phase: read inputs, write the corresponding body section, and recon
   ### Affected surfaces
   <crates, public traits, wire formats, ADRs touched>
   ```
+- **Cross-crate type move — cycle-direction check**: when the chosen approach moves a type from a lower crate into a higher one (lower→higher in the crate dependency DAG), the scoper must not assert cycle-freedom — it must record a concrete inverse-direction check in `### Affected surfaces`. Because a lower crate cannot depend on a higher one, the hazard for a lower→higher move is an item *remaining* in the lower crate that still references the moved type; grep the lower crate against `origin/main` for consumers of the moved type (e.g. `git grep <TypeName> origin/main -- crates/<lower-crate>/`) and paste the command and its result into §Design notes. An empty consumer set is the evidence the move is cycle-free; a non-empty set means the move closes a dependency cycle and the plan must resolve it (move the consumer too, relocate to a third crate, or abandon the move).
 - **ADR drafting**: if the chosen approach is load-bearing (touches public traits, wire formats, lifecycle, dispatch, or otherwise looks architectural), scaffold an ADR via the `/adr` skill on a `docs/adr-NNNN-<slug>` branch and open a PR. Link the ADR PR in the Design notes section. The issue is not eligible for `/approve` until the ADR PR is merged.
 - **Bounce**: rare. Use only when truly stuck on a value-judgment the user must make.
 - **Phase label**: reconcile to `phase:plan` on success.
