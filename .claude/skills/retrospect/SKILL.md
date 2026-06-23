@@ -19,8 +19,7 @@ Gathering the tooling and process papercuts hit during a session, triaging the r
 
 ## Preconditions
 
-1. `.claude/release-state.json` exists (confirms the project pipeline is bootstrapped).
-2. The running session has reviewable activity — at least one exchange in which tooling, process, or project mechanics were encountered.
+1. The running session has reviewable activity — at least one exchange in which tooling, process, or project mechanics were encountered.
 
 ## The flow
 

@@ -20,9 +20,8 @@ description: Triage §Side findings into child GitHub issues. Reads the parent i
 
 ## Preconditions
 
-1. `.claude/release-state.json` exists.
-2. Parent issue exists (no Phase restriction — even Done parents can spin off informational findings).
-3. Parent's body has a `## Side findings` section with at least one bullet.
+1. Parent issue exists (no Phase restriction — even Done parents can spin off informational findings).
+2. Parent's body has a `## Side findings` section with at least one bullet.
 
 ## Interactive mode
 

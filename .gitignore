@@ -43,7 +43,6 @@ spikes/*/target/
 # markdown, not part of the source tree. Read locally, file the wishes you
 # like as issues, discard the file.
 /wishes/
-.claude/release-state.json
 .claude/release-units.json
 # Perf-comparison artifacts written by scripts/perf-compare.sh
 # (iamacoffeepot/aether#1077) — per-run JSON + sticky-comment markdown,

@@ -2,9 +2,8 @@
 # release-project-init.sh — bootstrap the label vocabulary for aether releases.
 #
 #   release-project-init.sh <version> [--owner <owner>]
-#       Ensure the phase / bounce-to / size / model labels exist on the repo,
-#       then print the minimal release-state.json the /release-init skill
-#       writes. Idempotent — a re-run only fills gaps.
+#       Ensure the phase / bounce-to / size / model labels exist on the repo.
+#       Idempotent — a re-run only fills gaps.
 #
 # Issue phase is carried entirely by phase:* labels: Backlog and Done are
 # label-absence, each active phase has its own label. size:* and model:* carry
@@ -65,13 +64,5 @@ ensure_label "model:sonnet" fef2c0 "mechanical, fully-specified work"
 ensure_label "model:opus"   fef2c0 "judgment / cross-crate / design-adjacent"
 ensure_label "model:fable"  fef2c0 "top tier, pinned by a human"
 
-cat <<EOF
-
-✓ Labels ensured for aether ${VERSION}.
-
-Write .claude/release-state.json (the /release-init skill does this):
-  {
-    "release_version": "${VERSION}",
-    "owner": "${OWNER}"
-  }
-EOF
+echo ""
+echo "✓ Labels ensured for aether ${VERSION}."
