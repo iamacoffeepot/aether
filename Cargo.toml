@@ -29,17 +29,7 @@ members = [
     "crates/aether-test-fixtures/aether-test-fixtures-stateful-reshaped",
     "xtask",
 ]
-# Reference artefacts under spikes/ are standalone Cargo workspaces
-# (see ADR-0003 §Consequences) and must be excluded so they aren't
-# auto-absorbed into this workspace via the parent-walk. Explicit
-# listing (rather than a `spikes/*` glob) because Qodana's TOML
-# inspector can't resolve workspace globs and flags them as
-# unresolved file references.
 exclude = [
-    "spikes/aether-mail-spike-guest",
-    "spikes/aether-mail-spike-host",
-    "spikes/prompt-pipeline-spike",
-    "spikes/recruit-k-sim",
     # The cargo-fuzz harness (issue 1562) is its own nested crate on the
     # nightly toolchain; keeping it out of the workspace members leaves
     # the stable `cargo` build, the lockfile, and the `crate:<short>`
