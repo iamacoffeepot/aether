@@ -54,7 +54,9 @@ use aether_kinds::LifecycleUnsubscribeAll;
 use aether_kinds::{DropComponent, ListComponents, LoadComponent, ReplaceComponent};
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::ComponentHostConfig;
+mod config;
+#[cfg(not(target_arch = "wasm32"))]
+pub use config::ComponentHostConfig;
 
 #[aether_actor::bridge(singleton)]
 mod native {
@@ -67,6 +69,7 @@ mod native {
     use aether_kinds::{ListComponentsResult, LoadResult};
     use wasmtime::{Engine, Linker};
 
+    use super::config::ComponentHostConfig;
     use super::{
         DropComponent, LifecycleUnsubscribeAll, ListComponents, LoadComponent, ReplaceComponent,
         UnsubscribeAll,
@@ -82,20 +85,6 @@ mod native {
 
     use crate::input::InputCapability;
     use crate::lifecycle::LifecycleCapability;
-
-    /// Configuration for [`ComponentHostCapability`]. `engine` and
-    /// `linker` are the wasmtime instances every load instantiates
-    /// against (handed through to the trampoline's
-    /// `Component::instantiate` call); `hub_outbound` is the egress
-    /// handle the cap uses for `aether.kinds.changed` announcements
-    /// after each load. ADR-0021 fan-out is mail-driven post-issue-640
-    /// — the cap mails subscribe / unsubscribe to `aether.input`
-    /// rather than mutating shared state.
-    pub struct ComponentHostConfig {
-        pub engine: Arc<Engine>,
-        pub linker: Arc<Linker<ComponentCtx>>,
-        pub hub_outbound: Arc<HubOutbound>,
-    }
 
     /// `aether.component` cap. Plain-fields shape — single-threaded
     /// owner running on its dispatcher thread; no shared state. Input

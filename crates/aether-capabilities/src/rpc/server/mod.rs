@@ -31,7 +31,11 @@ use aether_kinds::trace::Settled;
 // Re-export the cap's config + handle struct at file root for chassis
 // builders + embedders that read the bound port.
 #[cfg(not(target_arch = "wasm32"))]
-pub use server_native::{RpcServerConfig, RpcServerHandle};
+mod config;
+#[cfg(not(target_arch = "wasm32"))]
+pub use config::RpcServerConfig;
+#[cfg(not(target_arch = "wasm32"))]
+pub use server_native::RpcServerHandle;
 
 use aether_rpc::rpc::PeerKind;
 
@@ -47,6 +51,7 @@ mod tests;
 
 #[aether_actor::bridge(singleton)]
 mod server_native {
+    use super::config::RpcServerConfig;
     use super::connection::{ConnId, ConnState, InboundEvent, run_reader_loop};
     use super::{PeerKind, RpcInboundReady, Settled};
     use crate::engine::EngineServer;
@@ -74,18 +79,6 @@ mod server_native {
     use std::thread;
     use std::thread::JoinHandle;
     use std::time::Duration;
-
-    /// Init config for [`RpcServerCapability`].
-    ///
-    /// `bind_addr` is the address to bind on (e.g. `"127.0.0.1:8910"`,
-    /// `"0.0.0.0:0"` to let the OS pick). `peer_kind` identifies this
-    /// server to connecting peers via the `HelloAck` reply; chassis
-    /// builders supply a `PeerKind::Substrate { engine_name, .. }` for
-    /// substrate / hub endpoints.
-    pub struct RpcServerConfig {
-        pub bind_addr: String,
-        pub peer_kind: PeerKind,
-    }
 
     /// Exported handle bundle published at boot. Reachable from the
     /// chassis via `PassiveChassis::handle::<RpcServerHandle>()`;
