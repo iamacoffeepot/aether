@@ -52,9 +52,8 @@ mod tests {
 
     use crate::{
         Delete, DeleteResult, DrawTriangle, DropComponent, DropResult, FsFetch, FsFetchResult, Key,
-        LifecycleUnsubscribeAll, List, ListResult, LoadComponent, LoadResult, LyriaGenerate,
-        LyriaGenerateResult, Mat4Apply, MouseButton, MouseMove, NanobananaGenerate,
-        NanobananaGenerateResult, Ping, Pong, ProcessExited, Read, ReadResult, RecordResult,
+        LifecycleUnsubscribeAll, List, ListResult, LoadComponent, LoadResult, Mat4Apply,
+        MouseButton, MouseMove, Ping, Pong, ProcessExited, Read, ReadResult, RecordResult,
         ReplaceComponent, ReplaceResult, Spawn, SpawnResult, Terminate, TerminateResult, Tick,
         TrajectoryEnd, TrajectoryLog, TrajectorySample, Write, WriteResult,
     };
@@ -122,42 +121,6 @@ mod tests {
         assert!(names.contains(&Terminate::NAME));
         assert!(names.contains(&TerminateResult::NAME));
         assert!(names.contains(&ProcessExited::NAME));
-        assert!(names.contains(&NanobananaGenerate::NAME));
-        assert!(names.contains(&NanobananaGenerateResult::NAME));
-        assert!(names.contains(&LyriaGenerate::NAME));
-        assert!(names.contains(&LyriaGenerateResult::NAME));
-    }
-
-    #[test]
-    fn gemini_requests_are_structured_schemas() {
-        // ADR-0050: both generate kinds carry String/Vec/Option fields.
-        let descs = all();
-        for name in [NanobananaGenerate::NAME, LyriaGenerate::NAME] {
-            let d = descs
-                .iter()
-                .find(|d| d.name == name)
-                .expect("test setup: gemini request kind is registered in descriptor inventory");
-            let SchemaType::Struct { repr_c, .. } = &d.schema else {
-                panic!("{name} should be Struct, got {:?}", d.schema);
-            };
-            assert!(!*repr_c, "{name} contains String/Vec, must be structured");
-        }
-    }
-
-    #[test]
-    fn gemini_results_are_enum_schemas() {
-        let descs = all();
-        for name in [NanobananaGenerateResult::NAME, LyriaGenerateResult::NAME] {
-            let d = descs
-                .iter()
-                .find(|d| d.name == name)
-                .expect("test setup: gemini result kind is registered in descriptor inventory");
-            assert!(
-                matches!(d.schema, SchemaType::Enum { .. }),
-                "{name} should be Enum, got {:?}",
-                d.schema
-            );
-        }
     }
 
     #[test]

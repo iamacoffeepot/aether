@@ -14,7 +14,7 @@
 //! reads base64 audio clips out of the Vertex `predictions` array; if
 //! the live field names differ, only this parser changes.
 
-use aether_kinds::GeminiError;
+use super::GeminiError;
 
 /// Supported Lyria models (2026-05-20 snapshot).
 pub const MODELS: &[&str] = &["lyria-2", "lyria-3", "lyria-3-pro"];
@@ -78,7 +78,7 @@ pub fn parse_clip_response(json: &str) -> Result<Vec<Vec<u8>>, String> {
 #[cfg(test)]
 mod tests {
     use super::{is_supported, parse_clip_response, supported_model_ids, validate};
-    use aether_kinds::GeminiError;
+    use crate::gemini::GeminiError;
 
     #[test]
     fn known_models_are_supported() {

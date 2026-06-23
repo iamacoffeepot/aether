@@ -5,7 +5,7 @@
 //! `*NotSupportedByModel` / `MissingRequiredField` / `UnknownModel`
 //! variants directly.
 
-use aether_kinds::GeminiError;
+use super::GeminiError;
 
 use crate::contentgen::shared::{parse_status_prefix, snippet};
 
@@ -51,7 +51,7 @@ pub fn adapter_error_to_typed(raw: &str) -> GeminiError {
 #[cfg(test)]
 mod tests {
     use super::{adapter_error_to_typed, status_to_error};
-    use aether_kinds::GeminiError;
+    use crate::gemini::GeminiError;
 
     #[test]
     fn unauthorized_statuses_map_to_unauthorized() {
