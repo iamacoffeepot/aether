@@ -66,7 +66,7 @@ pub use kinds::*;
 // of the mod (always-on, outside the cfg gate). The audio kinds resolve
 // through the `kinds` glob above; `ReadResult` is an `aether.fs` kind (a
 // different cap) the audio cap receives as the track-load reply.
-use aether_kinds::ReadResult;
+use crate::fs::ReadResult;
 
 // `AudioConfig` rides through file root for chassis-bin consumers
 // that build it from env (`from_env`) and pass it to
@@ -128,9 +128,9 @@ mod native {
         LoadInstrument, LoadInstrumentResult, PlayTrack, PlayTrackResult, Schedule, ScheduleResult,
         SetMasterGainResult, StopTrack,
     };
+    use crate::fs::{Read, ReadResult};
     use aether_actor::{Manual, OutboundReply, actor};
     use aether_data::{MailboxId, Source, SourceAddr};
-    use aether_kinds::{Read, ReadResult};
 
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
     use aether_substrate::chassis::error::BootError;
@@ -1078,13 +1078,13 @@ mod native {
         #![allow(clippy::unwrap_used)]
 
         use super::*;
+        use crate::fs::FsError;
         use crate::test_chassis::{
             TestChassis, boot_test_chassis_with, decode_session_reply, drive_task_completion,
             fresh_substrate, test_mailer_and_rx,
         };
         use aether_actor::Addressable;
         use aether_data::{MailId, SessionToken, Source, SourceAddr, Uuid};
-        use aether_kinds::FsError;
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::chassis::error::BootError;

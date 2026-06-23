@@ -12,9 +12,9 @@
 mod fleetbench;
 
 mod tests {
+    use aether_capabilities::fs::{List, ListResult};
     use aether_data::{Kind, MailId};
     use aether_kinds::trace::DispatchTraced;
-    use aether_kinds::{List, ListResult};
     use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 
     use crate::fleetbench::{FleetBench, dist_manifest_present};

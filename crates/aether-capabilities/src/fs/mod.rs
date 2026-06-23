@@ -1,9 +1,10 @@
-//! `aether.fs` cap. Owns the full ADR-0041 stack — `FileAdapter` trait,
-//! `LocalFileAdapter`, `AdapterRegistry`, env-driven `NamespaceRoots`,
-//! and the [`FsCapability`] itself. Chassis mains resolve a
-//! [`NamespaceRoots`] (typically via [`NamespaceRoots::from_env`]) and
-//! pass it through `with_actor::<FsCapability>(roots)` — `init` builds
-//! the adapter registry and returns `BootError` on failure (per
+//! `aether.fs` cap. Owns the full ADR-0041 stack — its mail kinds
+//! ([`kinds`], ADR-0121), the [`FileAdapter`] trait + [`LocalFileAdapter`]
+//! (`adapter`), the [`AdapterRegistry`] + env-driven [`NamespaceRoots`]
+//! (`registry`), and the [`FsCapability`] itself. Chassis mains
+//! resolve a [`NamespaceRoots`] (typically via `NamespaceRoots::from_env`)
+//! and pass it through `with_actor::<FsCapability>(roots)` — `init`
+//! builds the adapter registry and returns `BootError` on failure (per
 //! ADR-0063 fail-fast).
 //!
 //! Threading: the actor dispatcher thread pulls envelopes from the
@@ -12,302 +13,30 @@
 //! synchronously on that thread; ADR-0041 flagged a future host-fn
 //! fast path for asset-sized streaming.
 
-use std::collections::HashMap;
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+pub mod kinds;
 
-// Handler-signature kinds must be importable at file root because
-// `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
-// of the mod (always-on, outside the cfg gate).
+mod adapter;
+mod registry;
+
+pub use kinds::*;
+
+pub use adapter::{FileAdapter, FsResult, LocalFileAdapter};
+pub use registry::{AdapterRegistry, NamespaceRoots, build_registry};
+// The `Config` derive on `NamespaceRoots` emits these sibling types in
+// `registry`; chassis CLI / boot wiring addresses them through the
+// `fs::` path, so re-export them here (native-only — the derive is
+// feature-gated). Inherent shims (`from_env` / `from_argv_then_env` /
+// `into_layer`) ride the type and need no re-export.
+#[cfg(feature = "native")]
+pub use registry::{NamespaceRootsLayer, NamespaceRootsOverlay};
+
+// Handler-signature kinds resolve at file root through the `pub use
+// kinds::*` re-export above (the `#[bridge]` emits `impl HandlesKind<K>
+// for X {}` markers as siblings of the mod, always-on, outside the cfg
+// gate).
 use aether_actor::WasmActorMailbox;
-use aether_kinds::{Copy, CopyResult, Delete, FsError, FsFetch, List, NamespaceAddr, Read, Write};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::actor::native::NativeActorMailbox;
-use std::fs;
-use std::io;
-use std::process;
-
-/// Result shape used throughout the adapter layer. The variants of
-/// `FsError` map directly onto ADR-0041 §1's reply enums, so the
-/// chassis dispatcher can forward an adapter failure without
-/// translation.
-pub type FsResult<T> = Result<T, FsError>;
-
-/// Storage backend for one namespace. Implementations decide what
-/// `path` means against their own root — local files resolve it
-/// relative to a directory, a bundled adapter might look it up in
-/// an archive, a cloud adapter uses it as an object key. Path
-/// normalization (rejecting `..` and absolute prefixes) is the
-/// adapter's responsibility; callers hand the string through
-/// unchanged from the incoming mail.
-///
-/// All four methods return `FsResult<_>`. Any backend-specific
-/// detail the caller might want (OS errno text, HTTP status) rides
-/// inside `FsError::AdapterError(String)`.
-pub trait FileAdapter: Send + Sync {
-    fn read(&self, path: &str) -> FsResult<Vec<u8>>;
-    fn write(&self, path: &str, bytes: &[u8]) -> FsResult<()>;
-    fn delete(&self, path: &str) -> FsResult<()>;
-    fn list(&self, prefix: &str) -> FsResult<Vec<String>>;
-}
-
-/// Namespace → adapter table built at chassis boot. The cap reads
-/// `namespace` off an incoming `Read`/`Write`/etc. mail, looks up
-/// the adapter here, and either drives the call or replies
-/// `FsError::UnknownNamespace`. Registration is one-shot at boot;
-/// hot-swap is out of scope.
-pub struct AdapterRegistry {
-    adapters: HashMap<String, Arc<dyn FileAdapter>>,
-}
-
-impl AdapterRegistry {
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            adapters: HashMap::new(),
-        }
-    }
-
-    pub fn register(&mut self, namespace: impl Into<String>, adapter: Arc<dyn FileAdapter>) {
-        self.adapters.insert(namespace.into(), adapter);
-    }
-
-    pub fn get(&self, namespace: &str) -> Option<Arc<dyn FileAdapter>> {
-        self.adapters.get(namespace).map(Arc::clone)
-    }
-
-    #[must_use]
-    pub fn has(&self, namespace: &str) -> bool {
-        self.adapters.contains_key(namespace)
-    }
-}
-
-impl Default for AdapterRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Local-filesystem adapter. One instance per namespace root; the
-/// chassis boots one `LocalFileAdapter` per entry in the namespace
-/// config and registers them in an `AdapterRegistry`.
-///
-/// **Atomic writes.** `write` stages to a sibling `*.tmp-{pid}` file
-/// and `rename`s on success so a crash mid-write leaves either the
-/// old contents or the new — never a torn file. Rename on
-/// POSIX/Windows is atomic at the filesystem level; no application-
-/// level lock needed.
-///
-/// **Path safety.** `resolve` rejects any `path` that contains `..`
-/// segments, empty segments, or leading `/` — a component asking for
-/// `save://../etc/passwd` fails with `Forbidden` before the adapter
-/// touches the filesystem. `.` segments are permitted (they no-op on
-/// the join). Symlink escapes from within the namespace root are not
-/// defended against in v1: the substrate owns the root directory and
-/// doesn't create symlinks, and adversarial writes would require a
-/// pre-compromised disk state.
-pub struct LocalFileAdapter {
-    root: PathBuf,
-    writable: bool,
-}
-
-impl LocalFileAdapter {
-    /// Build an adapter rooted at `root`. The directory is created
-    /// if missing so a fresh install of the engine on a machine
-    /// without a pre-populated `$AETHER_SAVE_DIR` still boots. The
-    /// path is canonicalized so later comparisons (including the
-    /// symlink-safety check the v2 asset loader wants) work against
-    /// the real filesystem location.
-    // `root` is owned for builder ergonomics — callers pass the result
-    // of `dirs::data_dir()` / a `PathBuf::from(env)` straight in and
-    // we shadow-rebind to the canonicalised form.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn new(root: PathBuf, writable: bool) -> io::Result<Self> {
-        fs::create_dir_all(&root)?;
-        let root = root.canonicalize()?;
-        Ok(Self { root, writable })
-    }
-
-    /// Exposed for tests and chassis boot logging. Not a routing
-    /// surface — components address by namespace name, never by root.
-    #[must_use]
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    fn resolve(&self, path: &str) -> FsResult<PathBuf> {
-        if path.starts_with('/') {
-            return Err(FsError::Forbidden);
-        }
-        for component in path.split('/') {
-            if component == ".." {
-                return Err(FsError::Forbidden);
-            }
-        }
-        Ok(self.root.join(path))
-    }
-}
-
-impl FileAdapter for LocalFileAdapter {
-    fn read(&self, path: &str) -> FsResult<Vec<u8>> {
-        let resolved = self.resolve(path)?;
-        match fs::read(&resolved) {
-            Ok(bytes) => Ok(bytes),
-            Err(e) => Err(fs_error_from_std(e)),
-        }
-    }
-
-    fn write(&self, path: &str, bytes: &[u8]) -> FsResult<()> {
-        if !self.writable {
-            return Err(FsError::Forbidden);
-        }
-        let resolved = self.resolve(path)?;
-        if let Some(parent) = resolved.parent() {
-            fs::create_dir_all(parent).map_err(|e| FsError::AdapterError(e.to_string()))?;
-        }
-        let mut tmp = resolved.clone();
-        let existing = tmp
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| FsError::AdapterError("non-utf8 filename".into()))?
-            .to_string();
-        tmp.set_file_name(format!("{existing}.tmp-{}", process::id()));
-        fs::write(&tmp, bytes).map_err(|e| FsError::AdapterError(e.to_string()))?;
-        match fs::rename(&tmp, &resolved) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let _ = fs::remove_file(&tmp);
-                Err(FsError::AdapterError(e.to_string()))
-            }
-        }
-    }
-
-    fn delete(&self, path: &str) -> FsResult<()> {
-        if !self.writable {
-            return Err(FsError::Forbidden);
-        }
-        let resolved = self.resolve(path)?;
-        match fs::remove_file(&resolved) {
-            Ok(()) => Ok(()),
-            Err(e) => Err(fs_error_from_std(e)),
-        }
-    }
-
-    fn list(&self, prefix: &str) -> FsResult<Vec<String>> {
-        let resolved = self.resolve(prefix)?;
-        let entries = fs::read_dir(&resolved).map_err(fs_error_from_std)?;
-        let mut names = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|e| FsError::AdapterError(e.to_string()))?;
-            if let Some(s) = entry.file_name().to_str() {
-                names.push(s.to_string());
-            }
-        }
-        names.sort();
-        Ok(names)
-    }
-}
-
-// `err` taken by value so callers can use it directly as a
-// `.map_err(fs_error_from_std)` callback (the closure-converted form
-// is the natural shape at every call site here); `kind()` and
-// `to_string()` both borrow, so technically `&Error` would work, but
-// it'd force ad-hoc closures at every call site.
-#[allow(clippy::needless_pass_by_value)]
-fn fs_error_from_std(err: io::Error) -> FsError {
-    match err.kind() {
-        ErrorKind::NotFound => FsError::NotFound,
-        ErrorKind::PermissionDenied => FsError::Forbidden,
-        _ => FsError::AdapterError(err.to_string()),
-    }
-}
-
-/// Resolved filesystem roots for the three ADR-0041 namespaces. The
-/// chassis reads this at boot, hands each path to a `LocalFileAdapter`,
-/// and registers the result in an `AdapterRegistry` keyed on the
-/// namespace short name (`"save"`, `"assets"`, `"config"`).
-///
-/// ADR-0090 unit g (iamacoffeepot/aether#1264) escape hatch: the
-/// `#[derive(aether_substrate::Config)]` emits the Layer +
-/// `NamespaceRootsOverlay` + inherent `from_env` / `from_argv_then_env`
-/// shims, but `#[config(skip_from_layer)]` opts the cap out of the
-/// auto-generated `FromArgvThenEnv::from_layer`. The hand-written impl
-/// (below, in the `native` bridge mod) applies the runtime-computed
-/// `dirs::data_dir()` / `current_exe()` / `dirs::config_dir()`
-/// fallbacks that confique cannot express as literals. Per-field
-/// `env = "..."` overrides pin the unprefixed `AETHER_*_DIR` env keys.
-#[derive(Clone, Debug)]
-#[cfg_attr(feature = "native", derive(aether_substrate::Config))]
-#[cfg_attr(
-    feature = "native",
-    config(env_prefix = "AETHER", cli_prefix = "", skip_from_layer)
-)]
-pub struct NamespaceRoots {
-    #[cfg_attr(
-        feature = "native",
-        config(
-            env = "AETHER_SAVE_DIR",
-            cli_long = "save-dir",
-            parse = native::parse_dir
-        )
-    )]
-    pub save: PathBuf,
-    #[cfg_attr(
-        feature = "native",
-        config(
-            env = "AETHER_ASSETS_DIR",
-            cli_long = "assets-dir",
-            parse = native::parse_dir
-        )
-    )]
-    pub assets: PathBuf,
-    #[cfg_attr(
-        feature = "native",
-        config(
-            env = "AETHER_CONFIG_DIR",
-            cli_long = "config-dir",
-            parse = native::parse_dir
-        )
-    )]
-    pub config: PathBuf,
-}
-
-/// Populate a fresh `AdapterRegistry` with `LocalFileAdapter`s for
-/// each of the three ADR-0041 namespaces using the supplied
-/// [`NamespaceRoots`]. `save` and `config` are writable; `assets` is
-/// read-only. Returns the populated registry along with the roots
-/// echoed back (cloned) so the chassis can log what it actually
-/// wired.
-pub fn build_registry(roots: NamespaceRoots) -> io::Result<(Arc<AdapterRegistry>, NamespaceRoots)> {
-    let mut registry = AdapterRegistry::new();
-    let save = Arc::new(LocalFileAdapter::new(roots.save.clone(), true)?);
-    let assets = Arc::new(LocalFileAdapter::new(roots.assets.clone(), false)?);
-    let config = Arc::new(LocalFileAdapter::new(roots.config.clone(), true)?);
-    registry.register("save", save as Arc<dyn FileAdapter>);
-    registry.register("assets", assets as Arc<dyn FileAdapter>);
-    registry.register("config", config as Arc<dyn FileAdapter>);
-    Ok((Arc::new(registry), roots))
-}
-
-impl NamespaceRoots {
-    /// Pre-validate the configured roots: create each directory if
-    /// missing, then canonicalize. Mirrors what `LocalFileAdapter::new`
-    /// does inside `FsCapability::init`, but exposed so embedders
-    /// can validate before building the chassis. Used by chassis
-    /// builders that want to surface root-validity as a "skip the
-    /// `aether.fs` cap and continue" decision rather than letting
-    /// init failure abort the whole boot.
-    pub fn ensure_dirs(&self) -> io::Result<()> {
-        fs::create_dir_all(&self.save)?;
-        fs::create_dir_all(&self.assets)?;
-        fs::create_dir_all(&self.config)?;
-        self.save.canonicalize()?;
-        self.assets.canonicalize()?;
-        self.config.canonicalize()?;
-        Ok(())
-    }
-}
 
 /// Sender-side facade for actors addressed via
 /// `ctx.actor::<FsCapability>()`.
@@ -443,112 +172,24 @@ impl FsMailboxExt for NativeActorMailbox<'_, FsCapability> {
     }
 }
 
-// The derive emits the Layer + Overlay + `from_env` shims at this scope
-// (`NamespaceRootsLayer` alongside the `NamespaceRoots` struct). Their
-// field parsers name `native::parse_dir` by its full path, so the bridge
-// mod's helper stays put — no file-root re-export needed.
-
 #[aether_actor::bridge(singleton)]
 mod native {
+    use std::any::Any;
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::panic::{self, AssertUnwindSafe};
     use std::sync::Arc;
 
-    use std::any::Any;
-    use std::panic::{self, AssertUnwindSafe};
-
+    use super::adapter::fs_error_from_std;
     use super::{
-        AdapterRegistry, Copy, CopyResult, Delete, FsError, FsFetch, List, NamespaceRoots,
-        NamespaceRootsLayer, Read, Write, build_registry, fs_error_from_std,
+        AdapterRegistry, Copy, CopyResult, Delete, DeleteResult, FsError, FsFetch, FsFetchError,
+        FsFetchResult, FsFoldError, FsTransformError, List, ListResult, NamespaceRoots, Read,
+        ReadResult, Write, WriteResult, build_registry,
     };
     use aether_actor::actor;
     use aether_data::TransformError;
-    use aether_kinds::{
-        DeleteResult, FsFetchError, FsFetchResult, FsFoldError, FsTransformError, ListResult,
-        ReadResult, WriteResult,
-    };
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::transform::{FoldError, TransformRegistry};
-    use std::env;
-    #[cfg(feature = "native")]
-    use std::error::Error;
-    #[cfg(feature = "native")]
-    use std::fmt;
-
-    /// Hand-written `FromArgvThenEnv` impl for the `NamespaceRoots`
-    /// escape hatch (ADR-0090 unit g, iamacoffeepot/aether#1264). The
-    /// derive's `skip_from_layer` opt-out delegates `from_layer` here
-    /// because the defaults are *runtime-computed*
-    /// (`dirs::data_dir()` / `current_exe()` / `dirs::config_dir()`),
-    /// not literals confique can hold. Behaviour is byte-identical to
-    /// the prior `env_or_default` reader — an unset / empty
-    /// `AETHER_*_DIR` lands as `None` (the macro auto-promotes the
-    /// `PathBuf` domain to `Option<PathBuf>` on the Layer side when no
-    /// literal default is supplied), then the platform fallback
-    /// resolves it here.
-    ///
-    /// On a platform-directory lookup failure (e.g. no `HOME`) or
-    /// `current_exe()` resolution failure, the fallback is
-    /// `temp_dir()/aether/...` so a boot always finishes even on
-    /// headless CI.
-    #[cfg(feature = "native")]
-    impl aether_substrate::FromArgvThenEnv for NamespaceRoots {
-        type Layer = NamespaceRootsLayer;
-
-        fn from_layer(layer: NamespaceRootsLayer) -> Self {
-            Self {
-                save: layer.save.unwrap_or_else(|| {
-                    dirs::data_dir()
-                        .unwrap_or_else(env::temp_dir)
-                        .join("aether")
-                        .join("save")
-                }),
-                assets: layer.assets.unwrap_or_else(|| {
-                    env::current_exe()
-                        .ok()
-                        .and_then(|p| p.parent().map(Path::to_path_buf))
-                        .map_or_else(
-                            || env::temp_dir().join("aether").join("assets"),
-                            |p| p.join("assets"),
-                        )
-                }),
-                config: layer.config.unwrap_or_else(|| {
-                    dirs::config_dir()
-                        .unwrap_or_else(env::temp_dir)
-                        .join("aether")
-                }),
-            }
-        }
-    }
-
-    /// Parse a directory override. An empty string errors so confique
-    /// treats it as unset (preserving the prior `env_or_default`'s
-    /// `Ok(s) if !s.is_empty()` guard); any non-empty value is a path.
-    #[cfg(feature = "native")]
-    pub(super) fn parse_dir(s: &str) -> Result<PathBuf, EmptyDir> {
-        if s.is_empty() {
-            Err(EmptyDir)
-        } else {
-            Ok(PathBuf::from(s))
-        }
-    }
-
-    /// Sentinel error: an empty `AETHER_*_DIR` value, treated as unset by
-    /// confique's parse path (`Err` + empty → `None`).
-    #[cfg(feature = "native")]
-    #[derive(Debug)]
-    pub(super) struct EmptyDir;
-
-    #[cfg(feature = "native")]
-    impl fmt::Display for EmptyDir {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("empty directory override")
-        }
-    }
-
-    #[cfg(feature = "native")]
-    impl Error for EmptyDir {}
 
     /// `aether.fs` mailbox cap. Owns the resolved adapter registry +
     /// namespace roots, plus the link-time native-transform registry
@@ -899,53 +540,24 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::super::{
-            AdapterRegistry, Copy, Delete, FileAdapter, FsError, List, LocalFileAdapter,
-            NamespaceAddr, NamespaceRoots, Read, Write,
+            AdapterRegistry, Copy, CopyResult, Delete, DeleteResult, FileAdapter, FsError, List,
+            ListResult, LocalFileAdapter, NamespaceAddr, NamespaceRoots, Read, ReadResult, Write,
+            WriteResult,
         };
-        use super::{Arc, FsCapability, Path, PathBuf};
+        use super::{Arc, FsCapability};
         use aether_actor::Addressable;
         use aether_data::MailboxId;
-        use aether_kinds::{CopyResult, DeleteResult, ListResult, ReadResult, WriteResult};
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::actor::native::ctx::NativeCtx;
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::Source;
+        use std::path::{Path, PathBuf};
 
         use crate::test_chassis::{TestChassis, cleanup, fresh_substrate, scratch_dir};
         use aether_substrate::mail::SourceAddr;
         use aether_substrate::mail::registry;
         use std::fs;
-
-        // ADR-0090: the confique migration is byte-identical to the prior
-        // `env_or_default` reader. These exercise resolution without
-        // touching process env (issue 464) — the parser is pure, and the
-        // defaults check loads the layer with no `.env()` source.
-
-        #[test]
-        fn parse_dir_treats_empty_as_unset() {
-            use super::parse_dir;
-            assert!(parse_dir("").is_err(), "empty → unset (Err → None)");
-            assert_eq!(
-                parse_dir("/tmp/aether-save").expect("non-empty parses to a path"),
-                PathBuf::from("/tmp/aether-save")
-            );
-        }
-
-        #[test]
-        fn namespace_roots_layer_defaults_are_none() {
-            use super::NamespaceRootsLayer;
-            use confique::Config as _;
-            // No `.env()` source: each root has no literal default, so it
-            // resolves to `None` and `from_env` applies the runtime
-            // platform fallback. Env-free.
-            let layer = NamespaceRootsLayer::builder()
-                .load()
-                .expect("defaults load");
-            assert_eq!(layer.save, None);
-            assert_eq!(layer.assets, None);
-            assert_eq!(layer.config, None);
-        }
 
         /// Test fixture that bundles the cap, a fully-wired test mailer,
         /// and a `NativeBinding` long enough for handlers to borrow.
@@ -1766,8 +1378,8 @@ mod native {
             transform_id_by_name("seed_fs")
         }
 
+        use super::super::{FsFetch, FsFetchError, FsFetchResult, FsFoldError};
         use aether_data::Kind;
-        use aether_kinds::{FsFetch, FsFetchError, FsFetchResult, FsFoldError};
         use aether_substrate::transform::TransformRegistry;
 
         /// Unit test: `on_fetch` with empty transforms returns raw file bytes.
