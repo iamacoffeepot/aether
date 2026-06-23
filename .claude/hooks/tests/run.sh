@@ -110,6 +110,30 @@ else
 fi
 expect "release: no session id -> exit 0" release-session-worktree.sh '{}' 0
 
+echo "## check-pre-push.sh — session-cwd worktree resolution"
+SESS_WT="$SCAFFOLD/.claude/worktrees/SESS"
+SESS_GITDIR=$(git -C "$SESS_WT" rev-parse --git-dir)
+SESS_HEAD=$(git -C "$SESS_WT" rev-parse HEAD)
+SESS_STAMP="$SESS_GITDIR/aether-preflight-passed"
+
+# (d) --no-verify bypasses the gate regardless of stamp state.
+rm -f "$SESS_STAMP"
+expect "pre-push: --no-verify bypasses gate" check-pre-push.sh \
+  "{\"cwd\":\"$SESS_WT\",\"tool_input\":{\"command\":\"git push --no-verify\"}}" 0
+
+# (b) absent stamp for worktree HEAD → block.
+expect "pre-push: no stamp for worktree HEAD -> block" check-pre-push.sh \
+  "{\"cwd\":\"$SESS_WT\",\"tool_input\":{\"command\":\"git push\"}}" 2
+
+# (a) correct stamp + bare push resolved via .cwd → allow (#2200 fix).
+echo "$SESS_HEAD" > "$SESS_STAMP"
+expect "pre-push: stamped worktree HEAD, bare push via cwd -> allow" check-pre-push.sh \
+  "{\"cwd\":\"$SESS_WT\",\"tool_input\":{\"command\":\"git push\"}}" 0
+
+# (c) correct stamp + explicit cd-prefix form → allow (#1199 regression guard).
+expect "pre-push: stamped worktree HEAD, cd-prefix form -> allow" check-pre-push.sh \
+  "{\"cwd\":\"$SCAFFOLD\",\"tool_input\":{\"command\":\"cd $SESS_WT && git push\"}}" 0
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
