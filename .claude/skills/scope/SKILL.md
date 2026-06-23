@@ -59,7 +59,7 @@ Two things differ from `/implement --sweep`:
    Confirm scope? (the agents spawn only on your go-ahead)
    ```
 
-4. **On confirmation, dispatch.** Spawn one background agent per candidate, capped at a small concurrency (default ~3) so a sweep doesn't burst the shared per-user REST pool: fill the cap, and as each agent finishes the next candidate starts. Each agent runs the full single-issue `/scope` procedure on its issue and stops; the parent collects each outcome — landed at Plan, or self-bounced — and prints the roll-up.
+4. **On confirmation, dispatch.** Spawn one background agent per candidate, capped at **4** concurrent agents — the binding constraint is concurrent design-agent compute (scope runs Opus) and roll-up legibility, not the REST pool (a scope agent issues ~10 REST calls over several minutes, far below the 5,000/hr budget at any plausible concurrency): fill the cap, and as each agent finishes the next candidate starts. Each agent runs the full single-issue `/scope` procedure on its issue and stops; the parent collects each outcome — landed at Plan, or self-bounced — and prints the roll-up.
 
 The sweep never auto-confirms. A scoper agent that hits a tied design decision or an unframable body self-bounces its own issue (the single-issue Bounce mechanics), and the parent surfaces that bounce in the roll-up rather than guessing. `--sweep` takes no `--phase` (that is a single-issue resume control).
 

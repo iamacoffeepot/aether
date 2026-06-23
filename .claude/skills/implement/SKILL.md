@@ -43,7 +43,7 @@ Either mode opens the PR **as a draft**, drives CI green, and holds it in draft 
 
 2. **Gate-check each candidate.** Run the same [per-issue preconditions](#preconditions) the single-issue path runs — `phase:ready` present, no `## Sub-issues` umbrella, `## Implementation plan` present, exactly one `model:*` label. Drop any issue that fails and record the reason; the sweep does not silently skip — every dropped issue is listed in the plan with its drop reason.
 
-3. **Pack and order.** Apply the **Batched dispatch** rules above (under the hybrid background-agent mode): budget-based packing against the `size:*`-label priors refined by each body read, crate-affinity co-queueing with the trivial-mechanical exception, broadest-exploration-first ordering within each queue.
+3. **Pack and order.** Apply the **Batched dispatch** rules above (under the hybrid background-agent mode): budget-based packing against the `size:*`-label priors refined by each body read, crate-affinity co-queueing with the trivial-mechanical exception, broadest-exploration-first ordering within each queue. Concurrency equals the number of packed queues, bounded by the ~150k context-budget packing threshold (§Batched dispatch), not a flat agent count — the binding axis is per-agent context, not the REST pool.
 
    **Stale-worktree probe.** A re-swept issue from a prior bounced or aborted attempt can leave a stale `.claude/worktrees/issue-<N>` worktree and branch behind, so probe each packed candidate before dispatch: does the worktree exist, how many files are uncommitted in it, is its branch ahead of `origin/main`, and is there an open PR for the head branch (the REST `pulls?head=` form, never `gh pr list`):
 
