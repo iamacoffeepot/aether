@@ -1,19 +1,18 @@
 //! Content-addressed artifact store for the hub (ADR-0115, issue 1953).
 //!
-//! The storage half of the hub artifact registry: somewhere above the
-//! engine layer to keep uploaded binaries content-addressed, ingest one
-//! from a staged host path, and read what each binary *is*. The store is
-//! hub-scoped and keyed on a sha256 over the raw bytes, so an identical
-//! re-upload dedups to the same entry.
+//! Private implementation detail of the `aether.engine` cap: a plain
+//! struct held as one field of `EngineServer`, keeping uploaded binaries
+//! content-addressed, ingesting one from a staged host path, and reading
+//! what each binary *is*. The store is hub-scoped and keyed on a sha256
+//! over the raw bytes, so an identical re-upload dedups to the same entry.
 //!
-//! Artifact-generic from the start — an entry is a content blob plus a
-//! type-tagged ([`ArtifactKind`]) manifest — so the registry extraction
-//! (#1955) lifts it whole. Two artifact types share the store: a chassis
-//! binary (a [`BinaryManifest`](aether_kinds::BinaryManifest), ADR-0115)
-//! and a wasm component (a
-//! [`ComponentManifest`](aether_kinds::ComponentManifest) read straight
-//! from the wasm, ADR-0116 / #1956),
-//! carried in the [`StoredManifest`] enum.
+//! Artifact-generic by design — an entry is a content blob plus a
+//! type-tagged ([`ArtifactKind`]) manifest. Two artifact types share the
+//! store: a chassis binary (a
+//! [`BinaryManifest`](aether_kinds::BinaryManifest), ADR-0115) and a wasm
+//! component (a [`ComponentManifest`](aether_kinds::ComponentManifest)
+//! read straight from the wasm, ADR-0116 / #1956), carried in the
+//! [`StoredManifest`] enum.
 //!
 //! ## Layout
 //!
@@ -71,7 +70,7 @@ pub const LAYOUT_VERSION_DIR: &str = "v1";
 /// unparseable env value back to it.
 pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
-const TARGET: &str = "aether_capabilities::store";
+const TARGET: &str = "aether_capabilities::engine::store";
 
 /// The JSON sidecar written next to each entry's bytes — the type tag
 /// plus the type-tagged manifest, so a fresh store rebuilds its index
@@ -174,6 +173,7 @@ impl ArtifactStore {
 
     /// The layout root this store resolved to (after any temp fallback).
     #[must_use]
+    #[allow(dead_code)]
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -241,6 +241,7 @@ impl ArtifactStore {
     /// independent of whether a name points at it. Returns `false` if no
     /// entry has that hash. Persistence of the pin flag is a fast-follow —
     /// today a pin holds for the store's lifetime (the hub process).
+    #[allow(dead_code)]
     pub fn set_pinned(&mut self, hash: &str, pinned: bool) -> bool {
         if let Some(entry) = self.entries.get_mut(hash) {
             entry.pinned = pinned;
@@ -251,6 +252,7 @@ impl ArtifactStore {
     }
 
     /// Pin an entry by hash. Convenience for `set_pinned(hash, true)`.
+    #[allow(dead_code)]
     pub fn pin(&mut self, hash: &str) -> bool {
         self.set_pinned(hash, true)
     }
@@ -323,12 +325,14 @@ impl ArtifactStore {
 
     /// Number of stored entries.
     #[must_use]
+    #[allow(dead_code)]
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
 
     /// Approximate on-disk byte total.
     #[must_use]
+    #[allow(dead_code)]
     pub fn total_bytes(&self) -> u64 {
         self.total_bytes
     }

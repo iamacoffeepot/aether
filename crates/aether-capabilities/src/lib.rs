@@ -65,12 +65,6 @@ pub mod lifecycle;
 #[cfg(feature = "render")]
 pub mod render;
 pub mod rpc;
-// Content-addressed hub artifact store (ADR-0115, issue 1953). Native-only
-// — it forks `--describe`, reads staged host paths, and hashes bytes with
-// `sha2`, none of which the wasm-marker build links. The `EngineServer`
-// (`aether.engine`) owns one.
-#[cfg(feature = "native")]
-pub mod store;
 pub mod tcp;
 pub mod test_bench;
 // Shared `TestChassis` / `fresh_substrate` / reply-decode fixtures for the
@@ -167,10 +161,6 @@ pub use render::HeadlessRenderCapability;
 pub use render::RenderCapability;
 #[cfg(feature = "render-native")]
 pub use render::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
-#[cfg(feature = "native")]
-pub use store::{
-    ArtifactKind, ArtifactStore, Selector, StoredArtifact, StoredManifest, component_manifest,
-};
 pub use tcp::{TcpCapability, TcpListenerActor};
 pub use test_bench::UnsupportedTestBenchCapability;
 #[cfg(feature = "text")]
