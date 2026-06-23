@@ -17,8 +17,8 @@ the step where each bites.
 
 ## The exemplar to copy
 
-Follow [`HttpConfig`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/http/client.rs)
-in `crates/aether-capabilities/src/http/client.rs`. It's the same struct the
+Follow [`HttpConfig`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/http/client/config.rs)
+in `crates/aether-capabilities/src/http/client/config.rs`. It's the same struct the
 [Configuration](../systems/configuration.md) explainer excerpts, it carries most
 of the hints you'll reach for (`default`, `env`, `cli_long`, `csv_set`,
 `ms_duration`, `layer_field`), and it's wired into both full-stack chassis. Open
@@ -108,7 +108,7 @@ The container attribute on the struct sets the prefixes both names derive from:
 `HttpConfig` declares `impl Default` separately from the derive's `default = ...`
 literals (the derive feeds the layer; `Default` feeds direct construction in
 tests and call sites). Add your field's default to **both**. The
-`http_from_env_defaults_match` test in the `http/client.rs` test module is what
+`http_from_env_defaults_match` test in the `http/client/mod.rs` test module is what
 keeps them honest:
 
 ```rust
