@@ -49,9 +49,9 @@ mod load;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::input::UnsubscribeAll;
-use aether_kinds::{DropComponent, ListComponents, LoadComponent, ReplaceComponent};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_kinds::LifecycleUnsubscribeAll;
+use aether_kinds::{DropComponent, ListComponents, LoadComponent, ReplaceComponent};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::ComponentHostConfig;
