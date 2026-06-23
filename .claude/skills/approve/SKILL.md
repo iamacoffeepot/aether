@@ -19,7 +19,7 @@ The primary human review point of the release flow. The user invokes `/approve <
 
    This is the REST issues endpoint (per `/scope` §REST-vs-GraphQL routing), not `gh issue list`, which is GraphQL-backed and drains the contended pool.
 
-2. **Gate-check each candidate.** Run the full [gate checks](#gate-checks) per issue — `Phase == Plan`, the three §-sections present and non-empty, every referenced ADR PR merged, exactly one `model:*` label, not blocked by a `blocked`/`wontfix`/`duplicate` label. Drop any issue that fails and record the reason; the sweep never silently skips — every dropped issue is listed in the plan with its drop reason. `--skip-adr` is **not** honored in sweep mode: a batch is the wrong place for a per-issue emergency override, so an unmerged-ADR issue is dropped and listed, to be approved singly with `/approve <n> --skip-adr` if the override is intended.
+2. **Gate-check each candidate.** Run the full [gate checks](#gate-checks) per issue — `Phase == Plan`, the three §-sections present and non-empty, every referenced ADR PR merged, exactly one `model:*` label, not blocked by a `blocked`/`wontfix`/`duplicate` label, freshness gate (targeted paths exist on `origin/main` and none churned since scope). Drop any issue that fails and record the reason; the sweep never silently skips — every dropped issue is listed in the plan with its drop reason. `--skip-adr` is **not** honored in sweep mode: a batch is the wrong place for a per-issue emergency override, so an unmerged-ADR issue is dropped and listed, to be approved singly with `/approve <n> --skip-adr` if the override is intended.
 
 3. **Print the approve plan and wait for confirmation.** A batch label write is cheap to do but annoying to unwind, so one confirmation prompt covers the set. Print the issues that will be approved (with their `size:*` / `model:*` for context), any umbrella issues flagged distinctly (an umbrella with `## Sub-issues` is approvable — approving means "the plan is approved, children split correctly" — but it is not itself `/implement`-able; see [Multi-PR umbrella issues](#multi-pr-umbrella-issues)), and the dropped-with-reason list, then stop and wait:
 
@@ -35,6 +35,7 @@ The primary human review point of the release flow. The user invokes `/approve <
    Dropped:
      #1719  Phase=Design, not Plan
      #1740  ADR PR #1738 not merged (approve singly with /approve 1740 --skip-adr to override)
+     #1762  Targets removed on main: crates/aether-capabilities/src/audio/mod.rs
 
    Confirm approve? (no label write happens until your go-ahead)
    ```
@@ -66,8 +67,39 @@ Run all of these. **Refuse** if any fail; list every failure in the refusal outp
 | ADR merged | if §Design notes references an ADR PR, that PR's `mergedAt` is non-null | "ADR PR #M is not merged. Merge it or pass `--skip-adr` to override." |
 | Model label | exactly one `model:*` label present (REST: `gh api repos/iamacoffeepot/aether/issues/<n>/labels`) | "Missing model:* label (or more than one). `/scope` stamps model routing at Plan — re-run its Plan step or add the label by hand." |
 | Not blocked | no `blocked` / `wontfix` / `duplicate` label present | "Issue carries label '<label>' which blocks approval." |
+| Freshness | targeted paths exist on `origin/main` and none have churned since scope | "Targets removed on main: <paths>" (hard refuse) / "Targets churned since scope — re-ground before approving: <paths>" (soft surface) |
 
 If **all** gates pass, proceed.
+
+## Freshness gate
+
+Runs after the structural gates pass, against a freshly-fetched `origin/main`. Two tiers; both operate on paths extracted from §Implementation plan "files touched" segments and §Design notes §Affected surfaces.
+
+**Tier A — target existence (hard gate).** For each extracted path, test `git cat-file -e origin/main:<path>`. If any path is absent on `origin/main`, the plan targets removed code — refuse with the missing paths listed. `git fetch origin main` first so the check uses the current remote state, not a stale local cache.
+
+```bash
+git fetch origin main
+git cat-file -e origin/main:<path>   # exit 0 = exists, exit 128 = gone
+```
+
+A Tier A failure is a hard refusal (single) or drop-with-reason (sweep): the issue's premise is provably dead — there is nothing to implement.
+
+**Tier B — drift since scope (soft surface).** The scoped-at reference is the timestamp of the most-recent `phase:plan` labeled event on the issue timeline:
+
+```bash
+gh api repos/iamacoffeepot/aether/issues/<n>/timeline \
+  --jq '[.[] | select(.event=="labeled" and .label.name=="phase:plan")] | last | .created_at'
+```
+
+For each referenced path and each ADR file named in §Design notes, check for commits on `origin/main` since that timestamp:
+
+```bash
+git log origin/main --since=<scoped-at> -- <path>
+```
+
+A non-empty result means `main` has churned the target since the issue was scoped. Tier B does not auto-refuse: surface "Targets churned since scope — re-ground before approving: <paths>" so the human reviewer decides. In sweep mode, treat a Tier B hit as a drop-with-reason and list it in the plan (the reviewer resolves it singly with `/approve <n>` after grounding).
+
+**Symbol-tier follow-on (pending #2204).** Symbol-level checking — confirming named target symbols still exist on `origin/main`, not just the files — extends the same Tier A machinery once #2204's stable-anchor + discovery-command plan convention lands. Until then the freshness gate runs on paths only.
 
 ## Actions on pass
 
