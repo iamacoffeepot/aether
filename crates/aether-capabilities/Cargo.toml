@@ -88,7 +88,7 @@ audio-native = ["audio", "native", "dep:cpal", "dep:crossbeam-queue", "dep:hound
 # `fontdue` rides `text-native` the way `hound` rides `audio-native`:
 # the pure-Rust TTF parse + rasterize + horizontal layout the cap runs
 # off the hot path. Implies the marker layer + `native`.
-text-native = ["text", "native", "dep:fontdue"]
+text-native = ["text", "native", "render", "dep:fontdue"]
 # `ui-native` has no heavy deps — the cap only sends mail to the render
 # and text caps. Implies the marker layer + `native` + the two surface
 # marker layers the native impl addresses.
