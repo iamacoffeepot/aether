@@ -13,25 +13,15 @@
 //!   `Fetch.timeout_ms`.
 
 use std::collections::HashSet;
-#[cfg(feature = "native")]
-use std::num::ParseIntError;
 use std::time::Duration;
 
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
-// confique consumes `parse_flag` through the `#[config(parse_env = …)]`
-// attribute path; IntelliJ-Rust doesn't trace macro-attr path args and
-// flags this as unused (Qodana FP), but rustc + clippy resolve it.
-#[cfg(feature = "native")]
-#[allow(unused_imports)]
-use crate::config_env::parse_flag;
 use crate::http::kinds::{Fetch, HttpError, HttpHeader, HttpMethod};
 use aether_actor::WasmActorMailbox;
 #[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::actor::native::NativeActorMailbox;
-#[cfg(feature = "native")]
-use std::convert::Infallible;
 
 /// Default response-body cap when `AETHER_HTTP_MAX_BODY_BYTES` is
 /// unset. 16MB matches ADR-0043 §3.
@@ -112,28 +102,22 @@ pub struct HttpConfig {
         config(
             env = "AETHER_HTTP_DISABLE",
             cli_long = "http-disable",
-            default = false,
-            parse = parse_flag
+            default = false
         )
     )]
     pub disabled: bool,
     /// Hostnames the adapter will dial. Empty = deny all
-    /// (deny-by-default per ADR-0043).
-    #[cfg_attr(
-        feature = "native",
-        config(default = [], parse = parse_allowlist, csv_set)
-    )]
+    /// (deny-by-default per ADR-0043). The `csv_set` hint auto-wires the
+    /// shared comma-split parser on the env side.
+    #[cfg_attr(feature = "native", config(default = [], csv_set))]
     pub allowlist: HashSet<String>,
     /// `AETHER_HTTP_REQUIRE_HTTPS=1` rejects `http://` URLs with
     /// `HttpError::InvalidUrl`.
-    #[cfg_attr(feature = "native", config(default = false, parse = parse_flag))]
+    #[cfg_attr(feature = "native", config(default = false))]
     pub require_https: bool,
     /// Cap on inbound and outbound body bytes. Defaults to
     /// [`DEFAULT_MAX_BODY_BYTES`] (16 MB).
-    #[cfg_attr(
-        feature = "native",
-        config(default = 16_777_216, parse = parse_max_body_bytes)
-    )]
+    #[cfg_attr(feature = "native", config(default = 16_777_216))]
     pub max_body_bytes: usize,
     /// Default per-request timeout when `Fetch.timeout_ms` is
     /// `None`. Defaults to [`DEFAULT_TIMEOUT_MILLIS`] (30 s). The derive's
@@ -141,15 +125,10 @@ pub struct HttpConfig {
     /// bridges via `Duration::from_millis(u64::from(...))`;
     /// `layer_field = "timeout_ms"` pins the Layer / env / CLI shape to
     /// the pre-derive name (`AETHER_HTTP_TIMEOUT_MS`,
-    /// `--http-timeout-ms`) for byte-identical compat.
+    /// `--http-timeout-ms`).
     #[cfg_attr(
         feature = "native",
-        config(
-            default = 30_000,
-            parse = parse_timeout_millis,
-            ms_duration,
-            layer_field = "timeout_ms"
-        )
+        config(default = 30_000, ms_duration, layer_field = "timeout_ms")
     )]
     pub default_timeout: Duration,
 }
@@ -164,57 +143,6 @@ impl Default for HttpConfig {
             default_timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MILLIS)),
         }
     }
-}
-
-// confique's `parse_env` contract is `fn(&str) -> Result<T, impl Error>`, so
-// these helpers carry a `Result` they never fill with `Err` — a flag, a CSV
-// list, and a default-on-unparseable number are all total. Hence the per-fn
-// `unnecessary_wraps` allow; the strict (erroring) variants land with the
-// ADR-0090 §4 validation pass.
-
-/// Split a comma-separated host list, trimming and dropping empties.
-/// Total — never errors.
-#[cfg(feature = "native")]
-#[allow(clippy::unnecessary_wraps)]
-fn parse_allowlist(s: &str) -> Result<HashSet<String>, Infallible> {
-    Ok(s.split(',')
-        .map(str::trim)
-        .filter(|h| !h.is_empty())
-        .map(str::to_string)
-        .collect())
-}
-
-/// Parse a byte cap (ADR-0090 §4 hard-error half): empty → unset,
-/// falling back to [`DEFAULT_MAX_BODY_BYTES`]; a non-empty value that
-/// doesn't parse as `usize` errors, which confique surfaces from
-/// `.load()` and the chassis env resolver turns into a `ConfigError`.
-///
-/// # Errors
-///
-/// Returns a [`ParseIntError`] for a
-/// non-empty value that isn't a valid `usize`.
-#[cfg(feature = "native")]
-fn parse_max_body_bytes(s: &str) -> Result<usize, ParseIntError> {
-    if s.trim().is_empty() {
-        return Ok(DEFAULT_MAX_BODY_BYTES);
-    }
-    s.trim().parse()
-}
-
-/// Parse a timeout in milliseconds (ADR-0090 §4 hard-error half):
-/// empty → [`DEFAULT_TIMEOUT_MILLIS`]; a non-empty value that doesn't
-/// parse as `u32` errors.
-///
-/// # Errors
-///
-/// Returns a [`ParseIntError`] for a
-/// non-empty value that isn't a valid `u32`.
-#[cfg(feature = "native")]
-fn parse_timeout_millis(s: &str) -> Result<u32, ParseIntError> {
-    if s.trim().is_empty() {
-        return Ok(DEFAULT_TIMEOUT_MILLIS);
-    }
-    s.trim().parse()
 }
 
 /// Sender-side facade for actors addressed via
@@ -599,39 +527,11 @@ mod native {
         use crate::test_chassis::{TestChassis, fresh_substrate};
         use aether_substrate::mail::registry;
 
-        // ADR-0090: the confique migration is byte-identical to the prior
-        // hand-rolled reader. These exercise the resolution logic without
-        // touching process env (issue 464) — the parsers are pure, and the
-        // defaults check loads the layer with no `.env()` source.
-
-        #[test]
-        fn parse_allowlist_splits_trims_and_drops_empties() {
-            use super::super::parse_allowlist;
-            let got = parse_allowlist("a.com, b.com ,, c.com").unwrap();
-            let want: HashSet<String> = ["a.com", "b.com", "c.com"]
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect();
-            assert_eq!(got, want);
-            assert!(parse_allowlist("").unwrap().is_empty());
-        }
-
-        #[test]
-        fn parse_numbers_strict_error_on_garbage() {
-            // ADR-0090 §4 hard-error half: a valid value parses, an
-            // empty value falls back to the default (unset), and a
-            // non-empty garbage value errors rather than silently
-            // defaulting.
-            use super::super::{
-                DEFAULT_TIMEOUT_MILLIS, parse_max_body_bytes, parse_timeout_millis,
-            };
-            assert_eq!(parse_max_body_bytes("1024"), Ok(1024));
-            assert_eq!(parse_max_body_bytes(""), Ok(DEFAULT_MAX_BODY_BYTES));
-            assert!(parse_max_body_bytes("not-a-number").is_err());
-            assert_eq!(parse_timeout_millis("5000"), Ok(5000));
-            assert_eq!(parse_timeout_millis(""), Ok(DEFAULT_TIMEOUT_MILLIS));
-            assert!(parse_timeout_millis("garbage").is_err());
-        }
+        // ADR-0090: the defaults check loads the layer with no `.env()`
+        // source. The env-value behavior (trim, empty → default, garbage
+        // → hard-error) is now confique's native deserialization, covered
+        // by `aether_substrate::config`'s confique tests; the CSV split is
+        // covered by `parse_csv_set` there.
 
         #[test]
         fn http_from_env_defaults_match() {

@@ -12,8 +12,8 @@
 //! prefix, lowercase, hyphenate. `AETHER_HTTP_TIMEOUT_MS` →
 //! `--http-timeout-ms`, `GEMINI_API_KEY` → `--gemini-api-key`.
 //! Bool flags accept zero or one value (`--http-disable` ⇒ `true`,
-//! `--http-disable=false` ⇒ `false`, absent ⇒ `None`), matching the
-//! env-side `parse_flag` semantics.
+//! `--http-disable=false` ⇒ `false`, absent ⇒ `None`), matching
+//! confique's native env-side bool deserialization.
 //!
 //! Chassis-wide knobs (`workers`, `tick_hz`, `window_mode`,
 //! `window_title`, `rpc_port`) live as plain `Option<T>` fields on the

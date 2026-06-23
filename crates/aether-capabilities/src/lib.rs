@@ -39,10 +39,9 @@ pub mod component;
 // elides cleanly on the wasm-component build.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod contentgen;
-// Shared confique `parse_env` helpers + provider defaults (ADR-0090).
-// Kept ungated so the per-provider `DEFAULT_MAX_IN_FLIGHT` constants can
-// alias `DEFAULT_PROVIDER_MAX_IN_FLIGHT` at file top level; the parser
-// fns are tiny pure-Rust dead code on non-native builds.
+// Shared provider config defaults (ADR-0090). The per-provider
+// `DEFAULT_MAX_IN_FLIGHT` constants alias `DEFAULT_PROVIDER_MAX_IN_FLIGHT`
+// from here.
 mod config_env;
 
 pub mod engine;

@@ -7,15 +7,7 @@
 use crate::engine::proxy::HeartbeatParams;
 use crate::store::DEFAULT_DISK_BUDGET_BYTES;
 use std::collections::HashSet;
-use std::convert::Infallible;
 use std::time::Duration;
-
-/// Default heartbeat ping cadence (issue 1339). 5 s × the miss
-/// limit is the detection-latency vs. flap-tolerance tradeoff.
-const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 5;
-/// Default consecutive-miss threshold before an engine is declared
-/// dead. Small N tolerates a transient hiccup / GC pause.
-const DEFAULT_HEARTBEAT_MISS_LIMIT: u32 = 3;
 
 /// Default total time a freshly-forked substrate's proxy keeps
 /// retrying its startup dial before giving up (issue 2072). A debug
@@ -58,14 +50,14 @@ pub struct EngineConfig {
     /// `--hub-heartbeat-interval-secs`). `0` disables the heartbeat
     /// entirely (engines are then only evicted on a
     /// connection-close, never on a wedge).
-    #[config(default = 5, parse = parse_heartbeat_interval_secs)]
+    #[config(default = 5)]
     pub heartbeat_interval_secs: u64,
     /// Consecutive missed pings that mark an engine dead
     /// (`AETHER_HUB_HEARTBEAT_MISS_LIMIT` /
     /// `--hub-heartbeat-miss-limit`). Small N tolerates a transient
     /// hiccup; `0` also disables the heartbeat. Detection latency is
     /// `miss_limit × interval_secs`.
-    #[config(default = 3, parse = parse_heartbeat_miss_limit)]
+    #[config(default = 3)]
     pub heartbeat_miss_limit: u32,
     /// Total seconds a freshly-forked substrate's proxy keeps
     /// retrying its startup dial before the spawn fails
@@ -74,7 +66,7 @@ pub struct EngineConfig {
     /// default so a debug cold start under fork contention isn't
     /// called dead prematurely; `0` is the wait-forever sentinel
     /// (retry until the dial succeeds or hits a terminal error).
-    #[config(default = 30, parse = parse_proxy_connect_budget_secs)]
+    #[config(default = 30)]
     pub proxy_connect_budget_secs: u64,
     /// Layout-root override for the hub's content-addressed binary
     /// store (`AETHER_BINARY_STORE_DIR`, unprefixed — the ops escape
@@ -91,7 +83,7 @@ pub struct EngineConfig {
     /// `AETHER_HUB` prefix / `--hub-binary-disk-budget-bytes`). Default
     /// 16 GiB (`DEFAULT_DISK_BUDGET_BYTES`); LRU eviction over unpinned,
     /// unnamed entries holds it.
-    #[config(default = 17_179_869_184u64, parse = parse_binary_disk_budget)]
+    #[config(default = 17_179_869_184u64)]
     pub binary_disk_budget_bytes: u64,
     /// Chassis bins to bootstrap-ingest at init so a `default` / `name`
     /// selector resolves in a fresh or `restart-hub`'d hub
@@ -99,12 +91,7 @@ pub struct EngineConfig {
     /// ingested content-addressed and named by its file stem;
     /// idempotent via content dedup. `ensure-tunnel.sh` exports the
     /// freshly-built chassis bins here.
-    #[config(
-        env = "AETHER_BINARY_BOOTSTRAP",
-        default = [],
-        parse = parse_binary_bootstrap,
-        csv_set
-    )]
+    #[config(env = "AETHER_BINARY_BOOTSTRAP", default = [], csv_set)]
     pub binary_bootstrap: HashSet<String>,
 }
 
@@ -154,51 +141,6 @@ impl EngineConfig {
         (self.proxy_connect_budget_secs != 0)
             .then(|| Duration::from_secs(self.proxy_connect_budget_secs))
     }
-}
-
-// confique's `parse_env` contract is `fn(&str) -> Result<T, impl
-// Error>`; these total helpers carry a `Result` they never fill with
-// `Err` — an unparseable value folds back to the default (soft, like
-// the DAG validator's caps; the ADR-0090 §4 strict/erroring variant
-// is a follow-up). Hence the `unnecessary_wraps` allow.
-
-/// Parse the heartbeat interval; unparseable → the default.
-#[allow(clippy::unnecessary_wraps)]
-fn parse_heartbeat_interval_secs(s: &str) -> Result<u64, Infallible> {
-    Ok(s.trim().parse().unwrap_or(DEFAULT_HEARTBEAT_INTERVAL_SECS))
-}
-
-/// Parse the heartbeat miss limit; unparseable → the default.
-#[allow(clippy::unnecessary_wraps)]
-fn parse_heartbeat_miss_limit(s: &str) -> Result<u32, Infallible> {
-    Ok(s.trim().parse().unwrap_or(DEFAULT_HEARTBEAT_MISS_LIMIT))
-}
-
-/// Parse the proxy connect budget seconds; unparseable → the default.
-#[allow(clippy::unnecessary_wraps)]
-fn parse_proxy_connect_budget_secs(s: &str) -> Result<u64, Infallible> {
-    Ok(s.trim()
-        .parse()
-        .unwrap_or(DEFAULT_PROXY_CONNECT_BUDGET_SECS))
-}
-
-/// Parse the binary-store disk budget; unparseable → the default
-/// `DEFAULT_DISK_BUDGET_BYTES` (mirrors the heartbeat parsers).
-#[allow(clippy::unnecessary_wraps)]
-fn parse_binary_disk_budget(s: &str) -> Result<u64, Infallible> {
-    Ok(s.trim().parse().unwrap_or(DEFAULT_DISK_BUDGET_BYTES))
-}
-
-/// Split a comma-separated bootstrap path list, trimming and dropping
-/// empties (mirrors the http allowlist's `parse_allowlist`). Total —
-/// never errors.
-#[allow(clippy::unnecessary_wraps)]
-fn parse_binary_bootstrap(s: &str) -> Result<HashSet<String>, Infallible> {
-    Ok(s.split(',')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .collect())
 }
 
 #[cfg(test)]

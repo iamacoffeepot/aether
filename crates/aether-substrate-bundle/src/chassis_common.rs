@@ -13,7 +13,6 @@
 
 use std::env;
 use std::net::SocketAddr;
-use std::num::ParseIntError;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -118,31 +117,19 @@ pub struct ActorRingConfig {
     /// `AETHER_ACTOR_LOG_RING_SIZE=<entries>` per-actor log-ring capacity
     /// (default [`DEFAULT_RING_CAP`]). Zero clamps to 1 inside
     /// `ActorLogRing::with_capacity`.
-    #[config(
-        env = "AETHER_ACTOR_LOG_RING_SIZE",
-        default = 1024,
-        parse = parse_ring_capacity::<DEFAULT_RING_CAP>
-    )]
+    #[config(env = "AETHER_ACTOR_LOG_RING_SIZE", default = 1024)]
     pub log_ring_capacity: usize,
     /// `AETHER_ACTOR_TRACE_RING_SIZE=<entries>` per-actor (and
     /// chassis-host) trace-ring *floor* — the size each ring starts at
     /// (default [`DEFAULT_TRACE_RING_CAP`]). Zero clamps to 1 inside
     /// `ActorTraceRing::with_growth`.
-    #[config(
-        env = "AETHER_ACTOR_TRACE_RING_SIZE",
-        default = 4096,
-        parse = parse_ring_capacity::<DEFAULT_TRACE_RING_CAP>
-    )]
+    #[config(env = "AETHER_ACTOR_TRACE_RING_SIZE", default = 4096)]
     pub trace_ring_capacity: usize,
     /// `AETHER_ACTOR_TRACE_RING_MAX_SIZE=<entries>` ceiling a saturating
     /// trace ring grows to before it resumes drop-oldest (default
     /// [`DEFAULT_TRACE_RING_MAX_CAP`]). A value below the floor clamps up
     /// to the floor inside `ActorTraceRing::with_growth`.
-    #[config(
-        env = "AETHER_ACTOR_TRACE_RING_MAX_SIZE",
-        default = 65536,
-        parse = parse_ring_capacity::<DEFAULT_TRACE_RING_MAX_CAP>
-    )]
+    #[config(env = "AETHER_ACTOR_TRACE_RING_MAX_SIZE", default = 65536)]
     pub trace_ring_max_size: usize,
 }
 
@@ -167,22 +154,6 @@ impl ActorRingConfig {
             trace_max: self.trace_ring_max_size,
         }
     }
-}
-
-/// Parse a ring-capacity env value (ADR-0090 §4 hard-error half): empty →
-/// unset, falling back to the const default `D`; a non-empty value that
-/// isn't a valid `usize` errors, which confique surfaces from `.load()`
-/// and the chassis env resolver turns into a `ConfigError`.
-///
-/// # Errors
-///
-/// Returns a [`ParseIntError`] for a non-empty value that isn't a valid
-/// `usize`.
-fn parse_ring_capacity<const D: usize>(s: &str) -> Result<usize, ParseIntError> {
-    if s.trim().is_empty() {
-        return Ok(D);
-    }
-    s.trim().parse::<usize>()
 }
 
 /// Default cumulative settlement-patience cap, in seconds (issue 2062).
@@ -211,11 +182,7 @@ pub struct SettlementConfig {
     /// [`DEFAULT_SETTLEMENT_CAP_SECS`]). `0` is the sentinel for "no cap —
     /// wait forever," for attaching a debugger to a suspected deadlock; in
     /// that mode the per-round warn log stays the live signal.
-    #[config(
-        env = "AETHER_SETTLEMENT_CAP_SECS",
-        default = 300,
-        parse = parse_cap_secs
-    )]
+    #[config(env = "AETHER_SETTLEMENT_CAP_SECS", default = 300)]
     pub cap_secs: u64,
 }
 
@@ -240,23 +207,6 @@ impl SettlementConfig {
             Duration::from_secs(self.cap_secs)
         }
     }
-}
-
-/// Parse `AETHER_SETTLEMENT_CAP_SECS` (seconds; ADR-0090 §4 hard-error
-/// half): empty → unset, falling back to [`DEFAULT_SETTLEMENT_CAP_SECS`];
-/// a non-empty value that isn't a valid `u64` errors, which confique
-/// surfaces from `.load()` and the chassis env resolver turns into a
-/// `ConfigError`.
-///
-/// # Errors
-///
-/// Returns a [`ParseIntError`] for a non-empty value that isn't a valid
-/// `u64`.
-fn parse_cap_secs(s: &str) -> Result<u64, ParseIntError> {
-    if s.trim().is_empty() {
-        return Ok(DEFAULT_SETTLEMENT_CAP_SECS);
-    }
-    s.trim().parse::<u64>()
 }
 
 /// Assemble the chassis-wide [`KnownKeys`] set (ADR-0090 §4): every

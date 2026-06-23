@@ -16,25 +16,34 @@
 //!     config(env_prefix = "AETHER_HTTP", cli_prefix = "http")
 //! )]
 //! pub struct HttpConfig {
-//!     #[cfg_attr(feature = "native", config(default = false, parse = parse_flag))]
+//!     #[cfg_attr(feature = "native", config(default = false))]
 //!     pub disabled: bool,
 //!     #[cfg_attr(
 //!         feature = "native",
-//!         config(default = 30_000, parse = parse_timeout_ms, ms_duration)
+//!         config(default = 30_000, ms_duration)
 //!     )]
 //!     pub default_timeout: Duration,
 //! }
 //! ```
+//!
+//! A numeric / `Duration` / `bool` field needs no parser: confique's
+//! native env deserialization trims the value, treats an empty value as
+//! unset (falling back to the `default`), accepts the usual bool
+//! spellings (`1` / `true` / `yes` / `0` / `false` / `no`), and
+//! hard-errors on a non-empty garbage value (ADR-0090 §4). Only a
+//! genuinely-custom mapping names a `parse =` function.
 //!
 //! The derive emits the env-shaped `*Layer`, the clap-shaped
 //! `*Overlay` (next to the domain struct in the cap crate; the
 //! bundle's `cli.rs` `pub use`s them), the `FromArgvThenEnv` impl,
 //! and inherent `from_env()` / `from_argv_then_env(argv)` shims. Per-
 //! field hints (`default`, `parse`, `env`, `cli_long`, `ms_duration`,
-//! `csv_set`, `layer_field`) cover the d-era wire shapes; the
+//! `csv_set`, `nonzero`, `layer_field`) cover the wire shapes; the
 //! container `skip_from_layer` opt-out lets a cap hand-write
 //! `from_layer` when its defaults are runtime-computed (the
-//! `NamespaceRoots` case).
+//! `NamespaceRoots` case). `csv_set` auto-wires
+//! [`parse_csv_set`] on the env side; `nonzero` coerces a resolved `0`
+//! to the field default in `from_layer`.
 //!
 //! [`FromArgvThenEnv`] still exists as the underlying trait — the
 //! derive emits an impl of it. Hand-written impls remain valid where
@@ -51,7 +60,7 @@
 //! owns:
 //!
 //! ```ignore
-//! #[cfg_attr(feature = "native", config(default = false, parse = parse_flag))]
+//! #[cfg_attr(feature = "native", config(default = false))]
 //! pub enabled: bool,
 //! ```
 //!
@@ -60,10 +69,12 @@
 //! until suppressed — names it `disabled`. Both default to `false`, so
 //! the literal default always reads as the unsurprising state, and the
 //! chassis maps the resolved `bool` to its structural choice at the one
-//! composition site (`cfg.enabled.then_some(cfg)`). The `parse_flag`
-//! helper accepts the usual `1` / `true` / `yes` / `on` spellings.
+//! composition site (`cfg.enabled.then_some(cfg)`). confique's native
+//! bool deserialization accepts the usual `1` / `true` / `yes` / `0` /
+//! `false` / `no` spellings (case-insensitive, trimmed).
 
 use std::collections::HashSet;
+use std::convert::Infallible;
 use std::env;
 use std::error::Error as StdError;
 use std::fmt;
@@ -74,6 +85,30 @@ use aether_actor::trace_ring::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CA
 use confique::meta::{Expr, Field, FieldKind, LeafKind, Meta};
 
 use crate::BootError;
+
+/// Split a comma-separated env value into a `HashSet`, trimming each
+/// element and dropping empties. The `#[derive(Config)]` macro wires
+/// this as the `parse_env` for any field carrying the `csv_set` hint
+/// (the allowlist / bootstrap-path knobs), so a cap declares `csv_set`
+/// and never hand-rolls the split. Total — a missing/empty value yields
+/// the empty set, which confique then overrides with the field default
+/// when the var is unset.
+///
+/// Unlike confique's own `env::parse::list_by_sep`, this trims each
+/// element and drops empties, so `"a, ,b,"` is `{"a", "b"}` rather than
+/// `{"a", " ", "b", ""}`.
+///
+/// # Errors
+///
+/// Never errors (the return type is [`Infallible`]); the `Result` is the
+/// shape confique's `parse_env` contract requires.
+pub fn parse_csv_set(s: &str) -> Result<HashSet<String>, Infallible> {
+    Ok(s.split(',')
+        .map(str::trim)
+        .filter(|element| !element.is_empty())
+        .map(str::to_string)
+        .collect())
+}
 
 /// The two per-actor ring capacities resolved once at chassis boot and
 /// threaded down the spawn path (ADR-0081 log ring + ADR-0086 trace
@@ -570,6 +605,18 @@ mod tests {
 
     fn parse_count(raw: &str) -> Result<u32, ParseIntError> {
         raw.trim().parse()
+    }
+
+    #[test]
+    fn parse_csv_set_trims_and_drops_empties() {
+        let got = parse_csv_set("a.com, b.com ,, c.com").expect("infallible");
+        let want: HashSet<String> = ["a.com", "b.com", "c.com"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(got, want);
+        assert!(parse_csv_set("").expect("infallible").is_empty());
+        assert!(parse_csv_set("  ,  , ").expect("infallible").is_empty());
     }
 
     /// A real `ParseIntError` for the `ConfigError` constructor tests
