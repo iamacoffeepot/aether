@@ -1,8 +1,4 @@
 use super::{DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MILLIS};
-// confique consumes these through `#[config(parse_env = …)]`; IntelliJ-Rust
-// doesn't trace macro-attr path args (Qodana FP), but rustc + clippy do.
-#[allow(unused_imports)]
-use crate::config_env::{parse_flag, parse_millis_strict, parse_provider_max_in_flight_strict};
 use std::time::Duration;
 
 /// Resolved configuration for the `aether.gemini` cap. Chassis mains
@@ -37,16 +33,14 @@ pub struct GeminiConfig {
         config(
             env = "AETHER_GEMINI_DISABLE",
             cli_long = "gemini-disable",
-            default = false,
-            parse = parse_flag
+            default = false
         )
     )]
     pub disabled: bool,
-    /// Per-cap concurrency bound (doubles as rate-limit throttling).
-    #[cfg_attr(
-        feature = "native",
-        config(default = 2, parse = parse_provider_max_in_flight_strict)
-    )]
+    /// Per-cap concurrency bound (doubles as rate-limit throttling). The
+    /// `nonzero` hint coerces a resolved `0` (a zero-concurrency provider
+    /// deadlocks) back to the default.
+    #[cfg_attr(feature = "native", config(default = 2, nonzero))]
     pub max_in_flight: usize,
     /// Per-request timeout for the media APIs. The derive's
     /// `ms_duration` hint + `layer_field = "timeout_ms"` pin the
@@ -54,12 +48,7 @@ pub struct GeminiConfig {
     /// (`AETHER_GEMINI_TIMEOUT_MS`, `--gemini-timeout-ms`).
     #[cfg_attr(
         feature = "native",
-        config(
-            default = 180_000,
-            parse = parse_millis_strict::<DEFAULT_TIMEOUT_MILLIS>,
-            ms_duration,
-            layer_field = "timeout_ms"
-        )
+        config(default = 180_000, ms_duration, layer_field = "timeout_ms")
     )]
     pub timeout: Duration,
 }
@@ -74,11 +63,6 @@ impl Default for GeminiConfig {
         }
     }
 }
-
-// confique's `parse_env` contract is `fn(&str) -> Result<T, impl Error>`,
-// so these total helpers carry a `Result` they never fill with `Err`.
-// The strict (erroring) variants land with the ADR-0090 §4 validation
-// pass; hence the per-fn `unnecessary_wraps` allow.
 
 #[cfg(all(test, feature = "native"))]
 mod tests {

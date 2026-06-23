@@ -1,9 +1,6 @@
 //! Resolved audio synth configuration (ADR-0090). The `#[derive(Config)]`
 //! layer the chassis builds from argv/env and hands to `AudioCapability::init`.
 
-#[allow(unused_imports)]
-use crate::config_env::parse_flag;
-
 /// Resolved configuration for the audio synth. Chassis mains read
 /// env vars (`AETHER_AUDIO_DISABLE`, `AETHER_AUDIO_SAMPLE_RATE`)
 /// into an `AudioConfig` and pass it to `with_actor::<AudioCapability>(cfg)`
@@ -30,8 +27,7 @@ pub struct AudioConfig {
     #[config(
         env = "AETHER_AUDIO_DISABLE",
         cli_long = "audio-disable",
-        default = false,
-        parse = parse_flag
+        default = false
     )]
     pub disabled: bool,
     /// `AETHER_AUDIO_SAMPLE_RATE=<hz>` requests a specific rate. If

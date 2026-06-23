@@ -13,7 +13,9 @@ fn ui() {
     t.pass("tests/ui/accepts_full_http.rs");
     t.pass("tests/ui/accepts_optional_field.rs");
     t.pass("tests/ui/accepts_ms_duration.rs");
+    t.pass("tests/ui/accepts_auto_wired.rs");
     t.compile_fail("tests/ui/rejects_ms_duration_on_non_duration.rs");
     t.compile_fail("tests/ui/rejects_missing_env_prefix.rs");
     t.compile_fail("tests/ui/rejects_unknown_hint.rs");
+    t.compile_fail("tests/ui/rejects_nonzero_without_default.rs");
 }

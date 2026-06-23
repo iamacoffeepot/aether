@@ -58,7 +58,15 @@ struct FieldAttr {
     /// `<field>_ms: u32`.
     ms_duration: bool,
     /// `csv_set` hint — overlay accepts `Option<String>` and splits CSV.
+    /// On the env side the derive auto-wires
+    /// `aether_substrate::config::parse_csv_set` as the `parse_env`, so a
+    /// cap declares `csv_set` and never names a split parser.
     csv_set: bool,
+    /// `nonzero` hint — a resolved `0` coerces to the field's `default`
+    /// in `from_layer` (a zero is the unset sentinel for knobs where it
+    /// is degenerate, e.g. a `0`-concurrency bound that would deadlock).
+    /// Requires a `default`.
+    nonzero: bool,
     /// `layer_field = "..."` — overrides the Layer-side field
     /// identifier (and the env key derivation if `env` isn't also set).
     /// Used when the domain name differs from the historical Layer
@@ -209,6 +217,9 @@ fn parse_field_attr(attrs: &[Attribute]) -> syn::Result<FieldAttr> {
             } else if meta.path.is_ident("csv_set") {
                 out.csv_set = true;
                 Ok(())
+            } else if meta.path.is_ident("nonzero") {
+                out.nonzero = true;
+                Ok(())
             } else if meta.path.is_ident("layer_field") {
                 out.layer_field = Some(meta.value()?.parse::<LitStr>()?.value());
                 Ok(())
@@ -216,7 +227,7 @@ fn parse_field_attr(attrs: &[Attribute]) -> syn::Result<FieldAttr> {
                 Err(meta.error(
                     "unknown field attribute; expected one of \
                      `env = \"...\"`, `cli_long = \"...\"`, `default = <lit>`, \
-                     `parse = <fn_path>`, `ms_duration`, `csv_set`, \
+                     `parse = <fn_path>`, `ms_duration`, `csv_set`, `nonzero`, \
                      `layer_field = \"...\"`",
                 ))
             }
@@ -261,8 +272,15 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
             "`ms_duration` hint requires field type `std::time::Duration`",
         ));
     }
+    if attr.nonzero && attr.default.is_none() {
+        return Err(syn::Error::new(
+            span,
+            "`nonzero` hint requires a `default` (a resolved `0` coerces to it)",
+        ));
+    }
 
     let is_bool = is_bool_type(&domain_ty);
+    let is_string = matches!(&domain_ty, Type::Path(tp) if path_is(&tp.path, "String"));
     let inner_option_ty = unwrap_option(&domain_ty);
     // Whether this is `Option<numeric>` whose Layer rep is `Option<String>`.
     let is_option_numeric = inner_option_ty.as_ref().is_some_and(is_numeric_type);
@@ -350,16 +368,31 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
     });
     let cli_id = cli_long.replace('-', "_");
 
-    let layer_attrs = build_layer_attrs(&env_key, attr.default.as_ref(), attr.parse.as_ref());
+    let resolved_parse = resolve_parse_env(&attr);
+    let layer_attrs = build_layer_attrs(&env_key, attr.default.as_ref(), resolved_parse.as_ref());
     let overlay_attrs = build_overlay_attrs(&cli_id, &cli_long, is_bool);
 
+    // Resolve the `from_layer` body shape (priority-ordered): the typed
+    // shapes first, then the hint-driven coercions, then a plain move.
+    let from_layer_kind = if attr.ms_duration {
+        FromLayerKind::MsDuration
+    } else if is_option_string {
+        FromLayerKind::OptionString
+    } else if is_option_numeric {
+        FromLayerKind::OptionNumeric
+    } else if attr.nonzero {
+        FromLayerKind::Nonzero
+    } else if is_string && attr.default.is_some() {
+        FromLayerKind::StringWithDefault
+    } else {
+        FromLayerKind::Plain
+    };
     let from_layer_expr = build_from_layer_expr(
         &ident,
         &layer_ident,
         &domain_ty,
-        attr.ms_duration,
-        is_option_string,
-        is_option_numeric,
+        &from_layer_kind,
+        attr.default.as_ref(),
     );
     let into_layer_stmt =
         build_into_layer_stmt(&ident, &layer_ident, attr.csv_set, is_option_numeric);
@@ -373,6 +406,19 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
         layer_attrs,
         overlay_attrs,
         into_layer_stmt,
+    })
+}
+
+/// Resolve the Layer `parse_env`: an explicit `parse =` wins (the
+/// `parse_dir` escape hatch); else a `csv_set` field auto-wires the
+/// shared trim+split helper so the cap never names it. Plain numeric /
+/// `Duration` / `bool` / `String` fields resolve to `None` and ride
+/// confique's native deserialization (which trims, treats an empty value
+/// as unset → default, and hard-errors on garbage — ADR-0090 §4).
+fn resolve_parse_env(attr: &FieldAttr) -> Option<Path> {
+    attr.parse.clone().or_else(|| {
+        attr.csv_set
+            .then(|| syn::parse_quote!(::aether_substrate::config::parse_csv_set))
     })
 }
 
@@ -405,34 +451,69 @@ fn build_overlay_attrs(cli_id: &str, cli_long: &str, is_bool: bool) -> TokenStre
     }
 }
 
+/// Which `from_layer` body a field gets — resolved from its type +
+/// hints in [`field_info`], so the builder takes one tag rather than a
+/// fistful of booleans.
+enum FromLayerKind {
+    /// `Duration` domain, `<field>_ms: u32` Layer.
+    MsDuration,
+    /// `Option<String>` — empty string ≡ unset.
+    OptionString,
+    /// `Option<numeric>` — Layer holds `Option<String>`, soft-parsed.
+    OptionNumeric,
+    /// `nonzero` — a resolved `0` coerces to the field default.
+    Nonzero,
+    /// `String` with a `default` — an empty value coerces to the default.
+    StringWithDefault,
+    /// Straight move of the Layer field.
+    Plain,
+}
+
 fn build_from_layer_expr(
     domain_ident: &Ident,
     layer_ident: &Ident,
     domain_ty: &Type,
-    ms_duration: bool,
-    is_option_string: bool,
-    is_option_numeric: bool,
+    kind: &FromLayerKind,
+    default: Option<&Expr>,
 ) -> TokenStream2 {
-    if ms_duration {
-        // Domain stays the domain ident; layer is `<ident>_ms`.
-        quote! {
+    match kind {
+        FromLayerKind::MsDuration => quote! {
             #domain_ident: ::std::time::Duration::from_millis(::core::convert::From::from(layer.#layer_ident))
-        }
-    } else if is_option_string {
-        // `Option<String>` — empty string ≡ unset.
-        quote! {
+        },
+        FromLayerKind::OptionString => quote! {
             #domain_ident: layer.#layer_ident.filter(|s| !s.is_empty())
+        },
+        FromLayerKind::OptionNumeric => {
+            let inner = unwrap_option(domain_ty).expect("checked is_option_numeric");
+            quote! {
+                #domain_ident: layer.#layer_ident.and_then(|s| s.parse::<#inner>().ok())
+            }
         }
-    } else if is_option_numeric {
-        // Layer holds `Option<String>`; parse softly here.
-        let inner = unwrap_option(domain_ty).expect("checked is_option_numeric");
-        quote! {
-            #domain_ident: layer.#layer_ident.and_then(|s| s.parse::<#inner>().ok())
+        FromLayerKind::Nonzero => {
+            let default = default.expect("checked by `nonzero` guard");
+            quote! {
+                #domain_ident: {
+                    let resolved = layer.#layer_ident;
+                    if resolved == 0 { #default } else { resolved }
+                }
+            }
         }
-    } else {
-        quote! {
+        FromLayerKind::StringWithDefault => {
+            let default = default.expect("checked by `StringWithDefault`");
+            quote! {
+                #domain_ident: {
+                    let resolved = layer.#layer_ident;
+                    if resolved.is_empty() {
+                        ::std::string::ToString::to_string(&#default)
+                    } else {
+                        resolved
+                    }
+                }
+            }
+        }
+        FromLayerKind::Plain => quote! {
             #domain_ident: layer.#layer_ident
-        }
+        },
     }
 }
 

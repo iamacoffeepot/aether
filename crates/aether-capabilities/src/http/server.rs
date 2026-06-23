@@ -35,11 +35,6 @@
 use crate::http::kinds::HttpInboundReady;
 use aether_kinds::trace::Settled;
 
-// confique `parse_env` helpers below never error; their `Result` carries
-// the never-type.
-#[cfg(feature = "native")]
-use std::convert::Infallible;
-
 // Default bind address. Loopback per ADR-0108 §6 — binding a public
 // interface is an explicit operator choice.
 /// Default `bind_addr` when unset: loopback, OS-assigned port (ADR-0108 §6).
@@ -83,41 +78,31 @@ pub struct HttpServerConfig {
     /// Whether to bind the listening socket at all. Default `false` —
     /// the HTTP server is opt-in, so an unconfigured chassis binds no
     /// port. The remaining fields are consulted only when this is `true`.
-    #[cfg_attr(feature = "native", config(default = false, parse = parse_flag))]
+    #[cfg_attr(feature = "native", config(default = false))]
     pub enabled: bool,
     /// Address to bind the listening socket. Defaults to loopback
     /// ([`DEFAULT_BIND_ADDR`]); a public interface is an explicit choice.
-    #[cfg_attr(
-        feature = "native",
-        config(default = "127.0.0.1:8080", parse = parse_bind_addr)
-    )]
+    /// A blank override (`AETHER_HTTP_SERVER_BIND_ADDR=`) falls back to
+    /// the default — the derive treats an empty `String` as unset.
+    #[cfg_attr(feature = "native", config(default = "127.0.0.1:8080"))]
     pub bind_addr: String,
     /// The single handler mailbox every request is dispatched to (e.g.
     /// `"aether.component/aether.embedded:web"`). Empty = every request is
     /// answered `503` (no handler resolves).
-    #[cfg_attr(feature = "native", config(default = "", parse = parse_handler_mailbox))]
+    #[cfg_attr(feature = "native", config(default = ""))]
     pub handler_mailbox: String,
     /// Cap on the request body in bytes ([`DEFAULT_MAX_REQUEST_BYTES`]);
     /// an announced `Content-Length` past this is answered `413`.
-    #[cfg_attr(
-        feature = "native",
-        config(default = 1_048_576, parse = parse_max_request_bytes)
-    )]
+    #[cfg_attr(feature = "native", config(default = 1_048_576))]
     pub max_request_bytes: usize,
     /// Cap on the request line + header bytes ([`DEFAULT_MAX_HEADER_BYTES`]);
     /// a head that grows past this is answered `431`.
-    #[cfg_attr(
-        feature = "native",
-        config(default = 65_536, parse = parse_max_header_bytes)
-    )]
+    #[cfg_attr(feature = "native", config(default = 65_536))]
     pub max_header_bytes: usize,
     /// Per-read socket timeout (slow-loris guard) and handler response
     /// deadline in milliseconds ([`DEFAULT_REQUEST_TIMEOUT_MILLIS`]); a
     /// handler that doesn't reply in time yields `504`.
-    #[cfg_attr(
-        feature = "native",
-        config(default = 30_000, parse = parse_request_timeout_millis)
-    )]
+    #[cfg_attr(feature = "native", config(default = 30_000))]
     pub request_timeout_millis: u64,
 }
 
@@ -132,50 +117,6 @@ impl Default for HttpServerConfig {
             request_timeout_millis: DEFAULT_REQUEST_TIMEOUT_MILLIS,
         }
     }
-}
-
-// confique's `parse_env` contract is `fn(&str) -> Result<T, impl Error>`;
-// these total helpers carry a `Result` they never fill with `Err` — an
-// unparseable numeric folds back to the default (soft, like the engines
-// cap's heartbeat parse; the ADR-0090 §4 strict/erroring variant is a
-// follow-up). Hence the per-fn `unnecessary_wraps` allow.
-
-#[cfg(feature = "native")]
-use crate::config_env::parse_flag;
-
-#[cfg(feature = "native")]
-#[allow(clippy::unnecessary_wraps)]
-fn parse_bind_addr(s: &str) -> Result<String, Infallible> {
-    let trimmed = s.trim();
-    Ok(if trimmed.is_empty() {
-        DEFAULT_BIND_ADDR.to_string()
-    } else {
-        trimmed.to_string()
-    })
-}
-
-#[cfg(feature = "native")]
-#[allow(clippy::unnecessary_wraps)]
-fn parse_handler_mailbox(s: &str) -> Result<String, Infallible> {
-    Ok(s.trim().to_string())
-}
-
-#[cfg(feature = "native")]
-#[allow(clippy::unnecessary_wraps)]
-fn parse_max_request_bytes(s: &str) -> Result<usize, Infallible> {
-    Ok(s.trim().parse().unwrap_or(DEFAULT_MAX_REQUEST_BYTES))
-}
-
-#[cfg(feature = "native")]
-#[allow(clippy::unnecessary_wraps)]
-fn parse_max_header_bytes(s: &str) -> Result<usize, Infallible> {
-    Ok(s.trim().parse().unwrap_or(DEFAULT_MAX_HEADER_BYTES))
-}
-
-#[cfg(feature = "native")]
-#[allow(clippy::unnecessary_wraps)]
-fn parse_request_timeout_millis(s: &str) -> Result<u64, Infallible> {
-    Ok(s.trim().parse().unwrap_or(DEFAULT_REQUEST_TIMEOUT_MILLIS))
 }
 
 #[aether_actor::bridge(singleton)]

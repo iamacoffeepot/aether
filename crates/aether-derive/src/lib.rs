@@ -30,18 +30,33 @@ mod config;
 /// ## Field attributes
 ///
 /// - `#[config(default = <lit>)]` — confique default literal.
-/// - `#[config(parse = <fn_path>)]` — confique `parse_env` function;
-///   turbofish-bearing paths are supported (`parse_u32_ms_or::<DEFAULT_TIMEOUT_MS>`).
+/// - `#[config(parse = <fn_path>)]` — an explicit confique `parse_env`
+///   function (turbofish-bearing paths supported), for a genuinely-custom
+///   mapping like `aether-capabilities::fs`'s `parse_dir`. A plain
+///   numeric / `Duration` / `bool` / `String` field needs none — see
+///   "Type-driven emission" below.
 /// - `#[config(ms_duration)]` — domain field is `Duration`; Layer
 ///   carries `<field>_ms: u32`; `from_layer` does the millis → Duration
 ///   map.
 /// - `#[config(csv_set)]` — domain + Layer share `HashSet<String>`;
-///   overlay carries `Option<String>` and splits CSV inline.
+///   overlay carries `Option<String>` and splits CSV inline; the env side
+///   auto-wires `aether_substrate::config::parse_csv_set` (trim + split +
+///   drop-empties).
+/// - `#[config(nonzero)]` — a resolved `0` coerces to the field
+///   `default` in `from_layer` (requires a `default`); for a knob where
+///   `0` is degenerate, e.g. a concurrency bound that would deadlock.
 /// - `#[config(env = "...")]` — per-field env-name override (used for
 ///   un-prefixed keys like `GEMINI_API_KEY`).
 ///
 /// ## Type-driven emission (no explicit hint)
 ///
+/// - numeric / `Duration` / `bool` — no `parse_env`; confique's native
+///   env deserialization trims, treats an empty value as unset → default,
+///   accepts the usual bool spellings, and hard-errors on a non-empty
+///   garbage value (ADR-0090 §4).
+/// - `String` with a `default` — `from_layer` maps an empty value to the
+///   default (confique resolves an unset var to the default but a
+///   set-but-empty var to `""`, since empty is a valid string).
 /// - `Option<String>` — `from_layer` always applies `.filter(|s| !s.is_empty())`
 ///   (empty env ≡ unset).
 /// - `Option<<numeric>>` — Layer holds `Option<String>`; `from_layer`

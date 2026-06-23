@@ -1,0 +1,5 @@
+error: `nonzero` hint requires a `default` (a resolved `0` coerces to it)
+ --> tests/ui/rejects_nonzero_without_default.rs:8:5
+  |
+8 |     #[config(nonzero)]
+  |     ^
