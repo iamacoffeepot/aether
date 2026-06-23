@@ -10,7 +10,9 @@ whenever they disagree with it.
   MCP tool list with signatures, the recipient-name convention, the chassis
   surface (what to mail where), the pre-flight and CI workflow. Loaded into
   every agent session. If the guide and `CLAUDE.md` disagree about a command
-  or a tool signature, `CLAUDE.md` wins.
+  or a tool signature, `CLAUDE.md` wins. For the local verification workflow
+  — `scripts/preflight.sh`, `scripts/attest.sh`, and how to relocate their
+  scratch onto a larger volume — see [Local verification](local-verification.md).
 - **The ADR log** (`docs/adr/NNNN-*.md`) — the decision record, in the order
   decisions were made. Every claim in this guide about *why* a subsystem is
   shaped a certain way is digesting one or more ADRs; the citation is in the
