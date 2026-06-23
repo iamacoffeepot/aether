@@ -82,7 +82,7 @@ mod server_native {
     };
     use crate::engine::kinds::ForwardEnvelope;
     use crate::engine::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams};
-    use crate::store::{ArtifactStore, LAYOUT_VERSION_DIR};
+    use crate::engine::store::{ArtifactStore, LAYOUT_VERSION_DIR};
     use aether_actor::actor;
     use aether_data::{EngineId, Kind, MailboxId, Uuid};
     use aether_kinds::{
@@ -911,7 +911,7 @@ mod tests {
     #[test]
     fn bootstrap_populates_and_default_resolves_to_headless() {
         use super::artifacts::{bootstrap_ingest, resolve_selector};
-        use crate::store::{ArtifactStore, DEFAULT_DISK_BUDGET_BYTES};
+        use crate::engine::store::{ArtifactStore, DEFAULT_DISK_BUDGET_BYTES};
         use std::collections::HashSet;
         use std::fs;
         use std::os::unix::fs::PermissionsExt;

@@ -69,6 +69,7 @@ pub enum Selector {
 pub struct StoredArtifact {
     pub hash: String,
     pub path: PathBuf,
+    #[allow(dead_code)]
     pub kind: ArtifactKind,
     pub manifest: StoredManifest,
     pub name: Option<String>,

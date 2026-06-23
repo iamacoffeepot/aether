@@ -12,6 +12,8 @@
 pub mod kinds;
 pub mod proxy;
 pub mod server;
+#[cfg(feature = "native")]
+mod store;
 
 pub use kinds::{
     CallSettled, EngineAlive, EngineDied, EngineHeartbeatTick, ForwardEnvelope, RouteEnvelope,

@@ -5,7 +5,7 @@
 //! realize stored bytes to an executable temp file for fork+exec.
 //! Native-only (forks `--describe`, reads / copies files).
 
-use crate::store::{
+use crate::engine::store::{
     ArtifactKind, ArtifactStore, Selector, StoredArtifact, StoredManifest, component_manifest,
 };
 use aether_kinds::{
