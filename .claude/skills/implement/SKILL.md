@@ -273,7 +273,8 @@ CI green — or green except a sole `Qodana scan` red held for `/land`:
    ✓ #<N> implemented and CI-green.
    Draft PR: <pr-url>
    Branch: <type>/issue-<N>-<slug>
-   Worktree: .claude/worktrees/issue-<N>  (clean up after merge with `git worktree remove`)
+   Worktree: .claude/worktrees/issue-<N>
+   Clean up after merge: git worktree remove "$(git rev-parse --show-toplevel)/.claude/worktrees/issue-<N>"
    Next: review the draft; un-draft (or tell me) to let native auto-merge land it on green. Phase → Done at merge.
    ```
 
