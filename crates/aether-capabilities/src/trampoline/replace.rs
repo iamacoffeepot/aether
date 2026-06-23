@@ -13,7 +13,8 @@ use aether_substrate::mail::capability::MailboxCaps;
 use aether_substrate::mail::{CostCells, KindId};
 use wasmtime::Module;
 
-use super::state::{WasmTrampoline, WasmTrampolineConfig};
+use super::config::WasmTrampolineConfig;
+use super::state::WasmTrampoline;
 
 impl WasmTrampoline {
     /// ADR-0097: perform the sibling spawn the guest staged via the

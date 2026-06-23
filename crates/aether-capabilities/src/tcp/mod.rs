@@ -38,6 +38,8 @@
 //! to its bound port to wake the blocked accept; the accept returns,
 //! sees the flag, breaks; the dispatcher thread joins.
 
+#[cfg(not(target_arch = "wasm32"))]
+mod config;
 pub mod kinds;
 mod listener;
 mod session;
@@ -46,15 +48,12 @@ pub use kinds::*;
 pub use listener::TcpListenerActor;
 pub use session::TcpSessionActor;
 // `TcpListenerConfig` and `TcpSessionConfig` carry `std::net`
-// types (native-only) so they live inside the native bridge mod
-// and only re-export under `not(target_arch = "wasm32")`. The
-// actor markers themselves (above) are always-on so wasm callers
-// can name them in [`TcpWasmExt::listener`] / [`TcpWasmExt::session`]
-// type parameters.
+// types (native-only) so they live in `config` and only re-export
+// under `not(target_arch = "wasm32")`. The actor markers themselves
+// (above) are always-on so wasm callers can name them in
+// [`TcpWasmExt::listener`] / [`TcpWasmExt::session`] type parameters.
 #[cfg(not(target_arch = "wasm32"))]
-pub use listener::TcpListenerConfig;
-#[cfg(not(target_arch = "wasm32"))]
-pub use session::TcpSessionConfig;
+pub use config::{TcpListenerConfig, TcpSessionConfig};
 
 use aether_actor::{Addressable, WasmActorMailbox};
 use aether_data::{ActorId, Tag, fold_lineage, with_tag};

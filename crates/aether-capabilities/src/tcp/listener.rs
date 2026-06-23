@@ -17,12 +17,6 @@
 // of the mod (always-on, outside the cfg gate).
 use super::kinds::{Close, ConnectionReady};
 
-// `TcpListenerConfig` carries `std::net::TcpListener` (native-only) so
-// it lives inside the bridge mod. Re-export at file root for the cap
-// module to consume.
-#[cfg(not(target_arch = "wasm32"))]
-pub use listener_native::TcpListenerConfig;
-
 #[aether_actor::bridge(instanced, one_per = "listener")]
 mod listener_native {
     use super::{Close, ConnectionReady};
@@ -31,26 +25,16 @@ mod listener_native {
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::{KindId, Mail, Mailer};
-    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::net::{SocketAddr, TcpStream};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread::JoinHandle;
     use std::time::Duration;
 
-    use crate::tcp::session::{TcpSessionActor, TcpSessionConfig};
+    use crate::tcp::config::{TcpListenerConfig, TcpSessionConfig};
+    use crate::tcp::session::TcpSessionActor;
     use std::thread;
-
-    /// Init config for [`TcpListenerActor`]. `TcpCapability::on_bind`
-    /// binds the socket on the dispatcher thread (so addr-parse / port-
-    /// in-use failures surface synchronously) and hands the bound
-    /// listener through `spawn_child`. The `listener` field is
-    /// `Option` so init can move it out into the accept thread.
-    pub struct TcpListenerConfig {
-        pub listener: Option<TcpListener>,
-        pub addr: String,
-        pub port: u16,
-    }
 
     /// Issue 607 Phase 6b: the accept thread can't call
     /// `ctx.spawn_child` (no dispatcher ctx), so it pushes accepted

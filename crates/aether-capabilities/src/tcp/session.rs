@@ -34,11 +34,6 @@
 // the `#[bridge]`-emitted `HandlesKind` markers.
 use super::kinds::{SessionClose, SessionDataReady, SessionWrite};
 
-// `TcpSessionActor` is auto-re-exported by `#[bridge]` at file
-// root; only `TcpSessionConfig` needs the manual re-export.
-#[cfg(not(target_arch = "wasm32"))]
-pub use session_native::TcpSessionConfig;
-
 #[aether_actor::bridge(instanced, one_per = "connection")]
 mod session_native {
     use super::{SessionClose, SessionDataReady, SessionWrite};
@@ -55,22 +50,13 @@ mod session_native {
     use std::thread;
     use std::thread::JoinHandle;
 
+    use crate::tcp::config::TcpSessionConfig;
+
     /// Default per-read buffer size. 64 KiB matches the typical
     /// kernel TCP buffer; any larger and we just block waiting for
     /// the kernel to fill it. Smaller adds syscall overhead per
     /// chunk.
     const READ_BUFFER_BYTES: usize = 64 * 1024;
-
-    /// Init config for [`TcpSessionActor`]. The listener's
-    /// `on_connection_ready` builds this per accepted stream and
-    /// hands it through `spawn_child`. `stream` is `Option` so init
-    /// can `.take()` and split it; `peer` and `session_name` are
-    /// retained for log attribution.
-    pub struct TcpSessionConfig {
-        pub stream: Option<TcpStream>,
-        pub peer: String,
-        pub session_name: String,
-    }
 
     /// One end of a split `TcpStream`. The read sidecar owns the
     /// read half; the dispatcher owns the write half (used by
