@@ -134,6 +134,19 @@ expect "pre-push: stamped worktree HEAD, bare push via cwd -> allow" check-pre-p
 expect "pre-push: stamped worktree HEAD, cd-prefix form -> allow" check-pre-push.sh \
   "{\"cwd\":\"$SCAFFOLD\",\"tool_input\":{\"command\":\"cd $SESS_WT && git push\"}}" 0
 
+# (e) cross-checkout allow: stamp lives in the SESS worktree's git-dir, but the
+#     push command runs from the main checkout cwd and names the worktree's
+#     branch explicitly (#2247 fix). The hook must scan all worktree stamps and
+#     allow on match.
+echo "$SESS_HEAD" > "$SESS_STAMP"
+expect "pre-push: stamped worktree, main-cwd push by branch name -> allow" check-pre-push.sh \
+  "{\"cwd\":\"$SCAFFOLD\",\"tool_input\":{\"command\":\"git push origin SESS\"}}" 0
+
+# (f) same main-checkout cwd but no stamp anywhere — must block.
+rm -f "$SESS_STAMP"
+expect "pre-push: no stamp, main-cwd push by branch name -> block" check-pre-push.sh \
+  "{\"cwd\":\"$SCAFFOLD\",\"tool_input\":{\"command\":\"git push origin SESS\"}}" 2
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
