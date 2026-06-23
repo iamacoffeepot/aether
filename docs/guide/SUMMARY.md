@@ -48,6 +48,10 @@
   - [Writing a component](recipes/writing-a-component.md)
   - [Debugging a hung settlement](recipes/debugging-a-hung-settlement.md)
 
+# Testing
+
+- [Writing tests that earn their place](testing.md)
+
 # Reference
 
 - [Pointers & where to read more](reference.md)
