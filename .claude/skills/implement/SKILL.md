@@ -166,11 +166,12 @@ Type comes from the issue's `type:*` label. Slug is the issue title sanitized: l
 
 2. Implement per the issue body's `## Implementation plan` section. The agent follows the plan literally: same files, same sequence, same test coverage. Deviations are bounces, not freelancing.
 
-3. Run local pre-flight before pushing:
+3. Run local pre-flight before pushing (keep this list in lockstep with `scripts/checks.sh` — that file is the canonical source):
    - `cargo fmt`
+   - `cargo clean -p <crate>` for each crate the diff touches (ensures the final clippy below runs against a non-incremental target and cannot inherit a stale cache that masks a warning, e.g. an unused import left after a move)
    - `cargo clippy --workspace --all-targets -- -D warnings`
    - `cargo nextest run --workspace`
-   - `cargo doc --workspace --no-deps`
+   - `RUSTDOCFLAGS="-D rustdoc::redundant_explicit_links -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links" cargo doc --workspace --no-deps`
    - wasm32 cross-build for component crates (`cargo metadata` → packages with `crate-type = cdylib` and `aether-actor` dep)
    - `scripts/preflight.sh` if present (writes the stamp file expected by the pre-push hook). Qodana is **not** run here — it is a required CI gate (`Qodana scan`, in `ci-pass`) resolved at `/land` from the `qodana-report` artifact, so a sole `Qodana scan` red holds the draft for `/land` rather than blocking the push (see the Refine loop's CI-green branch)
 
