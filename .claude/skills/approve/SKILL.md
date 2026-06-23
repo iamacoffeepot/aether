@@ -68,6 +68,7 @@ Run all of these. **Refuse** if any fail; list every failure in the refusal outp
 | Model label | exactly one `model:*` label present (REST: `gh api repos/iamacoffeepot/aether/issues/<n>/labels`) | "Missing model:* label (or more than one). `/scope` stamps model routing at Plan — re-run its Plan step or add the label by hand." |
 | Not blocked | no `blocked` / `wontfix` / `duplicate` label present | "Issue carries label '<label>' which blocks approval." |
 | Freshness | targeted paths exist on `origin/main` and none have churned since scope | "Targets removed on main: <paths>" (hard refuse) / "Targets churned since scope — re-ground before approving: <paths>" (soft surface) |
+| Umbrella integrity | if `## Sub-issues` is non-empty, the own `## Implementation plan` describes only coordination/integration, not net-new code the children don't cover | "Malformed umbrella: `## Sub-issues` plus a substantial own plan. Split the residual plan into its own child issue (leaving a pure umbrella), or remove `## Sub-issues` to make it a plain implementable issue." |
 
 If **all** gates pass, proceed.
 
@@ -132,7 +133,13 @@ If `/approve` is re-run on an issue that already carries `phase:ready`:
 
 ## Multi-PR umbrella issues
 
-If §Sub-issues lists children, the umbrella's `/approve` means "the overall plan is approved, children are split correctly". Each child still goes through its own `/scope` → `/approve` flow. The umbrella itself may not be `/implement`-able (no code to write at this level); leaving it at `Phase=Ready` is correct — it advances to `Done` only when every child is `Done`.
+An issue carrying a non-empty `## Sub-issues` section is either a **pure umbrella** or a **malformed umbrella**:
+
+- **Pure umbrella** — its `## Sub-issues` children collectively cover all implementation work. Its own `## Implementation plan`, if present, describes only coordination or integration steps (e.g. "merge children in order", "run the migration script once all pieces land"), not net-new code the children don't cover. `/approve` means "the overall plan is approved, children are split correctly". The umbrella itself is not `/implement`-able; leaving it at `Phase=Ready` is correct — it advances to `Done` only when every child is `Done`. Each child still goes through its own `/scope` → `/approve` flow.
+
+- **Malformed umbrella** — its own `## Implementation plan` describes net-new code or steps not delegated to any listed child. The Umbrella integrity gate (see [Gate checks](#gate-checks)) refuses this shape: the author must either split the residual plan into its own child issue (leaving a pure umbrella) or remove `## Sub-issues` to make it a plain implementable issue.
+
+The one-or-the-other invariant means any issue that reaches `/implement` with a non-empty `## Sub-issues` is a pure umbrella and is correct to drop.
 
 A future `/release-promote-umbrella <parent>` skill can auto-close the umbrella when all children are Done. Out of scope for v1.
 
