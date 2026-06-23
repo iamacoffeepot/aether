@@ -23,10 +23,10 @@ members = [
     # typed↔reshaped replace-pair satellites). Listed explicitly (not a
     # `crates/aether-test-fixtures/*` glob) because Qodana's TOML inspector
     # can't resolve workspace globs.
-    "crates/aether-test-fixtures/kinds",
-    "crates/aether-test-fixtures/bundle",
-    "crates/aether-test-fixtures/stateful-typed",
-    "crates/aether-test-fixtures/stateful-reshaped",
+    "crates/aether-test-fixtures/aether-test-fixtures-kinds",
+    "crates/aether-test-fixtures/aether-test-fixtures-bundle",
+    "crates/aether-test-fixtures/aether-test-fixtures-stateful-typed",
+    "crates/aether-test-fixtures/aether-test-fixtures-stateful-reshaped",
     "xtask",
 ]
 # Reference artefacts under spikes/ are standalone Cargo workspaces
