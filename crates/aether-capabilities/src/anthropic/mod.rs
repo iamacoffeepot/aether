@@ -36,7 +36,6 @@ use std::time::Duration;
 
 use crate::contentgen::adapter::{AnthropicAdapter, AnthropicRequest, AnthropicResponse};
 
-use crate::config_env::DEFAULT_PROVIDER_MAX_IN_FLIGHT;
 pub use api::UreqAnthropicAdapter;
 pub use cli::ClaudeCliAdapter;
 pub use config::{AnthropicConfig, AnthropicConfigLayer, AnthropicOverlay};
@@ -44,7 +43,7 @@ pub use config::{AnthropicConfig, AnthropicConfigLayer, AnthropicOverlay};
 /// Default per-cap concurrency bound when `AETHER_ANTHROPIC_MAX_IN_FLIGHT`
 /// is unset. Conservative — paid-endpoint throttling matters more than
 /// throughput here.
-pub const DEFAULT_MAX_IN_FLIGHT: usize = DEFAULT_PROVIDER_MAX_IN_FLIGHT;
+pub const DEFAULT_MAX_IN_FLIGHT: usize = 2;
 
 /// Default per-request timeout when `AETHER_ANTHROPIC_TIMEOUT_MS` is
 /// unset. A long completion can run tens of seconds.

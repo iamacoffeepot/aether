@@ -30,8 +30,6 @@ mod kinds;
 mod lyria;
 mod nanobanana;
 
-use crate::config_env::DEFAULT_PROVIDER_MAX_IN_FLIGHT;
-
 pub use adapter::{DisabledGeminiAdapter, UreqGeminiAdapter};
 pub use capability::GeminiCapability;
 pub use config::{GeminiConfig, GeminiConfigLayer, GeminiOverlay};
@@ -40,7 +38,7 @@ pub use kinds::*;
 /// Default per-cap concurrency bound when `AETHER_GEMINI_MAX_IN_FLIGHT`
 /// is unset. Conservative — image / music generation is multi-second
 /// and paid.
-pub const DEFAULT_MAX_IN_FLIGHT: usize = DEFAULT_PROVIDER_MAX_IN_FLIGHT;
+pub const DEFAULT_MAX_IN_FLIGHT: usize = 2;
 
 /// Default per-request timeout when `AETHER_GEMINI_TIMEOUT_MS` is unset.
 /// Media generation can run a couple minutes.

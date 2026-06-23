@@ -39,10 +39,6 @@ pub mod component;
 // elides cleanly on the wasm-component build.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod contentgen;
-// Shared provider config defaults (ADR-0090). The per-provider
-// `DEFAULT_MAX_IN_FLIGHT` constants alias `DEFAULT_PROVIDER_MAX_IN_FLIGHT`
-// from here.
-mod config_env;
 
 pub mod engine;
 pub mod fs;
