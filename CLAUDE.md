@@ -144,6 +144,8 @@ Exception classes that skip the Rust pre-flight (only when *every* changed path 
 
 A Claude-side hook (`.claude/hooks/check-pre-push.sh`) checks the stamp ahead of `git push` / `gh pr create`. If HEAD has no matching stamp it blocks and prompts Claude to run `scripts/preflight.sh`. Bypass either layer with `git push --no-verify`.
 
+Manual cross-worktree `cargo doc` / `clippy` re-checks must keep each worktree on its own `target/` — never export a shared `CARGO_TARGET_DIR` across worktrees on divergent source, because cargo's incremental cache can surface a dependency last compiled from the other worktree's source, producing phantom errors that look like regressions but are tooling artifacts. `preflight.sh` is immune (it sets no `CARGO_TARGET_DIR` and builds into each worktree's own `target/`) and `scripts/attest.sh` is immune (fresh clone + external target per step) — both are the authoritative gates over any ad-hoc cross-worktree run.
+
 ## Qodana
 
 Qodana is a required merge gate via the `ci-pass` aggregator (the `Qodana scan` check), run by CI in PR mode — scoped against the `origin/main` merge-base, so only findings the branch newly introduces count toward `failThreshold: 2`. `scripts/preflight.sh` runs the same scan locally — the same pinned `jetbrains/qodana-rust` container, diff-scoped to the `origin/main` merge-base — so a passing pre-flight covers it (requires Docker); `qodana.yaml` (linter image, `qodana.recommended` profile, excludes, `failThreshold: 2`) is the single config source both the CI job and the local run read, and `NewCrateVersionAvailable` is excluded project-wide.
