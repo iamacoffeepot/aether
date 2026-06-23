@@ -27,6 +27,10 @@
 mod api;
 mod cli;
 mod error;
+mod kinds;
+pub use kinds::{
+    AnthropicError, CliSend, CliSendResult, Message, MessagesSend, MessagesSendResult, Role,
+};
 
 use std::time::Duration;
 
@@ -240,11 +244,14 @@ mod config {
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
-use aether_kinds::{CliSend, CliSendResult, MessagesSend, MessagesSendResult};
+// Handler-signature kinds are brought into file-root scope via
+// `pub use kinds::{..., CliSend, ...}` above; the bridge macro's
+// `impl HandlesKind<K>` markers outside `mod native` can see them there.
+// No separate `use` needed.
 
 /// Convert an adapter error string into the typed `AnthropicError`.
 /// Shared by both result paths.
-fn map_adapter_error(raw: &str) -> aether_kinds::AnthropicError {
+fn map_adapter_error(raw: &str) -> AnthropicError {
     error::adapter_error_to_typed(raw)
 }
 
@@ -260,7 +267,9 @@ mod native {
     use crate::contentgen::adapter::{AdapterUsage, AnthropicResponse};
     use crate::contentgen::task_queue::TaskQueue;
     use aether_actor::{Manual, OutboundReply, actor};
-    use aether_kinds::{AnthropicError, Message, Role, Usage};
+    use aether_kinds::Usage;
+
+    use super::kinds::{AnthropicError, Message, Role};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
     use aether_substrate::chassis::error::BootError;
 
@@ -554,6 +563,9 @@ mod native {
         use super::super::{
             AnthropicAdapter, AnthropicConfig, ClaudeCliAdapter, DisabledAnthropicAdapter,
         };
+        use super::super::{
+            AnthropicError, CliSend, CliSendResult, Message, MessagesSend, MessagesSendResult, Role,
+        };
         use super::AnthropicCapability;
         use crate::contentgen::adapter::{
             AnthropicRequest, AnthropicResponse, StubAnthropicAdapter,
@@ -564,9 +576,6 @@ mod native {
         };
         use aether_actor::Addressable;
         use aether_data::{Kind, MailboxId, SessionToken, Source, SourceAddr, Uuid};
-        use aether_kinds::{
-            AnthropicError, CliSend, CliSendResult, Message, MessagesSend, MessagesSendResult, Role,
-        };
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::actor::native::ctx::NativeCtx;
         use aether_substrate::chassis::builder::Builder;
