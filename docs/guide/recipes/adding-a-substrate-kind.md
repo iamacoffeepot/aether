@@ -27,8 +27,9 @@ window-less chassis. Trace it end to end through these four files:
   `apply_window_focus`.
 - **Window-less handler** — `crates/aether-capabilities/src/window/mod.rs`:
   `HeadlessWindowCapability::on_focus`.
-- **Coverage guard** — `crates/aether-kinds/src/descriptors.rs`:
-  `covers_every_substrate_kind`.
+- **Registration** — `crates/aether-kinds/src/descriptors.rs`: the
+  `#[derive(Kind)]` on the new type auto-submits its descriptor to the
+  inventory; no manual registration step.
 
 ## 1. Declare the type
 
@@ -77,15 +78,6 @@ puts it on the `send_mail` / `describe_kinds` surface — registers itself. The
 inventory slot. Adding a kind is one place: the struct definition with its
 derives. There is no manual descriptor `vec!` to append to.
 
-What you *do* add is a line to the coverage guard. `covers_every_substrate_kind`
-in `descriptors.rs` asserts each substrate kind name is present, so the linker
-stripping the per-kind submission static fails the test instead of booting an
-engine with a silently missing kind:
-
-```rust
-assert!(names.contains(&FocusWindow::NAME));
-```
-
 ## 3. Handle it
 
 A kind with no handler routes to "kind not found." Pick the mailbox that owns
@@ -117,11 +109,9 @@ shape (`aether.window.focus`), `recipient_name` names the mailbox
 
 Three checks, cheapest first:
 
-- **Coverage + schema shape** — `cargo nextest run -p aether-kinds` exercises
-  `descriptors.rs`: `covers_every_substrate_kind` proves the kind reaches the
-  hub-shipped list, and the shape tests (`signal_kinds_emit_unit`,
-  `cast_kinds_emit_struct_with_repr_c`, the structured-vs-cast guards) catch a
-  wire-format slip.
+- **Registration** — `cargo nextest run -p aether-kinds` runs the suite;
+  `descriptor_list_is_unique` in `descriptors.rs` catches duplicate names in the
+  inventory (a stray double-declaration or a mis-merged `#[derive(Kind)]`).
 - **Round-trip through the chassis** — drive a `send_and_await` against the
   owning mailbox in the test bench and decode the reply. The pattern is in
   `crates/aether-substrate-bundle/tests/input_subscriptions.rs`:

@@ -360,8 +360,7 @@ mod tests {
     // sees the fs statics — the standing guarantee that `describe_kinds`
     // still surfaces the fs family after the kinds moved out of
     // `aether-kinds` (ADR-0121). Relocated from `aether-kinds`'
-    // `covers_every_substrate_kind` / `io_requests_are_structured_schemas`
-    // / `io_results_are_enum_schemas`.
+    // relocated from `aether-kinds` when the fs kinds moved out (ADR-0121).
     mod descriptors {
         use super::*;
         use aether_kinds::descriptors::all;
