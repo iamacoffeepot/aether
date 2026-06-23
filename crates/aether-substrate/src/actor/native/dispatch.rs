@@ -52,12 +52,12 @@ use crate::mail::{KindId, MailboxId};
 /// borrows are sequential (clone borrows `&ctx`, drops; the fallback
 /// call borrows `&mut ctx`), so no borrow conflict.
 pub fn typed_then_fallback_or_warn<A>(
-    actor: &mut Box<A>,
+    actor: &mut Box<A::State>,
     ctx: &mut NativeCtx<'_, crate::Manual>,
     kind: KindId,
     payload: &[u8],
 ) where
-    A: NativeActor + NativeDispatch,
+    A: NativeActor,
 {
     if actor
         .__aether_dispatch_envelope(ctx, kind, payload)

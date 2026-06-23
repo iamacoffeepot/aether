@@ -71,7 +71,11 @@ impl aether_actor::Lifecycle for RingRelay {
         Ok(Self { next })
     }
 }
-impl NativeActor for RingRelay {}
+impl NativeActor for RingRelay {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
 impl NativeDispatch for RingRelay {
     fn __aether_dispatch_envelope(
         &mut self,
@@ -127,7 +131,11 @@ impl aether_actor::Lifecycle for HoldRelay {
         Ok(Self)
     }
 }
-impl NativeActor for HoldRelay {}
+impl NativeActor for HoldRelay {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
 impl NativeDispatch for HoldRelay {
     fn __aether_dispatch_envelope(
         &mut self,

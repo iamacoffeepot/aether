@@ -92,7 +92,10 @@ impl Deref for PooledSlots {
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
-use crate::actor::native::{NativeActor, NativeDispatch};
+use crate::actor::native::NativeActor;
+// Spike split: `actor.unwire(..)` resolves through `A::State: Lifecycle`,
+// which is no longer a `NativeActor` supertrait, so the trait must be in scope.
+use aether_actor::Lifecycle;
 use crate::actor::registry::ActorRegistry;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailboxId, Source};
@@ -108,7 +111,7 @@ use crate::scheduler::{
 /// is gone silently no-ops).
 pub struct DispatcherSlot<A>
 where
-    A: NativeActor + NativeDispatch,
+    A: NativeActor,
 {
     /// The slot's atomic state machine. Shared with the `WakeHandle`.
     pub(crate) state: Arc<SlotState>,
@@ -120,7 +123,7 @@ where
     /// [`SlotState`] alone, which is the scheduling filter above it.
     /// `Option` so the `Closed` finalize path can take the box and run
     /// `unwire` on the consumed actor.
-    actor: Mutex<Option<Box<A>>>,
+    actor: Mutex<Option<Box<A::State>>>,
     /// Per-actor binding (inbox + shutdown flag + reply machinery).
     binding: Arc<NativeBinding>,
     /// Per-actor `Local<T>` storage. Stamped into TLS for each
@@ -152,7 +155,7 @@ where
 
 impl<A> DispatcherSlot<A>
 where
-    A: NativeActor + NativeDispatch,
+    A: NativeActor,
 {
     /// Borrow this slot's [`SlotState`] — needed by callers building a
     /// [`crate::scheduler::WakeHandle`] over the slot.
@@ -170,7 +173,7 @@ where
     }
 
     pub(crate) fn new(
-        actor: Box<A>,
+        actor: Box<A::State>,
         binding: Arc<NativeBinding>,
         slots: Box<ActorSlots>,
         actor_registry: Arc<ActorRegistry>,
@@ -215,7 +218,7 @@ where
     /// the ADR-0081 `ActorLogRing`) resolve to this actor's slots.
     /// ADR-0081 retired the prior `log_install::with_actor_dispatch`
     /// wrap + per-handler flush hop.
-    fn dispatch_one(&self, actor: &mut Box<A>, env: Envelope) {
+    fn dispatch_one(&self, actor: &mut Box<A::State>, env: Envelope) {
         // iamacoffeepot/aether#1160: note this envelope against the
         // worker's local-drain burst *before* running the handler, so a
         // blob this handler produces (scheduled at `ctx` drop below) is
@@ -340,7 +343,7 @@ where
     /// The close hook in the slot teardown sequence. Wraps `actor.unwire`
     /// in `with_stamped` so any final tracing or `Local<T>` access from
     /// the close hook resolves to this actor's slots.
-    fn run_close_hook(&self, actor: &mut Box<A>) {
+    fn run_close_hook(&self, actor: &mut Box<A::State>) {
         local::with_stamped(&self.slots, || {
             let mut close_ctx = NativeCtx::new(
                 &self.binding,
@@ -517,7 +520,7 @@ where
 
 impl<A> Drainable for DispatcherSlot<A>
 where
-    A: NativeActor + NativeDispatch,
+    A: NativeActor,
 {
     fn run_cycle(&self, budget: BatchBudget) -> CycleResult {
         if !self.state.enter_running() {

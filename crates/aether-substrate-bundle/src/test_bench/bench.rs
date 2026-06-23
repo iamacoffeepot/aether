@@ -1709,7 +1709,11 @@ mod tests {
                 Ok(Self { received: config })
             }
         }
-        impl NativeActor for Child {}
+        impl NativeActor for Child {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for Child {
             fn __aether_dispatch_envelope(
                 &mut self,

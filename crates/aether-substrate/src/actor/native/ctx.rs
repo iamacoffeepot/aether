@@ -36,7 +36,7 @@ use crate::mail::Source;
 use crate::mail::mailer::Mailer;
 use crate::runtime::trace::SettlementHold;
 
-use super::{NativeActor, NativeDispatch};
+use super::NativeActor;
 use crate::actor::native::InheritCtx;
 use crate::actor::native::RootCtx;
 use crate::actor::native::dispatch_blocking::{DispatchId, Pending, TaskCompletionWake, TaskDone};
@@ -696,7 +696,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         config: A::Config,
     ) -> super::spawn::SpawnBuilder<'b, A>
     where
-        A: aether_actor::Instanced + NativeActor + NativeDispatch,
+        A: aether_actor::Instanced + NativeActor,
     {
         let spawner = self
             .binding
@@ -1252,7 +1252,22 @@ mod tests {
         }
     }
 
-    impl NativeActor for StubActor {}
+    impl crate::actor::native::NativeDispatch for StubActor {
+        fn __aether_dispatch_envelope(
+            &mut self,
+            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _kind: crate::mail::KindId,
+            _payload: &[u8],
+        ) -> Option<()> {
+            None
+        }
+    }
+
+    impl NativeActor for StubActor {
+        type Config = ();
+        // Spike split: the un-split shape — the identity is its own runtime.
+        type State = Self;
+    }
 
     /// Issue 629 / Phase A: handle-export round-trip. Caps publish a
     /// handle bundle during `init`; consumers retrieve a clone via

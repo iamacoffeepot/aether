@@ -122,14 +122,33 @@ pub use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapabil
 /// fields without interior-mutability gymnastics once Phase B sweeps each
 /// cap. Per-kind dispatch wiring lives on the sibling [`NativeDispatch`]
 /// trait, also macro-emitted.
-pub trait NativeActor:
-    Addressable
-    + for<'a> Lifecycle<
-        InitError = BootError,
-        InitCtx<'a> = NativeInitCtx<'a>,
-        Ctx<'a> = NativeCtx<'a>,
-    >
-{
+pub trait NativeActor: Addressable {
+    /// Boot configuration (ADR-0090), mirrored onto the runtime state's
+    /// [`Lifecycle::Config`]. Kept on the identity so the chassis builder's
+    /// `with_actor::<A>(config: A::Config)` reads it off the addressing type.
+    type Config: Send + 'static;
+
+    /// The runtime state this identity boots into (spike: identity/runtime
+    /// split). The default is `Self` — the identity IS its own runtime, the
+    /// shape every cap not yet split keeps. That default is supplied by the
+    /// `#[actor]` macro (`type State = Self;`), not as a trait-level
+    /// associated-type default, because associated-type defaults are unstable
+    /// on the 2024 edition. A cap that separates addressing from runtime (the
+    /// `fs` cap in this spike) sets `State` to a dedicated state struct that
+    /// holds the heavy `aether_substrate`-typed fields.
+    ///
+    /// The dispatcher owns the actor as `Box<Self::State>` and routes
+    /// envelopes through its [`NativeDispatch`]; boot runs
+    /// `<Self::State as Lifecycle>::init`. The lifecycle + dispatch live on
+    /// `State`, the addressing (`NAMESPACE`, `Resolver`, `HandlesKind`) lives
+    /// on `Self`.
+    type State: NativeDispatch
+        + for<'a> Lifecycle<
+            Config = Self::Config,
+            InitError = BootError,
+            InitCtx<'a> = NativeInitCtx<'a>,
+            Ctx<'a> = NativeCtx<'a>,
+        >;
 }
 
 /// Sum dispatch entry-point — emitted once per `#[actor] impl

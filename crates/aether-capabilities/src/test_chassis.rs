@@ -81,7 +81,7 @@ pub fn boot_test_chassis_with<A>(
     config: A::Config,
 ) -> PassiveChassis<TestChassis>
 where
-    A: NativeActor + NativeDispatch,
+    A: NativeActor,
 {
     Builder::<TestChassis>::new(Arc::clone(registry), Arc::clone(mailer))
         .with_actor::<A>(config)

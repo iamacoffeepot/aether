@@ -178,7 +178,11 @@ impl aether_actor::Lifecycle for Relay {
         })
     }
 }
-impl NativeActor for Relay {}
+impl NativeActor for Relay {
+    type Config = RelayConfig;
+    // Spike split: the un-split shape — the identity is its own runtime.
+    type State = Self;
+}
 impl NativeDispatch for Relay {
     fn __aether_dispatch_envelope(
         &mut self,
@@ -274,7 +278,11 @@ impl aether_actor::Lifecycle for TickSource {
         })
     }
 }
-impl NativeActor for TickSource {}
+impl NativeActor for TickSource {
+    type Config = (MailboxId, u32);
+    // Spike split: the un-split shape — the identity is its own runtime.
+    type State = Self;
+}
 impl NativeDispatch for TickSource {
     fn __aether_dispatch_envelope(
         &mut self,

@@ -1057,7 +1057,9 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
                     if parse_handler_variant(handler_attr)? == HandlerVariant::Task {
                         continue;
                     }
-                    let (kind_ty, _is_slice) = extract_native_actor_handler_kind(&f.sig)?;
+                    // `#[bridge]` is the legacy (un-split) splitter; its inner
+                    // handlers are always `&mut self` receivers.
+                    let (kind_ty, _is_slice) = extract_native_actor_handler_kind(&f.sig, false)?;
                     handler_kinds.push(kind_ty);
                 }
                 ImplItem::Fn(f) if f.attrs.iter().any(attr_is_fallback) => {
@@ -2397,6 +2399,27 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         .map(|(_, p, _)| p)
         .expect("trait_ checked above");
 
+    // Spike: identity/runtime split. A pre-scan for an explicit
+    // `type State = …`. When present and not `Self`, the macro divides
+    // its emission: the addressing markers (`Addressable` / `HandlesKind` /
+    // name inventory) stay always-on against the identity `Self`, while the
+    // runtime impls (`Lifecycle` / `NativeActor` / `NativeDispatch` + the
+    // handler bodies) are gated behind `feature = "runtime"` and target the
+    // declared state type. Absent (the shape every un-split cap keeps), the
+    // macro emits `type State = Self` and the legacy `not(wasm)`-gated
+    // surface unchanged.
+    let declared_state_ty: Option<Type> = item.items.iter().find_map(|it| {
+        if let ImplItem::Type(t) = it
+            && t.ident == "State"
+        {
+            return Some(t.ty.clone());
+        }
+        None
+    });
+    let is_split = declared_state_ty
+        .as_ref()
+        .is_some_and(|t| quote!(#t).to_string() != "Self");
+
     let mut init_method: Option<syn::ImplItemFn> = None;
     let mut config_type: Option<syn::ImplItemType> = None;
     let mut handlers: Vec<NativeActorHandlerFn> = Vec::new();
@@ -2425,11 +2448,16 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
             ImplItem::Type(it) if it.ident == "Config" => {
                 config_type = Some(it);
             }
+            ImplItem::Type(it) if it.ident == "State" => {
+                // Pre-scanned into `declared_state_ty` above; accepted here so
+                // it isn't rejected as a stray associated type.
+                let _ = it;
+            }
             ImplItem::Type(it) => {
                 return Err(syn::Error::new_spanned(
                     it,
-                    "#[actor] impl NativeActor for X accepts only `type Config = …` — \
-                     other associated types aren't part of the trait",
+                    "#[actor] impl NativeActor for X accepts only `type Config = …` \
+                     and `type State = …` — other associated types aren't part of the trait",
                 ));
             }
             ImplItem::Const(c) => {
@@ -2454,7 +2482,8 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                     f.attrs.remove(idx);
                     match variant {
                         HandlerVariant::Mail => {
-                            let (kind_ty, is_slice) = extract_native_actor_handler_kind(&f.sig)?;
+                            let (kind_ty, is_slice) =
+                                extract_native_actor_handler_kind(&f.sig, is_split)?;
                             let reply = classify_handler_reply(&f.sig.output);
                             handlers.push(NativeActorHandlerFn {
                                 method: f,
@@ -2700,6 +2729,21 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     // ADR-0081 retired the chassis-pushed `ConfigureLogDrain` mail;
     // see the matching note on the `#[actor]` derive path.
 
+    // Spike split: the handler / fallback methods are emitted into the
+    // identity's *inherent* impl (`impl FsCapability`), where the bare
+    // `Self::State` they're authored with is an ambiguous associated type
+    // (it belongs to the `NativeActor` trait, not an inherent assoc type).
+    // Substitute the `state: &mut Self::State` parameter type with the
+    // concrete declared state type before anything reads the methods.
+    if is_split && let Some(concrete) = declared_state_ty.as_ref() {
+        for h in &mut handlers {
+            rewrite_self_state_first_param(&mut h.method, concrete);
+        }
+        if let Some(f) = fallback.as_mut() {
+            rewrite_self_state_first_param(&mut f.method, concrete);
+        }
+    }
+
     let dispatch_arms = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;
         let method_ident = &h.method.sig.ident;
@@ -2710,19 +2754,44 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         // deferred `Pending` send is #1805). A manual handler is called with
         // the `Manual` ctx directly and issues its own replies — no
         // auto-reply, regardless of return type.
-        let call = match (h.class, &h.reply) {
-            (HandlerClass::Single, HandlerReply::Sync(_)) => quote! {
-                let __aether_reply = self.#method_ident(__aether_ctx.as_single(), __aether_decoded);
-                ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
-            },
-            (HandlerClass::Single, HandlerReply::None | HandlerReply::Deferred(_)) => quote! {
-                self.#method_ident(__aether_ctx.as_single(), __aether_decoded);
-            },
-            (HandlerClass::Manual, _) => quote! {
-                self.#method_ident(__aether_ctx, __aether_decoded);
-            },
-            (HandlerClass::Stream, _) => {
-                unreachable!("parse_handler_class rejects #[handler::stream]")
+        // Spike split: when the impl block divides identity from runtime,
+        // the dispatch impl sits on the state type (so `self: &mut
+        // Self::State`) and the handler is an associated fn on the identity
+        // that takes the state as its first parameter — call it as
+        // `<Identity>::on_x(self, ctx, decoded)`. The legacy (un-split)
+        // shape keeps the `self.on_x(ctx, decoded)` method call.
+        let call = if is_split {
+            match (h.class, &h.reply) {
+                (HandlerClass::Single, HandlerReply::Sync(_)) => quote! {
+                    let __aether_reply =
+                        #self_ty::#method_ident(self, __aether_ctx.as_single(), __aether_decoded);
+                    ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
+                },
+                (HandlerClass::Single, HandlerReply::None | HandlerReply::Deferred(_)) => quote! {
+                    #self_ty::#method_ident(self, __aether_ctx.as_single(), __aether_decoded);
+                },
+                (HandlerClass::Manual, _) => quote! {
+                    #self_ty::#method_ident(self, __aether_ctx, __aether_decoded);
+                },
+                (HandlerClass::Stream, _) => {
+                    unreachable!("parse_handler_class rejects #[handler::stream]")
+                }
+            }
+        } else {
+            match (h.class, &h.reply) {
+                (HandlerClass::Single, HandlerReply::Sync(_)) => quote! {
+                    let __aether_reply = self.#method_ident(__aether_ctx.as_single(), __aether_decoded);
+                    ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
+                },
+                (HandlerClass::Single, HandlerReply::None | HandlerReply::Deferred(_)) => quote! {
+                    self.#method_ident(__aether_ctx.as_single(), __aether_decoded);
+                },
+                (HandlerClass::Manual, _) => quote! {
+                    self.#method_ident(__aether_ctx, __aether_decoded);
+                },
+                (HandlerClass::Stream, _) => {
+                    unreachable!("parse_handler_class rejects #[handler::stream]")
+                }
             }
         };
         if h.is_slice {
@@ -2838,13 +2907,20 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         let method_ident = &f.method.sig.ident;
         // ADR-0112: the trait seam carries the `Manual` ctx; a `#[fallback]`
         // keeps its `NativeCtx<'_>` (= Single) signature, so downgrade.
+        // Spike split: forward through the identity assoc fn (state first),
+        // mirroring the typed-handler dispatch arms.
+        let call = if is_split {
+            quote! { #self_ty::#method_ident(self, __aether_ctx.as_single(), __aether_env); }
+        } else {
+            quote! { self.#method_ident(__aether_ctx.as_single(), __aether_env); }
+        };
         quote! {
             fn __aether_dispatch_fallback(
                 &mut self,
                 __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, ::aether_actor::Manual>,
                 __aether_env: &::aether_substrate::actor::native::envelope::Envelope,
             ) -> bool {
-                self.#method_ident(__aether_ctx.as_single(), __aether_env);
+                #call
                 true
             }
         }
@@ -2949,19 +3025,97 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     // there's no realistic case where a host build wants to skip
     // them. Pinning the cfg in the macro means consumer crates never
     // have to define matching feature flags.
+    // Spike: identity/runtime split keying.
+    //
+    // - Legacy (un-split): the identity IS its runtime, so the runtime impls
+    //   target `#self_ty` and gate on `not(wasm)` exactly as before. The
+    //   `NativeActor` impl pins `type State = Self`.
+    // - Split (`type State = …`): the runtime impls (`Lifecycle` /
+    //   `NativeDispatch`) target the declared state type and gate behind
+    //   `feature = "runtime"` (the hardcoded convention for now), so a
+    //   transport-only build never names the state type or pulls
+    //   `aether_substrate`. The handler inherent impl stays on the identity
+    //   (its assoc fns take `state: &mut Self::State`). The `NativeActor`
+    //   impl pins `type State` to the declared type and bridges identity →
+    //   runtime. The addressing markers above (`Addressable` /
+    //   `HandlesKind`) are always-on regardless.
+    let runtime_gate = if is_split {
+        quote! { #[cfg(feature = "runtime")] }
+    } else {
+        quote! { #[cfg(not(target_family = "wasm"))] }
+    };
+    // The target of the runtime (`Lifecycle` / `NativeDispatch`) impls.
+    let runtime_ty: Type = if is_split {
+        declared_state_ty.expect("is_split implies a declared `type State`")
+    } else {
+        (**self_ty).clone()
+    };
+    // The `type State` the identity's `NativeActor` impl pins. In the split
+    // path it is the same concrete type as `runtime_ty`.
+    let state_assoc: Type = if is_split {
+        runtime_ty.clone()
+    } else {
+        syn::parse_quote!(Self)
+    };
+
+    // Spike: a split (`#[actor] impl NativeActor`) cap carries its own
+    // always-on name-inventory submission (the `#[bridge]` path emits this
+    // for the caps it wraps; a de-bridged split cap emits it here). Keyed by
+    // cardinality off the single `#namespace_expr`, gated `not(wasm)` so it
+    // rides the transport build but never the wasm header build. Only the
+    // split path needs it — legacy non-bridge caps keep today's behaviour.
+    let name_entry = if is_split && !opts.skip_markers && has_namespace {
+        let namespace_expr = consts.iter().find_map(|c| {
+            if c.ident == "NAMESPACE" {
+                Some(&c.expr)
+            } else {
+                None
+            }
+        });
+        match (namespace_expr, opts.cardinality) {
+            (Some(ns), Some(BridgeCardinality::Instanced)) => quote! {
+                #[cfg(not(target_family = "wasm"))]
+                ::aether_data::name_inventory::inventory::submit! {
+                    ::aether_data::name_inventory::TemplateEntry {
+                        domain: ::aether_data::MAILBOX_DOMAIN,
+                        prefix: #ns,
+                        template: ":{subname}",
+                        param: ::aether_data::name_inventory::ParamKind::Dynamic,
+                        cardinality: ::aether_data::name_inventory::Cardinality::Unbounded,
+                    }
+                }
+            },
+            (Some(ns), _) => quote! {
+                #[cfg(not(target_family = "wasm"))]
+                ::aether_data::name_inventory::inventory::submit! {
+                    ::aether_data::name_inventory::NameEntry {
+                        domain: ::aether_data::MAILBOX_DOMAIN,
+                        name: #ns,
+                    }
+                }
+            },
+            (None, _) => quote! {},
+        }
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         #actor_impl
 
         #(#handles_kind_impls)*
 
+        #name_entry
+
         #handler_inventory
 
         // iamacoffeepot/aether#2048: the boot lifecycle (`init` / `wire` /
         // `unwire` + `type Config`) lives on the shared `Lifecycle`
-        // capability, with the per-target ctx GATs pinned to the concrete
-        // native ctx types so an `init`/`wire` body keeps its concrete ctx.
-        #[cfg(not(target_family = "wasm"))]
-        impl #impl_generics ::aether_actor::Lifecycle for #self_ty #where_clause {
+        // capability. In the split shape this targets the runtime state type
+        // (its `init` returns the state); in the legacy shape the state IS
+        // `Self`.
+        #runtime_gate
+        impl #impl_generics ::aether_actor::Lifecycle for #runtime_ty #where_clause {
             #config_type
             type InitError = ::aether_substrate::BootError;
             type InitCtx<'__a> = ::aether_substrate::NativeInitCtx<'__a>;
@@ -2970,14 +3124,17 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
             #(#lifecycle_methods)*
         }
 
-        // `NativeActor` is now the empty composition `Actor +
-        // Lifecycle<InitError = BootError>`; per-kind dispatch lives on the
-        // sibling `NativeDispatch` impl below.
-        #[cfg(not(target_family = "wasm"))]
-        impl #impl_generics #trait_path for #self_ty #where_clause {}
+        // The identity's `NativeActor` impl: pins the runtime `State` (the
+        // bridge from addressing → runtime) and mirrors `type Config`.
+        #runtime_gate
+        impl #impl_generics #trait_path for #self_ty #where_clause {
+            #config_type
+            type State = #state_assoc;
+        }
 
-        #[cfg(not(target_family = "wasm"))]
-        impl #impl_generics ::aether_substrate::NativeDispatch for #self_ty #where_clause {
+        // Per-kind dispatch lives on the runtime state type.
+        #runtime_gate
+        impl #impl_generics ::aether_substrate::NativeDispatch for #runtime_ty #where_clause {
             // ADR-0112: the dispatch seam carries the most-permissive
             // `Manual` ctx; the arms downgrade per handler class.
             fn __aether_dispatch_envelope(
@@ -2996,7 +3153,11 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
             #capabilities_override
         }
 
-        #[cfg(not(target_family = "wasm"))]
+        // The handler / helper bodies. In the legacy shape these are
+        // `&mut self` methods on the (identity == state) type; in the split
+        // shape they are associated fns on the identity taking
+        // `state: &mut Self::State`. Either way they land on `#self_ty`.
+        #runtime_gate
         impl #impl_generics #self_ty #where_clause {
             #(#handler_methods)*
             #(#task_handler_methods)*
@@ -3112,7 +3273,42 @@ fn validate_native_fallback_sig(sig: &Signature) -> syn::Result<()> {
 /// mutable state migrate from interior mutability (`Mutex` / `Atomic`)
 /// to plain fields by flipping handler signatures to `&mut self` per
 /// cap.
-fn extract_native_actor_handler_kind(sig: &Signature) -> syn::Result<(Type, bool)> {
+/// Spike split: rewrite a split handler's first parameter type
+/// (`state: &mut Self::State` — or a bare `state: Self::State`) so the bare
+/// `Self::State` becomes the concrete declared state type. Needed because
+/// these methods are emitted into the identity's *inherent* impl, where
+/// `Self::State` (a trait-associated type) is ambiguous. Only the first
+/// parameter carries `Self::State` in the split authoring shape, so a
+/// surgical first-param rewrite suffices — no full `visit_mut` pass (and no
+/// extra `syn` feature).
+fn type_is_self_state(ty: &Type) -> bool {
+    if let Type::Path(tp) = ty
+        && tp.qself.is_none()
+        && tp.path.segments.len() == 2
+        && tp.path.segments[0].ident == "Self"
+        && tp.path.segments[1].ident == "State"
+    {
+        return true;
+    }
+    false
+}
+
+fn rewrite_self_state_first_param(method: &mut syn::ImplItemFn, concrete: &Type) {
+    let Some(FnArg::Typed(pt)) = method.sig.inputs.first_mut() else {
+        return;
+    };
+    match &mut *pt.ty {
+        Type::Reference(r) if type_is_self_state(&r.elem) => {
+            *r.elem = concrete.clone();
+        }
+        ty if type_is_self_state(ty) => {
+            *pt.ty = concrete.clone();
+        }
+        _ => {}
+    }
+}
+
+fn extract_native_actor_handler_kind(sig: &Signature, is_split: bool) -> syn::Result<(Type, bool)> {
     if sig.inputs.len() != 3 {
         return Err(syn::Error::new_spanned(
             sig,
@@ -3122,7 +3318,18 @@ fn extract_native_actor_handler_kind(sig: &Signature) -> syn::Result<(Type, bool
         ));
     }
     let first = &sig.inputs[0];
-    if !matches!(first, FnArg::Receiver(_)) {
+    if is_split {
+        // Spike split shape: the impl block is on the identity, so a handler
+        // takes the runtime state explicitly — `(state: &mut Self::State,
+        // ctx: &mut NativeCtx<'_>, arg: K)` — rather than a `self` receiver.
+        if !matches!(first, FnArg::Typed(_)) {
+            return Err(syn::Error::new_spanned(
+                first,
+                "a split `#[actor]` (`type State = …`) #[handler]'s first parameter \
+                 must be `state: &mut Self::State` (the runtime state), not a `self` receiver",
+            ));
+        }
+    } else if !matches!(first, FnArg::Receiver(_)) {
         return Err(syn::Error::new_spanned(
             first,
             "#[handler] first parameter must be `&self` or `&mut self`",

@@ -22,7 +22,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use aether_actor::{HandlesKind, Instanced, NamespaceError, validate_namespace_segment};
+use aether_actor::{
+    HandlesKind, Instanced, Lifecycle, NamespaceError, validate_namespace_segment,
+};
 use aether_data::{ActorId, Kind, Tag, fold_lineage, with_tag};
 use aether_kinds::trace::Nanos;
 
@@ -30,7 +32,7 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dispatcher_slot::DispatcherSlot;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::{
-    ExportedHandles, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx,
+    ExportedHandles, NativeActor, NativeCtx, NativeInitCtx,
 };
 use crate::actor::registry::ActorRegistry;
 use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
@@ -328,7 +330,7 @@ impl Spawner {
         parent: Option<(u64, MailboxId)>,
     ) -> Result<MailboxId, SpawnError>
     where
-        A: Instanced + NativeActor + NativeDispatch,
+        A: Instanced + NativeActor,
     {
         // 1. Resolve subname → string.
         let subname_str = match subname {
@@ -428,7 +430,9 @@ impl Spawner {
             // per-actor `ActorLogRing`. The pre-ADR
             // `with_actor_dispatch` + `drain_buffer` flush hop
             // retired alongside `LogBatch`.
-            let init_result = local::with_stamped(&slots, || A::init(config, &mut init_ctx));
+            let init_result = local::with_stamped(&slots, || {
+                <A::State as Lifecycle>::init(config, &mut init_ctx)
+            });
             match init_result {
                 Ok(a) => a,
                 Err(e) => return Err(SpawnError::InitFailed(e)),
@@ -495,7 +499,7 @@ impl Spawner {
         // The chassis-side actor_registry no longer holds a clone of
         // the actor — only the sender + type_id + subname for routing
         // and resolve_actor.
-        let mut actor: Box<A> = Box::new(actor);
+        let mut actor: Box<A::State> = Box::new(actor);
 
         // Insert before pre-loading mail: the actor_registry holding
         // the sender is the canonical record that the slot is live.
@@ -630,7 +634,7 @@ impl Spawner {
 /// transport, the resolved subname, the consumed config, and the
 /// running list of after-init envelopes. `finish` consumes the
 /// builder and runs the spawn lifecycle.
-pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor + NativeDispatch> {
+pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor> {
     spawner: Arc<Spawner>,
     subname: Subname<'ctx>,
     config: Option<A::Config>,
@@ -651,7 +655,7 @@ pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor + NativeDispatch> {
     _ctx: PhantomData<&'ctx ()>,
 }
 
-impl<'ctx, A: Instanced + NativeActor + NativeDispatch> SpawnBuilder<'ctx, A> {
+impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
     /// Internal constructor. Public only because chassis-level
     /// `spawn_actor` entry points (on `BuiltChassis` / `PassiveChassis`)
     /// build these too.

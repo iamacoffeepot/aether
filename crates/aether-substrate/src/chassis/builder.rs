@@ -357,7 +357,7 @@ struct ClaimResources {
 /// via `mem::replace(&mut self.state, Transitioning)` plus a final
 /// state assignment, so each transition is atomic w.r.t. partial
 /// moves.
-enum BootState<A: NativeActor + NativeDispatch> {
+enum BootState<A: NativeActor> {
     /// Pre-claim — only the cap config is held.
     Pending { config: A::Config },
     /// Post-claim, pre-init — mailbox + transport + slots claimed,
@@ -366,15 +366,16 @@ enum BootState<A: NativeActor + NativeDispatch> {
         resources: ClaimResources,
         config: A::Config,
     },
-    /// Post-init, pre-wire — actor instance constructed.
+    /// Post-init, pre-wire — runtime-state instance constructed (spike
+    /// split: the dispatched object is `A::State`, not the identity `A`).
     Initialized {
         resources: ClaimResources,
-        actor: Box<A>,
+        actor: Box<A::State>,
     },
     /// Post-wire, pre-spawn — wire ran. The dispatcher is next.
     Wired {
         resources: ClaimResources,
-        actor: Box<A>,
+        actor: Box<A::State>,
     },
     /// Sentinel held only inside a phase method's body between
     /// `mem::replace` and the final state assignment. If the phase
@@ -398,11 +399,11 @@ enum BootState<A: NativeActor + NativeDispatch> {
 /// drop-on-shutdown claim, and settlement gating on the
 /// `LifecycleAdvance` chain root (not a per-mailbox pending counter) is
 /// the frame-integration gate now.
-struct NativeActorBoot<A: NativeActor + NativeDispatch> {
+struct NativeActorBoot<A: NativeActor> {
     state: BootState<A>,
 }
 
-impl<A: NativeActor + NativeDispatch> NativeActorBoot<A> {
+impl<A: NativeActor> NativeActorBoot<A> {
     fn new(config: A::Config) -> Self {
         Self {
             state: BootState::Pending { config },
@@ -410,7 +411,7 @@ impl<A: NativeActor + NativeDispatch> NativeActorBoot<A> {
     }
 }
 
-impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
+impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
     fn claim(&mut self, ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
         let BootState::Pending { config } = mem::replace(&mut self.state, BootState::Transitioning)
         else {
@@ -521,7 +522,12 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         let init_result = {
             let mailer_clone = ctx.mail_send_handle();
             let mut init_ctx = NativeInitCtx::new(&resources.transport, handles, mailer_clone);
-            local::with_stamped(&resources.slots, || A::init(config, &mut init_ctx))
+            // Spike split: boot the runtime state via the state type's
+            // `Lifecycle::init`, which returns `A::State` (the dispatched
+            // object), not the identity `A`.
+            local::with_stamped(&resources.slots, || {
+                <A::State as aether_actor::Lifecycle>::init(config, &mut init_ctx)
+            })
         };
         let actor = match init_result {
             Ok(a) => a,
@@ -549,7 +555,7 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         // `NativeDispatch`, whose `__aether_capabilities` the `#[actor]`
         // macro overrides to enumerate the cap's handlers; the default
         // (empty) covers any cap the macro didn't touch.
-        let capabilities = A::__aether_capabilities();
+        let capabilities = <A::State as NativeDispatch>::__aether_capabilities();
         ctx.mail_send_handle().capability_registry().register(
             resources.mailbox_id,
             MailboxCaps::from_component_capabilities(&capabilities),
@@ -606,7 +612,9 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
                 aether_data::MailId::NONE,
                 aether_data::MailId::NONE,
             );
-            actor.wire(&mut wire_ctx);
+            // Spike split: `wire` lives on `A::State: Lifecycle` (not a
+            // `NativeActor` supertrait), so call it fully-qualified.
+            aether_actor::Lifecycle::wire(actor.as_mut(), &mut wire_ctx);
         });
 
         self.state = BootState::Wired { resources, actor };
@@ -713,7 +721,7 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
 /// runtime shutdown path for every chassis cap.
 struct PooledActorShutdown<A>
 where
-    A: NativeActor + NativeDispatch,
+    A: NativeActor,
 {
     slot: Option<Arc<DispatcherSlot<A>>>,
     mailbox_sender: Option<MailboxSender>,
@@ -721,7 +729,7 @@ where
 
 impl<A> DynShutdown for PooledActorShutdown<A>
 where
-    A: NativeActor + NativeDispatch,
+    A: NativeActor,
 {
     fn shutdown_dyn(mut self: Box<Self>) {
         if let Some(slot) = &self.slot {
@@ -860,7 +868,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
     #[must_use]
     pub fn with_actor<A>(mut self, config: A::Config) -> Self
     where
-        A: NativeActor + NativeDispatch,
+        A: NativeActor,
     {
         self.passives
             .push(Box::new(NativeActorBoot::<A>::new(config)));
@@ -940,7 +948,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
     #[must_use]
     pub fn with_actor<A>(mut self, config: A::Config) -> Self
     where
-        A: NativeActor + NativeDispatch,
+        A: NativeActor,
     {
         self.passives
             .push(Box::new(NativeActorBoot::<A>::new(config)));
@@ -1439,7 +1447,7 @@ impl<C: Chassis> BuiltChassis<C> {
         config: A::Config,
     ) -> crate::SpawnBuilder<'a, A>
     where
-        A: aether_actor::Instanced + NativeActor + NativeDispatch,
+        A: aether_actor::Instanced + NativeActor,
     {
         crate::SpawnBuilder::new(
             Arc::clone(&self.booted.spawner),
@@ -1600,7 +1608,7 @@ impl<C: Chassis> PassiveChassis<C> {
         config: A::Config,
     ) -> crate::SpawnBuilder<'a, A>
     where
-        A: aether_actor::Instanced + NativeActor + NativeDispatch,
+        A: aether_actor::Instanced + NativeActor,
     {
         crate::SpawnBuilder::new(
             Arc::clone(&self.booted.spawner),
@@ -1674,7 +1682,11 @@ mod tests {
         }
     }
 
-    impl NativeActor for StubLog {}
+    impl NativeActor for StubLog {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
 
     impl NativeDispatch for StubLog {
         fn __aether_dispatch_envelope(
@@ -1798,7 +1810,11 @@ mod tests {
                 ))))
             }
         }
-        impl NativeActor for FailingCap {}
+        impl NativeActor for FailingCap {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for FailingCap {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -1886,7 +1902,11 @@ mod tests {
             }
         }
 
-        impl NativeActor for ProbeCap {}
+        impl NativeActor for ProbeCap {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
 
         // Hand-rolled NativeDispatch — what the macro arm emits in
         // task #731. The if-arm decodes Ping bytes, calls the
@@ -2022,7 +2042,11 @@ mod tests {
             }
         }
 
-        impl NativeActor for LocalProbe {}
+        impl NativeActor for LocalProbe {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
 
         impl NativeDispatch for LocalProbe {
             fn __aether_dispatch_envelope(
@@ -2155,7 +2179,11 @@ mod tests {
                 Ok(Self { received: config })
             }
         }
-        impl NativeActor for ChildCap {}
+        impl NativeActor for ChildCap {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for ChildCap {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -2196,7 +2224,11 @@ mod tests {
                 })
             }
         }
-        impl NativeActor for ParentCap {}
+        impl NativeActor for ParentCap {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for ParentCap {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -2332,7 +2364,11 @@ mod tests {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for Closer {}
+        impl NativeActor for Closer {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for Closer {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -2454,7 +2490,11 @@ mod tests {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for Quiet {}
+        impl NativeActor for Quiet {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for Quiet {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -2529,7 +2569,11 @@ mod tests {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for Quiet {}
+        impl NativeActor for Quiet {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for Quiet {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -2595,7 +2639,11 @@ mod tests {
                 Ok(Self)
             }
         }
-        impl NativeActor for Foo {}
+        impl NativeActor for Foo {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for Foo {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -2621,7 +2669,11 @@ mod tests {
                 Ok(Self)
             }
         }
-        impl NativeActor for Bar {}
+        impl NativeActor for Bar {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for Bar {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -2731,7 +2783,11 @@ mod tests {
                 Ok(Self)
             }
         }
-        impl NativeActor for Target {}
+        impl NativeActor for Target {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for Target {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -2775,7 +2831,11 @@ mod tests {
                 })
             }
         }
-        impl NativeActor for Watcher {}
+        impl NativeActor for Watcher {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for Watcher {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -2983,7 +3043,11 @@ mod tests {
                 Ok(Self)
             }
         }
-        impl NativeActor for Target {}
+        impl NativeActor for Target {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for Target {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -3020,7 +3084,11 @@ mod tests {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for Watcher {}
+        impl NativeActor for Watcher {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for Watcher {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -3184,7 +3252,11 @@ mod tests {
                 Ok(Self { tag })
             }
         }
-        impl NativeActor for Member {}
+        impl NativeActor for Member {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for Member {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -3393,7 +3465,11 @@ mod tests {
                 Ok(Self { received: config })
             }
         }
-        impl NativeActor for Grandchild {}
+        impl NativeActor for Grandchild {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for Grandchild {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -3430,7 +3506,11 @@ mod tests {
                 })
             }
         }
-        impl NativeActor for Parent {}
+        impl NativeActor for Parent {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for Parent {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -3616,7 +3696,11 @@ mod tests {
                 self.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for WireSpawnProbe {}
+        impl NativeActor for WireSpawnProbe {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for WireSpawnProbe {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -3675,7 +3759,11 @@ mod tests {
                 self.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for WireProbe {}
+        impl NativeActor for WireProbe {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for WireProbe {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -3750,7 +3838,11 @@ mod tests {
                 self.wire_ran.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for Pinger {}
+        impl NativeActor for Pinger {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for Pinger {
             fn __aether_dispatch_envelope(
                 &mut self,
@@ -3779,7 +3871,11 @@ mod tests {
                 Ok(Self { received: config })
             }
         }
-        impl NativeActor for Ponger {}
+        impl NativeActor for Ponger {
+        // Spike split: un-split fixture — identity is its own runtime.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
+        type State = Self;
+    }
         impl NativeDispatch for Ponger {
             fn __aether_dispatch_envelope(
                 &mut self,
