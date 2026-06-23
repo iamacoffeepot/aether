@@ -75,6 +75,8 @@ This section is the canonical grounding rule for the whole pipeline — `/implem
 
 Both execution contexts ground by these rules: the role-bound session worktree (the common path for a scoper) and the dispatched per-agent worktree (the common path under `--sweep`). The worked example is the case that motivated the rule — a session worktree one commit behind `origin/main`, where that one commit had deleted the exact call sites a child issue targeted, so a scoper reading the lagging tree produced a false "untracked surface" finding and a wrong plan grounded on code that no longer existed on main.
 
+These are the *read-side* discipline — the counterpart write-side mirror is the Plan edit-site citation convention (see `### Plan` Output block): cite each edit site by stable anchor and re-runnable pattern so the next reader can re-ground cheaply rather than trusting a frozen snapshot.
+
 ## Phase walk
 
 For each sub-phase: read inputs, write the corresponding body section, and reconcile the issue's `phase:*` label (see [Phase label reconcile](#phase-label-reconcile)). If a sub-phase has nothing to do (already complete on a resumed run), skip it.
@@ -119,6 +121,8 @@ For each sub-phase: read inputs, write the corresponding body section, and recon
   1. <step> — <files touched> — <test coverage>
   2. <step> — ...
   ```
+
+  Edit-site citation convention: locate each single edit site by a stable anchor — the symbol it touches (`fn foo`, `struct Bar`) and its file path; a line number, if given at all, is an advisory navigation hint (`near fn foo`) and is never the load-bearing locator. Express each multi-site change (importers, callers, a test module set) as the `git grep`/`rg` pattern that enumerates it — name the pattern and the expected shape of matches rather than a frozen count, so the implementer re-runs it against current `main` and acts on the complete present-day set. Example (stale): *"Update the 3 importers of `OldType` in `crates/aether-data/` (lines 12, 47, 88)."* Example (stable): *"Update every importer of `OldType` in `crates/aether-data/` — `git grep 'OldType' origin/main -- crates/aether-data/`; act on the current match set."*
 
   And, if the work spans multiple PRs:
 
