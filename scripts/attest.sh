@@ -129,6 +129,11 @@ cleanup() {
         command -v shred >/dev/null 2>&1 && shred -u "$KEYDIR/key.pem" 2>/dev/null || rm -f "$KEYDIR/key.pem"
     fi
     rm -rf "$KEYDIR" "$LOGDIR" 2>/dev/null || true
+    # Stop + remove the run's qodana container (named from the unique RUNDIR in
+    # the qodana step) so a mid-run kill leaves no orphan. No-op if no container
+    # exists (killed outside the qodana step) or docker is unavailable; runs
+    # before the RUNDIR rm so the container's bind-mount is released first.
+    docker rm -f "qodana-attest-$(basename "$RUNDIR")" >/dev/null 2>&1 || true
     # The qodana step removes its own root-owned droppings, but on a non-rootless
     # Docker host a stray root-owned file could remain; fall back to a throwaway
     # root container (Docker is already required for the qodana step) so a failed
