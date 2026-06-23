@@ -12,7 +12,6 @@
 // (the `TestBench::start()` API ADR-0067 introduced); both paths
 // share `TestBenchChassis::build_passive`.
 
-use std::env;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -35,43 +34,10 @@ use aether_substrate::{Chassis, capture::CaptureQueue, chassis::frame_loop, mail
 const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
 use aether_substrate_bundle::chassis_root::next_chassis_correlation;
 use aether_substrate_bundle::test_bench::{
-    TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS,
+    RenderSizeConfig, TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS,
     events::{self, ChassisEvent},
     render::Gpu,
 };
-
-/// Parse `AETHER_TEST_BENCH_SIZE=WxH`. Falls back to defaults on
-/// missing/unparseable input with a warn log so scenario scripts can
-/// see what dimensions they actually got.
-// Dev/test tooling: the test-bench binary takes its render size from env — not a
-// capability, no config layer in scope.
-#[allow(clippy::disallowed_methods)]
-fn parse_size_env() -> (u32, u32) {
-    use aether_substrate_bundle::test_bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
-    let Ok(raw) = env::var("AETHER_TEST_BENCH_SIZE") else {
-        return (DEFAULT_WIDTH, DEFAULT_HEIGHT);
-    };
-    if let Some((w, h)) = raw.split_once('x') {
-        match (w.parse::<u32>(), h.parse::<u32>()) {
-            (Ok(w), Ok(h)) if w > 0 && h > 0 => (w, h),
-            _ => {
-                tracing::warn!(
-                    target: "aether_substrate::boot",
-                    value = %raw,
-                    "AETHER_TEST_BENCH_SIZE unparseable — falling back to default",
-                );
-                (DEFAULT_WIDTH, DEFAULT_HEIGHT)
-            }
-        }
-    } else {
-        tracing::warn!(
-            target: "aether_substrate::boot",
-            value = %raw,
-            "AETHER_TEST_BENCH_SIZE missing 'x' separator — falling back to default",
-        );
-        (DEFAULT_WIDTH, DEFAULT_HEIGHT)
-    }
-}
 
 fn main() -> anyhow::Result<()> {
     let capture_queue = CaptureQueue::new();
@@ -102,7 +68,7 @@ fn main() -> anyhow::Result<()> {
         kind_tick,
     } = TestBenchChassis::build_passive(env)?;
 
-    let (width, height) = parse_size_env();
+    let (width, height) = RenderSizeConfig::from_env().to_size();
     let gpu = Gpu::new(width, height, render_handles);
     tracing::info!(
         target: "aether_substrate::boot",

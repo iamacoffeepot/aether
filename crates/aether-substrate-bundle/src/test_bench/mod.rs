@@ -16,6 +16,7 @@
 mod bench;
 pub mod cap;
 pub mod chassis;
+pub mod config;
 pub mod events;
 mod execute;
 #[cfg(test)]
@@ -26,4 +27,5 @@ pub mod test_helpers;
 pub use bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH, TestBench, TestBenchBuilder, TestBenchError};
 pub use cap::{TestBenchCapConfig, TestBenchCapability};
 pub use chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
+pub use config::RenderSizeConfig;
 pub use execute::{BenchOp, BenchOutput, ExecutionError, ExecutionResult};
