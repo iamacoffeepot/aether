@@ -8,8 +8,8 @@
 > "discovery dump" aren't already familiar.
 
 A knob is a field on a subsystem's resolved-config struct, declared once with a
-`#[config(...)]` hint that supplies its default, its parser, and its env/CLI
-names. That single declaration generates the env layer, the `clap` argument
+`#[config(...)]` hint that supplies its default and its env/CLI names. That
+single declaration generates the env layer, the `clap` argument
 overlay, the layered resolver, and the `--config` discovery entry — so you never
 write an `env::var(...).parse()` read. This recipe adds a knob end to end, with
 the two gotchas (the `native` feature gate, the `*_defaults_match` test) inline at
@@ -17,10 +17,10 @@ the step where each bites.
 
 ## The exemplar to copy
 
-Follow [`HttpConfig`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/http.rs)
-in `crates/aether-capabilities/src/http.rs`. It's the same struct the
-[Configuration](../systems/configuration.md) explainer excerpts, it carries every
-hint you'll reach for (`default`, `parse`, `env`, `cli_long`, `csv_set`,
+Follow [`HttpConfig`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/http/client.rs)
+in `crates/aether-capabilities/src/http/client.rs`. It's the same struct the
+[Configuration](../systems/configuration.md) explainer excerpts, it carries most
+of the hints you'll reach for (`default`, `env`, `cli_long`, `csv_set`,
 `ms_duration`, `layer_field`), and it's wired into both full-stack chassis. Open
 it alongside this recipe and mirror the field you're closest to.
 
@@ -35,10 +35,10 @@ A capability that ships off (or on) by default exposes that switch as one
 config-API `bool`, resolved through the same derive as every other knob —
 not inferred from another field (a bound address, a configured path) and
 not read out of `env::var` directly. Declare it with a `false` literal
-default and the shared `parse_flag` parser:
+default; a `bool` needs no parser:
 
 ```rust
-#[cfg_attr(feature = "native", config(default = false, parse = parse_flag))]
+#[cfg_attr(feature = "native", config(default = false))]
 pub enabled: bool,
 ```
 
@@ -49,9 +49,9 @@ unsurprising state, and a chassis turns the behaviour on from one
 documented `AETHER_…` key (or its CLI flag). At the composition site the
 chassis maps the resolved flag to its structural choice —
 `cfg.enabled.then_some(cfg)` for an opt-in cap — keeping the flag the
-single source of the on/off decision. `parse_flag` (in
-`aether-capabilities/src/config_env.rs`) accepts `1` / `true` / `yes` /
-`on`.
+single source of the on/off decision. confique's native bool parsing
+accepts `1` / `true` / `yes` / `0` / `false` / `no`, case-insensitive and
+trimmed.
 
 ## Steps
 
@@ -61,25 +61,38 @@ Add the field to the struct in its cap crate and annotate it. The derive reads
 the hint to generate everything downstream:
 
 ```rust
-#[cfg_attr(feature = "native", config(default = false, parse = parse_flag))]
+#[cfg_attr(feature = "native", config(default = false))]
 pub require_https: bool,
 ```
+
+Most fields need no parser. A numeric, `Duration`, or `bool` field rides
+confique's native env parsing: it trims the value, treats an empty one as unset
+(falling back to the default), and hard-errors on a non-empty value that doesn't
+parse — so a typo'd `AETHER_…` number stops the boot with the key named instead
+of silently defaulting.
 
 The hints you have:
 
 - `default = <lit>` — the literal default the layer resolves to when no env or
   argv value is set.
-- `parse = <fn_path>` — a `fn(&str) -> Result<T, impl Error>` that turns the
-  string value into the field type. `parse_flag` (a bool flag), `parse_allowlist`
-  (a CSV set) and the strict numeric parsers in `http.rs` are worked examples.
 - `env = "..."` / `cli_long = "..."` — pin the env key and `--flag` to an exact
   name when the field name doesn't match the historical wire shape. Absent these,
   the names come from the container's `env_prefix` / `cli_prefix` joined to the
   field name.
-- `csv_set` — the overlay accepts one `Option<String>` and splits it on commas.
+- `csv_set` — for a `HashSet<String>` field: the overlay accepts one
+  `Option<String>`, and the env side auto-wires `parse_csv_set` (trim, split on
+  commas, drop empties).
+- `nonzero` — a resolved `0` coerces to the field default, for a knob where `0`
+  is degenerate (a concurrency bound that would deadlock at zero). Requires a
+  `default`.
 - `ms_duration` + `layer_field = "..."` — the domain field is a `Duration` while
   the layer carries `<field>_ms: u32`; the derive bridges via
   `Duration::from_millis`.
+- `parse = <fn_path>` — the escape hatch for a genuinely custom mapping, a
+  `fn(&str) -> Result<T, impl Error>`. `fs`'s `parse_dir` (an empty override is
+  unset; the default is computed at runtime from `dirs::data_dir()`) is the
+  worked example. A plain numeric / `bool` / `Duration` / `String` field never
+  needs it.
 
 The container attribute on the struct sets the prefixes both names derive from:
 
@@ -95,8 +108,8 @@ The container attribute on the struct sets the prefixes both names derive from:
 `HttpConfig` declares `impl Default` separately from the derive's `default = ...`
 literals (the derive feeds the layer; `Default` feeds direct construction in
 tests and call sites). Add your field's default to **both**. The
-`http_from_env_defaults_match` test in the `http.rs` test module is what keeps
-them honest:
+`http_from_env_defaults_match` test in the `http/client.rs` test module is what
+keeps them honest:
 
 ```rust
 #[test]
