@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use ureq::http::Request;
 
-use crate::contentgen::adapter::{AdapterUsage, AnthropicRequest, AnthropicResponse};
-use crate::contentgen::shared;
+use crate::shared::contentgen::adapter::{AdapterUsage, AnthropicRequest, AnthropicResponse};
+use crate::shared::contentgen::shared;
 
 /// Official Messages API endpoint.
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -166,7 +166,7 @@ fn elapsed_millis(started: Instant) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{build_request_body, parse_messages_response};
-    use crate::contentgen::adapter::AnthropicRequest;
+    use crate::shared::contentgen::adapter::AnthropicRequest;
 
     /// Fixture-replay: a captured Messages-API success response. Locks
     /// the shape `parse_messages_response` reads (ADR-0050 §4) so a

@@ -7,7 +7,7 @@
 
 use super::GeminiError;
 
-use crate::contentgen::shared::{parse_status_prefix, snippet};
+use crate::shared::contentgen::shared::{parse_status_prefix, snippet};
 
 /// Sentinel an adapter returns to mean "no API key" so the cap maps it
 /// onto [`GeminiError::Unauthorized`]. The `DisabledGeminiAdapter`

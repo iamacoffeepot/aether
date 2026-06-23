@@ -9,7 +9,7 @@
 use crate::anthropic::kinds::AnthropicError;
 
 use crate::anthropic::cli::{CLI_NOT_FOUND, TIMEOUT_SENTINEL};
-use crate::contentgen::shared::{parse_status_prefix, snippet};
+use crate::shared::contentgen::shared::{parse_status_prefix, snippet};
 
 /// Sentinel an adapter returns to mean "no API key" so the cap maps it
 /// onto [`AnthropicError::Unauthorized`] without the adapter depending
