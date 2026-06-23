@@ -56,6 +56,8 @@ Either mode opens the PR **as a draft**, drives CI green, and holds it in draft 
 
    Classify each: **safe to auto-clear** when the worktree is clean (`dirty == 0`), its branch is not ahead of `origin/main` (`ahead == 0`), and there is no open PR — clear it at dispatch with `git worktree remove "$wt"` plus `git branch -D "$br"`. **Flag** when any of uncommitted files, unpushed commits, or an open PR is present — clearing would discard bounce context or unpushed work, so surface it as a plan line item rather than clearing, and let the one confirmation prompt the sweep already prints cover the destructive decision.
 
+   **File-overlap probe.** Two candidates that both edit the same file are a guaranteed land-time merge conflict — `/land`'s merge-tree oracle will surface it, but only after implementation has already happened. After packing, extract each candidate's declared edit paths from its scope body — the file paths cited in `## Implementation plan` (each edit-site names its file path per `/scope`'s convention) and the surfaces listed in `## Design notes` §Affected surfaces — and compute the pairwise path intersection across the full batch (not just within a queue: each issue lands as its own PR regardless of which agent runs it). An exact path shared by two candidates is a confident flag; a directory- or pattern-shaped citation (e.g. "every file in `crates/aether-data/`") yields a softer "possible overlap" note. The check is advisory only — never a blocker, never a re-pack input: overlap is a frequent, legitimate state (a refactor arc deliberately touches the same file across issues), and the user's confirmation gate already covers the destructive decision. It complements `/land`'s authoritative merge-tree oracle; at dispatch time no branch exists yet, so a content-level merge-tree check is impossible — the body-path heuristic is the only signal available that early.
+
 4. **Print the dispatch plan and wait for confirmation.** Packing is heuristic, so a mis-packed multi-issue agent run is expensive to unwind — one confirmation prompt per sweep is cheap insurance. Print the queues, their issues in order, the routed model per queue, the stale-worktree classification per affected candidate, and the dropped-with-reason list, then stop and wait:
 
    ```
@@ -72,6 +74,10 @@ Either mode opens the PR **as a draft**, drives CI green, and holds it in draft 
      #1612  clean, branch at origin/main, no PR → auto-clear at dispatch
      #1631  2 uncommitted files → FLAG: clearing loses bounce context, confirm
 
+   File overlap:
+     .claude/skills/implement/SKILL.md  →  #1631 × #1633  (exact path match — land-time conflict)
+     crates/aether-data/**              →  #1612 × #1613  (pattern — possible overlap)
+
    Dropped:
      #1620  Phase=Design, not Ready
      #1622  no ## Implementation plan
@@ -80,7 +86,7 @@ Either mode opens the PR **as a draft**, drives CI green, and holds it in draft 
    Confirm dispatch? (the agents spawn only on your go-ahead)
    ```
 
-   Candidates with no stale worktree need no line. Omit the **Stale worktrees** block entirely when none of the dispatched candidates have one.
+   Candidates with no stale worktree need no line. Omit the **Stale worktrees** block entirely when none of the dispatched candidates have one. Omit the **File overlap** block entirely when the pairwise path intersection across the batch is empty.
 
 5. **On confirmation, dispatch.** Clear the stale worktrees first: the auto-clear set unconditionally, and any flagged set the user confirmed (`git worktree remove` plus `git branch -D` per candidate) so each agent's `git worktree add` starts clean.
 
