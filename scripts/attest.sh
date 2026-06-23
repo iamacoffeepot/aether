@@ -145,6 +145,26 @@ trap cleanup EXIT
 OUTDIR="$(git rev-parse --git-dir)/aether-attestations/$HEAD_SHA"
 rm -rf "$OUTDIR"; mkdir -p "$OUTDIR"
 
+# run_witness runs one witness invocation for the given step, writing output to
+# $LOGDIR/$name.log and the signed attestation to $OUTDIR/$name.json. Returns
+# the witness exit code; does NOT reset the clone or die on failure, so the
+# caller can inspect the log (e.g. for a retriable transient) before deciding
+# what to do.
+# Run inside the clone (CWD = the real-`.git` checkout) so `-a git` binds the
+# step to the commit and records the tree status. `-a git` adds only the git
+# attestor — no environment attestor, so no machine/env PII. stdout/stderr go
+# to a tmpfs log whose path rides in the environment, never a `cmd` arg, so
+# the command-run attestor records no machine path while the command stays
+# visible.
+run_witness() {
+    local name="$1"; shift
+    ( cd "$RUN" && ATTEST_STEP_LOG="$LOGDIR/$name.log" \
+        witness run --step "$name" -a git \
+        --signer-file-key-path "$KEYDIR/key.pem" \
+        -o "$OUTDIR/$name.json" \
+        -- bash -c 'exec >"$ATTEST_STEP_LOG" 2>&1; "$@"; rc=$?; [ -n "${ATTEST_POST:-}" ] && eval "$ATTEST_POST"; exit "$rc"' attest "$@" )
+}
+
 # attest_step runs one canonical check (scripts/checks.sh) under witness.
 attest_step() {
     local name="$1"; shift
@@ -154,17 +174,7 @@ attest_step() {
     # clears stray untracked files such as qodana's .qodana/).
     git -C "$RUN" reset -q --hard HEAD
     git -C "$RUN" clean -qfd
-    # Run inside the clone (CWD = the real-`.git` checkout) so `-a git` binds the
-    # step to the commit and records the tree status. `-a git` adds only the git
-    # attestor — no environment attestor, so no machine/env PII. stdout/stderr go
-    # to a tmpfs log whose path rides in the environment, never a `cmd` arg, so
-    # the command-run attestor records no machine path while the command stays
-    # visible.
-    if ! ( cd "$RUN" && ATTEST_STEP_LOG="$LOGDIR/$name.log" \
-            witness run --step "$name" -a git \
-            --signer-file-key-path "$KEYDIR/key.pem" \
-            -o "$OUTDIR/$name.json" \
-            -- bash -c 'exec >"$ATTEST_STEP_LOG" 2>&1; "$@"; rc=$?; [ -n "${ATTEST_POST:-}" ] && eval "$ATTEST_POST"; exit "$rc"' attest "$@" ); then
+    if ! run_witness "$name" "$@"; then
         echo "[attest] step '$name' FAILED:" >&2
         tail -40 "$LOGDIR/$name.log" >&2 || true
         die "attestation aborted at step '$name'"
@@ -193,8 +203,39 @@ for step in $CANONICAL_STEPS; do
             # not products worth attesting, and the verifier reads only the
             # material/command-run/git attestations.
             export ATTEST_POST='docker run --rm -v "$PWD":/c alpine rm -rf /c/target /c/.qodana 2>/dev/null || true'
-            attest_step "$step" "${cmd[@]}" --diff-start "$QODANA_BASE" --cache-dir "$QODANA_CACHE_DIR" -u root
-            unset ATTEST_POST ;;
+            # Pin a unique container name derived from the unique run dir so
+            # concurrent attest runs on one host use distinct containers instead of
+            # colliding on the Qodana CLI's default path-hash. Belt-and-suspenders:
+            # the unique clone path already produces a distinct container name, but
+            # this makes the guarantee explicit and independent of that mktemp
+            # detail.
+            export QODANA_CLI_CONTAINER_NAME="qodana-attest-$(basename "$RUNDIR")"
+            echo "[attest] -> $step"
+            git -C "$RUN" reset -q --hard HEAD
+            git -C "$RUN" clean -qfd
+            if ! run_witness "$step" "${cmd[@]}" --diff-start "$QODANA_BASE" --cache-dir "$QODANA_CACHE_DIR" -u root; then
+                # Retry exactly once on the rare "Only one instance of Qodana"
+                # transient (a CLI startup race or EAP license cooldown). The
+                # retry runs at the witness-invocation level so the recorded
+                # command stays `qodana scan …` and the verifier's substring
+                # check is unaffected. Any other error, or a second failure,
+                # tails the log and dies.
+                if grep -q "Only one instance of Qodana" "$LOGDIR/$step.log" 2>/dev/null; then
+                    echo "[attest] qodana: 'Only one instance' transient, retrying once..." >&2
+                    git -C "$RUN" reset -q --hard HEAD
+                    git -C "$RUN" clean -qfd
+                    if ! run_witness "$step" "${cmd[@]}" --diff-start "$QODANA_BASE" --cache-dir "$QODANA_CACHE_DIR" -u root; then
+                        echo "[attest] step '$step' FAILED (after retry):" >&2
+                        tail -40 "$LOGDIR/$step.log" >&2 || true
+                        die "attestation aborted at step '$step'"
+                    fi
+                else
+                    echo "[attest] step '$step' FAILED:" >&2
+                    tail -40 "$LOGDIR/$step.log" >&2 || true
+                    die "attestation aborted at step '$step'"
+                fi
+            fi
+            unset ATTEST_POST QODANA_CLI_CONTAINER_NAME ;;
         *)      attest_step "$step" "${cmd[@]}" ;;
     esac
 done
