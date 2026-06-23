@@ -134,6 +134,16 @@ For each sub-phase: read inputs, write the corresponding body section, and recon
   - #MMM <child issue title>
   ```
 
+  And, if the plan has a cross-issue ordering precondition (a step that assumes another issue has already landed on `main`):
+
+  ```
+  ## Depends on
+
+  - #NNN — <why this must land first>
+  ```
+
+  Lift any "lands after #N" / "depends on #N" language out of plan prose and into `## Depends on` as `- #N — <why>` lines. `/approve` reads this section and refuses to advance the issue to `phase:ready` while any listed dependency is still open.
+
 - **Multi-PR split** triggers when:
   - More than 3 logically-separable changes, *or*
   - More than 2 crates with logically-separable work
@@ -190,7 +200,7 @@ Don't pad the comment with summaries of work that completed — the body section
 A body edit replaces the entire body, so to avoid clobbering user-written content:
 
 1. Read the current body — `gh api repos/iamacoffeepot/aether/issues/<n> --jq '.body'`.
-2. Identify scope-managed sections by their H2 headers: `## Problem statement`, `## Design notes`, `## Implementation plan`, `## Sub-issues`, `## Side findings`. Everything else is user content; preserve verbatim.
+2. Identify scope-managed sections by their H2 headers: `## Problem statement`, `## Design notes`, `## Implementation plan`, `## Sub-issues`, `## Depends on`, `## Side findings`. Everything else is user content; preserve verbatim.
 3. Insert or replace the managed sections, preserving user content above and below them.
 4. Write back over REST — `gh issue edit --body` is GraphQL-backed, while `PATCH …/issues/<n>` is REST. Write the new body to a file first so its backticks / `$` aren't shell-expanded: `gh api -X PATCH repos/iamacoffeepot/aether/issues/<n> -F body=@/tmp/issue-<n>-body.md`.
 

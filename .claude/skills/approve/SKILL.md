@@ -19,7 +19,7 @@ The primary human review point of the release flow. The user invokes `/approve <
 
    This is the REST issues endpoint (per `/scope` §REST-vs-GraphQL routing), not `gh issue list`, which is GraphQL-backed and drains the contended pool.
 
-2. **Gate-check each candidate.** Run the full [gate checks](#gate-checks) per issue — `Phase == Plan`, the three §-sections present and non-empty, every referenced ADR PR merged, exactly one `model:*` label, not blocked by a `blocked`/`wontfix`/`duplicate` label, freshness gate (targeted paths exist on `origin/main` and none churned since scope). Drop any issue that fails and record the reason; the sweep never silently skips — every dropped issue is listed in the plan with its drop reason. `--skip-adr` is **not** honored in sweep mode: a batch is the wrong place for a per-issue emergency override, so an unmerged-ADR issue is dropped and listed, to be approved singly with `/approve <n> --skip-adr` if the override is intended.
+2. **Gate-check each candidate.** Run the full [gate checks](#gate-checks) per issue — `Phase == Plan`, the three §-sections present and non-empty, every referenced ADR PR merged, exactly one `model:*` label, not blocked by a `blocked`/`wontfix`/`duplicate` label, freshness gate (targeted paths exist on `origin/main` and none churned since scope), dependency gate (every `#N` in `## Depends on` is a closed issue). Drop any issue that fails and record the reason; the sweep never silently skips — every dropped issue is listed in the plan with its drop reason. `--skip-adr` is **not** honored in sweep mode: a batch is the wrong place for a per-issue emergency override, so an unmerged-ADR issue is dropped and listed, to be approved singly with `/approve <n> --skip-adr` if the override is intended.
 
 3. **Print the approve plan and wait for confirmation.** A batch label write is cheap to do but annoying to unwind, so one confirmation prompt covers the set. Print the issues that will be approved (with their `size:*` / `model:*` for context), any umbrella issues flagged distinctly (an umbrella with `## Sub-issues` is approvable — approving means "the plan is approved, children split correctly" — but it is not itself `/implement`-able; see [Multi-PR umbrella issues](#multi-pr-umbrella-issues)), and the dropped-with-reason list, then stop and wait:
 
@@ -68,6 +68,7 @@ Run all of these. **Refuse** if any fail; list every failure in the refusal outp
 | Model label | exactly one `model:*` label present (REST: `gh api repos/iamacoffeepot/aether/issues/<n>/labels`) | "Missing model:* label (or more than one). `/scope` stamps model routing at Plan — re-run its Plan step or add the label by hand." |
 | Not blocked | no `blocked` / `wontfix` / `duplicate` label present | "Issue carries label '<label>' which blocks approval." |
 | Freshness | targeted paths exist on `origin/main` and none have churned since scope | "Targets removed on main: <paths>" (hard refuse) / "Targets churned since scope — re-ground before approving: <paths>" (soft surface) |
+| Dependency | every `#N` in `## Depends on` is a closed (Done) issue | "Blocked on unlanded dependency: #N (open)." |
 | Umbrella integrity | if `## Sub-issues` is non-empty, the own `## Implementation plan` describes only coordination/integration, not net-new code the children don't cover | "Malformed umbrella: `## Sub-issues` plus a substantial own plan. Split the residual plan into its own child issue (leaving a pure umbrella), or remove `## Sub-issues` to make it a plain implementable issue." |
 
 If **all** gates pass, proceed.
@@ -101,6 +102,16 @@ git log origin/main --since=<scoped-at> -- <path>
 A non-empty result means `main` has churned the target since the issue was scoped. Tier B does not auto-refuse: surface "Targets churned since scope — re-ground before approving: <paths>" so the human reviewer decides. In sweep mode, treat a Tier B hit as a drop-with-reason and list it in the plan (the reviewer resolves it singly with `/approve <n>` after grounding).
 
 **Symbol-tier follow-on (pending #2204).** Symbol-level checking — confirming named target symbols still exist on `origin/main`, not just the files — extends the same Tier A machinery once #2204's stable-anchor + discovery-command plan convention lands. Until then the freshness gate runs on paths only.
+
+## Dependency gate
+
+Runs after the structural gates pass. Parse every `#N` reference from the issue's `## Depends on` section (if the section is absent or empty, the gate passes trivially). For each referenced issue, read its state over REST:
+
+```bash
+gh api repos/iamacoffeepot/aether/issues/<N> --jq '.state'
+```
+
+Any dependency whose state is not `closed` is an unlanded blocker. A non-`closed` dependency is a hard refusal for a single `/approve` and a drop-with-reason for `--sweep` — the same semantics as a Tier A freshness failure. The refusal message names the blocking issue: `"Blocked on unlanded dependency: #N (open)."` List all open dependencies, not just the first. "Done" in this project means the issue is closed — consistent with the Backlog/Done = phase-label-absence/closed convention.
 
 ## Actions on pass
 
