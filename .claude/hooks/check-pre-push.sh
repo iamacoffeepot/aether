@@ -61,20 +61,56 @@ if ! git rev-parse --git-dir >/dev/null 2>&1; then
     exit 0
 fi
 
-head_sha=$(git rev-parse HEAD 2>/dev/null || true)
-[[ -z "$head_sha" ]] && exit 0
-
-stamp_file="$(git rev-parse --git-dir)/aether-preflight-passed"
-if [[ -f "$stamp_file" ]]; then
-    stamped_sha=$(awk '{print $1}' "$stamp_file" 2>/dev/null || echo)
-    if [[ "$stamped_sha" == "$head_sha" ]]; then
-        exit 0
-    fi
+# Resolve the pushed sha. Parse the command for an explicit refspec: after
+# "push", drop flags (-*) and the first bare positional (the remote, e.g.
+# "origin"); the next positional is the refspec — take its local side (left
+# of ":"). If no refspec positional is found, fall back to the resolved cwd's
+# HEAD. For `gh pr create` (no refspec) we also fall through to HEAD.
+local_ref=""
+if [[ "$command" =~ git[[:space:]]+push(.*) ]]; then
+    positional_count=0
+    for tok in ${BASH_REMATCH[1]}; do
+        case "$tok" in
+            -*) ;;
+            *)
+                positional_count=$((positional_count + 1))
+                if [[ $positional_count -eq 2 ]]; then
+                    local_ref="${tok%%:*}"
+                    break
+                fi
+                ;;
+        esac
+    done
 fi
 
-# No matching stamp — tell Claude to run the pre-flight.
+if [[ -n "$local_ref" ]]; then
+    pushed_sha=$(git rev-parse --verify "${local_ref}^{commit}" 2>/dev/null || true)
+else
+    pushed_sha=$(git rev-parse --verify HEAD 2>/dev/null || true)
+fi
+
+# Fail open when the pushed sha can't be resolved — defer to .githooks/pre-push.
+[[ -z "$pushed_sha" ]] && exit 0
+
+# Scan every worktree stamp: the common git dir's own stamp and every linked
+# worktree's per-worktree stamp. A match on any allows the push — the stamp
+# records the exact attested sha, so a cross-worktree scan cannot false-allow.
+common=$(git rev-parse --git-common-dir 2>/dev/null || true)
+[[ -z "$common" ]] && exit 0
+[[ "$common" = /* ]] || common="$(pwd)/$common"
+
+for stamp_file in "$common/aether-preflight-passed" "$common"/worktrees/*/aether-preflight-passed; do
+    if [[ -f "$stamp_file" ]]; then
+        stamped_sha=$(awk '{print $1}' "$stamp_file" 2>/dev/null || true)
+        if [[ "$stamped_sha" == "$pushed_sha" ]]; then
+            exit 0
+        fi
+    fi
+done
+
+# No matching stamp anywhere — tell Claude to run the pre-flight.
 {
-    echo "[claude pre-push] no pre-flight stamp for HEAD ($head_sha)."
+    echo "[claude pre-push] no pre-flight stamp for HEAD ($pushed_sha)."
     echo
     echo "Before pushing, run the local pre-flight:"
     echo
