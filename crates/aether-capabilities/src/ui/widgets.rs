@@ -20,7 +20,9 @@
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings of
 // the mod (always-on, outside the cfg gate).
-use aether_kinds::{MouseButton, MouseMove, Tick, UiBar, UiButton, UiLabel, UiPanel};
+use aether_kinds::{MouseButton, MouseMove, Tick};
+
+use super::kinds::{UiBar, UiButton, UiClicked, UiLabel, UiPanel};
 
 #[aether_actor::bridge(singleton, feature = "ui-native")]
 mod native {
@@ -29,7 +31,7 @@ mod native {
 
     use aether_actor::actor;
     use aether_data::MailboxId;
-    use aether_kinds::{DrawSolidQuads, QuadSpace, SolidQuad, UiClicked};
+    use aether_kinds::{DrawSolidQuads, QuadSpace, SolidQuad};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
 
@@ -38,7 +40,7 @@ mod native {
     use crate::render::RenderCapability;
     use crate::text::{DrawText, TextCapability};
 
-    use super::{MouseButton, MouseMove, Tick, UiBar, UiButton, UiLabel, UiPanel};
+    use super::{MouseButton, MouseMove, Tick, UiBar, UiButton, UiClicked, UiLabel, UiPanel};
 
     /// A button's hit-test record for one frame: where it was drawn, the
     /// caller's widget `id`, and the component that drew it (the

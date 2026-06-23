@@ -184,7 +184,7 @@ pub use trampoline::WasmTrampoline;
 #[cfg(not(target_arch = "wasm32"))]
 pub use trampoline::WasmTrampolineConfig;
 #[cfg(feature = "ui")]
-pub use ui::UiCapability;
+pub use ui::{UiBar, UiButton, UiCapability, UiClicked, UiLabel, UiPanel};
 pub use window::HeadlessWindowCapability;
 
 #[cfg(all(test, feature = "native"))]
