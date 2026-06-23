@@ -36,7 +36,6 @@ default = ["native"]
 # the `NativeActor` macro arm references. Always on for chassis.
 native = [
     "dep:aether-substrate",
-    "dep:bytemuck",
     "dep:clap",
     "dep:confique",
     "dep:dirs",
@@ -58,12 +57,12 @@ native = [
 # Empty bodies on purpose: the markers compile from pure-Rust sources
 # already pulled in unconditionally (`aether-actor`, `aether-kinds`).
 render = []
-# ADR-0121: the audio cap owns its kinds in `audio/kinds.rs`. The
+# ADR-0121: the audio cap owns its kinds in `audio/kinds.rs`. Its
 # cast-shaped triggers (`NoteOn` / `NoteOff` / `SetMasterGain`) are
-# `#[repr(C)]` + `Pod`/`Zeroable`, so the marker-only build needs
-# `bytemuck` (with `derive`) — gated on this feature, not unconditional,
-# so wasm guests using a non-Pod marker (render / text / ui) don't pull it.
-audio = ["dep:bytemuck"]
+# `#[repr(C)]` + `Pod`/`Zeroable` and need `bytemuck` (with `derive`),
+# but the always-on `aether.input` cast kinds (`UnsubscribeAll`) already
+# pull `bytemuck` unconditionally, so this marker is empty like the rest.
+audio = []
 # ADR-0105 `aether.text` cap marker. CPU-only (no GPU dep) — it composes
 # the render texture surface entirely by mail — but gated the same two-
 # layer way so a wasm component can address it via
@@ -114,7 +113,7 @@ serde = { workspace = true, default-features = false, features = ["derive"] }
 # Native-only: gated behind the `native` feature so wasm builds
 # don't drag in wasmtime / cpal / wgpu transitively.
 aether-substrate = { path = "../aether-substrate", optional = true }
-bytemuck = { workspace = true, optional = true, features = ["derive"] }
+bytemuck = { workspace = true, features = ["derive"] }
 # ADR-0090 unit g (iamacoffeepot/aether#1264): the `Config` derive
 # emits per-cap `*Overlay` structs (`#[derive(clap::Args)]`) next to
 # the domain struct, retiring the hand-rolled overlays that used to
@@ -174,7 +173,6 @@ inventory = { workspace = true }
 
 [dev-dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
-bytemuck = { workspace = true, features = ["derive"] }
 
 [lints]
 workspace = true

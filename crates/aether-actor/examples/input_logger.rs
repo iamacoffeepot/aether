@@ -23,8 +23,9 @@
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::InputCapability;
+use aether_capabilities::input::SubscribeInput;
 use aether_data::{Kind, MailboxId};
-use aether_kinds::{Key, MouseButton, MouseMove, SubscribeInput};
+use aether_kinds::{Key, MouseButton, MouseMove};
 
 pub struct InputLogger;
 

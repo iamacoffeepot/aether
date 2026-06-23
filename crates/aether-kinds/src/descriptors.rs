@@ -55,9 +55,8 @@ mod tests {
         LifecycleUnsubscribeAll, List, ListResult, LoadComponent, LoadResult, LyriaGenerate,
         LyriaGenerateResult, Mat4Apply, MouseButton, MouseMove, NanobananaGenerate,
         NanobananaGenerateResult, Ping, Pong, ProcessExited, Read, ReadResult, RecordResult,
-        ReplaceComponent, ReplaceResult, Spawn, SpawnResult, SubscribeInput, SubscribeInputResult,
-        Terminate, TerminateResult, Tick, TrajectoryEnd, TrajectoryLog, TrajectorySample,
-        UnsubscribeAll, UnsubscribeInput, Write, WriteResult,
+        ReplaceComponent, ReplaceResult, Spawn, SpawnResult, Terminate, TerminateResult, Tick,
+        TrajectoryEnd, TrajectoryLog, TrajectorySample, Write, WriteResult,
     };
 
     #[test]
@@ -107,11 +106,7 @@ mod tests {
         assert!(names.contains(&LoadResult::NAME));
         assert!(names.contains(&DropResult::NAME));
         assert!(names.contains(&ReplaceResult::NAME));
-        assert!(names.contains(&SubscribeInput::NAME));
-        assert!(names.contains(&UnsubscribeInput::NAME));
-        assert!(names.contains(&UnsubscribeAll::NAME));
         assert!(names.contains(&LifecycleUnsubscribeAll::NAME));
-        assert!(names.contains(&SubscribeInputResult::NAME));
         assert!(names.contains(&Read::NAME));
         assert!(names.contains(&ReadResult::NAME));
         assert!(names.contains(&Write::NAME));
