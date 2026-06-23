@@ -16,19 +16,21 @@
 pub mod kinds;
 
 mod adapter;
+mod config;
 mod registry;
 
 pub use kinds::*;
 
 pub use adapter::{FileAdapter, FsResult, LocalFileAdapter};
-pub use registry::{AdapterRegistry, NamespaceRoots, build_registry};
+pub use config::NamespaceRoots;
 // The `Config` derive on `NamespaceRoots` emits these sibling types in
-// `registry`; chassis CLI / boot wiring addresses them through the
+// `config`; chassis CLI / boot wiring addresses them through the
 // `fs::` path, so re-export them here (native-only — the derive is
 // feature-gated). Inherent shims (`from_env` / `from_argv_then_env` /
 // `into_layer`) ride the type and need no re-export.
 #[cfg(feature = "native")]
-pub use registry::{NamespaceRootsLayer, NamespaceRootsOverlay};
+pub use config::{NamespaceRootsLayer, NamespaceRootsOverlay};
+pub use registry::{AdapterRegistry, build_registry};
 
 // Handler-signature kinds resolve at file root through the `pub use
 // kinds::*` re-export above (the `#[bridge]` emits `impl HandlesKind<K>

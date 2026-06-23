@@ -27,6 +27,8 @@
 // decoded bytes so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
 
+#[cfg(not(target_arch = "wasm32"))]
+mod config;
 pub mod kinds;
 pub mod subscription;
 
@@ -34,7 +36,7 @@ pub use kinds::*;
 pub use subscription::InputCapability;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use subscription::InputConfig;
+pub use config::InputConfig;
 
 use aether_actor::WasmActorMailbox;
 use aether_data::{Kind, MailboxId};

@@ -1,8 +1,5 @@
 //! Native subscriber-table cap for `aether.input`.
 
-#[cfg(not(target_arch = "wasm32"))]
-pub use native::InputConfig;
-
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseMove, WindowSize};
 
 use super::kinds::{
@@ -25,15 +22,7 @@ mod native {
     use std::collections::{BTreeSet, HashMap};
     use std::sync::Arc;
 
-    /// Configuration for [`InputCapability`]. Empty today — the cap
-    /// builds its subscriber table from scratch and reaches for
-    /// `Mailer` / `Registry` through `NativeInitCtx`. Kept as a struct
-    /// so the chassis composes the cap with the same
-    /// `Builder::with_actor::<InputCapability>(InputConfig {})` shape
-    /// as every other cap and a future config knob (e.g. ring caps,
-    /// per-stream gates) lands without API churn.
-    #[derive(Default)]
-    pub struct InputConfig {}
+    use crate::input::config::InputConfig;
 
     /// `aether.input` cap. The single owner of the input-stream
     /// subscriber table. Handles three classes of mail:

@@ -69,6 +69,10 @@
 // markers (always-on, outside the cfg gate) resolve.
 use aether_kinds::{DropComponent, ReplaceComponent};
 
+// Init config — native-only (wasmtime types are not wasm32-safe).
+#[cfg(not(target_arch = "wasm32"))]
+mod config;
+
 // Struct definitions — native-only (wasmtime types are not wasm32-safe).
 // Declared at file root, outside the bridge, following the audio/decode
 // precedent for file-root submodules that assist the bridge block without
@@ -83,14 +87,15 @@ mod state;
 mod replace;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use state::WasmTrampolineConfig;
+pub use config::WasmTrampolineConfig;
 
 #[aether_actor::bridge(instanced, one_per = "component")]
 mod native {
-    // Re-export the struct from the file-root `state` sibling so the
+    // Re-export the structs from the file-root siblings so the
     // bridge's always-on `pub use native::WasmTrampoline;` emission
     // resolves to the same type on non-wasm32.
-    pub use super::state::{WasmTrampoline, WasmTrampolineConfig};
+    pub use super::config::WasmTrampolineConfig;
+    pub use super::state::WasmTrampoline;
 
     use std::io;
     use std::sync::Arc;
