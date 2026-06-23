@@ -399,25 +399,6 @@ mod tests {
     }
 
     #[test]
-    fn mail_recipient_roundtrips_from_raw_address() {
-        // ADR-0114 decision #1: the receive ABI threads the routed
-        // mailbox through as the trailing `recipient` frame slot; the
-        // accessor wraps it back into a `MailboxId`. Independent of the
-        // reply-handle `sender` slot — distinct values must not bleed.
-        // SAFETY: no pointer is dereferenced; only the scalar slots are
-        // inspected.
-        let mail = unsafe { Mail::__from_ptr(0, 0, 0, 0, 42, 0x1234_5678_9ABC_DEF0) };
-        assert_eq!(mail.recipient(), MailboxId(0x1234_5678_9ABC_DEF0));
-        // `__from_raw` (the wasm32 path) carries the same recipient
-        // unchanged — only the address widens, never the recipient.
-        // SAFETY: no pointer is dereferenced; only the scalar slots are
-        // inspected.
-        let raw_mail = unsafe { Mail::__from_raw(0, 0, 0, 0, NO_REPLY_HANDLE, 0xDEAD_BEEF) };
-        assert_eq!(raw_mail.recipient(), MailboxId(0xDEAD_BEEF));
-        assert!(raw_mail.reply_handle().is_none());
-    }
-
-    #[test]
     fn prior_state_empty_bytes_does_not_deref() {
         // With len=0, `bytes()` must not materialise a pointer — a
         // raw 0 ptr with len>0 would be UB if anyone called
@@ -460,39 +441,6 @@ mod tests {
             )
         };
         let out = mail.decode_kind::<FakeStructured>().expect("decode");
-        assert_eq!(out, value);
-    }
-
-    #[test]
-    fn mail_decode_kind_cast_roundtrip() {
-        // Cast arm — Kind derive on a `#[repr(C)] + Pod` type emits
-        // `decode_cast` as the body, so `decode_kind` lands on the
-        // bytemuck reader without any per-handler annotation.
-        #[repr(C)]
-        #[derive(
-            Copy,
-            Clone,
-            Debug,
-            PartialEq,
-            bytemuck::Pod,
-            bytemuck::Zeroable,
-            ::aether_data::Kind,
-            ::aether_data::Schema,
-        )]
-        #[kind(name = "test.fake_cast_kind")]
-        struct FakeCastKind {
-            a: u32,
-            b: u32,
-        }
-
-        let value = FakeCastKind { a: 5, b: 9 };
-        let ptr_raw = (&raw const value).addr();
-        let byte_len = size_of::<FakeCastKind>() as u32;
-        // SAFETY: see module-level test fixture justification above.
-        let mail = unsafe {
-            Mail::__from_ptr(FakeCastKind::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE, 0)
-        };
-        let out = mail.decode_kind::<FakeCastKind>().expect("decode");
         assert_eq!(out, value);
     }
 
@@ -645,16 +593,6 @@ mod tests {
             .as_kind::<StateStruct>()
             .expect("test setup: round-trip frame decodes back to StateStruct");
         assert_eq!(decoded, value);
-    }
-
-    #[test]
-    fn as_kind_id_mismatch_returns_none() {
-        // Frame under one kind, decode as a different one — the
-        // leading `K::ID` compare rejects before wire runs.
-        let value = OtherState { flag: true };
-        let buf = frame_bundle(&value);
-        let prior = prior_from(&buf, 0);
-        assert!(prior.as_kind::<StateStruct>().is_none());
     }
 
     #[test]

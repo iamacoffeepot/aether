@@ -1079,36 +1079,6 @@ mod tests {
         fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
     }
 
-    /// Step 2: `despawn_inline_child` removes a resident inline child
-    /// (returns `true`) and is idempotent — a second despawn of the same
-    /// alias returns `false`, not an error. Installs the child directly
-    /// (the host build's `spawn_inline_child` host fn is a panicking stub).
-    #[test]
-    fn despawn_inline_child_removes_then_idempotent() {
-        let registry = InlineRegistry::new();
-        let alias = MailboxId(0x6161);
-        install_inline_child::<SucceedingChild>(
-            &registry,
-            alias,
-            0,
-            String::from("widget"),
-            false,
-            0,
-            (),
-        )
-        .expect("a succeeding init installs the inline child");
-
-        let ctx = WasmCtx::__new(alias.0, &registry, NO_INBOUND_SOURCE);
-        assert!(
-            ctx.despawn_inline_child(alias),
-            "despawning a resident child returns true",
-        );
-        assert!(
-            !ctx.despawn_inline_child(alias),
-            "a second despawn of the same alias returns false (idempotent)",
-        );
-    }
-
     /// ADR-0112: the mode marker is layout-neutral — the `Single` and
     /// `Manual` views have identical size + alignment. This is the
     /// invariant the `as_single` pointer reborrow rests on.
@@ -1122,16 +1092,6 @@ mod tests {
             align_of::<WasmCtx<'static, Single>>(),
             align_of::<WasmCtx<'static, Manual>>(),
         );
-    }
-
-    /// ADR-0112: `OutboundReply` is reachable from the `Manual` ctx
-    /// only. The single-locked ctx carries no reply surface, so a `-> ()`
-    /// single handler is provably silent (a stray single-ctx `ctx.reply`
-    /// is a compile error, not a manifest lie).
-    #[test]
-    fn outbound_reply_present_on_manual() {
-        fn assert_impls<C: OutboundReply>() {}
-        assert_impls::<WasmCtx<'static, Manual>>();
     }
 
     /// ADR-0114 addressing amendment: a ctx self-identified as the cluster

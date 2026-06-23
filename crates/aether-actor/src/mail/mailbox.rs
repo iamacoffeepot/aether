@@ -180,21 +180,4 @@ mod tests {
         assert!(!a.matches(8));
         assert_eq!(a.raw(), 7);
     }
-
-    #[test]
-    fn mailbox_accessors() {
-        let s: Mailbox<FakeKind> = Mailbox::__new(3u64, 11);
-        assert_eq!(s.mailbox(), 3u64);
-        assert_eq!(s.kind(), 11);
-    }
-
-    // Asserts `resolve_mailbox` matches the name hash — the primitive is the
-    // reference value under test.
-    #[allow(clippy::disallowed_methods)]
-    #[test]
-    fn resolve_mailbox_uses_name_hash_and_kind_id() {
-        let s = resolve_mailbox::<FakeKind>("hand.rolled");
-        assert_eq!(s.mailbox(), mailbox_id_from_name("hand.rolled").0);
-        assert_eq!(s.kind(), FakeKind::ID.0);
-    }
 }

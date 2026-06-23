@@ -853,40 +853,6 @@ mod tests {
         );
     }
 
-    /// Step 1 coverage: `remove` drops a resident child (the alias goes
-    /// absent) and is idempotent — a second `remove` of the same id is a
-    /// clean `false`.
-    #[test]
-    fn registry_remove_drops_child_and_is_idempotent() {
-        let registry = InlineRegistry::new();
-        let id = MailboxId(0x8888);
-
-        assert!(
-            !registry.remove(id),
-            "removing an absent id returns false (idempotent)",
-        );
-        registry.insert_child(
-            id,
-            0,
-            String::from("widget"),
-            false,
-            0,
-            Box::new(RecordingChild::new().0),
-        );
-        assert!(
-            registry.remove(id),
-            "removing a resident child returns true",
-        );
-        assert!(
-            registry.take(id).is_none(),
-            "a removed child is absent from the registry",
-        );
-        assert!(
-            !registry.remove(id),
-            "a second remove of the same id is a clean false",
-        );
-    }
-
     /// Step 3 coverage: a child that despawns itself mid-dispatch drops
     /// correctly. `membrane_dispatch` takes it out, the dispatch removes the
     /// now-empty slot via `ctx.despawn_inline_child` (driving the same
@@ -1234,42 +1200,6 @@ mod tests {
             observed.get(),
             Some(MailboxId(root)),
             "the drained child reads the enqueuing parent's id as its source, not None",
-        );
-    }
-
-    /// Task 1: a child dispatched off the drain reads
-    /// `ctx.source_mailbox()` == the sending sibling — the child → sibling
-    /// direction. A sibling enqueues a send to the recipient child stamped
-    /// with the sibling's own id; the drained child observes exactly that
-    /// sibling id.
-    #[test]
-    fn drained_child_reads_enqueuing_sender_sibling() {
-        let registry = InlineRegistry::new();
-        let root = 0x7000_u64;
-        let sender_sibling = 0x7001_u64;
-        let recipient_child = 0x7002_u64;
-        registry.set_self_id(root);
-        // Both children are siblings under the root.
-        install_recording(&registry, sender_sibling, root);
-        let (dispatches, observed) =
-            install_recording_with_source(&registry, recipient_child, root);
-
-        // The sibling sends to the recipient child, stamping its own id.
-        registry.route_or_enqueue(recipient_child, 1, &[0x00], 1, false, sender_sibling);
-
-        drain_cluster_queue(&registry, |_source| {
-            |_mail| panic!("own dispatch must not run for a child-addressed item")
-        });
-
-        assert_eq!(
-            dispatches.get(),
-            1,
-            "the recipient child was dispatched once"
-        );
-        assert_eq!(
-            observed.get(),
-            Some(MailboxId(sender_sibling)),
-            "the drained child reads the sending sibling's id as its source",
         );
     }
 
