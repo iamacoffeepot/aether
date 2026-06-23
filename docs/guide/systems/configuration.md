@@ -119,17 +119,22 @@ a fresh `env::var` read. Derive `Config` on the struct and annotate the field:
 #[cfg_attr(feature = "native", derive(aether_substrate::Config))]
 #[cfg_attr(feature = "native", config(env_prefix = "AETHER_HTTP", cli_prefix = "http"))]
 pub struct HttpConfig {
-    #[cfg_attr(feature = "native", config(default = false, parse = parse_flag))]
+    #[cfg_attr(feature = "native", config(default = false))]
     pub disabled: bool,
-    #[cfg_attr(feature = "native", config(default = [], parse = parse_allowlist, csv_set))]
+    #[cfg_attr(feature = "native", config(default = [], csv_set))]
     pub allowlist: HashSet<String>,
 }
 ```
 
 The derive emits the environment-shaped layer, the `clap` argument overlay, and
-the `from_env` / `from_argv_then_env` resolvers; the field hints (`default`,
-`parse`, `env`, `cli_long`, `ms_duration`, `csv_set`) carry the per-knob shape.
-Two things to know going in:
+the `from_env` / `from_argv_then_env` resolvers. A numeric, `Duration`, or `bool`
+field carries only its `default` — confique's native parsing trims the value,
+treats an empty one as unset (falling back to the default), accepts the usual
+bool spellings (`1` / `true` / `yes` / `0` / `false` / `no`), and hard-errors on
+a non-empty garbage value. The remaining field hints (`env`, `cli_long`,
+`ms_duration`, `csv_set`, `nonzero`) carry the rest of the per-knob shape;
+`parse` names a custom parser for the rare field that needs one. Two things to
+know going in:
 
 - **Gate it on the `native` feature**, as above. The capabilities crate also
   cross-compiles to wasm, where the config machinery isn't available; the
