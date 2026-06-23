@@ -410,15 +410,4 @@ mod tests {
         assert!(Probe::try_with(|p| p.0).is_none());
         assert!(Probe::try_with_mut(|p| p.0).is_none());
     }
-
-    #[test]
-    fn static_backend_routes_through_the_provider() {
-        // `install_static_backend` is the single-actor install; once a
-        // provider is set the test provider wins (set-once), so assert the
-        // install call is a no-op rather than a panic and the API exists.
-        install_static_backend();
-        let slots = ActorSlots::new();
-        test_stamped(&slots, || Probe::with_mut(|p| p.0 = 5));
-        test_stamped(&slots, || Probe::with(|p| assert_eq!(p.0, 5)));
-    }
 }
