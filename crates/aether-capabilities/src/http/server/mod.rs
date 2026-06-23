@@ -46,78 +46,19 @@ pub const DEFAULT_MAX_HEADER_BYTES: usize = 65_536;
 /// Default `request_timeout_millis` (slow-loris read + response deadline): 30 s.
 pub const DEFAULT_REQUEST_TIMEOUT_MILLIS: u64 = 30_000;
 
+mod config;
+
+pub use config::HttpServerConfig;
+// The `Config` derive on `HttpServerConfig` emits these native-only sibling
+// types in `config`; chassis CLI / boot wiring addresses them through the
+// `server::` path, so re-export them here.
+#[cfg(feature = "native")]
+pub use config::{HttpServerConfigLayer, HttpServerOverlay};
+
 // Re-export the cap's handle struct at file root for chassis builders +
-// embedders that read the bound port. The native-only `*Layer` /
-// `*Overlay` the `Config` derive emits live next to `HttpServerConfig`.
+// embedders that read the bound port.
 #[cfg(not(target_arch = "wasm32"))]
 pub use server_native::HttpServerHandle;
-
-/// Init config for [`HttpServerCapability`] (ADR-0108).
-///
-/// `bind_addr` is the address to bind (e.g. `"127.0.0.1:8080"`,
-/// `"127.0.0.1:0"` to let the OS pick a port). `handler_mailbox` names the
-/// single component mailbox every request is dispatched to — resolved by
-/// name at dispatch time (late binding), so the handler component can load
-/// or reload independently of the server. `max_request_bytes` caps the
-/// request body, `max_header_bytes` caps the request line + headers, and
-/// `request_timeout_millis` bounds both the per-read slow-loris timeout and
-/// the handler response deadline.
-///
-/// `#[derive(aether_substrate::Config)]` (ADR-0090) emits the env-shaped
-/// `HttpServerConfigLayer`, the clap-shaped `HttpServerOverlay`, and the
-/// inherent `from_env` / `from_argv_then_env` shims under
-/// `feature = "native"`; the wasm-marker build carries only this domain
-/// struct.
-#[derive(Clone, Debug)]
-#[cfg_attr(feature = "native", derive(aether_substrate::Config))]
-#[cfg_attr(
-    feature = "native",
-    config(env_prefix = "AETHER_HTTP_SERVER", cli_prefix = "http-server")
-)]
-pub struct HttpServerConfig {
-    /// Whether to bind the listening socket at all. Default `false` —
-    /// the HTTP server is opt-in, so an unconfigured chassis binds no
-    /// port. The remaining fields are consulted only when this is `true`.
-    #[cfg_attr(feature = "native", config(default = false))]
-    pub enabled: bool,
-    /// Address to bind the listening socket. Defaults to loopback
-    /// ([`DEFAULT_BIND_ADDR`]); a public interface is an explicit choice.
-    /// A blank override (`AETHER_HTTP_SERVER_BIND_ADDR=`) falls back to
-    /// the default — the derive treats an empty `String` as unset.
-    #[cfg_attr(feature = "native", config(default = "127.0.0.1:8080"))]
-    pub bind_addr: String,
-    /// The single handler mailbox every request is dispatched to (e.g.
-    /// `"aether.component/aether.embedded:web"`). Empty = every request is
-    /// answered `503` (no handler resolves).
-    #[cfg_attr(feature = "native", config(default = ""))]
-    pub handler_mailbox: String,
-    /// Cap on the request body in bytes ([`DEFAULT_MAX_REQUEST_BYTES`]);
-    /// an announced `Content-Length` past this is answered `413`.
-    #[cfg_attr(feature = "native", config(default = 1_048_576))]
-    pub max_request_bytes: usize,
-    /// Cap on the request line + header bytes ([`DEFAULT_MAX_HEADER_BYTES`]);
-    /// a head that grows past this is answered `431`.
-    #[cfg_attr(feature = "native", config(default = 65_536))]
-    pub max_header_bytes: usize,
-    /// Per-read socket timeout (slow-loris guard) and handler response
-    /// deadline in milliseconds ([`DEFAULT_REQUEST_TIMEOUT_MILLIS`]); a
-    /// handler that doesn't reply in time yields `504`.
-    #[cfg_attr(feature = "native", config(default = 30_000))]
-    pub request_timeout_millis: u64,
-}
-
-impl Default for HttpServerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            bind_addr: DEFAULT_BIND_ADDR.to_string(),
-            handler_mailbox: String::new(),
-            max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
-            max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
-            request_timeout_millis: DEFAULT_REQUEST_TIMEOUT_MILLIS,
-        }
-    }
-}
 
 #[aether_actor::bridge(singleton)]
 mod server_native {
