@@ -34,19 +34,17 @@ use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
 use winit::error::EventLoopError;
 use winit::event_loop::EventLoop;
 
-use super::driver::{DesktopDriverCapability, parse_window_mode_env};
+use super::driver::{DesktopDriverCapability, WindowConfig};
 use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use crate::chassis_common::{
-    ActorRingConfig, CommonBoot, boot_manifest_from_env, chassis_known_keys,
-    frame_lifecycle_config, maybe_with_http_server, maybe_with_rpc_server, parse_workers_env,
-    with_common_caps,
+    ActorRingConfig, ChassisBootConfig, CommonBoot, chassis_known_keys, frame_lifecycle_config,
+    maybe_with_http_server, maybe_with_rpc_server, with_common_caps,
 };
 use crate::cli::{CommonOverlay, DesktopCli};
 use crate::hub;
 use aether_substrate::config::{ConfigError, RingCapacities, validate_env};
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
-use std::env;
 use std::path::Path;
 use winit::event_loop::ControlFlow;
 
@@ -193,14 +191,19 @@ pub struct DesktopEnv {
     /// `RpcServerCapability` so existing chassis behavior is unchanged.
     pub rpc_addr: Option<SocketAddr>,
     /// Issue 745: optional worker-pool size override. Populated from
-    /// `AETHER_WORKERS`; `None` keeps `PoolConfig::default()` behavior
-    /// (`available_parallelism() - 1`, min 1).
+    /// `AETHER_WORKERS` / `--workers`; `None` keeps `PoolConfig::default()`
+    /// behavior (`available_parallelism() - 1`, min 1).
     pub workers: Option<usize>,
     /// Issue 1990: per-actor ring capacities resolved from the
     /// `ActorRingConfig` knob (`AETHER_ACTOR_LOG_RING_SIZE` /
     /// `AETHER_ACTOR_TRACE_RING_SIZE`). Default is
     /// [`RingCapacities::default`] (the `aether-actor` const caps).
     pub ring_caps: RingCapacities,
+    /// Force-complete deadline (ms) for a pending lifecycle advance's
+    /// `Settled` (issue 1048). Resolved from
+    /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS` via `ChassisBootConfig`;
+    /// default [`aether_capabilities::LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`].
+    pub lifecycle_advance_timeout_millis: u64,
     /// Components to auto-load on boot, in order. A bundled standalone build
     /// populates this so the game comes up with no hub; the normal desktop bin
     /// leaves it empty and loads components over the hub instead.
@@ -237,19 +240,13 @@ impl DesktopEnv {
     /// # Errors
     ///
     /// See [`Self::from_env`].
-    // Desktop chassis boot resolver (argv > env): AETHER_WINDOW_MODE /
-    // AETHER_WINDOW_TITLE are hand-parsed boot overrides read by design here at
-    // the process boundary (see chassis_common's cap-flag-convention guard) — not
-    // a cap config knob.
-    #[allow(clippy::disallowed_methods)]
     pub fn from_env_with_argv(cli: DesktopCli) -> Result<Self, DesktopBootError> {
         // ADR-0090 §4 (e1): warn on any unknown AETHER_ env var.
         validate_env(&chassis_known_keys())?;
         let DesktopCli {
             common,
             audio: audio_overlay,
-            window_mode: cli_window_mode,
-            window_title: cli_window_title,
+            window: window_overlay,
             // The bin handles `--config` / `--describe` (print + exit)
             // before this resolver runs; ignore them here.
             config: _,
@@ -261,16 +258,20 @@ impl DesktopEnv {
             fs,
             anthropic,
             gemini,
-            workers: cli_workers,
+            chassis_boot: chassis_boot_overlay,
             rpc_port: cli_rpc_port,
-            boot_manifest: cli_boot_manifest,
         } = common;
 
-        // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST`. When set,
-        // the listed components' wasm + config are read into the autoload
-        // list `build_inner` drains into `aether.component.load`; an
-        // unreadable manifest aborts boot (ADR-0090 §4) via `ConfigError`.
-        let autoload = match cli_boot_manifest.or_else(boot_manifest_from_env) {
+        let chassis_boot =
+            ChassisBootConfig::try_from_argv_then_env(chassis_boot_overlay.into_layer())?;
+        let window_config = WindowConfig::from_argv_then_env(window_overlay.into_layer());
+
+        // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST` (resolved
+        // through `ChassisBootConfig`). When set, the listed components'
+        // wasm + config are read into the autoload list `build_inner`
+        // drains into `aether.component.load`; an unreadable manifest
+        // aborts boot (ADR-0090 §4) via `ConfigError`.
+        let autoload = match chassis_boot.boot_manifest.clone() {
             Some(path) => boot_manifest_autoload(Path::new(&path))?,
             None => Vec::new(),
         };
@@ -291,43 +292,12 @@ impl DesktopEnv {
         let http_server = http_server_config.enabled.then_some(http_server_config);
         let audio = AudioConf::try_from_argv_then_env(audio_overlay.into_layer())?;
 
-        // Window mode: argv wins over `AETHER_WINDOW_MODE` env. The
-        // parser is shared (`parse_window_mode_env`); a bad argv string
-        // warn-logs and falls back to Windowed, matching the env path.
-        #[allow(clippy::option_if_let_else)]
-        let (boot_mode, boot_size) = if let Some(s) = cli_window_mode {
-            match parse_window_mode_env(&s) {
-                Ok(parsed) => parsed,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "aether_substrate::boot",
-                        value = %s,
-                        error = %e,
-                        "--window-mode unparseable — falling back to Windowed",
-                    );
-                    (WindowMode::Windowed, None)
-                }
-            }
-        } else {
-            match env::var("AETHER_WINDOW_MODE") {
-                Ok(s) => match parse_window_mode_env(&s) {
-                    Ok(parsed) => parsed,
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "aether_substrate::boot",
-                            value = %s,
-                            error = %e,
-                            "AETHER_WINDOW_MODE unparseable — falling back to Windowed",
-                        );
-                        (WindowMode::Windowed, None)
-                    }
-                },
-                Err(_) => (WindowMode::Windowed, None),
-            }
-        };
-        let boot_title = cli_window_title
-            .or_else(|| env::var("AETHER_WINDOW_TITLE").ok())
-            .unwrap_or_else(|| "aether".to_owned());
+        // Window mode and title: resolved through `WindowConfig` (argv > env >
+        // default). `to_boot_mode` delegates to `parse_window_mode_env` and
+        // soft-falls back to `Windowed` on a bad value; `to_boot_title` maps
+        // `None` / empty to `"aether"`.
+        let (boot_mode, boot_size) = window_config.to_boot_mode();
+        let boot_title = window_config.to_boot_title();
 
         let rpc_addr = {
             use std::net::{IpAddr, Ipv4Addr};
@@ -336,7 +306,8 @@ impl DesktopEnv {
                 .map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p))
         };
 
-        let workers = cli_workers.or_else(parse_workers_env);
+        let workers = chassis_boot.to_workers();
+        let lifecycle_advance_timeout_millis = chassis_boot.lifecycle_advance_timeout_millis;
         // Issue 1990: resolve the per-actor ring capacities from
         // `AETHER_ACTOR_{LOG,TRACE}_RING_SIZE` (ADR-0090 §4 hard-error on
         // an unparseable known value, surfaced as `DesktopBootError::Config`).
@@ -357,6 +328,7 @@ impl DesktopEnv {
             rpc_addr,
             workers,
             ring_caps,
+            lifecycle_advance_timeout_millis,
             autoload,
         })
     }
@@ -387,6 +359,7 @@ impl DesktopChassis {
             rpc_addr,
             workers,
             ring_caps,
+            lifecycle_advance_timeout_millis,
             autoload,
         } = env;
 
@@ -472,7 +445,9 @@ impl DesktopChassis {
             .with_actor::<AudioCapability>(audio)
             .with_actor::<RenderCapability>(render_config)
             .with_actor::<UnsupportedTestBenchCapability>(())
-            .with_actor::<LifecycleCapability>(frame_lifecycle_config());
+            .with_actor::<LifecycleCapability>(frame_lifecycle_config(
+                lifecycle_advance_timeout_millis,
+            ));
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-desktop");
         let builder = maybe_with_http_server(builder, http_server);
         let built = builder.driver(driver).build()?;

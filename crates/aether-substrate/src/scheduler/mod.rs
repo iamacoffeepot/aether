@@ -50,35 +50,21 @@ pub use spin_park::{Acquired, SpinPark};
 pub use worker_deque::{burst_note_mail, pending_depth, time_budget};
 
 use crate::actor::native::blob_work::RECRUIT_KNOBS;
-use crate::config::{KnobKind, KnobRecord};
+use crate::config::KnobRecord;
 
-/// The lifecycle advance-timeout knob (ADR-0090 unit b2,
-/// iamacoffeepot/aether#1255). The `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS`
-/// override is read directly in `LifecycleCapability::init`
-/// (`aether-capabilities`); the record lives here, substrate-side,
-/// because the config-discovery aggregation below
-/// ([`SCHEDULER_KNOBS`]) is substrate-side and `aether-capabilities`
-/// depends on `aether-substrate`, not the reverse.
-pub const LIFECYCLE_KNOBS: &[KnobRecord] = &[KnobRecord {
-    env_key: "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS",
-    doc: "Deadline (ms) for a pending lifecycle advance's Settled before the next \
-          inbound advance force-completes it (degrades a wedged settlement pipeline \
-          into a visible stutter).",
-    default: Some("1000"),
-    kind: KnobKind::HandRegistered,
-}];
-
-/// The scheduler + lifecycle hot-path tuning knobs registered for
-/// config discovery (ADR-0090 unit b2, iamacoffeepot/aether#1255).
-/// Concatenates the four deque / keep-local-valve knobs
-/// (`worker_deque::DEQUE_KNOBS`), the handoff-cost calibration knob
-/// (`calibrate::CALIBRATE_KNOBS`), the lifecycle advance-timeout knob
-/// ([`LIFECYCLE_KNOBS`]), the three blob-recruiter knobs
-/// (`blob_work::RECRUIT_KNOBS`), and the spin-window knob
-/// (`pool::SPIN_KNOBS`) into the single slice e1's `chassis_known_keys()`
-/// folds into the known-key set and e2's `--config` dump renders. Pure
-/// `&'static` metadata — there is no change to any hot-path `OnceLock`
-/// read.
+/// The scheduler hot-path tuning knobs registered for config discovery
+/// (ADR-0090 unit b2, iamacoffeepot/aether#1255). Concatenates the four
+/// deque / keep-local-valve knobs (`worker_deque::DEQUE_KNOBS`), the
+/// handoff-cost calibration knob (`calibrate::CALIBRATE_KNOBS`), the three
+/// blob-recruiter knobs (`blob_work::RECRUIT_KNOBS`), and the spin-window
+/// knob (`pool::SPIN_KNOBS`) into the single slice e1's
+/// `chassis_known_keys()` folds into the known-key set and e2's `--config`
+/// dump renders. Pure `&'static` metadata — there is no change to any
+/// hot-path `OnceLock` read.
+///
+/// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS` moved to `ChassisBootConfigLayer`
+/// in `aether-substrate-bundle` (issue 2230): its record now rides the
+/// derive-emitted `META` rather than a hand-written `KnobRecord` here.
 ///
 /// The element-by-element array (rather than a runtime concat) keeps
 /// `SCHEDULER_KNOBS` a `const`: each record is still *defined* once in
@@ -89,7 +75,6 @@ pub const SCHEDULER_KNOBS: &[KnobRecord] = &[
     worker_deque::DEQUE_KNOBS[2],
     worker_deque::DEQUE_KNOBS[3],
     calibrate::CALIBRATE_KNOBS[0],
-    LIFECYCLE_KNOBS[0],
     RECRUIT_KNOBS[0],
     RECRUIT_KNOBS[1],
     RECRUIT_KNOBS[2],
@@ -110,7 +95,6 @@ mod knob_tests {
             "AETHER_PEER_STEAL",
             "AETHER_LOCAL_CHAIN_BACKSTOP",
             "AETHER_HANDOFF_COST_NS",
-            "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS",
             "AETHER_BLOB_RECRUIT_MIN",
             "AETHER_BLOB_RECRUIT_MAX",
             "AETHER_WAKE_COST_NANOS",
@@ -121,7 +105,7 @@ mod knob_tests {
                 "SCHEDULER_KNOBS missing {expected}; has {keys:?}",
             );
         }
-        assert_eq!(SCHEDULER_KNOBS.len(), 10);
+        assert_eq!(SCHEDULER_KNOBS.len(), 9);
     }
 
     #[test]

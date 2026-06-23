@@ -33,12 +33,11 @@ use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
 
-use super::driver::{HeadlessTimerDriverCapability, parse_tick_hz_env};
+use super::driver::{HeadlessTimerDriverCapability, TickConfig};
 use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use crate::chassis_common::{
-    ActorRingConfig, CommonBoot, boot_manifest_from_env, chassis_known_keys,
-    maybe_with_http_server, maybe_with_rpc_server, parse_workers_env, tick_only_lifecycle_config,
-    with_common_caps,
+    ActorRingConfig, ChassisBootConfig, CommonBoot, chassis_known_keys, maybe_with_http_server,
+    maybe_with_rpc_server, tick_only_lifecycle_config, with_common_caps,
 };
 use crate::cli::{CommonOverlay, HeadlessCli};
 use crate::hub;
@@ -117,6 +116,10 @@ pub struct HeadlessEnv {
     /// `AETHER_ACTOR_TRACE_RING_SIZE`). Default is
     /// [`RingCapacities::default`] (the `aether-actor` const caps).
     pub ring_caps: RingCapacities,
+    /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS` — timeout for one lifecycle
+    /// advance step (Tick) before the scheduler logs a slow-frame warning.
+    /// Resolved through `ChassisBootConfig`; default is 1000 ms.
+    pub lifecycle_advance_timeout_millis: u64,
     /// Components to auto-load on boot, in order. A bundled standalone build
     /// populates this so the components come up with no hub; the normal
     /// headless bin leaves it empty and loads components over the hub instead.
@@ -155,7 +158,7 @@ impl HeadlessEnv {
         validate_env(&chassis_known_keys())?;
         let HeadlessCli {
             common,
-            tick_hz: cli_tick_hz,
+            tick: tick_overlay,
             // The bin handles `--config` / `--describe` (print + exit)
             // before this resolver runs; ignore them here.
             config: _,
@@ -167,15 +170,20 @@ impl HeadlessEnv {
             fs,
             anthropic,
             gemini,
-            workers: cli_workers,
+            chassis_boot: chassis_boot_overlay,
             rpc_port: cli_rpc_port,
-            boot_manifest: cli_boot_manifest,
         } = common;
-        // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST`. When set,
-        // the listed components' wasm + config are read into the autoload
-        // list `build_inner` drains into `aether.component.load`; an
-        // unreadable manifest aborts boot (ADR-0090 §4) via `ConfigError`.
-        let autoload = match cli_boot_manifest.or_else(boot_manifest_from_env) {
+
+        let chassis_boot =
+            ChassisBootConfig::try_from_argv_then_env(chassis_boot_overlay.into_layer())?;
+        let tick_config = TickConfig::try_from_argv_then_env(tick_overlay.into_layer())?;
+
+        // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST` (resolved
+        // through `ChassisBootConfig`). When set, the listed components'
+        // wasm + config are read into the autoload list `build_inner`
+        // drains into `aether.component.load`; an unreadable manifest
+        // aborts boot (ADR-0090 §4) via `ConfigError`.
+        let autoload = match chassis_boot.boot_manifest.clone() {
             Some(path) => boot_manifest_autoload(Path::new(&path))?,
             None => Vec::new(),
         };
@@ -189,17 +197,14 @@ impl HeadlessEnv {
         let http_server_config =
             HttpServerConfig::try_from_argv_then_env(http_server_overlay.into_layer())?;
         let http_server = http_server_config.enabled.then_some(http_server_config);
-        // Chassis-wide knobs: argv-then-env shadow (ad-hoc, lifted to
-        // confique in unit e1). `cli.tick_hz` wins when `Some`, falls
-        // through to `AETHER_TICK_HZ` / default otherwise.
-        let tick_hz = cli_tick_hz
-            .filter(|hz| *hz > 0)
-            .unwrap_or_else(parse_tick_hz_env);
-        let tick_period = Duration::from_nanos(1_000_000_000 / u64::from(tick_hz));
+        // Tick cadence: resolved through `TickConfig` (argv > env > default).
+        // `nonzero` maps 0 to the default (60 Hz); a garbage value hard-errors.
+        let tick_period = tick_config.to_tick_period();
         let rpc_addr = cli_rpc_port
             .or_else(hub::rpc_port_from_env)
             .map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p));
-        let workers = cli_workers.or_else(parse_workers_env);
+        let workers = chassis_boot.to_workers();
+        let lifecycle_advance_timeout_millis = chassis_boot.lifecycle_advance_timeout_millis;
         // Issue 1990: resolve the per-actor ring capacities from
         // `AETHER_ACTOR_{LOG,TRACE}_RING_SIZE` (ADR-0090 §4 hard-error on
         // an unparseable known value, surfaced as `ConfigError`).
@@ -214,6 +219,7 @@ impl HeadlessEnv {
             rpc_addr,
             workers,
             ring_caps,
+            lifecycle_advance_timeout_millis,
             autoload,
         })
     }
@@ -238,6 +244,7 @@ impl HeadlessChassis {
             rpc_addr,
             workers,
             ring_caps,
+            lifecycle_advance_timeout_millis,
             autoload,
         } = env;
 
@@ -333,7 +340,9 @@ impl HeadlessChassis {
             .with_actor::<HeadlessRenderCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedTestBenchCapability>(())
-            .with_actor::<LifecycleCapability>(tick_only_lifecycle_config());
+            .with_actor::<LifecycleCapability>(tick_only_lifecycle_config(
+                lifecycle_advance_timeout_millis,
+            ));
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-headless");
         let builder = maybe_with_http_server(builder, http_server);
         let built = builder.driver(driver).build()?;

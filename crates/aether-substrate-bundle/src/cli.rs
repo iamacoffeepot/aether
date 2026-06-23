@@ -15,11 +15,12 @@
 //! `--http-disable=false` ⇒ `false`, absent ⇒ `None`), matching
 //! confique's native env-side bool deserialization.
 //!
-//! Chassis-wide knobs (`workers`, `tick_hz`, `window_mode`,
-//! `window_title`, `rpc_port`) live as plain `Option<T>` fields on the
-//! root `CommonOverlay` / `DesktopCli` / `HeadlessCli` and are
-//! ad-hoc-shadowed in the bin (`cli.workers.or_else(parse_workers_env)`).
-//! Unit e1 will lift them into their own confique layers.
+//! Chassis-wide knobs (`workers`, `boot_manifest`,
+//! `lifecycle_advance_timeout_millis`, `rpc_port`) and per-chassis knobs
+//! (`window_mode` / `window_title` for desktop, `tick_hz` for headless)
+//! are now fully migrated to `#[derive(aether_substrate::Config)]` overlays:
+//! `ChassisBootOverlay` / `WindowOverlay` / `TickOverlay`. Only
+//! `rpc_port` remains hand-written (its per-chassis default differs).
 //!
 //! ADR-0090 unit g (iamacoffeepot/aether#1264): the per-cap `*Overlay`
 //! structs now ride the `#[derive(aether_substrate::Config)]` next to
@@ -46,10 +47,14 @@ pub use aether_capabilities::gemini::GeminiOverlay;
 pub use aether_capabilities::http::HttpOverlay;
 pub use aether_capabilities::http::HttpServerOverlay;
 
+pub use crate::chassis_common::ChassisBootOverlay;
+pub use crate::desktop::driver::WindowOverlay;
+pub use crate::headless::driver::TickOverlay;
+
 /// Argv overlay shared by every full-stack chassis (desktop +
 /// headless). Captures every cap whose config layer is the same on
-/// both chassis. Per-chassis extras (audio for desktop, tick-hz +
-/// window-* for desktop) live on their own root struct.
+/// both chassis. Per-chassis extras (audio for desktop, tick / window
+/// for desktop) live on their own root struct.
 #[derive(Args, Debug, Default, Clone)]
 pub struct CommonOverlay {
     #[command(flatten)]
@@ -62,22 +67,16 @@ pub struct CommonOverlay {
     pub anthropic: AnthropicOverlay,
     #[command(flatten)]
     pub gemini: GeminiOverlay,
-
-    /// `AETHER_WORKERS` — worker pool size override.
-    #[arg(long)]
-    pub workers: Option<usize>,
+    /// Shared chassis boot knobs: `--workers`, `--boot-manifest`,
+    /// `--lifecycle-advance-timeout-millis`.
+    #[command(flatten)]
+    pub chassis_boot: ChassisBootOverlay,
 
     /// `AETHER_RPC_PORT` — `aether.rpc.server` bind port. Absent →
     /// chassis-specific default (desktop / headless skip the RPC
     /// server entirely; hub falls back to `DEFAULT_RPC_PORT`).
     #[arg(long = "rpc-port")]
     pub rpc_port: Option<u16>,
-
-    /// `AETHER_BOOT_MANIFEST` — path to a `BundleManifest` JSON of
-    /// components to auto-load at boot (the runtime twin of the
-    /// standalone-bundle compile-time pack). Absent → boot componentless.
-    #[arg(long = "boot-manifest")]
-    pub boot_manifest: Option<String>,
 }
 
 /// Desktop chassis CLI root.
@@ -91,14 +90,9 @@ pub struct DesktopCli {
     pub common: CommonOverlay,
     #[command(flatten)]
     pub audio: AudioOverlay,
-
-    /// `AETHER_WINDOW_MODE` — `windowed[:WxH]` /
-    /// `fullscreen-borderless` / `exclusive:WxH@HZ`.
-    #[arg(long = "window-mode")]
-    pub window_mode: Option<String>,
-    /// `AETHER_WINDOW_TITLE` — window title text.
-    #[arg(long = "window-title")]
-    pub window_title: Option<String>,
+    /// Desktop window knobs: `--window-mode`, `--window-title`.
+    #[command(flatten)]
+    pub window: WindowOverlay,
 
     /// Print every config knob (source-resolved value, default, doc)
     /// and exit before boot (ADR-0090 §4 discovery dump).
@@ -122,10 +116,9 @@ pub struct DesktopCli {
 pub struct HeadlessCli {
     #[command(flatten)]
     pub common: CommonOverlay,
-
-    /// `AETHER_TICK_HZ` — tick cadence in hertz (default 60).
-    #[arg(long = "tick-hz")]
-    pub tick_hz: Option<u32>,
+    /// Headless tick knob: `--tick-hz`.
+    #[command(flatten)]
+    pub tick: TickOverlay,
 
     /// Print every config knob (source-resolved value, default, doc)
     /// and exit before boot (ADR-0090 §4 discovery dump).
