@@ -156,7 +156,7 @@ serde_json = { workspace = true }
 # write_frame}`) used by the RPC engine-routing + FleetBench integration
 # tests; no `src/` consumer, so it rides dev-dependencies only.
 aether-codec = { path = "../aether-codec" }
-aether-test-fixtures-kinds = { path = "../aether-test-fixtures/kinds" }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
 # iamacoffeepot/aether#1472: the FleetBench Transform-DAG test builds a
 # descriptor with `output_kind_id == Vec4::ID` and casts the observer's
 # surfaced 16 bytes back to a `Vec4` for the `M·v` assertion, so it names
