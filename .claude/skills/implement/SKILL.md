@@ -110,7 +110,7 @@ The sweep never auto-confirms and never dispatches the serial tail (push / PR / 
 |-------|---------|
 | `phase:ready` label present | "Issue is not Ready (no `phase:ready` label). Use `/scope` + `/approve` first." |
 | Exactly one `model:*` label | "Missing model:* label (or more than one). Re-run `/scope`'s Plan step or stamp the label by hand." |
-| §Sub-issues section absent or empty | "Issue is an umbrella with sub-issues. Delegate the children, not the parent." |
+| §Sub-issues section absent or empty | "Issue is an umbrella with sub-issues. Delegate the children, not the parent." (The malformed-umbrella case — a non-empty `## Sub-issues` alongside a substantial own plan — is refused upstream at `/approve`'s Umbrella integrity gate, so any issue that reaches `/implement` with a non-empty `## Sub-issues` is a pure umbrella and correct to drop.) |
 | Issue body has `## Implementation plan` | "Missing implementation plan — issue isn't fully scoped. Re-run `/scope`." |
 | `gh auth status` has `repo` scope | "Run `gh auth refresh` (repo scope is standard)." |
 
