@@ -6,9 +6,9 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-#[cfg(feature = "native")]
+#[cfg(feature = "fs-runtime")]
 use std::error::Error;
-#[cfg(feature = "native")]
+#[cfg(feature = "fs-runtime")]
 use std::fmt;
 
 /// Resolved filesystem roots for the three ADR-0041 namespaces. The
@@ -26,24 +26,24 @@ use std::fmt;
 /// cannot express as literals. Per-field `env = "..."` overrides pin
 /// the unprefixed `AETHER_*_DIR` env keys.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "native", derive(aether_substrate::Config))]
+#[cfg_attr(feature = "fs-runtime", derive(aether_substrate::Config))]
 #[cfg_attr(
-    feature = "native",
+    feature = "fs-runtime",
     config(env_prefix = "AETHER", cli_prefix = "", skip_from_layer)
 )]
 pub struct NamespaceRoots {
     #[cfg_attr(
-        feature = "native",
+        feature = "fs-runtime",
         config(env = "AETHER_SAVE_DIR", cli_long = "save-dir", parse = parse_dir)
     )]
     pub save: PathBuf,
     #[cfg_attr(
-        feature = "native",
+        feature = "fs-runtime",
         config(env = "AETHER_ASSETS_DIR", cli_long = "assets-dir", parse = parse_dir)
     )]
     pub assets: PathBuf,
     #[cfg_attr(
-        feature = "native",
+        feature = "fs-runtime",
         config(env = "AETHER_CONFIG_DIR", cli_long = "config-dir", parse = parse_dir)
     )]
     pub config: PathBuf,
@@ -84,7 +84,7 @@ impl NamespaceRoots {
 /// `current_exe()` resolution failure, the fallback is
 /// `temp_dir()/aether/...` so a boot always finishes even on
 /// headless CI.
-#[cfg(feature = "native")]
+#[cfg(feature = "fs-runtime")]
 impl aether_substrate::FromArgvThenEnv for NamespaceRoots {
     type Layer = NamespaceRootsLayer;
 
@@ -119,7 +119,7 @@ impl aether_substrate::FromArgvThenEnv for NamespaceRoots {
 /// Parse a directory override. An empty string errors so confique
 /// treats it as unset (preserving the prior `env_or_default`'s
 /// `Ok(s) if !s.is_empty()` guard); any non-empty value is a path.
-#[cfg(feature = "native")]
+#[cfg(feature = "fs-runtime")]
 pub(super) fn parse_dir(s: &str) -> Result<PathBuf, EmptyDir> {
     if s.is_empty() {
         Err(EmptyDir)
@@ -130,18 +130,18 @@ pub(super) fn parse_dir(s: &str) -> Result<PathBuf, EmptyDir> {
 
 /// Sentinel error: an empty `AETHER_*_DIR` value, treated as unset by
 /// confique's parse path (`Err` + empty → `None`).
-#[cfg(feature = "native")]
+#[cfg(feature = "fs-runtime")]
 #[derive(Debug)]
 pub(super) struct EmptyDir;
 
-#[cfg(feature = "native")]
+#[cfg(feature = "fs-runtime")]
 impl fmt::Display for EmptyDir {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("empty directory override")
     }
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "fs-runtime")]
 impl Error for EmptyDir {}
 
 // ADR-0090: the confique migration is byte-identical to the prior
@@ -150,7 +150,7 @@ impl Error for EmptyDir {}
 // loads the layer with no `.env()` source. Native-only because the
 // `Config` derive (and `parse_dir` / the Layer) only exist under the
 // `native` feature.
-#[cfg(all(test, feature = "native"))]
+#[cfg(all(test, feature = "fs-runtime"))]
 mod tests {
     use super::{NamespaceRootsLayer, parse_dir};
     use std::path::PathBuf;

@@ -32,20 +32,51 @@ license.workspace = true
 # (`render` / `audio`) for the caps they typed-send to.
 default = ["native"]
 
-# Pulls every wasm-incompatible dep + the `aether-substrate` runtime
-# the `NativeActor` macro arm references. Always on for chassis.
-native = [
+# The base substrate runtime + the native deps every cap's runtime and
+# its ADR-0090 config layer share. This is the load-bearing split issue
+# 2296 establishes (template for #2282–2292): the substrate runtime is no
+# longer coupled to the wasm *target* — it is an explicit opt-in feature,
+# so a `default-features = false` build yields a cap's transport surface
+# (its addressing marker + wire kinds) with none of this.
+#
+# `tracing` (every cap's runtime logs) + the ADR-0090 config-machinery
+# deps (`confique` / `clap` / `dirs`, used by every cap's `#[derive(Config)]`
+# layer) live here because they are genuinely shared across all caps'
+# runtimes — so a per-cap `<cap>-runtime` feature (e.g. `fs-runtime`) is
+# self-contained: its native config compiles on `runtime` alone. `uuid`
+# rides here too (shared output-staging helper, ADR-0050). A `native`
+# umbrella pulls this transitively (below); the `native → runtime` rename
+# (#2290) is sequenced to the capstone.
+runtime = [
     "dep:aether-substrate",
-    "dep:clap",
+    "dep:tracing",
+    "dep:uuid",
     "dep:confique",
+    "dep:clap",
     "dep:dirs",
+]
+
+# fs's runtime layer: the `NativeActor` impl + native config/adapter/
+# registry in `fs/runtime.rs`. fs pulls no heavy deps beyond the shared
+# `runtime` base, so this just names the per-cap runtime the arc
+# (#2282–2292) standardizes on. A `default-features = false` build (no
+# `native` ⇒ no `fs-runtime`) gets fs transport-only.
+fs-runtime = ["runtime"]
+
+# Pulls every wasm-incompatible dep + the `aether-substrate` runtime the
+# native cap impls reference. Always on for chassis. Implies `runtime`
+# and every per-cap runtime (so a default build keeps each cap's impl)
+# plus the remaining cap-specific heavy deps. Kept (additive) during the
+# migration so the workspace stays green; its removal / rename to
+# `runtime` is the capstone (#2290).
+native = [
+    "runtime",
+    "fs-runtime",
     "dep:httparse",
     "dep:serde_json",
     "dep:sha2",
-    "dep:tracing",
     "dep:ureq",
     "dep:url",
-    "dep:uuid",
     "dep:wasmtime",
 ]
 

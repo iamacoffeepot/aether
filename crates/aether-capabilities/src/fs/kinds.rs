@@ -20,6 +20,14 @@
 
 use serde::{Deserialize, Serialize};
 
+// Reverse-lookup `NameEntry` submission (the marker surface below). Native
+// — `inventory` doesn't link on wasm — so it rides `fs-runtime`, the same
+// gate the native receive side keys on.
+#[cfg(feature = "fs-runtime")]
+use aether_data::MAILBOX_DOMAIN;
+#[cfg(feature = "fs-runtime")]
+use aether_data::name_inventory::{NameEntry, inventory};
+
 /// Structured failure reason for an I/O request (ADR-0041 §1).
 /// Components can pattern-match on the variant to decide whether
 /// to retry (`AdapterError`), prompt the user (`NotFound`), or
@@ -327,6 +335,54 @@ pub enum FsFetchResult {
         path: String,
         error: FsFetchError,
     },
+}
+
+/// The `aether.fs` capability marker (ADR-0099 addressing). Always-on,
+/// no heavy deps: a wasm component addressing the cap via
+/// `ctx.actor::<FsCapability>()` and a transport-only chassis both
+/// resolve `NAMESPACE` + the per-kind [`HandlesKind`](aether_actor::HandlesKind)
+/// markers below without the substrate runtime.
+///
+/// Two definitions, picked by `fs-runtime`. A transport-only build sees
+/// this unit stub — wasm guests never construct a cap, they only address
+/// it by type, so an uninhabited marker is enough. An `fs-runtime` build
+/// re-exports the state-bearing struct `runtime` defines (it carries the
+/// adapter registry + the link-time transform table the receive side
+/// needs). Hand-written here because the receive-side `#[actor]` block in
+/// `fs/runtime.rs` is `skip_markers` — it emits only the dispatch table,
+/// not these markers, so a transport consumer keeps them when the runtime
+/// is gated out. (This is the transport/runtime split #2296 establishes as
+/// the template for #2282–2292; it replaces what `#[bridge]` emitted off
+/// the wasm target.)
+#[cfg(not(feature = "fs-runtime"))]
+pub struct FsCapability;
+#[cfg(feature = "fs-runtime")]
+pub use super::runtime::FsCapability;
+
+impl aether_actor::Addressable for FsCapability {
+    const NAMESPACE: &'static str = "aether.fs";
+    type Resolver = aether_actor::One;
+}
+
+impl aether_actor::HandlesKind<Read> for FsCapability {}
+impl aether_actor::HandlesKind<Write> for FsCapability {}
+impl aether_actor::HandlesKind<Copy> for FsCapability {}
+impl aether_actor::HandlesKind<Delete> for FsCapability {}
+impl aether_actor::HandlesKind<List> for FsCapability {}
+impl aether_actor::HandlesKind<FsFetch> for FsCapability {}
+
+// ADR-0088 §3 reverse-lookup: a singleton's `NAMESPACE` *is* its mailbox
+// name, so submit a `NameEntry` letting a `MailboxId` reverse to
+// "aether.fs" through the static reverse map. Native-only (the
+// `inventory` crate doesn't link on wasm), so it rides `fs-runtime` — the
+// feature that carries the native receive side. Replaces the
+// `#[bridge(singleton)]` macro-auto-emitted submission.
+#[cfg(feature = "fs-runtime")]
+inventory::submit! {
+    NameEntry {
+        domain: MAILBOX_DOMAIN,
+        name: "aether.fs",
+    }
 }
 
 #[cfg(test)]
