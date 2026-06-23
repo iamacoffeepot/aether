@@ -144,7 +144,7 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
 
 8. **Sweep the merged worktree.** Run the worktree removal for this PR's branch, equivalent to `/sweep worktrees` §Target: worktrees step 4 for the merged entry:
    ```bash
-   git worktree remove .claude/worktrees/issue-<m>
+   git worktree remove "$(git rev-parse --show-toplevel)/.claude/worktrees/issue-<m>"
    git branch -D <branch>
    ```
    If the worktree has uncommitted files (rare — the implement agent should have committed everything), use `--force`. Skip this step when `--no-sweep` was passed.
