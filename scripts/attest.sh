@@ -100,6 +100,13 @@ AETHER_ATTEST_BASE="${AETHER_ATTEST_BASE:-$HOME/.cache}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$AETHER_ATTEST_BASE/aether-attest-target}"
 mkdir -p "$CARGO_TARGET_DIR"
 
+# Keep qodana's analysis cache and JBR downloads off $HOME and on the same
+# relocatable volume as CARGO_TARGET_DIR. Persisted across runs for incremental
+# warmth; root-owned droppings here are reclaimable via the existing
+# throwaway-root-container reap in the qodana) case below.
+QODANA_CACHE_DIR="${QODANA_CACHE_DIR:-$AETHER_ATTEST_BASE/aether-attest-qodana-cache}"
+mkdir -p "$QODANA_CACHE_DIR"
+
 # A fresh clone of HEAD with a real `.git`, under a Docker-shared path
 # (AETHER_ATTEST_BASE, $HOME/.cache by default — it must stay accessible to
 # qodana's container). Every step runs here: witness's git attestor reads
@@ -186,7 +193,7 @@ for step in $CANONICAL_STEPS; do
             # not products worth attesting, and the verifier reads only the
             # material/command-run/git attestations.
             export ATTEST_POST='docker run --rm -v "$PWD":/c alpine rm -rf /c/target /c/.qodana 2>/dev/null || true'
-            attest_step "$step" "${cmd[@]}" --diff-start "$QODANA_BASE" -u root
+            attest_step "$step" "${cmd[@]}" --diff-start "$QODANA_BASE" --cache-dir "$QODANA_CACHE_DIR" -u root
             unset ATTEST_POST ;;
         *)      attest_step "$step" "${cmd[@]}" ;;
     esac
