@@ -16,6 +16,7 @@ set -u
 
 input=$(cat)
 command=$(printf '%s' "$input" | jq -r '.tool_input.command // ""')
+hook_cwd=$(printf '%s' "$input" | jq -r '.cwd // ""')
 
 # Match `git push` / `gh pr create` only in command position — at the
 # start of a line or right after a separator (`;`, `&`, `|`, and thus
@@ -37,19 +38,23 @@ if ! command -v git >/dev/null 2>&1; then
     exit 0
 fi
 
-# iamacoffeepot/aether#1199: the gated command may target a worktree via a
-# leading `cd <path> &&` — the /implement skill pushes from
-# `.claude/worktrees/<slug>` / `/tmp/aether-*`. Evaluate git state in that
-# directory rather than the hook's own cwd (the main checkout); otherwise
-# HEAD and the stamp gitdir resolve against the wrong tree and a clean
-# in-worktree preflight is false-blocked. No `cd` prefix (the main-checkout
-# push) leaves cwd untouched, so that path is unchanged.
+# Worktree resolution — most-specific source wins:
+# (1) explicit `cd <path> &&` prefix on the gated command (#1199 behavior, unchanged);
+# (2) session cwd from the hook input JSON (.cwd), supplied by Claude Code for
+#     worktree-bound agents — closes the bare-push gap without a cd prefix
+#     (iamacoffeepot/aether#2200);
+# (3) current process cwd (main-checkout fallback when neither source is available).
+# Guard both hops with -n/-d before cd so a missing/garbage value fails open.
 cd_prefix_re='^[[:space:]]*cd[[:space:]]+([^[:space:];&|]+)'
 if [[ "$command" =~ $cd_prefix_re ]]; then
     target_dir="${BASH_REMATCH[1]}"
-    if [[ -n "$target_dir" && -d "$target_dir" ]]; then
-        cd "$target_dir" || true
-    fi
+elif [[ -n "$hook_cwd" && -d "$hook_cwd" ]]; then
+    target_dir="$hook_cwd"
+else
+    target_dir=""
+fi
+if [[ -n "$target_dir" && -d "$target_dir" ]]; then
+    cd "$target_dir" || true
 fi
 
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
