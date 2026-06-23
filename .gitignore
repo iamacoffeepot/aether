@@ -33,6 +33,7 @@ spikes/*/target/
 !.claude/skills/wish/
 !.claude/skills/release-init/
 !.claude/skills/scope/
+!.claude/skills/retrospect/
 !.claude/skills/scope-spinoff/
 !.claude/skills/sketch/
 !.claude/skills/secretary/
