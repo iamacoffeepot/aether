@@ -31,7 +31,7 @@
 //!   captured PNG.
 //!
 //! ADR-0090 c1: this fixture moved from `aether-test-fixture-probe`'s
-//! `src/lib.rs` to `aether-test-fixtures/examples/probe.rs`. The
+//! `src/lib.rs` to `aether-test-fixtures/bundle/src/probe.rs`. The
 //! actor source is unchanged; the shared `TickObserved` / `SetRender`
 //! kinds moved to the sibling lib so integration tests can import
 //! them without reaching into a cdylib.
