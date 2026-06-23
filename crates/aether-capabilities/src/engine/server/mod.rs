@@ -65,7 +65,7 @@ mod fleet;
 // `with_actor::<EngineServer>(cfg)` (ADR-0090). Native-only re-export —
 // the engines cap is native-only, so the config has no wasm consumer.
 #[cfg(not(target_arch = "wasm32"))]
-pub use config::{EngineConfig, EngineOverlay};
+pub use config::{EngineConfig, EngineConfigLayer, EngineOverlay};
 
 #[aether_actor::bridge(singleton)]
 mod server_native {
