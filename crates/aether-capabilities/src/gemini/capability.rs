@@ -16,7 +16,7 @@ use super::{
     LyriaGenerate, LyriaGenerateResult, NanobananaGenerate, NanobananaGenerateResult, lyria,
     nanobanana,
 };
-use crate::contentgen::adapter::{GeminiAdapter, GeminiImageRequest, GeminiMusicRequest};
+use crate::shared::contentgen::adapter::{GeminiAdapter, GeminiImageRequest, GeminiMusicRequest};
 
 #[aether_actor::bridge(singleton)]
 mod native {
@@ -28,10 +28,10 @@ mod native {
         UreqGeminiAdapter, aspect_ratio_str, image_size_str, lyria, map_adapter_error, nanobanana,
         thinking_level_str,
     };
-    use crate::contentgen::adapter::{AdapterUsage, GeminiResponse};
-    use crate::contentgen::staging::{gen_root, stage_gen_output};
-    use crate::contentgen::task_queue::TaskQueue;
     use crate::fs::{FileAdapter, LocalFileAdapter};
+    use crate::shared::contentgen::adapter::{AdapterUsage, GeminiResponse};
+    use crate::shared::contentgen::staging::{gen_root, stage_gen_output};
+    use crate::shared::contentgen::task_queue::TaskQueue;
     use aether_actor::{Manual, OutboundReply, actor};
     use aether_kinds::Usage;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
@@ -363,13 +363,13 @@ mod native {
     mod tests {
         use super::super::{DisabledGeminiAdapter, GeminiConfig};
         use super::GeminiCapability;
-        use crate::contentgen::adapter::STUB_PNG;
-        use crate::contentgen::adapter::StubGeminiAdapter;
-        use crate::contentgen::adapter::{AdapterUsage, GeminiArtifact, GeminiResponse};
         use crate::gemini::{
             AspectRatio, GeminiError, ImageSize, LyriaGenerate, LyriaGenerateResult,
             NanobananaGenerate, NanobananaGenerateResult,
         };
+        use crate::shared::contentgen::adapter::STUB_PNG;
+        use crate::shared::contentgen::adapter::StubGeminiAdapter;
+        use crate::shared::contentgen::adapter::{AdapterUsage, GeminiArtifact, GeminiResponse};
         use crate::test_chassis::{
             TestChassis, decode_session_reply, drive_task_completion, fresh_substrate,
             test_mailer_and_rx,

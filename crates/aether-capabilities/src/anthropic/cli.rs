@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::DEFAULT_TIMEOUT_MILLIS;
-use crate::contentgen::adapter::{AdapterUsage, AnthropicRequest, AnthropicResponse};
+use crate::shared::contentgen::adapter::{AdapterUsage, AnthropicRequest, AnthropicResponse};
 
 /// Sentinel returned when the `claude` binary isn't on PATH so the cap
 /// maps it onto `AnthropicError::CliNotFound`. Matched as a string
@@ -178,7 +178,7 @@ impl ClaudeCliAdapter {
 #[cfg(test)]
 mod tests {
     use super::{CLI_NOT_FOUND, ClaudeCliAdapter, TIMEOUT_SENTINEL};
-    use crate::contentgen::adapter::AnthropicRequest;
+    use crate::shared::contentgen::adapter::AnthropicRequest;
     use std::time::{Duration, Instant};
 
     fn req() -> AnthropicRequest {

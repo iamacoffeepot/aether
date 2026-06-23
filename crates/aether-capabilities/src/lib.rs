@@ -33,12 +33,12 @@ pub mod anthropic;
 #[cfg(feature = "audio")]
 pub mod audio;
 pub mod component;
-// Shared content-gen infrastructure (ADR-0050 §2). Native-only — the
+// Shared infrastructure for capabilities (ADR-0050 §2). Native-only — the
 // dispatch helper, staging, and adapter traits all lean on the
 // substrate runtime (`Mailer`, `LocalFileAdapter`), so the module
 // elides cleanly on the wasm-component build.
 #[cfg(not(target_arch = "wasm32"))]
-pub mod contentgen;
+pub mod shared;
 
 pub mod engine;
 pub mod fs;
@@ -115,7 +115,7 @@ pub use component::{ComponentHostCapability, resolve_embedded};
 // ADR-0050 §2 shared content-gen infrastructure. Native-only — the two
 // provider caps (issue 1014 / 1015) embed these.
 #[cfg(not(target_arch = "wasm32"))]
-pub use contentgen::{
+pub use shared::contentgen::{
     AnthropicAdapter, GeminiAdapter, StubAnthropicAdapter, StubGeminiAdapter, TaskQueue,
     stage_gen_output,
 };

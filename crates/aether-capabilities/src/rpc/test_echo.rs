@@ -131,7 +131,7 @@ pub struct DeferredEchoReply {
 }
 
 /// Test-only actor that answers [`DeferredEchoRequest`] off-thread via the
-/// ADR-0093 hold-until-resolve dispatch ([`crate::contentgen::TaskQueue`]
+/// ADR-0093 hold-until-resolve dispatch ([`crate::shared::contentgen::TaskQueue`]
 /// over `ctx.dispatch_blocking`), reproducing the production content-gen
 /// caps' deferred-reply shape (submit -> spawned worker -> completion wake
 /// -> re-reply). The whole point is that the reply happens *after* the
@@ -140,7 +140,7 @@ pub struct DeferredEchoReply {
 #[aether_actor::bridge(singleton)]
 mod deferred_echo_actor {
     use super::{DeferredEchoReply, DeferredEchoRequest};
-    use crate::contentgen::task_queue::TaskQueue;
+    use crate::shared::contentgen::task_queue::TaskQueue;
     use aether_actor::actor;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
     use aether_substrate::chassis::error::BootError;

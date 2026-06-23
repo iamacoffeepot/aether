@@ -8,7 +8,7 @@
 //! Long-tail calls (a multi-second Messages request, a `claude`
 //! subprocess) ride the ADR-0093 hold-until-resolve dispatch: the
 //! generate handler submits the blocking call to a
-//! [`TaskQueue`](crate::contentgen::TaskQueue), which hands it to
+//! [`TaskQueue`](crate::shared::contentgen::TaskQueue), which hands it to
 //! `ctx.dispatch_blocking` — the substrate spawns an ephemeral worker,
 //! holds the chain open in its in-flight ledger, and routes the
 //! completion to the cap's `#[handler(task)]` as a `TaskDone`. The cap
@@ -34,7 +34,7 @@ pub use kinds::{
 
 use std::time::Duration;
 
-use crate::contentgen::adapter::{AnthropicAdapter, AnthropicRequest, AnthropicResponse};
+use crate::shared::contentgen::adapter::{AnthropicAdapter, AnthropicRequest, AnthropicResponse};
 
 pub use api::UreqAnthropicAdapter;
 pub use cli::ClaudeCliAdapter;
@@ -155,8 +155,8 @@ mod native {
         CombinedAnthropicAdapter, DisabledAnthropicAdapter, MessagesSend, MessagesSendResult,
         map_adapter_error,
     };
-    use crate::contentgen::adapter::{AdapterUsage, AnthropicResponse};
-    use crate::contentgen::task_queue::TaskQueue;
+    use crate::shared::contentgen::adapter::{AdapterUsage, AnthropicResponse};
+    use crate::shared::contentgen::task_queue::TaskQueue;
     use aether_actor::{Manual, OutboundReply, actor};
     use aether_kinds::Usage;
 
@@ -458,7 +458,7 @@ mod native {
             AnthropicError, CliSend, CliSendResult, Message, MessagesSend, MessagesSendResult, Role,
         };
         use super::AnthropicCapability;
-        use crate::contentgen::adapter::{
+        use crate::shared::contentgen::adapter::{
             AnthropicRequest, AnthropicResponse, StubAnthropicAdapter,
         };
         use crate::test_chassis::{
@@ -833,7 +833,7 @@ mod native {
         #[ignore = "needs ANTHROPIC_API_KEY"]
         fn anthropic_api_smoke() {
             use super::super::UreqAnthropicAdapter;
-            use crate::contentgen::adapter::AnthropicRequest;
+            use crate::shared::contentgen::adapter::AnthropicRequest;
             use std::env;
             // Test-only: the live-API smoke reads an external credential
             // (ANTHROPIC_API_KEY), not cap config; gated `#[ignore]`.
