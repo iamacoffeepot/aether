@@ -10,40 +10,31 @@
 #![allow(clippy::print_stderr)]
 #![allow(clippy::print_stdout)]
 
+use aether_capabilities::EngineConfigLayer;
 use aether_substrate::config::{KnobKind, KnobRecord, dump_config};
 use aether_substrate_bundle::cli::HubCli;
 use aether_substrate_bundle::hub::{Chassis, HubChassis, HubEnv};
 use clap::Parser as _;
+use confique::Config as _;
 
-/// The hub chassis is coordinator-only — the full-stack cap knobs
-/// don't apply, so the hub dumps just its own (RPC bind port + the
-/// engines-cap liveness heartbeat, issue 1339) rather than the shared
-/// `chassis_config_dump`.
-const HUB_KNOBS: &[KnobRecord] = &[
-    KnobRecord {
-        env_key: "AETHER_RPC_PORT",
-        doc: "aether.rpc.server bind port (default 8901).",
-        default: Some("8901"),
-        kind: KnobKind::HandRegistered,
-    },
-    KnobRecord {
-        env_key: "AETHER_HUB_HEARTBEAT_INTERVAL_SECS",
-        doc: "Engine liveness-heartbeat ping cadence in seconds; 0 disables (--hub-heartbeat-interval-secs).",
-        default: Some("5"),
-        kind: KnobKind::HandRegistered,
-    },
-    KnobRecord {
-        env_key: "AETHER_HUB_HEARTBEAT_MISS_LIMIT",
-        doc: "Consecutive missed pings before an engine is evicted (--hub-heartbeat-miss-limit).",
-        default: Some("3"),
-        kind: KnobKind::HandRegistered,
-    },
-];
+/// `AETHER_RPC_PORT` is the hub's chassis-special bind-port knob —
+/// resolved via `HubCli --rpc-port` rather than an `EngineConfig`
+/// field, so it cannot ride the `EngineConfigLayer::META` walk and
+/// stays a hand `KnobRecord`.
+const RPC_PORT_RECORD: KnobRecord = KnobRecord {
+    env_key: "AETHER_RPC_PORT",
+    doc: "aether.rpc.server bind port (default 8901).",
+    default: Some("8901"),
+    kind: KnobKind::HandRegistered,
+};
 
 fn main() -> anyhow::Result<()> {
     let cli = HubCli::parse();
     if cli.config {
-        print!("{}", dump_config(&[], HUB_KNOBS));
+        print!(
+            "{}",
+            dump_config(&[&EngineConfigLayer::META], &[RPC_PORT_RECORD])
+        );
         return Ok(());
     }
     // `--describe` (ADR-0115, issue 1953): print this binary's manifest —

@@ -137,7 +137,7 @@ pub use engine::EngineProxy;
 pub use engine::EngineProxyConfig;
 pub use engine::EngineServer;
 #[cfg(not(target_arch = "wasm32"))]
-pub use engine::{EngineConfig, EngineOverlay};
+pub use engine::{EngineConfig, EngineConfigLayer, EngineOverlay};
 pub use http::{HttpCapability, HttpConfig};
 // ADR-0108 `aether.http.server` cap (issue 1760). `HttpServerConfig` is the
 // always-on domain struct; the `Config`-derive `HttpServerConfigLayer` /

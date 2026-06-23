@@ -21,4 +21,4 @@ pub use proxy::EngineProxy;
 pub use proxy::EngineProxyConfig;
 pub use server::EngineServer;
 #[cfg(not(target_arch = "wasm32"))]
-pub use server::{EngineConfig, EngineOverlay};
+pub use server::{EngineConfig, EngineConfigLayer, EngineOverlay};
