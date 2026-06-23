@@ -142,7 +142,7 @@ The sweep never auto-confirms and never dispatches the serial tail (push / PR / 
 - **Re-attest on each fix push:** every fix is a new head sha, so re-run `attest.sh --publish` before each Refine-loop push; skipping it degrades gracefully (heavy CI just runs for that sha).
 - **Qodana is local, not deferred:** attest runs and attests qodana, so the "sole `Qodana scan` red held for `/land`" branch does not apply — qodana is covered by the attestation and gated by `verify`.
 
-**Serial-tail only.** `--attest` lives in the in-session serial tail (where preflight, push, and the PR open already live) — it is **never** handed to a dispatched background agent, which must not push the attestation ref, consistent with the rule that push / PR / CI stay in-session. In hybrid background-agent / `--sweep` runs the parent owns the attest-and-publish step the same way it owns preflight and the push.
+**Serial-tail only.** `--attest` lives in the in-session serial tail (where preflight, push, and the PR open already live) — it is **never** handed to a dispatched background agent, which must not push the attestation ref, consistent with the rule that push / PR / CI stay in-session. In hybrid background-agent / `--sweep` runs the parent owns the attest-and-publish step the same way it owns preflight and the push. Across a sweep the parent may run these per-worktree `attest.sh --publish` calls **in parallel**, bounded only by the `aether-heavy` N=2 cargo semaphore; no qodana-singleton serialization is needed because `attest.sh` exports a unique `QODANA_CLI_CONTAINER_NAME` per run (derived from the `mktemp`-unique clone dir) and retries the rare `Only one instance of Qodana` transient exactly once at the witness-invocation level.
 
 ## Worktree setup
 
