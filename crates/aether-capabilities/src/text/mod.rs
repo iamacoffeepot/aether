@@ -36,9 +36,11 @@
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings of
 // the mod (always-on, outside the cfg gate). The `aether.text` mail kinds
-// (ADR-0121) live in `kinds` and re-export here; the substrate-core kinds
-// (`CreateTextureResult` / `ReadResult`) come from `aether-kinds`.
-use aether_kinds::{CreateTextureResult, ReadResult};
+// (ADR-0121) live in `kinds` and re-export here; `ReadResult` comes from
+// `aether-kinds`, and `CreateTextureResult` is a render-cap kind the text
+// cap receives as a reply (ADR-0121 moved it to the render submodule).
+use crate::render::CreateTextureResult;
+use aether_kinds::ReadResult;
 
 // ADR-0121: the cap owns its mail kinds. Always-on + wasm-safe (only
 // `aether-data` + `serde`), re-exported so callers address them as
@@ -65,13 +67,13 @@ mod native {
 
     use aether_actor::{OutboundReply, actor};
     use aether_data::Source;
-    use aether_kinds::{CreateTexture, QuadSpace, Read, TexturedQuad, UpdateTexture};
+    use aether_kinds::{QuadSpace, Read};
     use aether_substrate::Manual;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
     use aether_substrate::chassis::error::BootError;
 
     use crate::fs::FsCapability;
-    use crate::render::RenderCapability;
+    use crate::render::{CreateTexture, RenderCapability, TexturedQuad, UpdateTexture};
 
     use super::atlas::{ATLAS_SIZE, Atlas, AtlasEntry, GlyphKey, GlyphSlot};
     use super::layout::{
@@ -624,13 +626,14 @@ mod native {
         #![allow(clippy::unwrap_used)]
 
         use super::*;
+        use crate::render::DrawTexturedQuads;
         use crate::test_chassis::{
             TestChassis, decode_session_reply, drive_task_completion, fresh_substrate,
             test_mailer_and_rx,
         };
         use aether_actor::Addressable;
         use aether_data::{Kind, MailId, SessionToken, SourceAddr, Uuid};
-        use aether_kinds::{DrawTexturedQuads, FsError};
+        use aether_kinds::FsError;
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::mail::outbound::EgressEvent;

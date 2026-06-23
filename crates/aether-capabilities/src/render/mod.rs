@@ -7,12 +7,25 @@
 //! counter.
 //!
 //! Driver-side state (wgpu device, queue, pipeline, offscreen
-//! targets, accumulator buffers) lives on [`RenderHandles`]. The
-//! driver fetches the booted cap via
+//! targets, accumulator buffers) lives on [`RenderHandles`] in the
+//! `pipeline` submodule. The driver fetches the booted cap via
 //! `DriverCtx::actor::<RenderCapability>()` and clones `.handles()`
 //! from there. Phase 4 keeps the GPU lifecycle, encoder creation, and
 //! presentation in the chassis driver — this capability owns only the
 //! mail surface and accumulator state.
+//!
+//! The cap's drawing + texture mail kinds live in [`kinds`] (ADR-0121):
+//! they ride the always-on (marker-only `render`) region so a wasm
+//! guest sees the kind types for typed addressing without the
+//! `render-native` GPU stack. The capture-request and `FrameCheck`
+//! verification kinds stay in `aether-kinds` (consumed upstream by
+//! `aether-mcp` and the substrate core), as do the `QuadSpace` /
+//! `QuadScale` projection types the `aether.text` kinds share.
+//!
+//! The decomposition is along the cap's cohesion seams: `pipeline`
+//! (GPU bundle + accumulator handles), `texture` (the texture
+//! registry), `quad` (the quad-batch accumulator), and `capture`
+//! (the cross-thread readback machinery).
 //!
 //! [`HeadlessRenderCapability`] is the chassis-without-GPU companion:
 //! same `aether.render` mailbox, no-op `DrawTriangle` / `Camera`
@@ -32,13 +45,30 @@
 // where a sibling tick's producer mutates the buffer in between.
 #![allow(clippy::significant_drop_tightening)]
 
+// The cap's drawing + texture mail kinds (ADR-0121). Always-on (the
+// `render` marker feature gates the whole module) so a wasm guest on the
+// marker-only `render` feature sees the kind types.
+pub mod kinds;
+pub use kinds::*;
+
+// Native impl seams. Gated identically to the `#[bridge]`-emitted
+// `mod native` body (`not(wasm) AND render-native`) so they're present
+// exactly when that body references them.
+#[cfg(all(not(target_family = "wasm"), feature = "render-native"))]
+mod capture;
+#[cfg(all(not(target_family = "wasm"), feature = "render-native"))]
+mod pipeline;
+#[cfg(all(not(target_family = "wasm"), feature = "render-native"))]
+mod quad;
+#[cfg(all(not(target_family = "wasm"), feature = "render-native"))]
+mod texture;
+
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
-// of the mod (always-on, outside the cfg gate).
-use aether_kinds::{
-    Camera, CaptureFrame, CreateTexture, DrawSolidQuads, DrawTexturedQuads, DrawTriangle,
-    UpdateTexture,
-};
+// of the mod (always-on, outside the cfg gate). The drawing kinds come
+// from the local `kinds` module (via the glob re-export above);
+// `CaptureFrame` stays in `aether-kinds` (consumed by `aether-mcp`).
+use aether_kinds::CaptureFrame;
 
 // Auxiliary native-only types the chassis driver consumes alongside
 // `RenderCapability`. `#[bridge]` only re-exports the actor type
@@ -46,8 +76,12 @@ use aether_kinds::{
 // feature so wasm components that opt into the marker-only `render`
 // feature see only the cap stub + Actor / HandlesKind impls, not
 // these heavy GPU-bound types.
-#[cfg(all(not(target_arch = "wasm32"), feature = "render-native"))]
-pub use native::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
+#[cfg(all(not(target_family = "wasm"), feature = "render-native"))]
+pub use self::capture::CaptureBackend;
+#[cfg(all(not(target_family = "wasm"), feature = "render-native"))]
+pub use self::native::RenderConfig;
+#[cfg(all(not(target_family = "wasm"), feature = "render-native"))]
+pub use self::pipeline::{RenderGpu, RenderHandles};
 
 // `HeadlessRenderCapability` is exported through `#[bridge]`'s
 // auto-emitted re-export. It carries no auxiliary native-only types,
@@ -55,41 +89,31 @@ pub use native::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
 
 #[aether_actor::bridge(singleton, feature = "render-native")]
 mod native {
-    use std::collections::HashMap;
-    use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     use aether_actor::actor;
     use aether_data::Kind;
-    use aether_kinds::{
-        CaptureFrameResult, CreateTextureResult, DRAW_TRIANGLE_BYTES, QuadScale, QuadSpace,
-        SimilarityCheck, SolidQuad, TexturedQuad,
-    };
+    use aether_kinds::CaptureFrameResult;
     use aether_substrate::Manual;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::capture::{CaptureQueue, PendingCapture, ReferenceCapture};
+    use aether_substrate::capture::PendingCapture;
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::helpers::resolve_bundle;
     use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
-    use aether_substrate::render::{
-        CaptureMeta, IDENTITY_VIEW_PROJ, OverlayDraw, Pipeline, QUAD_VERTEX_STRIDE,
-        QUAD_VERTICES_PER_QUAD, QuadPipeline, RealizedTexture, RenderError, Targets,
-        build_main_pipeline, build_quad_pipeline, finish_capture, map_capture_rgba,
-        prepare_capture_copy, push_screen_quad_vertices, push_world_quad_vertices, realize_texture,
-        record_main_pass, record_quad_overlay_pass, upload_texture_full,
-    };
+    use aether_substrate::render::{IDENTITY_VIEW_PROJ, VERTEX_BUFFER_BYTES};
 
+    use super::capture::{CaptureBackend, resolve_reference};
+    use super::pipeline::RenderHandles;
+    use super::quad::QuadBatch;
+    use super::texture::{StagedTexture, TextureRegistry, WHITE_TEXTURE_ID, expected_pixel_bytes};
     use super::{
-        Camera, CaptureFrame, CreateTexture, DrawSolidQuads, DrawTexturedQuads, DrawTriangle,
-        UpdateTexture,
+        Camera, CaptureFrame, CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES,
+        DrawSolidQuads, DrawTexturedQuads, DrawTriangle, SolidQuad, TexturedQuad, UpdateTexture,
     };
-    use aether_substrate::render::VERTEX_BUFFER_BYTES;
-    use std::mem;
 
     /// Configuration for [`RenderCapability`]. `vertex_buffer_bytes` is
     /// the maximum bytes the render accumulator will hold before
@@ -135,149 +159,6 @@ mod native {
                 observed_kinds: None,
                 capture_backend: None,
                 assets_dir: None,
-            }
-        }
-    }
-
-    /// Per-chassis plumbing the [`RenderCapability`] capture handler
-    /// needs to defer the readback to the chassis main thread. The
-    /// cap's dispatcher thread can't touch the wgpu `Device` (it lives
-    /// on the render thread); the handler resolves the request, parks
-    /// it on `queue`, and the chassis main loop reads from there on
-    /// the next redraw. `wake` nudges that loop — desktop fires an
-    /// `EventLoopProxy<UserEvent>::Capture`; test-bench sends on its
-    /// `EventSender`.
-    ///
-    /// `outbound` is the cap's reply edge for the inline-failure
-    /// paths (decode error, bundle-resolution error, queue full,
-    /// wake target dead). All four bail before parking the request,
-    /// so the only happy-path reply comes from the render thread
-    /// after readback completes — that path uses its own outbound
-    /// clone the chassis driver keeps.
-    #[derive(Clone)]
-    pub struct CaptureBackend {
-        pub queue: CaptureQueue,
-        pub wake: Arc<dyn Fn() -> Result<(), &'static str> + Send + Sync>,
-        pub outbound: Arc<HubOutbound>,
-    }
-
-    /// One accumulated `draw_textured_quads` batch (ADR-0105): the
-    /// texture it samples, the projection it draws under, and the quad
-    /// list. Cloned out of the accumulator at record time so the cap
-    /// dispatcher thread can keep appending the next frame's batches
-    /// while the driver thread expands these.
-    #[derive(Clone)]
-    pub struct QuadBatch {
-        pub texture_id: u32,
-        pub space: QuadSpace,
-        pub quads: Vec<TexturedQuad>,
-    }
-
-    /// A texture registered via `create_texture`: the staged RGBA8 pixels
-    /// (the CPU source of truth), plus the lazily-realized GPU texture +
-    /// bind group. `create_texture` / `update_texture` run on the cap
-    /// dispatcher thread and only touch the staging side; the wgpu
-    /// resources are realized at record time on the driver thread (the
-    /// `RenderGpu` `OnceLock` isn't filled until the chassis driver boots
-    /// the GPU). `dirty` flags staging that the GPU copy hasn't caught up
-    /// to yet — the next record re-uploads the whole texture.
-    struct StagedTexture {
-        width: u32,
-        height: u32,
-        pixels: Vec<u8>,
-        realized: Option<RealizedTexture>,
-        dirty: bool,
-    }
-
-    impl StagedTexture {
-        /// Overwrite the `(x, y, width, height)` sub-rect of the staged
-        /// pixels with `pixels` (RGBA8, row-major) and dirty the texture.
-        /// Returns `false` without touching the buffer if the rect is
-        /// out of bounds, has a zero dimension, or `pixels` isn't exactly
-        /// `width * height * 4` bytes — the caller logs and drops.
-        fn apply_subrect(
-            &mut self,
-            x: u32,
-            y: u32,
-            width: u32,
-            height: u32,
-            pixels: &[u8],
-        ) -> bool {
-            let Some(rect_bytes) = expected_pixel_bytes(width, height) else {
-                return false;
-            };
-            let in_bounds = x
-                .checked_add(width)
-                .is_some_and(|right| right <= self.width)
-                && y.checked_add(height)
-                    .is_some_and(|bottom| bottom <= self.height);
-            if !in_bounds || pixels.len() != rect_bytes {
-                return false;
-            }
-            let row_bytes = width as usize * 4;
-            let dst_stride = self.width as usize * 4;
-            for row in 0..height as usize {
-                let src_start = row * row_bytes;
-                let dst_row = y as usize + row;
-                let dst_start = dst_row * dst_stride + x as usize * 4;
-                self.pixels[dst_start..dst_start + row_bytes]
-                    .copy_from_slice(&pixels[src_start..src_start + row_bytes]);
-            }
-            self.dirty = true;
-            true
-        }
-
-        /// Realize the GPU texture if it isn't yet, or re-upload the
-        /// staged pixels if `update_texture` dirtied them since the last
-        /// record. Runs at record time on the driver thread, where a
-        /// device + queue are available.
-        fn ensure_realized(
-            &mut self,
-            device: &wgpu::Device,
-            queue: &wgpu::Queue,
-            pipeline: &QuadPipeline,
-        ) {
-            if let Some(realized) = &self.realized {
-                // Already on the GPU; re-upload only if `update_texture`
-                // dirtied the staging buffer since the last record.
-                if self.dirty {
-                    upload_texture_full(queue, realized, &self.pixels);
-                }
-            } else {
-                self.realized = Some(realize_texture(
-                    device,
-                    queue,
-                    pipeline,
-                    self.width,
-                    self.height,
-                    &self.pixels,
-                ));
-            }
-            self.dirty = false;
-        }
-    }
-
-    /// Reserved sentinel `texture_id` for the internal 1×1 white texture
-    /// used by `on_draw_solid_quads`. `create_texture` starts at `0` and
-    /// increments, so `u32::MAX` is outside the range any caller-visible id
-    /// occupies — the white texture is never handed to a caller and never
-    /// collides with a user-created texture.
-    const WHITE_TEXTURE_ID: u32 = u32::MAX;
-
-    /// Session-scoped texture registry. `next_id` hands out the
-    /// `texture_id` a `create_texture` reply carries — assigned in
-    /// sequence the same way ADR-0103 assigns instrument ids, so ids are
-    /// stable for the session and depend only on creation order.
-    struct TextureRegistry {
-        next_id: u32,
-        entries: HashMap<u32, StagedTexture>,
-    }
-
-    impl TextureRegistry {
-        fn new() -> Self {
-            Self {
-                next_id: 0,
-                entries: HashMap::new(),
             }
         }
     }
@@ -784,592 +665,6 @@ mod native {
         }
     }
 
-    /// Resolve the optional reference image for a `#1780` similarity
-    /// check, reading it synchronously on the cap dispatcher thread so all
-    /// filesystem I/O stays off the render hot path. `Ok(None)` when no
-    /// check was requested; `Err(message)` when the reference can't be
-    /// used (unsupported namespace, no assets dir, forbidden path, or an
-    /// unreadable file) — the caller replies that message as
-    /// `CaptureFrameResult::Err`.
-    fn resolve_reference(
-        assets_dir: Option<&Path>,
-        similarity: Option<&SimilarityCheck>,
-    ) -> Result<Option<ReferenceCapture>, String> {
-        let Some(sim) = similarity else {
-            return Ok(None);
-        };
-        // Only the "assets" namespace is supported in v1.
-        if sim.namespace != "assets" {
-            return Err(format!(
-                "capture_frame similarity: namespace {:?} is not supported in v1 — use \"assets\"",
-                sim.namespace,
-            ));
-        }
-        let Some(assets_dir) = assets_dir else {
-            return Err(
-                "capture_frame similarity: no assets directory is configured on this \
-                        chassis; similarity checks are unavailable"
-                    .to_owned(),
-            );
-        };
-        // Reject path components that would escape the assets root
-        // (mirrors `LocalFileAdapter::resolve`).
-        if sim.reference_path.starts_with('/') || sim.reference_path.split('/').any(|c| c == "..") {
-            return Err(format!(
-                "capture_frame similarity: reference_path {:?} is forbidden (contains '..' or \
-                 starts with '/')",
-                sim.reference_path,
-            ));
-        }
-        let full_path = assets_dir.join(&sim.reference_path);
-        match fs::read(&full_path) {
-            Ok(bytes) => Ok(Some(ReferenceCapture {
-                png_bytes: bytes,
-                threshold: sim.threshold,
-            })),
-            Err(e) => Err(format!(
-                "capture_frame similarity: could not read reference {:?}: {e}",
-                sim.reference_path,
-            )),
-        }
-    }
-
-    /// RGBA8 byte count for a `width x height` texture, or `None` if the
-    /// dimensions are zero or the product overflows `usize`. Shared by the
-    /// `create_texture` validation and the `update_texture` sub-rect
-    /// check.
-    fn expected_pixel_bytes(width: u32, height: u32) -> Option<usize> {
-        if width == 0 || height == 0 {
-            return None;
-        }
-        (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|pixels| pixels.checked_mul(4))
-    }
-
-    /// Bundle of accumulator state plus GPU resources, shared between
-    /// the cap's dispatcher thread (write side for accumulators) and the
-    /// chassis driver (read side for accumulators, install + read for
-    /// GPU). All fields are `Arc`s so cloning is cheap and shutdown
-    /// drops are independent.
-    #[derive(Clone)]
-    pub struct RenderHandles {
-        /// Per-frame accumulator. `on_draw_triangle` appends bytes
-        /// here; `record_frame` consumes by swapping with
-        /// `last_submitted` and clearing.
-        pub frame_vertices: Arc<Mutex<Vec<u8>>>,
-        /// Most-recently-rendered geometry, kept across frames
-        /// (iamacoffeepot/aether#847). When `record_frame` runs with
-        /// an empty `frame_vertices` — typically a `TestBench::capture`
-        /// that didn't dispatch a `Tick` — the GPU draw replays this
-        /// buffer so the captured frame matches "what the user would
-        /// see right now" instead of clear-color.
-        ///
-        /// Lock ordering: `frame_vertices` first, then `last_submitted`
-        /// when both are held. Today only `record_frame` holds both;
-        /// callers reading `last_submitted` in isolation are fine.
-        pub last_submitted: Arc<Mutex<Vec<u8>>>,
-        pub triangles_rendered: Arc<AtomicU64>,
-        pub camera_state: Arc<Mutex<[f32; 16]>>,
-        /// Per-frame textured-quad accumulator (ADR-0105). `on_draw_
-        /// textured_quads` pushes a [`QuadBatch`] here; `record_overlay_
-        /// pass` consumes by swapping with `quad_last_submitted` — the
-        /// same immediate-mode cache the triangle path uses, so a
-        /// `TestBench::capture` replays the last committed quads.
-        quad_frame: Arc<Mutex<Vec<QuadBatch>>>,
-        /// Most-recently-rendered quad batches, kept across frames so an
-        /// idle `capture` (no producer this frame) replays them, matching
-        /// `last_submitted`'s role for triangles.
-        quad_last_submitted: Arc<Mutex<Vec<QuadBatch>>>,
-        /// Session-scoped texture registry: staged CPU pixels + lazily-
-        /// realized GPU textures. Written by the cap dispatcher thread
-        /// (`create_texture` / `update_texture`), realized + read by the
-        /// driver thread at record time.
-        textures: Arc<Mutex<TextureRegistry>>,
-        /// wgpu state, installed post-cap-construction by the driver via
-        /// [`Self::install_gpu`]. Boots empty because winit 0.30's
-        /// `ActiveEventLoop::create_window` only fires inside `resumed`,
-        /// after `Builder::build` has returned. Test-bench (no surface)
-        /// installs immediately after `build_passive`; desktop installs
-        /// in its `resumed` handler. Encoder-level methods panic if
-        /// called before install — in practice every code path that
-        /// calls them runs after the install site.
-        gpu: Arc<OnceLock<RenderGpu>>,
-    }
-
-    impl RenderHandles {
-        /// Install the wgpu resources the encoder-level methods read.
-        /// The driver constructs [`RenderGpu`] once it has a device +
-        /// queue — for desktop that's inside `resumed` after winit hands
-        /// back a window and surface; for test-bench it's right after
-        /// `build_passive` returns.
-        ///
-        /// # Panics
-        /// Panics if called more than once — fail-fast per ADR-0063:
-        /// install is the chassis's promise that wgpu state is now
-        /// ready and stable for the chassis lifetime; a double install
-        /// indicates a chassis-wiring bug.
-        pub fn install_gpu(&self, gpu: RenderGpu) {
-            self.gpu
-                .set(gpu)
-                .ok()
-                .expect("RenderHandles::install_gpu called twice");
-        }
-
-        /// Returns the installed [`RenderGpu`], or `None` if `install_gpu`
-        /// hasn't been called yet. Chassis-side glue that needs raw
-        /// access to the pipeline's bind group layouts (e.g. desktop's
-        /// wireframe overlay pipeline construction) reaches in here.
-        #[must_use]
-        pub fn gpu(&self) -> Option<&RenderGpu> {
-            self.gpu.get()
-        }
-
-        fn expect_gpu(&self) -> &RenderGpu {
-            self.gpu.get().expect(
-                "RenderHandles::install_gpu must be called before encoder-level methods. \
-             Desktop installs in winit's resumed; test-bench installs after build_passive.",
-            )
-        }
-
-        /// Read the latest camera view-proj and record the main render
-        /// pass into `encoder` against the current frame's geometry.
-        /// `extra_pipelines` are drawn after the main pipeline inside
-        /// the same render pass — desktop passes a wireframe overlay
-        /// pipeline here when `AETHER_WIREFRAME=overlay`; test-bench
-        /// passes `&[]`.
-        ///
-        /// ## Cache semantics (iamacoffeepot/aether#847)
-        ///
-        /// If `frame_vertices` holds new emissions from this tick's
-        /// `on_draw_triangle` calls, swap them into `last_submitted`
-        /// and clear the live accumulator (the swapped-out buffer,
-        /// now in `live`, becomes the next tick's staging area). The
-        /// render pass then draws from `last_submitted`.
-        ///
-        /// If `frame_vertices` is empty, `replay_cache_when_idle`
-        /// picks the behaviour:
-        ///
-        /// - `false` — **commit-current**: clear `last_submitted` so
-        ///   the next frame reflects "the producer chose not to
-        ///   emit," and render an empty draw list (clear-color
-        ///   frame). Used by desktop's per-frame draw and by the
-        ///   test-bench's advance path. Matches a game's normal
-        ///   semantic: if the producer stops drawing, the screen
-        ///   goes to clear color.
-        /// - `true` — **replay-cache**: leave `last_submitted`
-        ///   untouched and render its current contents. Used by
-        ///   `TestBench::capture` when it didn't dispatch a `Tick`
-        ///   of its own — the cache holds whatever the last advance
-        ///   committed, which is the right "what would the user
-        ///   see right now" answer. Retires the historical
-        ///   `nudge_tick` boilerplate.
-        ///
-        /// Lock ordering: `frame_vertices` first, then
-        /// `last_submitted`. Today only this function holds both.
-        ///
-        /// # Panics
-        /// Panics if `install_gpu` hasn't been called, or if any of the
-        /// internal mutexes (frame vertices, last submitted, camera
-        /// state, targets) are poisoned — fail-fast per ADR-0063: both
-        /// indicate a substrate-level invariant violation.
-        pub fn record_frame(
-            &self,
-            encoder: &mut wgpu::CommandEncoder,
-            extra_pipelines: &[&wgpu::RenderPipeline],
-            replay_cache_when_idle: bool,
-        ) -> Result<(), RenderError> {
-            let gpu = self.expect_gpu();
-            {
-                let mut live = self
-                    .frame_vertices
-                    .lock()
-                    .expect("mutex poisoned; fail-fast per ADR-0063");
-                let mut last = self
-                    .last_submitted
-                    .lock()
-                    .expect("mutex poisoned; fail-fast per ADR-0063");
-                if !live.is_empty() {
-                    // Producer emitted: swap into cache.
-                    mem::swap(&mut *live, &mut *last);
-                    // Post-swap, `live` holds what `last` held before
-                    // — stale geometry from however many frames ago.
-                    // Clear (preserves capacity) so the next tick's
-                    // `on_draw_triangle` appends into an empty buffer
-                    // without reallocating.
-                    live.clear();
-                } else if !replay_cache_when_idle {
-                    // Commit-current: producer chose not to emit
-                    // this frame, so the cache should reflect that
-                    // for any subsequent replay-cache caller.
-                    last.clear();
-                }
-                // else: replay-cache + empty live — leave cache
-                // alone, render its current contents.
-            }
-            let view_proj = *self
-                .camera_state
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063");
-            let last = self
-                .last_submitted
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063");
-            let targets = gpu
-                .targets
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063");
-            record_main_pass(
-                &gpu.queue,
-                encoder,
-                &gpu.pipeline,
-                &targets,
-                &last,
-                &view_proj,
-                extra_pipelines,
-            )
-        }
-
-        /// Record the textured-quad overlay pass (ADR-0105) into `encoder`
-        /// after [`Self::record_frame`] — a sibling pass that draws the
-        /// accumulated `Screen`-space quads over the world geometry with
-        /// alpha blending and no depth.
-        ///
-        /// `replay_cache_when_idle` mirrors [`Self::record_frame`]'s cache
-        /// semantics for quads: an empty live accumulator commits-current
-        /// (clears the cache) under `false` — the per-frame draw / advance
-        /// path — and replays the cache under `true` — `TestBench::capture`
-        /// without a dispatched tick.
-        ///
-        /// Each batch realizes its texture lazily (creating the wgpu
-        /// texture + bind group on first use, re-uploading on a dirtied
-        /// staging buffer), expands its quads into vertices, and draws
-        /// with that texture's bind group. An unknown `texture_id`
-        /// warn-drops the batch. `World`-space quads transform their
-        /// anchor through the latest `view_proj` (ADR-0105).
-        ///
-        /// # Panics
-        /// Panics if `install_gpu` hasn't been called, or if any internal
-        /// mutex is poisoned — fail-fast per ADR-0063.
-        // Two-pass texture realization + quad expansion in a single
-        // function avoids threading split borrows through multiple
-        // helpers; the line count reflects the World/Screen branching
-        // added in #1699.
-        #[allow(clippy::too_many_lines)]
-        pub fn record_overlay_pass(
-            &self,
-            encoder: &mut wgpu::CommandEncoder,
-            replay_cache_when_idle: bool,
-        ) {
-            let gpu = self.expect_gpu();
-            {
-                let mut live = self
-                    .quad_frame
-                    .lock()
-                    .expect("mutex poisoned; fail-fast per ADR-0063");
-                let mut last = self
-                    .quad_last_submitted
-                    .lock()
-                    .expect("mutex poisoned; fail-fast per ADR-0063");
-                if !live.is_empty() {
-                    mem::swap(&mut *live, &mut *last);
-                    live.clear();
-                } else if !replay_cache_when_idle {
-                    last.clear();
-                }
-            }
-            let batches = self
-                .quad_last_submitted
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063")
-                .clone();
-            if batches.is_empty() {
-                return;
-            }
-
-            let targets = gpu
-                .targets
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063");
-            #[allow(clippy::cast_precision_loss)]
-            let viewport = [targets.width() as f32, targets.height() as f32];
-
-            let view_proj = *self
-                .camera_state
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063");
-
-            let mut registry = self
-                .textures
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063");
-
-            // First pass: realize / re-upload every texture the frame
-            // references (Screen and World batches share the same atlas),
-            // mutably borrowing the registry.
-            for batch in &batches {
-                if let Some(entry) = registry.entries.get_mut(&batch.texture_id) {
-                    entry.ensure_realized(&gpu.device, &gpu.queue, &gpu.quad_pipeline);
-                } else {
-                    tracing::warn!(
-                        target: "aether_capabilities::render",
-                        texture_id = batch.texture_id,
-                        "draw_textured_quads for unknown texture id; dropping the batch",
-                    );
-                }
-            }
-
-            // Second pass: expand quads into vertices and build the draw
-            // list, immutably borrowing each realized texture's bind group.
-            let mut vertex_bytes = Vec::new();
-            let mut draws: Vec<OverlayDraw<'_>> = Vec::new();
-            for batch in &batches {
-                let Some(entry) = registry.entries.get(&batch.texture_id) else {
-                    continue;
-                };
-                let Some(realized) = entry.realized.as_ref() else {
-                    continue;
-                };
-                #[allow(clippy::cast_possible_truncation)]
-                let first_vertex = (vertex_bytes.len() / QUAD_VERTEX_STRIDE as usize) as u32;
-                match &batch.space {
-                    QuadSpace::Screen => {
-                        for quad in &batch.quads {
-                            push_screen_quad_vertices(
-                                &mut vertex_bytes,
-                                [quad.x, quad.y, quad.width, quad.height],
-                                [quad.u0, quad.v0, quad.u1, quad.v1],
-                                quad.tint,
-                            );
-                        }
-                    }
-                    QuadSpace::World { anchor, scale } => {
-                        // k < 0 => Pixels mode (shader uses clip.w for
-                        // constant on-screen size). k > 0 => Distance mode
-                        // (constant k, label shrinks with depth; holds its
-                        // size at reference_distance).
-                        let k = match scale {
-                            QuadScale::Pixels => -1.0_f32,
-                            QuadScale::Distance { reference_distance } => *reference_distance,
-                        };
-                        for quad in &batch.quads {
-                            push_world_quad_vertices(
-                                &mut vertex_bytes,
-                                *anchor,
-                                [quad.x, quad.y, quad.width, quad.height],
-                                [quad.u0, quad.v0, quad.u1, quad.v1],
-                                quad.tint,
-                                k,
-                            );
-                        }
-                    }
-                }
-                #[allow(clippy::cast_possible_truncation)]
-                let vertex_count = (batch.quads.len() * QUAD_VERTICES_PER_QUAD) as u32;
-                if vertex_count == 0 {
-                    continue;
-                }
-                draws.push(OverlayDraw {
-                    bind_group: realized.bind_group(),
-                    first_vertex,
-                    vertex_count,
-                });
-            }
-
-            record_quad_overlay_pass(
-                &gpu.queue,
-                encoder,
-                &gpu.quad_pipeline,
-                &targets,
-                &vertex_bytes,
-                &draws,
-                viewport,
-                view_proj,
-            );
-        }
-
-        /// Encode a copy of the offscreen color target into a readback
-        /// buffer. Pair with [`Self::finish_capture`] after submit. The
-        /// readback buffer is reallocated on size mismatch with the
-        /// current offscreen, so any sequence of resize → `record_frame` →
-        /// `record_capture_copy` → submit → `finish_capture` works.
-        ///
-        /// # Panics
-        /// Panics if `install_gpu` hasn't been called or if the targets
-        /// mutex is poisoned — fail-fast per ADR-0063.
-        pub fn record_capture_copy(&self, encoder: &mut wgpu::CommandEncoder) -> CaptureMeta {
-            let gpu = self.expect_gpu();
-            let mut targets = gpu
-                .targets
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063");
-            prepare_capture_copy(&gpu.device, &mut targets, encoder)
-        }
-
-        /// Map the readback buffer prepared by [`Self::record_capture_copy`]
-        /// and return the encoded PNG. Call after the encoder containing
-        /// the matching `record_capture_copy` has been submitted.
-        ///
-        /// # Panics
-        /// Panics if `install_gpu` hasn't been called or if the targets
-        /// mutex is poisoned — fail-fast per ADR-0063.
-        pub fn finish_capture(&self, meta: &CaptureMeta) -> Result<Vec<u8>, String> {
-            let gpu = self.expect_gpu();
-            let targets = gpu
-                .targets
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063");
-            finish_capture(&gpu.device, &targets, meta)
-        }
-
-        /// Map the readback buffer prepared by [`Self::record_capture_copy`]
-        /// and return the raw de-padded RGBA8 frame — the exact pixels
-        /// [`Self::finish_capture`] PNG-encodes. The bundle render thread
-        /// scores a verdict on these bytes and encodes the PNG from the
-        /// same buffer, so the readback is mapped just once
-        /// (iamacoffeepot/aether#1777). Call after the encoder containing
-        /// the matching `record_capture_copy` has been submitted.
-        ///
-        /// # Panics
-        /// Panics if `install_gpu` hasn't been called or if the targets
-        /// mutex is poisoned — fail-fast per ADR-0063.
-        pub fn map_capture_rgba(&self, meta: &CaptureMeta) -> Result<Vec<u8>, String> {
-            let gpu = self.expect_gpu();
-            let targets = gpu
-                .targets
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063");
-            map_capture_rgba(&gpu.device, &targets, meta)
-        }
-
-        /// Resize the offscreen color + depth targets. Idempotent on
-        /// zero dimensions (matches winit's `Resized(0, 0)` on minimize).
-        ///
-        /// # Panics
-        /// Panics if `install_gpu` hasn't been called or if the targets
-        /// mutex is poisoned — fail-fast per ADR-0063.
-        pub fn resize(&self, width: u32, height: u32) {
-            let gpu = self.expect_gpu();
-            let mut targets = gpu
-                .targets
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063");
-            targets.resize(&gpu.device, width, height);
-        }
-
-        /// Cloned `Arc<wgpu::Device>`. Drivers that need the device for
-        /// their own pipelines (e.g. desktop's wireframe overlay pipeline,
-        /// swapchain blit) clone here.
-        #[must_use]
-        pub fn device(&self) -> Arc<wgpu::Device> {
-            Arc::clone(&self.expect_gpu().device)
-        }
-
-        /// Cloned `Arc<wgpu::Queue>`. Drivers submit through this; the
-        /// shared queue means render's `record_frame` writes and the
-        /// driver's swapchain submit go through the same submission
-        /// order.
-        #[must_use]
-        pub fn queue(&self) -> Arc<wgpu::Queue> {
-            Arc::clone(&self.expect_gpu().queue)
-        }
-
-        /// Format the offscreen color target was created with. Capture's
-        /// BGRA-vs-RGBA decision keys on this; desktop's swapchain blit
-        /// matches its surface format against this to pick a direct copy
-        /// vs a manual swizzle.
-        #[must_use]
-        pub fn color_format(&self) -> wgpu::TextureFormat {
-            self.expect_gpu().color_format
-        }
-
-        /// Current offscreen color target dimensions. Drivers reading
-        /// after a `resize` see the new dimensions immediately.
-        ///
-        /// # Panics
-        /// Panics if `install_gpu` hasn't been called or if the targets
-        /// mutex is poisoned — fail-fast per ADR-0063.
-        #[must_use]
-        pub fn color_size(&self) -> (u32, u32) {
-            let targets = self
-                .expect_gpu()
-                .targets
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063");
-            (targets.width(), targets.height())
-        }
-
-        /// Run `f` with a borrow of the offscreen color texture. Used by
-        /// desktop's swapchain blit: the closure body holds the targets
-        /// mutex, so any encoder commands recorded inside are sequenced
-        /// against any concurrent resize. Test-bench reaches the
-        /// offscreen via the capture path and doesn't need this.
-        ///
-        /// # Panics
-        /// Panics if `install_gpu` hasn't been called or if the targets
-        /// mutex is poisoned — fail-fast per ADR-0063.
-        pub fn with_color_texture<F, R>(&self, f: F) -> R
-        where
-            F: FnOnce(&wgpu::Texture) -> R,
-        {
-            let gpu = self.expect_gpu();
-            let targets = gpu
-                .targets
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063");
-            f(targets.color_texture())
-        }
-    }
-
-    /// Bundle of wgpu resources `RenderHandles` exposes post-install.
-    /// Constructed by the driver from a wgpu device + queue obtained via
-    /// `Adapter::request_device` (desktop: with surface compatibility;
-    /// test-bench: offscreen-only). Holds the pipeline + offscreen
-    /// targets so encoder-level methods can record draws and capture
-    /// copies without the driver threading these through every call.
-    pub struct RenderGpu {
-        pub device: Arc<wgpu::Device>,
-        pub queue: Arc<wgpu::Queue>,
-        pub pipeline: Pipeline,
-        /// Textured-quad overlay pipeline (ADR-0105). Built alongside the
-        /// main pipeline so `record_overlay_pass` can draw the
-        /// accumulated quads into the same offscreen target after the
-        /// world pass.
-        pub quad_pipeline: QuadPipeline,
-        pub targets: Mutex<Targets>,
-        pub color_format: wgpu::TextureFormat,
-    }
-
-    impl RenderGpu {
-        /// Build the standard render pipeline + offscreen targets at the
-        /// given size and pass [`Self`] to [`RenderHandles::install_gpu`].
-        /// `polygon_mode` is `Fill` for the normal case; desktop's
-        /// `AETHER_WIREFRAME=line` chassis env passes `Line` so the main
-        /// pipeline draws as wireframe instead of building a separate
-        /// overlay pipeline.
-        #[must_use]
-        pub fn new(
-            device: Arc<wgpu::Device>,
-            queue: Arc<wgpu::Queue>,
-            color_format: wgpu::TextureFormat,
-            width: u32,
-            height: u32,
-            polygon_mode: wgpu::PolygonMode,
-        ) -> Self {
-            let pipeline = build_main_pipeline(&device, &queue, color_format, polygon_mode);
-            let quad_pipeline = build_quad_pipeline(&device, color_format);
-            let targets = Targets::new(&device, color_format, width, height);
-            Self {
-                device,
-                queue,
-                pipeline,
-                quad_pipeline,
-                targets: Mutex::new(targets),
-                color_format,
-            }
-        }
-    }
-
     #[cfg(test)]
     mod tests {
         use std::time::Duration;
@@ -1377,6 +672,7 @@ mod native {
         use super::*;
         use crate::test_chassis::TestChassis;
         use aether_actor::Addressable;
+        use aether_kinds::QuadSpace;
         use aether_kinds::trace::Nanos;
         use aether_substrate::chassis::builder::{Builder, PassiveChassis};
         use aether_substrate::mail::MailId;
@@ -1460,73 +756,6 @@ mod native {
         // by the bundle scenario tests (`tick_roundtrip_component_to_sink`
         // and the `test_bench_scenario` suite), which exercise it through
         // real settlement rather than a per-mailbox counter poll.
-
-        /// ADR-0105: `expected_pixel_bytes` is the single source of the
-        /// RGBA8 length rule. Zero dimensions and overflowing products
-        /// return `None`; a valid texture returns `width * height * 4`.
-        #[test]
-        fn expected_pixel_bytes_validates_dimensions() {
-            assert_eq!(expected_pixel_bytes(2, 3), Some(24));
-            assert_eq!(expected_pixel_bytes(0, 4), None);
-            assert_eq!(expected_pixel_bytes(4, 0), None);
-            assert_eq!(expected_pixel_bytes(u32::MAX, u32::MAX), None);
-        }
-
-        /// The registry hands out ids in creation order, starting at 0 —
-        /// the same id-assignment shape ADR-0103 uses for instruments.
-        #[test]
-        fn texture_registry_assigns_sequential_ids() {
-            let mut registry = TextureRegistry::new();
-            let mut next = || {
-                let id = registry.next_id;
-                registry.next_id += 1;
-                registry.entries.insert(
-                    id,
-                    StagedTexture {
-                        width: 1,
-                        height: 1,
-                        pixels: vec![0, 0, 0, 0],
-                        realized: None,
-                        dirty: true,
-                    },
-                );
-                id
-            };
-            assert_eq!(next(), 0);
-            assert_eq!(next(), 1);
-            assert_eq!(next(), 2);
-            assert_eq!(registry.entries.len(), 3);
-        }
-
-        /// `apply_subrect` writes an in-bounds rect into the staged pixels
-        /// and dirties the texture; an out-of-bounds rect, a zero
-        /// dimension, or a pixel-length mismatch leaves the buffer
-        /// untouched and returns `false`.
-        #[test]
-        fn staged_texture_apply_subrect_bounds() {
-            let mut texture = StagedTexture {
-                width: 2,
-                height: 2,
-                pixels: vec![0u8; 16],
-                realized: None,
-                dirty: false,
-            };
-            // Overwrite the bottom-right pixel (1, 1) with 0xAA bytes.
-            assert!(texture.apply_subrect(1, 1, 1, 1, &[0xAA, 0xAA, 0xAA, 0xAA]));
-            assert!(texture.dirty);
-            assert_eq!(&texture.pixels[12..16], &[0xAA, 0xAA, 0xAA, 0xAA]);
-            // The other three pixels are untouched.
-            assert_eq!(&texture.pixels[0..12], &[0u8; 12]);
-
-            // Out of bounds (rect extends past the right edge).
-            texture.dirty = false;
-            assert!(!texture.apply_subrect(1, 0, 2, 1, &[1, 2, 3, 4, 5, 6, 7, 8]));
-            assert!(!texture.dirty);
-            // Pixel-length mismatch for the declared rect.
-            assert!(!texture.apply_subrect(0, 0, 1, 1, &[1, 2, 3]));
-            // Zero-sized rect.
-            assert!(!texture.apply_subrect(0, 0, 0, 1, &[]));
-        }
 
         /// ADR-0107 §4: `draw_solid_quads` accumulates into `quad_frame` under
         /// the reserved `WHITE_TEXTURE_ID` and records its kind name in
@@ -1647,15 +876,15 @@ mod native_headless {
     use std::sync::Arc;
 
     use aether_actor::actor;
-    use aether_kinds::{CaptureFrameResult, CreateTextureResult};
+    use aether_kinds::CaptureFrameResult;
     use aether_substrate::Manual;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::outbound::HubOutbound;
 
     use super::{
-        Camera, CaptureFrame, CreateTexture, DrawSolidQuads, DrawTexturedQuads, DrawTriangle,
-        UpdateTexture,
+        Camera, CaptureFrame, CreateTexture, CreateTextureResult, DrawSolidQuads,
+        DrawTexturedQuads, DrawTriangle, UpdateTexture,
     };
     use std::io;
 
@@ -1762,7 +991,6 @@ mod native_headless {
         use crate::test_chassis::{decode_reply, test_mailer_and_rx};
         use aether_data::{MailboxId, Source, SourceAddr};
         use aether_data::{SessionToken, Uuid};
-        use aether_kinds::CreateTexture;
         use aether_substrate::actor::native::NativeCtx;
         use aether_substrate::actor::native::binding::NativeBinding;
 
@@ -1813,7 +1041,7 @@ mod native_headless {
         /// `on_draw_textured_quads` no-op contract.
         #[test]
         fn headless_draw_solid_quads_is_noop() {
-            use aether_kinds::{DrawSolidQuads, QuadSpace};
+            use aether_kinds::QuadSpace;
 
             let (mailer, _rx) = test_mailer_and_rx();
             let outbound = mailer

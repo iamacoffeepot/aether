@@ -152,7 +152,7 @@ pub struct ReachabilityMargin {
 // the graph stays orders of magnitude smaller than `V`, and components
 // are re-derivable from `V` + `B` + the [`MovementStencil`] (all
 // content-addressed) rather than stored as per-tick label images.
-// `Vec`-bearing like [`aether_kinds::DrawTexturedQuads`].
+// `Vec`-bearing like the render cap's `DrawTexturedQuads`.
 
 /// One node in a [`CorridorGraph`] — a single connected component of
 /// the affordable set `{cell : V(cell, tick) <= budget}` at one tick.
@@ -235,8 +235,8 @@ pub struct CorridorGraph {
 /// derives `Schema`, the same way [`aether_kinds::Mat4Apply`] embeds the
 /// top-level Kind `Vec4`. Each log replays one moving point's tick-
 /// ordered path; the aggregation snaps every sample to its corridor
-/// component and accumulates per-edge traffic. `Vec`-bearing like
-/// [`aether_kinds::DrawTexturedQuads`].
+/// component and accumulates per-edge traffic. `Vec`-bearing like the
+/// render cap's `DrawTexturedQuads`.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.corridor.trajectory_set")]
 pub struct TrajectorySet {

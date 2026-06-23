@@ -48,8 +48,9 @@ use std::collections::HashMap;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
+use aether_capabilities::render::Camera;
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
-use aether_kinds::{Camera, Render, Tick, WindowSize};
+use aether_kinds::{Render, Tick, WindowSize};
 use aether_math::{Mat4, PI, Quat, TAU, Vec2, Vec3};
 
 use crate::camera::{
