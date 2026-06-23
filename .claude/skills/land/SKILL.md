@@ -72,7 +72,7 @@ Read PR draft state and `mergeable_state` over REST (`gh api repos/iamacoffeepot
 
 5. **On confirmation, land in sequence.** Land each PR through the [Landing sequence](#landing-sequence) in the printed order. After every merge, **recompute the remaining predictions** — the HEAD of `main` has advanced and a previously-clean branch may now be `behind`. A recomputed `dirty` halts the sequence and surfaces the conflict to the user before proceeding to the next PR.
 
-The sweep never auto-confirms and never auto-resolves a `dirty` conflict.
+The sweep never auto-confirms and never auto-resolves a `dirty` conflict. Landing is serial by construction — each merge advances `main` and the recompute loop updates conflict state after it — so sweep concurrency is 1 and no cap applies.
 
 ## Landing sequence
 

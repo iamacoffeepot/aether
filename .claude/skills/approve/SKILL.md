@@ -40,7 +40,7 @@ The primary human review point of the release flow. The user invokes `/approve <
    Confirm approve? (no label write happens until your go-ahead)
    ```
 
-4. **On confirmation, approve the batch.** Apply [Actions on pass](#actions-on-pass) over the passing set — reconcile each passing issue's label to `phase:ready` (a REST `PUT …/labels` per issue, see [Phase label reconcile](#phase-label-reconcile)). The sweep never auto-confirms.
+4. **On confirmation, approve the batch.** Apply [Actions on pass](#actions-on-pass) over the passing set — reconcile each passing issue's label to `phase:ready` (a REST `PUT …/labels` per issue, see [Phase label reconcile](#phase-label-reconcile)). The sweep never auto-confirms. `--sweep` dispatches no background agents — the parent applies the `phase:ready` label PUTs inline — so there is no concurrency cap to set.
 
 `--sweep` takes no issue argument — it discovers them. It does not combine with `--note` or `--skip-adr`, both single-issue concerns.
 
