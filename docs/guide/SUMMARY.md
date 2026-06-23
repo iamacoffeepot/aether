@@ -52,6 +52,10 @@
 
 - [Writing tests that earn their place](testing.md)
 
+# Contributing
+
+- [Local verification](local-verification.md)
+
 # Reference
 
 - [Pointers & where to read more](reference.md)
