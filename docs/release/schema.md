@@ -1,6 +1,6 @@
 # Release phase schema
 
-Each aether release is tracked entirely on GitHub issue labels — there is no project board. Phase and all issue metadata ride `phase:*` / `type:*` / `size:*` / `model:*` labels, set by the `/release-*` skills, so every pipeline write goes over REST and the contended GraphQL pool stays free (ProjectsV2 is GraphQL-only; the one GraphQL op the pipeline still issues is the PR un-draft at land time). `release-project-init.sh <version>` ensures the label vocabulary exists and writes a minimal `.claude/release-state.json` (`{release_version, owner}`).
+Each aether release is tracked entirely on GitHub issue labels — there is no project board. Phase and all issue metadata ride `phase:*` / `type:*` / `size:*` / `model:*` labels, set by the `/release-*` skills, so every pipeline write goes over REST and the contended GraphQL pool stays free (ProjectsV2 is GraphQL-only; the one GraphQL op the pipeline still issues is the PR un-draft at land time). `release-project-init.sh <version>` ensures the label vocabulary exists.
 
 ## Phase — the `phase:*` label
 
@@ -53,7 +53,7 @@ Any      → Stalled    env/tooling failure (not the issue's fault)
 
 ## Operations
 
-- **Bootstrap a release:** `release-project-init.sh <version>` — ensures the `phase:*` / `bounce-to:*` / `size:*` / `model:*` labels exist (REST `gh label create`) and writes `.claude/release-state.json` = `{release_version, owner}`.
+- **Bootstrap a release:** `release-project-init.sh <version>` — ensures the `phase:*` / `bounce-to:*` / `size:*` / `model:*` labels exist (REST `gh label create`).
 - **File an issue:** `/sketch` — REST `POST …/issues` with the `type:*` (and `crate:*`) labels; a fresh issue is Backlog by label-absence.
 - **Advance phase:** the `/release-*` skills swap the `phase:*` label atomically over REST (`PUT …/issues/<n>/labels`, replacing the prior `phase:*` with the new one); Backlog and Done delete the label rather than swap it.
 
