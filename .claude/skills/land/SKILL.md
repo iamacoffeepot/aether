@@ -84,11 +84,14 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
 
 3. **Auto-rebase a `behind` branch.** If the branch is `behind`:
 
+   The rebase runs inside the branch's own worktree (`<m>` is the closing issue; step 8 sweeps exactly this path). `git rebase origin/main` with no branch argument rebases the worktree's current HEAD in place — git refuses the `<branch>` argument when that branch is checked out in another worktree, so the argument is dropped.
+
    Capture the pre-rebase head first — it is the attestation key for detection:
    ```bash
+   wt=.claude/worktrees/issue-<m>
    old=$(git rev-parse origin/<branch>)
-   git fetch origin
-   git rebase origin/main <branch>
+   git -C "$wt" fetch origin
+   git -C "$wt" rebase origin/main
    ```
    If the rebase produces conflicts, the branch becomes `dirty` — surface and abort.
 
@@ -98,9 +101,9 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
    ```
    When the ref is present (exit 0), the PR was on the attested fast-path; run `scripts/attest.sh --publish` against the post-rebase worktree HEAD to publish a fresh `refs/attestations/<new-sha>` before CI sees the new push:
    ```bash
-   CARGO_TARGET_DIR=/mnt/dev/tmp/aether-attest-target \
+   (cd "$wt" && CARGO_TARGET_DIR=/mnt/dev/tmp/aether-attest-target \
      TMPDIR=/mnt/dev/tmp \
-     scripts/attest.sh --publish
+     scripts/attest.sh --publish)
    ```
    This must complete before the force-push so the attestation ref lands before CI's `synchronize` event triggers the `changes` job's ref-keyed opt-in check. When the ref is absent (exit non-zero), the PR was not on the attested path — skip re-attest; the force-push triggers normal heavy CI for the new sha, which is the correct behavior.
 
@@ -108,7 +111,7 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
 
    Then force-push:
    ```bash
-   git push --force-with-lease origin <branch>
+   git -C "$wt" push --force-with-lease origin <branch>
    ```
    Then re-predict. In `--sweep` mode the recompute loop iterates this same rebase action after every sibling merge, so a branch that becomes `behind` after a sibling lands is re-attested by the same path — no separate sweep handling is needed.
 
