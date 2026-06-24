@@ -320,560 +320,536 @@ impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
     }
 }
 
-#[aether_actor::bridge(singleton)]
-mod cap_native {
-    // Trait-marker kinds the wasm32 bridge stub needs to satisfy
-    // HandlesKind; these stay always-imported.
-    use super::{BindListener, ListListeners, MonitorNotice, UnbindListener};
-    // Reply / payload kinds + native-only types (TcpListenerActor /
-    // TcpListenerConfig) only consumed by native handler bodies. The
-    // wasm32 stub bridge emits doesn't reference them, so they're
-    // gated to avoid an unused-import warning.
-    #[cfg(not(target_arch = "wasm32"))]
-    use super::{
-        BindListenerResult, Close, ListListenersResult, ListenerInfo, TcpListenerActor,
-        TcpListenerConfig, UnbindListenerResult,
-    };
-    use aether_actor::actor::ctx::OutboundReply;
-    use aether_actor::{Manual, actor};
-    use aether_substrate::actor::monitor::MonitorHandle;
-    use aether_substrate::actor::native::spawn::Subname;
-    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::chassis::error::BootError;
-    use std::collections::HashMap;
-    use std::net::TcpListener;
+/// `aether.tcp` cap **identity** (ADR-0122 identity/runtime split). A ZST
+/// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`), the
+/// per-handler `HandlesKind` markers, and the singleton name-inventory entry,
+/// all emitted always-on by `#[actor]`. The state-bearing runtime
+/// (`TcpCapabilityState`, the cap's listener-fleet supervisor map) lives
+/// behind the one `feature = "runtime"` gate, so a transport-only build never
+/// names `TcpCapabilityState` nor pulls `aether_substrate` through this cap.
+///
+/// The cap is the supervisor of its listener fleet: it spawns listeners,
+/// monitors them, and replies to unbind requests on their close. It holds its
+/// own `MailboxId → ListenerEntry` map; it does NOT walk the chassis-wide
+/// actor registry to enumerate children.
+pub struct TcpCapability;
 
-    /// Singleton control-plane cap. Owns the listener fleet directly
-    /// — the cap is the supervisor, not a thin shim over the chassis
-    /// registry. Each spawn registers a monitor on the new listener
-    /// and inserts a `ListenerEntry` into the cap-local map; the
-    /// `on_monitor_notice` handler removes the entry on listener
-    /// close.
+// The `#[actor]` attribute path stays always-on (the macro divides what it
+// emits). Everything that names an `aether_substrate` / `std::net` type — the
+// handler/init ctx, the runtime state, the supervisor structs — lives in the
+// `runtime` module below, gated once by `feature = "runtime"` and reached
+// through the single `use runtime::*` glob. The handled kinds (`BindListener`
+// / `UnbindListener` / `ListListeners`) stay always-on via `pub use kinds::*`
+// and `MonitorNotice` via the always-on `aether_kinds` import above — the
+// always-on `HandlesKind<K>` markers name them.
+use aether_actor::actor;
+
+#[cfg(feature = "runtime")]
+#[allow(clippy::wildcard_imports)]
+use runtime::*;
+
+#[cfg(feature = "runtime")]
+mod runtime;
+
+#[actor(singleton)]
+impl NativeActor for TcpCapability {
+    /// The runtime state this identity boots into (ADR-0122 split): the
+    /// cap-local listener-fleet supervisor map.
+    type State = TcpCapabilityState;
+    type Config = ();
+    const NAMESPACE: &'static str = "aether.tcp";
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<TcpCapabilityState, BootError> {
+        Ok(TcpCapabilityState {
+            listeners: HashMap::new(),
+            pending_unbinds: HashMap::new(),
+        })
+    }
+
+    /// Spawn a fresh `TcpListenerActor` bound to `mail.addr`.
     ///
-    /// Issue 629 / Phase B: plain `HashMap` fields. The dispatcher
-    /// thread is the sole writer / reader; pre-Phase-A's
-    /// `Mutex<HashMap<...>>` was a worker-pool-era tax, not a
-    /// contention point.
-    pub struct TcpCapability {
-        /// Live listeners spawned by this cap. Key is the listener's
-        /// full-name `MailboxId`. Each entry holds the bind metadata
-        /// surfaced via `ListListeners` plus the monitor handle that
-        /// pins the cap's monitor on the listener until close.
-        listeners: HashMap<aether_data::MailboxId, ListenerEntry>,
-        /// Outstanding unbind replies parked until `MonitorNotice`
-        /// arrives from the listener being closed. Key is the same
-        /// `MailboxId` as `listeners`; the cap's monitor (registered
-        /// at spawn time) is what fires the notice.
-        pending_unbinds: HashMap<aether_data::MailboxId, PendingUnbind>,
-    }
-
-    /// Cap-local supervisor state for one live listener. Drops with
-    /// the entry; `MonitorHandle::Drop` is idempotent with the close
-    /// path's index drain.
-    struct ListenerEntry {
-        addr: String,
-        port: u16,
-        name: String,
-        // Held to keep the cap's monitor registered against the
-        // listener for its lifetime. Drops when the entry is removed
-        // (in `on_monitor_notice`).
-        _monitor_handle: MonitorHandle,
-    }
-
-    struct PendingUnbind {
-        sender: aether_data::Source,
-        listener_name: String,
-    }
-
-    #[actor]
-    impl NativeActor for TcpCapability {
-        type Config = ();
-        const NAMESPACE: &'static str = "aether.tcp";
-
-        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self {
-                listeners: HashMap::new(),
-                pending_unbinds: HashMap::new(),
-            })
-        }
-
-        /// Spawn a fresh `TcpListenerActor` bound to `mail.addr`.
-        ///
-        /// Binds the socket on the dispatcher thread (so a bind
-        /// failure replies `Err` synchronously), then hands the bound
-        /// listener through `spawn_child`. After spawn the cap
-        /// registers a monitor and inserts the listener into its
-        /// supervisor map.
-        ///
-        /// # Agent
-        /// Reply: `BindListenerResult`. `Ok` on successful bind +
-        /// spawn; `Err` on addr parse / bind / spawn / monitor failure.
-        #[handler]
-        fn on_bind(&mut self, ctx: &mut NativeCtx<'_>, mail: BindListener) -> BindListenerResult {
-            let listener = match TcpListener::bind(&mail.addr) {
-                Ok(l) => l,
-                Err(e) => {
-                    return BindListenerResult::Err {
-                        addr: mail.addr,
-                        reason: format!("bind failed: {e}"),
-                    };
-                }
-            };
-            let local_port = match listener.local_addr() {
-                Ok(addr) => addr.port(),
-                Err(e) => {
-                    return BindListenerResult::Err {
-                        addr: mail.addr,
-                        reason: format!("local_addr failed: {e}"),
-                    };
-                }
-            };
-            let subname_str = mail.name.clone().unwrap_or_else(|| format!("{local_port}"));
-
-            let listener_id = match ctx
-                .spawn_child::<TcpListenerActor>(
-                    Subname::Named(&subname_str),
-                    TcpListenerConfig {
-                        listener: Some(listener),
-                        addr: mail.addr.clone(),
-                        port: local_port,
-                    },
-                )
-                .finish()
-            {
-                Ok(id) => id,
-                Err(e) => {
-                    return BindListenerResult::Err {
-                        addr: mail.addr,
-                        reason: format!("spawn failed: {e:?}"),
-                    };
-                }
-            };
-
-            // Register the cap's monitor on the freshly-spawned
-            // listener. The monitor pins until the entry is removed
-            // (in on_monitor_notice).
-            let monitor_handle = match ctx.monitor(listener_id) {
-                Ok(h) => h,
-                Err(e) => {
-                    // Listener spawned but monitor failed — extremely
-                    // unlikely (listener was just inserted Live). Reply
-                    // Err and let the listener live; chassis shutdown
-                    // will reap it.
-                    return BindListenerResult::Err {
-                        addr: mail.addr,
-                        reason: format!("monitor failed: {e:?}"),
-                    };
-                }
-            };
-
-            self.listeners.insert(
-                listener_id,
-                ListenerEntry {
+    /// Binds the socket on the dispatcher thread (so a bind
+    /// failure replies `Err` synchronously), then hands the bound
+    /// listener through `spawn_child`. After spawn the cap
+    /// registers a monitor and inserts the listener into its
+    /// supervisor map.
+    ///
+    /// # Agent
+    /// Reply: `BindListenerResult`. `Ok` on successful bind +
+    /// spawn; `Err` on addr parse / bind / spawn / monitor failure.
+    #[handler]
+    fn on_bind(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: BindListener,
+    ) -> BindListenerResult {
+        let listener = match TcpListener::bind(&mail.addr) {
+            Ok(l) => l,
+            Err(e) => {
+                return BindListenerResult::Err {
                     addr: mail.addr,
+                    reason: format!("bind failed: {e}"),
+                };
+            }
+        };
+        let local_port = match listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(e) => {
+                return BindListenerResult::Err {
+                    addr: mail.addr,
+                    reason: format!("local_addr failed: {e}"),
+                };
+            }
+        };
+        let subname_str = mail.name.clone().unwrap_or_else(|| format!("{local_port}"));
+
+        let listener_id = match ctx
+            .spawn_child::<TcpListenerActor>(
+                Subname::Named(&subname_str),
+                TcpListenerConfig {
+                    listener: Some(listener),
+                    addr: mail.addr.clone(),
                     port: local_port,
-                    name: subname_str.clone(),
-                    _monitor_handle: monitor_handle,
                 },
-            );
-
-            BindListenerResult::Ok {
-                listener_name: subname_str,
-                listener_id,
-                local_port,
+            )
+            .finish()
+        {
+            Ok(id) => id,
+            Err(e) => {
+                return BindListenerResult::Err {
+                    addr: mail.addr,
+                    reason: format!("spawn failed: {e:?}"),
+                };
             }
-        }
+        };
 
-        /// Mail `Close` to the named listener and park the
-        /// originator's reply target. Reply fires from
-        /// `on_monitor_notice` once the listener tombstones.
-        ///
-        /// # Agent
-        /// Reply: `UnbindListenerResult`. Asynchronous — the response
-        /// fires after the listener's accept thread joins and its
-        /// `MonitorNotice` arrives at this cap.
-        #[handler::manual]
-        fn on_unbind(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: UnbindListener) {
-            // Resolve listener_id from the cap-local supervisor map by
-            // name. The cap is the source of truth for "what listeners
-            // exist"; no registry walk needed.
-            let listener_id = self
-                .listeners
-                .iter()
-                .find(|(_, entry)| entry.name == mail.listener_name)
-                .map(|(id, _)| *id);
-            let Some(listener_id) = listener_id else {
-                ctx.reply(&UnbindListenerResult::Err {
-                    listener_name: mail.listener_name,
-                    reason: "no such listener (or already closed)".into(),
-                });
-                return;
-            };
-            // Park the reply target keyed on listener_id. The cap's
-            // already-registered monitor (set at spawn time) fires
-            // MonitorNotice on close, which drives the reply.
-            self.pending_unbinds.insert(
-                listener_id,
-                PendingUnbind {
-                    sender: ctx.reply_target(),
-                    listener_name: mail.listener_name,
-                },
-            );
-            // Mail Close to the listener by its stored id. ADR-0099 §3:
-            // the listener is a spawned child, so its id is the lineage
-            // fold, not `hash(NAMESPACE:name)` — re-resolving by name
-            // would reach a flat id nothing is registered under. The cap
-            // already holds the folded id from the spawn (the
-            // `self.listeners` key), so address it directly.
-            ctx.actor_at::<TcpListenerActor>(listener_id)
-                .send(&Close::default());
-        }
-
-        /// Walk the cap-local listener map and report metadata.
-        ///
-        /// # Agent
-        /// Reply: `ListListenersResult`.
-        #[handler]
-        fn on_list(
-            &mut self,
-            _ctx: &mut NativeCtx<'_>,
-            _mail: ListListeners,
-        ) -> ListListenersResult {
-            let listeners: Vec<ListenerInfo> = self
-                .listeners
-                .values()
-                .map(|entry| ListenerInfo {
-                    name: entry.name.clone(),
-                    addr: entry.addr.clone(),
-                    port: entry.port,
-                })
-                .collect();
-            ListListenersResult { listeners }
-        }
-
-        /// Listener tombstoned — remove from the supervisor map and
-        /// fire the parked unbind reply if one is waiting.
-        ///
-        /// `MonitorNotice.target` identifies which listener closed.
-        /// The cap's monitor on every spawned listener (registered in
-        /// `on_bind`) fires this notice; if the close came from an
-        /// unbind request, `pending_unbinds` has an entry with the
-        /// originator to reply to.
-        #[handler::manual]
-        fn on_monitor_notice(&mut self, ctx: &mut NativeCtx<'_, Manual>, notice: MonitorNotice) {
-            // Drop the supervisor entry. The held MonitorHandle drops
-            // here; deregister is idempotent with the close path's
-            // forward-index drain.
-            let _entry = self.listeners.remove(&notice.target);
-            // Fire the parked unbind reply if one was waiting.
-            let parked = self.pending_unbinds.remove(&notice.target);
-            if let Some(parked) = parked {
-                ctx.reply_to(
-                    parked.sender,
-                    &UnbindListenerResult::Ok {
-                        listener_name: parked.listener_name,
-                    },
-                );
+        // Register the cap's monitor on the freshly-spawned
+        // listener. The monitor pins until the entry is removed
+        // (in on_monitor_notice).
+        let monitor_handle = match ctx.monitor(listener_id) {
+            Ok(h) => h,
+            Err(e) => {
+                // Listener spawned but monitor failed — extremely
+                // unlikely (listener was just inserted Live). Reply
+                // Err and let the listener live; chassis shutdown
+                // will reap it.
+                return BindListenerResult::Err {
+                    addr: mail.addr,
+                    reason: format!("monitor failed: {e:?}"),
+                };
             }
-            // Else: notice came from a non-unbind close (chassis
-            // shutdown, future trap). Nothing to reply to; the
-            // supervisor entry is gone, that's the cleanup.
+        };
+
+        state.listeners.insert(
+            listener_id,
+            ListenerEntry {
+                addr: mail.addr,
+                port: local_port,
+                name: subname_str.clone(),
+                _monitor_handle: monitor_handle,
+            },
+        );
+
+        BindListenerResult::Ok {
+            listener_name: subname_str,
+            listener_id,
+            local_port,
         }
     }
 
-    #[cfg(test)]
-    mod tests {
-        use std::sync::Arc;
-        use std::sync::mpsc;
-        use std::thread;
-        use std::time::{Duration, Instant};
-
-        use super::{
-            BindListener, BindListenerResult, ListListeners, ListListenersResult, TcpCapability,
-            UnbindListener, UnbindListenerResult,
+    /// Mail `Close` to the named listener and park the
+    /// originator's reply target. Reply fires from
+    /// `on_monitor_notice` once the listener tombstones.
+    ///
+    /// # Agent
+    /// Reply: `UnbindListenerResult`. Asynchronous — the response
+    /// fires after the listener's accept thread joins and its
+    /// `MonitorNotice` arrives at this cap.
+    #[handler::manual]
+    fn on_unbind(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: UnbindListener) {
+        // Resolve listener_id from the cap-local supervisor map by
+        // name. The cap is the source of truth for "what listeners
+        // exist"; no registry walk needed.
+        let listener_id = state
+            .listeners
+            .iter()
+            .find(|(_, entry)| entry.name == mail.listener_name)
+            .map(|(id, _)| *id);
+        let Some(listener_id) = listener_id else {
+            ctx.reply(&UnbindListenerResult::Err {
+                listener_name: mail.listener_name,
+                reason: "no such listener (or already closed)".into(),
+            });
+            return;
         };
-        use crate::test_chassis::TestChassis;
-        use aether_actor::Addressable;
-        use aether_data::{Kind, SessionToken, Uuid};
-        use aether_kinds::descriptors;
-        use aether_kinds::trace::Nanos;
-        use aether_substrate::chassis::builder::{Builder, PassiveChassis};
-        use aether_substrate::mail::MailId;
-        use aether_substrate::mail::mailer::Mailer;
-        use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
-        use aether_substrate::mail::registry::OwnedDispatch;
-        use aether_substrate::mail::registry::{MailboxEntry, Registry};
-        use aether_substrate::mail::{MailRef, Source, SourceAddr};
+        // Park the reply target keyed on listener_id. The cap's
+        // already-registered monitor (set at spawn time) fires
+        // MonitorNotice on close, which drives the reply.
+        state.pending_unbinds.insert(
+            listener_id,
+            PendingUnbind {
+                sender: ctx.reply_target(),
+                listener_name: mail.listener_name,
+            },
+        );
+        // Mail Close to the listener by its stored id. ADR-0099 §3:
+        // the listener is a spawned child, so its id is the lineage
+        // fold, not `hash(NAMESPACE:name)` — re-resolving by name
+        // would reach a flat id nothing is registered under. The cap
+        // already holds the folded id from the spawn (the
+        // `state.listeners` key), so address it directly.
+        ctx.actor_at::<TcpListenerActor>(listener_id)
+            .send(&Close::default());
+    }
 
-        fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
-            let registry = Arc::new(Registry::new());
-            for d in descriptors::all() {
-                let _ = registry.register_kind_with_descriptor(d);
-            }
-            let (outbound, rx) = HubOutbound::attached_loopback();
-            let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
-            (registry, mailer, rx)
-        }
+    /// Walk the cap-local listener map and report metadata.
+    ///
+    /// # Agent
+    /// Reply: `ListListenersResult`.
+    #[handler]
+    fn on_list(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: ListListeners,
+    ) -> ListListenersResult {
+        let listeners: Vec<ListenerInfo> = state
+            .listeners
+            .values()
+            .map(|entry| ListenerInfo {
+                name: entry.name.clone(),
+                addr: entry.addr.clone(),
+                port: entry.port,
+            })
+            .collect();
+        ListListenersResult { listeners }
+    }
 
-        /// Boot a fresh substrate with `TcpCapability` registered as a
-        /// passive actor and return the pieces every test in this
-        /// module reaches for: the kind registry (for mailbox lookup
-        /// in [`drive_and_decode`]), the egress receiver (for reply
-        /// decode), and the [`PassiveChassis`] (held by the caller so
-        /// the cap's actor thread stays alive for the test body).
-        ///
-        /// Collapses the previously-duplicated `fresh_substrate()` +
-        /// `Builder::<TestChassis>::new(...)` chain that opened every
-        /// test (issue 796).
-        fn boot_tcp_substrate() -> (
-            Arc<Registry>,
-            mpsc::Receiver<EgressEvent>,
-            PassiveChassis<TestChassis>,
-        ) {
-            let (registry, mailer, rx) = fresh_substrate();
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<TcpCapability>(())
-                .build_passive()
-                .expect("TcpCapability boots");
-            (registry, rx, chassis)
-        }
-
-        fn session_reply() -> Source {
-            Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xfeed))))
-        }
-
-        /// Push an encoded mail (via the kind's `encode_into_bytes`) at
-        /// the cap's mailbox via the registered sink handler, then wait
-        /// for the next outbound reply on `rx` and decode as `R`.
-        fn drive_and_decode<K, R>(
-            registry: &Arc<Registry>,
-            rx: &mpsc::Receiver<EgressEvent>,
-            cap_namespace: &str,
-            mail: &K,
-        ) -> R
-        where
-            K: Kind,
-            R: Kind,
-        {
-            let id = registry
-                .lookup(cap_namespace)
-                .expect("cap mailbox registered");
-            let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("cap entry") else {
-                panic!("expected mailbox entry");
-            };
-            let bytes = mail.encode_into_bytes();
-            handler.enqueue(OwnedDispatch::disarmed(
-                K::ID,
-                K::NAME.to_owned(),
-                None,
-                session_reply(),
-                MailRef::from(bytes),
-                1,
-                MailId::NONE,
-                MailId::NONE,
-                None,
-                Nanos(0),
-                0,
-                aether_data::MailboxId(0),
-            ));
-
-            let deadline = Instant::now() + Duration::from_secs(2);
-            let frame = loop {
-                if let Ok(f) = rx.try_recv() {
-                    break f;
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "reply did not arrive within deadline for {}",
-                    K::NAME
-                );
-                thread::sleep(Duration::from_millis(5));
-            };
-            let payload = match frame {
-                EgressEvent::ToSession { payload, .. } => payload,
-                other => panic!("expected ToSession egress, got {other:?}"),
-            };
-            R::decode_from_bytes(&payload).expect("decode reply")
-        }
-
-        /// Issue 607 Phase 6a: bind → list → unbind round-trip on a
-        /// loopback port. Asserts the cap-local supervisor map
-        /// reflects every step (bound, listed, unbound).
-        #[test]
-        fn bind_then_list_then_unbind_roundtrip() {
-            let (registry, rx, _chassis) = boot_tcp_substrate();
-
-            // Bind to port 0 — let the OS pick a free port.
-            let bind_reply: BindListenerResult = drive_and_decode(
-                &registry,
-                &rx,
-                TcpCapability::NAMESPACE,
-                &BindListener {
-                    addr: "127.0.0.1:0".into(),
-                    name: None,
+    /// Listener tombstoned — remove from the supervisor map and
+    /// fire the parked unbind reply if one is waiting.
+    ///
+    /// `MonitorNotice.target` identifies which listener closed.
+    /// The cap's monitor on every spawned listener (registered in
+    /// `on_bind`) fires this notice; if the close came from an
+    /// unbind request, `pending_unbinds` has an entry with the
+    /// originator to reply to.
+    #[handler::manual]
+    fn on_monitor_notice(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Manual>,
+        notice: MonitorNotice,
+    ) {
+        // Drop the supervisor entry. The held MonitorHandle drops
+        // here; deregister is idempotent with the close path's
+        // forward-index drain.
+        let _entry = state.listeners.remove(&notice.target);
+        // Fire the parked unbind reply if one was waiting.
+        let parked = state.pending_unbinds.remove(&notice.target);
+        if let Some(parked) = parked {
+            ctx.reply_to(
+                parked.sender,
+                &UnbindListenerResult::Ok {
+                    listener_name: parked.listener_name,
                 },
             );
-            let (listener_name, local_port) = match bind_reply {
-                BindListenerResult::Ok {
-                    listener_name,
-                    local_port,
-                    ..
-                } => (listener_name, local_port),
-                BindListenerResult::Err { reason, .. } => panic!("bind failed: {reason}"),
-            };
-            assert_eq!(
-                listener_name,
-                local_port.to_string(),
-                "default subname should be the bound port",
-            );
-            assert!(local_port > 0, "OS-picked port should be non-zero");
+        }
+        // Else: notice came from a non-unbind close (chassis
+        // shutdown, future trap). Nothing to reply to; the
+        // supervisor entry is gone, that's the cleanup.
+    }
+}
 
-            // List enumerates the one listener.
-            let list_reply: ListListenersResult = drive_and_decode(
-                &registry,
-                &rx,
-                TcpCapability::NAMESPACE,
-                &ListListeners::default(),
-            );
-            assert_eq!(list_reply.listeners.len(), 1, "exactly one listener");
-            let entry = &list_reply.listeners[0];
-            assert_eq!(entry.name, listener_name);
-            assert_eq!(entry.port, local_port);
-            assert_eq!(entry.addr, "127.0.0.1:0");
+#[cfg(all(test, feature = "runtime"))]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
-            // Unbind — asynchronous reply via MonitorNotice.
-            let unbind_reply: UnbindListenerResult = drive_and_decode(
-                &registry,
-                &rx,
-                TcpCapability::NAMESPACE,
-                &UnbindListener {
-                    listener_name: listener_name.clone(),
-                },
-            );
-            match unbind_reply {
-                UnbindListenerResult::Ok { listener_name: ln } => assert_eq!(ln, listener_name),
-                UnbindListenerResult::Err { reason, .. } => panic!("unbind failed: {reason}"),
+    use super::{
+        BindListener, BindListenerResult, ListListeners, ListListenersResult, TcpCapability,
+        UnbindListener, UnbindListenerResult,
+    };
+    use crate::test_chassis::TestChassis;
+    use aether_actor::Addressable;
+    use aether_data::{Kind, SessionToken, Uuid};
+    use aether_kinds::descriptors;
+    use aether_kinds::trace::Nanos;
+    use aether_substrate::chassis::builder::{Builder, PassiveChassis};
+    use aether_substrate::mail::MailId;
+    use aether_substrate::mail::mailer::Mailer;
+    use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
+    use aether_substrate::mail::registry::OwnedDispatch;
+    use aether_substrate::mail::registry::{MailboxEntry, Registry};
+    use aether_substrate::mail::{MailRef, Source, SourceAddr};
+
+    fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
+        let registry = Arc::new(Registry::new());
+        for d in descriptors::all() {
+            let _ = registry.register_kind_with_descriptor(d);
+        }
+        let (outbound, rx) = HubOutbound::attached_loopback();
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
+        (registry, mailer, rx)
+    }
+
+    /// Boot a fresh substrate with `TcpCapability` registered as a
+    /// passive actor and return the pieces every test in this
+    /// module reaches for: the kind registry (for mailbox lookup
+    /// in [`drive_and_decode`]), the egress receiver (for reply
+    /// decode), and the [`PassiveChassis`] (held by the caller so
+    /// the cap's actor thread stays alive for the test body).
+    ///
+    /// Collapses the previously-duplicated `fresh_substrate()` +
+    /// `Builder::<TestChassis>::new(...)` chain that opened every
+    /// test (issue 796).
+    fn boot_tcp_substrate() -> (
+        Arc<Registry>,
+        mpsc::Receiver<EgressEvent>,
+        PassiveChassis<TestChassis>,
+    ) {
+        let (registry, mailer, rx) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<TcpCapability>(())
+            .build_passive()
+            .expect("TcpCapability boots");
+        (registry, rx, chassis)
+    }
+
+    fn session_reply() -> Source {
+        Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xfeed))))
+    }
+
+    /// Push an encoded mail (via the kind's `encode_into_bytes`) at
+    /// the cap's mailbox via the registered sink handler, then wait
+    /// for the next outbound reply on `rx` and decode as `R`.
+    fn drive_and_decode<K, R>(
+        registry: &Arc<Registry>,
+        rx: &mpsc::Receiver<EgressEvent>,
+        cap_namespace: &str,
+        mail: &K,
+    ) -> R
+    where
+        K: Kind,
+        R: Kind,
+    {
+        let id = registry
+            .lookup(cap_namespace)
+            .expect("cap mailbox registered");
+        let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("cap entry") else {
+            panic!("expected mailbox entry");
+        };
+        let bytes = mail.encode_into_bytes();
+        handler.enqueue(OwnedDispatch::disarmed(
+            K::ID,
+            K::NAME.to_owned(),
+            None,
+            session_reply(),
+            MailRef::from(bytes),
+            1,
+            MailId::NONE,
+            MailId::NONE,
+            None,
+            Nanos(0),
+            0,
+            aether_data::MailboxId(0),
+        ));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let frame = loop {
+            if let Ok(f) = rx.try_recv() {
+                break f;
             }
-
-            // List should now be empty — cap-local supervisor map
-            // dropped the entry on MonitorNotice.
-            let list_reply: ListListenersResult = drive_and_decode(
-                &registry,
-                &rx,
-                TcpCapability::NAMESPACE,
-                &ListListeners::default(),
-            );
             assert!(
-                list_reply.listeners.is_empty(),
-                "list should drop the unbound listener",
+                Instant::now() < deadline,
+                "reply did not arrive within deadline for {}",
+                K::NAME
             );
+            thread::sleep(Duration::from_millis(5));
+        };
+        let payload = match frame {
+            EgressEvent::ToSession { payload, .. } => payload,
+            other => panic!("expected ToSession egress, got {other:?}"),
+        };
+        R::decode_from_bytes(&payload).expect("decode reply")
+    }
+
+    /// Issue 607 Phase 6a: bind → list → unbind round-trip on a
+    /// loopback port. Asserts the cap-local supervisor map
+    /// reflects every step (bound, listed, unbound).
+    #[test]
+    fn bind_then_list_then_unbind_roundtrip() {
+        let (registry, rx, _chassis) = boot_tcp_substrate();
+
+        // Bind to port 0 — let the OS pick a free port.
+        let bind_reply: BindListenerResult = drive_and_decode(
+            &registry,
+            &rx,
+            TcpCapability::NAMESPACE,
+            &BindListener {
+                addr: "127.0.0.1:0".into(),
+                name: None,
+            },
+        );
+        let (listener_name, local_port) = match bind_reply {
+            BindListenerResult::Ok {
+                listener_name,
+                local_port,
+                ..
+            } => (listener_name, local_port),
+            BindListenerResult::Err { reason, .. } => panic!("bind failed: {reason}"),
+        };
+        assert_eq!(
+            listener_name,
+            local_port.to_string(),
+            "default subname should be the bound port",
+        );
+        assert!(local_port > 0, "OS-picked port should be non-zero");
+
+        // List enumerates the one listener.
+        let list_reply: ListListenersResult = drive_and_decode(
+            &registry,
+            &rx,
+            TcpCapability::NAMESPACE,
+            &ListListeners::default(),
+        );
+        assert_eq!(list_reply.listeners.len(), 1, "exactly one listener");
+        let entry = &list_reply.listeners[0];
+        assert_eq!(entry.name, listener_name);
+        assert_eq!(entry.port, local_port);
+        assert_eq!(entry.addr, "127.0.0.1:0");
+
+        // Unbind — asynchronous reply via MonitorNotice.
+        let unbind_reply: UnbindListenerResult = drive_and_decode(
+            &registry,
+            &rx,
+            TcpCapability::NAMESPACE,
+            &UnbindListener {
+                listener_name: listener_name.clone(),
+            },
+        );
+        match unbind_reply {
+            UnbindListenerResult::Ok { listener_name: ln } => assert_eq!(ln, listener_name),
+            UnbindListenerResult::Err { reason, .. } => panic!("unbind failed: {reason}"),
         }
 
-        /// Binding the same port twice fails the second bind. Uses
-        /// the first bind's actually-bound port to drive the second.
-        #[test]
-        fn bind_port_in_use_returns_err() {
-            let (registry, rx, _chassis) = boot_tcp_substrate();
+        // List should now be empty — cap-local supervisor map
+        // dropped the entry on MonitorNotice.
+        let list_reply: ListListenersResult = drive_and_decode(
+            &registry,
+            &rx,
+            TcpCapability::NAMESPACE,
+            &ListListeners::default(),
+        );
+        assert!(
+            list_reply.listeners.is_empty(),
+            "list should drop the unbound listener",
+        );
+    }
 
-            let first: BindListenerResult = drive_and_decode(
-                &registry,
-                &rx,
-                TcpCapability::NAMESPACE,
-                &BindListener {
-                    addr: "127.0.0.1:0".into(),
-                    name: Some("first".into()),
-                },
-            );
-            let local_port = match first {
-                BindListenerResult::Ok { local_port, .. } => local_port,
-                BindListenerResult::Err { reason, .. } => panic!("first bind failed: {reason}"),
-            };
+    /// Binding the same port twice fails the second bind. Uses
+    /// the first bind's actually-bound port to drive the second.
+    #[test]
+    fn bind_port_in_use_returns_err() {
+        let (registry, rx, _chassis) = boot_tcp_substrate();
 
-            // Second bind on the same port — must fail.
-            let second: BindListenerResult = drive_and_decode(
-                &registry,
-                &rx,
-                TcpCapability::NAMESPACE,
-                &BindListener {
-                    addr: format!("127.0.0.1:{local_port}"),
-                    name: Some("second".into()),
-                },
-            );
-            match second {
-                BindListenerResult::Ok { .. } => panic!("expected port-in-use Err"),
-                BindListenerResult::Err { reason, addr } => {
-                    assert_eq!(addr, format!("127.0.0.1:{local_port}"));
-                    assert!(
-                        reason.starts_with("bind failed:"),
-                        "expected bind-fail reason, got: {reason}",
-                    );
-                }
+        let first: BindListenerResult = drive_and_decode(
+            &registry,
+            &rx,
+            TcpCapability::NAMESPACE,
+            &BindListener {
+                addr: "127.0.0.1:0".into(),
+                name: Some("first".into()),
+            },
+        );
+        let local_port = match first {
+            BindListenerResult::Ok { local_port, .. } => local_port,
+            BindListenerResult::Err { reason, .. } => panic!("first bind failed: {reason}"),
+        };
+
+        // Second bind on the same port — must fail.
+        let second: BindListenerResult = drive_and_decode(
+            &registry,
+            &rx,
+            TcpCapability::NAMESPACE,
+            &BindListener {
+                addr: format!("127.0.0.1:{local_port}"),
+                name: Some("second".into()),
+            },
+        );
+        match second {
+            BindListenerResult::Ok { .. } => panic!("expected port-in-use Err"),
+            BindListenerResult::Err { reason, addr } => {
+                assert_eq!(addr, format!("127.0.0.1:{local_port}"));
+                assert!(
+                    reason.starts_with("bind failed:"),
+                    "expected bind-fail reason, got: {reason}",
+                );
             }
         }
+    }
 
-        /// Unbind on an unknown name surfaces an Err with the name
-        /// echoed back.
-        #[test]
-        fn unbind_unknown_listener_errors() {
-            let (registry, rx, _chassis) = boot_tcp_substrate();
+    /// Unbind on an unknown name surfaces an Err with the name
+    /// echoed back.
+    #[test]
+    fn unbind_unknown_listener_errors() {
+        let (registry, rx, _chassis) = boot_tcp_substrate();
 
-            let reply: UnbindListenerResult = drive_and_decode(
-                &registry,
-                &rx,
-                TcpCapability::NAMESPACE,
-                &UnbindListener {
-                    listener_name: "nope".into(),
-                },
-            );
-            match reply {
-                UnbindListenerResult::Err { listener_name, .. } => {
-                    assert_eq!(listener_name, "nope");
-                }
-                UnbindListenerResult::Ok { .. } => panic!("expected Err for unknown listener"),
+        let reply: UnbindListenerResult = drive_and_decode(
+            &registry,
+            &rx,
+            TcpCapability::NAMESPACE,
+            &UnbindListener {
+                listener_name: "nope".into(),
+            },
+        );
+        match reply {
+            UnbindListenerResult::Err { listener_name, .. } => {
+                assert_eq!(listener_name, "nope");
             }
+            UnbindListenerResult::Ok { .. } => panic!("expected Err for unknown listener"),
         }
+    }
 
-        // Pre-#775 the session round-trip test asserted that
-        // SessionData / SessionClosed broadcasts arrived at the egress
-        // after a real TCP client wrote then dropped. Issue 775 retired
-        // the BroadcastCapability + observation fan-out, so the
-        // session actor no longer publishes those kinds — the test was
-        // deleted with the broadcasts.
+    // Pre-#775 the session round-trip test asserted that
+    // SessionData / SessionClosed broadcasts arrived at the egress
+    // after a real TCP client wrote then dropped. Issue 775 retired
+    // the BroadcastCapability + observation fan-out, so the
+    // session actor no longer publishes those kinds — the test was
+    // deleted with the broadcasts.
 
-        /// Two concurrent binds on different ports both surface in
-        /// `ListListeners`.
-        #[test]
-        fn list_enumerates_two_concurrent_listeners() {
-            let (registry, rx, _chassis) = boot_tcp_substrate();
+    /// Two concurrent binds on different ports both surface in
+    /// `ListListeners`.
+    #[test]
+    fn list_enumerates_two_concurrent_listeners() {
+        let (registry, rx, _chassis) = boot_tcp_substrate();
 
-            let _: BindListenerResult = drive_and_decode(
-                &registry,
-                &rx,
-                TcpCapability::NAMESPACE,
-                &BindListener {
-                    addr: "127.0.0.1:0".into(),
-                    name: Some("admin".into()),
-                },
-            );
-            let _: BindListenerResult = drive_and_decode(
-                &registry,
-                &rx,
-                TcpCapability::NAMESPACE,
-                &BindListener {
-                    addr: "127.0.0.1:0".into(),
-                    name: Some("game".into()),
-                },
-            );
+        let _: BindListenerResult = drive_and_decode(
+            &registry,
+            &rx,
+            TcpCapability::NAMESPACE,
+            &BindListener {
+                addr: "127.0.0.1:0".into(),
+                name: Some("admin".into()),
+            },
+        );
+        let _: BindListenerResult = drive_and_decode(
+            &registry,
+            &rx,
+            TcpCapability::NAMESPACE,
+            &BindListener {
+                addr: "127.0.0.1:0".into(),
+                name: Some("game".into()),
+            },
+        );
 
-            let list: ListListenersResult = drive_and_decode(
-                &registry,
-                &rx,
-                TcpCapability::NAMESPACE,
-                &ListListeners::default(),
-            );
-            let mut names: Vec<String> = list.listeners.iter().map(|l| l.name.clone()).collect();
-            names.sort();
-            assert_eq!(names, vec!["admin".to_string(), "game".to_string()]);
-        }
+        let list: ListListenersResult = drive_and_decode(
+            &registry,
+            &rx,
+            TcpCapability::NAMESPACE,
+            &ListListeners::default(),
+        );
+        let mut names: Vec<String> = list.listeners.iter().map(|l| l.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, vec!["admin".to_string(), "game".to_string()]);
     }
 }
