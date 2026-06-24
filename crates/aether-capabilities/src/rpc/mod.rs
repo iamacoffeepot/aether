@@ -33,4 +33,10 @@ pub use aether_rpc::rpc::*;
 
 pub use server::RpcServerCapability;
 #[cfg(not(target_arch = "wasm32"))]
-pub use server::{RpcServerConfig, RpcServerHandle};
+pub use server::RpcServerConfig;
+// `RpcServerHandle` is a live-server boot artifact (published only inside
+// runtime `init`), so it rides the runtime half's gate rather than the
+// `not(wasm32)` marker gate (ADR-0122). Every consumer is a chassis/test
+// build with `runtime` on.
+#[cfg(feature = "runtime")]
+pub use server::RpcServerHandle;
