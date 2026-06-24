@@ -47,9 +47,9 @@ impl Chassis for TestChassis {
     }
 }
 
-// Reply sink: records the latest reply of each engines-cap reply kind
-// into shared cells. Lives at module root so the `#[bridge]` macro's
-// marker emission stays addressable.
+// Reply sink config: records the latest reply of each engines-cap reply
+// kind into shared cells. Lives at module root always-on (it names no
+// `aether_substrate` type) and is the cap's `Config`.
 #[derive(Clone, Default)]
 pub struct ReplyCells {
     pub list: Arc<Mutex<Option<ListEnginesResult>>>,
@@ -57,57 +57,82 @@ pub struct ReplyCells {
     pub terminate: Arc<Mutex<Option<TerminateEngineResult>>>,
 }
 
-#[aether_actor::bridge(singleton)]
-mod sink {
-    use super::{ListEnginesResult, ReplyCells, SpawnEngineResult, TerminateEngineResult};
-    use aether_actor::actor;
-    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::chassis::error::BootError;
+/// `aether.engine.test.reply_sink` **identity** (ADR-0122 identity/runtime
+/// split). A ZST carrying only the addressing — `Addressable` and the
+/// per-handler `HandlesKind` markers, emitted always-on by `#[actor]`. The
+/// state-bearing runtime (`ReplySinkState`) lives behind the bundle's one
+/// `feature = "runtime"` gate (default-on; the integration target rides it
+/// like the lib).
+pub struct ReplySink;
 
-    pub struct ReplySink {
-        cells: ReplyCells,
+// The `#[actor]` attribute path stays always-on (the macro divides what
+// it emits). The substrate-typed ctx imports + the runtime state live in
+// the gated `runtime` module below, reached through the `use runtime::*`
+// glob.
+use aether_actor::actor;
+#[cfg(feature = "runtime")]
+#[allow(clippy::wildcard_imports)]
+use runtime::*;
+
+#[actor(singleton)]
+impl NativeActor for ReplySink {
+    type State = ReplySinkState;
+    type Config = ReplyCells;
+    const NAMESPACE: &'static str = "aether.engine.test.reply_sink";
+
+    fn init(cells: ReplyCells, _ctx: &mut NativeInitCtx<'_>) -> Result<ReplySinkState, BootError> {
+        Ok(ReplySinkState { cells })
     }
 
-    #[actor]
-    impl NativeActor for ReplySink {
-        type Config = ReplyCells;
-        const NAMESPACE: &'static str = "aether.engine.test.reply_sink";
+    #[handler]
+    fn on_list_result(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, reply: ListEnginesResult) {
+        *state
+            .cells
+            .list
+            .lock()
+            .expect("test setup: list cell mutex is never poisoned") = Some(reply);
+    }
 
-        fn init(cells: ReplyCells, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { cells })
-        }
+    #[handler]
+    fn on_spawn_result(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        reply: SpawnEngineResult,
+    ) {
+        *state
+            .cells
+            .spawn
+            .lock()
+            .expect("test setup: spawn cell mutex is never poisoned") = Some(reply);
+    }
 
-        #[handler]
-        fn on_list_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: ListEnginesResult) {
-            *self
-                .cells
-                .list
-                .lock()
-                .expect("test setup: list cell mutex is never poisoned") = Some(reply);
-        }
-
-        #[handler]
-        fn on_spawn_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: SpawnEngineResult) {
-            *self
-                .cells
-                .spawn
-                .lock()
-                .expect("test setup: spawn cell mutex is never poisoned") = Some(reply);
-        }
-
-        #[handler]
-        fn on_terminate_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: TerminateEngineResult) {
-            *self
-                .cells
-                .terminate
-                .lock()
-                .expect("test setup: terminate cell mutex is never poisoned") = Some(reply);
-        }
+    #[handler]
+    fn on_terminate_result(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        reply: TerminateEngineResult,
+    ) {
+        *state
+            .cells
+            .terminate
+            .lock()
+            .expect("test setup: terminate cell mutex is never poisoned") = Some(reply);
     }
 }
 
-// `ReplySink` is re-exported to this module root by the `#[bridge]`
-// macro — no explicit `use sink::ReplySink` needed.
+// The runtime half — the substrate-typed ctx imports + the state — gated
+// once here; the `#[actor] impl` above reaches it through the glob.
+#[cfg(feature = "runtime")]
+mod runtime {
+    use super::ReplyCells;
+    pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+
+    /// Runtime state for the reply sink: the shared cells the handlers
+    /// record into. The addressing identity is the ZST `ReplySink`.
+    pub struct ReplySinkState {
+        pub(super) cells: ReplyCells,
+    }
+}
 
 fn boot(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
     let registry = Arc::new(Registry::new());
