@@ -1,8 +1,8 @@
 //! Connection-side plumbing for the `RpcServerCapability`: the
 //! sidecar->dispatcher event type, per-connection state, the
 //! per-connection reader loop, and the oversize-frame guard. These are
-//! plain items (no actor-macro surface), split out of the
-//! `#[bridge(singleton)]` module so the actor core stays navigable.
+//! plain items (no actor-macro surface), split out of the cap's identity +
+//! runtime modules so the actor core stays navigable.
 
 use super::RpcInboundReady;
 use crate::rpc::{RpcError, WireFrame};
