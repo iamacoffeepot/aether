@@ -152,7 +152,7 @@ impl TrackVoice {
 /// the cap as `Box<A>` and `Drop` runs with exclusive `&mut self`,
 /// so the wrapping mutex retires.
 /// A `play_track` request parked while its `aether.fs.read` is in
-/// flight (ADR-0103 §2). Keyed in [`AudioCapability::pending_tracks`]
+/// flight (ADR-0103 §2). Keyed in `AudioCapabilityState::pending_tracks`
 /// by the echoed `(namespace, path)` the `ReadResult` carries; the
 /// original requester's reply route + the synth-side track key live
 /// here until the bytes land.

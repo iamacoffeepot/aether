@@ -274,7 +274,7 @@ impl SampleVoice {
 
 /// A `load_instrument` request parked while its `.sfz` `aether.fs.read`
 /// is in flight (ADR-0103 §2/§5). Keyed in
-/// [`AudioCapability::pending_instruments`] by the echoed
+/// `AudioCapabilityState::pending_instruments` by the echoed
 /// `(namespace, path)` of the `.sfz`. Only the original requester's
 /// reply route lives here — the namespace / path come back on the
 /// `ReadResult`, and the bank's name is derived from the `.sfz` path.
@@ -295,8 +295,8 @@ pub struct SampleSlot {
 /// A bank load in progress: the `.sfz` parsed into regions, fanning out
 /// one `aether.fs.read` per unique referenced sample, assembling when
 /// the last reply lands (ADR-0103 §2). Keyed in
-/// [`AudioCapability::assemblies`] by a minted id; the per-sample reads
-/// correlate back to it through [`AudioCapability::pending_samples`].
+/// `AudioCapabilityState::assemblies` by a minted id; the per-sample reads
+/// correlate back to it through `AudioCapabilityState::pending_samples`.
 pub struct BankAssembly {
     /// The original `load_instrument` requester — the
     /// `LoadInstrumentResult` reply routes here.
