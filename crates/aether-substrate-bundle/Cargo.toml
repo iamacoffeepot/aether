@@ -64,6 +64,18 @@ path = "src/bin/perf-compare.rs"
 name = "aether-perf-plot"
 path = "src/bin/perf-plot.rs"
 
+# The `runtime` feature exists solely to drive the `#[actor]` split
+# path's hardcoded `feature = "runtime"` gate (the macro convention from
+# iamacoffeepot/aether#2311 / ADR-0122): a split cap's `NativeActor` /
+# `Lifecycle` / `NativeDispatch` impls compile only when this feature is
+# active. The bundle never builds to wasm and has no transport-only
+# consumer, so it is default-on. `aether-substrate` / `aether-capabilities`
+# already arrive with their own `runtime` / `native` defaults via the
+# non-`default-features = false` deps below, so no forwarding is needed.
+[features]
+default = ["runtime"]
+runtime = []
+
 [dependencies]
 aether-substrate = { path = "../aether-substrate", features = ["render"] }
 aether-capabilities = { path = "../aether-capabilities", features = ["render-native", "audio-native", "text-native", "ui-native"] }
