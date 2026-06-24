@@ -2624,7 +2624,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts) -> syn::Result<To
                             "at most one #[fallback] method per native actor",
                         ));
                     }
-                    validate_native_fallback_sig(&f.sig)?;
+                    validate_native_fallback_sig(&f.sig, is_split)?;
                     f.attrs.remove(idx);
                     fallback = Some(NativeFallbackFn { method: f });
                 } else if f.sig.ident == "init" {
@@ -3413,7 +3413,7 @@ struct NativeFallbackFn {
 /// Issue 629 / Phase B: `&mut self` is now allowed alongside `&self`.
 /// The dispatcher owns the cap as `Box<A>` and calls the fallback
 /// through `&mut Box<A>`, so either receiver shape works.
-fn validate_native_fallback_sig(sig: &Signature) -> syn::Result<()> {
+fn validate_native_fallback_sig(sig: &Signature, is_split: bool) -> syn::Result<()> {
     if sig.inputs.len() != 3 {
         return Err(syn::Error::new_spanned(
             sig,
@@ -3422,7 +3422,22 @@ fn validate_native_fallback_sig(sig: &Signature) -> syn::Result<()> {
         ));
     }
     let first = &sig.inputs[0];
-    if !matches!(first, FnArg::Receiver(_)) {
+    if is_split {
+        // iamacoffeepot/aether#2338: a split `#[actor]` (`type State = …`) is on
+        // the identity, so the `#[fallback]` takes the runtime state explicitly —
+        // `(state: &mut Self::State, ctx: &mut NativeCtx<'_>, env: &Envelope)` —
+        // rather than a `self` receiver, mirroring the split `#[handler]` shape.
+        // `dispatch_fallback` already passes `__aether_state` and
+        // `rewrite_self_state_first_param` already rewrites the first param; this
+        // validator was the only gap.
+        if !matches!(first, FnArg::Typed(_)) {
+            return Err(syn::Error::new_spanned(
+                first,
+                "a split `#[actor]` (`type State = …`) #[fallback]'s first parameter \
+                 must be `state: &mut Self::State` (the runtime state), not a `self` receiver",
+            ));
+        }
+    } else if !matches!(first, FnArg::Receiver(_)) {
         return Err(syn::Error::new_spanned(
             first,
             "#[fallback] first parameter must be `&self` or `&mut self`",
