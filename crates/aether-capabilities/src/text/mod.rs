@@ -747,7 +747,7 @@ mod native {
                     bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
                 },
             );
-            drive_task_completion(&mut cap, &binding, &rx);
+            drive_task_completion::<TextCapability>(&mut cap, &binding, &rx);
             match decode_session_reply::<LoadFontResult>(&rx) {
                 LoadFontResult::Err { error, .. } => {
                     assert!(error.contains("parse"), "unexpected error: {error}");
@@ -1162,7 +1162,7 @@ mod native {
                     bytes: test_font_bytes().to_vec(),
                 },
             );
-            drive_task_completion(&mut cap, &binding, &rx);
+            drive_task_completion::<TextCapability>(&mut cap, &binding, &rx);
             match decode_session_reply::<FontMetricsResult>(&rx) {
                 FontMetricsResult::Ok { metrics } => {
                     assert!(!metrics.advances.is_empty());

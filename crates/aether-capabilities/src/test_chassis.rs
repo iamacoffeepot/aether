@@ -123,13 +123,14 @@ pub fn test_mailer_and_rx() -> (Arc<Mailer>, Receiver<EgressEvent>) {
 /// the completion's reply routes through the reply target captured at
 /// dispatch and parked in the framework's in-flight ledger, not this ctx.
 pub fn drive_task_completion<A>(
-    cap: &mut A,
+    state: &mut A::State,
     binding: &Arc<NativeBinding>,
     rx: &Receiver<EgressEvent>,
 ) where
-    // Spike fold: dispatch is a `NativeActor` assoc fn over `&mut Self::State`.
-    // This helper drives un-split caps, so `State = A`.
-    A: NativeActor<State = A>,
+    // Dispatch is a `NativeActor` assoc fn over `&mut Self::State` (ADR-0122
+    // identity/runtime split). The param is the associated projection, so `A`
+    // is not inferable from it — every call site names it via turbofish.
+    A: NativeActor,
 {
     let payload = loop {
         let event = rx
@@ -151,7 +152,7 @@ pub fn drive_task_completion<A>(
         aether_data::MailId::NONE,
         aether_data::MailId::NONE,
     );
-    A::dispatch(cap, &mut ctx, TaskCompletionWake::ID, &payload)
+    A::dispatch(state, &mut ctx, TaskCompletionWake::ID, &payload)
         .expect("test: task completion routes to a #[handler(task)] arm");
 }
 

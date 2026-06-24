@@ -2134,7 +2134,7 @@ mod native {
             );
             // The decode worker runs off-thread and pushes the completion
             // wake; route it through the cap's #[handler(task)] arm.
-            drive_task_completion(&mut cap, &transport, &rx);
+            drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
 
             match decode_session_reply::<PlayTrackResult>(&rx) {
                 PlayTrackResult::Ok {
@@ -2197,7 +2197,7 @@ mod native {
                     bytes: wav,
                 },
             );
-            drive_task_completion(&mut cap, &transport, &rx);
+            drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
 
             match decode_session_reply::<PlayTrackResult>(&rx) {
                 PlayTrackResult::Ok { lane, .. } => {
@@ -2988,7 +2988,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
                 },
             );
             // The last sample triggers the assembly dispatch off-thread.
-            drive_task_completion(&mut cap, &transport, &rx);
+            drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
 
             match decode_session_reply::<LoadInstrumentResult>(&rx) {
                 LoadInstrumentResult::Ok {
@@ -3170,7 +3170,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
                 );
             }
 
-            drive_task_completion(&mut cap, &transport, &rx);
+            drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
 
             // The settlement hold was released inside resolve_with, but the
             // reply is now in-flight on the caller root — live_roots must
@@ -3236,7 +3236,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
                 );
             }
 
-            drive_task_completion(&mut cap, &transport, &rx);
+            drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
 
             assert_eq!(
                 counter.live_roots(),
@@ -3322,7 +3322,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
                 );
             }
 
-            drive_task_completion(&mut cap, &transport, &rx);
+            drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
 
             assert_eq!(
                 counter.live_roots(),

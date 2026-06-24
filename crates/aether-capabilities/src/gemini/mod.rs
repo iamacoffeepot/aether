@@ -30,6 +30,14 @@ mod kinds;
 mod lyria;
 mod nanobanana;
 
+// The `aether.gemini` runtime half (ADR-0122 identity/runtime split): the
+// `aether_substrate`-typed state + reply helpers the `#[actor] impl` in
+// `capability` reaches through `use super::runtime::*`. Gated once here so a
+// transport-only build of the `GeminiCapability` identity never names the
+// state nor pulls `aether_substrate` through this cap.
+#[cfg(feature = "runtime")]
+mod runtime;
+
 pub use adapter::{DisabledGeminiAdapter, UreqGeminiAdapter};
 pub use capability::GeminiCapability;
 pub use config::{GeminiConfig, GeminiConfigLayer, GeminiOverlay};
