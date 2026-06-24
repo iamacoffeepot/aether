@@ -52,7 +52,7 @@ fn describe_binary(binary_path: &str) -> Result<BinaryManifest, String> {
 /// or a human-readable error for an unreadable path or a `--describe`
 /// that failed / yielded no parseable manifest. Idempotent — identical
 /// bytes dedup to the same hash.
-pub(super) fn ingest_binary(
+pub fn ingest_binary(
     store: &mut ArtifactStore,
     path: &str,
     name: Option<String>,
@@ -74,7 +74,7 @@ pub(super) fn ingest_binary(
 /// env layer, ADR-0090). A path that can't be read or `--describe`d is
 /// logged and skipped — a bad bootstrap entry must not fail hub boot.
 /// Idempotent via content dedup.
-pub(super) fn bootstrap_ingest(store: &mut ArtifactStore, paths: &HashSet<String>) {
+pub fn bootstrap_ingest(store: &mut ArtifactStore, paths: &HashSet<String>) {
     for path_str in paths {
         let name = Path::new(path_str)
             .file_stem()
@@ -102,7 +102,7 @@ pub(super) fn bootstrap_ingest(store: &mut ArtifactStore, paths: &HashSet<String
 /// no execution step. Returns the stored content hash, or a
 /// human-readable error for an unreadable path or an unparseable wasm.
 /// Idempotent — identical bytes dedup to the same hash.
-pub(super) fn ingest_component(
+pub fn ingest_component(
     store: &mut ArtifactStore,
     path: &str,
     name: Option<String>,
@@ -128,7 +128,7 @@ pub(super) fn ingest_component(
 /// silent pick). A `module@actor` token's `@actor` part populates the
 /// reply `export` so the forwarded `LoadComponent` instantiates that
 /// actor type (ADR-0096). Returns `Err` for no match / ambiguity.
-pub(super) fn resolve_component(
+pub fn resolve_component(
     store: &mut ArtifactStore,
     selector: &ComponentSelector,
 ) -> ResolveComponentResult {
@@ -246,7 +246,7 @@ fn stored_component_reply(
 /// the `chassis` / `caps` / `target` attribute query resolves, and with
 /// no attribute filters either, `default` = the [`DEFAULT_CHASSIS`]
 /// binary. `None` when nothing matched.
-pub(super) fn resolve_selector(
+pub fn resolve_selector(
     store: &mut ArtifactStore,
     selector: &BinarySelector,
 ) -> Option<StoredArtifact> {
@@ -314,7 +314,7 @@ fn pick_versioned(store: &ArtifactStore, name: &str, version: &str) -> Option<St
 /// `anthropic/cli.rs`), creating `dest`'s parent dir. The
 /// realize-to-exec step for spawn: stored bytes aren't directly
 /// fork-exec'able (ADR-0115 §Execution).
-pub(super) fn realize_executable(src: &Path, dest: &Path) -> io::Result<()> {
+pub fn realize_executable(src: &Path, dest: &Path) -> io::Result<()> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
