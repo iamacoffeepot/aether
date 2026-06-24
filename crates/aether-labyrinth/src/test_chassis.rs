@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use aether_substrate::actor::native::{NativeActor, NativeDispatch};
+use aether_substrate::actor::native::NativeActor;
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
@@ -40,7 +40,7 @@ pub fn boot_test_chassis_with<A>(
     config: A::Config,
 ) -> PassiveChassis<TestChassis>
 where
-    A: NativeActor + NativeDispatch,
+    A: NativeActor,
 {
     Builder::<TestChassis>::new(Arc::clone(registry), Arc::clone(mailer))
         .with_actor::<A>(config)

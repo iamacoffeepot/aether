@@ -171,10 +171,18 @@ pub trait Addressable: Sized + Send + 'static {
 /// standalone trait both transports compose makes a divergent edit a
 /// compile error instead of silent drift.
 ///
+/// `Lifecycle<S>` is **generic over the runtime state `S`** the identity
+/// boots into (iamacoffeepot/aether#2311): `init` returns `S`, and
+/// `wire`/`unwire` operate over `&mut S`. The identity type that implements
+/// it is the *addressing* identity; the state `S` is plain data the dispatch
+/// surface runs over. For an un-split actor `S = Self`, so `&mut S == &mut
+/// self` and the author's `init`/`wire` bodies are unchanged. Both transports
+/// (`WasmActor`/`NativeActor`) share this one trait so a divergent edit is a
+/// compile error instead of silent drift.
+///
 /// `Lifecycle` carries **no** supertrait. The methods never read
-/// `NAMESPACE`: `init` returns `Self`, `wire`/`unwire` operate on the
-/// ctx, and a send inside a hook is gated on the *target's* cardinality
-/// marker, not on `Self`'s identity. The "a thing that boots must have a
+/// `NAMESPACE`: a send inside a hook is gated on the *target's* cardinality
+/// marker, not on the identity. The "a thing that boots must have a
 /// mailbox to boot into" constraint is asserted where it bites — on the
 /// transport subtraits (`WasmActor`/`NativeActor`), which add `Addressable` as a
 /// co-supertrait — rather than welded into the capability.
@@ -185,9 +193,9 @@ pub trait Addressable: Sized + Send + 'static {
 /// native pair), so a `wire`/`unwire` body reaches the concrete ctx's
 /// inherent methods (`ctx.actor::<R>().send(&p)`) with no generic bound at
 /// the call site. `InitError` is pinned per transport subtrait
-/// (`WasmActor: Lifecycle<InitError = ActorInitError>`), so existing generic call
-/// sites keep seeing a concrete error type.
-pub trait Lifecycle {
+/// (`WasmActor: Lifecycle<_, InitError = ActorInitError>`), so existing generic
+/// call sites keep seeing a concrete error type.
+pub trait Lifecycle<S> {
     /// ADR-0090 boot configuration the chassis threads into [`Self::init`].
     /// `Send + 'static` only here; [`crate::WasmActor`] tightens it to
     /// `Kind` (FFI config crosses the wasm boundary as bytes) while native
@@ -207,23 +215,21 @@ pub trait Lifecycle {
     type Ctx<'a>;
 
     /// Runs once before any mail. Resolves kinds/handles via `ctx` and
-    /// returns the initial state. ADR-0079: the init ctx carries no send
-    /// surface — use [`Self::wire`] for mail-driven setup.
-    fn init(config: Self::Config, ctx: &mut Self::InitCtx<'_>) -> Result<Self, Self::InitError>
-    where
-        Self: Sized;
+    /// returns the initial runtime state `S`. ADR-0079: the init ctx carries
+    /// no send surface — use [`Self::wire`] for mail-driven setup.
+    fn init(config: Self::Config, ctx: &mut Self::InitCtx<'_>) -> Result<S, Self::InitError>;
 
     /// Post-init, mail-allowed hook (ADR-0079). Runs after `init` returned
     /// `Ok` and the mailbox is published, before the first envelope.
     /// Default no-op; override to register subscriptions or announce.
-    fn wire(&mut self, ctx: &mut Self::Ctx<'_>) {
-        let _ = ctx;
+    fn wire(state: &mut S, ctx: &mut Self::Ctx<'_>) {
+        let _ = (state, ctx);
     }
 
     /// Pre-shutdown, mail-allowed hook (ADR-0079). Runs after the inbox
     /// drain, before the actor value drops. Default no-op.
-    fn unwire(&mut self, ctx: &mut Self::Ctx<'_>) {
-        let _ = ctx;
+    fn unwire(state: &mut S, ctx: &mut Self::Ctx<'_>) {
+        let _ = (state, ctx);
     }
 }
 
@@ -373,12 +379,13 @@ pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
 pub trait HandlesKind<K: Kind>: Addressable {}
 
 /// A complete actor: an addressable identity ([`Addressable`]) that also
-/// carries a boot lifecycle ([`Lifecycle`]). The blanket impl supplies it
-/// for any type that is both, so `WasmActor` / `NativeActor` implementors
-/// are `Actor` automatically. Code that wants a fully-formed actor bounds
-/// `Actor`; code that wants only identity bounds `Addressable`.
-pub trait Actor: Addressable + Lifecycle {}
-impl<T: Addressable + Lifecycle> Actor for T {}
+/// carries a boot lifecycle ([`Lifecycle<S>`](Lifecycle)) over a runtime
+/// state `S`. The blanket impl supplies it for any type that is both, so
+/// `WasmActor` / `NativeActor` implementors are `Actor<Self::State>`
+/// automatically. Code that wants a fully-formed actor bounds `Actor<S>`;
+/// code that wants only identity bounds `Addressable`.
+pub trait Actor<S>: Addressable + Lifecycle<S> {}
+impl<S, T: Addressable + Lifecycle<S>> Actor<S> for T {}
 
 #[cfg(test)]
 mod tests {

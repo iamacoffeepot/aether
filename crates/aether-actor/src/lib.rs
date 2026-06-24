@@ -79,7 +79,7 @@ pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyHandle};
 // an extra `wasm::` segment.
 pub use wasm::{
     ActorInitError, ErasedWasmActor, RelativeMailbox, SpawnError, WasmActor, WasmActorMailbox,
-    WasmCtx, WasmDropCtx, WasmInitCtx,
+    WasmCtx, WasmDispatch, WasmDropCtx, WasmInitCtx,
 };
 
 // Issue 665 retired `MailTransport` and its `MailTransportTrait`

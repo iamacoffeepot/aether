@@ -472,7 +472,9 @@ mod tests {
     #[test]
     fn default_camera_boots_with_zero_speed() {
         let mut ctx = WasmInitCtx::__new(0);
-        let comp = <CameraComponent as aether_actor::Lifecycle>::init((), &mut ctx).expect("init");
+        let comp =
+            <CameraComponent as aether_actor::Lifecycle<CameraComponent>>::init((), &mut ctx)
+                .expect("init");
         let main = comp.cameras.get("main").expect("\"main\" camera present");
         match main.mode {
             ModeState::Orbit(state) => {

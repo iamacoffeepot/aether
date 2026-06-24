@@ -679,9 +679,7 @@ impl TestBench {
         config: A::Config,
     ) -> aether_substrate::SpawnBuilder<'a, A>
     where
-        A: aether_actor::Instanced
-            + aether_substrate::NativeActor
-            + aether_substrate::NativeDispatch,
+        A: aether_actor::Instanced + aether_substrate::NativeActor,
     {
         self.passive.spawn_actor::<A>(subname, config)
     }
@@ -1677,7 +1675,7 @@ mod tests {
         use aether_actor::{Addressable as ActorTrait, HandlesKind};
         use aether_data::{Kind as DataKind, KindId as DataKindId, mailbox_id_from_name};
         use aether_substrate::{
-            BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, SpawnError, Subname,
+            BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, SpawnError, Subname,
         };
         use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -1700,7 +1698,7 @@ mod tests {
             type Resolver = aether_actor::Many;
         }
         impl HandlesKind<Bump> for Child {}
-        impl aether_actor::Lifecycle for Child {
+        impl aether_actor::Lifecycle<Self> for Child {
             type Config = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -1709,17 +1707,19 @@ mod tests {
                 Ok(Self { received: config })
             }
         }
-        impl NativeActor for Child {}
-        impl NativeDispatch for Child {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for Child {
+            type State = Self;
+        }
+        impl Dispatch<Self> for Child {
+            fn dispatch(
+                state: &mut Self,
                 _ctx: &mut NativeCtx<'_, aether_substrate::Manual>,
                 kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == Bump::ID.0 {
                     let _ = Bump::decode_from_bytes(payload)?;
-                    self.received.fetch_add(1, AtomicOrdering::SeqCst);
+                    state.received.fetch_add(1, AtomicOrdering::SeqCst);
                     return Some(());
                 }
                 None

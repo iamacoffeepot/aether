@@ -29,9 +29,7 @@ use aether_kinds::trace::Nanos;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dispatcher_slot::DispatcherSlot;
 use crate::actor::native::envelope::Envelope;
-use crate::actor::native::{
-    ExportedHandles, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx,
-};
+use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
 use crate::actor::registry::ActorRegistry;
 use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
 use crate::chassis::error::BootError;
@@ -328,7 +326,7 @@ impl Spawner {
         parent: Option<(u64, MailboxId)>,
     ) -> Result<MailboxId, SpawnError>
     where
-        A: Instanced + NativeActor + NativeDispatch,
+        A: Instanced + NativeActor,
     {
         // 1. Resolve subname → string.
         let subname_str = match subname {
@@ -495,7 +493,7 @@ impl Spawner {
         // The chassis-side actor_registry no longer holds a clone of
         // the actor — only the sender + type_id + subname for routing
         // and resolve_actor.
-        let mut actor: Box<A> = Box::new(actor);
+        let mut actor: Box<A::State> = Box::new(actor);
 
         // Insert before pre-loading mail: the actor_registry holding
         // the sender is the canonical record that the slot is live.
@@ -539,7 +537,7 @@ impl Spawner {
         // ctx, peers are running, all mailboxes claimed.
         local::with_stamped(&slots, || {
             let mut wire_ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
-            actor.wire(&mut wire_ctx);
+            A::wire(actor.as_mut(), &mut wire_ctx);
         });
 
         // Pre-load bootstrap mail. tx is alive (rx is held by the
@@ -630,7 +628,7 @@ impl Spawner {
 /// transport, the resolved subname, the consumed config, and the
 /// running list of after-init envelopes. `finish` consumes the
 /// builder and runs the spawn lifecycle.
-pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor + NativeDispatch> {
+pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor> {
     spawner: Arc<Spawner>,
     subname: Subname<'ctx>,
     config: Option<A::Config>,
@@ -651,7 +649,7 @@ pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor + NativeDispatch> {
     _ctx: PhantomData<&'ctx ()>,
 }
 
-impl<'ctx, A: Instanced + NativeActor + NativeDispatch> SpawnBuilder<'ctx, A> {
+impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
     /// Internal constructor. Public only because chassis-level
     /// `spawn_actor` entry points (on `BuiltChassis` / `PassiveChassis`)
     /// build these too.

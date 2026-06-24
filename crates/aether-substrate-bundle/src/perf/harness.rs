@@ -34,7 +34,7 @@ use aether_capabilities::trace_walk::fold_nodes;
 use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
 use aether_kinds::trace::{MailNodeWire, TraceRingEntry, TraceTail, TraceTailResult};
 use aether_kinds::{LifecycleSubscribe, LifecycleSubscribeResult, Tick};
-use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, Subname};
+use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, Subname};
 
 use crate::perf::report::LatencySection;
 use crate::test_bench::TestBench;
@@ -164,7 +164,7 @@ impl aether_actor::Addressable for Relay {
     type Resolver = aether_actor::Many;
 }
 impl aether_actor::HandlesKind<Ping> for Relay {}
-impl aether_actor::Lifecycle for Relay {
+impl aether_actor::Lifecycle<Self> for Relay {
     type Config = RelayConfig;
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
@@ -178,10 +178,12 @@ impl aether_actor::Lifecycle for Relay {
         })
     }
 }
-impl NativeActor for Relay {}
-impl NativeDispatch for Relay {
-    fn __aether_dispatch_envelope(
-        &mut self,
+impl NativeActor for Relay {
+    type State = Self;
+}
+impl Dispatch<Self> for Relay {
+    fn dispatch(
+        state: &mut Self,
         ctx: &mut NativeCtx<'_, aether_substrate::Manual>,
         kind: KindId,
         payload: &[u8],
@@ -190,26 +192,26 @@ impl NativeDispatch for Relay {
         // out-of-band counter query before the `Ping` fast path.
         if kind.0 == CountQuery::ID.0 {
             ctx.reply(&CountReport {
-                sent: self.sent,
-                received: self.received,
+                sent: state.sent,
+                received: state.received,
             });
             return Some(());
         }
         if kind.0 != Ping::ID.0 {
             return None;
         }
-        self.received += 1;
+        state.received += 1;
         // Burn the configured CPU budget on this worker thread before
         // forwarding. With heavy leaves and idle cores this is what makes
         // scattering children across workers pay off — the contention the
         // trivial harness can't exhibit (iamacoffeepot/aether#1074).
-        busy_spin(self.work_iters);
+        busy_spin(state.work_iters);
         // Forward the bytes verbatim to each downstream. Each push
         // stamps its own `t_sent`, so later children in a fan-out reveal
         // any per-child enqueue skew.
-        for &down in self.downstreams.iter() {
+        for &down in state.downstreams.iter() {
             let _ = ctx.send_envelope_traced(down, Ping::ID, payload);
-            self.sent += 1;
+            state.sent += 1;
         }
         Some(())
     }
@@ -257,7 +259,7 @@ impl aether_actor::Addressable for TickSource {
     type Resolver = aether_actor::Many;
 }
 impl aether_actor::HandlesKind<Tick> for TickSource {}
-impl aether_actor::Lifecycle for TickSource {
+impl aether_actor::Lifecycle<Self> for TickSource {
     /// `(entry, burst)`: the relay-0 mailbox and the number of `Ping`s to
     /// emit per `Tick` (`1` in `Latency`, `backlog` in `Saturate`).
     type Config = (MailboxId, u32);
@@ -274,10 +276,12 @@ impl aether_actor::Lifecycle for TickSource {
         })
     }
 }
-impl NativeActor for TickSource {}
-impl NativeDispatch for TickSource {
-    fn __aether_dispatch_envelope(
-        &mut self,
+impl NativeActor for TickSource {
+    type State = Self;
+}
+impl Dispatch<Self> for TickSource {
+    fn dispatch(
+        state: &mut Self,
         ctx: &mut NativeCtx<'_, aether_substrate::Manual>,
         kind: KindId,
         _payload: &[u8],
@@ -286,7 +290,7 @@ impl NativeDispatch for TickSource {
         // never receives a `Ping`, so its `received` is 0.
         if kind.0 == CountQuery::ID.0 {
             ctx.reply(&CountReport {
-                sent: self.sent,
+                sent: state.sent,
                 received: 0,
             });
             return Some(());
@@ -294,11 +298,11 @@ impl NativeDispatch for TickSource {
         if kind.0 != Tick::ID.0 {
             return None;
         }
-        for _ in 0..self.burst {
-            let bytes = Ping { seq: self.seq }.encode_into_bytes();
-            self.seq = self.seq.wrapping_add(1);
-            let _ = ctx.send_envelope_traced(self.entry, Ping::ID, &bytes);
-            self.sent += 1;
+        for _ in 0..state.burst {
+            let bytes = Ping { seq: state.seq }.encode_into_bytes();
+            state.seq = state.seq.wrapping_add(1);
+            let _ = ctx.send_envelope_traced(state.entry, Ping::ID, &bytes);
+            state.sent += 1;
         }
         Some(())
     }

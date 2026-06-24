@@ -31,8 +31,8 @@ use aether_substrate::actor::native::{Pending, TaskDone};
 use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
 use aether_substrate::mail::{MailId, MailRef};
 use aether_substrate::{
-    Addressable, BootError, Builder, BuiltChassis, Chassis, Mailer, Manual, NativeActor,
-    NativeBinding, NativeCtx, NativeDispatch, NativeInitCtx, NeverDriver, PassiveChassis, Registry,
+    Addressable, BootError, Builder, BuiltChassis, Chassis, Dispatch, Mailer, Manual, NativeActor,
+    NativeBinding, NativeCtx, NativeInitCtx, NeverDriver, PassiveChassis, Registry,
     mail::MailboxId,
 };
 use std::thread;
@@ -1044,7 +1044,8 @@ fn manual_handler_replies_through_ctx() {
         // via `new_dispatching`.
         let mut ctx =
             NativeCtx::new_dispatching(&binding, caller_reply_to, MailId::NONE, MailId::NONE);
-        let handled = cap.__aether_dispatch_envelope(
+        let handled = <ManualReplyCap as Dispatch<ManualReplyCap>>::dispatch(
+            &mut cap,
             &mut ctx,
             ManualPing::ID,
             &ManualPing { seq: 9 }.encode_into_bytes(),
