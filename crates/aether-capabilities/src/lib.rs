@@ -169,7 +169,7 @@ pub use test_bench::UnsupportedTestBenchCapability;
 #[cfg(feature = "text")]
 pub use text::TextCapability;
 pub use trampoline::WasmTrampoline;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "runtime")]
 pub use trampoline::WasmTrampolineConfig;
 #[cfg(feature = "ui")]
 pub use ui::{UiBar, UiButton, UiCapability, UiClicked, UiLabel, UiPanel};

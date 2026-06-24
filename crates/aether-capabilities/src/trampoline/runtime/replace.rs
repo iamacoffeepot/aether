@@ -13,19 +13,26 @@ use aether_substrate::mail::capability::MailboxCaps;
 use aether_substrate::mail::{CostCells, KindId};
 use wasmtime::Module;
 
-use super::config::WasmTrampolineConfig;
-use super::state::WasmTrampoline;
+use crate::trampoline::WasmTrampoline;
 
-impl WasmTrampoline {
+use super::config::WasmTrampolineConfig;
+use super::state::WasmTrampolineState;
+
+impl WasmTrampolineState {
     /// ADR-0097: perform the sibling spawn the guest staged via the
     /// `spawn_sibling` host fn during `Component::deliver`. The
-    /// trampoline runs the typed `spawn_child::<WasmTrampoline>` the
-    /// substrate host fn couldn't (it can't name this type), reusing
+    /// trampoline runs the typed `spawn_child::<WasmTrampoline>` (the
+    /// identity ZST) the substrate host fn couldn't (it can't name this
+    /// type), reusing
     /// the resident `Module` and registering the spawned sibling's
     /// own capability group (looked up by actor-type tag). A
     /// spawn-time failure surfaces here, asynchronously to the guest
     /// (which already received the `MailboxId`): logged, not fatal.
-    pub(super) fn spawn_sibling(&self, ctx: &mut NativeCtx<'_>, pending: PendingSpawn) {
+    pub(in crate::trampoline) fn spawn_sibling(
+        &self,
+        ctx: &mut NativeCtx<'_>,
+        pending: PendingSpawn,
+    ) {
         let capabilities = self
             .actor_caps
             .iter()
@@ -53,7 +60,7 @@ impl WasmTrampoline {
             actor_caps: self.actor_caps.clone(),
         };
         if let Err(e) = ctx
-            .spawn_child::<Self>(Subname::Named(&pending.subname), config)
+            .spawn_child::<WasmTrampoline>(Subname::Named(&pending.subname), config)
             .finish()
         {
             tracing::warn!(
@@ -80,7 +87,7 @@ impl WasmTrampoline {
     /// and on success the caller promotes it to the new `self.type_tag`
     /// so a later bare replace reuses the *current* hosted type rather
     /// than reverting to the original load's.
-    pub(super) fn resolve_replace_target(
+    pub(in crate::trampoline) fn resolve_replace_target(
         &self,
         export: Option<&str>,
         actors: &[ActorInputs],
@@ -138,7 +145,10 @@ impl WasmTrampoline {
             })
     }
 
-    pub(super) fn handle_replace(&mut self, payload: ReplaceComponent) -> ReplaceResult {
+    pub(in crate::trampoline) fn handle_replace(
+        &mut self,
+        payload: ReplaceComponent,
+    ) -> ReplaceResult {
         // `payload.wasm` is the new module bytes; `mailbox_id` is
         // the trampoline's own id (the agent already addressed
         // this mail to us, so the field is informational).
