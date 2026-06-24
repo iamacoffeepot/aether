@@ -67,7 +67,10 @@ pub use actor::native::ctx::{ExportedHandles, NativeCtx, NativeInitCtx};
 // reaches them without an `aether_actor` import.
 pub use actor::native::envelope::Envelope;
 pub use actor::native::spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
-pub use actor::native::{NativeActor, NativeDispatch};
+// Spike (composed): the native behaviour traits parameterised by the runtime
+// state. `Lifecycle<S>` re-exported as `NativeLifecycle` to avoid colliding
+// with the shared wasm `aether_actor::Lifecycle`.
+pub use actor::native::{Dispatch, Lifecycle as NativeLifecycle, NativeActor};
 pub use actor::registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError};
 #[cfg(feature = "wasm")]
 pub use actor::wasm::component::{Component, ComponentCtx};

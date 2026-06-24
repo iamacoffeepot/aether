@@ -679,9 +679,7 @@ impl TestBench {
         config: A::Config,
     ) -> aether_substrate::SpawnBuilder<'a, A>
     where
-        A: aether_actor::Instanced
-            + aether_substrate::NativeActor
-            + aether_substrate::NativeDispatch,
+        A: aether_actor::Instanced + aether_substrate::NativeActor,
     {
         self.passive.spawn_actor::<A>(subname, config)
     }
@@ -1677,7 +1675,7 @@ mod tests {
         use aether_actor::{Addressable as ActorTrait, HandlesKind};
         use aether_data::{Kind as DataKind, KindId as DataKindId, mailbox_id_from_name};
         use aether_substrate::{
-            BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, SpawnError, Subname,
+            BootError, NativeActor, NativeCtx, NativeInitCtx, SpawnError, Subname,
         };
         use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -1709,21 +1707,10 @@ mod tests {
                 Ok(Self { received: config })
             }
         }
-        impl NativeActor for Child {
-        // Spike fold: un-split fixture — forwards to the hand-written impls.
+        impl aether_substrate::actor::native::Lifecycle<Self> for Child {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut aether_substrate::NativeInitCtx<'_>) -> Result<Self, aether_substrate::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_, aether_substrate::Manual>, __k: aether_substrate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as aether_substrate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_, aether_substrate::Manual>, __e: &aether_substrate::actor::native::envelope::Envelope) -> bool {
-            <Self as aether_substrate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> aether_substrate::actor::native::ComponentCapabilities {
-            <Self as aether_substrate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -1732,7 +1719,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for Child {
+
+    impl aether_substrate::actor::native::Dispatch<Self> for Child {
+        fn dispatch(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_, aether_substrate::Manual>, __k: aether_substrate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl aether_substrate::actor::native::NativeActor for Child { type State = Self; }
+        impl Child {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut NativeCtx<'_, aether_substrate::Manual>,

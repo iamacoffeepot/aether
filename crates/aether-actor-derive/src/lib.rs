@@ -2766,6 +2766,18 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         }
     }
 
+    // The concrete runtime state type: the declared `type State` for a split
+    // cap, `Self` for an un-split one. The composed `Lifecycle<S>` /
+    // `Dispatch<S>` impls carry no `NativeActor` bound, so their method
+    // signatures must name this concrete type rather than `Self::State`.
+    let state_ty: Type = if is_split {
+        declared_state_ty
+            .clone()
+            .expect("is_split implies a declared `type State`")
+    } else {
+        syn::parse_quote!(Self)
+    };
+
     let dispatch_arms = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;
         let method_ident = &h.method.sig.ident;
@@ -2919,7 +2931,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         let method_ident = &f.method.sig.ident;
         quote! {
             fn dispatch_fallback(
-                __aether_state: &mut Self::State,
+                __aether_state: &mut #state_ty,
                 __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, ::aether_actor::Manual>,
                 __aether_env: &::aether_substrate::actor::native::envelope::Envelope,
             ) -> bool {
@@ -3047,23 +3059,16 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     } else {
         quote! { #[cfg(not(target_family = "wasm"))] }
     };
-    // The `type State` the identity's `NativeActor` impl pins: the declared
-    // concrete state in the split path, `Self` for an un-split cap.
-    let state_assoc: Type = if is_split {
-        declared_state_ty.expect("is_split implies a declared `type State`")
-    } else {
-        syn::parse_quote!(Self)
-    };
 
-    // Folded shape: `wire` / `unwire` collide by name with the trait fns, so
-    // the inherent copies were renamed to `__aether_{wire,unwire}` above; the
-    // trait fns forward to them by UFCS (passing the state as the receiver
-    // for an un-split `&mut self` hook). Emitted only when the user provided
-    // the hook — otherwise the trait's default no-op stands.
+    // Composed shape: `Lifecycle<S>::wire` / `unwire` forward to the inherent
+    // `__aether_{wire,unwire}` copies (renamed above to dodge the trait-name
+    // collision) by UFCS — passing the state as the receiver for an un-split
+    // `&mut self` hook. Emitted only when the user provided the hook; the
+    // trait's default no-op stands otherwise.
     let wire_forward = if has_wire {
         quote! {
             fn wire(
-                __aether_state: &mut Self::State,
+                __aether_state: &mut #state_ty,
                 __aether_ctx: &mut ::aether_substrate::NativeCtx<'_>,
             ) {
                 #self_ty::__aether_wire(__aether_state, __aether_ctx);
@@ -3075,7 +3080,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     let unwire_forward = if has_unwire {
         quote! {
             fn unwire(
-                __aether_state: &mut Self::State,
+                __aether_state: &mut #state_ty,
                 __aether_ctx: &mut ::aether_substrate::NativeCtx<'_>,
             ) {
                 #self_ty::__aether_unwire(__aether_state, __aether_ctx);
@@ -3140,22 +3145,31 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
 
         #handler_inventory
 
-        // The folded `NativeActor` impl on the addressing identity: `State`
-        // is plain data, and every behaviour (`init` / `dispatch` /
-        // `dispatch_fallback` / `capabilities` / `wire` / `unwire`) is an
-        // associated fn over `&mut Self::State`. No `Lifecycle` /
-        // `NativeDispatch` impl is emitted — the state implements nothing.
+        // Composed shape: the addressing identity carries the two native
+        // behaviour traits parameterised by the runtime state, plus the
+        // `NativeActor` composition that pins `State` (plain data). No
+        // behaviour trait is implemented on the state itself.
+
+        // Boot lifecycle over the state.
         #runtime_gate
-        impl #impl_generics #trait_path for #self_ty #where_clause {
+        impl #impl_generics ::aether_substrate::actor::native::Lifecycle<#state_ty>
+            for #self_ty #where_clause
+        {
             #config_type
-            type State = #state_assoc;
-
             #init_method
+            #wire_forward
+            #unwire_forward
+        }
 
+        // Per-kind dispatch over the state.
+        #runtime_gate
+        impl #impl_generics ::aether_substrate::actor::native::Dispatch<#state_ty>
+            for #self_ty #where_clause
+        {
             // ADR-0112: the dispatch seam carries the most-permissive
             // `Manual` ctx; the arms downgrade per handler class.
             fn dispatch(
-                __aether_state: &mut Self::State,
+                __aether_state: &mut #state_ty,
                 __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, ::aether_actor::Manual>,
                 __aether_kind: ::aether_substrate::mail::KindId,
                 __aether_payload: &[u8],
@@ -3168,10 +3182,12 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
             #fallback_dispatch_override
 
             #capabilities_override
+        }
 
-            #wire_forward
-
-            #unwire_forward
+        // The composition: identity → runtime state.
+        #runtime_gate
+        impl #impl_generics #trait_path for #self_ty #where_clause {
+            type State = #state_ty;
         }
 
         // The handler / fallback / wire / unwire / helper bodies as inherent

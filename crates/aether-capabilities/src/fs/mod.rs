@@ -235,10 +235,10 @@ impl NativeActor for FsCapability {
     /// init failure surfaces as `BootError::Other(io::Error)` so
     /// chassis mains propagate via `?` to abort startup (ADR-0063
     /// fail-fast).
-    // Spike fold: `init` is a `NativeActor` method on the identity, so its
-    // return type can name `Self::State`; the body constructs the concrete
-    // `FsState`.
-    fn init(roots: NamespaceRoots, _ctx: &mut NativeInitCtx<'_>) -> Result<Self::State, BootError> {
+    // Spike (composed): `init` is emitted into `impl Lifecycle<FsState> for
+    // FsCapability`, which carries no `NativeActor` bound, so it names the
+    // concrete state directly rather than `Self::State`.
+    fn init(roots: NamespaceRoots, _ctx: &mut NativeInitCtx<'_>) -> Result<FsState, BootError> {
         let (registry, roots) =
             build_registry(roots).map_err(|e| BootError::Other(Box::new(e)))?;
         let transforms = TransformRegistry::from_inventory();

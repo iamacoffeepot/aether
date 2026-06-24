@@ -25,9 +25,7 @@ use std::sync::Arc;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dispatcher_slot::DispatcherSlot;
-use crate::actor::native::{
-    ExportedHandles, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx,
-};
+use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
 use crate::chassis::Chassis;
 use crate::chassis::ctx::MailboxSender;
 use crate::chassis::ctx::MailboxWakeSlot;
@@ -1679,22 +1677,10 @@ mod tests {
         }
     }
 
-    impl NativeActor for StubLog {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+    impl crate::actor::native::Lifecycle<Self> for StubLog {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -1704,7 +1690,15 @@ mod tests {
         }
     }
 
-    impl NativeDispatch for StubLog {
+    impl crate::actor::native::Dispatch<Self> for StubLog {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for StubLog { type State = Self; }
+
+    impl StubLog {
         fn __aether_dispatch_envelope(
             &mut self,
             _ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -1826,22 +1820,10 @@ mod tests {
                 ))))
             }
         }
-        impl NativeActor for FailingCap {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for FailingCap {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -1850,7 +1832,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for FailingCap {
+
+    impl crate::actor::native::Dispatch<Self> for FailingCap {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for FailingCap { type State = Self; }
+        impl FailingCap {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -1937,22 +1927,10 @@ mod tests {
             }
         }
 
-        impl NativeActor for ProbeCap {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for ProbeCap {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -1962,10 +1940,18 @@ mod tests {
         }
     }
 
+    impl crate::actor::native::Dispatch<Self> for ProbeCap {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for ProbeCap { type State = Self; }
+
         // Hand-rolled NativeDispatch — what the macro arm emits in
         // task #731. The if-arm decodes Ping bytes, calls the
         // handler, returns Some(()) on success.
-        impl NativeDispatch for ProbeCap {
+        impl ProbeCap {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -2096,22 +2082,10 @@ mod tests {
             }
         }
 
-        impl NativeActor for LocalProbe {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for LocalProbe {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -2121,7 +2095,15 @@ mod tests {
         }
     }
 
-        impl NativeDispatch for LocalProbe {
+    impl crate::actor::native::Dispatch<Self> for LocalProbe {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for LocalProbe { type State = Self; }
+
+        impl LocalProbe {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -2252,22 +2234,10 @@ mod tests {
                 Ok(Self { received: config })
             }
         }
-        impl NativeActor for ChildCap {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for ChildCap {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -2276,7 +2246,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for ChildCap {
+
+    impl crate::actor::native::Dispatch<Self> for ChildCap {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for ChildCap { type State = Self; }
+        impl ChildCap {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -2316,22 +2294,10 @@ mod tests {
                 })
             }
         }
-        impl NativeActor for ParentCap {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for ParentCap {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -2340,7 +2306,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for ParentCap {
+
+    impl crate::actor::native::Dispatch<Self> for ParentCap {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for ParentCap { type State = Self; }
+        impl ParentCap {
             fn __aether_dispatch_envelope(
                 &mut self,
                 ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -2475,22 +2449,10 @@ mod tests {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for Closer {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for Closer {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -2499,7 +2461,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for Closer {
+
+    impl crate::actor::native::Dispatch<Self> for Closer {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for Closer { type State = Self; }
+        impl Closer {
             fn __aether_dispatch_envelope(
                 &mut self,
                 ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -2620,22 +2590,10 @@ mod tests {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for Quiet {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for Quiet {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -2644,7 +2602,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for Quiet {
+
+    impl crate::actor::native::Dispatch<Self> for Quiet {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for Quiet { type State = Self; }
+        impl Quiet {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -2718,22 +2684,10 @@ mod tests {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for Quiet {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for Quiet {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -2742,7 +2696,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for Quiet {
+
+    impl crate::actor::native::Dispatch<Self> for Quiet {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for Quiet { type State = Self; }
+        impl Quiet {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -2807,22 +2769,10 @@ mod tests {
                 Ok(Self)
             }
         }
-        impl NativeActor for Foo {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for Foo {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -2831,7 +2781,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for Foo {
+
+    impl crate::actor::native::Dispatch<Self> for Foo {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for Foo { type State = Self; }
+        impl Foo {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -2856,22 +2814,10 @@ mod tests {
                 Ok(Self)
             }
         }
-        impl NativeActor for Bar {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for Bar {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -2880,7 +2826,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for Bar {
+
+    impl crate::actor::native::Dispatch<Self> for Bar {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for Bar { type State = Self; }
+        impl Bar {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -2989,22 +2943,10 @@ mod tests {
                 Ok(Self)
             }
         }
-        impl NativeActor for Target {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for Target {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -3013,7 +2955,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for Target {
+
+    impl crate::actor::native::Dispatch<Self> for Target {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for Target { type State = Self; }
+        impl Target {
             fn __aether_dispatch_envelope(
                 &mut self,
                 ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -3056,22 +3006,10 @@ mod tests {
                 })
             }
         }
-        impl NativeActor for Watcher {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for Watcher {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -3080,7 +3018,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for Watcher {
+
+    impl crate::actor::native::Dispatch<Self> for Watcher {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for Watcher { type State = Self; }
+        impl Watcher {
             fn __aether_dispatch_envelope(
                 &mut self,
                 ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -3287,22 +3233,10 @@ mod tests {
                 Ok(Self)
             }
         }
-        impl NativeActor for Target {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for Target {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -3311,7 +3245,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for Target {
+
+    impl crate::actor::native::Dispatch<Self> for Target {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for Target { type State = Self; }
+        impl Target {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -3347,22 +3289,10 @@ mod tests {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for Watcher {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for Watcher {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -3371,7 +3301,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for Watcher {
+
+    impl crate::actor::native::Dispatch<Self> for Watcher {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for Watcher { type State = Self; }
+        impl Watcher {
             fn __aether_dispatch_envelope(
                 &mut self,
                 ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -3534,22 +3472,10 @@ mod tests {
                 Ok(Self { tag })
             }
         }
-        impl NativeActor for Member {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for Member {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -3558,7 +3484,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for Member {
+
+    impl crate::actor::native::Dispatch<Self> for Member {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for Member { type State = Self; }
+        impl Member {
             fn __aether_dispatch_envelope(
                 &mut self,
                 ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -3766,22 +3700,10 @@ mod tests {
                 Ok(Self { received: config })
             }
         }
-        impl NativeActor for Grandchild {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for Grandchild {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -3790,7 +3712,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for Grandchild {
+
+    impl crate::actor::native::Dispatch<Self> for Grandchild {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for Grandchild { type State = Self; }
+        impl Grandchild {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -3826,22 +3756,10 @@ mod tests {
                 })
             }
         }
-        impl NativeActor for Parent {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for Parent {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -3850,7 +3768,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for Parent {
+
+    impl crate::actor::native::Dispatch<Self> for Parent {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for Parent { type State = Self; }
+        impl Parent {
             fn __aether_dispatch_envelope(
                 &mut self,
                 ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -4035,22 +3961,10 @@ mod tests {
                 self.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for WireSpawnProbe {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for WireSpawnProbe {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -4059,7 +3973,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for WireSpawnProbe {
+
+    impl crate::actor::native::Dispatch<Self> for WireSpawnProbe {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for WireSpawnProbe { type State = Self; }
+        impl WireSpawnProbe {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -4117,22 +4039,10 @@ mod tests {
                 self.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for WireProbe {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for WireProbe {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -4141,7 +4051,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for WireProbe {
+
+    impl crate::actor::native::Dispatch<Self> for WireProbe {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for WireProbe { type State = Self; }
+        impl WireProbe {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -4215,22 +4133,10 @@ mod tests {
                 self.wire_ran.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for Pinger {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for Pinger {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -4239,7 +4145,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for Pinger {
+
+    impl crate::actor::native::Dispatch<Self> for Pinger {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for Pinger { type State = Self; }
+        impl Pinger {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -4267,22 +4181,10 @@ mod tests {
                 Ok(Self { received: config })
             }
         }
-        impl NativeActor for Ponger {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        impl crate::actor::native::Lifecycle<Self> for Ponger {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -4291,7 +4193,15 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-        impl NativeDispatch for Ponger {
+
+    impl crate::actor::native::Dispatch<Self> for Ponger {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for Ponger { type State = Self; }
+        impl Ponger {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,

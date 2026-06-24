@@ -1252,7 +1252,7 @@ mod tests {
         }
     }
 
-    impl crate::actor::native::NativeDispatch for StubActor {
+    impl StubActor {
         fn __aether_dispatch_envelope(
             &mut self,
             _ctx: &mut NativeCtx<'_, crate::Manual>,
@@ -1263,22 +1263,10 @@ mod tests {
         }
     }
 
-    impl NativeActor for StubActor {
-        // Spike fold: un-split fixture — `State = Self`, forwarding to the
-        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+    impl crate::actor::native::Lifecycle<Self> for StubActor {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
-            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> crate::actor::native::ComponentCapabilities {
-            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -1287,6 +1275,14 @@ mod tests {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
+
+    impl crate::actor::native::Dispatch<Self> for StubActor {
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl crate::actor::native::NativeActor for StubActor { type State = Self; }
 
     /// Issue 629 / Phase A: handle-export round-trip. Caps publish a
     /// handle bundle during `init`; consumers retrieve a clone via

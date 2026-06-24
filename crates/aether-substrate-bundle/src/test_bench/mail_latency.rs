@@ -36,7 +36,7 @@ use aether_kinds::trace::{
 use aether_substrate::chassis::settlement::{
     TerminalDisposition, WaitOutcome, await_internal_signal,
 };
-use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, Subname};
+use aether_substrate::{BootError, NativeActor, NativeCtx, NativeInitCtx, Subname};
 
 use super::TestBench;
 use crate::perf::harness::{
@@ -71,21 +71,10 @@ impl aether_actor::Lifecycle for RingRelay {
         Ok(Self { next })
     }
 }
-impl NativeActor for RingRelay {
-        // Spike fold: un-split fixture — forwards to the hand-written impls.
+impl aether_substrate::actor::native::Lifecycle<Self> for RingRelay {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut aether_substrate::NativeInitCtx<'_>) -> Result<Self, aether_substrate::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_, aether_substrate::Manual>, __k: aether_substrate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as aether_substrate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_, aether_substrate::Manual>, __e: &aether_substrate::actor::native::envelope::Envelope) -> bool {
-            <Self as aether_substrate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> aether_substrate::actor::native::ComponentCapabilities {
-            <Self as aether_substrate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -94,7 +83,15 @@ impl NativeActor for RingRelay {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-impl NativeDispatch for RingRelay {
+
+    impl aether_substrate::actor::native::Dispatch<Self> for RingRelay {
+        fn dispatch(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_, aether_substrate::Manual>, __k: aether_substrate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl aether_substrate::actor::native::NativeActor for RingRelay { type State = Self; }
+impl RingRelay {
     fn __aether_dispatch_envelope(
         &mut self,
         ctx: &mut NativeCtx<'_, aether_substrate::Manual>,
@@ -149,21 +146,10 @@ impl aether_actor::Lifecycle for HoldRelay {
         Ok(Self)
     }
 }
-impl NativeActor for HoldRelay {
-        // Spike fold: un-split fixture — forwards to the hand-written impls.
+impl aether_substrate::actor::native::Lifecycle<Self> for HoldRelay {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut aether_substrate::NativeInitCtx<'_>) -> Result<Self, aether_substrate::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_, aether_substrate::Manual>, __k: aether_substrate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as aether_substrate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_, aether_substrate::Manual>, __e: &aether_substrate::actor::native::envelope::Envelope) -> bool {
-            <Self as aether_substrate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> aether_substrate::actor::native::ComponentCapabilities {
-            <Self as aether_substrate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -172,7 +158,15 @@ impl NativeActor for HoldRelay {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-impl NativeDispatch for HoldRelay {
+
+    impl aether_substrate::actor::native::Dispatch<Self> for HoldRelay {
+        fn dispatch(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_, aether_substrate::Manual>, __k: aether_substrate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl aether_substrate::actor::native::NativeActor for HoldRelay { type State = Self; }
+impl HoldRelay {
     fn __aether_dispatch_envelope(
         &mut self,
         ctx: &mut NativeCtx<'_, aether_substrate::Manual>,

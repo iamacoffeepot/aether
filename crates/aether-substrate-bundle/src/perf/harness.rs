@@ -34,7 +34,7 @@ use aether_capabilities::trace_walk::fold_nodes;
 use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
 use aether_kinds::trace::{MailNodeWire, TraceRingEntry, TraceTail, TraceTailResult};
 use aether_kinds::{LifecycleSubscribe, LifecycleSubscribeResult, Tick};
-use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, Subname};
+use aether_substrate::{BootError, NativeActor, NativeCtx, NativeInitCtx, Subname};
 
 use crate::perf::report::LatencySection;
 use crate::test_bench::TestBench;
@@ -178,21 +178,10 @@ impl aether_actor::Lifecycle for Relay {
         })
     }
 }
-impl NativeActor for Relay {
-        // Spike fold: un-split fixture — forwards to the hand-written impls.
+impl aether_substrate::actor::native::Lifecycle<Self> for Relay {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut aether_substrate::NativeInitCtx<'_>) -> Result<Self, aether_substrate::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_, aether_substrate::Manual>, __k: aether_substrate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as aether_substrate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_, aether_substrate::Manual>, __e: &aether_substrate::actor::native::envelope::Envelope) -> bool {
-            <Self as aether_substrate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> aether_substrate::actor::native::ComponentCapabilities {
-            <Self as aether_substrate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -201,7 +190,15 @@ impl NativeActor for Relay {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-impl NativeDispatch for Relay {
+
+    impl aether_substrate::actor::native::Dispatch<Self> for Relay {
+        fn dispatch(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_, aether_substrate::Manual>, __k: aether_substrate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl aether_substrate::actor::native::NativeActor for Relay { type State = Self; }
+impl Relay {
     fn __aether_dispatch_envelope(
         &mut self,
         ctx: &mut NativeCtx<'_, aether_substrate::Manual>,
@@ -296,21 +293,10 @@ impl aether_actor::Lifecycle for TickSource {
         })
     }
 }
-impl NativeActor for TickSource {
-        // Spike fold: un-split fixture — forwards to the hand-written impls.
+impl aether_substrate::actor::native::Lifecycle<Self> for TickSource {
         type Config = <Self as aether_actor::Lifecycle>::Config;
-        type State = Self;
         fn init(__c: Self::Config, __ctx: &mut aether_substrate::NativeInitCtx<'_>) -> Result<Self, aether_substrate::BootError> {
             <Self as aether_actor::Lifecycle>::init(__c, __ctx)
-        }
-        fn dispatch(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_, aether_substrate::Manual>, __k: aether_substrate::mail::KindId, __p: &[u8]) -> Option<()> {
-            <Self as aether_substrate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
-        }
-        fn dispatch_fallback(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_, aether_substrate::Manual>, __e: &aether_substrate::actor::native::envelope::Envelope) -> bool {
-            <Self as aether_substrate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
-        }
-        fn capabilities() -> aether_substrate::actor::native::ComponentCapabilities {
-            <Self as aether_substrate::actor::native::NativeDispatch>::__aether_capabilities()
         }
         fn wire(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_>) {
             <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
@@ -319,7 +305,15 @@ impl NativeActor for TickSource {
             <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
         }
     }
-impl NativeDispatch for TickSource {
+
+    impl aether_substrate::actor::native::Dispatch<Self> for TickSource {
+        fn dispatch(__s: &mut Self, __ctx: &mut aether_substrate::NativeCtx<'_, aether_substrate::Manual>, __k: aether_substrate::mail::KindId, __p: &[u8]) -> Option<()> {
+            Self::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+    }
+
+    impl aether_substrate::actor::native::NativeActor for TickSource { type State = Self; }
+impl TickSource {
     fn __aether_dispatch_envelope(
         &mut self,
         ctx: &mut NativeCtx<'_, aether_substrate::Manual>,

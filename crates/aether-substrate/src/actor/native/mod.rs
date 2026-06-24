@@ -106,49 +106,40 @@ use crate::mail::KindId;
 /// (iamacoffeepot/aether#1037).
 pub use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapability};
 
-/// Native chassis-cap actor trait (spike: identity/runtime split). One
-/// **identity** type — a `#[actor] impl NativeActor for X` block — owns the
-/// addressing ([`Addressable`]) and the full runtime behaviour as
-/// associated functions over its [`State`](NativeActor::State). The state
-/// is **plain data** with no behaviour bound: it never implements
-/// `Lifecycle` / `NativeDispatch` / any "runtime" trait. The boot lifecycle
-/// (`init` / `wire` / `unwire`), per-kind dispatch (`dispatch` /
-/// `dispatch_fallback`), and the ADR-0033 capability surface
-/// (`capabilities`) all live here, each taking `&mut Self::State`.
-///
-/// `State` defaults to `Self` for every un-split cap (the identity IS its
-/// own runtime, so `&mut Self::State == &mut self`); the default is supplied
-/// by the `#[actor]` macro (`type State = Self;`), since associated-type
-/// defaults are unstable on the 2024 edition. A cap that separates
-/// addressing from runtime (the `fs` cap in this spike) points `State` at a
-/// dedicated plain `struct` that holds the heavy `aether_substrate`-typed
-/// fields, declared in a `feature = "runtime"`-gated module.
-///
-/// The dispatcher owns the actor as `Box<Self::State>` and drives it through
-/// `A::init` / `A::dispatch(&mut state, …)` / `A::wire(&mut state, …)` — the
-/// state value never has to know how to dispatch itself.
-pub trait NativeActor: Addressable {
-    /// Boot configuration (ADR-0090). Lives on the identity so the chassis
-    /// builder's `with_actor::<A>(config: A::Config)` reads it off the
-    /// addressing type.
+/// Native boot lifecycle over a runtime state `S` (spike: identity/runtime
+/// split, composed shape). **Distinct from the shared
+/// [`aether_actor::Lifecycle`]** — that one is `init -> Self` and is shared by
+/// wasm + native; this one is `init -> S` and is native-only, parameterised by
+/// the state the identity boots into. The `#[actor]` macro implements it on the
+/// addressing identity, `impl Lifecycle<State> for Identity`. For an un-split
+/// cap `S = Self`, so `&mut S == &mut self` and the author's `init`/`wire`
+/// bodies are unchanged.
+pub trait Lifecycle<S> {
+    /// Boot configuration (ADR-0090).
     type Config: Send + 'static;
 
-    /// The runtime state this identity boots into — **plain data**, bounded
-    /// only by `Send + 'static` (the dispatcher owns it as `Box<Self::State>`
-    /// on a worker thread). No behaviour trait is required of it.
-    type State: Send + 'static;
-
     /// Build the runtime state from the resolved config (ADR-0063 fail-fast).
-    /// Returns `Self::State` — for an un-split cap (`State = Self`) that is
-    /// `Self`, unchanged from the pre-split `init -> Self`.
-    fn init(config: Self::Config, ctx: &mut NativeInitCtx<'_>) -> Result<Self::State, BootError>;
+    fn init(config: Self::Config, ctx: &mut NativeInitCtx<'_>) -> Result<S, BootError>;
 
-    /// Route one inbound envelope to the matching `#[handler]` over the
-    /// runtime state. `Some(())` on a handled kind + decode success, `None`
-    /// on unknown kind / decode failure. The `#[actor]` macro emits the sum
-    /// dispatch table here.
+    /// Post-init, mail-allowed hook (ADR-0079). Default no-op.
+    fn wire(_state: &mut S, _ctx: &mut NativeCtx<'_>) {}
+
+    /// Pre-shutdown, mail-allowed hook (ADR-0079). Default no-op.
+    fn unwire(_state: &mut S, _ctx: &mut NativeCtx<'_>) {}
+}
+
+/// Per-kind dispatch over a runtime state `S` (the reshaped `NativeDispatch`,
+/// now generic over the state rather than taking `&mut self`). The `#[actor]`
+/// macro implements it on the addressing identity, `impl Dispatch<State> for
+/// Identity`, emitting the sum dispatch table; for an un-split cap `S = Self`.
+pub trait Dispatch<S> {
+    // ADR-0112: the dispatch seam carries the most-permissive `Manual` ctx so a
+    // `#[handler::manual]` arm reaches the reply surface; the macro downgrades
+    // to `Single` per single-class handler.
+    /// Route one inbound envelope to the matching `#[handler]` over the state.
+    /// `Some(())` on a handled kind + decode success, `None` otherwise.
     fn dispatch(
-        state: &mut Self::State,
+        state: &mut S,
         ctx: &mut NativeCtx<'_, crate::Manual>,
         kind: KindId,
         payload: &[u8],
@@ -158,7 +149,7 @@ pub trait NativeActor: Addressable {
     /// returns `false` so the trampoline warn-logs the miss; the macro
     /// overrides it when a `#[fallback]` is present.
     fn dispatch_fallback(
-        _state: &mut Self::State,
+        _state: &mut S,
         _ctx: &mut NativeCtx<'_, crate::Manual>,
         _envelope: &Envelope,
     ) -> bool {
@@ -166,8 +157,8 @@ pub trait NativeActor: Addressable {
     }
 
     /// The ADR-0033 receive-side capability surface (handler kinds +
-    /// `#[fallback]` presence). Static — independent of any state instance.
-    /// Default empty; the macro overrides it (iamacoffeepot/aether#1037).
+    /// `#[fallback]` presence, iamacoffeepot/aether#1037). Static — independent
+    /// of any state instance. Default empty; the macro overrides it.
     #[must_use]
     fn capabilities() -> ComponentCapabilities
     where
@@ -175,74 +166,27 @@ pub trait NativeActor: Addressable {
     {
         ComponentCapabilities::default()
     }
-
-    /// Post-init, mail-allowed hook (ADR-0079). Default no-op.
-    fn wire(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {}
-
-    /// Pre-shutdown, mail-allowed hook (ADR-0079). Default no-op.
-    fn unwire(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {}
 }
 
-/// Sum dispatch entry-point — emitted once per `#[actor] impl
-/// NativeActor for X` block. Takes the inbound mail's `(kind, payload)`
-/// pair, routes by kind id to the right `#[handler]` method, and
-/// returns `Some(())` on match + decode success or `None` on unknown
-/// kind / decode failure.
+/// Native chassis-cap actor trait (spike: identity/runtime split, composed
+/// shape). One **identity** type owns the addressing ([`Addressable`]) and
+/// composes the two native behaviour traits parameterised by its runtime
+/// [`State`](NativeActor::State): [`Lifecycle<Self::State>`](Lifecycle) (boot)
+/// and [`Dispatch<Self::State>`](Dispatch) (per-kind routing). The state is
+/// **plain data** — bounded only by `Send + 'static`, it implements no
+/// behaviour trait.
 ///
-/// Issue 629 / Phase A: `&mut self` since the dispatcher thread owns
-/// the cap as `Box<Self>` and is the sole entry-point. `: Send +
-/// 'static` (no `Sync`) — the cap is not shared across threads.
+/// `State` defaults to `Self` for every un-split cap (the identity IS its own
+/// runtime, so `&mut Self::State == &mut self`); the default is supplied by the
+/// `#[actor]` macro (`type State = Self;`), since associated-type defaults are
+/// unstable on the 2024 edition. A cap that separates addressing from runtime
+/// (the `fs` cap) points `State` at a dedicated plain `struct` in a
+/// `feature = "runtime"`-gated module.
 ///
-/// Per-handler-kind compile checks come from
-/// [`aether_actor::HandlesKind`] (one impl per handler the macro
-/// emits); a future per-K `NativeDispatch<K>` may layer on top if a
-/// caller wants a typed `dispatch_kind::<K>` entry, but Phase A
-/// doesn't need it.
-pub trait NativeDispatch: Send + 'static {
-    // ADR-0112: the dispatch seam carries the most-permissive `Manual`
-    // ctx so a `#[handler::manual]` arm reaches the reply surface; the
-    // macro downgrades to `Single` per single-class handler. Every impl
-    // (macro-emitted and hand-written test fixtures) spells `Manual` here.
-    fn __aether_dispatch_envelope(
-        &mut self,
-        ctx: &mut NativeCtx<'_, crate::Manual>,
-        kind: KindId,
-        payload: &[u8],
-    ) -> Option<()>;
-
-    /// Catch-all fallback for envelopes whose kind doesn't match any
-    /// `#[handler]` (issue 576). Default returns `false` — the
-    /// chassis trampoline warn-logs the unknown-kind miss as today.
-    /// The `#[actor]` macro overrides this when the impl carries a
-    /// `#[fallback]` method, returning `true` after the user's
-    /// fallback runs so the trampoline knows to suppress the warn
-    /// log.
-    fn __aether_dispatch_fallback(
-        &mut self,
-        _ctx: &mut NativeCtx<'_, crate::Manual>,
-        _envelope: &Envelope,
-    ) -> bool {
-        false
-    }
-
-    /// The native cap's ADR-0033 receive-side capability surface —
-    /// every `#[handler]` kind plus `#[fallback]` presence
-    /// (iamacoffeepot/aether#1037). The `#[actor] impl NativeActor`
-    /// macro overrides this to enumerate the cap's handlers + fallback,
-    /// the always-on native counterpart of a wasm component's
-    /// `aether.kinds.inputs` manifest. The native-cap-boot path reads
-    /// it to populate the [`CapabilityRegistry`](crate::mail::CapabilityRegistry),
-    /// so a native cap (e.g.
-    /// `aether.fs`) is queryable for dispatchability just like a loaded
-    /// wasm component. Default is an empty surface — only the
-    /// (`name` / `doc`-dropping) handler ids + fallback flag are
-    /// load-bearing here; reply kinds are deliberately absent (handlers
-    /// promise nothing about replies).
-    #[must_use]
-    fn __aether_capabilities() -> ComponentCapabilities
-    where
-        Self: Sized,
-    {
-        ComponentCapabilities::default()
-    }
+/// The dispatcher owns the actor as `Box<Self::State>` and drives it through
+/// the composed traits: `<A as Lifecycle<_>>::init` / `<A as Dispatch<_>>::dispatch`.
+pub trait NativeActor: Addressable + Lifecycle<Self::State> + Dispatch<Self::State> {
+    /// The runtime state this identity boots into — **plain data**, bounded
+    /// only by `Send + 'static`.
+    type State: Send + 'static;
 }
