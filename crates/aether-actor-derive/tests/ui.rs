@@ -51,4 +51,13 @@ fn ui() {
     t.compile_fail("tests/ui/rejects_state_with_manual_hook.rs");
     t.compile_fail("tests/ui/rejects_accessor_without_state.rs");
     t.compile_fail("tests/ui/rejects_missing_rehydrate.rs");
+    // iamacoffeepot/aether#2330: the `#[actor]` split path gains a
+    // `runtime_feature = "name"` gate override and `one_per = "entity"`
+    // instance-cardinality, to `#[bridge]` parity. The substrate-typed runtime
+    // impls cfg out in the fixture bin (no `runtime`/named feature), so the pass
+    // fixtures exercise the marker + name-inventory surface the args drive;
+    // `one_per` without `instanced` is a macro-level rejection.
+    t.pass("tests/ui/accepts_actor_runtime_feature.rs");
+    t.pass("tests/ui/accepts_actor_one_per.rs");
+    t.compile_fail("tests/ui/rejects_actor_one_per_without_instanced.rs");
 }

@@ -744,7 +744,7 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
     let item = parse_macro_input!(item as ItemImpl);
-    match expand_handlers(item, opts) {
+    match expand_handlers(item, &opts) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
@@ -755,7 +755,7 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// a wrapping `#[bridge]` already emitted them as siblings of a cfg-gated
 /// module. `singleton` / `instanced` (ADR-0119) declare cardinality, mapped to
 /// the `Addressable::Resolver` per transport.
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 struct ActorOpts {
     skip_markers: bool,
     /// ADR-0119 cardinality from `#[actor(singleton|instanced)]`, mapped to
@@ -764,6 +764,21 @@ struct ActorOpts {
     /// wrapping `#[bridge]` owns the resolver) or where the transport supplies
     /// a default (FFI ⇒ `Embedded`).
     cardinality: Option<BridgeCardinality>,
+    /// iamacoffeepot/aether#2330: override the `runtime` feature the split path
+    /// gates its `Lifecycle`/`Dispatch`/`NativeActor` impls behind, from
+    /// `#[actor(runtime_feature = "name")]`. A media cap whose native half lives
+    /// behind a cap-specific feature (`render-native` / `audio-native` / …)
+    /// names it here so the runtime impls gate on that feature rather than the
+    /// generic `runtime`. `None` ⇒ the default `feature = "runtime"`. Mirrors
+    /// `BridgeOpts::feature`.
+    runtime_feature: Option<String>,
+    /// iamacoffeepot/aether#2330: the `one_per = "entity"` instance-cardinality
+    /// declaration (ADR-0088 §4 v2) from `#[actor(instanced, one_per = "…")]`,
+    /// threaded into the split-path name-inventory `TemplateEntry` as
+    /// `Cardinality::OnePer(entity)`. Only meaningful with `instanced`; absent ⇒
+    /// `Cardinality::Unbounded`. Mirrors `BridgeOpts::one_per` (which the
+    /// `#[bridge]` path already supports).
+    one_per: Option<String>,
 }
 
 fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
@@ -791,9 +806,27 @@ fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
             }
             opts.cardinality = Some(BridgeCardinality::Instanced);
             Ok(())
+        } else if meta.path.is_ident("runtime_feature") {
+            // iamacoffeepot/aether#2330: gate the split runtime impls on a
+            // cap-specific feature instead of the default `runtime`. Mirrors
+            // `parse_bridge_attr`'s `feature = "name"` arm.
+            let value = meta.value()?;
+            let lit: syn::LitStr = value.parse()?;
+            opts.runtime_feature = Some(lit.value());
+            Ok(())
+        } else if meta.path.is_ident("one_per") {
+            // iamacoffeepot/aether#2330: instanced-family entity relationship
+            // (ADR-0088 §4 v2). Mirrors `parse_bridge_attr`'s `one_per` arm; the
+            // `one_per`-requires-`instanced` check is in `expand_native_actor_trait`
+            // (arg order is unspecified, so cardinality may not be known yet here).
+            let value = meta.value()?;
+            let lit: syn::LitStr = value.parse()?;
+            opts.one_per = Some(lit.value());
+            Ok(())
         } else {
             Err(meta.error(
-                "unrecognised #[actor] argument; expected `singleton`, `instanced`, or `skip_markers`",
+                "unrecognised #[actor] argument; expected `singleton`, `instanced`, \
+                 `skip_markers`, `runtime_feature = \"name\"`, or `one_per = \"entity\"`",
             ))
         }
     });
@@ -1478,7 +1511,7 @@ struct FallbackFn {
     agent_doc: Option<String>,
 }
 
-fn expand_handlers(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream2> {
+fn expand_handlers(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStream2> {
     if let Some((_, trait_path, _)) = item.trait_.as_ref() {
         // Pattern-match the trait path's last identifier so the macro
         // works regardless of the user's import style — bare
@@ -1810,7 +1843,7 @@ fn classify_task_reply_mode(sig: &Signature, is_borrow: bool) -> syn::Result<Tas
 /// statics, plus the `HandlesKind<K>` and `Addressable` impls common to both
 /// shapes.
 #[allow(clippy::too_many_lines)] // emits the full wasm-actor surface in one go
-fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream2> {
+fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStream2> {
     let self_ty = &item.self_ty;
     let generics = &item.generics;
     let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
@@ -2456,7 +2489,19 @@ fn expand_wasm_actor(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream
 // dispatch ABI plumbing. Splitting into helpers would force shared
 // per-handler context structs without saving readability.
 #[allow(clippy::too_many_lines)]
-fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream2> {
+fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStream2> {
+    // iamacoffeepot/aether#2330: `one_per` only describes an instanced family's
+    // entity relationship; on a singleton (or a bare `#[actor]`) it is
+    // meaningless — reject it, mirroring `expand_bridge`'s guard. Validated here
+    // (not in `parse_actor_opts`) because attribute arg order is unspecified, so
+    // `cardinality` may not be known yet when `one_per` is parsed.
+    if opts.one_per.is_some() && !matches!(opts.cardinality, Some(BridgeCardinality::Instanced)) {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "#[actor] `one_per` requires `instanced` — it declares the entity \
+             relationship of an instanced family (ADR-0088 §4 v2)",
+        ));
+    }
     let self_ty = &item.self_ty;
     let generics = &item.generics;
     let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
@@ -3128,8 +3173,18 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     //   impl pins `type State` to the declared type and bridges identity →
     //   runtime. The addressing markers above (`Addressable` /
     //   `HandlesKind`) are always-on regardless.
+    // iamacoffeepot/aether#2330: a split cap gates its runtime impls behind the
+    // generic `runtime` feature by default, or a cap-specific feature when
+    // `#[actor(runtime_feature = "name")]` overrides it (the media caps whose
+    // native half lives behind `render-native` / `audio-native` / … name it so
+    // a plain-`runtime` build never tries to compile their substrate-typed
+    // impls without the heavy dep).
     let runtime_gate = if is_split {
-        quote! { #[cfg(feature = "runtime")] }
+        if let Some(feat) = opts.runtime_feature.as_deref() {
+            quote! { #[cfg(feature = #feat)] }
+        } else {
+            quote! { #[cfg(feature = "runtime")] }
+        }
     } else {
         quote! { #[cfg(not(target_family = "wasm"))] }
     };
@@ -3179,18 +3234,28 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
             }
         });
         match (namespace_expr, opts.cardinality) {
-            (Some(ns), Some(BridgeCardinality::Instanced)) => quote! {
-                #[cfg(not(target_family = "wasm"))]
-                ::aether_data::name_inventory::inventory::submit! {
-                    ::aether_data::name_inventory::TemplateEntry {
-                        domain: ::aether_data::MAILBOX_DOMAIN,
-                        prefix: #ns,
-                        template: ":{subname}",
-                        param: ::aether_data::name_inventory::ParamKind::Dynamic,
-                        cardinality: ::aether_data::name_inventory::Cardinality::Unbounded,
+            (Some(ns), Some(BridgeCardinality::Instanced)) => {
+                // iamacoffeepot/aether#2330: `#[actor(instanced, one_per = "x")]`
+                // declares the entity relationship (ADR-0088 §4 v2), mirroring
+                // `#[bridge]`'s `instanced_cardinality`; absent ⇒ `Unbounded`.
+                let cardinality = if let Some(entity) = opts.one_per.as_deref() {
+                    quote! { ::aether_data::name_inventory::Cardinality::OnePer(#entity) }
+                } else {
+                    quote! { ::aether_data::name_inventory::Cardinality::Unbounded }
+                };
+                quote! {
+                    #[cfg(not(target_family = "wasm"))]
+                    ::aether_data::name_inventory::inventory::submit! {
+                        ::aether_data::name_inventory::TemplateEntry {
+                            domain: ::aether_data::MAILBOX_DOMAIN,
+                            prefix: #ns,
+                            template: ":{subname}",
+                            param: ::aether_data::name_inventory::ParamKind::Dynamic,
+                            cardinality: #cardinality,
+                        }
                     }
                 }
-            },
+            }
             (Some(ns), _) => quote! {
                 #[cfg(not(target_family = "wasm"))]
                 ::aether_data::name_inventory::inventory::submit! {
