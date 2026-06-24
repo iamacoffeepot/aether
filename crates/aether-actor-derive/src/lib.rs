@@ -1699,7 +1699,7 @@ fn parse_handler_class(attr: &Attribute) -> syn::Result<HandlerClass> {
 /// are its generic arguments, not a kind. `is_borrow` is `true` when the
 /// parameter is `&TaskDone<…>` (the ADR-0109 opt-in for a macro-driven
 /// reply) versus the by-value `TaskDone<…>` self-resolve form.
-fn extract_task_handler_types(sig: &Signature) -> syn::Result<(Type, Type, bool)> {
+fn extract_task_handler_types(sig: &Signature, is_split: bool) -> syn::Result<(Type, Type, bool)> {
     if sig.inputs.len() != 3 {
         return Err(syn::Error::new_spanned(
             sig,
@@ -1709,7 +1709,22 @@ fn extract_task_handler_types(sig: &Signature) -> syn::Result<(Type, Type, bool)
         ));
     }
     let first = &sig.inputs[0];
-    if !matches!(first, FnArg::Receiver(_)) {
+    if is_split {
+        // iamacoffeepot/aether#2341: a split `#[actor]` (`type State = …`) is on
+        // the identity, so a `#[handler(task)]` takes the runtime state
+        // explicitly — `(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done:
+        // TaskDone<O>)` — rather than a `self` receiver, mirroring the split
+        // `#[handler]` / `#[fallback]` shapes. `rewrite_self_state_first_param`
+        // is already applied to `task_handlers` and the task-completion dispatch
+        // arm already passes `__aether_state`; this validator was the last gap.
+        if !matches!(first, FnArg::Typed(_)) {
+            return Err(syn::Error::new_spanned(
+                first,
+                "a split `#[actor]` (`type State = …`) #[handler(task)]'s first parameter \
+                 must be `state: &mut Self::State` (the runtime state), not a `self` receiver",
+            ));
+        }
+    } else if !matches!(first, FnArg::Receiver(_)) {
         return Err(syn::Error::new_spanned(
             first,
             "#[handler(task)] first parameter must be `&self` or `&mut self`",
@@ -2607,7 +2622,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts) -> syn::Result<To
                         }
                         HandlerVariant::Task => {
                             let (output_ty, context_ty, is_borrow) =
-                                extract_task_handler_types(&f.sig)?;
+                                extract_task_handler_types(&f.sig, is_split)?;
                             let mode = classify_task_reply_mode(&f.sig, is_borrow)?;
                             task_handlers.push(NativeActorTaskHandlerFn {
                                 method: f,
