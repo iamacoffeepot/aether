@@ -8,5 +8,8 @@
 pub mod kinds;
 mod widgets;
 
+#[cfg(feature = "ui-native")]
+mod runtime;
+
 pub use kinds::{UiBar, UiButton, UiClicked, UiLabel, UiPanel};
 pub use widgets::UiCapability;
