@@ -1,9 +1,10 @@
 //! `handle_load` — the wasm component load sequence.
 //!
-//! Declared as `mod load;` at the `component` level (outside `mod native`).
-//! Fields on [`ComponentHostCapability`] carry `pub(in crate::component)`
-//! visibility so this sibling module retains the same access as an
-//! inline impl block would.
+//! Declared as `mod load;` at the `component` level (a sibling of `runtime`).
+//! Under the ADR-0122 split the sequence is a method on
+//! `ComponentHostCapabilityState`; its fields carry
+//! `pub(in crate::component)` visibility so this sibling module retains the
+//! same access as an inline impl block would.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -19,9 +20,9 @@ use aether_substrate::mail::helpers::register_or_match_all;
 
 use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
 
-use super::ComponentHostCapability;
+use crate::component::runtime::ComponentHostCapabilityState;
 
-impl ComponentHostCapability {
+impl ComponentHostCapabilityState {
     #[allow(
         clippy::too_many_lines,
         reason = "one cohesive load sequence: parse + register kinds, resolve the export, \
