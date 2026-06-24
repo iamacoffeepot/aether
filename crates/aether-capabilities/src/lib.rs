@@ -120,11 +120,12 @@ pub use shared::contentgen::{
     stage_gen_output,
 };
 // `ComponentHostConfig` is wasmtime-bound (it holds `Arc<Engine>` /
-// `Arc<Linker<ComponentCtx>>`). It re-exports only on the native
-// target — wasm-component consumers see the cap stub via
-// `ComponentHostCapability` for typed `ctx.actor::<...>()` addressing
-// without dragging the wasmtime stack into the wasm graph.
-#[cfg(not(target_arch = "wasm32"))]
+// `Arc<Linker<ComponentCtx>>`). Under the ADR-0122 split it lives behind
+// the `feature = "runtime"` gate (only the runtime half names it), so it
+// re-exports only when that feature is on — a transport-only build sees the
+// cap stub via `ComponentHostCapability` for typed `ctx.actor::<...>()`
+// addressing without dragging the wasmtime stack in.
+#[cfg(feature = "runtime")]
 pub use component::ComponentHostConfig;
 pub use engine::EngineProxy;
 #[cfg(not(target_arch = "wasm32"))]
