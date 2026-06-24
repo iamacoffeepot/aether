@@ -41,7 +41,7 @@ impl Drop for HeartbeatHandle {
 /// each interval — the empty-payload wake shape the RPC reader
 /// sidecar uses (the timer carries no data, only the schedule). The
 /// handle's `Drop` stops + joins the thread.
-pub(super) fn spawn_heartbeat(
+pub fn spawn_heartbeat(
     mailer: Arc<Mailer>,
     self_mailbox: MailboxId,
     interval: Duration,

@@ -23,7 +23,7 @@ const PROXY_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 /// the wait-forever sentinel: retry until the dial succeeds or hits
 /// a terminal error. Handshake / frame errors are always terminal:
 /// the peer answered, just wrongly.
-pub(super) fn connect_proxy(
+pub fn connect_proxy(
     addr: &str,
     mailer: &Arc<Mailer>,
     self_mailbox: MailboxId,
