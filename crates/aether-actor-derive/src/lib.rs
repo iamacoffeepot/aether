@@ -2771,9 +2771,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     // `Dispatch<S>` impls carry no `NativeActor` bound, so their method
     // signatures must name this concrete type rather than `Self::State`.
     let state_ty: Type = if is_split {
-        declared_state_ty
-            .clone()
-            .expect("is_split implies a declared `type State`")
+        declared_state_ty.expect("is_split implies a declared `type State`")
     } else {
         syn::parse_quote!(Self)
     };
