@@ -1264,9 +1264,28 @@ mod tests {
     }
 
     impl NativeActor for StubActor {
-        type Config = ();
-        // Spike split: the un-split shape — the identity is its own runtime.
+        // Spike fold: un-split fixture — `State = Self`, forwarding to the
+        // fixture's hand-written `Lifecycle` / `NativeDispatch` impls.
+        type Config = <Self as aether_actor::Lifecycle>::Config;
         type State = Self;
+        fn init(__c: Self::Config, __ctx: &mut crate::actor::native::NativeInitCtx<'_>) -> Result<Self, crate::chassis::error::BootError> {
+            <Self as aether_actor::Lifecycle>::init(__c, __ctx)
+        }
+        fn dispatch(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __k: crate::mail::KindId, __p: &[u8]) -> Option<()> {
+            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_envelope(__s, __ctx, __k, __p)
+        }
+        fn dispatch_fallback(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_, crate::Manual>, __e: &crate::actor::native::envelope::Envelope) -> bool {
+            <Self as crate::actor::native::NativeDispatch>::__aether_dispatch_fallback(__s, __ctx, __e)
+        }
+        fn capabilities() -> crate::actor::native::ComponentCapabilities {
+            <Self as crate::actor::native::NativeDispatch>::__aether_capabilities()
+        }
+        fn wire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
+            <Self as aether_actor::Lifecycle>::wire(__s, __ctx)
+        }
+        fn unwire(__s: &mut Self, __ctx: &mut crate::actor::native::NativeCtx<'_>) {
+            <Self as aether_actor::Lifecycle>::unwire(__s, __ctx)
+        }
     }
 
     /// Issue 629 / Phase A: handle-export round-trip. Caps publish a

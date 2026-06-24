@@ -1044,7 +1044,8 @@ fn manual_handler_replies_through_ctx() {
         // via `new_dispatching`.
         let mut ctx =
             NativeCtx::new_dispatching(&binding, caller_reply_to, MailId::NONE, MailId::NONE);
-        let handled = cap.__aether_dispatch_envelope(
+        let handled = <ManualReplyCap as aether_substrate::actor::native::NativeActor>::dispatch(
+            &mut cap,
             &mut ctx,
             ManualPing::ID,
             &ManualPing { seq: 9 }.encode_into_bytes(),

@@ -162,7 +162,9 @@ mod native {
 
                 {
                     let mut ctx = NativeCtx::new_dispatching(&transport, caller_source, root, root);
-                    cap.__aether_dispatch_envelope(&mut ctx, kind_id, payload);
+                    <HeadlessWindowCapability as aether_substrate::actor::native::NativeActor>::dispatch(
+                        &mut cap, &mut ctx, kind_id, payload,
+                    );
                 }
 
                 assert_eq!(

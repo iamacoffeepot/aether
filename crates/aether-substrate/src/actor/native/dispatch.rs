@@ -32,7 +32,7 @@ use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult};
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
 use crate::actor::native::envelope::Envelope;
-use crate::actor::native::{NativeActor, NativeDispatch};
+use crate::actor::native::NativeActor;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, MailboxId};
 
@@ -59,10 +59,7 @@ pub fn typed_then_fallback_or_warn<A>(
 ) where
     A: NativeActor,
 {
-    if actor
-        .__aether_dispatch_envelope(ctx, kind, payload)
-        .is_some()
-    {
+    if A::dispatch(actor.as_mut(), ctx, kind, payload).is_some() {
         return;
     }
     let Some(env) = ctx.inbound().cloned() else {
@@ -73,7 +70,7 @@ pub fn typed_then_fallback_or_warn<A>(
         );
         return;
     };
-    if !actor.__aether_dispatch_fallback(ctx, &env) {
+    if !A::dispatch_fallback(actor.as_mut(), ctx, &env) {
         tracing::warn!(
             target: "aether_substrate::dispatch",
             actor = A::NAMESPACE,

@@ -93,9 +93,6 @@ impl Deref for PooledSlots {
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
 use crate::actor::native::NativeActor;
-// Spike split: `actor.unwire(..)` resolves through `A::State: Lifecycle`,
-// which is no longer a `NativeActor` supertrait, so the trait must be in scope.
-use aether_actor::Lifecycle;
 use crate::actor::registry::ActorRegistry;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailboxId, Source};
@@ -351,7 +348,7 @@ where
                 aether_data::MailId::NONE,
                 aether_data::MailId::NONE,
             );
-            actor.unwire(&mut close_ctx);
+            A::unwire(actor.as_mut(), &mut close_ctx);
         });
     }
 

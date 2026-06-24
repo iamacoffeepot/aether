@@ -22,9 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use aether_actor::{
-    HandlesKind, Instanced, Lifecycle, NamespaceError, validate_namespace_segment,
-};
+use aether_actor::{HandlesKind, Instanced, NamespaceError, validate_namespace_segment};
 use aether_data::{ActorId, Kind, Tag, fold_lineage, with_tag};
 use aether_kinds::trace::Nanos;
 
@@ -430,9 +428,7 @@ impl Spawner {
             // per-actor `ActorLogRing`. The pre-ADR
             // `with_actor_dispatch` + `drain_buffer` flush hop
             // retired alongside `LogBatch`.
-            let init_result = local::with_stamped(&slots, || {
-                <A::State as Lifecycle>::init(config, &mut init_ctx)
-            });
+            let init_result = local::with_stamped(&slots, || A::init(config, &mut init_ctx));
             match init_result {
                 Ok(a) => a,
                 Err(e) => return Err(SpawnError::InitFailed(e)),
@@ -543,7 +539,7 @@ impl Spawner {
         // ctx, peers are running, all mailboxes claimed.
         local::with_stamped(&slots, || {
             let mut wire_ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
-            actor.wire(&mut wire_ctx);
+            A::wire(actor.as_mut(), &mut wire_ctx);
         });
 
         // Pre-load bootstrap mail. tx is alive (rx is held by the

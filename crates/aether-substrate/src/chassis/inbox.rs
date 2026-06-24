@@ -680,7 +680,8 @@ mod tests {
             // `Manual` ctx — build it via `new_dispatching`, not `new`.
             let mut ctx =
                 NativeCtx::new_dispatching(&binding, caller_reply_to, MailId::NONE, MailId::NONE);
-            let handled = cap.__aether_dispatch_envelope(
+            let handled = <ReplyProbe as crate::actor::native::NativeActor>::dispatch(
+                &mut cap,
                 &mut ctx,
                 ReplyRequest::ID,
                 &ReplyRequest { seq: 9 }.encode_into_bytes(),
