@@ -73,7 +73,7 @@ pub use config::{EngineProxyConfig, HeartbeatParams};
 /// `aether.engine.proxy:<id>` cap **identity** (ADR-0122 identity/runtime
 /// split). A ZST carrying only the addressing — `Addressable` (`NAMESPACE`,
 /// `Resolver`), the per-handler `HandlesKind` markers, and the instanced
-/// name-inventory entry (`one_per = "engine"`), all emitted always-on by
+/// name-inventory entry, all emitted always-on by
 /// `#[actor]`. The state-bearing runtime (`runtime::EngineProxyState`, which
 /// holds the `aether_substrate`-typed RPC connection + the forked child +
 /// heartbeat handle) lives behind the one `feature = "runtime"` gate, so a
@@ -99,7 +99,7 @@ use aether_actor::actor;
 #[allow(clippy::wildcard_imports)]
 use runtime::*;
 
-#[actor(instanced, one_per = "engine")]
+#[actor(instanced)]
 impl NativeActor for EngineProxy {
     /// The runtime state this identity boots into (ADR-0122 split): the
     /// per-engine outbound RPC connection plus the in-flight

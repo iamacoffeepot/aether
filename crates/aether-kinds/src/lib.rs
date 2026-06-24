@@ -1755,30 +1755,6 @@ mod control_plane {
         Dynamic,
     }
 
-    /// *How many* instances a [`TemplateEntryWire`] family can have — the
-    /// wire mirror of `aether_data::name_inventory::Cardinality` (ADR-0088
-    /// §4 v2). Orthogonal to [`ParamKindWire`] (the *shape* axis): the
-    /// client expands / prehashes templates off `param`, while
-    /// `cardinality` is the self-describing "how many" the manifest
-    /// surfaces so a consumer reads "trampoline = one mailbox per loaded
-    /// component" rather than an opaque `Dynamic` family. Struct variants
-    /// (not tuple) so the wire JSON carries named fields, matching
-    /// [`ParamKindWire`].
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.inventory.cardinality")]
-    pub enum CardinalityWire {
-        /// A compile-time-known finite instance bound (`aether-worker-{N}`
-        /// prehashes `count` instantiations).
-        Bounded { count: u64 },
-        /// One instance per live entity of the named kind — the
-        /// relationship the four instanced actors carry (`"component"`,
-        /// `"connection"`, `"listener"`, `"engine"`).
-        OnePer { entity: String },
-        /// Open-ended, runtime-minted, no fixed relationship
-        /// (`aether-instanced-{full_name}`).
-        Unbounded,
-    }
-
     /// A declared name on the wire — the mirror of
     /// `aether_data::name_inventory::NameEntry` (ADR-0088 §3). `domain`
     /// is the byte-domain prefix the name is hashed under; `name` is the
@@ -1793,18 +1769,15 @@ mod control_plane {
     /// A name template for an instanced family on the wire — the mirror
     /// of `aether_data::name_inventory::TemplateEntry` (ADR-0088 §4).
     /// `template` carries one `{…}` hole; [`ParamKindWire`] (the shape
-    /// axis) says how it is filled and [`CardinalityWire`] (the how-many
-    /// axis) says how many instances exist. Preserving the template
-    /// (rather than its expansion) keeps the family shape so the client
-    /// can declare "ids in this family exist and look like *this*" even
-    /// for `Dynamic` families it cannot enumerate; `cardinality` makes
-    /// that declaration self-describing.
+    /// axis) says how it is filled. Preserving the template (rather than
+    /// its expansion) keeps the family shape so the client can declare
+    /// "ids in this family exist and look like *this*" even for `Dynamic`
+    /// families it cannot enumerate.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct TemplateEntryWire {
         pub domain: Vec<u8>,
         pub template: String,
         pub param: ParamKindWire,
-        pub cardinality: CardinalityWire,
     }
 
     /// `aether.inventory.manifest` — request the running substrate's

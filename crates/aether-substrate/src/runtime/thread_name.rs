@@ -56,7 +56,7 @@ use std::thread;
 use aether_data::ThreadId;
 use aether_data::build_static_reverse_map;
 use aether_data::hash::{MAILBOX_DOMAIN, THREAD_DOMAIN};
-use aether_data::name_inventory::{Cardinality, ParamKind, TemplateEntry, inventory};
+use aether_data::name_inventory::{ParamKind, TemplateEntry, inventory};
 use aether_data::tagged_id;
 
 /// Upper bound on the worker-id range the `aether-worker-{N}` template
@@ -71,17 +71,15 @@ const WORKER_TEMPLATE_HI: u64 = 255;
 // `aether-worker-N`; native-actor root threads `aether-root-<NAMESPACE>`
 // (over the declared mailbox namespaces); instanced-actor threads
 // `aether-instanced-<full_name>` (an unbounded runtime parameter). The
-// `cardinality` (ADR-0088 §4 v2) states how many of each can exist:
-// workers prehash a fixed ceiling (`Bounded`); one root thread per
-// declared mailbox (`OnePer`); instanced threads are open-ended
-// (`Unbounded`).
+// `param` shape axis is what the reverse-map builder enumerates: workers
+// prehash a `Bounded` integer range, root threads range over the
+// `Declared` mailbox namespaces, and instanced threads are `Dynamic`.
 inventory::submit! {
     TemplateEntry {
         domain: THREAD_DOMAIN,
         prefix: "",
         template: "aether-worker-{N}",
         param: ParamKind::Bounded { lo: 0, hi: WORKER_TEMPLATE_HI },
-        cardinality: Cardinality::Bounded(WORKER_TEMPLATE_HI + 1),
     }
 }
 inventory::submit! {
@@ -90,7 +88,6 @@ inventory::submit! {
         prefix: "",
         template: "aether-root-{NAMESPACE}",
         param: ParamKind::Declared { domain: MAILBOX_DOMAIN },
-        cardinality: Cardinality::OnePer("mailbox"),
     }
 }
 inventory::submit! {
@@ -99,7 +96,6 @@ inventory::submit! {
         prefix: "",
         template: "aether-instanced-{full_name}",
         param: ParamKind::Dynamic,
-        cardinality: Cardinality::Unbounded,
     }
 }
 

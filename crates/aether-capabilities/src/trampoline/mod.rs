@@ -34,7 +34,7 @@
 //!
 //! ## Shape
 //!
-//! Instanced (`one_per = "component"`). Anything the trampoline doesn't handle
+//! Instanced. Anything the trampoline doesn't handle
 //! natively (today: `DropComponent`, `ReplaceComponent`) falls through the
 //! `#[fallback]` (`forward_to_wasm`) to the wasm guest via `Component::deliver`.
 //! The framework dispatcher reads from the trampoline's `NativeBinding`;
@@ -98,7 +98,7 @@ pub use runtime::WasmTrampolineConfig;
 /// `WasmTrampoline::NAMESPACE`.
 pub struct WasmTrampoline;
 
-#[actor(instanced, one_per = "component")]
+#[actor(instanced)]
 impl NativeActor for WasmTrampoline {
     /// The runtime state this identity boots into (ADR-0122 split): the
     /// field-bearing [`WasmTrampolineState`] holding the wasm `Component` and

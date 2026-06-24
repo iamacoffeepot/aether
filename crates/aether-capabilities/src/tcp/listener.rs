@@ -41,7 +41,7 @@ use runtime::*;
 #[cfg(feature = "runtime")]
 mod runtime;
 
-#[actor(instanced, one_per = "listener")]
+#[actor(instanced)]
 impl NativeActor for TcpListenerActor {
     /// The runtime state this identity boots into (ADR-0122 split): the
     /// accept-thread + connection-channel bundle.
