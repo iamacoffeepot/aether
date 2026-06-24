@@ -60,4 +60,8 @@ fn ui() {
     t.pass("tests/ui/accepts_actor_runtime_feature.rs");
     t.pass("tests/ui/accepts_actor_one_per.rs");
     t.compile_fail("tests/ui/rejects_actor_one_per_without_instanced.rs");
+    // iamacoffeepot/aether#2338: a split `#[actor]` may carry a `#[fallback]`
+    // whose first param is `state: &mut Self::State` (the validator gained the
+    // `is_split` branch the split `#[handler]` path already had).
+    t.pass("tests/ui/accepts_actor_split_fallback.rs");
 }
