@@ -26,6 +26,7 @@ The guest/actor SDK is **`aether-actor`** — the `Actor` / `WasmActor` traits, 
 - **Load-bearing architectural decisions** are recorded as ADRs in `docs/adr/NNNN-title.md`. Use `docs/adr/TEMPLATE.md` when starting a new one. Number sequentially. An ADR is reviewed via a PR like any other change.
 - **Branches**: `type/short-slug` (e.g. `chore/ci-bootstrap`, `feat/mail-runtime`, `docs/adr-workflow`).
 - **Worktrees** live under `./.claude/worktrees/` (gitignored), never as siblings of the repo. `git worktree add .claude/worktrees/<slug>` — the path is already excluded so the worktree never shows up in `git status`.
+- **Spikes** run on their own `spike/<name>` branch cut from `main` (`git checkout -b spike/<name> main`), with the spike crate in its own `spikes/<name>/` subdir on that branch. `main` never carries a `spikes/` tree; the spike branches are listable via `git branch -r | grep '^[[:space:]]*origin/spike/'`.
 - **Commits and PR titles** follow Conventional Commits (`type(scope): subject`). Enforced in CI against PR titles. Main uses squash-merge with the PR title as the commit subject, so PR title quality matters.
 - **Merging**: `main` is protected (PR required, all CI checks required, linear history, no force-push). Claude does not push to `main`, does not force-push reviewed branches, does not self-merge, and asks before destructive operations.
 - **PRs** should be small and focused — one concept per PR.
