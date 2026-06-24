@@ -1,8 +1,10 @@
 //! The settlement-gated advance state machine (ADR-0082 §6). Carries
 //! the in-flight [`PendingAdvance`], the edge-resolution + force-complete
 //! decision logic, and the rolling settlement-latency EWMA with its
-//! slow-warn gate (iamacoffeepot/aether#1048 / #1052). Native-only — the
-//! whole settlement path elides on wasm32 with `mod native`.
+//! slow-warn gate (iamacoffeepot/aether#1048 / #1052). Runtime-only — the
+//! whole settlement path sits behind the `feature = "runtime"` gate (the
+//! `mod settlement;` declaration carries it), alongside the rest of the
+//! `LifecycleCapability` runtime half (ADR-0122).
 
 use std::time::{Duration, Instant};
 
@@ -14,7 +16,7 @@ use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::mail::{MailId, Source};
 
 use super::LifecycleStateData;
-use super::native::LifecycleCapability;
+use super::runtime::LifecycleCapabilityState;
 
 /// Default deadline for a pending advance's `Settled` to arrive
 /// before [`LifecycleCapability::on_advance`](super) force-completes it
@@ -71,7 +73,7 @@ pub struct PendingAdvance {
     pub(crate) started: Instant,
 }
 
-impl LifecycleCapability {
+impl LifecycleCapabilityState {
     /// Fold one observed `Sent`→`Settled` latency into the rolling
     /// EWMA and emit a rate-limited warn when a settle blows past the
     /// slow threshold (`advance_timeout / SLOW_SETTLE_DIVISOR`). The
@@ -183,7 +185,7 @@ mod tests {
     //! frame-loop scenarios; the decision functions below carry the
     //! ADR-0082 §3 quit-flag semantics and the #1048/#1052
     //! settlement-latency gate, pinned at the unit layer.
-    use super::super::native::test_cap;
+    use super::super::test_cap;
     use super::*;
     use aether_data::Kind;
     use aether_kinds::{Present, Render};

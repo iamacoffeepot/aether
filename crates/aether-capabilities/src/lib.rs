@@ -147,7 +147,10 @@ pub use input::InputCapability;
 #[cfg(not(target_arch = "wasm32"))]
 pub use input::InputConfig;
 pub use inventory::InventoryCapability;
-#[cfg(not(target_arch = "wasm32"))]
+// ADR-0122 split: `LifecycleConfig` configures the runtime-only
+// `LifecycleCapabilityState`, so it rides the `runtime` gate with the
+// rest of the lifecycle runtime half.
+#[cfg(feature = "runtime")]
 pub use lifecycle::LifecycleConfig;
 pub use lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 
