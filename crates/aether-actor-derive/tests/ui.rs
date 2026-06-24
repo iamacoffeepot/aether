@@ -64,4 +64,8 @@ fn ui() {
     // whose first param is `state: &mut Self::State` (the validator gained the
     // `is_split` branch the split `#[handler]` path already had).
     t.pass("tests/ui/accepts_actor_split_fallback.rs");
+    // iamacoffeepot/aether#2341: a split `#[actor]` may carry a `#[handler(task)]`
+    // whose first param is `state: &mut Self::State` (the last native-split
+    // first-param validator to gain the `is_split` branch).
+    t.pass("tests/ui/accepts_actor_split_task_handler.rs");
 }
