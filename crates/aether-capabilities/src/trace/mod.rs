@@ -35,7 +35,7 @@ use aether_actor::actor;
 /// split, ADR-0086 Phase 3c). A ZST carrying only the addressing — the
 /// `Addressable` / `HandlesKind` markers and the name-inventory entry,
 /// all emitted always-on by `#[actor]`. The state-bearing runtime
-/// ([`TraceDispatchCapabilityState`], holding the substrate registry
+/// (`TraceDispatchCapabilityState`, holding the substrate registry
 /// handle) lives behind the one `feature = "runtime"` gate, so a
 /// transport-only build never names it nor pulls `aether_substrate`
 /// through this cap.
@@ -52,35 +52,41 @@ pub struct TraceDispatchCapability;
 // `with_registry` ctor) sits behind the one `feature = "runtime"` gate.
 #[cfg(not(target_arch = "wasm32"))]
 use aether_kinds::trace::DispatchTracedAck;
-#[cfg(feature = "runtime")]
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-#[cfg(feature = "runtime")]
-use aether_substrate::chassis::error::BootError;
-#[cfg(feature = "runtime")]
-use aether_substrate::mail::helpers::resolve_bundle;
-#[cfg(feature = "runtime")]
-use aether_substrate::mail::registry::Registry;
-#[cfg(feature = "runtime")]
-use std::sync::Arc;
-
-/// `aether.trace` runtime state (ADR-0086 Phase 3c). Holds the
-/// substrate registry handle for `DispatchTraced`'s per-envelope name
-/// resolution (recipient mailbox name → id, kind name → id). The
-/// addressing identity is the distinct ZST `TraceDispatchCapability`.
-#[cfg(feature = "runtime")]
-pub struct TraceDispatchCapabilityState {
-    /// Substrate registry handle for `DispatchTraced`'s per-envelope
-    /// name resolution. Cloned from `ctx.mailer().registry()` at init;
-    /// matches the `RenderCapability` pattern that resolves
-    /// `CaptureFrame` mail bundles through the same registry.
-    registry: Arc<Registry>,
-}
 
 #[cfg(feature = "runtime")]
-impl TraceDispatchCapabilityState {
-    /// The single struct-construction site.
-    fn with_registry(registry: Arc<Registry>) -> Self {
-        Self { registry }
+#[allow(clippy::wildcard_imports)]
+use runtime::*;
+
+/// The `aether.trace` runtime half (ADR-0122 identity/runtime split):
+/// the `aether_substrate`-typed imports and the state struct + its
+/// `with_registry` ctor, gated once by this module rather than per-import.
+/// The `#[actor] impl` reaches them through the single `use runtime::*`
+/// glob above.
+#[cfg(feature = "runtime")]
+mod runtime {
+    pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    pub use aether_substrate::chassis::error::BootError;
+    pub use aether_substrate::mail::helpers::resolve_bundle;
+    pub use aether_substrate::mail::registry::Registry;
+    pub use std::sync::Arc;
+
+    /// `aether.trace` runtime state (ADR-0086 Phase 3c). Holds the
+    /// substrate registry handle for `DispatchTraced`'s per-envelope name
+    /// resolution (recipient mailbox name → id, kind name → id). The
+    /// addressing identity is the distinct ZST `TraceDispatchCapability`.
+    pub struct TraceDispatchCapabilityState {
+        /// Substrate registry handle for `DispatchTraced`'s per-envelope
+        /// name resolution. Cloned from `ctx.mailer().registry()` at init;
+        /// matches the `RenderCapability` pattern that resolves
+        /// `CaptureFrame` mail bundles through the same registry.
+        pub(super) registry: Arc<Registry>,
+    }
+
+    impl TraceDispatchCapabilityState {
+        /// The single struct-construction site.
+        pub(super) fn with_registry(registry: Arc<Registry>) -> Self {
+            Self { registry }
+        }
     }
 }
 

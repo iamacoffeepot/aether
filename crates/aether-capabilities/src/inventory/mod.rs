@@ -67,7 +67,7 @@ mod resolve;
 /// ADR-0088 §6, widened by ADR-0091 §5). A ZST carrying only the
 /// addressing — the `Addressable` / `HandlesKind` markers and the
 /// name-inventory entry, all emitted always-on by `#[actor]`. The
-/// state-bearing runtime ([`InventoryCapabilityState`], holding the
+/// state-bearing runtime (`InventoryCapabilityState`, holding the
 /// substrate `Arc<Registry>` the `ListKinds` arm projects) lives behind
 /// the one `feature = "runtime"` gate, so a transport-only build never
 /// names it nor pulls `aether_substrate` through this cap.
@@ -91,28 +91,42 @@ pub struct InventoryCapability;
 use aether_kinds::{HandlersResult, ListKindsResult, ManifestResult, ResolveResult};
 
 #[cfg(feature = "runtime")]
-use self::manifest::{cardinality_wire, param_kind_wire};
-#[cfg(feature = "runtime")]
-use self::resolve::resolve_ids;
+#[allow(clippy::wildcard_imports)]
+use runtime::*;
 
+/// The `aether.inventory` runtime half (ADR-0122 identity/runtime split):
+/// the wire-projection helpers, the `aether_substrate`-typed imports, and
+/// the state struct, gated once by this module rather than per-import. The
+/// `#[actor] impl` reaches them through the single `use runtime::*` glob
+/// above.
 #[cfg(feature = "runtime")]
-use aether_data::KindId;
-#[cfg(feature = "runtime")]
-use aether_data::canonical::kind_id_from_parts;
-#[cfg(feature = "runtime")]
-use aether_data::name_inventory::{handler_entries, name_entries, template_entries};
-#[cfg(feature = "runtime")]
-use aether_data::wire;
-#[cfg(feature = "runtime")]
-use aether_kinds::{HandlerEntryWire, KindDescriptorWire, NameEntryWire, TemplateEntryWire};
-#[cfg(feature = "runtime")]
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-#[cfg(feature = "runtime")]
-use aether_substrate::chassis::error::BootError;
-#[cfg(feature = "runtime")]
-use aether_substrate::mail::registry::Registry;
-#[cfg(feature = "runtime")]
-use std::sync::Arc;
+mod runtime {
+    pub use super::manifest::{cardinality_wire, param_kind_wire};
+    pub use super::resolve::resolve_ids;
+
+    pub use aether_data::KindId;
+    pub use aether_data::canonical::kind_id_from_parts;
+    pub use aether_data::name_inventory::{handler_entries, name_entries, template_entries};
+    pub use aether_data::wire;
+    pub use aether_kinds::{
+        HandlerEntryWire, KindDescriptorWire, NameEntryWire, TemplateEntryWire,
+    };
+    pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    pub use aether_substrate::chassis::error::BootError;
+    pub use aether_substrate::mail::registry::Registry;
+    pub use std::sync::Arc;
+
+    /// `aether.inventory` runtime state (ADR-0091 §2). Holds the substrate's
+    /// shared `Arc<Registry>` — the same `Arc` `ComponentHostCapability`
+    /// clones for `register_or_match_all` — so a load-time registration is
+    /// visible to `on_list_kinds` the moment it returns. The `Manifest` /
+    /// `Resolve` / `ListHandlers` arms are stateless reads of process-global
+    /// link-time tables. The addressing identity is the distinct ZST
+    /// `InventoryCapability`.
+    pub struct InventoryCapabilityState {
+        pub(super) registry: Arc<Registry>,
+    }
+}
 
 // Used only by the test suite — gate to avoid unused-import warnings in
 // the non-test build (they flow in via `use super::*` inside `mod tests`).
@@ -122,18 +136,6 @@ use aether_data::tagged_id;
 use aether_kinds::{CardinalityWire, ParamKindWire};
 #[cfg(all(test, feature = "runtime"))]
 use aether_substrate::runtime::thread_name::resolve_runtime;
-
-/// `aether.inventory` runtime state (ADR-0091 §2). Holds the substrate's
-/// shared `Arc<Registry>` — the same `Arc` `ComponentHostCapability`
-/// clones for `register_or_match_all` — so a load-time registration is
-/// visible to `on_list_kinds` the moment it returns. The `Manifest` /
-/// `Resolve` / `ListHandlers` arms are stateless reads of process-global
-/// link-time tables. The addressing identity is the distinct ZST
-/// `InventoryCapability`.
-#[cfg(feature = "runtime")]
-pub struct InventoryCapabilityState {
-    registry: Arc<Registry>,
-}
 
 #[actor(singleton)]
 impl NativeActor for InventoryCapability {

@@ -12,6 +12,7 @@
 // and exempts only `pub use`).
 use super::LifecycleGraphData;
 
+pub use super::config::LifecycleConfig;
 #[cfg(test)]
 pub use super::settlement::ADVANCE_TIMEOUT_MS_DEFAULT;
 pub use super::settlement::{PendingAdvance, Step, resolve_edge};
@@ -20,6 +21,7 @@ pub use super::subscribers::broadcast_to_subscribers;
 pub use aether_actor::Manual;
 pub use aether_actor::actor::ctx::OutboundReply;
 pub use aether_data::{Kind, KindId, MailboxId as DataMailboxId, mailbox_id_from_name};
+pub use aether_kinds::LifecycleAdvanceComplete;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::mail::mailer::Mailer;
