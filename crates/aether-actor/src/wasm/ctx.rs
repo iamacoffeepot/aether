@@ -380,6 +380,9 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         // ErasedWasmActor`, so the bound is the mechanical realisation of
         // "reuse the existing erasure" (no new child-dispatch trait).
         A: Instanced + WasmActor + ErasedWasmActor,
+        // iamacoffeepot/aether#2311: `A::init` returns the runtime state, boxed
+        // as the erased child (`State = Self` for an un-split component).
+        <A as WasmActor>::State: ErasedWasmActor,
     {
         let (is_counter, full_subname) = resolve_subname(subname)?;
         let alias = MailboxId(mail::spawn_inline_child(is_counter, &full_subname));
@@ -572,6 +575,9 @@ fn install_inline_child<A>(
 ) -> Result<MailboxId, SpawnError>
 where
     A: WasmActor + ErasedWasmActor,
+    // iamacoffeepot/aether#2311: `A::init` returns the runtime state, boxed as
+    // the erased child. For an un-split component `State = Self`.
+    <A as WasmActor>::State: ErasedWasmActor,
 {
     let mut ctx = WasmInitCtx::__new(alias.0);
     match A::init(config, &mut ctx) {
@@ -940,7 +946,7 @@ mod tests {
         type Resolver = crate::Many;
     }
 
-    impl crate::Lifecycle for FailingChild {
+    impl crate::Lifecycle<Self> for FailingChild {
         type Config = ();
         type InitError = ActorInitError;
         type InitCtx<'a> = WasmInitCtx<'a>;
@@ -952,7 +958,14 @@ mod tests {
     }
 
     impl WasmActor for FailingChild {
-        type State = ();
+        type State = Self;
+        type Persist = ();
+    }
+
+    impl crate::WasmDispatch<Self> for FailingChild {
+        fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+            unreachable!("a failed-init child is never dispatched")
+        }
     }
 
     impl ErasedWasmActor for FailingChild {
@@ -1051,7 +1064,7 @@ mod tests {
         type Resolver = crate::Many;
     }
 
-    impl crate::Lifecycle for SucceedingChild {
+    impl crate::Lifecycle<Self> for SucceedingChild {
         type Config = ();
         type InitError = ActorInitError;
         type InitCtx<'a> = WasmInitCtx<'a>;
@@ -1063,7 +1076,14 @@ mod tests {
     }
 
     impl WasmActor for SucceedingChild {
-        type State = ();
+        type State = Self;
+        type Persist = ();
+    }
+
+    impl crate::WasmDispatch<Self> for SucceedingChild {
+        fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+            unreachable!("the despawn test never dispatches this child")
+        }
     }
 
     impl ErasedWasmActor for SucceedingChild {

@@ -375,6 +375,7 @@ const _: fn() = || {
 mod tests {
     use super::*;
 
+    use crate::actor::native::Dispatch;
     use crate::actor::native::binding::NativeBinding;
     use crate::actor::native::ctx::NativeCtx;
     use crate::chassis::settlement::SettlementRegistry;
@@ -613,7 +614,7 @@ mod tests {
         reply_env.discharge();
     }
 
-    use crate::{BootError, NativeActor, NativeDispatch, NativeInitCtx};
+    use crate::{BootError, NativeActor, NativeInitCtx};
     use aether_data::Schema;
 
     #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize, Kind, Schema)]
@@ -680,7 +681,8 @@ mod tests {
             // `Manual` ctx — build it via `new_dispatching`, not `new`.
             let mut ctx =
                 NativeCtx::new_dispatching(&binding, caller_reply_to, MailId::NONE, MailId::NONE);
-            let handled = cap.__aether_dispatch_envelope(
+            let handled = <ReplyProbe as Dispatch<ReplyProbe>>::dispatch(
+                &mut cap,
                 &mut ctx,
                 ReplyRequest::ID,
                 &ReplyRequest { seq: 9 }.encode_into_bytes(),

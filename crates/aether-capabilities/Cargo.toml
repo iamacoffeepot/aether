@@ -30,7 +30,15 @@ license.workspace = true
 # substrate-side runtime impls. Wasm consumers do
 # `default-features = false` and opt into per-cap marker features
 # (`render` / `audio`) for the caps they typed-send to.
-default = ["native"]
+default = ["native", "runtime"]
+
+# iamacoffeepot/aether#2311 (identity/runtime split): the `#[actor]` macro gates
+# a split cap's runtime impls (`Lifecycle` / `NativeActor` / `Dispatch` + handler
+# bodies) behind this feature, so a transport-only build (`--features native`
+# without `runtime`) compiles only the cap's identity + addressing markers and
+# never names the state type or pulls the substrate runtime through it. Implies
+# `native` because a split cap's runtime half is substrate-typed.
+runtime = ["native"]
 
 # Pulls every wasm-incompatible dep + the `aether-substrate` runtime
 # the `NativeActor` macro arm references. Always on for chassis.

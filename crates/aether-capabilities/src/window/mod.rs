@@ -102,11 +102,10 @@ mod native {
         use super::*;
         use aether_data::{Kind, MailId, Source, SourceAddr};
         use aether_kinds::{FocusWindow, SetWindowMode, SetWindowTitle, WindowMode};
+        use aether_substrate::actor::native::Dispatch;
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::mail::mailer::Mailer;
-        use aether_substrate::{
-            HubOutbound, InboxHandler, MailboxId, NativeDispatch, OwnedDispatch, Registry,
-        };
+        use aether_substrate::{HubOutbound, InboxHandler, MailboxId, OwnedDispatch, Registry};
         use std::sync::Arc;
         use std::sync::mpsc;
         use std::time::Duration;
@@ -162,7 +161,9 @@ mod native {
 
                 {
                     let mut ctx = NativeCtx::new_dispatching(&transport, caller_source, root, root);
-                    cap.__aether_dispatch_envelope(&mut ctx, kind_id, payload);
+                    <HeadlessWindowCapability as Dispatch<HeadlessWindowCapability>>::dispatch(
+                        &mut cap, &mut ctx, kind_id, payload,
+                    );
                 }
 
                 assert_eq!(

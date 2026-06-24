@@ -36,7 +36,7 @@ use crate::mail::Source;
 use crate::mail::mailer::Mailer;
 use crate::runtime::trace::SettlementHold;
 
-use super::{NativeActor, NativeDispatch};
+use super::NativeActor;
 use crate::actor::native::InheritCtx;
 use crate::actor::native::RootCtx;
 use crate::actor::native::dispatch_blocking::{DispatchId, Pending, TaskCompletionWake, TaskDone};
@@ -696,7 +696,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         config: A::Config,
     ) -> super::spawn::SpawnBuilder<'b, A>
     where
-        A: aether_actor::Instanced + NativeActor + NativeDispatch,
+        A: aether_actor::Instanced + NativeActor,
     {
         let spawner = self
             .binding
@@ -1222,6 +1222,7 @@ impl ExportedHandles {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actor::native::Dispatch;
     use crate::chassis::error::BootError;
     use aether_data::KindId as DataKindId;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -1240,7 +1241,7 @@ mod tests {
         type Resolver = aether_actor::One;
     }
 
-    impl aether_actor::Lifecycle for StubActor {
+    impl aether_actor::Lifecycle<Self> for StubActor {
         type Config = ();
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
@@ -1252,7 +1253,20 @@ mod tests {
         }
     }
 
-    impl NativeActor for StubActor {}
+    impl Dispatch<Self> for StubActor {
+        fn dispatch(
+            _state: &mut Self,
+            _ctx: &mut NativeCtx<'_, Manual>,
+            _kind: KindId,
+            _payload: &[u8],
+        ) -> Option<()> {
+            None
+        }
+    }
+
+    impl NativeActor for StubActor {
+        type State = Self;
+    }
 
     /// Issue 629 / Phase A: handle-export round-trip. Caps publish a
     /// handle bundle during `init`; consumers retrieve a clone via

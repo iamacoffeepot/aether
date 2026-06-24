@@ -25,9 +25,7 @@ use std::sync::Arc;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dispatcher_slot::DispatcherSlot;
-use crate::actor::native::{
-    ExportedHandles, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx,
-};
+use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
 use crate::chassis::Chassis;
 use crate::chassis::ctx::MailboxSender;
 use crate::chassis::ctx::MailboxWakeSlot;
@@ -357,7 +355,7 @@ struct ClaimResources {
 /// via `mem::replace(&mut self.state, Transitioning)` plus a final
 /// state assignment, so each transition is atomic w.r.t. partial
 /// moves.
-enum BootState<A: NativeActor + NativeDispatch> {
+enum BootState<A: NativeActor> {
     /// Pre-claim — only the cap config is held.
     Pending { config: A::Config },
     /// Post-claim, pre-init — mailbox + transport + slots claimed,
@@ -369,12 +367,12 @@ enum BootState<A: NativeActor + NativeDispatch> {
     /// Post-init, pre-wire — actor instance constructed.
     Initialized {
         resources: ClaimResources,
-        actor: Box<A>,
+        actor: Box<A::State>,
     },
     /// Post-wire, pre-spawn — wire ran. The dispatcher is next.
     Wired {
         resources: ClaimResources,
-        actor: Box<A>,
+        actor: Box<A::State>,
     },
     /// Sentinel held only inside a phase method's body between
     /// `mem::replace` and the final state assignment. If the phase
@@ -390,7 +388,7 @@ enum BootState<A: NativeActor + NativeDispatch> {
 /// per-cap [`NativeBinding`], constructs a [`NativeInitCtx`], calls
 /// `A::init(config, &mut init_ctx)`, runs `A::wire`, and finally
 /// spawns a dispatcher thread that pulls from the transport's inbox
-/// and routes through [`NativeDispatch::__aether_dispatch_envelope`] —
+/// and routes through [`Dispatch::dispatch`](crate::actor::native::Dispatch) —
 /// the sum dispatch trait the `#[actor] impl NativeActor for A`
 /// macro emits.
 ///
@@ -398,11 +396,11 @@ enum BootState<A: NativeActor + NativeDispatch> {
 /// drop-on-shutdown claim, and settlement gating on the
 /// `LifecycleAdvance` chain root (not a per-mailbox pending counter) is
 /// the frame-integration gate now.
-struct NativeActorBoot<A: NativeActor + NativeDispatch> {
+struct NativeActorBoot<A: NativeActor> {
     state: BootState<A>,
 }
 
-impl<A: NativeActor + NativeDispatch> NativeActorBoot<A> {
+impl<A: NativeActor> NativeActorBoot<A> {
     fn new(config: A::Config) -> Self {
         Self {
             state: BootState::Pending { config },
@@ -410,7 +408,7 @@ impl<A: NativeActor + NativeDispatch> NativeActorBoot<A> {
     }
 }
 
-impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
+impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
     fn claim(&mut self, ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
         let BootState::Pending { config } = mem::replace(&mut self.state, BootState::Transitioning)
         else {
@@ -546,10 +544,10 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         // receive-side capabilities (handler kinds + `#[fallback]`
         // presence) into the queryable `CapabilityRegistry`, the same
         // population path a wasm component's load takes. `A` is a
-        // `NativeDispatch`, whose `__aether_capabilities` the `#[actor]`
+        // `Dispatch`, whose `capabilities` the `#[actor]`
         // macro overrides to enumerate the cap's handlers; the default
         // (empty) covers any cap the macro didn't touch.
-        let capabilities = A::__aether_capabilities();
+        let capabilities = A::capabilities();
         ctx.mail_send_handle().capability_registry().register(
             resources.mailbox_id,
             MailboxCaps::from_component_capabilities(&capabilities),
@@ -606,7 +604,7 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
                 aether_data::MailId::NONE,
                 aether_data::MailId::NONE,
             );
-            actor.wire(&mut wire_ctx);
+            A::wire(actor.as_mut(), &mut wire_ctx);
         });
 
         self.state = BootState::Wired { resources, actor };
@@ -713,7 +711,7 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
 /// runtime shutdown path for every chassis cap.
 struct PooledActorShutdown<A>
 where
-    A: NativeActor + NativeDispatch,
+    A: NativeActor,
 {
     slot: Option<Arc<DispatcherSlot<A>>>,
     mailbox_sender: Option<MailboxSender>,
@@ -721,7 +719,7 @@ where
 
 impl<A> DynShutdown for PooledActorShutdown<A>
 where
-    A: NativeActor + NativeDispatch,
+    A: NativeActor,
 {
     fn shutdown_dyn(mut self: Box<Self>) {
         if let Some(slot) = &self.slot {
@@ -850,7 +848,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// `Config`. The chassis claims the cap's mailbox under
     /// `A::NAMESPACE`, runs `A::init(config, ctx)`, hands ownership of
     /// the cap to a freshly-spawned dispatcher thread that drives it
-    /// via [`NativeDispatch`], and tracks the live entry through
+    /// via [`Dispatch`](crate::actor::native::Dispatch), and tracks the live entry through
     /// [`crate::ActorRegistry`].
     ///
     /// Boot order is declaration order; `.with_actor` calls before
@@ -860,7 +858,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
     #[must_use]
     pub fn with_actor<A>(mut self, config: A::Config) -> Self
     where
-        A: NativeActor + NativeDispatch,
+        A: NativeActor,
     {
         self.passives
             .push(Box::new(NativeActorBoot::<A>::new(config)));
@@ -940,7 +938,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
     #[must_use]
     pub fn with_actor<A>(mut self, config: A::Config) -> Self
     where
-        A: NativeActor + NativeDispatch,
+        A: NativeActor,
     {
         self.passives
             .push(Box::new(NativeActorBoot::<A>::new(config)));
@@ -1439,7 +1437,7 @@ impl<C: Chassis> BuiltChassis<C> {
         config: A::Config,
     ) -> crate::SpawnBuilder<'a, A>
     where
-        A: aether_actor::Instanced + NativeActor + NativeDispatch,
+        A: aether_actor::Instanced + NativeActor,
     {
         crate::SpawnBuilder::new(
             Arc::clone(&self.booted.spawner),
@@ -1600,7 +1598,7 @@ impl<C: Chassis> PassiveChassis<C> {
         config: A::Config,
     ) -> crate::SpawnBuilder<'a, A>
     where
-        A: aether_actor::Instanced + NativeActor + NativeDispatch,
+        A: aether_actor::Instanced + NativeActor,
     {
         crate::SpawnBuilder::new(
             Arc::clone(&self.booted.spawner),
@@ -1643,6 +1641,7 @@ impl<C: Chassis> PassiveChassis<C> {
 mod tests {
     use super::*;
     use crate::actor::monitor::MonitorHandle;
+    use crate::actor::native::Dispatch;
     use crate::actor::native::ctx::NativeCtx;
     use crate::mail::KindId;
     use crate::mail::registry;
@@ -1664,7 +1663,7 @@ mod tests {
         type Resolver = aether_actor::One;
     }
 
-    impl aether_actor::Lifecycle for StubLog {
+    impl aether_actor::Lifecycle<Self> for StubLog {
         type Config = ();
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
@@ -1674,11 +1673,13 @@ mod tests {
         }
     }
 
-    impl NativeActor for StubLog {}
+    impl NativeActor for StubLog {
+        type State = Self;
+    }
 
-    impl NativeDispatch for StubLog {
-        fn __aether_dispatch_envelope(
-            &mut self,
+    impl Dispatch<Self> for StubLog {
+        fn dispatch(
+            _state: &mut Self,
             _ctx: &mut NativeCtx<'_, crate::Manual>,
             _kind: KindId,
             _payload: &[u8],
@@ -1787,7 +1788,7 @@ mod tests {
             type Resolver = aether_actor::One;
         }
 
-        impl aether_actor::Lifecycle for FailingCap {
+        impl aether_actor::Lifecycle<Self> for FailingCap {
             type Config = ();
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -1798,10 +1799,12 @@ mod tests {
                 ))))
             }
         }
-        impl NativeActor for FailingCap {}
-        impl NativeDispatch for FailingCap {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for FailingCap {
+            type State = Self;
+        }
+        impl Dispatch<Self> for FailingCap {
+            fn dispatch(
+                _state: &mut Self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
                 _kind: KindId,
                 _payload: &[u8],
@@ -1832,7 +1835,7 @@ mod tests {
 
     /// Issue 552 stage 1: end-to-end smoke for the new
     /// [`Builder::with_actor`] boot path. Boots a hand-rolled
-    /// `NativeActor + NativeDispatch` fixture, looks it up via
+    /// `NativeActor` fixture, looks it up via
     /// [`PassiveChassis::actor`], pushes one envelope at the cap's
     /// mailbox, and asserts the dispatcher routed it to the right
     /// handler. Stage 1 lands the infrastructure; stage 2 migrates
@@ -1876,7 +1879,7 @@ mod tests {
         }
         impl HandlesKind<Ping> for ProbeCap {}
 
-        impl aether_actor::Lifecycle for ProbeCap {
+        impl aether_actor::Lifecycle<Self> for ProbeCap {
             type Config = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -1886,21 +1889,23 @@ mod tests {
             }
         }
 
-        impl NativeActor for ProbeCap {}
+        impl NativeActor for ProbeCap {
+            type State = Self;
+        }
 
-        // Hand-rolled NativeDispatch — what the macro arm emits in
+        // Hand-rolled Dispatch — what the macro arm emits in
         // task #731. The if-arm decodes Ping bytes, calls the
         // handler, returns Some(()) on success.
-        impl NativeDispatch for ProbeCap {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl Dispatch<Self> for ProbeCap {
+            fn dispatch(
+                state: &mut Self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
                 kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == Ping::ID.0 {
                     let _decoded = Ping::decode_from_bytes(payload)?;
-                    self.received.fetch_add(1, AtomicOrdering::SeqCst);
+                    state.received.fetch_add(1, AtomicOrdering::SeqCst);
                     return Some(());
                 }
                 None
@@ -2008,7 +2013,7 @@ mod tests {
         #[aether_actor::local]
         struct Counter(u32);
 
-        impl aether_actor::Lifecycle for LocalProbe {
+        impl aether_actor::Lifecycle<Self> for LocalProbe {
             type Config = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -2022,11 +2027,13 @@ mod tests {
             }
         }
 
-        impl NativeActor for LocalProbe {}
+        impl NativeActor for LocalProbe {
+            type State = Self;
+        }
 
-        impl NativeDispatch for LocalProbe {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl Dispatch<Self> for LocalProbe {
+            fn dispatch(
+                state: &mut Self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
                 kind: KindId,
                 payload: &[u8],
@@ -2035,7 +2042,7 @@ mod tests {
                     let _decoded = Tick::decode_from_bytes(payload)?;
                     Counter::with_mut(|c| c.0 += 1);
                     let snapshot = Counter::with(|c| c.0);
-                    self.observed.store(snapshot, AtomicOrdering::SeqCst);
+                    state.observed.store(snapshot, AtomicOrdering::SeqCst);
                     return Some(());
                 }
                 None
@@ -2146,7 +2153,7 @@ mod tests {
             type Resolver = aether_actor::Many;
         }
         impl HandlesKind<Ping> for ChildCap {}
-        impl aether_actor::Lifecycle for ChildCap {
+        impl aether_actor::Lifecycle<Self> for ChildCap {
             type Config = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -2155,17 +2162,19 @@ mod tests {
                 Ok(Self { received: config })
             }
         }
-        impl NativeActor for ChildCap {}
-        impl NativeDispatch for ChildCap {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for ChildCap {
+            type State = Self;
+        }
+        impl Dispatch<Self> for ChildCap {
+            fn dispatch(
+                state: &mut Self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
                 kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == Ping::ID.0 {
                     let _ = Ping::decode_from_bytes(payload)?;
-                    self.received.fetch_add(1, AtomicOrdering::SeqCst);
+                    state.received.fetch_add(1, AtomicOrdering::SeqCst);
                     return Some(());
                 }
                 None
@@ -2181,7 +2190,7 @@ mod tests {
             type Resolver = aether_actor::One;
         }
         impl HandlesKind<Hatch> for ParentCap {}
-        impl aether_actor::Lifecycle for ParentCap {
+        impl aether_actor::Lifecycle<Self> for ParentCap {
             type Config = (Arc<AtomicU32>, Arc<AtomicU32>);
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -2196,10 +2205,12 @@ mod tests {
                 })
             }
         }
-        impl NativeActor for ParentCap {}
-        impl NativeDispatch for ParentCap {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for ParentCap {
+            type State = Self;
+        }
+        impl Dispatch<Self> for ParentCap {
+            fn dispatch(
+                state: &mut Self,
                 ctx: &mut NativeCtx<'_, crate::Manual>,
                 kind: KindId,
                 payload: &[u8],
@@ -2207,11 +2218,14 @@ mod tests {
                 if kind.0 == Hatch::ID.0 {
                     let _ = Hatch::decode_from_bytes(payload)?;
                     let _id = ctx
-                        .spawn_child::<ChildCap>(Subname::Counter, Arc::clone(&self.child_received))
+                        .spawn_child::<ChildCap>(
+                            Subname::Counter,
+                            Arc::clone(&state.child_received),
+                        )
                         .after_init(Ping { tag: 42 })
                         .finish()
                         .expect("spawn_child must succeed");
-                    self.spawn_count.fetch_add(1, AtomicOrdering::SeqCst);
+                    state.spawn_count.fetch_add(1, AtomicOrdering::SeqCst);
                     return Some(());
                 }
                 None
@@ -2318,7 +2332,7 @@ mod tests {
             type Resolver = aether_actor::Many;
         }
         impl HandlesKind<Quit> for Closer {}
-        impl aether_actor::Lifecycle for Closer {
+        impl aether_actor::Lifecycle<Self> for Closer {
             type Config = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -2328,14 +2342,16 @@ mod tests {
                     close_observed: config,
                 })
             }
-            fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
-                self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
+            fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
+                state.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for Closer {}
-        impl NativeDispatch for Closer {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for Closer {
+            type State = Self;
+        }
+        impl Dispatch<Self> for Closer {
+            fn dispatch(
+                _state: &mut Self,
                 ctx: &mut NativeCtx<'_, crate::Manual>,
                 kind: KindId,
                 payload: &[u8],
@@ -2440,7 +2456,7 @@ mod tests {
             const NAMESPACE: &'static str = "test.teardown.quiet";
             type Resolver = aether_actor::Many;
         }
-        impl aether_actor::Lifecycle for Quiet {
+        impl aether_actor::Lifecycle<Self> for Quiet {
             type Config = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -2450,14 +2466,16 @@ mod tests {
                     close_observed: config,
                 })
             }
-            fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
-                self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
+            fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
+                state.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for Quiet {}
-        impl NativeDispatch for Quiet {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for Quiet {
+            type State = Self;
+        }
+        impl Dispatch<Self> for Quiet {
+            fn dispatch(
+                _state: &mut Self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
                 _kind: KindId,
                 _payload: &[u8],
@@ -2515,7 +2533,7 @@ mod tests {
             const NAMESPACE: &'static str = "test.teardown.quiet_many";
             type Resolver = aether_actor::Many;
         }
-        impl aether_actor::Lifecycle for Quiet {
+        impl aether_actor::Lifecycle<Self> for Quiet {
             type Config = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -2525,14 +2543,16 @@ mod tests {
                     close_observed: config,
                 })
             }
-            fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
-                self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
+            fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
+                state.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for Quiet {}
-        impl NativeDispatch for Quiet {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for Quiet {
+            type State = Self;
+        }
+        impl Dispatch<Self> for Quiet {
+            fn dispatch(
+                _state: &mut Self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
                 _kind: KindId,
                 _payload: &[u8],
@@ -2586,7 +2606,7 @@ mod tests {
             const NAMESPACE: &'static str = "test.resolve_mismatch.foo";
             type Resolver = aether_actor::Many;
         }
-        impl aether_actor::Lifecycle for Foo {
+        impl aether_actor::Lifecycle<Self> for Foo {
             type Config = ();
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -2595,10 +2615,12 @@ mod tests {
                 Ok(Self)
             }
         }
-        impl NativeActor for Foo {}
-        impl NativeDispatch for Foo {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for Foo {
+            type State = Self;
+        }
+        impl Dispatch<Self> for Foo {
+            fn dispatch(
+                _state: &mut Self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
                 _kind: KindId,
                 _payload: &[u8],
@@ -2612,7 +2634,7 @@ mod tests {
             const NAMESPACE: &'static str = "test.resolve_mismatch.bar";
             type Resolver = aether_actor::Many;
         }
-        impl aether_actor::Lifecycle for Bar {
+        impl aether_actor::Lifecycle<Self> for Bar {
             type Config = ();
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -2621,10 +2643,12 @@ mod tests {
                 Ok(Self)
             }
         }
-        impl NativeActor for Bar {}
-        impl NativeDispatch for Bar {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for Bar {
+            type State = Self;
+        }
+        impl Dispatch<Self> for Bar {
+            fn dispatch(
+                _state: &mut Self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
                 _kind: KindId,
                 _payload: &[u8],
@@ -2722,7 +2746,7 @@ mod tests {
             type Resolver = aether_actor::Many;
         }
         impl HandlesKind<Quit> for Target {}
-        impl aether_actor::Lifecycle for Target {
+        impl aether_actor::Lifecycle<Self> for Target {
             type Config = ();
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -2731,10 +2755,12 @@ mod tests {
                 Ok(Self)
             }
         }
-        impl NativeActor for Target {}
-        impl NativeDispatch for Target {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for Target {
+            type State = Self;
+        }
+        impl Dispatch<Self> for Target {
+            fn dispatch(
+                _state: &mut Self,
                 ctx: &mut NativeCtx<'_, crate::Manual>,
                 kind: KindId,
                 payload: &[u8],
@@ -2762,7 +2788,7 @@ mod tests {
         }
         impl HandlesKind<WatchOrder> for Watcher {}
         impl HandlesKind<aether_kinds::MonitorNotice> for Watcher {}
-        impl aether_actor::Lifecycle for Watcher {
+        impl aether_actor::Lifecycle<Self> for Watcher {
             type Config = (Arc<AtomicU32>, Arc<AtomicU64>);
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -2775,10 +2801,12 @@ mod tests {
                 })
             }
         }
-        impl NativeActor for Watcher {}
-        impl NativeDispatch for Watcher {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for Watcher {
+            type State = Self;
+        }
+        impl Dispatch<Self> for Watcher {
+            fn dispatch(
+                state: &mut Self,
                 ctx: &mut NativeCtx<'_, crate::Manual>,
                 kind: KindId,
                 payload: &[u8],
@@ -2789,14 +2817,15 @@ mod tests {
                     let h = ctx
                         .monitor(target)
                         .expect("target must be Live at order time");
-                    *self.handle.lock().unwrap() = Some(h);
+                    *state.handle.lock().unwrap() = Some(h);
                     return Some(());
                 }
                 if kind.0 == <aether_kinds::MonitorNotice as Kind>::ID.0 {
                     let notice = <aether_kinds::MonitorNotice as Kind>::decode_from_bytes(payload)?;
-                    self.last_target
+                    state
+                        .last_target
                         .store(notice.target.0, AtomicOrdering::SeqCst);
-                    self.notice_count.fetch_add(1, AtomicOrdering::SeqCst);
+                    state.notice_count.fetch_add(1, AtomicOrdering::SeqCst);
                     return Some(());
                 }
                 None
@@ -2974,7 +3003,7 @@ mod tests {
             const NAMESPACE: &'static str = "test.monitor.target2";
             type Resolver = aether_actor::Many;
         }
-        impl aether_actor::Lifecycle for Target {
+        impl aether_actor::Lifecycle<Self> for Target {
             type Config = ();
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -2983,10 +3012,12 @@ mod tests {
                 Ok(Self)
             }
         }
-        impl NativeActor for Target {}
-        impl NativeDispatch for Target {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for Target {
+            type State = Self;
+        }
+        impl Dispatch<Self> for Target {
+            fn dispatch(
+                _state: &mut Self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
                 _kind: KindId,
                 _payload: &[u8],
@@ -3005,7 +3036,7 @@ mod tests {
         }
         impl HandlesKind<WatchOrder> for Watcher {}
         impl HandlesKind<Quit> for Watcher {}
-        impl aether_actor::Lifecycle for Watcher {
+        impl aether_actor::Lifecycle<Self> for Watcher {
             type Config = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -3016,14 +3047,16 @@ mod tests {
                     close_observed: config,
                 })
             }
-            fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
-                self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
+            fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
+                state.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for Watcher {}
-        impl NativeDispatch for Watcher {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for Watcher {
+            type State = Self;
+        }
+        impl Dispatch<Self> for Watcher {
+            fn dispatch(
+                state: &mut Self,
                 ctx: &mut NativeCtx<'_, crate::Manual>,
                 kind: KindId,
                 payload: &[u8],
@@ -3032,7 +3065,7 @@ mod tests {
                     let order = WatchOrder::decode_from_bytes(payload)?;
                     let target = MailboxId(order.target_id);
                     let h = ctx.monitor(target).expect("target Live");
-                    *self.handle.lock().unwrap() = Some(h);
+                    *state.handle.lock().unwrap() = Some(h);
                     return Some(());
                 }
                 if kind.0 == Quit::ID.0 {
@@ -3175,7 +3208,7 @@ mod tests {
             type Resolver = aether_actor::Many;
         }
         impl HandlesKind<Quit> for Member {}
-        impl aether_actor::Lifecycle for Member {
+        impl aether_actor::Lifecycle<Self> for Member {
             type Config = u32;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -3184,10 +3217,12 @@ mod tests {
                 Ok(Self { tag })
             }
         }
-        impl NativeActor for Member {}
-        impl NativeDispatch for Member {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for Member {
+            type State = Self;
+        }
+        impl Dispatch<Self> for Member {
+            fn dispatch(
+                _state: &mut Self,
                 ctx: &mut NativeCtx<'_, crate::Manual>,
                 kind: KindId,
                 payload: &[u8],
@@ -3384,7 +3419,7 @@ mod tests {
             type Resolver = aether_actor::Many;
         }
         impl HandlesKind<Ping> for Grandchild {}
-        impl aether_actor::Lifecycle for Grandchild {
+        impl aether_actor::Lifecycle<Self> for Grandchild {
             type Config = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -3393,17 +3428,19 @@ mod tests {
                 Ok(Self { received: config })
             }
         }
-        impl NativeActor for Grandchild {}
-        impl NativeDispatch for Grandchild {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for Grandchild {
+            type State = Self;
+        }
+        impl Dispatch<Self> for Grandchild {
+            fn dispatch(
+                state: &mut Self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
                 kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == Ping::ID.0 {
                     let _ = Ping::decode_from_bytes(payload)?;
-                    self.received.fetch_add(1, AtomicOrdering::SeqCst);
+                    state.received.fetch_add(1, AtomicOrdering::SeqCst);
                     return Some(());
                 }
                 None
@@ -3419,7 +3456,7 @@ mod tests {
         }
         impl HandlesKind<Hatch> for Parent {}
         impl HandlesKind<Quit> for Parent {}
-        impl aether_actor::Lifecycle for Parent {
+        impl aether_actor::Lifecycle<Self> for Parent {
             type Config = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -3430,10 +3467,12 @@ mod tests {
                 })
             }
         }
-        impl NativeActor for Parent {}
-        impl NativeDispatch for Parent {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for Parent {
+            type State = Self;
+        }
+        impl Dispatch<Self> for Parent {
+            fn dispatch(
+                state: &mut Self,
                 ctx: &mut NativeCtx<'_, crate::Manual>,
                 kind: KindId,
                 payload: &[u8],
@@ -3447,7 +3486,7 @@ mod tests {
                     let _id = ctx
                         .spawn_child::<Grandchild>(
                             Subname::Named("only"),
-                            Arc::clone(&self.grandchild_received),
+                            Arc::clone(&state.grandchild_received),
                         )
                         .after_init(Ping { tag: 0xCAFE })
                         .finish()
@@ -3604,7 +3643,7 @@ mod tests {
             const NAMESPACE: &'static str = "test.spawn_wire.probe";
             type Resolver = aether_actor::Many;
         }
-        impl aether_actor::Lifecycle for WireSpawnProbe {
+        impl aether_actor::Lifecycle<Self> for WireSpawnProbe {
             type Config = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -3612,14 +3651,16 @@ mod tests {
             fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { wire_count: config })
             }
-            fn wire(&mut self, _ctx: &mut NativeCtx<'_>) {
-                self.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
+            fn wire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
+                state.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for WireSpawnProbe {}
-        impl NativeDispatch for WireSpawnProbe {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for WireSpawnProbe {
+            type State = Self;
+        }
+        impl Dispatch<Self> for WireSpawnProbe {
+            fn dispatch(
+                _state: &mut Self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
                 _kind: KindId,
                 _payload: &[u8],
@@ -3663,7 +3704,7 @@ mod tests {
             const NAMESPACE: &'static str = "test.wire.singleton";
             type Resolver = aether_actor::One;
         }
-        impl aether_actor::Lifecycle for WireProbe {
+        impl aether_actor::Lifecycle<Self> for WireProbe {
             type Config = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -3671,14 +3712,16 @@ mod tests {
             fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { wire_count: config })
             }
-            fn wire(&mut self, _ctx: &mut NativeCtx<'_>) {
-                self.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
+            fn wire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
+                state.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for WireProbe {}
-        impl NativeDispatch for WireProbe {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for WireProbe {
+            type State = Self;
+        }
+        impl Dispatch<Self> for WireProbe {
+            fn dispatch(
+                _state: &mut Self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
                 _kind: KindId,
                 _payload: &[u8],
@@ -3734,7 +3777,7 @@ mod tests {
             const NAMESPACE: &'static str = "test.barrier.pinger";
             type Resolver = aether_actor::One;
         }
-        impl aether_actor::Lifecycle for Pinger {
+        impl aether_actor::Lifecycle<Self> for Pinger {
             type Config = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -3742,18 +3785,20 @@ mod tests {
             fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { wire_ran: config })
             }
-            fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
+            fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
                 ctx.send_to_named::<WireBarrierPing>(
                     Ponger::NAMESPACE,
                     &WireBarrierPing { tag: 1 },
                 );
-                self.wire_ran.fetch_add(1, AtomicOrdering::SeqCst);
+                state.wire_ran.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl NativeActor for Pinger {}
-        impl NativeDispatch for Pinger {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for Pinger {
+            type State = Self;
+        }
+        impl Dispatch<Self> for Pinger {
+            fn dispatch(
+                _state: &mut Self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
                 _kind: KindId,
                 _payload: &[u8],
@@ -3770,7 +3815,7 @@ mod tests {
             type Resolver = aether_actor::One;
         }
         impl HandlesKind<WireBarrierPing> for Ponger {}
-        impl aether_actor::Lifecycle for Ponger {
+        impl aether_actor::Lifecycle<Self> for Ponger {
             type Config = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
@@ -3779,17 +3824,19 @@ mod tests {
                 Ok(Self { received: config })
             }
         }
-        impl NativeActor for Ponger {}
-        impl NativeDispatch for Ponger {
-            fn __aether_dispatch_envelope(
-                &mut self,
+        impl NativeActor for Ponger {
+            type State = Self;
+        }
+        impl Dispatch<Self> for Ponger {
+            fn dispatch(
+                state: &mut Self,
                 _ctx: &mut NativeCtx<'_, crate::Manual>,
                 kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == WireBarrierPing::ID.0 {
                     let _ = WireBarrierPing::decode_from_bytes(payload)?;
-                    self.received.fetch_add(1, AtomicOrdering::SeqCst);
+                    state.received.fetch_add(1, AtomicOrdering::SeqCst);
                     return Some(());
                 }
                 None

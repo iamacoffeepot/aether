@@ -36,7 +36,7 @@ use aether_kinds::trace::{
 use aether_substrate::chassis::settlement::{
     TerminalDisposition, WaitOutcome, await_internal_signal,
 };
-use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, Subname};
+use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, Subname};
 
 use super::TestBench;
 use crate::perf::harness::{
@@ -62,7 +62,7 @@ impl aether_actor::Addressable for RingRelay {
     type Resolver = aether_actor::Many;
 }
 impl aether_actor::HandlesKind<Ping> for RingRelay {}
-impl aether_actor::Lifecycle for RingRelay {
+impl aether_actor::Lifecycle<Self> for RingRelay {
     type Config = MailboxId;
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
@@ -71,10 +71,12 @@ impl aether_actor::Lifecycle for RingRelay {
         Ok(Self { next })
     }
 }
-impl NativeActor for RingRelay {}
-impl NativeDispatch for RingRelay {
-    fn __aether_dispatch_envelope(
-        &mut self,
+impl NativeActor for RingRelay {
+    type State = Self;
+}
+impl Dispatch<Self> for RingRelay {
+    fn dispatch(
+        state: &mut Self,
         ctx: &mut NativeCtx<'_, aether_substrate::Manual>,
         kind: KindId,
         payload: &[u8],
@@ -85,7 +87,7 @@ impl NativeDispatch for RingRelay {
         let ping = Ping::decode_from_bytes(payload)?;
         if ping.seq > 0 {
             let bytes = Ping { seq: ping.seq - 1 }.encode_into_bytes();
-            let _ = ctx.send_envelope_traced(self.next, Ping::ID, &bytes);
+            let _ = ctx.send_envelope_traced(state.next, Ping::ID, &bytes);
         }
         Some(())
     }
@@ -118,7 +120,7 @@ impl aether_actor::Addressable for HoldRelay {
     type Resolver = aether_actor::Many;
 }
 impl aether_actor::HandlesKind<Ping> for HoldRelay {}
-impl aether_actor::Lifecycle for HoldRelay {
+impl aether_actor::Lifecycle<Self> for HoldRelay {
     type Config = ();
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
@@ -127,10 +129,12 @@ impl aether_actor::Lifecycle for HoldRelay {
         Ok(Self)
     }
 }
-impl NativeActor for HoldRelay {}
-impl NativeDispatch for HoldRelay {
-    fn __aether_dispatch_envelope(
-        &mut self,
+impl NativeActor for HoldRelay {
+    type State = Self;
+}
+impl Dispatch<Self> for HoldRelay {
+    fn dispatch(
+        _state: &mut Self,
         ctx: &mut NativeCtx<'_, aether_substrate::Manual>,
         kind: KindId,
         _payload: &[u8],

@@ -23,7 +23,7 @@ use aether_data::{Kind, Source};
 use aether_kinds::descriptors;
 use aether_substrate::actor::native::binding::NativeBinding;
 use aether_substrate::actor::native::ctx::NativeCtx;
-use aether_substrate::actor::native::{NativeActor, NativeDispatch, TaskCompletionWake};
+use aether_substrate::actor::native::{NativeActor, TaskCompletionWake};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
@@ -81,7 +81,7 @@ pub fn boot_test_chassis_with<A>(
     config: A::Config,
 ) -> PassiveChassis<TestChassis>
 where
-    A: NativeActor + NativeDispatch,
+    A: NativeActor,
 {
     Builder::<TestChassis>::new(Arc::clone(registry), Arc::clone(mailer))
         .with_actor::<A>(config)
@@ -127,7 +127,9 @@ pub fn drive_task_completion<A>(
     binding: &Arc<NativeBinding>,
     rx: &Receiver<EgressEvent>,
 ) where
-    A: NativeDispatch,
+    // Spike fold: dispatch is a `NativeActor` assoc fn over `&mut Self::State`.
+    // This helper drives un-split caps, so `State = A`.
+    A: NativeActor<State = A>,
 {
     let payload = loop {
         let event = rx
@@ -149,7 +151,7 @@ pub fn drive_task_completion<A>(
         aether_data::MailId::NONE,
         aether_data::MailId::NONE,
     );
-    cap.__aether_dispatch_envelope(&mut ctx, TaskCompletionWake::ID, &payload)
+    A::dispatch(cap, &mut ctx, TaskCompletionWake::ID, &payload)
         .expect("test: task completion routes to a #[handler(task)] arm");
 }
 

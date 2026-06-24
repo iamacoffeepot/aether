@@ -189,6 +189,10 @@ pub fn reconstruct_one_child<A>(
 ) -> bool
 where
     A: WasmActor + ErasedWasmActor,
+    // iamacoffeepot/aether#2311: `A::init` returns the runtime state, boxed as
+    // the erased child. For an un-split component `State = Self`, so the
+    // identity's `ErasedWasmActor` impl satisfies this.
+    <A as WasmActor>::State: ErasedWasmActor,
 {
     // The child's config isn't part of the migration bundle; re-`init`
     // from empty config bytes, the same shape the legacy zero-config
