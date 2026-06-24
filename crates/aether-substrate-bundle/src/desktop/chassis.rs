@@ -409,9 +409,9 @@ impl DesktopChassis {
 
         // Issue 552 stage 2d: render is a NativeActor. The chassis
         // builder constructs the cap inside `init` (called from
-        // `with_actor::<RenderCapability>(config)`); the driver pulls
-        // `Arc<RenderCapability>` via `DriverCtx::actor` and clones
-        // `.handles()` from there.
+        // `with_actor::<RenderCapability>(config)`); `init` publishes the
+        // `RenderHandles` bundle on the exported-handle map, and the driver
+        // fetches it via `DriverCtx::handle::<RenderHandles>()`.
         let driver = DesktopDriverCapability {
             event_loop,
             boot,
