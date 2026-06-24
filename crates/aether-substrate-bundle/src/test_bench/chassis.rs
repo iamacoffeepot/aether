@@ -32,6 +32,7 @@ use aether_substrate::{
 use super::cap::{TestBenchCapConfig, TestBenchCapability};
 use super::events::{ChassisEvent, EventSender};
 use crate::chassis_common::frame_lifecycle_config;
+use aether_capabilities::LifecycleConfig;
 use aether_substrate::mail::registry::MailDispatch;
 use std::io;
 
@@ -324,7 +325,9 @@ impl TestBenchChassis {
             .with_actor::<UiCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<TestBenchCapability>(test_bench_cap_config)
-            .with_actor::<LifecycleCapability>(frame_lifecycle_config());
+            .with_actor::<LifecycleCapability>(frame_lifecycle_config(
+                LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT,
+            ));
         if let Some(roots) = io_roots {
             builder = builder.with_actor::<FsCapability>(roots);
         }

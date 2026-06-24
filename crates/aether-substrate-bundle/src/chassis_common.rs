@@ -11,7 +11,6 @@
 //! minimal RPC-only chassis, test-bench drives a loopback), so the
 //! helper module stays scoped to the two full-stack chassis.
 
-use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,53 +47,23 @@ use aether_substrate::scheduler::SCHEDULER_KNOBS;
 use confique::Config as _;
 use confique::meta::Meta;
 
+use crate::desktop::driver::WindowConfigLayer;
+use crate::headless::driver::TickConfigLayer;
+
 /// Chassis-direct env knobs that aren't `#[derive(Config)]` fields —
-/// the bare-shadowed knobs the chassis bins read inline
-/// (`AETHER_WORKERS`, `AETHER_TICK_HZ`, `AETHER_RPC_PORT`, the desktop
-/// window knobs). Registered as [`KnobRecord`]s so e1's
-/// unknown-`AETHER_*` sweep doesn't flag them and e2's `--config`
-/// dump lists them. ADR-0090 §1/§4. The scheduler hot-path knobs are
-/// registered separately by unit b2's `SCHEDULER_KNOBS`.
-pub const CHASSIS_KNOBS: &[KnobRecord] = &[
-    KnobRecord {
-        env_key: "AETHER_WORKERS",
-        doc: "Worker-pool size override (unset → available_parallelism()-1, min 1).",
-        default: None,
-        kind: KnobKind::HandRegistered,
-    },
-    KnobRecord {
-        env_key: "AETHER_TICK_HZ",
-        doc: "Headless tick cadence in hertz.",
-        default: Some("60"),
-        kind: KnobKind::HandRegistered,
-    },
-    KnobRecord {
-        env_key: "AETHER_RPC_PORT",
-        doc: "aether.rpc.server bind port (desktop/headless skip the server when unset).",
-        default: None,
-        kind: KnobKind::HandRegistered,
-    },
-    KnobRecord {
-        env_key: "AETHER_BOOT_MANIFEST",
-        doc: "Path to a BundleManifest JSON of components to auto-load at boot \
-              (the runtime twin of the standalone-bundle compile-time pack; \
-              injected by the engines cap on a spawn_substrate carrying components).",
-        default: None,
-        kind: KnobKind::HandRegistered,
-    },
-    KnobRecord {
-        env_key: "AETHER_WINDOW_MODE",
-        doc: "Desktop window mode: windowed[:WxH] / fullscreen-borderless / exclusive:WxH@HZ.",
-        default: None,
-        kind: KnobKind::HandRegistered,
-    },
-    KnobRecord {
-        env_key: "AETHER_WINDOW_TITLE",
-        doc: "Desktop window title text.",
-        default: None,
-        kind: KnobKind::HandRegistered,
-    },
-];
+/// the remaining hand-registered knob the chassis bins read inline
+/// (`AETHER_RPC_PORT`). Registered as a [`KnobRecord`] so e1's
+/// unknown-`AETHER_*` sweep doesn't flag it and e2's `--config`
+/// dump lists it. ADR-0090 §1/§4. The scheduler hot-path knobs are
+/// registered separately by unit b2's `SCHEDULER_KNOBS`; the chassis
+/// boot / window / tick knobs are now covered by the derive-emitted
+/// `*Layer::META`s in [`chassis_registry`].
+pub const CHASSIS_KNOBS: &[KnobRecord] = &[KnobRecord {
+    env_key: "AETHER_RPC_PORT",
+    doc: "aether.rpc.server bind port (desktop/headless skip the server when unset).",
+    default: None,
+    kind: KnobKind::HandRegistered,
+}];
 
 /// Per-actor ring-capacity knob (issue 1990, ADR-0081 / ADR-0086). The
 /// `#[derive(aether_substrate::Config)]` emits the env-shaped
@@ -209,10 +178,86 @@ impl SettlementConfig {
     }
 }
 
+/// Default lifecycle advance timeout in milliseconds. The literal
+/// `default = 1000` on [`ChassisBootConfig`] must equal this;
+/// `chassis_boot_config_defaults_match` guards the pair.
+const DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS: u64 = 1_000;
+
+/// Shared boot knobs for the desktop and headless chassis
+/// (ADR-0090 §1/§2 applied to the chassis's own knobs). The
+/// `#[derive(aether_substrate::Config)]` emits the env-shaped
+/// `ChassisBootConfigLayer`, the clap-shaped `ChassisBootOverlay`,
+/// the `FromArgvThenEnv` impl, and the inherent `from_env` /
+/// `from_argv_then_env` / `try_*` shims — mirrors [`ActorRingConfig`].
+///
+/// `env_prefix = "AETHER"` joins the field env keys; explicit
+/// `cli_long` overrides pin the historical flag names so existing
+/// scripts and operators are unaffected.
+#[derive(Clone, Debug, aether_substrate::Config)]
+#[config(env_prefix = "AETHER", cli_prefix = "chassis")]
+pub struct ChassisBootConfig {
+    /// `AETHER_WORKERS=<n>` worker-pool size override (unset →
+    /// `available_parallelism()-1`, min 1). `Option<usize>` soft-parses
+    /// (unparseable → `None`, matching the old `parse_workers_env`
+    /// fallback). The 0→1 clamp logic lives in [`Self::to_workers`].
+    #[config(cli_long = "workers")]
+    pub workers: Option<usize>,
+    /// `AETHER_BOOT_MANIFEST=<path>` path to a `BundleManifest` JSON
+    /// of components to auto-load at boot (the runtime twin of the
+    /// standalone-bundle compile-time pack; injected by the engines cap
+    /// on a `spawn_substrate` carrying components). `Option<String>`
+    /// filters empty → `None`, exactly matching `boot_manifest_from_env`.
+    #[config(cli_long = "boot-manifest")]
+    pub boot_manifest: Option<String>,
+    /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS=<ms>` force-complete deadline
+    /// (ms) for a pending lifecycle advance's `Settled` (issue 1048,
+    /// ADR-0082). Default [`DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS`] (1 s).
+    /// A garbage value hard-errors at boot (ADR-0090 §4 strict path),
+    /// replacing the old soft-warn fallback.
+    #[config(
+        env = "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS",
+        cli_long = "lifecycle-advance-timeout-millis",
+        default = 1000
+    )]
+    pub lifecycle_advance_timeout_millis: u64,
+}
+
+impl Default for ChassisBootConfig {
+    fn default() -> Self {
+        Self {
+            workers: None,
+            boot_manifest: None,
+            lifecycle_advance_timeout_millis: DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS,
+        }
+    }
+}
+
+impl ChassisBootConfig {
+    /// Lower the resolved `workers` knob to the pool-size `Option<usize>`
+    /// the chassis builder's `with_workers` takes. The 0→1 clamp is the
+    /// only piece of logic this crate owns (the rest is pure field reads):
+    /// `0` is invalid for the pool (it requires at least one worker) and
+    /// users who set it almost certainly meant "any" (i.e. the system
+    /// default), so we clamp + warn rather than hard-error.
+    pub fn to_workers(&self) -> Option<usize> {
+        match self.workers {
+            None => None,
+            Some(0) => {
+                tracing::warn!(
+                    target: "aether_substrate::boot",
+                    "AETHER_WORKERS=0 — clamping to 1",
+                );
+                Some(1)
+            }
+            Some(n) => Some(n),
+        }
+    }
+}
+
 /// Assemble the chassis-wide [`KnownKeys`] set (ADR-0090 §4): every
-/// migrated `*Layer::META` (http / gemini / anthropic / audio / fs)
-/// plus the hand-registered chassis knobs ([`CHASSIS_KNOBS`])
-/// and scheduler hot-path knobs (b2's
+/// migrated `*Layer::META` (http / gemini / anthropic / audio / fs /
+/// chassis-boot / window / tick) plus the hand-registered chassis knob
+/// ([`CHASSIS_KNOBS`]) and scheduler hot-path knobs (b2's
 /// `aether_substrate::scheduler::SCHEDULER_KNOBS`). e1's
 /// [`validate_env`](aether_substrate::config::validate_env) sweeps the
 /// process env against this; e2's `--config` dump walks the same
@@ -243,6 +288,9 @@ fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
         &NamespaceRootsLayer::META,
         &ActorRingConfigLayer::META,
         &SettlementConfigLayer::META,
+        &ChassisBootConfigLayer::META,
+        &WindowConfigLayer::META,
+        &TickConfigLayer::META,
     ];
     let mut records: Vec<KnobRecord> = CHASSIS_KNOBS.to_vec();
     records.extend_from_slice(SCHEDULER_KNOBS);
@@ -267,12 +315,16 @@ pub fn chassis_config_dump() -> String {
 /// `Tick → Render → Present` graph from `frame_lifecycle_config()`
 /// below instead.
 ///
+/// `advance_timeout_millis` is the resolved value from
+/// [`ChassisBootConfig::lifecycle_advance_timeout_millis`] (or
+/// [`LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`] for the test-bench).
+///
 /// # Panics
 /// Panics if the (compile-time-fixed) graph fails to build — it can't,
 /// the shape is structurally valid; the `expect` documents the
 /// invariant.
 #[must_use]
-pub fn tick_only_lifecycle_config() -> LifecycleConfig {
+pub fn tick_only_lifecycle_config(advance_timeout_millis: u64) -> LifecycleConfig {
     let graph = LifecycleGraphData::builder()
         .state::<Tick>()
         .next::<Tick>()
@@ -284,21 +336,8 @@ pub fn tick_only_lifecycle_config() -> LifecycleConfig {
     LifecycleConfig {
         graph,
         initial_subscribers: vec![],
-        advance_timeout_millis: lifecycle_advance_timeout_millis(),
+        advance_timeout_millis,
     }
-}
-
-/// Resolve the lifecycle force-complete deadline (ms) chassis-side
-/// (iamacoffeepot/aether#1048): the `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS`
-/// override over the cap's default. Read here, in the chassis builder, so
-/// `LifecycleCapability::init` configures through `LifecycleConfig`
-/// rather than a naked env read.
-#[allow(clippy::disallowed_methods)] // chassis-level process tuning knob: the lifecycle force-complete deadline (#1048) is a per-process override resolved here into LifecycleConfig, not a cap-internal env read
-fn lifecycle_advance_timeout_millis() -> u64 {
-    env::var("AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT)
 }
 
 /// Build the three-stage frame lifecycle config the display-driving
@@ -327,12 +366,16 @@ fn lifecycle_advance_timeout_millis() -> u64 {
 /// [`tick_only_lifecycle_config`] (its render cap is a no-op, so a
 /// `Render` / `Present` stage would settle to no GPU work).
 ///
+/// `advance_timeout_millis` is the resolved value from
+/// [`ChassisBootConfig::lifecycle_advance_timeout_millis`] (or
+/// [`LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`] for the test-bench).
+///
 /// # Panics
 /// Panics if the (compile-time-fixed) graph fails to build — it can't,
 /// the shape is structurally valid; the `expect` documents the
 /// invariant.
 #[must_use]
-pub fn frame_lifecycle_config() -> LifecycleConfig {
+pub fn frame_lifecycle_config(advance_timeout_millis: u64) -> LifecycleConfig {
     let graph = LifecycleGraphData::builder()
         .state::<Tick>()
         .next::<Render>()
@@ -348,7 +391,7 @@ pub fn frame_lifecycle_config() -> LifecycleConfig {
     LifecycleConfig {
         graph,
         initial_subscribers: vec![],
-        advance_timeout_millis: lifecycle_advance_timeout_millis(),
+        advance_timeout_millis,
     }
 }
 
@@ -476,73 +519,26 @@ pub fn maybe_with_http_server<C: Chassis>(
     builder.with_actor::<HttpServerCapability>(config)
 }
 
-/// Read `AETHER_BOOT_MANIFEST` into the optional boot-manifest path —
-/// a `BundleManifest` JSON of components to auto-load at boot. `None`
-/// when unset; the chassis then boots componentless (the bare-spawn /
-/// hub-load path). Mirrors [`crate::hub::rpc_port_from_env`]: the env
-/// read is the fallback for an absent `--boot-manifest` CLI flag.
-/// Shared by the desktop + headless chassis.
-#[must_use]
-// Chassis-level boot config: the env fallback for an absent --boot-manifest CLI
-// flag (argv > env > default at the process boundary), read in a chassis builder.
-#[allow(clippy::disallowed_methods)]
-pub fn boot_manifest_from_env() -> Option<String> {
-    env::var("AETHER_BOOT_MANIFEST")
-        .ok()
-        .filter(|p| !p.is_empty())
-}
-
-/// Parse `AETHER_WORKERS`. Unset → `None` (chassis falls back to
-/// [`aether_substrate::scheduler::PoolConfig::default`]); positive →
-/// `Some(n)`; `0` → `Some(1)` with a warn (the pool requires at least
-/// one worker); unparseable → `None` with a warn. Issue 745. Shared by
-/// the desktop + headless chassis, which both fall back to it when the
-/// CLI `--workers` flag is absent.
-// Chassis-level boot config: the env fallback for an absent --workers CLI flag
-// (argv > env > default at the process boundary), read in a chassis builder.
-#[allow(clippy::disallowed_methods)]
-pub fn parse_workers_env() -> Option<usize> {
-    let raw = env::var("AETHER_WORKERS").ok()?;
-    match raw.trim().parse::<usize>() {
-        Ok(0) => {
-            tracing::warn!(
-                target: "aether_substrate::boot",
-                value = %raw,
-                "AETHER_WORKERS=0 — clamping to 1",
-            );
-            Some(1)
-        }
-        Ok(n) => Some(n),
-        Err(e) => {
-            tracing::warn!(
-                target: "aether_substrate::boot",
-                value = %raw,
-                error = %e,
-                "AETHER_WORKERS unparseable — falling back to PoolConfig::default",
-            );
-            None
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::ActorRingConfig;
     use super::ActorRingConfigLayer;
+    use super::ChassisBootConfig;
+    use super::ChassisBootConfigLayer;
+    use super::DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS;
     use super::DEFAULT_SETTLEMENT_CAP_SECS;
     use super::SettlementConfig;
     use super::chassis_known_keys;
-    use super::parse_workers_env;
     use aether_actor::log::DEFAULT_RING_CAP;
     use aether_actor::trace_ring::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
+    use aether_capabilities::LifecycleConfig;
     use std::env;
     use std::sync::Mutex;
     use std::sync::PoisonError;
     use std::time::Duration;
 
     /// Process-wide guard around the `AETHER_ACTOR_*` ring env mutation,
-    /// distinct from `ENV_LOCK` so a ring test and a workers test don't
-    /// contend on one lock.
+    /// so ring tests serialise their set/remove pairs.
     static RING_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
@@ -656,55 +652,59 @@ mod tests {
         assert!(known.contains("AETHER_SETTLEMENT_CAP_SECS"));
     }
 
-    /// Process-wide guard around `AETHER_WORKERS` env mutation —
-    /// `cargo test` parallelises within a binary, so each parser test
-    /// has to serialise its set/remove pair.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn with_env<R>(value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        // Safety: this test owns the AETHER_WORKERS slot for the
-        // duration of the closure via ENV_LOCK; no other thread inside
-        // the same test binary mutates it concurrently. Edition-2024
-        // marked the env mutators unsafe due to non-test signal-handler
-        // races that don't apply here.
-        unsafe {
-            match value {
-                Some(v) => env::set_var("AETHER_WORKERS", v),
-                None => env::remove_var("AETHER_WORKERS"),
-            }
-        }
-        let out = f();
-        // SAFETY: same justification as the prior block — this test
-        // still owns the `AETHER_WORKERS` slot via `ENV_LOCK`.
-        unsafe {
-            env::remove_var("AETHER_WORKERS");
-        }
-        out
+    #[test]
+    fn chassis_boot_config_defaults_match() {
+        use confique::Config as _;
+        // No `.env()` source: literal defaults only — env-free. The
+        // `default = 1000` literal must equal `LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`
+        // so an unset knob reproduces the cap's const default.
+        // Tripwire: drifts when the producing const or the derive literal changes.
+        let _guard = RING_ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let layer = ChassisBootConfigLayer::builder()
+            .load()
+            .expect("defaults load");
+        assert_eq!(
+            layer.lifecycle_advance_timeout_millis, DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS,
+            "derive default must match DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS",
+        );
+        assert_eq!(
+            DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS,
+            LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT,
+            "DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS must match LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT",
+        );
+        let default = ChassisBootConfig::default();
+        assert_eq!(
+            default.lifecycle_advance_timeout_millis,
+            DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS,
+        );
+        assert_eq!(default.workers, None);
+        assert_eq!(default.boot_manifest, None);
     }
 
     #[test]
-    fn parse_workers_unset_returns_none() {
-        let parsed = with_env(None, parse_workers_env);
-        assert_eq!(parsed, None);
+    fn to_workers_none_returns_none() {
+        // No workers knob set — pool uses PoolConfig::default.
+        assert_eq!(ChassisBootConfig::default().to_workers(), None);
     }
 
     #[test]
-    fn parse_workers_positive_returns_some() {
-        let parsed = with_env(Some("4"), parse_workers_env);
-        assert_eq!(parsed, Some(4));
+    fn to_workers_positive_returns_some() {
+        // Positive value passes through unchanged.
+        let cfg = ChassisBootConfig {
+            workers: Some(4),
+            ..ChassisBootConfig::default()
+        };
+        assert_eq!(cfg.to_workers(), Some(4));
     }
 
     #[test]
-    fn parse_workers_zero_clamps_to_one() {
-        let parsed = with_env(Some("0"), parse_workers_env);
-        assert_eq!(parsed, Some(1));
-    }
-
-    #[test]
-    fn parse_workers_unparseable_returns_none() {
-        let parsed = with_env(Some("abc"), parse_workers_env);
-        assert_eq!(parsed, None);
+    fn to_workers_zero_clamps_to_one() {
+        // The 0→1 clamp: the only real logic this crate owns for the workers knob.
+        let cfg = ChassisBootConfig {
+            workers: Some(0),
+            ..ChassisBootConfig::default()
+        };
+        assert_eq!(cfg.to_workers(), Some(1));
     }
 
     #[test]
@@ -723,7 +723,7 @@ mod tests {
         use aether_data::Kind;
         use aether_kinds::{Present, Render, Shutdown, Tick};
 
-        let cfg = super::frame_lifecycle_config();
+        let cfg = super::frame_lifecycle_config(LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT);
         let graph_dbg = format!("{:?}", cfg.graph);
         let tick = format!("{:?}", <Tick as Kind>::ID);
         let render = format!("{:?}", <Render as Kind>::ID);
@@ -759,26 +759,46 @@ mod tests {
 
     #[test]
     fn chassis_known_keys_includes_scheduler_hot_path_knobs() {
-        // ADR-0090 unit b2: the six scheduler / lifecycle hot-path
-        // knobs join the known-key set, so e1's unknown-AETHER_ sweep
-        // doesn't flag them.
+        // ADR-0090 unit b2: the scheduler hot-path knobs join the
+        // known-key set, so e1's unknown-AETHER_ sweep doesn't flag them.
         let known = chassis_known_keys();
         for key in [
             "AETHER_LOCAL_STICKY_MAX",
             "AETHER_LOCAL_TIME_BUDGET_US",
             "AETHER_PEER_STEAL",
             "AETHER_HANDOFF_COST_NS",
-            "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS",
         ] {
             assert!(known.contains(key), "chassis_known_keys missing {key}");
         }
     }
 
     #[test]
+    fn chassis_boot_config_keys_are_known() {
+        // Guards the three `ChassisBootConfigLayer::META` keys joining
+        // the chassis known-key set. `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS`
+        // relocated here from the scheduler knob list (it was only
+        // registered scheduler-side because `aether-capabilities` couldn't
+        // hold it; the bundle can, so the workaround is gone).
+        let known = chassis_known_keys();
+        assert!(
+            known.contains("AETHER_WORKERS"),
+            "AETHER_WORKERS must be a known key",
+        );
+        assert!(
+            known.contains("AETHER_BOOT_MANIFEST"),
+            "AETHER_BOOT_MANIFEST must be a known key",
+        );
+        assert!(
+            known.contains("AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS"),
+            "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS must be a known key",
+        );
+    }
+
+    #[test]
     fn chassis_known_keys_includes_a_representative_cap_key() {
         // The cap layer META walk lands the per-cap env keys (a
-        // representative from each migrated cap) plus the bare chassis
-        // knobs — the set is non-empty and covers more than scheduler.
+        // representative from each migrated cap) plus the derive-Config
+        // chassis knobs — the set is non-empty and covers more than scheduler.
         let known = chassis_known_keys();
         assert!(known.contains("AETHER_HTTP_DISABLE"));
         assert!(known.contains("AETHER_WORKERS"));
@@ -809,7 +829,7 @@ mod tests {
     fn chassis_config_dump_lists_a_knob_from_each_cap_plus_scheduler() {
         // ADR-0090 §4 `--config`: the dump walks the same registry as
         // the sweep, so it lists a representative knob from each cap, a
-        // bare chassis knob, and a scheduler hot-path knob — with a
+        // chassis-boot knob, and a scheduler hot-path knob — with a
         // header row.
         let dump = super::chassis_config_dump();
         assert!(dump.contains("KEY"));
@@ -817,7 +837,7 @@ mod tests {
         assert!(dump.contains("AETHER_HTTP_SERVER_BIND_ADDR")); // http server cap
         assert!(dump.contains("AETHER_GEMINI_TIMEOUT_MS")); // gemini cap
         assert!(dump.contains("AETHER_AUDIO_DISABLE")); // audio cap
-        assert!(dump.contains("AETHER_WORKERS")); // bare chassis knob
+        assert!(dump.contains("AETHER_WORKERS")); // chassis-boot derive-Config knob
         assert!(dump.contains("AETHER_LOCAL_STICKY_MAX")); // scheduler knob
     }
 
@@ -826,12 +846,10 @@ mod tests {
     /// derive-`Config` (`*Config::from_argv_then_env`), never a raw
     /// `env::var` read in a chassis builder. This is the shape #1761 put
     /// the http server on; the guard keeps a future cap from regressing to
-    /// presence-inference or a hand-rolled env read.
-    ///
-    /// Scoped to the cap *flag* keys on purpose — `AETHER_WINDOW_MODE` /
-    /// `AETHER_WINDOW_TITLE` are hand-parsed desktop boot overrides, not
-    /// derive-`Config` knobs, and are read via `env::var` by design, so a
-    /// blanket "no `env::var` of a known key" scan would false-positive.
+    /// presence-inference or a hand-rolled env read. The chassis window /
+    /// tick / boot knobs are now also derive-`Config` (`WindowConfig`,
+    /// `TickConfig`, `ChassisBootConfig`), so no raw `env::var` of any
+    /// known `AETHER_*` key should appear in the chassis builder sources.
     #[test]
     fn chassis_builders_resolve_cap_enable_flags_via_config() {
         // Enable / disable env keys owned by a derive-`Config` cap. Add a

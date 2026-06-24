@@ -83,6 +83,7 @@ mod tests {
             rpc_addr: None,
             workers: None,
             ring_caps: aether_substrate_bundle::RingCapacities::default(),
+            lifecycle_advance_timeout_millis: 1_000,
             autoload: decoded
                 .components
                 .into_iter()
@@ -157,6 +158,7 @@ mod tests {
             rpc_addr: None,
             workers: None,
             ring_caps: aether_substrate_bundle::RingCapacities::default(),
+            lifecycle_advance_timeout_millis: 1_000,
             autoload,
         };
 
