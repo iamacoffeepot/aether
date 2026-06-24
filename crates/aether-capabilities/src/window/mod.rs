@@ -43,18 +43,26 @@ pub struct HeadlessWindowCapability;
 // runtime half, so this cap's identity compiles transport-only.
 #[cfg(not(target_arch = "wasm32"))]
 use aether_kinds::{FocusWindowResult, SetWindowModeResult, SetWindowTitleResult};
-#[cfg(feature = "runtime")]
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-#[cfg(feature = "runtime")]
-use aether_substrate::chassis::error::BootError;
 
-/// `aether.window` headless-companion runtime state (ADR-0122 split).
-/// The cap is stateless — every handler `Err`-replies off `ctx` alone —
-/// so this is a named empty struct standing in for future state rather
-/// than `()` or `Self`. The addressing identity is the distinct ZST
-/// `HeadlessWindowCapability`.
 #[cfg(feature = "runtime")]
-pub struct HeadlessWindowCapabilityState;
+#[allow(clippy::wildcard_imports)]
+use runtime::*;
+
+/// The `aether.window` headless-companion runtime half (ADR-0122 split):
+/// the `aether_substrate`-typed ctx imports and the state struct, gated once
+/// by this module rather than per-import.
+#[cfg(feature = "runtime")]
+mod runtime {
+    pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    pub use aether_substrate::chassis::error::BootError;
+
+    /// `aether.window` headless-companion runtime state (ADR-0122 split).
+    /// The cap is stateless — every handler `Err`-replies off `ctx` alone —
+    /// so this is a named empty struct standing in for future state rather
+    /// than `()` or `Self`. The addressing identity is the distinct ZST
+    /// [`HeadlessWindowCapability`](super::HeadlessWindowCapability).
+    pub struct HeadlessWindowCapabilityState;
+}
 
 #[actor(singleton)]
 impl NativeActor for HeadlessWindowCapability {

@@ -47,9 +47,8 @@ use aether_kinds::{
 // handlers' reply kind `::ID`, so a transport-only build must see it.
 // `LifecycleAdvanceComplete` is the reply of the two `#[handler::manual]`
 // arms, which declare no manifest reply kind, so it is named only by the
-// runtime handler bodies and rides the `runtime` gate.
-#[cfg(feature = "runtime")]
-use aether_kinds::LifecycleAdvanceComplete;
+// runtime handler bodies and lives in `mod runtime` behind the `runtime`
+// gate.
 #[cfg(not(target_arch = "wasm32"))]
 use aether_kinds::LifecycleSubscribeResult;
 
@@ -75,8 +74,11 @@ mod settlement;
 
 #[cfg(feature = "runtime")]
 mod config;
+// `LifecycleConfig` configures the runtime-only `LifecycleCapabilityState`,
+// so its re-export rides the `runtime` gate through `mod runtime` (where the
+// rest of the runtime half lives) rather than a per-import gate here.
 #[cfg(feature = "runtime")]
-pub use config::LifecycleConfig;
+pub use runtime::LifecycleConfig;
 
 /// The `aether.lifecycle` cap **identity** (ADR-0122 identity/runtime
 /// split, ADR-0082). A ZST carrying only the addressing — the
