@@ -16,7 +16,7 @@
 //! to the inbound request), records the open response socket in an
 //! in-flight table keyed by the dispatch's correlation id, and subscribes
 //! to settlement of the dispatched root. The handler replies
-//! [`HttpServerResponse`]; the reply
+//! [`HttpServerResponse`](crate::http::kinds::HttpServerResponse); the reply
 //! routes back to the cap, the
 //! reply-interception fallback formats the HTTP/1.1 response and writes it
 //! to the held socket. A response-less chain settles into `502`, a
@@ -83,229 +83,24 @@ pub struct HttpServerHandle {
 /// listener + accept thread + connection table) lives behind the one
 /// `feature = "runtime"` gate, so a transport-only build never names the state
 /// type nor pulls `aether_substrate` through this cap.
+#[actor(singleton)]
 pub struct HttpServerCapability;
 
+// The struct-hosted `#[actor(singleton)]` reads the sibling `runtime` module
+// off disk, lifts the `NAMESPACE` + `#[handler]` kinds out of the
+// `#[runtime] impl NativeActor` there, and emits the always-on identity
+// markers (`Addressable`, one `HandlesKind<K>` per handler, the `#[fallback]`
+// marker, the name-inventory entry) against this struct. The kind types those
+// markers name (`HttpInboundReady` / `Settled`) are imported at file root
+// above.
 use aether_actor::actor;
 
 // The runtime half — the whole `aether_substrate`-typed surface (the state,
-// the sidecar threads, the parse/render machinery) — lives in `runtime.rs`,
-// gated once here; the `#[actor] impl` reaches it through the `use runtime::*`
-// glob.
+// the sidecar threads, the parse/render machinery, the `#[runtime] impl
+// NativeActor` with the handler bodies) — lives in `runtime.rs`, gated once
+// here.
 #[cfg(feature = "runtime")]
 mod runtime;
-
-#[cfg(feature = "runtime")]
-#[allow(clippy::wildcard_imports)]
-use runtime::*;
-
-#[actor(singleton)]
-impl NativeActor for HttpServerCapability {
-    /// The runtime state this identity boots into (ADR-0122 split): the
-    /// listener port, the accept thread, the connection table, and the
-    /// in-flight correlation table.
-    type State = HttpServerCapabilityState;
-
-    type Config = HttpServerConfig;
-
-    const NAMESPACE: &'static str = "aether.http.server";
-
-    fn init(
-        config: HttpServerConfig,
-        ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<HttpServerCapabilityState, BootError> {
-        let listener =
-            TcpListener::bind(&config.bind_addr).map_err(|e| BootError::Other(Box::new(e)))?;
-        let local_addr = listener
-            .local_addr()
-            .map_err(|e| BootError::Other(Box::new(e)))?;
-        let port = local_addr.port();
-        listener
-            .set_nonblocking(false)
-            .map_err(|e| BootError::Other(Box::new(e)))?;
-
-        let accept_shutdown = Arc::new(AtomicBool::new(false));
-        let accept_shutdown_for_thread = Arc::clone(&accept_shutdown);
-
-        let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
-        let mailer: Arc<Mailer> = ctx.mailer();
-        let self_id = ctx.self_id();
-        let wake_kind = KindId(<HttpInboundReady as Kind>::ID.0);
-
-        let accept_sink = WakeSink {
-            inbound_tx: inbound_tx.clone(),
-            mailer: Arc::clone(&mailer),
-            self_id,
-            wake_kind,
-        };
-
-        // Transport thread below the mail layer — it accepts sockets
-        // that carry inbound mail in; no inbound chain to inherit, no
-        // settlement umbrella.
-        #[allow(clippy::disallowed_methods)]
-        let accept_thread = thread::Builder::new()
-            .name(format!("aether-http-accept-{port}"))
-            .spawn(move || {
-                while !accept_shutdown_for_thread.load(Ordering::Acquire) {
-                    match listener.accept() {
-                        Ok((stream, peer)) => {
-                            if accept_shutdown_for_thread.load(Ordering::Acquire) {
-                                drop(stream);
-                                break;
-                            }
-                            if !accept_sink.post(InboundEvent::PeerAccepted { stream, peer }) {
-                                break;
-                            }
-                        }
-                        Err(_) => {
-                            if accept_shutdown_for_thread.load(Ordering::Acquire) {
-                                break;
-                            }
-                        }
-                    }
-                }
-            })
-            .map_err(|e| BootError::Other(Box::new(e)))?;
-
-        tracing::info!(
-            target: "aether_substrate::http_server",
-            addr = %config.bind_addr,
-            port,
-            handler = %config.handler_mailbox,
-            "http server bound",
-        );
-
-        ctx.publish_handle(HttpServerHandle { local_port: port });
-
-        Ok(HttpServerCapabilityState {
-            handler_mailbox: config.handler_mailbox,
-            max_request_bytes: config.max_request_bytes,
-            max_header_bytes: config.max_header_bytes,
-            request_timeout: Duration::from_millis(config.request_timeout_millis),
-            self_mailbox: self_id,
-            mailer,
-            listener_port: port,
-            accept_shutdown,
-            accept_thread: Some(accept_thread),
-            inbound_rx,
-            inbound_tx,
-            connections: HashMap::new(),
-            next_conn_id: 0,
-            in_flight: HashMap::new(),
-        })
-    }
-
-    fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
-        // Stop the accept thread; self-connect to unblock its
-        // blocking `accept()`.
-        state.accept_shutdown.store(true, Ordering::Release);
-        if let Ok(addr) = format!("127.0.0.1:{}", state.listener_port).parse::<SocketAddr>() {
-            let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(100));
-        }
-        if let Some(thread) = state.accept_thread.take() {
-            let _ = thread.join();
-        }
-        // Stop every per-connection reader. Shutting the socket down
-        // wakes the blocked `read()`; the reader sees the flag and exits.
-        for conn in state.connections.values_mut() {
-            conn.shutdown.store(true, Ordering::Release);
-            let _ = conn.write_half.shutdown(Shutdown::Both);
-            if let Some(thread) = conn.reader_thread.take() {
-                let _ = thread.join();
-            }
-        }
-        tracing::info!(
-            target: "aether_substrate::http_server",
-            port = state.listener_port,
-            "http server closed",
-        );
-    }
-
-    /// Sidecar wake. Drain every pending inbound event.
-    ///
-    /// # Agent
-    /// Internal wake mail — not part of the cap's external surface. The
-    /// accept / reader sidecars fire this; the handler drains the mpsc
-    /// and acts per item.
-    #[handler]
-    fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: HttpInboundReady) {
-        while let Ok(event) = state.inbound_rx.try_recv() {
-            match event {
-                InboundEvent::PeerAccepted { stream, peer } => {
-                    state.spawn_reader_for_peer(stream, peer);
-                }
-                InboundEvent::RequestParsed { conn_id, request } => {
-                    state.dispatch_request(ctx, conn_id, request);
-                }
-                InboundEvent::RequestRejected {
-                    conn_id,
-                    status,
-                    message,
-                } => {
-                    state.write_status_response(conn_id, status, message);
-                    state.close_connection(conn_id, "request rejected");
-                }
-                InboundEvent::ReaderClosed { conn_id, reason } => {
-                    state.close_connection(conn_id, &reason);
-                }
-                InboundEvent::RequestTimedOut { conn_id } => {
-                    if state.in_flight.values().any(|p| p.conn_id == conn_id) {
-                        state.write_status_response(conn_id, 504, "gateway timeout");
-                    }
-                    state.close_connection(conn_id, "request timeout");
-                }
-            }
-        }
-    }
-
-    /// Settlement notice. The root corresponds to a dispatched request
-    /// we subscribed to; if it settled with no [`HttpServerResponse`]
-    /// written, answer `502` (ADR-0108 §5) and clear the entry.
-    ///
-    /// # Agent
-    /// Internal — fires from the settlement registry, not external mail.
-    #[handler]
-    fn on_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Settled) {
-        let correlation = mail.root.correlation_id;
-        let Some(pending) = state.in_flight.remove(&correlation) else {
-            // Already answered (the reply landed first) or never ours.
-            return;
-        };
-        state.write_status_response(pending.conn_id, 502, "no response from handler");
-        state.close_connection(pending.conn_id, "settled without response");
-    }
-
-    /// Reply interception. Any mail addressed at this cap that isn't one
-    /// of the typed wake / settlement kinds is treated as the handler's
-    /// reply; if its `correlation_id` matches an in-flight request and
-    /// it is an [`HttpServerResponse`], format the HTTP/1.1 response,
-    /// write it to the held socket, and close.
-    ///
-    /// # Agent
-    /// Not user-callable — this is the cap's reply-interception path. A
-    /// by-value `#[handler]` can't read the inbound `sender.correlation_id`,
-    /// so reply correlation goes through this envelope fallback
-    /// (ADR-0108 §5).
-    #[fallback]
-    fn on_any(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, env: &Envelope) {
-        let correlation = env.sender.correlation_id;
-        let Some(pending) = state.in_flight.get(&correlation).copied() else {
-            return;
-        };
-        if env.kind != <HttpServerResponse as Kind>::ID {
-            // Unexpected kind with a matching correlation — leave the
-            // in-flight entry for the settlement / timeout safety net.
-            return;
-        }
-        match HttpServerResponse::decode_from_bytes(env.payload.bytes()) {
-            Some(response) => state.write_handler_response(pending.conn_id, &response),
-            None => {
-                state.write_status_response(pending.conn_id, 502, "malformed handler response");
-            }
-        }
-        state.in_flight.remove(&correlation);
-        state.close_connection(pending.conn_id, "response written");
-    }
-}
 
 #[cfg(all(test, feature = "runtime"))]
 mod test_handlers {
