@@ -94,14 +94,8 @@ QODANA_BASE="$(git merge-base HEAD origin/main)"
 # Must stay a Docker-shared path (qodana's container mounts the clone).
 AETHER_ATTEST_BASE="${AETHER_ATTEST_BASE:-$HOME/.cache}"
 
-# Keep build artifacts out of the clone the git attestor walks, so its tree
-# status stays clean and the material walk stays source-only. Persisted across
-# runs so the producer stays incrementally warm.
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$AETHER_ATTEST_BASE/aether-attest-target}"
-mkdir -p "$CARGO_TARGET_DIR"
-
 # Keep qodana's analysis cache and JBR downloads off $HOME and on the same
-# relocatable volume as CARGO_TARGET_DIR. Persisted across runs for incremental
+# relocatable volume as AETHER_ATTEST_BASE. Persisted across runs for incremental
 # warmth; root-owned droppings here are reclaimable via the existing
 # throwaway-root-container reap in the qodana) case below.
 QODANA_CACHE_DIR="${QODANA_CACHE_DIR:-$AETHER_ATTEST_BASE/aether-attest-qodana-cache}"
@@ -116,6 +110,15 @@ RUNDIR="$(mktemp -d "$AETHER_ATTEST_BASE/aether-attest-run.XXXXXX")"
 RUN="$RUNDIR/scan"
 git clone --quiet "$ROOT" "$RUN"
 git -C "$RUN" -c advice.detachedHead=false checkout --quiet "$HEAD_SHA"
+
+# Keep build artifacts out of the clone the git attestor walks ($RUNDIR/scan), so
+# its tree status stays clean and the material walk stays source-only. The default
+# target dir is per-run (nested under RUNDIR), isolating concurrent attests from
+# each other's cargo lock — the trade is no cross-run incremental reuse on the
+# default path. Pin CARGO_TARGET_DIR explicitly to opt back into a shared warm cache
+# (e.g. for /land's re-attest, which pins its own path).
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$RUNDIR/target}"
+mkdir -p "$CARGO_TARGET_DIR"
 
 # Ephemeral PKCS8 signing key in a private temp dir; shredded on exit.
 KEYDIR="$(mktemp -d)"

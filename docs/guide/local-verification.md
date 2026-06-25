@@ -19,7 +19,7 @@ for most contributors; the CI runner covers the case you skip it.
 
 `scripts/attest.sh` writes three kinds of scratch under a single base directory:
 
-- a persistent `CARGO_TARGET_DIR` (incremental build cache, kept warm across runs)
+- a per-run `CARGO_TARGET_DIR` (build artifacts, nested under `RUNDIR`, removed on exit)
 - a persistent qodana analysis cache (JBR downloads and prior-analysis snapshots)
 - a per-run fresh clone of HEAD, `RUNDIR`, removed on exit
 
@@ -51,9 +51,12 @@ AETHER_ATTEST_BASE=/mnt/large-volume/.cache
 ```
 
 Substitute the path to a filesystem with enough room for build artifacts. On a
-fresh machine, a few gigabytes for the Rust target cache plus a few hundred
-megabytes for the qodana cache is a reasonable floor; an incremental warm cache
-grows as the codebase does.
+fresh machine, a few gigabytes per attest run for the Rust target cache plus a
+few hundred megabytes for the qodana cache is a reasonable floor; each
+concurrent attest run carries its own full target tree (the default
+`CARGO_TARGET_DIR` is per-run and removed on exit), so N parallel runs need N
+times the target space. Pin `CARGO_TARGET_DIR` explicitly to share one warm
+cache across runs — at the cost of serializing on cargo's target lock.
 
 The `.env` file is gitignored and not sourced by `scripts/preflight.sh` (which
 has no comparable scratch cost), so adding the file has no effect on the fast
