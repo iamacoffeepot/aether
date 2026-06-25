@@ -1,30 +1,38 @@
-//! The runtime half — dispatcher + state. Compiled only under
-//! `feature = "runtime"` (the gate `#[pull_up]` stamps onto the `mod runtime;`
-//! declaration in `lib.rs`). The macro still *reads* this file at compile
-//! time in every configuration, to harvest the handler kinds for the markers
-//! it lifts up to `lib.rs`.
+//! The runtime half — behavior + state. Compiled only under `feature =
+//! "runtime"` (the gate sits on the `mod runtime;` line in `lib.rs`).
+//! `#[actor]` in `lib.rs` still *reads* this file in every configuration to
+//! lift the identity, so the `NAMESPACE` const and the `#[handler]` kinds here
+//! drive the always-on `Addressable` + `Handles<K>` impls up there.
 //!
-//! Names referenced in handler signatures (`RenderCapability`, `Tick`,
-//! `Resize`) are written *bare* so the type tokens the macro lifts upward
-//! resolve in `lib.rs`'s scope too. `use super::*` brings them in here.
+//! Names in signatures (`RenderCapability`, `Tick`, `Resize`) are written bare
+//! so the kind tokens `#[actor]` lifts resolve in `lib.rs`'s scope too;
+//! `use super::*` brings them in here.
 
-use super::{RenderCapability, Resize, Tick};
-use pull_up_macro::handler;
+use super::{RenderCapability, Resize, Runtime, Tick};
+use pull_up_macro::{handler, runtime};
 
-/// Stand-in for the feature-gated, substrate-typed runtime state — the heavy
-/// surface a transport-only / wasm build must never name.
+/// Stand-in for the feature-gated, substrate-typed runtime state.
 pub struct RenderCapabilityState {
     pub frames: u64,
 }
 
-/// The dispatcher: `#[handler]`-tagged methods. The macro harvests the last
-/// typed argument of each as the kind (`Tick`, `Resize`).
-impl RenderCapability {
+/// The behavior impl. `#[runtime]` keeps `type State` + `fn init` on the
+/// `Runtime` trait impl, moves the `#[handler]` bodies to an inherent impl, and
+/// consumes `NAMESPACE` (lifted into `Addressable` by `#[actor]`).
+#[runtime]
+impl Runtime for RenderCapability {
+    const NAMESPACE: &str = "spike.render";
+    type State = RenderCapabilityState;
+
+    fn init() -> RenderCapabilityState {
+        RenderCapabilityState { frames: 0 }
+    }
+
     #[handler]
-    pub fn on_tick(state: &mut RenderCapabilityState, _mail: Tick) {
+    fn on_tick(state: &mut RenderCapabilityState, _mail: Tick) {
         state.frames += 1;
     }
 
     #[handler]
-    pub fn on_resize(_state: &mut RenderCapabilityState, _mail: Resize) {}
+    fn on_resize(_state: &mut RenderCapabilityState, _mail: Resize) {}
 }

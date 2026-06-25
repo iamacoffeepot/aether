@@ -1,107 +1,127 @@
-# Spike: pulling runtime handler-markers up to the identity module
+# Spike: `#[actor]` on the capability, behavior in the runtime module
 
 ## Question
 
 The ADR-0122 identity/runtime split puts the `#[actor] impl` (dispatcher +
 handler bodies) in the cap's identity file (`mod.rs`) and only the runtime
-*state* in `runtime.rs`. We want the inverse: the dispatcher next to the state
-it drives (in `runtime.rs`), with the always-on addressing markers
-(`HandlesKind<K>`) still reachable from the identity even when the runtime
-module is `#[cfg]`-stripped.
+*state* in `runtime.rs`. We want the inverse: behavior next to the state it
+drives (in `runtime.rs`), the `#[actor]` macro on the **capability struct**,
+and the always-on addressing markers reachable from the identity even when the
+runtime module is `#[cfg]`-stripped.
 
-A proc-macro emits at one site, so it cannot put markers in `mod.rs` and a
-dispatcher in `runtime.rs` from one invocation **unless** it can read the
-runtime file off disk to harvest the handler kinds. This spike tests whether
-that disk-read approach is viable on the pinned stable toolchain (Rust 1.96).
+A proc-macro emits at one site, so it can't put markers in `mod.rs` and a
+dispatcher in `runtime.rs` from one invocation — *unless* it reads the runtime
+file off disk to harvest what it needs. This spike proves that works on the
+pinned stable toolchain (Rust 1.96).
 
-## Result
+## Target shape (proven)
 
-| Form | Verdict |
-| --- | --- |
-| `#[pull_up] mod runtime;` — attribute on the **file module** | **Blocked on stable** — E0658, [rust#54727]: *file modules in proc-macro input are unstable*. Inline `mod m { .. }` is stable; the `mod m;` file form is not, and never reaches the macro. |
-| `#[lift_up(runtime)] pub struct RenderCapability;` — attribute on the **identity struct** | **Works on stable.** A struct is ordinary proc-macro input; the macro passes it through and emits the lifted markers beside it. `mod runtime;` stays a separate plain line. |
-| `lift_markers!(runtime => Identity)` — function-like macro + plain `mod runtime;` | **Works on stable.** The file module is in neither the macro's input nor its output. |
+```rust
+// mod.rs — identity
+#[actor(singleton, runtime)]
+pub struct RenderCapability;
 
-The capability — auto-lifting markers with the kinds harvested from the runtime
-file — is achievable, and the *attribute* spelling is available too. The single
-forbidden thing is attaching a macro to the `mod runtime;` declaration itself.
-Move the attribute onto the identity struct and the attribute form works; the
-function-like form is the alternative when there's no natural item to host it.
+#[cfg(feature = "render-native")]
+mod runtime;
+```
+```rust
+// runtime.rs — behavior, gated with the module
+#[runtime]
+impl Runtime for RenderCapability {
+    const NAMESPACE: &str = "spike.render";   // consumed by #[actor]
+    type State = RenderCapabilityState;
+    fn init() -> RenderCapabilityState { .. } // lifecycle — kept
+    #[handler] fn on_tick(..) { .. }           // dispatch    — kept
+}
+pub struct RenderCapabilityState { .. }
+```
 
-## What the macro does (working forms)
+- `#[actor(singleton, runtime)]` on the struct reads `runtime.rs`, pulls the
+  `NAMESPACE` const and the `#[handler]` kinds out of the impl, and emits the
+  always-on identity: `impl Addressable` (namespace + `Resolver = One` from
+  `singleton`) and one `impl Handles<K>` per kind. Nothing is restated on the
+  struct — the namespace and kinds are read, not re-declared.
+- `#[runtime]` on the impl emits the behavior — the `Runtime` (lifecycle +
+  state) impl plus the handler bodies as an inherent impl — and *consumes* the
+  `NAMESPACE` const (it belongs to `Addressable`, not the behavior trait). It
+  rides the module's `#[cfg]`.
 
-Both working forms share one harvest path (`harvest_from_sibling`) and differ
-only in where they emit the markers:
+(`Handles<K>` ≈ `HandlesKind<K>`, `Addressable` ≈ the real one, `Runtime` ≈ the
+gated `Lifecycle`/`Dispatch`/`NativeActor` surface. The real `#[actor]` would
+also emit the always-on name-inventory entry; omitted here.)
 
-- `#[lift_up(runtime)]` on the identity struct — passes the struct through and
-  emits the markers beside it. The identity defaults to the attached struct's
-  name; `#[lift_up(runtime => Identity)]` overrides it. This is the form the
-  design discussion asked for.
-- `lift_markers!(runtime => Identity)` — function-like, emits only the markers.
+## Why it's an attribute on the struct, not on `mod runtime;`
 
-The shared harvest, given the module name:
+The natural-looking `#[actor] mod runtime;` is **rejected on stable** —
+E0658, [rust#54727]: *file modules in proc-macro input are unstable* (inline
+`mod m { .. }` is stable; the `mod m;` file form is not, and never reaches the
+macro). A struct is ordinary proc-macro input, so hosting `#[actor]` on the cap
+struct sidesteps it entirely; `mod runtime;` stays a plain, author-written,
+`#[cfg]`-gated line that no macro touches.
 
-1. `proc_macro::Span::local_file()` (stable since 1.88, [rust#140514]) resolves
-   the on-disk path of the file holding the invocation.
-2. Resolve the sibling module file (`<dir>/<name>.rs` else `<dir>/<name>/mod.rs`).
-3. `fs::read_to_string` + `syn::parse_file` — cfg-agnostic, so the kinds are
-   harvested even in a config where the module is stripped.
-4. Collect the type of each `#[handler]` method's last typed argument.
-5. Emit `impl Handles<K> for Identity {}` per kind, at the invocation site.
+## How the read works
 
-`mod runtime;` stays a plain, author-written, `#[cfg(feature = "runtime")]`
-line. `Handles<K>` stands in for `aether_actor::HandlesKind<K>`.
+`proc_macro::Span::local_file()` ([rust#140514], stable since 1.88) resolves the
+on-disk path of the file holding the `#[actor]` invocation. The sibling runtime
+file (`<name>.rs` else `<name>/mod.rs`) is read with `fs::read_to_string` and
+parsed with `syn` — cfg-agnostically, so the identity is harvested even in a
+configuration where `mod runtime` is stripped.
 
 ## Evidence
 
 ```
 cargo build -p consumer --no-default-features   # mod runtime STRIPPED → exit 0
-cargo build -p consumer --features runtime       # full dispatcher       → exit 0
+cargo build -p consumer --features runtime       # full behavior        → exit 0
+cargo test  -p consumer --no-default-features    # 1 passed
+cargo test  -p consumer --features runtime       # 2 passed
+cargo clippy --workspace --all-targets           # clean
 ```
 
-The feature-off build is the proof: `mod runtime` is stripped, so the marker
-impls cannot come from compiling `runtime.rs` — yet `_assert_markers_present`
-(which forces `RenderCapability: Handles<Tick> + Handles<Resize>` via a
-turbofish call site) compiles. The impls came only from the macro's disk read.
-
-Negative control (temporary, reverted): requiring `Handles<Unhandled>` for a
-kind with no `#[handler]` fails with `E0277` — the lift is precise (per-kind),
-not a blanket `impl<K> Handles<K>`.
+- **Feature-off** is the proof: `mod runtime` is stripped, so the `Addressable`
+  + `Handles<_>` impls can't come from compiling `runtime.rs`. Yet
+  `_assert_identity_present` (forcing `RenderCapability: Handles<Tick> +
+  Handles<Resize> + Addressable<Resolver = One>`) compiles, and the
+  `namespace_lifted_from_runtime_const` test passes
+  (`NAMESPACE == "spike.render"`). All of it came from `#[actor]`'s disk read.
+- **Lifecycle survives the split:** the feature-on `lifecycle_init_runs` test
+  calls `<RenderCapability as Runtime>::init()` — emitted by `#[runtime]` from
+  the `fn init` in the impl. The split loses no behavior; only the markers float
+  up.
+- An earlier negative control (requiring a marker for a non-`#[handler]` kind →
+  E0277) confirmed the lift is precise, not a blanket impl.
 
 ## Caveats / open questions
 
 - **rust-analyzer is the unverified risk, and it's the one that matters.** A
-  disk-reading macro is exactly where RA's in-memory VFS can diverge from what
-  `cargo build` sees — RA may run the macro against a stale buffer, a different
-  path, or skip the read. If RA fails to resolve the lifted markers, typed
+  disk-reading macro is exactly where RA's in-memory VFS can diverge from
+  `cargo` — it may run `#[actor]` against a stale buffer, a different path, or
+  skip the read. If RA fails to resolve the lifted identity, typed
   `ctx.actor::<Cap>().send(&kind)` goes red in the editor, which undercuts the
   whole reason the markers are always-on. **Verify in RA/RustRover before
   adopting.** `cargo` correctness (proven here) is necessary, not sufficient.
 - **`local_file()` is `Option`** — `None` under `--remap-path-prefix` (some
-  sandboxed / distributed builds). The macro hard-errors there; a real version
+  sandboxed / distributed builds). `#[actor]` hard-errors there; a real version
   needs a defined fallback.
-- **Lifted type tokens are verbatim.** Handler arg types and the impl self-type
-  must resolve in the *identity* module's scope, not just the runtime module's
-  — so they must be written bare (`Tick`, not `super::Tick`) or the lifted
-  `impl` won't resolve. A real macro would need a path-normalization story.
+- **Lifted kind tokens are verbatim**, so handler arg types must resolve in the
+  *identity* module's scope, not just the runtime module's — write them bare
+  (`Tick`, not `super::Tick`) or the lifted `impl` won't resolve. A real macro
+  needs a path-normalization story.
 - **Harvest ignores cfg** (syn doesn't evaluate it), so cfg'd-out handlers are
-  also lifted. Controllable, but a sharp edge.
-- **Incremental is fine here.** `runtime.rs` is a real crate module, so editing
-  it changes the crate fingerprint → recompile → macro re-runs and re-reads.
+  also lifted.
+- **Incremental is fine.** `runtime.rs` is a real crate module, so editing it
+  changes the crate fingerprint → recompile → `#[actor]` re-runs and re-reads.
   The unstable `tracked_path` API ([rust#99515]) is only needed for non-module
   asset files, which this is not.
-- **Ergonomics:** two lines (`#[cfg] mod runtime;` + `lift_markers!(...)`) and a
-  re-stated identity name in the macro call, versus the dreamed one-liner.
 
 ## Comparison
 
-This competes with the no-macro alternative ("Option A"): leave `mod runtime;`
-ungated and gate only the substrate-typed items inside it, letting the existing
+This competes with the no-macro "Option A": leave `mod runtime;` ungated and
+gate only the substrate-typed items inside it, letting the existing
 `#[actor(runtime_feature = ...)]` emit markers ungated from within `runtime.rs`
 (crate-global impls reach the identity for free). Option A needs no new
-machinery and is RA-clean; this spike's form gives the cleaner physical split
-(markers literally at the identity site, dispatcher fully inside the runtime
-file) at the cost of a disk-reading macro and the RA risk above.
+machinery and is RA-clean; this spike's form gives the cleaner authoring model
+(`#[actor]` on the cap, behavior + state together in the runtime file) at the
+cost of a disk-reading macro and the RA risk above.
 
 [rust#54727]: https://github.com/rust-lang/rust/issues/54727
 [rust#140514]: https://github.com/rust-lang/rust/pull/140514
