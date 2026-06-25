@@ -1,0 +1,35 @@
+[package]
+name = "aether-test-fixtures-split-cap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ADR-0123 struct-hosted split-cap fixture: `#[actor(singleton)]` on the
+# capability struct in `src/lib.rs` (the always-on identity) plus
+# `#[runtime] impl NativeActor` in `src/runtime.rs` (the feature-gated
+# behaviour). A `lib` (not a `cdylib`) because it exercises the *native* split
+# path — unlike the wasm cdylib fixtures alongside. The `runtime` feature gates
+# `mod runtime;` and the `aether-substrate` dep, so a `--no-default-features`
+# build compiles only the cap's lifted identity + addressing markers and never
+# names the state type nor pulls the substrate runtime.
+
+[features]
+default = []
+runtime = ["dep:aether-substrate"]
+
+[dependencies]
+# Always-on identity deps — these compile feature-off and carry the markers.
+aether-actor = { path = "../../aether-actor" }
+aether-data = { path = "../../aether-data", features = ["derive"] }
+bytemuck = { workspace = true, features = ["derive"] }
+# Native runtime half — pulled in only under `feature = "runtime"`.
+aether-substrate = { path = "../../aether-substrate", optional = true }
+
+# The `Kind` derive + the `#[actor]`-lifted handler inventory emit
+# `cfg(not(wasm32))`-gated `inventory::submit!`s, so a native (host) build needs
+# `inventory` reachable. The fixture is host-only, so this is unconditional.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = { workspace = true }
+
+[lints]
+workspace = true

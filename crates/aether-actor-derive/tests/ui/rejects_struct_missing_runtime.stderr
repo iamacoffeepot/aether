@@ -1,0 +1,5 @@
+error: #[actor]: cannot read runtime module `rt_absent` (expected `rt_absent.rs` or `rt_absent/mod.rs` beside this file): No such file or directory (os error 2)
+ --> tests/ui/rejects_struct_missing_runtime.rs:7:20
+  |
+7 | #[actor(singleton, rt_absent)]
+  |                    ^^^^^^^^^

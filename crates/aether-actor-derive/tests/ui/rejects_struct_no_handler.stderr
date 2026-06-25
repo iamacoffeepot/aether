@@ -1,0 +1,5 @@
+error: #[actor]: no `#[handler]`-bearing impl found in runtime module `rt_nohandler` — the struct-hosted form expects a sibling `#[runtime] impl NativeActor` with at least one `#[handler]` (or a `#[fallback]`)
+ --> tests/ui/rejects_struct_no_handler.rs:6:20
+  |
+6 | #[actor(singleton, rt_nohandler)]
+  |                    ^^^^^^^^^^^^

@@ -40,6 +40,9 @@
 //! `SchemaType::Bytes` / `LabelNode::Anonymous` directly when it
 //! sees `Vec<u8>`. Every other shape goes through trait dispatch.
 
+use std::fs;
+use std::path::Path;
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -48,8 +51,8 @@ use syn::parse::Parser;
 use syn::spanned::Spanned;
 use syn::{
     Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprLit, Fields, FnArg,
-    GenericArgument, ImplItem, ItemImpl, Lit, Meta, PathArguments, ReturnType, Signature, Type,
-    parse_macro_input,
+    GenericArgument, ImplItem, ItemImpl, ItemStruct, Lit, Meta, PathArguments, ReturnType,
+    Signature, Type, parse_macro_input,
 };
 
 #[proc_macro_derive(Kind, attributes(kind))]
@@ -742,8 +745,61 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(opts) => opts,
         Err(e) => return e.to_compile_error().into(),
     };
+    // ADR-0123: `#[actor]` may now sit on the capability *struct* (the
+    // struct-hosted identity form) as well as on an `impl WasmActor /
+    // NativeActor for X` block (the impl-hosted form). A struct input takes
+    // the disk-read identity path — it parses the sibling runtime module file,
+    // lifts the `NAMESPACE` const + `#[handler]` kinds out of the
+    // `impl NativeActor` there, and emits the always-on identity markers
+    // against the struct. Any other input is the existing impl-hosted path.
+    let item2: TokenStream2 = item.clone().into();
+    if let Ok(item_struct) = syn::parse2::<ItemStruct>(item2) {
+        return match expand_struct_hosted_actor(&item_struct, &opts) {
+            Ok(ts) => ts.into(),
+            Err(e) => e.to_compile_error().into(),
+        };
+    }
     let item = parse_macro_input!(item as ItemImpl);
     match expand_handlers(item, &opts) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `#[runtime]` (ADR-0123): sits on the `impl NativeActor for Cap` block in a
+/// capability's `mod runtime;` file. It emits only the gated runtime surface —
+/// `Lifecycle`, `Dispatch`, the `NativeActor` composition pinning `type State`,
+/// and the handler bodies as an inherent impl — and consumes the `NAMESPACE`
+/// const (lifted into `Addressable` by the struct-side `#[actor]`). It emits no
+/// addressing markers; those come from the struct. The runtime impls ride the
+/// `#[cfg]` on the `mod runtime;` line, so this attribute adds no gate of its
+/// own.
+#[proc_macro_attribute]
+pub fn runtime(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if !attr.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "#[runtime] takes no arguments",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let item = parse_macro_input!(item as ItemImpl);
+    let is_native_actor = item
+        .trait_
+        .as_ref()
+        .and_then(|(_, p, _)| p.segments.last())
+        .is_some_and(|s| s.ident == "NativeActor");
+    if !is_native_actor {
+        return syn::Error::new_spanned(
+            &item.self_ty,
+            "#[runtime] expects `impl NativeActor for X` — it emits the gated native \
+             runtime surface for a struct-hosted (`#[actor]`-on-the-struct) split capability",
+        )
+        .to_compile_error()
+        .into();
+    }
+    match expand_native_actor_trait(item, &ActorOpts::default(), NativeEmit::RuntimeOnly) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
@@ -766,6 +822,11 @@ struct ActorOpts {
     /// names it here so the runtime impls gate on that feature rather than the
     /// generic `runtime`. `None` ⇒ the default `feature = "runtime"`.
     runtime_feature: Option<String>,
+    /// ADR-0123: the runtime module name the struct-hosted `#[actor]` reads off
+    /// disk, from a bare positional ident — `#[actor(singleton, other)]` reads
+    /// `other.rs`. `None` ⇒ the conventional sibling `runtime`. Only consulted
+    /// on the struct-hosted path; the impl-hosted path ignores it.
+    runtime_module: Option<syn::Ident>,
 }
 
 fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
@@ -797,10 +858,25 @@ fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
             let lit: syn::LitStr = value.parse()?;
             opts.runtime_feature = Some(lit.value());
             Ok(())
+        } else if meta.path.get_ident().is_some() && !meta.input.peek(syn::Token![=]) {
+            // ADR-0123: a bare positional ident names the runtime module the
+            // struct-hosted `#[actor]` reads off disk (default `runtime`).
+            let id = meta
+                .path
+                .get_ident()
+                .expect("checked is_some above")
+                .clone();
+            if opts.runtime_module.is_some() {
+                return Err(
+                    meta.error("duplicate runtime module name in #[actor] — name it at most once")
+                );
+            }
+            opts.runtime_module = Some(id);
+            Ok(())
         } else {
             Err(meta.error(
                 "unrecognised #[actor] argument; expected `singleton`, `instanced`, \
-                 or `runtime_feature = \"name\"`",
+                 `runtime_feature = \"name\"`, or a bare runtime module name",
             ))
         }
     });
@@ -884,7 +960,7 @@ pub fn fallback(_attr: TokenStream, _item: TokenStream) -> TokenStream {
 /// mostly for completeness.
 #[proc_macro_attribute]
 pub fn local(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(item as syn::ItemStruct);
+    let input = parse_macro_input!(item as ItemStruct);
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     quote! {
@@ -934,7 +1010,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     }
-    let mut item = parse_macro_input!(item as syn::ItemStruct);
+    let mut item = parse_macro_input!(item as ItemStruct);
     // Issue 552 stage 4: gate fields on `not(target_family = "wasm")`
     // to match the macro-emitted `NativeActor` / `NativeDispatch`
     // impls. Wasm builds see the cap struct with no fields (a pure
@@ -999,7 +1075,7 @@ fn expand_handlers(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStream2
             .map(|s| s.ident.to_string())
             .unwrap_or_default();
         match last.as_str() {
-            "NativeActor" => expand_native_actor_trait(item, opts),
+            "NativeActor" => expand_native_actor_trait(item, opts, NativeEmit::Full),
             // `WasmActor` is the post-552 trait name; `Component` is
             // the back-compat alias retained until stage 4.
             "WasmActor" | "Component" => expand_wasm_actor(item, opts),
@@ -1966,12 +2042,33 @@ fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStrea
 ///
 /// `#[fallback]` is rejected — native actors are typed receivers;
 /// unknown kinds are programming errors, not fallback paths.
+/// What an `impl NativeActor for X` expansion emits, selecting between the two
+/// attribute sites that drive a native cap (ADR-0122 / ADR-0123).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NativeEmit {
+    /// Impl-hosted `#[actor] impl NativeActor for X`: the always-on addressing
+    /// markers (`Addressable` / `HandlesKind` / name inventory) *plus* the
+    /// runtime surface, the latter `#[cfg]`-gated (split caps gate on the
+    /// runtime feature, un-split on `not(wasm)`).
+    Full,
+    /// Struct-hosted `#[runtime] impl NativeActor for X` (ADR-0123): only the
+    /// runtime surface (`Lifecycle` / `Dispatch` / `NativeActor` / inherent
+    /// handler impl), ungated — the `mod runtime;` line carries the `#[cfg]`.
+    /// The addressing markers come from the struct-side `#[actor]`, so none are
+    /// emitted here and the `NAMESPACE` const is consumed (dropped).
+    RuntimeOnly,
+}
+
 // Emits the full `NativeActor` surface in one walk: dispatch table,
 // `init` wrapper, `HandlesKind<K>` impls per handler, plus the
 // dispatch ABI plumbing. Splitting into helpers would force shared
 // per-handler context structs without saving readability.
 #[allow(clippy::too_many_lines)]
-fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStream2> {
+fn expand_native_actor_trait(
+    item: ItemImpl,
+    opts: &ActorOpts,
+    emit: NativeEmit,
+) -> syn::Result<TokenStream2> {
     let self_ty = &item.self_ty;
     let generics = &item.generics;
     let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
@@ -2239,58 +2336,40 @@ fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts) -> syn::Result<To
              `const NAMESPACE: &'static str = ...` so the marker `impl Addressable` can carry it",
         ));
     }
-    // NAMESPACE passes through unchanged because its RHS is a
-    // primitive that doesn't require resolution.
-    let const_tokens: Vec<TokenStream2> = consts.iter().map(|c| quote! { #c }).collect();
-    // ADR-0119: a native actor's cardinality picks its resolver — `One`
-    // (default, or `#[actor(singleton)]`) or `Many` (`#[actor(instanced)]`).
-    // `Singleton` / `Instanced` are derived from it; the old hand-written
-    // `impl Singleton/Instanced for X {}` next to `#[actor]` is retired.
-    let resolver_ty = if matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
-        quote! { ::aether_actor::Many }
-    } else {
-        quote! { ::aether_actor::One }
-    };
-    let actor_impl = if consts.is_empty() {
-        quote! {}
-    } else {
-        quote! {
-            impl #impl_generics ::aether_actor::Addressable for #self_ty #where_clause {
-                #(#const_tokens)*
-                type Resolver = #resolver_ty;
-            }
-        }
-    };
+    // NAMESPACE passes through unchanged because its RHS is a primitive that
+    // doesn't require resolution. The `Addressable` body restates the const
+    // (built inside the helper) so the struct-hosted path (which has only the
+    // harvested expr) and this path share one emission helper.
+    let namespace_expr: &Expr = consts
+        .iter()
+        .find_map(|c| (c.ident == "NAMESPACE").then_some(&c.expr))
+        .expect("has_namespace checked above");
 
-    // Issue 576 + issue 603: only-fallback (true catch-all) caps emit
-    // a single blanket `impl<K: Kind> HandlesKind<K> for X {}` so any
-    // typed `ctx.actor::<X>().send(&payload)` compiles for every K.
-    // Strict receivers and hybrid caps (handlers + fallback safety
-    // net) keep per-handler impls — only declared kinds compile via
-    // typed sends; the fallback handles unknown kinds at runtime
-    // (e.g. mail arriving by mailbox name).
-    let handles_kind_impls: Vec<TokenStream2> = if fallback.is_some() && handlers.is_empty() {
-        let kind_param: syn::Ident = syn::parse_quote!(__AetherCatchAllK);
-        let mut blanket_generics = generics.clone();
-        blanket_generics.params.push(syn::parse_quote!(
-            #kind_param: ::aether_actor::__macro_internals::Kind
-        ));
-        let (blanket_impl, _, blanket_where) = blanket_generics.split_for_impl();
-        vec![quote! {
-            impl #blanket_impl ::aether_actor::HandlesKind<#kind_param>
-                for #self_ty #blanket_where {}
-        }]
-    } else {
-        handlers
-            .iter()
-            .map(|h| {
-                let kind_ty = &h.kind_ty;
-                quote! {
-                    impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
-                        for #self_ty #where_clause {}
-                }
-            })
-            .collect()
+    // ADR-0122 / ADR-0123: the always-on addressing markers (`Addressable` /
+    // per-kind `HandlesKind` / name inventory) are shared with the struct-hosted
+    // `#[actor]` path. The impl-hosted form emits them here (`Full`); the
+    // `#[runtime]` form (`RuntimeOnly`) leaves them to the struct's `#[actor]`.
+    let markers = match emit {
+        NativeEmit::Full => {
+            // Mail handlers only — task completions get no `HandlesKind` /
+            // name-inventory entry (a completion is not inbound mail).
+            let handler_kinds: Vec<HandlerMarker> = handlers
+                .iter()
+                .map(|h| (h.kind_ty.clone(), h.reply.manifest_kind().cloned()))
+                .collect();
+            emit_native_identity_markers(
+                self_ty,
+                generics,
+                namespace_expr,
+                opts.cardinality,
+                &handler_kinds,
+                fallback.is_some(),
+                // The name-inventory entry is split-only (an un-split cap
+                // registers its name through the chassis builder, not the macro).
+                is_split,
+            )
+        }
+        NativeEmit::RuntimeOnly => quote! {},
     };
 
     // ADR-0081 retired the chassis-pushed `ConfigureLogDrain` mail;
@@ -2563,43 +2642,6 @@ fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts) -> syn::Result<To
         }
     };
 
-    // ADR-0109 §5: the native analogue of the wasm `aether.kinds.inputs`
-    // custom section. Submit one link-time `HandlerEntry` per
-    // `#[handler]` — the owning `NAMESPACE`, the input kind (id + name),
-    // and the reply kind id read off the return type (the same
-    // `classify_handler_reply` the auto-reply arm uses). The
-    // `aether.inventory` cap folds these into the
-    // `aether.inventory.handlers` reply, so a native cap surfaces its
-    // `In -> Out` the way `describe_component` does for a wasm component.
-    // Gated on `not(wasm32)` to match the rest of the native surface
-    // (the `inventory` crate doesn't link on wasm32). Skipped for a
-    // generic native actor — none exist, and `<Self as Addressable>::NAMESPACE`
-    // wouldn't const-resolve in the non-generic inventory static.
-    let handler_inventory = if generics.params.is_empty() {
-        let submissions = handlers.iter().map(|h| {
-            let kind_ty = &h.kind_ty;
-            let reply_expr = if let Some(reply_ty) = h.reply.manifest_kind() {
-                quote! { ::core::option::Option::Some(<#reply_ty as ::aether_data::Kind>::ID) }
-            } else {
-                quote! { ::core::option::Option::None }
-            };
-            quote! {
-                #[cfg(not(target_family = "wasm"))]
-                ::aether_data::name_inventory::inventory::submit! {
-                    ::aether_data::name_inventory::HandlerEntry {
-                        namespace: <#self_ty as ::aether_actor::Addressable>::NAMESPACE,
-                        id: <#kind_ty as ::aether_data::Kind>::ID,
-                        name: <#kind_ty as ::aether_data::Kind>::NAME,
-                        reply: #reply_expr,
-                    }
-                }
-            }
-        });
-        quote! { #(#submissions)* }
-    } else {
-        quote! {}
-    };
-
     // Issue 552 stage 4: NativeActor + NativeDispatch + the inherent
     // handler-method impl all reach for `::aether_substrate::*` paths
     // and native-only types in their bodies. They're emitted under
@@ -2634,14 +2676,19 @@ fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts) -> syn::Result<To
     // native half lives behind `render-native` / `audio-native` / … name it so
     // a plain-`runtime` build never tries to compile their substrate-typed
     // impls without the heavy dep).
-    let runtime_gate = if is_split {
-        if let Some(feat) = opts.runtime_feature.as_deref() {
-            quote! { #[cfg(feature = #feat)] }
-        } else {
-            quote! { #[cfg(feature = "runtime")] }
+    let runtime_gate = match emit {
+        // ADR-0123: `#[runtime]` emits the runtime surface ungated — the
+        // `#[cfg]` rides the author-written `mod runtime;` line, so the impls
+        // already only exist in a build where the runtime module is present.
+        NativeEmit::RuntimeOnly => quote! {},
+        NativeEmit::Full if is_split => {
+            if let Some(feat) = opts.runtime_feature.as_deref() {
+                quote! { #[cfg(feature = #feat)] }
+            } else {
+                quote! { #[cfg(feature = "runtime")] }
+            }
         }
-    } else {
-        quote! { #[cfg(not(target_family = "wasm"))] }
+        NativeEmit::Full => quote! { #[cfg(not(target_family = "wasm"))] },
     };
 
     // Composed shape: `Lifecycle<S>::wire` / `unwire` forward to the inherent
@@ -2674,57 +2721,14 @@ fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts) -> syn::Result<To
         quote! {}
     };
 
-    // A split (`#[actor] impl NativeActor`) cap carries its own always-on
-    // name-inventory submission, keyed by cardinality off the single
-    // `#namespace_expr` and gated `not(wasm)` so it rides the transport build
-    // but never the wasm header build. Only the split path emits it.
-    let name_entry = if is_split && has_namespace {
-        let namespace_expr = consts.iter().find_map(|c| {
-            if c.ident == "NAMESPACE" {
-                Some(&c.expr)
-            } else {
-                None
-            }
-        });
-        match (namespace_expr, opts.cardinality) {
-            (Some(ns), Some(ActorCardinality::Instanced)) => quote! {
-                #[cfg(not(target_family = "wasm"))]
-                ::aether_data::name_inventory::inventory::submit! {
-                    ::aether_data::name_inventory::TemplateEntry {
-                        domain: ::aether_data::MAILBOX_DOMAIN,
-                        prefix: #ns,
-                        template: ":{subname}",
-                        param: ::aether_data::name_inventory::ParamKind::Dynamic,
-                    }
-                }
-            },
-            (Some(ns), _) => quote! {
-                #[cfg(not(target_family = "wasm"))]
-                ::aether_data::name_inventory::inventory::submit! {
-                    ::aether_data::name_inventory::NameEntry {
-                        domain: ::aether_data::MAILBOX_DOMAIN,
-                        name: #ns,
-                    }
-                }
-            },
-            (None, _) => quote! {},
-        }
-    } else {
-        quote! {}
-    };
-
     Ok(quote! {
-        // Always-on addressing markers: the identity carries `Addressable`
-        // (`NAMESPACE` / `Resolver`), the per-handler `HandlesKind<K>` impls,
-        // and (split caps) the name-inventory entry — none of which name the
-        // runtime state or pull `aether_substrate`.
-        #actor_impl
-
-        #(#handles_kind_impls)*
-
-        #name_entry
-
-        #handler_inventory
+        // Always-on addressing markers (`Full` only): the identity carries
+        // `Addressable` (`NAMESPACE` / `Resolver`), the per-handler
+        // `HandlesKind<K>` impls, and (split caps) the name-inventory entry —
+        // none of which name the runtime state or pull `aether_substrate`. On
+        // the `RuntimeOnly` (`#[runtime]`) path this is empty: the struct-side
+        // `#[actor]` emits the markers.
+        #markers
 
         // Composed shape: the addressing identity carries the two native
         // behaviour traits parameterised by the runtime state, plus the
@@ -2789,6 +2793,299 @@ fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts) -> syn::Result<To
             #(#helper_methods)*
         }
     })
+}
+
+/// One mail handler's marker payload: its inbound kind type plus the manifest
+/// reply kind read off the handler's return type (`None` for `-> ()`).
+type HandlerMarker = (Type, Option<Type>);
+
+/// Emit the always-on native addressing markers shared by the impl-hosted
+/// `#[actor]` path (ADR-0122) and the struct-hosted one (ADR-0123): the
+/// `Addressable` impl (`NAMESPACE` + the cardinality resolver), one
+/// `HandlesKind<K>` per mail handler (a single blanket impl for a
+/// fallback-only catch-all cap), the cardinality-keyed name-inventory entry
+/// (`emit_name_entry`), and the per-handler `HandlerEntry` inventory
+/// submissions. None of these name the runtime state or pull `aether_substrate`,
+/// so they compile in a transport-only / wasm build where the runtime module is
+/// stripped. `handler_kinds` carries each mail handler's `(kind, reply)`; task
+/// completions are not inbound mail and carry no marker.
+fn emit_native_identity_markers(
+    self_ty: &Type,
+    generics: &syn::Generics,
+    namespace_expr: &Expr,
+    cardinality: Option<ActorCardinality>,
+    handler_kinds: &[HandlerMarker],
+    has_fallback: bool,
+    emit_name_entry: bool,
+) -> TokenStream2 {
+    let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
+
+    // ADR-0119: cardinality picks the resolver — `One` (default / `singleton`)
+    // or `Many` (`instanced`). `Singleton` / `Instanced` derive from it.
+    let resolver_ty = if matches!(cardinality, Some(ActorCardinality::Instanced)) {
+        quote! { ::aether_actor::Many }
+    } else {
+        quote! { ::aether_actor::One }
+    };
+    // The `NAMESPACE` const restated in the `Addressable` body — built here so
+    // both call sites pass just the expr.
+    let actor_impl = quote! {
+        impl #impl_generics ::aether_actor::Addressable for #self_ty #where_clause {
+            const NAMESPACE: &'static str = #namespace_expr;
+            type Resolver = #resolver_ty;
+        }
+    };
+
+    // Issue 576 + issue 603: a fallback-only (true catch-all) cap emits a single
+    // blanket `impl<K: Kind> HandlesKind<K>` so any typed
+    // `ctx.actor::<X>().send(&payload)` compiles for every K. Strict / hybrid
+    // caps keep per-handler impls — only declared kinds compile via typed sends.
+    let handles_kind_impls: Vec<TokenStream2> = if has_fallback && handler_kinds.is_empty() {
+        let kind_param: syn::Ident = syn::parse_quote!(__AetherCatchAllK);
+        let mut blanket_generics = generics.clone();
+        blanket_generics.params.push(syn::parse_quote!(
+            #kind_param: ::aether_actor::__macro_internals::Kind
+        ));
+        let (blanket_impl, _, blanket_where) = blanket_generics.split_for_impl();
+        vec![quote! {
+            impl #blanket_impl ::aether_actor::HandlesKind<#kind_param>
+                for #self_ty #blanket_where {}
+        }]
+    } else {
+        handler_kinds
+            .iter()
+            .map(|(kind_ty, _)| {
+                quote! {
+                    impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
+                        for #self_ty #where_clause {}
+                }
+            })
+            .collect()
+    };
+
+    // A split cap carries its own always-on name-inventory submission, keyed by
+    // cardinality off the `NAMESPACE` expr and gated `not(wasm)` so it rides the
+    // transport build but never the wasm header build.
+    let name_entry = if !emit_name_entry {
+        quote! {}
+    } else if matches!(cardinality, Some(ActorCardinality::Instanced)) {
+        quote! {
+            #[cfg(not(target_family = "wasm"))]
+            ::aether_data::name_inventory::inventory::submit! {
+                ::aether_data::name_inventory::TemplateEntry {
+                    domain: ::aether_data::MAILBOX_DOMAIN,
+                    prefix: #namespace_expr,
+                    template: ":{subname}",
+                    param: ::aether_data::name_inventory::ParamKind::Dynamic,
+                }
+            }
+        }
+    } else {
+        quote! {
+            #[cfg(not(target_family = "wasm"))]
+            ::aether_data::name_inventory::inventory::submit! {
+                ::aether_data::name_inventory::NameEntry {
+                    domain: ::aether_data::MAILBOX_DOMAIN,
+                    name: #namespace_expr,
+                }
+            }
+        }
+    };
+
+    // ADR-0109 §5: the native analogue of the wasm `aether.kinds.inputs` custom
+    // section — one link-time `HandlerEntry` per mail handler (owning
+    // `NAMESPACE`, input kind id + name, reply kind id off the return type),
+    // gated `not(wasm32)`. Skipped for a generic native actor (none exist):
+    // `<Self as Addressable>::NAMESPACE` wouldn't const-resolve in the
+    // non-generic inventory static.
+    let handler_inventory = if generics.params.is_empty() {
+        let submissions = handler_kinds.iter().map(|(kind_ty, reply)| {
+            let reply_expr = if let Some(reply_ty) = reply {
+                quote! { ::core::option::Option::Some(<#reply_ty as ::aether_data::Kind>::ID) }
+            } else {
+                quote! { ::core::option::Option::None }
+            };
+            quote! {
+                #[cfg(not(target_family = "wasm"))]
+                ::aether_data::name_inventory::inventory::submit! {
+                    ::aether_data::name_inventory::HandlerEntry {
+                        namespace: <#self_ty as ::aether_actor::Addressable>::NAMESPACE,
+                        id: <#kind_ty as ::aether_data::Kind>::ID,
+                        name: <#kind_ty as ::aether_data::Kind>::NAME,
+                        reply: #reply_expr,
+                    }
+                }
+            }
+        });
+        quote! { #(#submissions)* }
+    } else {
+        quote! {}
+    };
+
+    quote! {
+        #actor_impl
+        #(#handles_kind_impls)*
+        #name_entry
+        #handler_inventory
+    }
+}
+
+/// ADR-0123 struct-hosted `#[actor]`: `#[actor(<cardinality>[, <module>])]` on
+/// the capability *struct*. It reads the sibling runtime module off disk
+/// (default `runtime`), lifts the native cap's identity out of the
+/// `#[handler]`-bearing `impl NativeActor` there, and emits the always-on
+/// addressing markers against the struct — passing the struct itself through
+/// unchanged. The behaviour + state stay in the runtime module (under
+/// `#[runtime]`); none of the emitted markers name the runtime state or pull
+/// `aether_substrate`, so the identity survives a `--no-default-features` build
+/// where `mod runtime` is `#[cfg]`-stripped.
+fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::Result<TokenStream2> {
+    let ident = &item.ident;
+    let (_impl_generics, ty_generics, _where_clause) = item.generics.split_for_impl();
+    let self_ty: Type = syn::parse_quote!(#ident #ty_generics);
+
+    // The runtime module name (default `runtime`) plus a span in the invoking
+    // file to resolve it from. A defaulted module has no ident of its own, so
+    // borrow the struct ident's span — it lives in the same file.
+    let (module_name, module_span) = match &opts.runtime_module {
+        Some(id) => (id.to_string(), id.span()),
+        None => ("runtime".to_string(), ident.span()),
+    };
+
+    let (namespace_expr, handler_kinds, has_fallback) =
+        harvest_runtime_identity(&module_name, module_span)?;
+
+    let markers = emit_native_identity_markers(
+        &self_ty,
+        &item.generics,
+        &namespace_expr,
+        opts.cardinality,
+        &handler_kinds,
+        has_fallback,
+        // The struct-hosted form is always a split identity, so it always
+        // carries its own name-inventory entry.
+        true,
+    );
+
+    Ok(quote! {
+        #item
+        #markers
+    })
+}
+
+/// Read the sibling runtime module file off disk and lift the native cap's
+/// identity out of its `#[handler]`-bearing `impl NativeActor` block: the
+/// `NAMESPACE` const expression, each *mail* handler's `(kind, reply)`, and
+/// whether a `#[fallback]` is present. The read is cfg-blind — `syn` does not
+/// evaluate `cfg`, so the identity is harvested even when `mod runtime` is
+/// stripped from the build. `module_span` both resolves the on-disk path
+/// (`Span::local_file`) and anchors every diagnostic back at the `#[actor]`
+/// invocation rather than into the parsed (span-less) runtime file.
+fn harvest_runtime_identity(
+    module_name: &str,
+    module_span: proc_macro2::Span,
+) -> syn::Result<(Expr, Vec<HandlerMarker>, bool)> {
+    // `Span::local_file()` (stable since 1.88) → the on-disk path of the file
+    // holding the `#[actor]` invocation. It is `None` only under path remapping
+    // (`--remap-path-prefix`), where the runtime file can't be located — a hard
+    // error, per ADR-0123's recorded fallback.
+    let Some(decl_path) = module_span.unwrap().local_file() else {
+        return Err(syn::Error::new(
+            module_span,
+            "#[actor]: Span::local_file() returned None — the source path is unavailable \
+             (path remapping?), so the runtime module file can't be located. The struct-hosted \
+             identity form needs an un-remapped build (ADR-0123).",
+        ));
+    };
+    let dir = decl_path.parent().unwrap_or_else(|| Path::new("."));
+    let flat = dir.join(format!("{module_name}.rs"));
+    let nested = dir.join(module_name).join("mod.rs");
+    let target = if flat.exists() { flat } else { nested };
+
+    let src = fs::read_to_string(&target).map_err(|e| {
+        syn::Error::new(
+            module_span,
+            format!(
+                "#[actor]: cannot read runtime module `{module_name}` (expected \
+                 `{module_name}.rs` or `{module_name}/mod.rs` beside this file): {e}"
+            ),
+        )
+    })?;
+    let parsed = syn::parse_file(&src).map_err(|e| {
+        syn::Error::new(
+            module_span,
+            format!("#[actor]: parse error in runtime module `{module_name}`: {e}"),
+        )
+    })?;
+
+    let remap = |e: syn::Error| {
+        syn::Error::new(
+            module_span,
+            format!("#[actor]: harvesting runtime module `{module_name}`: {e}"),
+        )
+    };
+
+    for syn_item in &parsed.items {
+        let syn::Item::Impl(imp) = syn_item else {
+            continue;
+        };
+        let mut handler_kinds: Vec<(Type, Option<Type>)> = Vec::new();
+        let mut has_fallback = false;
+        let mut saw_handler = false;
+        for impl_item in &imp.items {
+            let ImplItem::Fn(f) = impl_item else {
+                continue;
+            };
+            if f.attrs.iter().any(attr_is_fallback) {
+                has_fallback = true;
+                continue;
+            }
+            let Some(handler_attr) = f.attrs.iter().find(|a| attr_is_handler(a)) else {
+                continue;
+            };
+            saw_handler = true;
+            // Task completions get no `HandlesKind` / inventory marker.
+            if matches!(
+                parse_handler_variant(handler_attr).map_err(remap)?,
+                HandlerVariant::Task
+            ) {
+                continue;
+            }
+            let (kind_ty, _is_slice) =
+                extract_native_actor_handler_kind(&f.sig, true).map_err(remap)?;
+            let reply = classify_handler_reply(&f.sig.output)
+                .manifest_kind()
+                .cloned();
+            handler_kinds.push((kind_ty, reply));
+        }
+        // Not the runtime impl — some other trait impl in the file.
+        if !saw_handler && !has_fallback {
+            continue;
+        }
+        let namespace_expr = imp.items.iter().find_map(|impl_item| match impl_item {
+            ImplItem::Const(c) if c.ident == "NAMESPACE" => Some(c.expr.clone()),
+            _ => None,
+        });
+        let Some(namespace_expr) = namespace_expr else {
+            return Err(syn::Error::new(
+                module_span,
+                format!(
+                    "#[actor]: the runtime impl in module `{module_name}` has #[handler]s but \
+                     no `const NAMESPACE` to lift into Addressable"
+                ),
+            ));
+        };
+        return Ok((namespace_expr, handler_kinds, has_fallback));
+    }
+
+    Err(syn::Error::new(
+        module_span,
+        format!(
+            "#[actor]: no `#[handler]`-bearing impl found in runtime module `{module_name}` — \
+             the struct-hosted form expects a sibling `#[runtime] impl NativeActor` with at \
+             least one `#[handler]` (or a `#[fallback]`)"
+        ),
+    ))
 }
 
 struct NativeActorHandlerFn {
