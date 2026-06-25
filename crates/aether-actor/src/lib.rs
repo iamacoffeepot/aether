@@ -135,7 +135,7 @@ pub mod __macro_internals {
 /// the foundational data-layer crate and no longer exports actor-SDK
 /// surface. Component and capability authors need only `aether-actor`
 /// in their dep list; the full macro surface is available from here.
-pub use aether_actor_derive::{actor, capability, fallback, handler, local};
+pub use aether_actor_derive::{actor, capability, fallback, handler, local, runtime};
 pub use aether_data::{Kind, KindId as DataKindId, MailboxId, Schema};
 // ADR-0119: the `#[derive(Singleton)]` / `#[derive(Instanced)]` /
 // `#[derive(Embeddable)]` proc-macros are retired. Cardinality is the

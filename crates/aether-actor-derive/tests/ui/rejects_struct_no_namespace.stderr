@@ -1,0 +1,5 @@
+error: #[actor]: the runtime impl in module `rt_nonamespace` has #[handler]s but no `const NAMESPACE` to lift into Addressable
+ --> tests/ui/rejects_struct_no_namespace.rs:7:20
+  |
+7 | #[actor(singleton, rt_nonamespace)]
+  |                    ^^^^^^^^^^^^^^

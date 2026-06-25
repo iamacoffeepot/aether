@@ -1,0 +1,5 @@
+error: unrecognised #[actor] argument; expected `singleton`, `instanced`, `runtime_feature = "name"`, or a bare runtime module name
+ --> tests/ui/rejects_actor_unknown_arg.rs:8:9
+  |
+8 | #[actor(bogus = 1)]
+  |         ^^^^^

@@ -64,4 +64,16 @@ fn ui() {
     // whose first param is `state: &mut Self::State` (the last native-split
     // first-param validator to gain the `is_split` branch).
     t.pass("tests/ui/accepts_actor_split_task_handler.rs");
+    // ADR-0123 struct-hosted `#[actor]` diagnostics. An unrecognised arg fails
+    // at parse; the disk-read harvest hard-errors on a missing runtime module,
+    // a runtime module with no `#[handler]`-bearing impl, and a handler-bearing
+    // impl that omits `const NAMESPACE`. (The `local_file() == None` path under
+    // `--remap-path-prefix` is not trybuild-reproducible — it is covered by the
+    // hard-error branch in `harvest_runtime_identity` and exercised live.) The
+    // `rt_nohandler.rs` / `rt_nonamespace.rs` siblings are read off disk by the
+    // harvest, never compiled as fixtures.
+    t.compile_fail("tests/ui/rejects_actor_unknown_arg.rs");
+    t.compile_fail("tests/ui/rejects_struct_missing_runtime.rs");
+    t.compile_fail("tests/ui/rejects_struct_no_handler.rs");
+    t.compile_fail("tests/ui/rejects_struct_no_namespace.rs");
 }

@@ -345,6 +345,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-test-fixtures-split-cap"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-substrate",
+ "bytemuck",
+ "inventory",
+]
+
+[[package]]
 name = "aether-test-fixtures-stateful-reshaped"
 version = "0.3.0-alpha"
 dependencies = [
