@@ -18,17 +18,28 @@ that disk-read approach is viable on the pinned stable toolchain (Rust 1.96).
 
 | Form | Verdict |
 | --- | --- |
-| `#[pull_up] mod runtime;` (attribute on a file module) | **Blocked on stable** — E0658, [rust#54727]: *file modules in proc-macro input are unstable*. Inline `mod m { .. }` is stable; the `mod m;` file form is not, and never reaches the macro. |
-| `lift_markers!(runtime => Identity)` (function-like macro) + a plain hand-gated `mod runtime;` | **Works on stable.** The file module is in neither the macro's input nor its output, so #54727 never triggers. |
+| `#[pull_up] mod runtime;` — attribute on the **file module** | **Blocked on stable** — E0658, [rust#54727]: *file modules in proc-macro input are unstable*. Inline `mod m { .. }` is stable; the `mod m;` file form is not, and never reaches the macro. |
+| `#[lift_up(runtime)] pub struct RenderCapability;` — attribute on the **identity struct** | **Works on stable.** A struct is ordinary proc-macro input; the macro passes it through and emits the lifted markers beside it. `mod runtime;` stays a separate plain line. |
+| `lift_markers!(runtime => Identity)` — function-like macro + plain `mod runtime;` | **Works on stable.** The file module is in neither the macro's input nor its output. |
 
-The capability the user asked about — auto-lifting markers with the kinds
-harvested from the runtime file — is achievable. The exact *spelling*
-(`#[pull_up] mod runtime;`) is not; it costs one extra line and a slightly
-different shape.
+The capability — auto-lifting markers with the kinds harvested from the runtime
+file — is achievable, and the *attribute* spelling is available too. The single
+forbidden thing is attaching a macro to the `mod runtime;` declaration itself.
+Move the attribute onto the identity struct and the attribute form works; the
+function-like form is the alternative when there's no natural item to host it.
 
-## What the macro does (working form)
+## What the macro does (working forms)
 
-`pull-up-macro/src/lib.rs` exposes `lift_markers!(module => Identity)`:
+Both working forms share one harvest path (`harvest_from_sibling`) and differ
+only in where they emit the markers:
+
+- `#[lift_up(runtime)]` on the identity struct — passes the struct through and
+  emits the markers beside it. The identity defaults to the attached struct's
+  name; `#[lift_up(runtime => Identity)]` overrides it. This is the form the
+  design discussion asked for.
+- `lift_markers!(runtime => Identity)` — function-like, emits only the markers.
+
+The shared harvest, given the module name:
 
 1. `proc_macro::Span::local_file()` (stable since 1.88, [rust#140514]) resolves
    the on-disk path of the file holding the invocation.

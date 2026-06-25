@@ -17,14 +17,21 @@
 //!
 //! ## What works
 //!
-//! A *function-like* macro invoked at the identity site:
+//! The forbidden target is the file module *specifically*. Host the attribute
+//! on the identity struct instead — ordinary proc-macro input — or use a
+//! function-like macro:
 //! ```ignore
+//! #[lift_up(runtime)]                        // attribute on the struct: works
+//! pub struct RenderCapability;
+//!
 //! #[cfg(feature = "runtime")]
-//! mod runtime;                              // plain, hand-gated — no macro
-//! lift_markers!(runtime => RenderCapability); // reads runtime.rs, emits markers
+//! mod runtime;                               // plain, hand-gated — no macro
+//!
+//! // or, function-like:
+//! lift_markers!(runtime => RenderCapability);
 //! ```
-//! The file module is in neither the macro's input nor its output, so #54727
-//! never triggers. `Span::local_file()` (stable since 1.88) resolves the
+//! In both, the file module is in neither the macro's input nor its output, so
+//! #54727 never triggers. `Span::local_file()` (stable since 1.88) resolves the
 //! invoking file, and the sibling runtime file is read + parsed regardless of
 //! cfg — so the markers land even when `mod runtime` is stripped.
 //!
@@ -45,6 +52,47 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// `#[lift_up(runtime)]` / `#[lift_up(runtime => RenderCapability)]`
+///
+/// The *attribute* form, attached to the identity item (the struct), not the
+/// file module. The forbidden target was only the file module (`mod m;`,
+/// rust#54727) — a struct is ordinary proc-macro input. The macro passes the
+/// attached item through unchanged and emits the lifted `Handles<K>` markers
+/// beside it, reading the kinds from the sibling runtime file exactly as
+/// `lift_markers!` does. The identity defaults to the attached struct's name;
+/// the `=> Ident` form overrides it.
+#[proc_macro_attribute]
+pub fn lift_up(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let LiftUpArgs { module, identity } = parse_macro_input!(attr as LiftUpArgs);
+    let item: Item = parse_macro_input!(item as Item);
+
+    // Identity: explicit `=> Ident`, else the attached struct's name.
+    let identity: Type = match identity {
+        Some(ty) => ty,
+        None => match struct_ident(&item) {
+            Some(id) => syn::parse_quote!(#id),
+            None => {
+                return err(
+                    &module,
+                    "#[lift_up] without `=> Identity` must sit on a struct (so the \
+                     identity name is the attached type); add `=> Identity` otherwise",
+                );
+            }
+        },
+    };
+
+    let kinds = match harvest_from_sibling(&module) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let markers = kinds.iter().map(|k| quote! { impl Handles<#k> for #identity {} });
+    quote! {
+        #item
+        #(#markers)*
+    }
+    .into()
+}
+
 /// `lift_markers!(runtime => RenderCapability)`
 ///
 /// Reads the sibling `runtime.rs` (or `runtime/mod.rs`), harvests the
@@ -55,51 +103,59 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn lift_markers(input: TokenStream) -> TokenStream {
     let LiftArgs { module, identity } = parse_macro_input!(input as LiftArgs);
-
-    // 1. Resolve the file holding *this invocation* (the identity module).
-    //    `Span::local_file()` is stable since 1.88 and gives the on-disk
-    //    path, `None` only under full path remapping.
-    let Some(decl_path) = module.span().unwrap().local_file() else {
-        return err(
-            &module,
-            "lift_markers!: Span::local_file() returned None — source path \
-             unavailable (path remapping?), cannot locate the runtime module file",
-        );
+    let kinds = match harvest_from_sibling(&module) {
+        Ok(k) => k,
+        Err(e) => return e,
     };
+    let markers = kinds.iter().map(|k| quote! { impl Handles<#k> for #identity {} });
+    quote! { #(#markers)* }.into()
+}
 
-    // 2. Resolve the sibling module file: `<dir>/<name>.rs` else
-    //    `<dir>/<name>/mod.rs` — the standard rule.
+/// Resolve the sibling runtime file next to the invocation, read + parse it
+/// (cfg-agnostically), and harvest the `#[handler]` kinds. Shared by both the
+/// function-like (`lift_markers!`) and attribute (`#[lift_up]`) forms — the
+/// only difference between them is where the markers are emitted.
+fn harvest_from_sibling(module: &syn::Ident) -> Result<Vec<Type>, TokenStream> {
+    // `Span::local_file()` (stable since 1.88) gives the on-disk path of the
+    // file holding the invocation; `None` only under full path remapping.
+    let Some(decl_path) = module.span().unwrap().local_file() else {
+        return Err(err(
+            module,
+            "lift: Span::local_file() returned None — source path unavailable \
+             (path remapping?), cannot locate the runtime module file",
+        ));
+    };
+    // Standard module-file rule: `<dir>/<name>.rs` else `<dir>/<name>/mod.rs`.
     let dir = decl_path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let flat = dir.join(format!("{module}.rs"));
     let nested = dir.join(module.to_string()).join("mod.rs");
     let target: PathBuf = if flat.exists() { flat } else { nested };
 
-    // 3. Read + parse (cfg-agnostic — syn keeps every item, so the kinds are
-    //    harvested even in a config where `mod runtime` is stripped).
-    let src = match std::fs::read_to_string(&target) {
-        Ok(s) => s,
-        Err(e) => return err(&module, &format!("lift_markers!: cannot read {}: {e}", target.display())),
-    };
-    let parsed = match syn::parse_file(&src) {
-        Ok(f) => f,
-        Err(e) => return err(&module, &format!("lift_markers!: parse error in {}: {e}", target.display())),
-    };
+    let src = std::fs::read_to_string(&target)
+        .map_err(|e| err(module, &format!("lift: cannot read {}: {e}", target.display())))?;
+    let parsed = syn::parse_file(&src)
+        .map_err(|e| err(module, &format!("lift: parse error in {}: {e}", target.display())))?;
 
-    // 4. Harvest the handler kinds (type of each handler's last typed arg).
     let kinds = harvest_kinds(&parsed);
     if kinds.is_empty() {
-        return err(
-            &module,
-            &format!("lift_markers!: no `#[handler]`-bearing impl found in {}", target.display()),
-        );
+        return Err(err(
+            module,
+            &format!("lift: no `#[handler]`-bearing impl found in {}", target.display()),
+        ));
     }
-
-    // 5. Emit the always-on markers against the caller-named identity.
-    let markers = kinds.iter().map(|k| quote! { impl Handles<#k> for #identity {} });
-    quote! { #(#markers)* }.into()
+    Ok(kinds)
 }
 
-/// `module => Identity`
+/// The attached struct's name, if the item is a struct (the default identity
+/// for `#[lift_up]`).
+fn struct_ident(item: &Item) -> Option<syn::Ident> {
+    match item {
+        Item::Struct(s) => Some(s.ident.clone()),
+        _ => None,
+    }
+}
+
+/// `module => Identity` (function-like form — identity is mandatory).
 struct LiftArgs {
     module: syn::Ident,
     identity: Type,
@@ -110,6 +166,26 @@ impl Parse for LiftArgs {
         let module: syn::Ident = input.parse()?;
         input.parse::<syn::Token![=>]>()?;
         let identity: Type = input.parse()?;
+        Ok(Self { module, identity })
+    }
+}
+
+/// `module` or `module => Identity` (attribute form — identity optional,
+/// defaults to the attached struct).
+struct LiftUpArgs {
+    module: syn::Ident,
+    identity: Option<Type>,
+}
+
+impl Parse for LiftUpArgs {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let module: syn::Ident = input.parse()?;
+        let identity = if input.peek(syn::Token![=>]) {
+            input.parse::<syn::Token![=>]>()?;
+            Some(input.parse()?)
+        } else {
+            None
+        };
         Ok(Self { module, identity })
     }
 }

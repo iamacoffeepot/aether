@@ -15,18 +15,19 @@ pub struct Tick;
 pub struct Resize;
 
 /// The cap identity ZST — always-on, names no runtime/substrate types.
+///
+/// `#[lift_up(runtime)]` sits on the struct (ordinary proc-macro input — the
+/// forbidden target was only the file module, rust#54727). It passes the
+/// struct through unchanged and emits `impl Handles<Tick> for RenderCapability {}`
+/// + `impl Handles<Resize> for RenderCapability {}` beside it — always-on, by
+/// reading the `#[handler]` kinds out of `runtime.rs`. So the markers survive
+/// a build where `mod runtime` below is `#[cfg]`-stripped.
+#[pull_up_macro::lift_up(runtime)]
 pub struct RenderCapability;
 
-// Plain, hand-gated module declaration — no macro touches it (an attribute
-// macro on a file module is unstable, rust#54727; see README).
+// Plain, hand-gated module declaration — no macro touches it.
 #[cfg(feature = "runtime")]
 mod runtime;
-
-// The function-like macro reads `runtime.rs` off disk, harvests the
-// `#[handler]` kinds, and emits `impl Handles<Tick> for RenderCapability {}`
-// + `impl Handles<Resize> for RenderCapability {}` here — always-on, so the
-// markers survive a build where `mod runtime` above is `#[cfg]`-stripped.
-pull_up_macro::lift_markers!(runtime => RenderCapability);
 
 // Compile-time proof that the markers exist regardless of the `runtime`
 // feature. The inner turbofish call forces rustc to *prove* the bounds at
