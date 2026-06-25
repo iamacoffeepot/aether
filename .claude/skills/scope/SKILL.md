@@ -199,12 +199,13 @@ Don't pad the comment with summaries of work that completed — the body section
 
 A body edit replaces the entire body, so to avoid clobbering user-written content:
 
-1. Read the current body — `gh api repos/iamacoffeepot/aether/issues/<n> --jq '.body'`.
+1. Read the current body and capture the issue's `number`, `title`, and non-managed (user) prose as the scoped baseline — `gh api repos/iamacoffeepot/aether/issues/<n> --jq '{number, title, body}'`. Extract and hold the user prose (everything that is not a scope-managed H2 section) from the captured body as the baseline for the guard below.
 2. Identify scope-managed sections by their H2 headers: `## Problem statement`, `## Design notes`, `## Implementation plan`, `## Sub-issues`, `## Depends on`, `## Side findings`. Everything else is user content; preserve verbatim.
 3. Insert or replace the managed sections, preserving user content above and below them.
-4. Write back over REST — `gh issue edit --body` is GraphQL-backed, while `PATCH …/issues/<n>` is REST. Write the new body to a file first so its backticks / `$` aren't shell-expanded: `gh api -X PATCH repos/iamacoffeepot/aether/issues/<n> -F body=@/tmp/issue-<n>-body.md`.
+4. **Identity guard — assert before writing.** Re-read `{number, title}` for the same `<n>` — `gh api repos/iamacoffeepot/aether/issues/<n> --jq '{number, title}'`. Assert it equals the baseline captured at step 1; also assert the spliced body about to be written still contains the captured user prose. On any mismatch, abort the PATCH and surface the discrepancy instead of writing — a number or title mismatch means the wrong issue is targeted, and a prose mismatch means user content was accidentally removed during the splice.
+5. Write back over REST — `gh issue edit --body` is GraphQL-backed, while `PATCH …/issues/<n>` is REST. Write the new body to a file first so its backticks / `$` aren't shell-expanded: `gh api -X PATCH repos/iamacoffeepot/aether/issues/<n> -F body=@/tmp/issue-<n>-body.md`.
 
-The agent must be careful here — the body is the canonical scope artifact and clobbering user-written background notes will erode trust.
+The agent must be careful here — the body is the canonical scope artifact and clobbering user-written background notes will erode trust. The identity guard at step 4 is the tripwire that makes the full-body replace safe under concurrent `--sweep`: it catches a number or title mismatch before the PATCH lands, turning a silent cross-issue clobber into a loud abort.
 
 ## GitHub API budget
 
