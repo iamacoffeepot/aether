@@ -1,0 +1,6 @@
+# Nested workspace: isolates the spike from the root aether workspace (a
+# nested `[workspace]` is never absorbed by the outer one). `main` never
+# carries a `spikes/` tree — this lives only on `spike/actor-pull-up`.
+[workspace]
+resolver = "2"
+members = ["pull-up-macro", "consumer"]

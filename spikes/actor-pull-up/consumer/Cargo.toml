@@ -1,0 +1,14 @@
+[package]
+name = "consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# `runtime` off  ⇒ the dispatcher module is stripped; only the markers remain.
+# `runtime` on   ⇒ the full dispatcher + state compile.
+[features]
+default = []
+runtime = []
+
+[dependencies]
+pull-up-macro = { path = "../pull-up-macro" }
