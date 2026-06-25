@@ -1,7 +1,7 @@
 //! An `#[actor] impl WasmActor` block that omits `const NAMESPACE` is
-//! rejected at the type, mirroring the `#[bridge]` path — rather than
-//! falling through to a later "no associated const NAMESPACE" error
-//! against the surfaceless `Actor` trait.
+//! rejected at the type — rather than falling through to a later
+//! "no associated const NAMESPACE" error against the surfaceless
+//! `Actor` trait.
 
 use aether_actor::actor;
 

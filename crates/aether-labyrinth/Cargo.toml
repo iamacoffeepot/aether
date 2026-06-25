@@ -35,8 +35,8 @@ native = ["dep:aether-substrate"]
 # rather than relying on workspace feature unification.
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
-# The `#[bridge]` / `#[actor]` attribute macros the recorder cap declares
-# with. Target-agnostic; the native impl arm it emits is itself
+# The `#[actor]` attribute macro the recorder cap declares with.
+# Target-agnostic; the native runtime arm it gates is itself
 # `aether-substrate`-gated, so the bare crate carries only the markers.
 aether-actor = { path = "../aether-actor" }
 # Issue 1914: the relocated `aether.reach.*` / `aether.corridor.*` kinds

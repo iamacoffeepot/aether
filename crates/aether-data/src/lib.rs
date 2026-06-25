@@ -84,8 +84,8 @@ pub use wire_id::{EngineId, SessionToken, Uuid};
 /// `aether-actor-derive` proc-macro crate so the data-layer derives
 /// share a home with the actor-SDK attributes. Only the data-layer
 /// derives (`Kind`, `Schema`) are re-exported here; the actor-SDK
-/// attribute macros (`actor`, `bridge`, `capability`, `fallback`,
-/// `handler`, `local`) are exported from `aether-actor` directly.
+/// attribute macros (`actor`, `capability`, `fallback`, `handler`,
+/// `local`) are exported from `aether-actor` directly.
 #[cfg(feature = "derive")]
 pub use aether_actor_derive::{Kind, Schema};
 

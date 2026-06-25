@@ -17,7 +17,7 @@ license.workspace = true
 # the wasm FFI into the linker.
 [dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
-# The actor-SDK attribute macros (`actor`, `bridge`, `capability`, `fallback`,
+# The actor-SDK attribute macros (`actor`, `capability`, `fallback`,
 # `handler`, `local`) are sourced directly here now that `aether-data` no
 # longer re-exports them (ADR-0077 / issue 552 consolidated them into this
 # crate for compile cost; aether-data forwards only the data-layer derives).

@@ -43,14 +43,13 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use std::mem;
 use syn::meta;
 use syn::parse::Parser;
 use syn::spanned::Spanned;
 use syn::{
     Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprLit, Fields, FnArg,
-    GenericArgument, ImplItem, Item, ItemImpl, ItemMod, Lit, Meta, PathArguments, ReturnType,
-    Signature, Type, parse_macro_input,
+    GenericArgument, ImplItem, ItemImpl, Lit, Meta, PathArguments, ReturnType, Signature, Type,
+    parse_macro_input,
 };
 
 #[proc_macro_derive(Kind, attributes(kind))]
@@ -750,27 +749,22 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Parsed `#[actor(...)]` attribute arguments. `skip_markers` (issue 565)
-/// tells the expander not to emit `Addressable` + `HandlesKind` impls because
-/// a wrapping `#[bridge]` already emitted them as siblings of a cfg-gated
-/// module. `singleton` / `instanced` (ADR-0119) declare cardinality, mapped to
-/// the `Addressable::Resolver` per transport.
+/// Parsed `#[actor(...)]` attribute arguments. `singleton` / `instanced`
+/// (ADR-0119) declare cardinality, mapped to the `Addressable::Resolver` per
+/// transport.
 #[derive(Default, Clone)]
 struct ActorOpts {
-    skip_markers: bool,
     /// ADR-0119 cardinality from `#[actor(singleton|instanced)]`, mapped to
     /// the resolver per transport — native: `One` / `Many`; FFI: `Embedded`
-    /// (default) / `EmbeddedMany`. `None` on a `skip_markers` block (the
-    /// wrapping `#[bridge]` owns the resolver) or where the transport supplies
-    /// a default (FFI ⇒ `Embedded`).
-    cardinality: Option<BridgeCardinality>,
+    /// (default) / `EmbeddedMany`. `None` where the transport supplies a
+    /// default (FFI ⇒ `Embedded`).
+    cardinality: Option<ActorCardinality>,
     /// iamacoffeepot/aether#2330: override the `runtime` feature the split path
     /// gates its `Lifecycle`/`Dispatch`/`NativeActor` impls behind, from
     /// `#[actor(runtime_feature = "name")]`. A media cap whose native half lives
     /// behind a cap-specific feature (`render-native` / `audio-native` / …)
     /// names it here so the runtime impls gate on that feature rather than the
-    /// generic `runtime`. `None` ⇒ the default `feature = "runtime"`. Mirrors
-    /// `BridgeOpts::feature`.
+    /// generic `runtime`. `None` ⇒ the default `feature = "runtime"`.
     runtime_feature: Option<String>,
 }
 
@@ -780,29 +774,25 @@ fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
         return Ok(opts);
     }
     let parser = meta::parser(|meta| {
-        if meta.path.is_ident("skip_markers") {
-            opts.skip_markers = true;
-            Ok(())
-        } else if meta.path.is_ident("singleton") {
-            if matches!(opts.cardinality, Some(BridgeCardinality::Instanced)) {
+        if meta.path.is_ident("singleton") {
+            if matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
                 return Err(
                     meta.error("`singleton` and `instanced` are mutually exclusive (ADR-0079)")
                 );
             }
-            opts.cardinality = Some(BridgeCardinality::Singleton);
+            opts.cardinality = Some(ActorCardinality::Singleton);
             Ok(())
         } else if meta.path.is_ident("instanced") {
-            if matches!(opts.cardinality, Some(BridgeCardinality::Singleton)) {
+            if matches!(opts.cardinality, Some(ActorCardinality::Singleton)) {
                 return Err(
                     meta.error("`singleton` and `instanced` are mutually exclusive (ADR-0079)")
                 );
             }
-            opts.cardinality = Some(BridgeCardinality::Instanced);
+            opts.cardinality = Some(ActorCardinality::Instanced);
             Ok(())
         } else if meta.path.is_ident("runtime_feature") {
             // iamacoffeepot/aether#2330: gate the split runtime impls on a
-            // cap-specific feature instead of the default `runtime`. Mirrors
-            // `parse_bridge_attr`'s `feature = "name"` arm.
+            // cap-specific feature instead of the default `runtime`.
             let value = meta.value()?;
             let lit: syn::LitStr = value.parse()?;
             opts.runtime_feature = Some(lit.value());
@@ -810,7 +800,7 @@ fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
         } else {
             Err(meta.error(
                 "unrecognised #[actor] argument; expected `singleton`, `instanced`, \
-                 `skip_markers`, or `runtime_feature = \"name\"`",
+                 or `runtime_feature = \"name\"`",
             ))
         }
     });
@@ -818,512 +808,14 @@ fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
     Ok(opts)
 }
 
-/// `#[bridge]` — attribute on a `mod foo { ... }` block holding the
-/// native-side implementation of an actor (issue 565).
-///
-/// The mod hosts substrate-side imports, helpers, and a single
-/// `#[actor] impl NativeActor for X { ... }` block. Wasm consumers
-/// (loading the cap crate via `aether-capabilities` with
-/// `default-features = false`) must still see the always-on `Addressable`
-/// and `HandlesKind<K>` markers so typed sends like
-/// `ctx.actor::<X>().send(&kind)` compile-check, but the substrate-side
-/// trait impls and helpers can't be in scope on wasm32.
-///
-/// `#[bridge]`'s expansion splits across that boundary:
-///
-/// 1. The marker impls (`Addressable` + `HandlesKind<K>` per handler kind)
-///    are emitted at sibling level to the mod, **outside** any cfg
-///    gate — wasm consumers see them.
-/// 2. The original mod is emitted with `#[cfg(not(target_arch =
-///    "wasm32"))]` injected, with the inner `#[actor]` rewritten to
-///    `#[actor(skip_markers)]` so it doesn't duplicate the markers.
-///
-/// Naming follows the `cxx::bridge` precedent — an attribute on a
-/// mod that splits emission across a boundary.
-///
-/// ## `#[bridge(feature = "name")]`
-///
-/// Caps whose native impl pulls heavy native-only deps (`render` →
-/// wgpu+png, `audio` → cpal) live behind a cargo feature. Without the
-/// feature, the inner `#[actor]` block can't compile (its imports are
-/// gone). The optional `feature = "name"` argument adds the feature
-/// to the cfg keying both the wasm stub vs. native re-export and the
-/// inner `mod native` itself: stub when wasm32 OR the feature is off;
-/// re-export when native AND the feature is on. This keeps the
-/// always-on markers reachable for wasm components (so they can write
-/// `ctx.actor::<RenderCapability>().send(&triangle)`) without the
-/// feature pulling its native dep set in.
-#[proc_macro_attribute]
-pub fn bridge(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let opts = match parse_bridge_attr(attr) {
-        Ok(o) => o,
-        Err(e) => return e.to_compile_error().into(),
-    };
-    let item = parse_macro_input!(item as ItemMod);
-    match expand_bridge(item, opts) {
-        Ok(ts) => ts.into(),
-        Err(e) => e.to_compile_error().into(),
-    }
-}
-
-/// Cardinality declaration on `#[bridge]`. The bridge attribute is the
-/// natural site for this because the bridge owns two struct definition
-/// sites (the wasm stub at file root + the native struct in `mod
-/// native`), and a cardinality marker impl needs to land at file root
-/// to cover both. Pre-issue-625 the bridge auto-emitted Singleton; the
-/// refactor makes the choice explicit (and adds Instanced as the
-/// counterpart).
+/// Cardinality declaration from `#[actor(singleton|instanced)]` (ADR-0119),
+/// mapped to the `Addressable::Resolver`. The `Singleton` / `Instanced`
+/// markers derive from the resolver by blanket impl, so nothing emits a
+/// separate marker impl; `None` ⇒ the transport default.
 #[derive(Clone, Copy)]
-enum BridgeCardinality {
+enum ActorCardinality {
     Singleton,
     Instanced,
-}
-
-#[derive(Default)]
-struct BridgeOpts {
-    cardinality: Option<BridgeCardinality>,
-    feature: Option<String>,
-    /// The `one_per = "entity"` instance-cardinality declaration
-    /// (ADR-0088 §4 v2). Only meaningful with `instanced`: it rides into
-    /// the emitted `TemplateEntry` as `Cardinality::OnePer(entity)`,
-    /// making the reverse-lookup manifest self-describing ("one mailbox
-    /// per loaded component") instead of an opaque `Dynamic` family.
-    /// Absent on an instanced actor ⇒ `Cardinality::Unbounded`.
-    one_per: Option<String>,
-}
-
-/// Parse `#[bridge]`'s optional arguments. Recognised:
-/// - `singleton` (positional flag) — emit `impl Singleton for X`
-/// - `instanced` (positional flag) — emit `impl Instanced for X`
-/// - `one_per = "entity"` — instanced cardinality (ADR-0088 §4 v2);
-///   `instanced`-only
-/// - `feature = "name"` — gate the inner mod on the named feature
-///
-/// Empty attr (`#[bridge]`) emits no cardinality marker; the author is
-/// expected to hand-roll one (test fixtures, future cases). Mixing
-/// `singleton` and `instanced` is rejected — a cap is one or the other.
-/// `one_per` on a non-instanced bridge is rejected (the entity-relationship
-/// only describes an instanced family); it is validated in `expand_bridge`
-/// where both flags are known, since attribute arg order is unspecified.
-fn parse_bridge_attr(attr: TokenStream) -> syn::Result<BridgeOpts> {
-    let mut opts = BridgeOpts::default();
-    if attr.is_empty() {
-        return Ok(opts);
-    }
-    let parser = meta::parser(|meta| {
-        if meta.path.is_ident("singleton") {
-            if matches!(opts.cardinality, Some(BridgeCardinality::Instanced)) {
-                return Err(meta.error(
-                    "#[bridge] cannot declare both `singleton` and `instanced` — \
-                     cardinality is mutually exclusive (ADR-0079)",
-                ));
-            }
-            opts.cardinality = Some(BridgeCardinality::Singleton);
-            Ok(())
-        } else if meta.path.is_ident("instanced") {
-            if matches!(opts.cardinality, Some(BridgeCardinality::Singleton)) {
-                return Err(meta.error(
-                    "#[bridge] cannot declare both `singleton` and `instanced` — \
-                     cardinality is mutually exclusive (ADR-0079)",
-                ));
-            }
-            opts.cardinality = Some(BridgeCardinality::Instanced);
-            Ok(())
-        } else if meta.path.is_ident("one_per") {
-            let value = meta.value()?;
-            let lit: syn::LitStr = value.parse()?;
-            opts.one_per = Some(lit.value());
-            Ok(())
-        } else if meta.path.is_ident("feature") {
-            let value = meta.value()?;
-            let lit: syn::LitStr = value.parse()?;
-            opts.feature = Some(lit.value());
-            Ok(())
-        } else {
-            Err(meta.error(
-                "#[bridge] only accepts `singleton`, `instanced`, \
-                 `one_per = \"entity\"`, or `feature = \"name\"`",
-            ))
-        }
-    });
-    Parser::parse(parser, attr)?;
-    Ok(opts)
-}
-
-// Single-pass `#[bridge]` expander: walks the inner mod, splits wasm
-// stub vs native impl emission, and wires the cardinality marker.
-// The pieces share captured spans / item refs so factoring out helpers
-// would force ad-hoc shared-state structs that read worse than a
-// linear walk.
-#[allow(clippy::too_many_lines)]
-fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenStream2> {
-    let BridgeOpts {
-        cardinality,
-        feature,
-        one_per,
-    } = opts;
-    // `one_per` only describes an instanced family's entity relationship.
-    // On a singleton (or a bare `#[bridge]`) it is meaningless — reject it
-    // rather than silently dropping it. Validated here (not in the parser)
-    // because attribute arg order is unspecified, so `cardinality` may not
-    // be known yet when `one_per` is seen.
-    if one_per.is_some() && !matches!(cardinality, Some(BridgeCardinality::Instanced)) {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "#[bridge] `one_per` requires `instanced` — it declares the entity \
-             relationship of an instanced family (ADR-0088 §4 v2)",
-        ));
-    }
-    let Some((brace, items)) = item_mod.content.take() else {
-        return Err(syn::Error::new_spanned(
-            &item_mod,
-            "#[bridge] must be applied to an inline `mod foo { ... }` block, not a file-backed mod",
-        ));
-    };
-    let mod_ident = item_mod.ident.clone();
-
-    // Find the `#[actor] impl NativeActor for X { ... }` block.
-    // Collect its index (so we can rewrite the attribute in place) and
-    // walk its items to extract X, NAMESPACE, and handler kinds.
-    let mut actor_idx: Option<usize> = None;
-    for (idx, it) in items.iter().enumerate() {
-        if let Item::Impl(impl_block) = it
-            && impl_block.attrs.iter().any(attr_is_actor)
-        {
-            actor_idx = Some(idx);
-            break;
-        }
-    }
-    let Some(actor_idx) = actor_idx else {
-        return Err(syn::Error::new_spanned(
-            &item_mod,
-            "#[bridge] expects exactly one `#[actor] impl NativeActor for X { ... }` block \
-             inside the wrapped mod",
-        ));
-    };
-
-    // Collect everything we need from the inner actor impl into owned
-    // values so the borrow on `items` ends before we mutate it below.
-    let (self_ty, type_ident, generics, namespace_expr, handler_kinds, catch_all) = {
-        let Item::Impl(actor_impl) = &items[actor_idx] else {
-            unreachable!("actor_idx points to an Item::Impl by construction");
-        };
-
-        // Reject `impl Trait for X` shapes that aren't `NativeActor`.
-        let trait_path = actor_impl.trait_.as_ref().ok_or_else(|| {
-            syn::Error::new_spanned(
-                actor_impl,
-                "#[bridge]'s inner #[actor] block must be `impl NativeActor for X`, \
-                 not an inherent `impl X { ... }`",
-            )
-        })?;
-        let last_seg = trait_path
-            .1
-            .segments
-            .last()
-            .map(|s| s.ident.to_string())
-            .unwrap_or_default();
-        if last_seg != "NativeActor" {
-            return Err(syn::Error::new_spanned(
-                &trait_path.1,
-                format!(
-                    "#[bridge]'s inner #[actor] block must be `impl NativeActor for X` — got `{last_seg}`",
-                ),
-            ));
-        }
-
-        // Pull the bare struct ident out of `self_ty`. Required for the
-        // wasm-stub + re-export emission, where we need to write
-        // `pub struct X;` and `pub use <mod>::X;` referencing X by name.
-        let type_ident = match &*actor_impl.self_ty {
-            Type::Path(tp) if tp.qself.is_none() && tp.path.segments.len() == 1 => {
-                tp.path.segments[0].ident.clone()
-            }
-            _ => {
-                return Err(syn::Error::new_spanned(
-                    &actor_impl.self_ty,
-                    "#[bridge]'s actor type must be a bare ident (`HandleCapability`), not a \
-                     path or generic — the macro emits a wasm-stub `pub struct X;` and a \
-                     `pub use <mod>::X;` re-export referencing it by name",
-                ));
-            }
-        };
-
-        // Walk the impl items to collect handler kind types and the
-        // `NAMESPACE` const expression. The const lives on the supertrait
-        // `Addressable`, but the user wrote it inside `impl NativeActor for X`
-        // — same source-of-truth contract `expand_native_actor_trait`
-        // uses.
-        let mut handler_kinds: Vec<Type> = Vec::new();
-        let mut has_fallback = false;
-        let mut namespace_expr: Option<Expr> = None;
-        for impl_item in &actor_impl.items {
-            match impl_item {
-                ImplItem::Fn(f) if f.attrs.iter().any(attr_is_handler) => {
-                    // ADR-0093 §3: `#[handler(task)]` completions route by
-                    // their `TaskDone<O, C>` output type, not a kind id —
-                    // they carry no mail kind and emit no `HandlesKind`
-                    // marker, so skip them when collecting the mail-handler
-                    // kinds. Only `#[handler]` / `#[handler(mail)]` feed the
-                    // marker set.
-                    let handler_attr = f
-                        .attrs
-                        .iter()
-                        .find(|a| attr_is_handler(a))
-                        .expect("matched on attr_is_handler above");
-                    if parse_handler_variant(handler_attr)? == HandlerVariant::Task {
-                        continue;
-                    }
-                    // `#[bridge]` is the legacy (un-split) splitter; its inner
-                    // handlers are always `&mut self` receivers.
-                    let (kind_ty, _is_slice) = extract_native_actor_handler_kind(&f.sig, false)?;
-                    handler_kinds.push(kind_ty);
-                }
-                ImplItem::Fn(f) if f.attrs.iter().any(attr_is_fallback) => {
-                    has_fallback = true;
-                }
-                ImplItem::Const(c) => {
-                    if c.ident == "NAMESPACE" {
-                        namespace_expr = Some(c.expr.clone());
-                    } else if c.ident == "SCHEDULING" {
-                        // Issue 1187: dispatch placement is no longer
-                        // authorable — the scheduling enum + trait const
-                        // were removed. Reject a leftover const with a
-                        // pointed diagnostic rather than letting it fall
-                        // through to a surfaceless-trait error.
-                        return Err(syn::Error::new_spanned(
-                            c,
-                            "`SCHEDULING` was removed (issue 1187): every actor drains on the \
-                             chassis worker pool. Drop the const — never block a handler; \
-                             offload blocking work to a `ctx.spawn`'d thread that feeds results \
-                             back as mail.",
-                        ));
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let namespace_expr = namespace_expr.ok_or_else(|| {
-            syn::Error::new_spanned(
-                actor_impl,
-                "#[bridge]'s inner #[actor] block must declare \
-                 `const NAMESPACE: &'static str = ...` so the marker `impl Addressable` can carry it",
-            )
-        })?;
-        // Issue 576 + issue 603: bridge-wrapped actors come in three
-        // flavours — strict typed receiver (only `#[handler]`s),
-        // catch-all cap (only `#[fallback]`), or hybrid (typed
-        // handlers + a `#[fallback]` runtime safety net). The hybrid
-        // shape is what `ComponentHostCapability` uses: declared kinds
-        // it accepts are typed; unknown kinds (Phase 1 chassis-
-        // peripheral migration window) ride the fallback. Hybrid emits
-        // per-handler `HandlesKind<K>` impls (no blanket — declared
-        // kinds compile, undeclared do not), so the type-system
-        // strictness is unchanged from a pure-handler cap.
-        if handler_kinds.is_empty() && !has_fallback {
-            return Err(syn::Error::new_spanned(
-                actor_impl,
-                "#[bridge]'s inner #[actor] block must declare at least one #[handler] method \
-                 or a #[fallback] method",
-            ));
-        }
-        (
-            (*actor_impl.self_ty).clone(),
-            type_ident,
-            actor_impl.generics.clone(),
-            namespace_expr,
-            handler_kinds,
-            has_fallback,
-        )
-    };
-
-    let (impl_generics, _, where_clause) = generics.split_for_impl();
-
-    // Always-on marker surface, emitted as siblings of the mod.
-    //
-    // - On wasm, the real struct (inside `mod native`) is cfg-stripped;
-    //   a unit-struct stub takes its place at file root so the marker
-    //   impls below have a type to reference. Wasm consumers never
-    //   construct caps — they only address them by type via
-    //   `ctx.actor::<X>().send(&kind)` — so the stub being uninhabited
-    //   is fine.
-    // - On native, the `pub use` re-exports the real struct from `mod
-    //   native` to file root, so callers writing `crate::log::LogCapability`
-    //   (chassis builders, tests in sibling mods) keep working.
-    // - Singleton, Addressable, and HandlesKind impls are always-on so wasm
-    //   consumers compile typed sends without the substrate runtime.
-    // When the bridge declares `feature = "X"`, the wasm stub also
-    // covers "native target without the feature" so consumers that
-    // build with `default-features = false` keep a reachable type for
-    // the always-on markers below. The native re-export and the inner
-    // `mod native` then key on `feature = "X"` too.
-    let (stub_cfg, native_cfg) = match feature.as_deref() {
-        None => (
-            quote! { #[cfg(target_family = "wasm")] },
-            quote! { #[cfg(not(target_family = "wasm"))] },
-        ),
-        Some(feat) => (
-            quote! { #[cfg(any(target_family = "wasm", not(feature = #feat)))] },
-            quote! { #[cfg(all(not(target_family = "wasm"), feature = #feat))] },
-        ),
-    };
-    let stub_and_reexport = quote! {
-        #stub_cfg
-        pub struct #type_ident;
-
-        #native_cfg
-        pub use #mod_ident::#type_ident;
-    };
-    // Issue 625 / ADR-0119: cardinality is an explicit declaration on the
-    // bridge attribute (`#[bridge(singleton|instanced)]`), mapped to the
-    // `Addressable::Resolver` — `One` (default / `singleton`) or `Many`
-    // (`instanced`). `Singleton` / `Instanced` are derived from the resolver
-    // via blanket impls, so nothing emits a separate marker impl. The
-    // Addressable impl lands at file root so the wasm stub and the native
-    // struct both carry it.
-    let resolver_ty = if matches!(cardinality, Some(BridgeCardinality::Instanced)) {
-        quote! { ::aether_actor::Many }
-    } else {
-        quote! { ::aether_actor::One }
-    };
-    let actor_marker = quote! {
-        impl #impl_generics ::aether_actor::Addressable for #self_ty #where_clause {
-            const NAMESPACE: &'static str = #namespace_expr;
-            type Resolver = #resolver_ty;
-        }
-    };
-    // The cardinality marker (issue 625 / ADR-0079) plus its ADR-0088
-    // §3/§4 reverse-lookup submission. The bridge already knows the
-    // actor's `NAMESPACE` and cardinality, so it auto-submits the
-    // name-inventory entry next to the marker — no per-actor registration
-    // list to keep in sync (the drift hazard iamacoffeepot/aether#1036
-    // flags). A **singleton**'s `NAMESPACE` *is* its mailbox name, so it
-    // submits a `NameEntry` (the static reverse map folds it, letting a
-    // `MailboxId` reverse to `aether.audio` instead of a hex tag). An
-    // **instanced** actor's `NAMESPACE` is the prefix of
-    // `<NAMESPACE>:<subname>` instances, so it submits a `Dynamic`
-    // `TemplateEntry` — the family's shape is declared, individual
-    // instances reverse via the runtime registry. (Typed instance
-    // parameters are future work; for now the convention is a single
-    // `:<subname>` string hole.) ADR-0088 §4 v2 adds the orthogonal
-    // `cardinality`: `one_per = "entity"` ⇒ `Cardinality::OnePer(entity)`
-    // (the relationship every instanced actor actually has — one per
-    // component / connection / …), absent ⇒ `Cardinality::Unbounded`.
-    // Both submissions are gated by the same `native_cfg` as the rest of
-    // the native surface (the `inventory` crate doesn't link on wasm32,
-    // and a feature-gated cap's entry tracks the cap's availability).
-    let instanced_cardinality = if let Some(entity) = one_per.as_deref() {
-        let entity = syn::LitStr::new(entity, proc_macro2::Span::call_site());
-        quote! { ::aether_data::name_inventory::Cardinality::OnePer(#entity) }
-    } else {
-        quote! { ::aether_data::name_inventory::Cardinality::Unbounded }
-    };
-    // ADR-0119: the marker impls are gone (derived from the resolver); this
-    // is now purely the ADR-0088 §3/§4 name-inventory submission, keyed by
-    // cardinality. `None` submits nothing (the Addressable still resolves via
-    // the default `One`).
-    let cardinality_marker = match cardinality {
-        Some(BridgeCardinality::Singleton) => quote! {
-            #native_cfg
-            ::aether_data::name_inventory::inventory::submit! {
-                ::aether_data::name_inventory::NameEntry {
-                    domain: ::aether_data::MAILBOX_DOMAIN,
-                    name: #namespace_expr,
-                }
-            }
-        },
-        Some(BridgeCardinality::Instanced) => quote! {
-            #native_cfg
-            ::aether_data::name_inventory::inventory::submit! {
-                ::aether_data::name_inventory::TemplateEntry {
-                    domain: ::aether_data::MAILBOX_DOMAIN,
-                    // Split the namespace (prefix) from the structural
-                    // `:{subname}` suffix so a forward-fed const NAMESPACE
-                    // (e.g. `EMBEDDED_SCOPE`, ADR-0099 §5/§6) works —
-                    // `concat!` would reject a non-literal namespace.
-                    prefix: #namespace_expr,
-                    template: ":{subname}",
-                    param: ::aether_data::name_inventory::ParamKind::Dynamic,
-                    cardinality: #instanced_cardinality,
-                }
-            }
-        },
-        None => quote! {},
-    };
-    // Issue 576 + issue 603: only-fallback (true catch-all) caps emit
-    // one blanket `impl<K: Kind> HandlesKind<K> for X {}` so typed
-    // sends compile for every K. Strict receivers (only `#[handler]`s)
-    // and hybrid caps (handlers + fallback) emit per-handler impls so
-    // only declared kinds are reachable via `ctx.actor::<X>().send`.
-    // The fallback in the hybrid shape is a runtime safety net for
-    // mail that arrives by mailbox name, not a type-system catch-all.
-    let only_fallback = catch_all && handler_kinds.is_empty();
-    let handles_kind_markers: Vec<TokenStream2> = if only_fallback {
-        let kind_param: syn::Ident = syn::parse_quote!(__AetherCatchAllK);
-        let mut blanket_generics = generics.clone();
-        blanket_generics.params.push(syn::parse_quote!(
-            #kind_param: ::aether_actor::__macro_internals::Kind
-        ));
-        let (blanket_impl, _, blanket_where) = blanket_generics.split_for_impl();
-        vec![quote! {
-            impl #blanket_impl ::aether_actor::HandlesKind<#kind_param>
-                for #self_ty #blanket_where {}
-        }]
-    } else {
-        handler_kinds
-            .iter()
-            .map(|kind_ty| {
-                quote! {
-                    impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
-                        for #self_ty #where_clause {}
-                }
-            })
-            .collect()
-    };
-
-    // Rewrite the inner `#[actor]` to `#[actor(skip_markers)]` so the
-    // expander inside the cfg-gated mod doesn't duplicate the markers
-    // we just emitted. Preserve the user's original path token so a
-    // `use aether_actor::actor;` line remains "used" — replacing with
-    // an absolute path would silently produce unused-import warnings
-    // in caller code.
-    let mut items = items;
-    if let Item::Impl(actor_impl_mut) = &mut items[actor_idx] {
-        for attr in &mut actor_impl_mut.attrs {
-            if attr_is_actor(attr) {
-                let path = attr.path().clone();
-                *attr = syn::parse_quote!(#[#path(skip_markers)]);
-            }
-        }
-    }
-
-    // Reassemble the mod with the rewritten contents and prepend the
-    // cfg gate. `native_cfg` keys on the optional feature too — without
-    // a feature it's the original `not(target_family = "wasm")`; with
-    // one it adds `feature = "X"` so the inner `mod native` only
-    // compiles when both the target and the feature say to.
-    item_mod.content = Some((brace, items));
-    let mod_attrs = mem::take(&mut item_mod.attrs);
-    Ok(quote! {
-        #stub_and_reexport
-        #actor_marker
-        #cardinality_marker
-        #(#handles_kind_markers)*
-
-        #(#mod_attrs)*
-        #native_cfg
-        #item_mod
-    })
-}
-
-/// Match `#[actor]` or `#[crate::actor]` or `#[aether_actor::actor]` —
-/// any path whose last segment is `actor`.
-fn attr_is_actor(attr: &Attribute) -> bool {
-    attr.path()
-        .segments
-        .last()
-        .is_some_and(|s| s.ident == "actor")
 }
 
 #[proc_macro_attribute]
@@ -1406,9 +898,9 @@ pub fn local(_attr: TokenStream, item: TokenStream) -> TokenStream {
 // `#[derive(Embeddable)]` are retired. Cardinality is now the
 // `Addressable::Resolver` (`One` / `Many` / `Embedded` / `EmbeddedMany`); the
 // `Singleton` / `Instanced` markers derive from it by blanket impl, so a
-// hand-emitted marker would conflict. `#[actor]` / `#[bridge]` emit the
-// resolver from their `singleton` / `instanced` arg; a hand-written actor sets
-// `type Resolver` directly.
+// hand-emitted marker would conflict. `#[actor]` emits the resolver from its
+// `singleton` / `instanced` arg; a hand-written actor sets `type Resolver`
+// directly.
 
 /// `#[capability]` — attribute macro for native chassis capability
 /// structs. Cfg-gates every field with `#[cfg(feature = "native")]`
@@ -1510,16 +1002,7 @@ fn expand_handlers(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStream2
             "NativeActor" => expand_native_actor_trait(item, opts),
             // `WasmActor` is the post-552 trait name; `Component` is
             // the back-compat alias retained until stage 4.
-            "WasmActor" | "Component" => {
-                if opts.skip_markers {
-                    return Err(syn::Error::new_spanned(
-                        trait_path,
-                        "#[actor(skip_markers)] is only meaningful on \
-                         `impl NativeActor for X` blocks wrapped by `#[bridge]`",
-                    ));
-                }
-                expand_wasm_actor(item, opts)
-            }
+            "WasmActor" | "Component" => expand_wasm_actor(item, opts),
             other => Err(syn::Error::new_spanned(
                 trait_path,
                 format!(
@@ -1911,7 +1394,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStrea
                 if let Some(idx) = handler_attr_idx {
                     // ADR-0093 §7: dispatch completions are native-only.
                     // `try_take_task_done` lives on `NativeCtx`; the
-                    // wasm/bridge path has no umbrella-aware blocking
+                    // wasm path has no umbrella-aware blocking
                     // dispatch yet. Reject `#[handler(task)]` here with a
                     // clear diagnostic rather than letting it expand into
                     // a guest dispatch table that can't satisfy it.
@@ -2198,7 +1681,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStrea
     // `Singleton`, reached by `ctx.actor::<R>()`); `#[actor(instanced)]`
     // selects `EmbeddedMany` for a spawn-sibling child (ADR-0097). Cardinality
     // is derived from the resolver; nothing emits `impl Singleton` here.
-    let resolver_ty = if matches!(opts.cardinality, Some(BridgeCardinality::Instanced)) {
+    let resolver_ty = if matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
         quote! { ::aether_actor::EmbeddedMany }
     } else {
         quote! { ::aether_actor::Embedded }
@@ -2719,29 +2202,16 @@ fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts) -> syn::Result<To
     // block so satisfying the supertrait bound works without making the
     // user split the impl.
     //
-    // `skip_markers` (issue 565): when `#[bridge]` wraps a cfg-gated
-    // `mod native` containing the actor block, it emits the always-on
-    // `Addressable` + `HandlesKind` impls itself as siblings of the mod and
-    // rewrites this `#[actor]` to `#[actor(skip_markers)]` so this
-    // expansion does not duplicate them. The native-only impls below
-    // still emit unchanged.
-    //
-    //
     // Validate the const surface in one pass. Dispatch placement is no
     // longer authorable (issue 1187): the scheduling enum + trait const
     // were removed — every actor drains on the chassis worker pool, so a
     // leftover `SCHEDULING` const earns a pointed diagnostic. Any const
     // other than `NAMESPACE` is stray (the `Addressable` super-trait carries no
-    // other
-    // authorable const) and is rejected at its own span rather than
+    // other authorable const) and is rejected at its own span rather than
     // silently routed onto the sibling `impl Addressable` block; and the
     // presence of `NAMESPACE` is tracked so a block that omits it fails
-    // here (spanned at the type, mirroring the `#[bridge]` path) instead
-    // of at a later "no associated const NAMESPACE" error against the
-    // surfaceless `Addressable` trait. A `skip_markers` (bridge-wrapped) block
-    // legitimately omits `NAMESPACE` — the `#[bridge]` expansion emits
-    // the marker `impl Addressable` carrying it as a sibling — so the
-    // missing-NAMESPACE check is gated on `!opts.skip_markers`.
+    // here (spanned at the type) instead of at a later "no associated const
+    // NAMESPACE" error against the surfaceless `Addressable` trait.
     let mut has_namespace = false;
     for c in &consts {
         if c.ident == "NAMESPACE" {
@@ -2762,7 +2232,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts) -> syn::Result<To
             ));
         }
     }
-    if !has_namespace && !opts.skip_markers {
+    if !has_namespace {
         return Err(syn::Error::new_spanned(
             self_ty,
             "#[actor] impl NativeActor for X must declare \
@@ -2776,12 +2246,12 @@ fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts) -> syn::Result<To
     // (default, or `#[actor(singleton)]`) or `Many` (`#[actor(instanced)]`).
     // `Singleton` / `Instanced` are derived from it; the old hand-written
     // `impl Singleton/Instanced for X {}` next to `#[actor]` is retired.
-    let resolver_ty = if matches!(opts.cardinality, Some(BridgeCardinality::Instanced)) {
+    let resolver_ty = if matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
         quote! { ::aether_actor::Many }
     } else {
         quote! { ::aether_actor::One }
     };
-    let actor_impl = if opts.skip_markers || consts.is_empty() {
+    let actor_impl = if consts.is_empty() {
         quote! {}
     } else {
         quote! {
@@ -2799,9 +2269,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts) -> syn::Result<To
     // net) keep per-handler impls — only declared kinds compile via
     // typed sends; the fallback handles unknown kinds at runtime
     // (e.g. mail arriving by mailbox name).
-    let handles_kind_impls: Vec<TokenStream2> = if opts.skip_markers {
-        Vec::new()
-    } else if fallback.is_some() && handlers.is_empty() {
+    let handles_kind_impls: Vec<TokenStream2> = if fallback.is_some() && handlers.is_empty() {
         let kind_param: syn::Ident = syn::parse_quote!(__AetherCatchAllK);
         let mut blanket_generics = generics.clone();
         blanket_generics.params.push(syn::parse_quote!(
@@ -3206,13 +2674,11 @@ fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts) -> syn::Result<To
         quote! {}
     };
 
-    // Spike: a split (`#[actor] impl NativeActor`) cap carries its own
-    // always-on name-inventory submission (the `#[bridge]` path emits this
-    // for the caps it wraps; a de-bridged split cap emits it here). Keyed by
-    // cardinality off the single `#namespace_expr`, gated `not(wasm)` so it
-    // rides the transport build but never the wasm header build. Only the
-    // split path needs it — legacy non-bridge caps keep today's behaviour.
-    let name_entry = if is_split && !opts.skip_markers && has_namespace {
+    // A split (`#[actor] impl NativeActor`) cap carries its own always-on
+    // name-inventory submission, keyed by cardinality off the single
+    // `#namespace_expr` and gated `not(wasm)` so it rides the transport build
+    // but never the wasm header build. Only the split path emits it.
+    let name_entry = if is_split && has_namespace {
         let namespace_expr = consts.iter().find_map(|c| {
             if c.ident == "NAMESPACE" {
                 Some(&c.expr)
@@ -3221,7 +2687,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts) -> syn::Result<To
             }
         });
         match (namespace_expr, opts.cardinality) {
-            (Some(ns), Some(BridgeCardinality::Instanced)) => quote! {
+            (Some(ns), Some(ActorCardinality::Instanced)) => quote! {
                 #[cfg(not(target_family = "wasm"))]
                 ::aether_data::name_inventory::inventory::submit! {
                     ::aether_data::name_inventory::TemplateEntry {
