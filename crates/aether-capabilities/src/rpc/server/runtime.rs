@@ -15,14 +15,20 @@
 //! so the thread spawn / wake-mail / settlement-subscription / shutdown
 //! path transfers from the pre-split cap struct unchanged.
 
+// `#[handler]` methods take their decoded payload by value per the ADR-0033
+// dispatch ABI; the macro-generated trampoline owns the decoded bytes so
+// callers can't see references.
+#![allow(clippy::needless_pass_by_value)]
+
 // Sibling / cap-level types named by the state, the helpers, and the
-// top-level `#[actor] impl`, reached through the parent module. `super::`
-// works because `runtime` is a descendant of `server` (the parent's
-// private `use` aliases + the `pub(super)` connection items are visible to
-// it). `RpcServerConfig` is named only in the parent's `init` and resolves
-// there through the file-root re-export, so it is not pulled here.
+// `#[runtime] impl NativeActor` block below, reached through the parent
+// module. `super::` works because `runtime` is a descendant of `server` (the
+// parent's private `use` aliases + the `pub(super)` connection items are
+// visible to it). `RpcServerConfig` is named by `init`'s signature; the cap
+// struct `RpcServerCapability` is the impl's `Self` type.
 use super::connection::{ConnId, ConnState, InboundEvent, run_reader_loop};
-use super::{PeerKind, RpcInboundReady, Settled};
+use super::{PeerKind, RpcInboundReady, RpcServerCapability, RpcServerConfig, Settled};
+use aether_actor::runtime;
 
 // Re-export every substrate / std / cross-crate type the top-level
 // `#[actor] impl` body in `mod.rs` names; it reaches them through the
@@ -385,5 +391,290 @@ impl RpcServerState {
             );
             self.close_connection(conn_id, reason);
         }
+    }
+}
+
+#[runtime]
+impl NativeActor for RpcServerCapability {
+    /// The runtime state this identity boots into (ADR-0122 split): the
+    /// state-bearing struct holding the TCP listener bookkeeping +
+    /// per-connection state.
+    type State = RpcServerState;
+    type Config = RpcServerConfig;
+    const NAMESPACE: &'static str = "aether.rpc.server";
+
+    fn init(
+        config: RpcServerConfig,
+        ctx: &mut NativeInitCtx<'_>,
+    ) -> Result<RpcServerState, BootError> {
+        let listener =
+            TcpListener::bind(&config.bind_addr).map_err(|e| BootError::Other(Box::new(e)))?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|e| BootError::Other(Box::new(e)))?;
+        let port = local_addr.port();
+        listener
+            .set_nonblocking(false)
+            .map_err(|e| BootError::Other(Box::new(e)))?;
+
+        let accept_shutdown = Arc::new(AtomicBool::new(false));
+        let accept_shutdown_for_thread = Arc::clone(&accept_shutdown);
+
+        let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
+        let inbound_tx_for_thread = inbound_tx.clone();
+
+        let mailer: Arc<Mailer> = ctx.mailer();
+        let self_id = ctx.self_id();
+        let wake_kind = KindId(<RpcInboundReady as Kind>::ID.0);
+
+        // Transport thread below the mail layer — it accepts sockets that carry
+        // inbound mail in; no inbound chain to inherit, no settlement umbrella.
+        #[allow(clippy::disallowed_methods)]
+        let thread = thread::Builder::new()
+            .name(format!("aether-rpc-accept-{port}"))
+            .spawn(move || {
+                while !accept_shutdown_for_thread.load(Ordering::Acquire) {
+                    if let Ok((stream, peer)) = listener.accept() {
+                        if accept_shutdown_for_thread.load(Ordering::Acquire) {
+                            drop(stream);
+                            break;
+                        }
+                        if inbound_tx_for_thread
+                            .send(InboundEvent::PeerAccepted { stream, peer })
+                            .is_err()
+                        {
+                            break;
+                        }
+                        mailer.push(Mail::new(
+                            self_id,
+                            wake_kind,
+                            RpcInboundReady::default().encode_into_bytes(),
+                            1,
+                        ));
+                    } else if accept_shutdown_for_thread.load(Ordering::Acquire) {
+                        break;
+                    }
+                }
+            })
+            .map_err(|e| BootError::Other(Box::new(e)))?;
+
+        tracing::info!(
+            target: "aether_substrate::rpc",
+            addr = %config.bind_addr,
+            port = port,
+            "rpc server bound",
+        );
+
+        ctx.publish_handle(RpcServerHandle { local_port: port });
+
+        Ok(RpcServerState {
+            peer_kind: config.peer_kind,
+            self_mailbox: self_id,
+            mailer: ctx.mailer(),
+            listener_port: port,
+            accept_shutdown,
+            accept_thread: Some(thread),
+            inbound_rx,
+            inbound_tx,
+            connections: HashMap::new(),
+            next_conn_id: 0,
+            in_flight: HashMap::new(),
+        })
+    }
+
+    fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+        // Stop the accept thread.
+        state.accept_shutdown.store(true, Ordering::Release);
+        let addr_str = format!("127.0.0.1:{}", state.listener_port);
+        if let Ok(addr) = addr_str.parse::<SocketAddr>() {
+            let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(100));
+        }
+        if let Some(t) = state.accept_thread.take() {
+            let _ = t.join();
+        }
+        // Stop every per-connection reader. Shutting down the read
+        // half wakes the blocked `read()`; the reader sees the
+        // shutdown flag and exits.
+        for conn in state.connections.values_mut() {
+            conn.shutdown.store(true, Ordering::Release);
+            let _ = conn.write_half.shutdown(Shutdown::Read);
+            if let Some(t) = conn.reader_thread.take() {
+                let _ = t.join();
+            }
+        }
+        tracing::info!(
+            target: "aether_substrate::rpc",
+            port = state.listener_port,
+            "rpc server closed",
+        );
+    }
+
+    /// Sidecar wake. Drain every pending inbound event.
+    ///
+    /// # Agent
+    /// Internal wake mail — not part of the cap's external surface.
+    /// The accept / reader sidecars fire this to wake the
+    /// dispatcher; the handler drains the mpsc and dispatches per
+    /// item.
+    #[handler]
+    fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: RpcInboundReady) {
+        while let Ok(event) = state.inbound_rx.try_recv() {
+            match event {
+                InboundEvent::PeerAccepted { stream, peer } => {
+                    state.spawn_reader_for_peer(ctx, stream, peer);
+                }
+                InboundEvent::FrameReceived { conn_id, frame } => {
+                    state.dispatch_frame(ctx, conn_id, frame);
+                }
+                InboundEvent::ReaderClosed { conn_id, reason } => {
+                    state.close_connection(conn_id, &reason);
+                }
+                InboundEvent::FrameDecodeError { conn_id, error } => {
+                    // The reader kept frame-sync (body drained).
+                    // Write a structured `ReplyEnd { cid: 0, Err }`
+                    // and leave the connection up so further calls
+                    // on this socket still work (issue 1271).
+                    //
+                    // `cid = 0` is the sentinel: the wire couldn't
+                    // be decoded far enough to learn the real cid,
+                    // so we report against id 0 and the mcp router
+                    // surfaces it as a wire-level out-of-band
+                    // failure rather than a per-call settled-Err.
+                    tracing::warn!(
+                        target: "aether_substrate::rpc",
+                        conn = conn_id,
+                        error = ?error,
+                        "rpc inbound frame decode error; keeping connection alive",
+                    );
+                    state.write_frame_to(
+                        conn_id,
+                        &WireFrame::ReplyEnd {
+                            cid: 0,
+                            result: Err(error),
+                        },
+                    );
+                }
+                InboundEvent::FrameDecodeAborted { conn_id, error } => {
+                    // The announced body was big enough to be its
+                    // own OOM vector (size > 2 * max). Write a
+                    // structured `Bye` so the peer sees a named
+                    // close instead of a bare reset, then tear the
+                    // connection down (issue 1271).
+                    let reason = match &error {
+                        RpcError::FrameTooLarge { size, max } => {
+                            format!("frame too large: {size} > {max}")
+                        }
+                        other => format!("frame decode aborted: {other:?}"),
+                    };
+                    tracing::warn!(
+                        target: "aether_substrate::rpc",
+                        conn = conn_id,
+                        reason = %reason,
+                        "rpc inbound frame too large to drain; closing connection",
+                    );
+                    state.write_frame_to(
+                        conn_id,
+                        &WireFrame::Bye {
+                            reason: reason.clone(),
+                        },
+                    );
+                    state.close_connection(conn_id, &reason);
+                }
+            }
+        }
+    }
+
+    /// Settlement notice from the chassis. The root corresponds
+    /// to a `Call` dispatch we subscribed to; close the call by
+    /// writing `ReplyEnd { cid, result: Ok(()) }` and dropping
+    /// the in-flight entry.
+    ///
+    /// # Agent
+    /// Internal — fires from `SettlementRegistry::fire_settled`,
+    /// not from external mail. Subscribers parked in the registry
+    /// receive one of these per settled root.
+    #[handler]
+    fn on_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Settled) {
+        let correlation = mail.root.correlation_id;
+        let Some(entry) = state.in_flight.remove(&correlation) else {
+            // No matching in-flight call. Either we never owned
+            // this root or the connection already closed and we
+            // cleared eagerly. Either way: drop silently.
+            return;
+        };
+        state.write_frame_to(
+            entry.conn_id,
+            &WireFrame::ReplyEnd {
+                cid: entry.wire_cid,
+                result: Ok(()),
+            },
+        );
+    }
+
+    /// Catch-all. Any mail addressed at this cap that's not one of
+    /// the typed wake / settlement kinds is treated as a reply
+    /// mail from a downstream actor; if its `correlation_id`
+    /// matches an in-flight call, the cap wraps it as a
+    /// `ReplyEvent` and writes to the originating connection.
+    ///
+    /// # Agent
+    /// Not user-callable — this is the cap's reply interception
+    /// path. The wire is mail-shaped (issue 750 §wire), so any
+    /// kind two peers share is reachable; reply correlation goes
+    /// through this fallback.
+    #[fallback]
+    fn on_any(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, env: &Envelope) {
+        let correlation = env.sender.correlation_id;
+        let Some(entry) = state.in_flight.get(&correlation).copied() else {
+            tracing::debug!(
+                target: "aether_substrate::rpc",
+                kind = %env.kind_name,
+                correlation,
+                "rpc reply with no matching in-flight call; dropping",
+            );
+            return;
+        };
+
+        // A forwarded engine call (issue 763 P5a) closes when its
+        // proxy lifts the substrate's terminal `ReplyEnd` into a
+        // `CallSettled` — there's no local chain for `on_settled`
+        // to catch. Recognize it here, write the wire `ReplyEnd`,
+        // and clear the in-flight entry.
+        if env.kind == <CallSettled as Kind>::ID {
+            let result = match CallSettled::decode_from_bytes(env.payload.bytes()) {
+                Some(CallSettled::Ok) => Ok(()),
+                Some(CallSettled::Err { error }) => Err(RpcError::Other { reason: error }),
+                None => Err(RpcError::Other {
+                    reason: "malformed CallSettled payload".into(),
+                }),
+            };
+            state.write_frame_to(
+                entry.conn_id,
+                &WireFrame::ReplyEnd {
+                    cid: entry.wire_cid,
+                    result,
+                },
+            );
+            state.in_flight.remove(&correlation);
+            return;
+        }
+
+        let envelope = MailEnvelope {
+            to: MailboxAddress::local(state.self_mailbox),
+            from: match env.sender.addr {
+                SourceAddr::Component(id) => Some(MailboxAddress::local(id)),
+                _ => None,
+            },
+            kind: env.kind,
+            correlation_id: Some(entry.wire_cid),
+            payload: env.payload.bytes().to_vec(),
+        };
+        state.write_frame_to(
+            entry.conn_id,
+            &WireFrame::ReplyEvent {
+                cid: entry.wire_cid,
+                envelope,
+            },
+        );
     }
 }
