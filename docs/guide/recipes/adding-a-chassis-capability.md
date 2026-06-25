@@ -39,80 +39,107 @@ isn't already claimed; the builder rejects a collision at boot
 
 ## 2. Write the actor
 
-The capability is a struct plus an `#[actor] impl NativeActor for X`
-block, wrapped in a `#[bridge(singleton)] mod native`:
+A capability is split into two halves (ADR-0122). The **identity** is a
+ZST struct carrying only the addressing; the state-bearing **runtime**
+lives in a feature-gated `runtime` module. The `#[actor] impl NativeActor
+for X` block sits on the identity and names the runtime via `type State`:
 
 ```rust
-use aether_kinds::{TrajectoryEnd, TrajectorySample /* … the handler kinds */};
+use aether_kinds::{RecordResult, TrajectoryEnd, TrajectorySample};
 
-#[aether_actor::bridge(singleton)]
-mod native {
-    use std::collections::HashMap;
+// The runtime half is reached through a single glob seam.
+#[allow(clippy::wildcard_imports)]
+use runtime::*;
 
-    use aether_actor::actor;
-    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::chassis::error::BootError;
+/// `aether.trajectory` cap identity: a ZST carrying only the addressing —
+/// `Addressable` (`NAMESPACE`, `Resolver`) and the per-handler
+/// `HandlesKind` markers, emitted always-on by `#[actor]`.
+pub struct TrajectoryRecorderCapability;
 
-    use super::{TrajectoryEnd, TrajectorySample};
+#[actor(singleton, runtime_feature = "native")]
+impl NativeActor for TrajectoryRecorderCapability {
+    type State = TrajectoryRecorderCapabilityState;
+    type Config = ();
+    const NAMESPACE: &'static str = "aether.trajectory";
 
-    pub struct TrajectoryRecorderCapability {
-        sessions: HashMap<u64, Vec<…>>,
+    fn init(
+        (): (),
+        _ctx: &mut NativeInitCtx<'_>,
+    ) -> Result<TrajectoryRecorderCapabilityState, BootError> {
+        Ok(TrajectoryRecorderCapabilityState { sessions: HashMap::new() })
     }
 
-    #[actor]
-    impl NativeActor for TrajectoryRecorderCapability {
-        type Config = ();
-        const NAMESPACE: &'static str = "aether.trajectory";
+    // A reply-bearing handler returns its reply kind (ADR-0112). The first
+    // parameter is the runtime state, threaded explicitly (the identity is
+    // a ZST):
+    #[handler]
+    fn on_end(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        e: TrajectoryEnd,
+    ) -> RecordResult {
+        // … flush the session, then return the reply value:
+        RecordResult::Ok { /* … */ }
+    }
+}
 
-        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { sessions: HashMap::new() })
-        }
+// The runtime half: the cap's state plus its substrate-typed imports. The
+// whole module is gated behind the cap's feature at its declaration (here
+// `#[cfg(feature = "native")] pub mod trajectory;` in `lib.rs`), so every
+// line compiles only on a native build — no inner `#[cfg]` is needed.
+mod runtime {
+    pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    pub use aether_substrate::chassis::error::BootError;
+    pub use std::collections::HashMap;
 
-        // A reply-bearing handler returns its reply kind (ADR-0112):
-        #[handler]
-        fn on_end(&mut self, _ctx: &mut NativeCtx<'_>, mail: TrajectoryEnd) -> RecordResult {
-            // … flush the session, then return the reply value:
-            RecordResult::Ok { /* … */ }
-        }
+    pub struct TrajectoryRecorderCapabilityState {
+        pub(super) sessions: HashMap<u64, Vec<…>>,
     }
 }
 ```
 
 The pieces:
 
-- **`#[bridge(singleton)]`** wraps the `mod native` that holds the native
-  impl. It emits the always-on `Actor` + `HandlesKind<K>` markers at file
-  root (outside any cfg gate) so a wasm guest can write
-  `ctx.actor::<HandleCapability>().send(&kind)` and have it compile-check,
-  while the substrate-side impl and its imports sit behind
-  `#[cfg(not(target_arch = "wasm32"))]`. The inner `#[actor]` is rewritten
-  to `#[actor(skip_markers)]` so the markers aren't duplicated. Singleton
-  is the cardinality for a chassis cap; `instanced` is the counterpart for
-  per-instance actors. The handler-signature kind types must be imported
-  at file root (as `super::*` shows) because the markers land as siblings
-  of the mod.
+- **The identity ZST** — `pub struct TrajectoryRecorderCapability;` carries
+  no state. `#[actor]` emits its always-on `Addressable` + `HandlesKind<K>`
+  markers, so a wasm guest writing
+  `ctx.actor::<TrajectoryRecorderCapability>().send(&kind)` compile-checks
+  even on a build where the runtime half is gated out.
+- **`#[actor(singleton, runtime_feature = "native")]`** declares the
+  cardinality — `singleton` for a chassis cap; `instanced` is the
+  counterpart for per-instance actors — and names the feature its runtime
+  `Lifecycle` / `Dispatch` / `NativeActor` impls gate behind. Omit
+  `runtime_feature` to gate on the default `runtime` feature (the
+  `aether.fs` cap does this); name a cap-specific feature when the native
+  half pulls a heavy dep ([heavy native deps](#heavy-native-deps)).
+- **`type State`** names the runtime struct holding the cap's mutable
+  state. It lives in the feature-gated `runtime` module so it never
+  compiles into a wasm build, and `#[handler]`s receive it as
+  `state: &mut Self::State`.
 - **`type Config`** is `()` for a config-free cap, or a real struct
   ([step 3](#3-give-it-a-config-if-it-needs-one)). The chassis builder
   threads it into `init`.
-- **`init(config, ctx)`** builds the struct. The mailbox is already
-  claimed; `ctx` is a `NativeInitCtx` exposing `ctx.mailer()` (the shared
-  `Mailer`, which carries the `Registry`) for caps that pull a shared
-  resource at boot — this one just builds plain state. `init` runs before
-  the dispatcher starts and before any peer's dispatcher runs — no mail
-  yet. Return `Err(BootError::…)` to abort the chassis build.
+- **`init(config, ctx)`** builds the runtime state (it returns
+  `Self::State`, not `Self`). The mailbox is already claimed; `ctx` is a
+  `NativeInitCtx` exposing `ctx.mailer()` (the shared `Mailer`, which
+  carries the `Registry`) for caps that pull a shared resource at boot —
+  this one just builds plain state. `init` runs before the dispatcher
+  starts and before any peer's dispatcher runs — no mail yet. Return
+  `Err(BootError::…)` to abort the chassis build.
 - **`wire(&mut self, ctx)`** (optional, default no-op) is the post-init
   mail-allowed hook: peers are addressable here, so subscribe to input
   streams or announce yourself from `wire`, not `init`.
   **`unwire(&mut self, ctx)`** (optional) is the symmetric pre-shutdown
   hook.
-- **`#[handler] fn on_x(&self, ctx, mail: K)`** infers the kind from its
-  third parameter. Take `&self` for a read-only or stateless handler,
-  `&mut self` to mutate cap state — the dispatcher owns the cap on one
-  thread, so state is [plain fields, no locks](../foundations/actor-model.md).
-  The handler receives `mail` by value. A reply-bearing handler returns
-  its reply kind (`-> R`, ADR-0112); a fire-and-forget handler returns
-  `()`. For an imperative mid-handler reply, `ctx.reply(&result)` is the
-  alternative.
+- **`#[handler] fn on_x(state: &mut Self::State, ctx, mail: K)`** infers
+  the kind from its third parameter. The first parameter is the runtime
+  state, threaded explicitly because the identity carries none — take
+  `&Self::State` for a read-only handler, `&mut Self::State` to mutate; the
+  dispatcher owns the cap on one thread, so state is [plain fields, no
+  locks](../foundations/actor-model.md). The handler receives `mail` by
+  value. A reply-bearing handler returns its reply kind (`-> R`, ADR-0112);
+  a fire-and-forget handler returns `()`. For an imperative mid-handler
+  reply, `ctx.reply(&result)` is the alternative.
 
 The kinds a handler receives must exist in the substrate kind inventory
 so the dispatcher can decode the wire bytes — that's the *Adding a
@@ -198,12 +225,14 @@ only when standing up a new chassis kind.
 
 ### Heavy native deps
 
-A cap whose native impl pulls a heavy native-only dependency (the
-renderer's wgpu, audio's cpal) gates the inner module behind a cargo
-feature: `#[bridge(singleton, feature = "render-native")]`. The wasm-side
-markers stay always-on (so guests still address the cap by type) while
-the native dep set only enters when the feature is on. A cap with no
-native-only deps — like `TrajectoryRecorderCapability` — needs no feature.
+A cap whose runtime half pulls a heavy native-only dependency (the
+renderer's wgpu, audio's cpal) names a cap-specific feature in its
+`runtime_feature` override: `#[actor(singleton, runtime_feature =
+"render-native")]`, with the `runtime` module gated `#[cfg(feature =
+"render-native")]`. The identity markers stay always-on (so guests still
+address the cap by type) while the native dep set only enters when the
+feature is on. A cap whose runtime needs no heavy dep omits
+`runtime_feature` and gates on the default `runtime` feature.
 
 ## 6. Test it in-process
 

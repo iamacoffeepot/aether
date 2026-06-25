@@ -130,12 +130,12 @@ pub mod __macro_internals {
 /// `aether-data` so the derive paths the macro emits
 /// (`::aether_data::Kind`, etc.) continue to resolve through the
 /// established re-export chain. The actor-SDK attribute macros
-/// (`actor`, `bridge`, `capability`, `fallback`, `handler`, `local`)
+/// (`actor`, `capability`, `fallback`, `handler`, `local`)
 /// are sourced directly from `aether-actor-derive` — `aether-data` is
 /// the foundational data-layer crate and no longer exports actor-SDK
 /// surface. Component and capability authors need only `aether-actor`
 /// in their dep list; the full macro surface is available from here.
-pub use aether_actor_derive::{actor, bridge, capability, fallback, handler, local};
+pub use aether_actor_derive::{actor, capability, fallback, handler, local};
 pub use aether_data::{Kind, KindId as DataKindId, MailboxId, Schema};
 // ADR-0119: the `#[derive(Singleton)]` / `#[derive(Instanced)]` /
 // `#[derive(Embeddable)]` proc-macros are retired. Cardinality is the

@@ -147,8 +147,8 @@ pub trait Addressable: Sized + Send + 'static {
     /// is derived from it: a keyless resolver ([`One`] / [`Embedded`],
     /// `Args<'a> = ()`) makes the actor a [`Singleton`]; a keyed resolver
     /// ([`Many`] / [`EmbeddedMany`], `Args<'a> = &'a str`) makes it
-    /// [`Instanced`]. The `#[bridge]` / `#[actor]` macros emit this; a
-    /// hand-written actor sets it directly.
+    /// [`Instanced`]. The `#[actor]` macro emits this; a hand-written
+    /// actor sets it directly.
     type Resolver: Resolve;
 
     /// This actor's [`MailboxId`] as seen by a caller whose lineage carry is
