@@ -58,8 +58,8 @@ pub mod input;
 // 1122). Serves the per-build name/template manifest + dynamic-instance
 // resolve over mail.
 pub mod inventory;
-// `aether.lifecycle` cap (ADR-0082). The bridged, non-generic capability
-// the chassis drives one frame at a time. Always-native via `#[bridge]`,
+// `aether.lifecycle` cap (ADR-0082). The non-generic capability the
+// chassis drives one frame at a time. Always-native via `#[actor(singleton)]`,
 // so a wasm component can address it by name.
 pub mod lifecycle;
 #[cfg(feature = "render")]
@@ -183,14 +183,14 @@ mod auto_name_inventory_tests {
 
     use crate::fs::FsCapability;
 
-    /// ADR-0088: `#[bridge(singleton)]` auto-emits a `NameEntry` for each
+    /// ADR-0088: `#[actor(singleton)]` auto-emits a `NameEntry` for each
     /// chassis cap's mailbox namespace, so a `MailboxId` reverses to its
     /// real name through the static reverse map — no hand-maintained
     /// registration list. Touching `FsCapability` forces its module (and
     /// the macro-auto-emitted `NameEntry` submission alongside it) into
     /// this unit-test binary, so the map must then reverse `aether.fs`.
     /// Guards the macro -> submit -> reverse-map chain against a future
-    /// regression that stops the bridge emitting the entry.
+    /// regression that stops the macro emitting the entry.
     // Probes the reverse map for the fs cap's own id (FsCapability::NAMESPACE)
     // — the primitive yields the reference id under test.
     #[allow(clippy::disallowed_methods)]
@@ -203,7 +203,7 @@ mod auto_name_inventory_tests {
             map.get(&id.0).map(String::as_str),
             Some("aether.fs"),
             "FsCapability's mailbox name should reverse via its \
-             #[bridge(singleton)] macro-auto-emitted NameEntry",
+             #[actor(singleton)] macro-auto-emitted NameEntry",
         );
     }
 }
