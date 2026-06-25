@@ -32,10 +32,12 @@ pub trait Runtime: Sized {
 pub struct Tick;
 pub struct Resize;
 
-/// The cap identity ZST. `#[actor(singleton, runtime)]` reads `runtime.rs`,
-/// lifts `impl Addressable` (namespace from the impl's const, `Resolver = One`
-/// from `singleton`) and `impl Handles<Tick|Resize>` here — all always-on.
-#[pull_up_macro::actor(singleton, runtime)]
+/// The cap identity ZST. `#[actor(singleton)]` defaults to the sibling
+/// `runtime` module — reads `runtime.rs`, lifts `impl Addressable` (namespace
+/// from the impl's const, `Resolver = One` from `singleton`) and
+/// `impl Handles<Tick|Resize>` here — all always-on. An explicit
+/// `#[actor(singleton, other_module)]` would override the module name.
+#[pull_up_macro::actor(singleton)]
 pub struct RenderCapability;
 
 #[cfg(feature = "runtime")]

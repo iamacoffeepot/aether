@@ -18,8 +18,8 @@ pinned stable toolchain (Rust 1.96).
 
 ```rust
 // mod.rs — identity
-#[actor(singleton, runtime)]
-pub struct RenderCapability;
+#[actor(singleton)]          // module name defaults to the sibling `runtime`
+pub struct RenderCapability; // (`#[actor(singleton, other)]` overrides it)
 
 #[cfg(feature = "render-native")]
 mod runtime;

@@ -226,6 +226,10 @@ enum ResolverKind {
 
 impl Parse for ActorArgs {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        // Span of the attribute contents, used to resolve the invoking file
+        // when the module name is defaulted (a synthesized ident carries no
+        // useful span on its own).
+        let here = input.span();
         let idents = Punctuated::<syn::Ident, Token![,]>::parse_terminated(input)?;
         let mut resolver = ResolverKind::One;
         let mut module = None;
@@ -236,9 +240,9 @@ impl Parse for ActorArgs {
                 _ => module = Some(id),
             }
         }
-        let module = module.ok_or_else(|| {
-            input.error("#[actor] needs the runtime module name, e.g. `#[actor(singleton, runtime)]`")
-        })?;
+        // Default to the conventional sibling `runtime` module when no name is
+        // given (`#[actor(singleton)]`); an explicit name overrides it.
+        let module = module.unwrap_or_else(|| syn::Ident::new("runtime", here));
         Ok(Self { resolver, module })
     }
 }
