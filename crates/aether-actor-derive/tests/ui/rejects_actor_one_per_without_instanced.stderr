@@ -1,7 +1,0 @@
-error: #[actor] `one_per` requires `instanced` — it declares the entity relationship of an instanced family (ADR-0088 §4 v2)
-  --> tests/ui/rejects_actor_one_per_without_instanced.rs:29:1
-   |
-29 | #[actor(singleton, one_per = "thing")]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)

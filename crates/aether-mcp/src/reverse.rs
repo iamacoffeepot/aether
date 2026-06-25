@@ -198,7 +198,6 @@ mod tests {
     use super::*;
     use aether_data::hash::{mailbox_id_from_name, thread_id_from_name};
     use aether_data::{KIND_DOMAIN, MAILBOX_DOMAIN, THREAD_DOMAIN};
-    use aether_kinds::CardinalityWire;
 
     /// Build a synthetic manifest with a `NameEntry` (a mailbox name + a
     /// kind name), a `Bounded` template (`aether-test-worker-{N}`), and a
@@ -221,16 +220,12 @@ mod tests {
                     domain: THREAD_DOMAIN.to_vec(),
                     template: "aether-test-worker-{N}".to_string(),
                     param: ParamKindWire::Bounded { lo: 0, hi: 3 },
-                    cardinality: CardinalityWire::Bounded { count: 4 },
                 },
                 TemplateEntryWire {
                     domain: THREAD_DOMAIN.to_vec(),
                     template: "aether-test-root-{NAMESPACE}".to_string(),
                     param: ParamKindWire::Declared {
                         domain: MAILBOX_DOMAIN.to_vec(),
-                    },
-                    cardinality: CardinalityWire::OnePer {
-                        entity: "mailbox".to_string(),
                     },
                 },
             ],

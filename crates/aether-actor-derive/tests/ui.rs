@@ -52,14 +52,10 @@ fn ui() {
     t.compile_fail("tests/ui/rejects_accessor_without_state.rs");
     t.compile_fail("tests/ui/rejects_missing_rehydrate.rs");
     // iamacoffeepot/aether#2330: the `#[actor]` split path gains a
-    // `runtime_feature = "name"` gate override and `one_per = "entity"`
-    // instance-cardinality, to `#[bridge]` parity. The substrate-typed runtime
+    // `runtime_feature = "name"` gate override. The substrate-typed runtime
     // impls cfg out in the fixture bin (no `runtime`/named feature), so the pass
-    // fixtures exercise the marker + name-inventory surface the args drive;
-    // `one_per` without `instanced` is a macro-level rejection.
+    // fixture exercises the marker + name-inventory surface the arg drives.
     t.pass("tests/ui/accepts_actor_runtime_feature.rs");
-    t.pass("tests/ui/accepts_actor_one_per.rs");
-    t.compile_fail("tests/ui/rejects_actor_one_per_without_instanced.rs");
     // iamacoffeepot/aether#2338: a split `#[actor]` may carry a `#[fallback]`
     // whose first param is `state: &mut Self::State` (the validator gained the
     // `is_split` branch the split `#[handler]` path already had).

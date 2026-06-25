@@ -101,7 +101,7 @@ use runtime::*;
 /// above.
 #[cfg(feature = "runtime")]
 mod runtime {
-    pub use super::manifest::{cardinality_wire, param_kind_wire};
+    pub use super::manifest::param_kind_wire;
     pub use super::resolve::resolve_ids;
 
     pub use aether_data::KindId;
@@ -133,7 +133,7 @@ mod runtime {
 #[cfg(all(test, feature = "runtime"))]
 use aether_data::tagged_id;
 #[cfg(all(test, feature = "runtime"))]
-use aether_kinds::{CardinalityWire, ParamKindWire};
+use aether_kinds::ParamKindWire;
 #[cfg(all(test, feature = "runtime"))]
 use aether_substrate::runtime::thread_name::resolve_runtime;
 
@@ -193,7 +193,6 @@ impl NativeActor for InventoryCapability {
                 // detail (ADR-0099 §5/§6 forward-feed).
                 template: entry.pattern().into_owned(),
                 param: param_kind_wire(&entry.param),
-                cardinality: cardinality_wire(&entry.cardinality),
             })
             .collect();
         ManifestResult { names, templates }
@@ -379,14 +378,12 @@ mod tests {
             "manifest should carry the aether.fs chassis mailbox NameEntry; names: {:?}",
             result.names.iter().map(|n| &n.name).collect::<Vec<_>>(),
         );
-        // The worker template is `Bounded` on both axes: a `Bounded`
-        // `param` (enumerable integer hole) and a `Bounded` cardinality
-        // (the prehashed instance ceiling) — ADR-0088 §4 v2.
+        // The worker template carries a `Bounded` `param` — an
+        // enumerable integer hole the client expands locally (ADR-0088 §4).
         assert!(
             result.templates.iter().any(|t| {
                 t.template == "aether-worker-{N}"
                     && matches!(t.param, ParamKindWire::Bounded { .. })
-                    && matches!(t.cardinality, CardinalityWire::Bounded { .. })
             }),
             "manifest should carry the aether-worker-{{N}} Bounded template; templates: {:?}",
             result
@@ -394,39 +391,6 @@ mod tests {
                 .iter()
                 .map(|t| &t.template)
                 .collect::<Vec<_>>(),
-        );
-    }
-
-    /// ADR-0088 §4 v2: an instanced actor declaring `one_per` surfaces
-    /// a `OnePer(<entity>)` cardinality in the manifest, so a consumer
-    /// reads "trampoline = one mailbox per loaded component" instead of
-    /// an opaque `Dynamic` family. `WasmTrampoline` is the canonical
-    /// case (`#[bridge(instanced, one_per = "component")]`); touching
-    /// its `NAMESPACE` forces the macro-emitted `TemplateEntry` into
-    /// this test binary.
-    #[test]
-    fn manifest_surfaces_one_per_cardinality_for_trampoline() {
-        use crate::trampoline::WasmTrampoline;
-        use aether_actor::Addressable;
-        assert_eq!(WasmTrampoline::NAMESPACE, "aether.embedded");
-
-        let mut fix = fixture();
-        let mut ctx = session_ctx(&fix.transport);
-        let result = InventoryCapability::on_manifest(&mut fix.state, &mut ctx, Manifest {});
-        drop(ctx);
-
-        let trampoline = result
-            .templates
-            .iter()
-            .find(|t| t.template == "aether.embedded:{subname}")
-            .expect("manifest should carry the trampoline instanced-family template");
-        // Shape axis unchanged (opaque runtime string); cardinality
-        // axis now names the entity each instance tracks.
-        assert!(matches!(trampoline.param, ParamKindWire::Dynamic));
-        assert!(
-            matches!(&trampoline.cardinality, CardinalityWire::OnePer { entity } if entity == "component"),
-            "trampoline cardinality should be OnePer(\"component\"); got {:?}",
-            trampoline.cardinality,
         );
     }
 

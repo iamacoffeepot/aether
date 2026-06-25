@@ -59,7 +59,7 @@ use runtime::*;
 #[cfg(feature = "runtime")]
 mod runtime;
 
-#[actor(instanced, one_per = "connection")]
+#[actor(instanced)]
 impl NativeActor for TcpSessionActor {
     /// The runtime state this identity boots into (ADR-0122 split): the
     /// write-half + read-thread bundle.

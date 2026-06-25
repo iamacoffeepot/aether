@@ -772,13 +772,6 @@ struct ActorOpts {
     /// generic `runtime`. `None` ⇒ the default `feature = "runtime"`. Mirrors
     /// `BridgeOpts::feature`.
     runtime_feature: Option<String>,
-    /// iamacoffeepot/aether#2330: the `one_per = "entity"` instance-cardinality
-    /// declaration (ADR-0088 §4 v2) from `#[actor(instanced, one_per = "…")]`,
-    /// threaded into the split-path name-inventory `TemplateEntry` as
-    /// `Cardinality::OnePer(entity)`. Only meaningful with `instanced`; absent ⇒
-    /// `Cardinality::Unbounded`. Mirrors `BridgeOpts::one_per` (which the
-    /// `#[bridge]` path already supports).
-    one_per: Option<String>,
 }
 
 fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
@@ -814,19 +807,10 @@ fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
             let lit: syn::LitStr = value.parse()?;
             opts.runtime_feature = Some(lit.value());
             Ok(())
-        } else if meta.path.is_ident("one_per") {
-            // iamacoffeepot/aether#2330: instanced-family entity relationship
-            // (ADR-0088 §4 v2). Mirrors `parse_bridge_attr`'s `one_per` arm; the
-            // `one_per`-requires-`instanced` check is in `expand_native_actor_trait`
-            // (arg order is unspecified, so cardinality may not be known yet here).
-            let value = meta.value()?;
-            let lit: syn::LitStr = value.parse()?;
-            opts.one_per = Some(lit.value());
-            Ok(())
         } else {
             Err(meta.error(
                 "unrecognised #[actor] argument; expected `singleton`, `instanced`, \
-                 `skip_markers`, `runtime_feature = \"name\"`, or `one_per = \"entity\"`",
+                 `skip_markers`, or `runtime_feature = \"name\"`",
             ))
         }
     });
@@ -2505,18 +2489,6 @@ fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStrea
 // per-handler context structs without saving readability.
 #[allow(clippy::too_many_lines)]
 fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStream2> {
-    // iamacoffeepot/aether#2330: `one_per` only describes an instanced family's
-    // entity relationship; on a singleton (or a bare `#[actor]`) it is
-    // meaningless — reject it, mirroring `expand_bridge`'s guard. Validated here
-    // (not in `parse_actor_opts`) because attribute arg order is unspecified, so
-    // `cardinality` may not be known yet when `one_per` is parsed.
-    if opts.one_per.is_some() && !matches!(opts.cardinality, Some(BridgeCardinality::Instanced)) {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "#[actor] `one_per` requires `instanced` — it declares the entity \
-             relationship of an instanced family (ADR-0088 §4 v2)",
-        ));
-    }
     let self_ty = &item.self_ty;
     let generics = &item.generics;
     let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
@@ -3249,28 +3221,17 @@ fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts) -> syn::Result<To
             }
         });
         match (namespace_expr, opts.cardinality) {
-            (Some(ns), Some(BridgeCardinality::Instanced)) => {
-                // iamacoffeepot/aether#2330: `#[actor(instanced, one_per = "x")]`
-                // declares the entity relationship (ADR-0088 §4 v2), mirroring
-                // `#[bridge]`'s `instanced_cardinality`; absent ⇒ `Unbounded`.
-                let cardinality = if let Some(entity) = opts.one_per.as_deref() {
-                    quote! { ::aether_data::name_inventory::Cardinality::OnePer(#entity) }
-                } else {
-                    quote! { ::aether_data::name_inventory::Cardinality::Unbounded }
-                };
-                quote! {
-                    #[cfg(not(target_family = "wasm"))]
-                    ::aether_data::name_inventory::inventory::submit! {
-                        ::aether_data::name_inventory::TemplateEntry {
-                            domain: ::aether_data::MAILBOX_DOMAIN,
-                            prefix: #ns,
-                            template: ":{subname}",
-                            param: ::aether_data::name_inventory::ParamKind::Dynamic,
-                            cardinality: #cardinality,
-                        }
+            (Some(ns), Some(BridgeCardinality::Instanced)) => quote! {
+                #[cfg(not(target_family = "wasm"))]
+                ::aether_data::name_inventory::inventory::submit! {
+                    ::aether_data::name_inventory::TemplateEntry {
+                        domain: ::aether_data::MAILBOX_DOMAIN,
+                        prefix: #ns,
+                        template: ":{subname}",
+                        param: ::aether_data::name_inventory::ParamKind::Dynamic,
                     }
                 }
-            }
+            },
             (Some(ns), _) => quote! {
                 #[cfg(not(target_family = "wasm"))]
                 ::aether_data::name_inventory::inventory::submit! {
