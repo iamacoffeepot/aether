@@ -51,18 +51,6 @@
 pub mod kinds;
 pub use kinds::*;
 
-// Native impl seams. Gated identically to the `render` runtime half
-// (`not(wasm) AND render-native`) so they're present exactly when the
-// `runtime` module references them.
-#[cfg(all(not(target_family = "wasm"), feature = "render-native"))]
-mod capture;
-#[cfg(all(not(target_family = "wasm"), feature = "render-native"))]
-mod pipeline;
-#[cfg(all(not(target_family = "wasm"), feature = "render-native"))]
-mod quad;
-#[cfg(all(not(target_family = "wasm"), feature = "render-native"))]
-mod texture;
-
 // Handler-signature kinds must be importable at file root because
 // `#[actor]` emits `impl HandlesKind<K> for X {}` markers always-on
 // (outside the `render-native` gate), against the identity. The drawing
@@ -72,18 +60,14 @@ mod texture;
 use aether_kinds::CaptureFrame;
 
 // Auxiliary native-only types the chassis driver consumes alongside
-// `RenderCapability`. Keyed on the `render-native` feature so wasm
-// components that opt into the marker-only `render` feature see only the
-// identity ZST + Actor / HandlesKind impls, not these heavy GPU-bound
-// types.
-#[cfg(all(not(target_family = "wasm"), feature = "render-native"))]
-mod config;
-#[cfg(all(not(target_family = "wasm"), feature = "render-native"))]
-pub use self::capture::CaptureBackend;
-#[cfg(all(not(target_family = "wasm"), feature = "render-native"))]
-pub use self::pipeline::{RenderGpu, RenderHandles};
-#[cfg(all(not(target_family = "wasm"), feature = "render-native"))]
-pub use config::RenderConfig;
+// `RenderCapability`. The seams (`capture`, `pipeline`, `quad`, `texture`,
+// `config`) now live under the `runtime` directory, covered by the one
+// `mod runtime;` gate (`render-native`); their re-exports source through
+// `runtime` so wasm components that opt into the marker-only `render` feature
+// see only the identity ZST + Actor / HandlesKind impls, not these heavy
+// GPU-bound types.
+#[cfg(feature = "render-native")]
+pub use runtime::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
 
 // `#[actor]` sits on each capability struct (the struct-hosted ADR-0123
 // form): it reads the cap's sibling runtime module off disk and emits the

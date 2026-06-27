@@ -55,11 +55,11 @@ use crate::rpc::RpcInboundReady;
 // `sinks` (the test-only capture actors). All are native-only — the
 // proxy owns a `TcpStream` and OS threads — so they elide on wasm
 // alongside the runtime half.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 mod config;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 mod connect;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 mod heartbeat;
 #[cfg(test)]
 mod sinks;
@@ -67,7 +67,7 @@ mod sinks;
 // `EngineProxyConfig` / `HeartbeatParams` carry only wasm-safe types,
 // but the proxy that consumes them is native-only, so the re-export is
 // gated like `TcpListenerConfig`.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use config::{EngineProxyConfig, HeartbeatParams};
 
 /// `aether.engine.proxy:<id>` cap **identity** (ADR-0122 identity/runtime

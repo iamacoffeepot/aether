@@ -67,9 +67,9 @@ pub use config::{HttpServerConfigLayer, HttpServerOverlay};
 /// OS-picked port when `bind_addr` requested port 0.
 ///
 /// Plain data (no substrate type), so it stays at file root under the
-/// existing `not(target_arch = "wasm32")` gate — the `pub use
+/// existing `not(target_family = "wasm")` gate — the `pub use
 /// server::HttpServerHandle` chain in `http/mod.rs` reads it from here.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 #[derive(Clone)]
 pub struct HttpServerHandle {
     pub local_port: u16,

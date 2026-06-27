@@ -24,11 +24,18 @@ pub use crate::render::{
     CreateTexture, CreateTextureResult, RenderCapability, TexturedQuad, UpdateTexture,
 };
 
+// ADR-0105 shelf-packed RGBA8 glyph atlas (`atlas`) and the pure layout /
+// rasterization helpers (`layout`), now nested under this `runtime` directory
+// so the one `mod runtime;` gate in the parent covers them (no per-sibling
+// `#[cfg]`).
+mod atlas;
+mod layout;
+
 // The atlas types the state struct + helpers name. Plain `use` (not a
 // `pub use` re-export): the submodule items are `pub(super)`, so a wider
-// re-export is disallowed — the handlers in the parent that name atlas /
-// layout symbols import them straight from `super::atlas` / `super::layout`.
-use super::atlas::{ATLAS_SIZE, Atlas, AtlasEntry, GlyphKey, GlyphSlot};
+// re-export is disallowed — the handler bodies in this module name atlas /
+// layout symbols straight from `self::atlas` / `self::layout`.
+use self::atlas::{ATLAS_SIZE, Atlas, AtlasEntry, GlyphKey, GlyphSlot};
 
 /// Which reply shape a parked font request is owed once its font is
 /// resident. `load_font` and the `font_metrics` grab share the
@@ -232,12 +239,12 @@ impl TextCapabilityState {
 // The cap mail kinds (`LoadFont`, `DrawText`, …) plus the layout helpers the
 // moved handler bodies name. The `#[runtime]` attribute emits the gated native
 // runtime surface for the struct-hosted identity in the parent.
+use self::layout::{
+    build_font_metrics, emit_draw, font_name_from_path, glyph_dimensions, glyph_quad, quantize_size,
+};
 use super::TextCapability;
 use super::kinds::{
     DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult,
-};
-use super::layout::{
-    build_font_metrics, emit_draw, font_name_from_path, glyph_dimensions, glyph_quad, quantize_size,
 };
 use aether_actor::runtime;
 
@@ -605,9 +612,9 @@ impl NativeActor for TextCapability {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::super::atlas::{ATLAS_SIZE, GlyphKey, GlyphSlot};
-    use super::super::layout::build_font_metrics;
     use super::super::*;
+    use super::atlas::{ATLAS_SIZE, GlyphKey, GlyphSlot};
+    use super::layout::build_font_metrics;
     use super::{
         Arc, CreateTexture, NativeCtx, QuadSpace, Read, Source, TextCapabilityState, UpdateTexture,
     };
@@ -1015,7 +1022,7 @@ mod tests {
     /// The raw bytes of [`test_font`], for the read-result tests that
     /// feed the parse path a real TTF.
     fn test_font_bytes() -> &'static [u8] {
-        include_bytes!("../../../aether-substrate-bundle/assets/fonts/RobotoMono.ttf")
+        include_bytes!("../../../../aether-substrate-bundle/assets/fonts/RobotoMono.ttf")
     }
 
     /// `build_font_metrics`'s table scales back to fontdue's draw-path

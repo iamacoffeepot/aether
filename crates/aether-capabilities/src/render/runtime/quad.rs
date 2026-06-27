@@ -5,7 +5,7 @@
 
 use aether_kinds::QuadSpace;
 
-use super::kinds::TexturedQuad;
+use super::super::kinds::TexturedQuad;
 
 /// One accumulated `draw_textured_quads` batch (ADR-0105): the
 /// texture it samples, the projection it draws under, and the quad
@@ -13,8 +13,8 @@ use super::kinds::TexturedQuad;
 /// dispatcher thread can keep appending the next frame's batches
 /// while the driver thread expands these.
 #[derive(Clone)]
-pub(super) struct QuadBatch {
-    pub(super) texture_id: u32,
-    pub(super) space: QuadSpace,
-    pub(super) quads: Vec<TexturedQuad>,
+pub(in crate::render) struct QuadBatch {
+    pub(in crate::render) texture_id: u32,
+    pub(in crate::render) space: QuadSpace,
+    pub(in crate::render) quads: Vec<TexturedQuad>,
 }

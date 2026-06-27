@@ -23,19 +23,42 @@ use aether_data::{MailboxId, Source, SourceAddr};
 
 use aether_actor::runtime;
 
+// ADR-0121 cohesion submodules, now nested under this `runtime` directory so
+// the one `mod runtime;` gate in the parent covers them (no per-sibling
+// `#[cfg]`). The seams: config (the derive-Config layer), event (the cpal
+// event queue), schedule (the ADR-0104 heap entry), instrument (the built-in
+// registry), voice (the synthesis kernels), sample (the ADR-0103 sampled
+// banks), track (the ADR-0103 mixer lane), synth (the mixer aggregate + cpal
+// pipeline build), decode (the ADR-0103 §1 decode/resample core), and sfz (the
+// ADR-0103 §5 SFZ-subset parser).
+mod config;
+mod decode;
+mod event;
+mod instrument;
+mod sample;
+mod schedule;
+mod sfz;
+mod synth;
+mod track;
+mod voice;
+
 use super::AudioCapability;
-use super::config::AudioConfig;
-use super::decode::decode_wav_to_mono;
-use super::event::AudioEventSender;
+// `AudioConfig` (+ the derive-emitted `AudioConfigLayer` / `AudioOverlay`)
+// rides up to the cap root through this `pub use` (the trampoline pattern):
+// the cap-root `pub use runtime::{AudioConfig, …}` re-export sources the three
+// config names from here.
+pub use self::config::{AudioConfig, AudioConfigLayer, AudioOverlay};
+use self::decode::decode_wav_to_mono;
+use self::event::AudioEventSender;
+use self::sample::{
+    BankAssembly, SampleSlot, assemble_bank, bank_name_from_path, join_fs, sfz_dir,
+};
+use self::sfz::parse_sfz;
+use self::synth::{AudioBuildError, try_build_pipeline};
 use super::kinds::{
     LoadInstrument, LoadInstrumentResult, NoteOff, NoteOn, PlayTrack, PlayTrackResult, Schedule,
     ScheduleResult, SetMasterGain, SetMasterGainResult, StopTrack,
 };
-use super::sample::{
-    BankAssembly, SampleSlot, assemble_bank, bank_name_from_path, join_fs, sfz_dir,
-};
-use super::sfz::parse_sfz;
-use super::synth::{AudioBuildError, try_build_pipeline};
 
 // The substrate-typed + native-only surface the parent's `#[actor] impl`
 // reaches through `use runtime::*`. Gated once here so a marker-only build
@@ -47,11 +70,11 @@ pub use aether_actor::{Manual, OutboundReply};
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 
-pub use super::event::AudioEvent;
-pub use super::instrument::builtin_id_ceiling;
-pub use super::sample::{BankAssemblyContext, BankAssemblyOutput, PendingInstrument};
-pub use super::schedule::{SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS};
-pub use super::track::{DecodeOutput, PendingTrack, TrackDecodeContext};
+pub use self::event::AudioEvent;
+pub use self::instrument::builtin_id_ceiling;
+pub use self::sample::{BankAssemblyContext, BankAssemblyOutput, PendingInstrument};
+pub use self::schedule::{SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS};
+pub use self::track::{DecodeOutput, PendingTrack, TrackDecodeContext};
 pub use crate::fs::{FsCapability, Read, ReadResult};
 
 /// Extract the sender's mailbox id for voice-table keying. Component
@@ -968,16 +991,16 @@ mod tests {
     // per call would be pure noise.
     #![allow(clippy::unwrap_used)]
 
-    use super::super::event::new_event_channel;
-    use super::super::instrument::{
+    use super::super::*;
+    use super::event::new_event_channel;
+    use super::instrument::{
         Adsr, BUILTINS, PARTIAL_COUNT, PartialBankDef, PitchSweep, VoiceDef, Wave, builtin_count,
         builtin_names,
     };
-    use super::super::sample::{SampleBank, SampleLoop, SampleRegion, SampleVoice, assemble_bank};
-    use super::super::sfz::{SfzLoop, SfzRegion};
-    use super::super::synth::Synth;
-    use super::super::voice::{MAX_VOICES, OscVoice, PartialBankVoice, voice_seed};
-    use super::super::*;
+    use super::sample::{SampleBank, SampleLoop, SampleRegion, SampleVoice, assemble_bank};
+    use super::sfz::{SfzLoop, SfzRegion};
+    use super::synth::Synth;
+    use super::voice::{MAX_VOICES, OscVoice, PartialBankVoice, voice_seed};
     use super::*;
     use crate::fs::FsError;
     use crate::test_chassis::{decode_session_reply, drive_task_completion, test_mailer_and_rx};

@@ -29,9 +29,9 @@ use aether_kinds::trace::Settled;
 // top-level `not(wasm32)` plain struct; the `RpcServerHandle` boot artifact
 // lives in the runtime half and is re-exported below under the runtime
 // gate.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 mod config;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use config::RpcServerConfig;
 #[cfg(feature = "runtime")]
 pub use runtime::RpcServerHandle;
@@ -44,7 +44,7 @@ use aether_rpc::rpc::PeerKind;
 // state, reader loop, oversize guard) lives in `connection`; the runtime
 // half `use`s it. Native-only — it owns a `TcpStream` + OS threads, elided
 // on the wasm marker build.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 mod connection;
 
 #[cfg(test)]

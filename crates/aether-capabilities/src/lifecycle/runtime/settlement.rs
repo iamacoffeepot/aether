@@ -15,8 +15,12 @@ use aether_kinds::LifecycleAdvanceComplete;
 use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::mail::{MailId, Source};
 
-use super::LifecycleStateData;
-use super::runtime::LifecycleCapabilityState;
+// `LifecycleStateData` is the cap-root `pub(crate)` re-export over `graph`
+// (which stays at cap root as always-on public surface); `super::super` reaches
+// it from this nested `runtime` module. `LifecycleCapabilityState` lives in the
+// parent `runtime/mod.rs`, one level up.
+use super::super::LifecycleStateData;
+use super::LifecycleCapabilityState;
 
 /// Default deadline for a pending advance's `Settled` to arrive
 /// before [`LifecycleCapability::on_advance`](super) force-completes it
@@ -185,8 +189,8 @@ mod tests {
     //! frame-loop scenarios; the decision functions below carry the
     //! ADR-0082 §3 quit-flag semantics and the #1048/#1052
     //! settlement-latency gate, pinned at the unit layer.
-    use super::super::test_cap;
     use super::*;
+    use crate::lifecycle::test_cap;
     use aether_data::Kind;
     use aether_kinds::{Present, Render};
 

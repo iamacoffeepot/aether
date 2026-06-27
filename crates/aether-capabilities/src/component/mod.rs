@@ -51,17 +51,16 @@
 #![allow(clippy::needless_pass_by_value)]
 
 mod route;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use route::ComponentHostNativeExt;
 pub use route::{ComponentHostWasmExt, resolve_embedded};
 
+// `load` (the `handle_load` sequence) and `config` (the `ComponentHostConfig`
+// init bundle) now live under the `runtime` directory beside the rest of the
+// runtime half, covered by the one `mod runtime;` gate. The cap-root
+// re-export sources `ComponentHostConfig` through `runtime`.
 #[cfg(feature = "runtime")]
-mod load;
-
-#[cfg(feature = "runtime")]
-mod config;
-#[cfg(feature = "runtime")]
-pub use config::ComponentHostConfig;
+pub use runtime::ComponentHostConfig;
 
 // Handler-signature kinds resolve at file root always-on: `#[actor]` emits the
 // `impl HandlesKind<K>` markers AND the `aether.kinds.inputs` handler-inventory

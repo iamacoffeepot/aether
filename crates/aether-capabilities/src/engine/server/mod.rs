@@ -56,11 +56,11 @@ use std::sync::{Arc, Mutex};
 // spawn-dir resolution). All three are native-only — the cap forks
 // processes and owns sockets — so they elide on wasm alongside the
 // runtime half.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 mod artifacts;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 mod config;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 mod fleet;
 
 // `EngineConfig` (+ its derive-emitted `EngineOverlay`) ride through
@@ -68,7 +68,7 @@ mod fleet;
 // `HubCli`, resolves argv-then-env, and passes the config to
 // `with_actor::<EngineServer>(cfg)` (ADR-0090). Native-only re-export —
 // the engines cap is native-only, so the config has no wasm consumer.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use config::{EngineConfig, EngineConfigLayer, EngineOverlay};
 
 /// `aether.engine` engines-cap **identity** (ADR-0122 identity/runtime

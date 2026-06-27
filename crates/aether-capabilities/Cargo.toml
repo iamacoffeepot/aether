@@ -21,7 +21,7 @@ license.workspace = true
 # `default-features = false` and pick up only the target-agnostic
 # Actor / Singleton / HandlesKind markers. The `#[actor]` macro
 # emits `NativeActor` + `NativeDispatch` + handler-method impls
-# under `#[cfg(not(target_arch = "wasm32"))]`, so the feature gate
+# under `#[cfg(not(target_family = "wasm"))]`, so the feature gate
 # here matches: cfg cleanly elides on wasm regardless of how the
 # consumer flips features.
 
@@ -178,10 +178,10 @@ hound = { workspace = true, optional = true }
 fontdue = { version = "0.9", optional = true }
 
 # ADR-0121: the `Kind` derive (now used by the audio cap's owned kinds
-# in `audio/kinds.rs`) emits a `cfg(not(target_arch = "wasm32"))`-gated
+# in `audio/kinds.rs`) emits a `cfg(not(target_family = "wasm"))`-gated
 # `inventory::submit!` per kind, so native builds need `inventory`
 # reachable. Wasm guests don't (the derive's gate skips emission).
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 inventory = { workspace = true }
 
 [dev-dependencies]

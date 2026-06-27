@@ -1,13 +1,13 @@
 use aether_data::{KindId, MailboxId as DataMailboxId};
 
-use super::LifecycleGraphData;
+use super::super::LifecycleGraphData;
 
 /// Construction-time configuration for `LifecycleCapability`.
 /// Carries the compiled data graph + the initial subscriber wiring.
 /// Built per-chassis at builder time and consumed by `init`.
 pub struct LifecycleConfig {
     /// The compiled lifecycle graph. Built via
-    /// [`LifecycleGraphData::builder`](super::LifecycleGraphData::builder)
+    /// [`LifecycleGraphData::builder`](super::super::LifecycleGraphData::builder)
     /// on the chassis side.
     pub graph: LifecycleGraphData,
     /// Initial `(stage_kind, mailbox)` pairs to populate the

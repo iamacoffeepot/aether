@@ -49,7 +49,7 @@ use aether_kinds::{
 // arms, which declare no manifest reply kind, so it is named only by the
 // runtime handler bodies and lives in `mod runtime` behind the `runtime`
 // gate.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 use aether_kinds::LifecycleSubscribeResult;
 
 use aether_actor::actor;
@@ -67,16 +67,10 @@ mod subscribers;
 pub use subscribers::LifecycleMailboxExt;
 
 // The settlement state machine and the boot-config both name the
-// runtime-only `LifecycleCapabilityState`, so both ride the one
-// `feature = "runtime"` gate alongside the rest of the runtime half.
-#[cfg(feature = "runtime")]
-mod settlement;
-
-#[cfg(feature = "runtime")]
-mod config;
-// `LifecycleConfig` configures the runtime-only `LifecycleCapabilityState`,
-// so its re-export rides the `runtime` gate through `mod runtime` (where the
-// rest of the runtime half lives) rather than a per-import gate here.
+// runtime-only `LifecycleCapabilityState`, so both live under the `runtime`
+// directory beside the rest of the runtime half, covered by the one
+// `mod runtime;` gate. `LifecycleConfig` configures that runtime state, so its
+// re-export sources through `runtime` rather than a per-import gate here.
 #[cfg(feature = "runtime")]
 pub use runtime::LifecycleConfig;
 

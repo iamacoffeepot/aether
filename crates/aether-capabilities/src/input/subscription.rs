@@ -40,7 +40,7 @@ pub struct InputCapability;
 // half (the `aether_substrate`-typed imports, the state struct + its
 // `fanout` helper, and the shared mailbox-validation fn) sits behind the
 // one `feature = "runtime"` gate.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 use super::kinds::SubscribeInputResult;
 #[cfg(feature = "runtime")]
 #[allow(clippy::wildcard_imports)]
