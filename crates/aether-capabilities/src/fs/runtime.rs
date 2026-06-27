@@ -19,16 +19,16 @@ use super::{
 };
 use aether_actor::runtime;
 
-pub use std::any::Any;
-pub use std::fs;
-pub use std::panic::{self, AssertUnwindSafe};
-pub use std::sync::Arc;
+pub(super) use std::any::Any;
+pub(super) use std::fs;
+pub(super) use std::panic::{self, AssertUnwindSafe};
+pub(super) use std::sync::Arc;
 
-pub use super::adapter::fs_error_from_std;
-pub use aether_data::TransformError;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::transform::{FoldError, TransformRegistry};
+pub(super) use super::adapter::fs_error_from_std;
+pub(super) use aether_data::TransformError;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub(super) use aether_substrate::chassis::error::BootError;
+pub(super) use aether_substrate::transform::{FoldError, TransformRegistry};
 
 /// `aether.fs` runtime state (ADR-0041). Owns the resolved adapter
 /// registry plus the link-time native-transform registry (ADR-0048 §2)
@@ -95,7 +95,7 @@ impl FsCapabilityState {
     /// `Builder::with_actor::<FsCapability>(roots)` which calls the
     /// generated `Lifecycle::init`; handler-unit tests that want to drive
     /// a handler without a full chassis hand a pre-built registry directly.
-    pub(crate) fn from_registry(registry: Arc<AdapterRegistry>) -> Self {
+    fn from_registry(registry: Arc<AdapterRegistry>) -> Self {
         Self {
             registry,
             transforms: TransformRegistry::from_inventory(),

@@ -11,19 +11,19 @@
 // dispatch contract; the by-value `SessionWrite` arg trips this lint.
 #![allow(clippy::needless_pass_by_value)]
 
-pub use std::io::{Read, Write};
-pub use std::net::{Shutdown, TcpStream};
-pub use std::sync::Arc;
-pub use std::sync::atomic::{AtomicBool, Ordering};
-pub use std::sync::mpsc;
-pub use std::thread::{self, JoinHandle};
+pub(super) use std::io::{Read, Write};
+pub(super) use std::net::{Shutdown, TcpStream};
+pub(super) use std::sync::Arc;
+pub(super) use std::sync::atomic::{AtomicBool, Ordering};
+pub(super) use std::sync::mpsc;
+pub(super) use std::thread::{self, JoinHandle};
 
-pub use aether_data::Kind;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::{KindId, Mail, Mailer};
+pub(super) use aether_data::Kind;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub(super) use aether_substrate::chassis::error::BootError;
+pub(super) use aether_substrate::{KindId, Mail, Mailer};
 
-pub use crate::tcp::config::TcpSessionConfig;
+pub(super) use crate::tcp::config::TcpSessionConfig;
 
 use aether_actor::runtime;
 // The moved handler bodies name the cap kinds backing their signatures; bring
@@ -50,8 +50,8 @@ pub struct TcpSessionState {
     pub(super) session_name: String,
     pub(super) write_half: TcpStream,
     pub(super) shutdown: Arc<AtomicBool>,
-    pub(super) read_thread: Option<JoinHandle<()>>,
-    pub(super) bytes_rx: mpsc::Receiver<Result<Vec<u8>, String>>,
+    read_thread: Option<JoinHandle<()>>,
+    bytes_rx: mpsc::Receiver<Result<Vec<u8>, String>>,
 }
 
 #[runtime]

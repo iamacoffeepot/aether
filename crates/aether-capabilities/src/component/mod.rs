@@ -42,8 +42,8 @@
 //!   ([`ComponentHostWasmExt`], [`ComponentHostNativeExt`],
 //!   [`resolve_embedded`]).
 //! - `load.rs` — the `handle_load` sequence as a method on the state; the
-//!   state fields carry `pub(in crate::component)` so this sibling reaches
-//!   them.
+//!   state fields carry `pub(in crate::component::runtime)` so this sibling
+//!   reaches them.
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the

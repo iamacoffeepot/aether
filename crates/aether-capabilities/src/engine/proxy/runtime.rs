@@ -13,23 +13,23 @@
 //! state.
 
 use super::{EngineProxy, EngineProxyConfig};
-pub use crate::engine::kinds::{CallSettled, EngineAlive, EngineDied};
+pub(super) use crate::engine::kinds::{CallSettled, EngineAlive, EngineDied};
 use crate::engine::kinds::{EngineHeartbeatTick, ForwardEnvelope};
 use crate::rpc::RpcInboundReady;
-pub use crate::rpc::{MailEnvelope, MailboxAddress, RpcConnection, RpcError, WireFrame};
-pub use aether_actor::Addressable;
+pub(super) use crate::rpc::{MailEnvelope, MailboxAddress, RpcConnection, RpcError, WireFrame};
+pub(super) use aether_actor::Addressable;
 use aether_actor::runtime;
-pub use aether_data::{EngineId, Kind, KindId, MailboxId, mailbox_id_from_name};
-pub use aether_kinds::DeathReason;
+pub(super) use aether_data::{EngineId, Kind, KindId, MailboxId, mailbox_id_from_name};
+pub(super) use aether_kinds::DeathReason;
 use aether_kinds::TerminateEngine;
-pub use aether_substrate::Mail;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::mailer::Mailer;
-pub use aether_substrate::mail::{Source, SourceAddr};
-pub use std::collections::HashMap;
-pub use std::process::Child;
-pub use std::sync::Arc;
+pub(super) use aether_substrate::Mail;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub(super) use aether_substrate::chassis::error::BootError;
+pub(super) use aether_substrate::mail::mailer::Mailer;
+pub(super) use aether_substrate::mail::{Source, SourceAddr};
+pub(super) use std::collections::HashMap;
+pub(super) use std::process::Child;
+pub(super) use std::sync::Arc;
 
 use super::heartbeat::HeartbeatHandle;
 use crate::engine::EngineServer;
@@ -37,8 +37,8 @@ use crate::engine::EngineServer;
 // The init-only bring-up helpers live in the native-only `connect` /
 // `heartbeat` submodules; re-export them here so the parent's `use runtime::*`
 // glob reaches them alongside the rest of the runtime half.
-pub use super::connect::connect_proxy;
-pub use super::heartbeat::spawn_heartbeat;
+pub(super) use super::connect::connect_proxy;
+pub(super) use super::heartbeat::spawn_heartbeat;
 
 /// Mailbox of the engines cap (`aether.engine`) — where a proxy
 /// reports its own liveness transitions (`EngineAlive` / `EngineDied`,
@@ -83,7 +83,7 @@ pub struct EngineProxyState {
     /// (issue 1339). Incremented each `on_heartbeat_tick`, reset to
     /// `0` on any inbound `Pong`. Crossing `miss_limit` evicts the
     /// engine.
-    pub(super) missed_heartbeats: u32,
+    missed_heartbeats: u32,
     /// Consecutive-miss threshold that marks the engine dead. `0`
     /// when the heartbeat is disabled (`heartbeat: None`), in which
     /// case `on_heartbeat_tick` never fires anyway.
@@ -91,11 +91,11 @@ pub struct EngineProxyState {
     /// Monotonic nonce stamped on each heartbeat `Ping` — for log
     /// correlation only; a `Pong` carrying any nonce counts as
     /// liveness, since there is at most one heartbeat outstanding.
-    pub(super) heartbeat_seq: u64,
+    heartbeat_seq: u64,
     /// The heartbeat timer thread, when armed. `Drop` stops + joins
     /// it. Held as the field's RAII guard — the leading `_` marks
     /// it as owned-for-its-Drop, not read.
-    pub(super) _heartbeat: Option<HeartbeatHandle>,
+    _heartbeat: Option<HeartbeatHandle>,
 }
 
 impl Drop for EngineProxyState {
@@ -118,7 +118,7 @@ impl EngineProxyState {
     /// 1339). Sent as a fresh root: the `Pong` that triggered it is
     /// an external event causally unrelated to whatever inbound
     /// mail woke the handler.
-    pub(super) fn report_alive(&self, ctx: &NativeCtx<'_>) {
+    fn report_alive(&self, ctx: &NativeCtx<'_>) {
         let alive = EngineAlive {
             engine_id: self.engine_id.0.to_string(),
         };
@@ -156,7 +156,7 @@ impl EngineProxyState {
     /// original `correlation_id` echoed (reply-to `None` — nobody
     /// replies to a reply) so a correlation-matching caller picks
     /// it up.
-    pub(super) fn route_reply(&mut self, cid: u64, envelope: MailEnvelope) {
+    fn route_reply(&mut self, cid: u64, envelope: MailEnvelope) {
         let Some(reply_to) = self.in_flight.get(&cid).copied() else {
             tracing::debug!(
                 target: "aether_substrate::engine_proxy",
@@ -187,7 +187,7 @@ impl EngineProxyState {
     /// originating `RpcServerCapability` learns to close its wire
     /// call. The wire `RpcError` is rendered to a string; the
     /// `aether-kinds` layer can't carry the structured variant.
-    pub(super) fn route_settled(&mut self, cid: u64, result: Result<(), RpcError>) {
+    fn route_settled(&mut self, cid: u64, result: Result<(), RpcError>) {
         let Some(reply_to) = self.in_flight.remove(&cid) else {
             tracing::debug!(
                 target: "aether_substrate::engine_proxy",

@@ -22,15 +22,15 @@ use crate::shared::contentgen::adapter::{
 };
 use crate::shared::contentgen::staging::{gen_root, stage_gen_output};
 
-pub use crate::shared::contentgen::task_queue::TaskQueue;
-pub use std::sync::Arc;
+pub(super) use crate::shared::contentgen::task_queue::TaskQueue;
+pub(super) use std::sync::Arc;
 
 use aether_actor::runtime;
 use aether_kinds::Usage;
 
-pub use aether_actor::{Manual, OutboundReply};
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
-pub use aether_substrate::chassis::error::BootError;
+pub(super) use aether_actor::{Manual, OutboundReply};
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
+pub(super) use aether_substrate::chassis::error::BootError;
 
 /// `aether.gemini` runtime state (ADR-0050). Owns the resolved adapter +
 /// the cap-level rate-limit queue over the ADR-0093 dispatch primitive.
@@ -47,14 +47,14 @@ pub struct GeminiCapabilityState {
 
 #[cfg(test)]
 impl GeminiCapabilityState {
-    pub(crate) fn from_parts(adapter: Arc<dyn GeminiAdapter>, max_in_flight: usize) -> Self {
+    fn from_parts(adapter: Arc<dyn GeminiAdapter>, max_in_flight: usize) -> Self {
         Self {
             adapter,
             tasks: TaskQueue::new(max_in_flight),
         }
     }
 
-    pub(crate) fn test_in_flight(&self) -> usize {
+    fn test_in_flight(&self) -> usize {
         self.tasks.in_flight()
     }
 }

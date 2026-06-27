@@ -16,13 +16,13 @@ use aether_data::MailboxId;
 pub use core::iter::once;
 pub use core::mem::swap;
 
-pub use crate::input::{InputCapability, InputMailboxExt};
-pub use crate::lifecycle::{LifecycleCapability, LifecycleMailboxExt};
-pub use crate::render::{DrawSolidQuads, RenderCapability, SolidQuad};
-pub use crate::text::{DrawText, TextCapability};
-pub use aether_kinds::QuadSpace;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::chassis::error::BootError;
+pub(super) use crate::input::{InputCapability, InputMailboxExt};
+pub(super) use crate::lifecycle::{LifecycleCapability, LifecycleMailboxExt};
+pub(super) use crate::render::{DrawSolidQuads, RenderCapability, SolidQuad};
+pub(super) use crate::text::{DrawText, TextCapability};
+pub(super) use aether_kinds::QuadSpace;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub(super) use aether_substrate::chassis::error::BootError;
 
 /// A button's hit-test record for one frame: where it was drawn, the
 /// caller's widget `id`, and the component that drew it (the
@@ -33,7 +33,7 @@ pub struct ButtonRect {
     /// Caller-stable widget id echoed back in `UiClicked`.
     pub(super) id: u32,
     /// Mailbox of the component that sent the `UiButton`.
-    pub(super) owner: MailboxId,
+    owner: MailboxId,
 }
 
 /// `aether.ui` runtime state (ADR-0122 split). Owns the cursor position

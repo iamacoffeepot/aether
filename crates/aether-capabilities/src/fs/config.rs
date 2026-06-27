@@ -120,7 +120,7 @@ impl aether_substrate::FromArgvThenEnv for NamespaceRoots {
 /// treats it as unset (preserving the prior `env_or_default`'s
 /// `Ok(s) if !s.is_empty()` guard); any non-empty value is a path.
 #[cfg(feature = "native")]
-pub(super) fn parse_dir(s: &str) -> Result<PathBuf, EmptyDir> {
+fn parse_dir(s: &str) -> Result<PathBuf, EmptyDir> {
     if s.is_empty() {
         Err(EmptyDir)
     } else {
@@ -132,7 +132,7 @@ pub(super) fn parse_dir(s: &str) -> Result<PathBuf, EmptyDir> {
 /// confique's parse path (`Err` + empty → `None`).
 #[cfg(feature = "native")]
 #[derive(Debug)]
-pub(super) struct EmptyDir;
+struct EmptyDir;
 
 #[cfg(feature = "native")]
 impl fmt::Display for EmptyDir {

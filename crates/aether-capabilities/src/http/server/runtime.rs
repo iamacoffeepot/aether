@@ -26,23 +26,23 @@
 use super::{HttpInboundReady, HttpServerCapability, HttpServerConfig, HttpServerHandle, Settled};
 use aether_actor::runtime;
 
-pub use std::collections::HashMap;
-pub use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-pub use std::sync::Arc;
-pub use std::sync::atomic::{AtomicBool, Ordering};
-pub use std::sync::mpsc;
-pub use std::thread;
-pub use std::time::Duration;
+pub(super) use std::collections::HashMap;
+pub(super) use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+pub(super) use std::sync::Arc;
+pub(super) use std::sync::atomic::{AtomicBool, Ordering};
+pub(super) use std::sync::mpsc;
+pub(super) use std::thread;
+pub(super) use std::time::Duration;
 
-pub use aether_data::{Kind, KindId, MailboxId};
-pub use aether_substrate::actor::native::envelope::Envelope;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::mailer::Mailer;
+pub(super) use aether_data::{Kind, KindId, MailboxId};
+pub(super) use aether_substrate::actor::native::envelope::Envelope;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub(super) use aether_substrate::chassis::error::BootError;
+pub(super) use aether_substrate::mail::mailer::Mailer;
 
 // The parent `#[actor] impl` writes the `502` reply path, so it names
 // `HttpServerResponse`; the rest of the kind vocabulary is used only here.
-pub use crate::http::kinds::HttpServerResponse;
+pub(super) use crate::http::kinds::HttpServerResponse;
 use crate::http::kinds::{HttpHeader, HttpMethod, HttpServerRequest};
 
 use aether_substrate::Mail;
@@ -158,7 +158,7 @@ pub struct HttpServerCapabilityState {
     pub(super) handler_mailbox: String,
     pub(super) max_request_bytes: usize,
     pub(super) max_header_bytes: usize,
-    pub(super) request_timeout: Duration,
+    request_timeout: Duration,
     pub(super) self_mailbox: MailboxId,
     /// Cached `Arc<Mailer>` so the dispatcher can fire wake mails into
     /// the cap, resolve the handler mailbox by name at dispatch time,
@@ -180,7 +180,7 @@ pub struct HttpServerCapabilityState {
 impl HttpServerCapabilityState {
     /// Allocate a fresh `ConnId`, store the connection's write half, and
     /// spin a reader thread for the read half.
-    pub(super) fn spawn_reader_for_peer(&mut self, stream: TcpStream, peer: SocketAddr) {
+    fn spawn_reader_for_peer(&mut self, stream: TcpStream, peer: SocketAddr) {
         let conn_id = self.next_conn_id;
         self.next_conn_id += 1;
 
@@ -267,7 +267,7 @@ impl HttpServerCapabilityState {
 
     /// Map the method, resolve the handler, dispatch the request, and
     /// record the in-flight entry. Answers `501` / `503` inline.
-    pub(super) fn dispatch_request(
+    fn dispatch_request(
         &mut self,
         ctx: &mut NativeCtx<'_>,
         conn_id: ConnId,
@@ -313,18 +313,14 @@ impl HttpServerCapabilityState {
     }
 
     /// Format + write the handler's [`HttpServerResponse`].
-    pub(super) fn write_handler_response(
-        &mut self,
-        conn_id: ConnId,
-        response: &HttpServerResponse,
-    ) {
+    fn write_handler_response(&mut self, conn_id: ConnId, response: &HttpServerResponse) {
         let bytes = render_handler_response(response);
         self.write_raw_to(conn_id, &bytes);
     }
 
     /// Format + write a canned status response (the cap's own
     /// `413` / `431` / `501` / `502` / `503` / `504`).
-    pub(super) fn write_status_response(&mut self, conn_id: ConnId, status: u16, message: &str) {
+    fn write_status_response(&mut self, conn_id: ConnId, status: u16, message: &str) {
         let bytes = render_status_response(status, message);
         self.write_raw_to(conn_id, &bytes);
     }
@@ -347,7 +343,7 @@ impl HttpServerCapabilityState {
         }
     }
 
-    pub(super) fn close_connection(&mut self, conn_id: ConnId, reason: &str) {
+    fn close_connection(&mut self, conn_id: ConnId, reason: &str) {
         let Some(mut conn) = self.connections.remove(&conn_id) else {
             return;
         };

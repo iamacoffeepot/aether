@@ -15,7 +15,7 @@ use aether_kinds::LifecycleAdvanceComplete;
 use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::mail::{MailId, Source};
 
-// `LifecycleStateData` is the cap-root `pub(crate)` re-export over `graph`
+// `LifecycleStateData` is the cap-root `pub(in crate::lifecycle)` re-export over `graph`
 // (which stays at cap root as always-on public surface); `super::super` reaches
 // it from this nested `runtime` module. `LifecycleCapabilityState` lives in the
 // parent `runtime/mod.rs`, one level up.
@@ -62,19 +62,19 @@ pub enum Step {
 /// Per-advance state tracked across `on_advance` → `on_settled`.
 pub struct PendingAdvance {
     /// Causal-chain root of the in-flight broadcast (ADR-0080 §6).
-    pub(crate) root: MailId,
+    pub(in crate::lifecycle) root: MailId,
     /// Kind id of the state just broadcast — echoed in `completed`.
-    pub(crate) completed_kind: KindId,
+    pub(in crate::lifecycle) completed_kind: KindId,
     /// Kind id of the state to broadcast next — echoed in `next`.
     /// `KindId(0)` when the settling broadcast was a terminal.
-    pub(crate) next_kind: KindId,
+    pub(in crate::lifecycle) next_kind: KindId,
     /// True if the settling broadcast is a terminal state.
-    pub(crate) is_terminal: bool,
+    pub(in crate::lifecycle) is_terminal: bool,
     /// Original chassis sender of the [`LifecycleAdvance`](aether_kinds::LifecycleAdvance) mail.
-    pub(crate) reply_to: Source,
+    pub(in crate::lifecycle) reply_to: Source,
     /// When this advance was issued. Drives the `advance_timeout`
     /// force-complete fallback (iamacoffeepot/aether#1048).
-    pub(crate) started: Instant,
+    pub(in crate::lifecycle) started: Instant,
 }
 
 impl LifecycleCapabilityState {
@@ -87,7 +87,7 @@ impl LifecycleCapabilityState {
     /// deadline, naming the offending `root` so a
     /// `describe_tree <root>` surfaces the in-flight nodes. O(1) per
     /// settle.
-    pub(crate) fn record_settlement_latency(&mut self, latency: Duration, root: MailId) {
+    pub(super) fn record_settlement_latency(&mut self, latency: Duration, root: MailId) {
         // EWMA in nanos, α = SETTLE_EWMA_ALPHA_PERMILLE/1000. Up and
         // down moves are handled separately so the whole thing stays
         // in u128 (no signed casts): next = prev ± α·|sample − prev|.
@@ -132,7 +132,7 @@ impl LifecycleCapabilityState {
     /// True when a pending advance has exceeded
     /// [`Self::advance_timeout`](super) without settling
     /// (iamacoffeepot/aether#1048). `false` when nothing is pending.
-    pub(crate) fn pending_timed_out(&self) -> bool {
+    pub(super) fn pending_timed_out(&self) -> bool {
         self.pending
             .as_ref()
             .is_some_and(|p| p.started.elapsed() >= self.advance_timeout)
@@ -143,7 +143,7 @@ impl LifecycleCapabilityState {
     /// state mutation + reply but logs at `error`: reaching here means
     /// the settlement pipeline stalled past `advance_timeout`. No-op when
     /// nothing is pending.
-    pub(crate) fn force_complete_pending(&mut self, ctx: &mut NativeCtx<'_, Manual>) {
+    pub(super) fn force_complete_pending(&mut self, ctx: &mut NativeCtx<'_, Manual>) {
         let Some(pending) = self.pending.take() else {
             return;
         };

@@ -7,18 +7,18 @@
 //! reaches the state, ctx types, and supervisor structs through the single
 //! `use runtime::*` glob in the parent.
 
-pub use std::collections::HashMap;
-pub use std::net::TcpListener;
+pub(super) use std::collections::HashMap;
+pub(super) use std::net::TcpListener;
 
-pub use aether_actor::Manual;
+pub(super) use aether_actor::Manual;
 // The manual handlers (`on_unbind` / `on_monitor_notice`) issue their own
 // replies through `ctx.reply` / `ctx.reply_to`, the `OutboundReply` trait
 // methods, so the trait must be in scope where those handler bodies expand.
-pub use aether_actor::OutboundReply;
-pub use aether_substrate::actor::monitor::MonitorHandle;
-pub use aether_substrate::actor::native::spawn::Subname;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::chassis::error::BootError;
+pub(super) use aether_actor::OutboundReply;
+pub(super) use aether_substrate::actor::monitor::MonitorHandle;
+pub(super) use aether_substrate::actor::native::spawn::Subname;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub(super) use aether_substrate::chassis::error::BootError;
 
 use aether_actor::runtime;
 // `MonitorNotice` is named by `on_monitor_notice`'s signature; the parent's
@@ -54,7 +54,7 @@ pub struct TcpCapabilityState {
     /// arrives from the listener being closed. Key is the same
     /// `MailboxId` as `listeners`; the cap's monitor (registered
     /// at spawn time) is what fires the notice.
-    pub(super) pending_unbinds: HashMap<aether_data::MailboxId, PendingUnbind>,
+    pending_unbinds: HashMap<aether_data::MailboxId, PendingUnbind>,
 }
 
 /// Cap-local supervisor state for one live listener. Drops with
@@ -67,10 +67,10 @@ pub(super) struct ListenerEntry {
     // Held to keep the cap's monitor registered against the
     // listener for its lifetime. Drops when the entry is removed
     // (in `on_monitor_notice`).
-    pub(super) _monitor_handle: MonitorHandle,
+    _monitor_handle: MonitorHandle,
 }
 
-pub(super) struct PendingUnbind {
+struct PendingUnbind {
     pub(super) sender: aether_data::Source,
     pub(super) listener_name: String,
 }

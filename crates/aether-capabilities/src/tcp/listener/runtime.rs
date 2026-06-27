@@ -7,20 +7,20 @@
 //! `#[actor] impl` reaches the state, ctx types, and config / session types
 //! through the single `use runtime::*` glob in the parent.
 
-pub use std::net::{SocketAddr, TcpStream};
-pub use std::sync::Arc;
-pub use std::sync::atomic::{AtomicBool, Ordering};
-pub use std::sync::mpsc;
-pub use std::thread::{self, JoinHandle};
-pub use std::time::Duration;
+pub(super) use std::net::{SocketAddr, TcpStream};
+pub(super) use std::sync::Arc;
+pub(super) use std::sync::atomic::{AtomicBool, Ordering};
+pub(super) use std::sync::mpsc;
+pub(super) use std::thread::{self, JoinHandle};
+pub(super) use std::time::Duration;
 
-pub use aether_data::Kind;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::{KindId, Mail, Mailer};
+pub(super) use aether_data::Kind;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub(super) use aether_substrate::chassis::error::BootError;
+pub(super) use aether_substrate::{KindId, Mail, Mailer};
 
-pub use crate::tcp::config::{TcpListenerConfig, TcpSessionConfig};
-pub use crate::tcp::session::TcpSessionActor;
+pub(super) use crate::tcp::config::{TcpListenerConfig, TcpSessionConfig};
+pub(super) use crate::tcp::session::TcpSessionActor;
 
 use aether_actor::runtime;
 // The moved handler bodies name the cap kinds backing their signatures; bring
@@ -40,8 +40,8 @@ pub struct TcpListenerState {
     pub(super) local_port: u16,
     pub(super) shutdown: Arc<AtomicBool>,
     pub(super) accept_thread: Option<JoinHandle<()>>,
-    pub(super) connection_rx: mpsc::Receiver<(TcpStream, SocketAddr)>,
-    pub(super) next_subname: u64,
+    connection_rx: mpsc::Receiver<(TcpStream, SocketAddr)>,
+    next_subname: u64,
 }
 
 #[runtime]

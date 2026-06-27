@@ -6,7 +6,7 @@
 //! by this module rather than line-by-line; the `#[actor] impl` reaches the
 //! state and the `forward_to_trampoline` helper through the single
 //! `use runtime::*` glob in the parent, and the `load` sibling reaches the
-//! state fields through their `pub(in crate::component)` visibility.
+//! state fields through their `pub(in crate::component::runtime)` visibility.
 
 // The moved `#[runtime] impl NativeActor for ComponentHostCapability` body
 // names the `#[runtime]` attribute, the cap struct, the cap kinds (input +
@@ -18,7 +18,8 @@ use aether_actor::runtime;
 // (the `ComponentHostConfig` init bundle), now nested under this `runtime`
 // directory so the one `mod runtime;` gate in the parent covers them (no
 // per-sibling `#[cfg]`). The `load` impl reaches the state fields through their
-// `pub(in crate::component)` visibility, unchanged by the move.
+// `pub(in crate::component::runtime)` visibility — scoped to this runtime
+// subtree now that the siblings live under it.
 mod config;
 mod load;
 
@@ -35,23 +36,23 @@ use aether_kinds::{
 // Crate-local wiring the `#[actor] impl` handler bodies name (sibling caps it
 // mails, the unsubscribe kind, the `Kind` / `MailboxCategory` vocabulary),
 // re-exported so the parent reaches them through its `use runtime::*` glob.
-pub use crate::input::{InputCapability, UnsubscribeAll};
-pub use crate::lifecycle::LifecycleCapability;
-pub use aether_data::{Kind, MailboxCategory};
-pub use aether_kinds::LifecycleUnsubscribeAll;
+pub(super) use crate::input::{InputCapability, UnsubscribeAll};
+pub(super) use crate::lifecycle::LifecycleCapability;
+pub(super) use aether_data::{Kind, MailboxCategory};
+pub(super) use aether_kinds::LifecycleUnsubscribeAll;
 
-pub use std::sync::Arc;
-pub use std::sync::atomic::AtomicU64;
+pub(super) use std::sync::Arc;
+pub(super) use std::sync::atomic::AtomicU64;
 
-pub use wasmtime::{Engine, Linker};
+pub(super) use wasmtime::{Engine, Linker};
 
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::actor::wasm::component::ComponentCtx;
-pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::mailer::Mailer;
-pub use aether_substrate::mail::outbound::HubOutbound;
-pub use aether_substrate::mail::registry::Registry;
-pub use aether_substrate::mail::{KindId, MailboxId};
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub(super) use aether_substrate::actor::wasm::component::ComponentCtx;
+pub(super) use aether_substrate::chassis::error::BootError;
+pub(super) use aether_substrate::mail::mailer::Mailer;
+pub(super) use aether_substrate::mail::outbound::HubOutbound;
+pub(super) use aether_substrate::mail::registry::Registry;
+pub(super) use aether_substrate::mail::{KindId, MailboxId};
 
 /// `aether.component` runtime state (ADR-0122 split). Holds the wasmtime
 /// `engine` + `linker` every load instantiates against, the mail `registry`,
@@ -66,18 +67,18 @@ pub use aether_substrate::mail::{KindId, MailboxId};
 /// the macro-emitted `Dispatch` impl; the addressing identity is the distinct
 /// ZST `ComponentHostCapability`. Living in this private module keeps it
 /// `pub`-enough to satisfy the `NativeActor::State` interface without exposing
-/// it as crate-public API. Fields carry `pub(in crate::component)` so the
+/// it as crate-public API. Fields carry `pub(in crate::component::runtime)` so the
 /// `load` submodule (which holds `handle_load`) can reach them as a sibling
 /// within `crate::component`.
 pub struct ComponentHostCapabilityState {
-    pub(in crate::component) engine: Arc<Engine>,
-    pub(in crate::component) linker: Arc<Linker<ComponentCtx>>,
-    pub(in crate::component) registry: Arc<Registry>,
-    pub(in crate::component) mailer: Arc<Mailer>,
-    pub(in crate::component) outbound: Arc<HubOutbound>,
+    pub(in crate::component::runtime) engine: Arc<Engine>,
+    pub(in crate::component::runtime) linker: Arc<Linker<ComponentCtx>>,
+    pub(in crate::component::runtime) registry: Arc<Registry>,
+    pub(in crate::component::runtime) mailer: Arc<Mailer>,
+    pub(in crate::component::runtime) outbound: Arc<HubOutbound>,
     /// Monotonic counter for `component_N` default names when an agent passes
     /// `name: None` and the wasm doesn't declare an `aether.namespace`.
-    pub(in crate::component) default_name_counter: AtomicU64,
+    pub(in crate::component::runtime) default_name_counter: AtomicU64,
 }
 
 /// Forward an arbitrary kind to a trampoline's mailbox, preserving the

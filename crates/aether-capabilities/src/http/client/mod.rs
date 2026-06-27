@@ -463,8 +463,8 @@ mod runtime {
     use std::sync::Arc;
     use std::time::Duration;
 
-    pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    pub use aether_substrate::chassis::error::BootError;
+    pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    pub(super) use aether_substrate::chassis::error::BootError;
 
     /// `aether.http` runtime state (ADR-0043). Owns the resolved adapter
     /// and the default per-request timeout applied when `Fetch.timeout_ms`
@@ -485,7 +485,7 @@ mod runtime {
         /// `Builder::with_actor::<HttpCapability>(config)` which calls the
         /// generated `Lifecycle::init`; tests that drive the handler with a
         /// stub adapter hand it in directly.
-        pub(crate) fn from_adapter(
+        pub(super) fn from_adapter(
             adapter: Arc<dyn HttpAdapter>,
             default_timeout: Duration,
         ) -> Self {

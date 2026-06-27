@@ -1,10 +1,10 @@
 //! `handle_load` — the wasm component load sequence.
 //!
-//! Declared as `mod load;` at the `component` level (a sibling of `runtime`).
+//! Declared as `mod load;` under `runtime` (a sibling of `config`).
 //! Under the ADR-0122 split the sequence is a method on
 //! `ComponentHostCapabilityState`; its fields carry
-//! `pub(in crate::component)` visibility so this sibling module retains the
-//! same access as an inline impl block would.
+//! `pub(in crate::component::runtime)` visibility so this sibling module retains
+//! the same access as an inline impl block would.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -30,7 +30,7 @@ impl ComponentHostCapabilityState {
                   would thread the load payload + registry/engine handles through a helper \
                   for no clarity gain."
     )]
-    pub(in crate::component) fn handle_load(
+    pub(in crate::component::runtime) fn handle_load(
         &mut self,
         ctx: &mut NativeCtx<'_>,
         payload: LoadComponent,

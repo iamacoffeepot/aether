@@ -34,28 +34,28 @@ use aether_actor::runtime;
 // `#[actor] impl` body in `mod.rs` names; it reaches them through the
 // single `use runtime::*` glob. Types named only by the inherent helper
 // methods below ride the same wall (used locally here).
-pub use crate::engine::EngineServer;
-pub use crate::engine::kinds::{CallSettled, RouteEnvelope};
-pub use crate::rpc::{
+pub(super) use crate::engine::EngineServer;
+pub(super) use crate::engine::kinds::{CallSettled, RouteEnvelope};
+pub(super) use crate::rpc::{
     Hello, HelloAck, MailEnvelope, MailboxAddress, RpcError, WIRE_VERSION, WireFrame,
 };
-pub use aether_actor::Addressable;
+pub(super) use aether_actor::Addressable;
 pub use aether_codec::frame::{FrameError, write_frame};
-pub use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
-pub use aether_substrate::Mail;
-pub use aether_substrate::actor::native::envelope::Envelope;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::SourceAddr;
-pub use aether_substrate::mail::mailer::Mailer;
-pub use std::collections::HashMap;
-pub use std::io;
-pub use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-pub use std::sync::Arc;
-pub use std::sync::atomic::{AtomicBool, Ordering};
-pub use std::sync::mpsc;
-pub use std::thread::{self, JoinHandle};
-pub use std::time::Duration;
+pub(super) use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
+pub(super) use aether_substrate::Mail;
+pub(super) use aether_substrate::actor::native::envelope::Envelope;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub(super) use aether_substrate::chassis::error::BootError;
+pub(super) use aether_substrate::mail::SourceAddr;
+pub(super) use aether_substrate::mail::mailer::Mailer;
+pub(super) use std::collections::HashMap;
+pub(super) use std::io;
+pub(super) use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+pub(super) use std::sync::Arc;
+pub(super) use std::sync::atomic::{AtomicBool, Ordering};
+pub(super) use std::sync::mpsc;
+pub(super) use std::thread::{self, JoinHandle};
+pub(super) use std::time::Duration;
 
 /// Exported handle bundle published at boot. Reachable from the
 /// chassis via `PassiveChassis::handle::<RpcServerHandle>()`;
@@ -77,7 +77,7 @@ pub struct RpcServerHandle {
 #[derive(Copy, Clone)]
 pub(super) struct InFlight {
     pub(super) conn_id: ConnId,
-    pub(super) wire_cid: u64,
+    wire_cid: u64,
 }
 
 /// `aether.rpc.server` runtime state (ADR-0122 split). Owns one TCP
@@ -114,7 +114,7 @@ pub struct RpcServerState {
 impl RpcServerState {
     /// Allocate a fresh `ConnId`, store the connection's write half,
     /// spin a reader thread for the read half.
-    pub(super) fn spawn_reader_for_peer(
+    fn spawn_reader_for_peer(
         &mut self,
         _ctx: &mut NativeCtx<'_>,
         stream: TcpStream,
@@ -191,12 +191,7 @@ impl RpcServerState {
     }
 
     /// Dispatch one incoming frame.
-    pub(super) fn dispatch_frame(
-        &mut self,
-        ctx: &mut NativeCtx<'_>,
-        conn_id: ConnId,
-        frame: WireFrame,
-    ) {
+    fn dispatch_frame(&mut self, ctx: &mut NativeCtx<'_>, conn_id: ConnId, frame: WireFrame) {
         match frame {
             WireFrame::Hello(hello) => self.handle_hello(conn_id, hello),
             WireFrame::HelloAck(_) => {
@@ -228,7 +223,7 @@ impl RpcServerState {
         }
     }
 
-    pub(super) fn handle_hello(&mut self, conn_id: ConnId, hello: Hello) {
+    fn handle_hello(&mut self, conn_id: ConnId, hello: Hello) {
         if hello.wire_version != WIRE_VERSION {
             self.write_frame_to(
                 conn_id,
@@ -254,7 +249,7 @@ impl RpcServerState {
         );
     }
 
-    pub(super) fn handle_call(
+    fn handle_call(
         &mut self,
         ctx: &mut NativeCtx<'_>,
         conn_id: ConnId,
@@ -341,7 +336,7 @@ impl RpcServerState {
             .insert(mail_id.correlation_id, InFlight { conn_id, wire_cid });
     }
 
-    pub(super) fn close_connection(&mut self, conn_id: ConnId, reason: &str) {
+    fn close_connection(&mut self, conn_id: ConnId, reason: &str) {
         let Some(mut conn) = self.connections.remove(&conn_id) else {
             return;
         };
@@ -364,7 +359,7 @@ impl RpcServerState {
         );
     }
 
-    pub(super) fn write_frame_to(&mut self, conn_id: ConnId, frame: &WireFrame) {
+    fn write_frame_to(&mut self, conn_id: ConnId, frame: &WireFrame) {
         let Some(conn) = self.connections.get_mut(&conn_id) else {
             return;
         };

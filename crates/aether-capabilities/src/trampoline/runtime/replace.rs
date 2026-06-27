@@ -28,7 +28,7 @@ impl WasmTrampolineState {
     /// own capability group (looked up by actor-type tag). A
     /// spawn-time failure surfaces here, asynchronously to the guest
     /// (which already received the `MailboxId`): logged, not fatal.
-    pub(in crate::trampoline) fn spawn_sibling(
+    pub(in crate::trampoline::runtime) fn spawn_sibling(
         &self,
         ctx: &mut NativeCtx<'_>,
         pending: PendingSpawn,
@@ -87,7 +87,7 @@ impl WasmTrampolineState {
     /// and on success the caller promotes it to the new `self.type_tag`
     /// so a later bare replace reuses the *current* hosted type rather
     /// than reverting to the original load's.
-    pub(in crate::trampoline) fn resolve_replace_target(
+    fn resolve_replace_target(
         &self,
         export: Option<&str>,
         actors: &[ActorInputs],
@@ -145,7 +145,7 @@ impl WasmTrampolineState {
             })
     }
 
-    pub(in crate::trampoline) fn handle_replace(
+    pub(in crate::trampoline::runtime) fn handle_replace(
         &mut self,
         payload: ReplaceComponent,
     ) -> ReplaceResult {

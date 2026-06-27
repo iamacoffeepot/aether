@@ -20,9 +20,9 @@ use super::{LifecycleCapability, LifecycleGraphData};
 
 pub use self::config::LifecycleConfig;
 #[cfg(test)]
-pub use self::settlement::ADVANCE_TIMEOUT_MS_DEFAULT;
-pub use self::settlement::{PendingAdvance, Step, resolve_edge};
-pub use super::subscribers::broadcast_to_subscribers;
+pub(super) use self::settlement::ADVANCE_TIMEOUT_MS_DEFAULT;
+pub(super) use self::settlement::{PendingAdvance, Step, resolve_edge};
+pub(super) use super::subscribers::broadcast_to_subscribers;
 
 // Handler-argument and reply kinds named by the moved `#[runtime] impl`
 // bodies. Private to this module — the identity in the parent resolves the
@@ -34,16 +34,16 @@ use aether_kinds::{
     LifecycleUnsubscribe, LifecycleUnsubscribeAll, LifecycleUnsubscribeSelf, Quit,
 };
 
-pub use aether_actor::Manual;
-pub use aether_actor::actor::ctx::OutboundReply;
-pub use aether_data::{Kind, KindId, MailboxId as DataMailboxId, mailbox_id_from_name};
-pub use aether_kinds::LifecycleAdvanceComplete;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::mailer::Mailer;
-pub use std::collections::{BTreeMap, BTreeSet};
-pub use std::sync::Arc;
-pub use std::time::{Duration, Instant};
+pub(super) use aether_actor::Manual;
+pub(super) use aether_actor::actor::ctx::OutboundReply;
+pub(super) use aether_data::{Kind, KindId, MailboxId as DataMailboxId, mailbox_id_from_name};
+pub(super) use aether_kinds::LifecycleAdvanceComplete;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub(super) use aether_substrate::chassis::error::BootError;
+pub(super) use aether_substrate::mail::mailer::Mailer;
+pub(super) use std::collections::{BTreeMap, BTreeSet};
+pub(super) use std::sync::Arc;
+pub(super) use std::time::{Duration, Instant};
 
 /// `aether.lifecycle` runtime state (ADR-0082). Owns the lifecycle data
 /// graph, the subscriber table, the state pointer, and the settlement
@@ -58,39 +58,39 @@ pub use std::time::{Duration, Instant};
 /// dispatcher thread, so no `Mutex` / `Arc<Atomic*>` is needed for the
 /// subscriber table or state pointer.
 ///
-/// Fields are `pub(crate)` so the settlement state machine
+/// Fields are `pub(in crate::lifecycle)` so the settlement state machine
 /// (`mod settlement`) can carry its inherent-impl cluster in a sibling
 /// file and the parent's handlers can read them.
 pub struct LifecycleCapabilityState {
-    pub(crate) graph: LifecycleGraphData,
+    pub(in crate::lifecycle) graph: LifecycleGraphData,
     /// Subscriber table keyed by stage kind id (ADR-0082 §7).
-    pub(crate) subscribers: BTreeMap<KindId, BTreeSet<DataMailboxId>>,
+    pub(in crate::lifecycle) subscribers: BTreeMap<KindId, BTreeSet<DataMailboxId>>,
     /// Kind id of the state the cap will broadcast on the next
     /// [`LifecycleAdvance`]. Starts at
     /// `graph.start()`; mutated after each settled advance to the resolved
     /// next/quit edge target.
-    pub(crate) current_state: KindId,
+    pub(in crate::lifecycle) current_state: KindId,
     /// True once the lifecycle reached a terminal — further advances
     /// are no-ops.
-    pub(crate) terminal_reached: bool,
+    pub(in crate::lifecycle) terminal_reached: bool,
     /// Quit flag (ADR-0082 §3). Set by inbound [`Quit`]
     /// mail; consumed at the next state whose graph declares a `quit` edge.
-    pub(crate) quit_pending: bool,
+    pub(in crate::lifecycle) quit_pending: bool,
     /// In-flight advance awaiting settlement (ADR-0082 §6).
-    pub(crate) pending: Option<PendingAdvance>,
+    pub(in crate::lifecycle) pending: Option<PendingAdvance>,
     /// Deadline for a pending advance's `Settled`
     /// (iamacoffeepot/aether#1048). Set from
     /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS`.
-    pub(crate) advance_timeout: Duration,
+    pub(in crate::lifecycle) advance_timeout: Duration,
     /// EWMA of observed `Sent`→`Settled` latency (ADR-0082 §6),
     /// updated once per settle. `None` until the first settlement.
-    pub(crate) settlement_latency_ewma: Option<Duration>,
+    pub(in crate::lifecycle) settlement_latency_ewma: Option<Duration>,
     /// Last time a slow-settlement warn fired, for the
     /// `SLOW_SETTLE_WARN_COOLDOWN` rate limit.
-    pub(crate) last_slow_warn: Option<Instant>,
+    pub(in crate::lifecycle) last_slow_warn: Option<Instant>,
     /// `Arc<Mailer>` cached at init for `subscribe_settlement_mail`
     /// calls inside handlers.
-    pub(crate) mailer: Arc<Mailer>,
+    pub(in crate::lifecycle) mailer: Arc<Mailer>,
 }
 
 #[runtime]

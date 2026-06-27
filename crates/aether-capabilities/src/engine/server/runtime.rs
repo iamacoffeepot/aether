@@ -8,13 +8,13 @@
 //! single `use runtime::*` glob in the parent.
 
 use super::{EngineConfig, EngineServer};
-pub use crate::engine::kinds::ForwardEnvelope;
+pub(super) use crate::engine::kinds::ForwardEnvelope;
 use crate::engine::kinds::{EngineAlive, EngineDied, RouteEnvelope};
-pub use crate::engine::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams};
-pub use crate::engine::store::{ArtifactStore, LAYOUT_VERSION_DIR};
+pub(super) use crate::engine::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams};
+pub(super) use crate::engine::store::{ArtifactStore, LAYOUT_VERSION_DIR};
 use aether_actor::runtime;
-pub use aether_data::{EngineId, Kind, MailboxId, Uuid};
-pub use aether_kinds::{
+pub(super) use aether_data::{EngineId, Kind, MailboxId, Uuid};
+pub(super) use aether_kinds::{
     DeadEngineDescriptor, DeathReason, EngineDescriptor, ListComponentBinariesResult,
     ListEngineBinariesResult, ListEnginesResult, ResolveComponentResult, SpawnEngineResult,
     TerminateEngineResult, UploadBinaryResult, UploadComponentResult,
@@ -23,28 +23,28 @@ use aether_kinds::{
     ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SpawnEngine,
     TerminateEngine, UploadBinary, UploadComponent,
 };
-pub use aether_substrate::Mail;
-pub use aether_substrate::Subname;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::SourceAddr;
-pub use aether_substrate::mail::mailer::Mailer;
-pub use std::collections::HashMap;
-pub use std::collections::VecDeque;
-pub use std::path::PathBuf;
-pub use std::process::{Command, Stdio};
-pub use std::sync::Arc;
-pub use std::time::{Duration, Instant};
+pub(super) use aether_substrate::Mail;
+pub(super) use aether_substrate::Subname;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub(super) use aether_substrate::chassis::error::BootError;
+pub(super) use aether_substrate::mail::SourceAddr;
+pub(super) use aether_substrate::mail::mailer::Mailer;
+pub(super) use std::collections::HashMap;
+pub(super) use std::collections::VecDeque;
+pub(super) use std::path::PathBuf;
+pub(super) use std::process::{Command, Stdio};
+pub(super) use std::sync::Arc;
+pub(super) use std::time::{Duration, Instant};
 
 // The artifact-store + fleet helpers the handlers delegate to live in the
 // native-only `artifacts` / `fleet` submodules; re-export them here so the
 // parent's `use runtime::*` glob reaches them alongside the rest of the
 // runtime half.
-pub use super::artifacts::{
+pub(super) use super::artifacts::{
     bootstrap_ingest, ingest_binary, ingest_component, realize_executable, resolve_component,
     resolve_selector,
 };
-pub use super::fleet::{engine_store_root, free_local_port, settle_err};
+pub(super) use super::fleet::{engine_store_root, free_local_port, settle_err};
 
 /// How many recently-died engines [`EngineServer`](super::EngineServer)
 /// retains for `list_engines`' `recently_died` sidecar (issue 1906). A small
@@ -58,9 +58,9 @@ const RECENTLY_DIED_CAP: usize = 16;
 /// `died_age_millis` it reports in a [`DeadEngineDescriptor`].
 pub struct DeadRecord {
     pub(super) engine_id: String,
-    pub(super) rpc_port: u16,
+    rpc_port: u16,
     pub(super) reason: DeathReason,
-    pub(super) died_at: Instant,
+    died_at: Instant,
 }
 
 /// One supervised engine in [`EngineServerState`]'s table.
@@ -69,12 +69,12 @@ pub struct EngineEntry {
     /// forward target for `TerminateEngine`.
     pub(super) proxy_mailbox: MailboxId,
     /// The localhost RPC port the cap assigned this substrate.
-    pub(super) rpc_port: u16,
+    rpc_port: u16,
     /// When the cap last saw this engine alive (issue 1339): set at
     /// spawn (just-connected = alive) and refreshed on each
     /// `EngineAlive` the proxy reports from a confirmed `Pong`.
     /// `on_list` reports `now - last_alive` as the heartbeat age.
-    pub(super) last_alive: Instant,
+    last_alive: Instant,
 }
 
 /// `aether.engine` runtime state (ADR-0122 split): supervises a fleet of
@@ -91,7 +91,7 @@ pub struct EngineServerState {
     /// process-local counter delivers that without a `uuid` rng
     /// dependency. Starts at 1 (`Uuid::from_u128(0)` is the nil
     /// uuid).
-    pub(super) next_engine_seq: u128,
+    next_engine_seq: u128,
     /// Cached so `on_route` can push a `ForwardEnvelope` at a proxy
     /// while *propagating the inbound reply-to* — `NativeCtx`'s
     /// sends stamp the cap as sender, but a routed call's reply

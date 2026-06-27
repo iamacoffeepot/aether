@@ -13,7 +13,7 @@
 // `BootError` / `Manual` / `CaptureFrameResult`) come from the shared
 // `any(render-native, runtime)` seam in `mod.rs`, not from here, so a
 // desktop build doesn't re-export them through two globs.
-pub use std::io;
+pub(super) use std::io;
 
 use std::sync::Arc;
 

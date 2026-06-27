@@ -14,16 +14,16 @@ use super::{
 };
 use crate::shared::contentgen::adapter::{AdapterUsage, AnthropicRequest, AnthropicResponse};
 
-pub use crate::shared::contentgen::task_queue::TaskQueue;
-pub use std::sync::Arc;
+pub(super) use crate::shared::contentgen::task_queue::TaskQueue;
+pub(super) use std::sync::Arc;
 
 use aether_actor::OutboundReply;
 use aether_actor::runtime;
 use aether_kinds::Usage;
 
-pub use aether_actor::Manual;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
-pub use aether_substrate::chassis::error::BootError;
+pub(super) use aether_actor::Manual;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
+pub(super) use aether_substrate::chassis::error::BootError;
 
 /// Which send path a request rode. The generate handler threads it
 /// into the worker closure to pick the blocking call + result kind.
@@ -52,7 +52,7 @@ impl AnthropicCapabilityState {
     /// Test-only constructor. Production boots through
     /// `Builder::with_actor::<AnthropicCapability>(config)`; tests
     /// hand in a stub adapter directly.
-    pub(crate) fn from_parts(adapter: Arc<dyn AnthropicAdapter>, max_in_flight: usize) -> Self {
+    fn from_parts(adapter: Arc<dyn AnthropicAdapter>, max_in_flight: usize) -> Self {
         Self {
             adapter,
             tasks: TaskQueue::new(max_in_flight),
@@ -62,7 +62,7 @@ impl AnthropicCapabilityState {
     /// White-box accessor for tests asserting the queue's in-flight
     /// counter (e.g. that a synchronous validation error never spawned
     /// work).
-    pub(crate) fn test_in_flight(&self) -> usize {
+    fn test_in_flight(&self) -> usize {
         self.tasks.in_flight()
     }
 }

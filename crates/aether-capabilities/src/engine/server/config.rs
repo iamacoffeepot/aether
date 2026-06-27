@@ -18,7 +18,7 @@ use std::time::Duration;
 /// needs, comfortably under the `FleetBench` client's own spawn cap so
 /// the hub returns a clean `Err` first rather than the client
 /// tripping its backstop. `0` is the wait-forever sentinel.
-pub(super) const DEFAULT_PROXY_CONNECT_BUDGET_SECS: u64 = 30;
+const DEFAULT_PROXY_CONNECT_BUDGET_SECS: u64 = 30;
 
 /// Resolved engines-cap configuration (ADR-0090, issue 1339): the
 /// liveness-heartbeat tuning plus the hub binary store's layout dir,
