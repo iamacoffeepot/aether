@@ -51,7 +51,13 @@ fi
 
 # The artifact may carry a nested qodana-report.zip → unpacked/qodana.sarif.json.
 nested=$(find "$tmp" -name 'qodana-report.zip' | head -1)
-[[ -n "$nested" ]] && unzip -q -o "$nested" -d "$tmp/unpacked"
+if [[ -n "$nested" ]]; then
+    # unzip exits 1 on benign "stripped absolute path spec" warnings even
+    # though it extracted every file successfully. Tolerate it: the
+    # qodana.sarif.json presence check below is the real success gate — if
+    # the extraction actually produced nothing, we fall through to exit 3.
+    unzip -q -o "$nested" -d "$tmp/unpacked" || true
+fi
 sarif=$(find "$tmp" -name 'qodana.sarif.json' | head -1)
 if [[ -z "$sarif" ]]; then
     echo "qodana-report: no qodana.sarif.json inside the artifact" >&2
