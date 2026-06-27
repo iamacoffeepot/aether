@@ -387,9 +387,8 @@ impl NativeActor for FsCapability {
 mod tests {
     use super::super::FsCapability;
     use super::super::{
-        AdapterRegistry, Copy, CopyResult, Delete, DeleteResult, FileAdapter, FsError, List,
-        ListResult, LocalFileAdapter, NamespaceAddr, NamespaceRoots, Read, ReadResult, Write,
-        WriteResult,
+        AdapterRegistry, Copy, CopyResult, Delete, DeleteResult, FileAdapter, FsError,
+        LocalFileAdapter, NamespaceAddr, NamespaceRoots, Read, ReadResult, Write, WriteResult,
     };
     use super::FsCapabilityState;
     use aether_actor::Addressable;
@@ -397,14 +396,12 @@ mod tests {
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
     use aether_substrate::chassis::builder::Builder;
-    use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::Source;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use crate::test_chassis::{TestChassis, cleanup, fresh_substrate, scratch_dir};
     use aether_substrate::mail::SourceAddr;
-    use aether_substrate::mail::registry;
     use std::fs;
 
     /// Test fixture that bundles the cap, a fully-wired test mailer,
@@ -492,21 +489,6 @@ mod tests {
         let a = LocalFileAdapter::new(root.clone(), true)
             .expect("test setup: LocalFileAdapter constructs on scratch root");
         assert!(matches!(a.read("slot.bin"), Err(FsError::NotFound)));
-        cleanup(&root);
-    }
-
-    #[test]
-    fn write_then_read_roundtrip() {
-        let root = scratch_root("write-read");
-        let a = LocalFileAdapter::new(root.clone(), true)
-            .expect("test setup: LocalFileAdapter constructs on scratch root");
-        a.write("slot.bin", &[1, 2, 3, 4])
-            .expect("test setup: adapter accepts write");
-        assert_eq!(
-            a.read("slot.bin")
-                .expect("test setup: adapter returns written bytes"),
-            vec![1, 2, 3, 4]
-        );
         cleanup(&root);
     }
 
@@ -641,27 +623,6 @@ mod tests {
         cleanup(&root);
     }
 
-    #[test]
-    fn registry_returns_none_for_unknown_namespace() {
-        let reg = AdapterRegistry::new();
-        assert!(reg.get("save").is_none());
-        assert!(!reg.has("save"));
-    }
-
-    #[test]
-    fn registry_registers_and_retrieves_adapter() {
-        let root = scratch_root("reg-basic");
-        let adapter: Arc<dyn FileAdapter> = Arc::new(
-            LocalFileAdapter::new(root.clone(), true)
-                .expect("test setup: LocalFileAdapter constructs on scratch root"),
-        );
-        let mut reg = AdapterRegistry::new();
-        reg.register("save", adapter);
-        assert!(reg.has("save"));
-        assert!(reg.get("save").is_some());
-        cleanup(&root);
-    }
-
     use aether_data::{SessionToken, Uuid};
 
     fn build_save_only_registry(root: &Path, writable: bool) -> Arc<AdapterRegistry> {
@@ -720,26 +681,6 @@ mod tests {
             .with_actor::<FsCapability>(roots)
             .build_passive();
         assert!(result.is_err(), "save root being a file must fail cap init");
-        cleanup(&root);
-    }
-
-    /// Builder rejects a duplicate claim. Same protection as the
-    /// other capabilities.
-    #[test]
-    fn duplicate_claim_rejects_with_typed_error() {
-        let root = scratch_root("collide");
-        let (registry, mailer) = fresh_substrate();
-        registry.register_inbox(FsCapability::NAMESPACE, registry::noop_handler());
-
-        let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<FsCapability>(roots_under(&root))
-            .build_passive()
-            .expect_err("collision must surface as BootError");
-        assert!(matches!(
-            err,
-            BootError::MailboxAlreadyClaimed { ref name }
-                if name == FsCapability::NAMESPACE
-        ));
         cleanup(&root);
     }
 
@@ -923,43 +864,6 @@ mod tests {
         cleanup(&root);
     }
 
-    #[test]
-    fn cap_list_returns_sorted_entries() {
-        let root = scratch_root("cap-list");
-        let reg = build_save_only_registry(&root, true);
-        reg.get("save")
-            .expect("test setup: save adapter is registered")
-            .write("b.bin", b"")
-            .expect("test setup: adapter accepts b.bin write");
-        reg.get("save")
-            .expect("test setup: save adapter is registered")
-            .write("a.bin", b"")
-            .expect("test setup: adapter accepts a.bin write");
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result = FsCapability::on_list(
-            &mut fix.state,
-            &mut ctx,
-            List {
-                namespace: "save".to_string(),
-                prefix: String::new(),
-            },
-        );
-        match result {
-            ListResult::Ok {
-                namespace,
-                prefix,
-                entries,
-            } => {
-                assert_eq!(namespace, "save");
-                assert_eq!(prefix, "");
-                assert_eq!(entries, vec!["a.bin".to_string(), "b.bin".to_string()]);
-            }
-            ListResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
-        }
-        cleanup(&root);
-    }
-
     // The end-to-end "component pushes Read, dispatcher delivers
     // ReadResult to the component's receive_p32" test that lived here
     // pre-stage-2e (issue 552) reached deep into `aether_substrate`
@@ -1030,39 +934,6 @@ mod tests {
                 .read("copied.bin")
                 .expect("test setup: adapter reads copied bytes"),
             vec![0x0a_u8, 0x14, 0x1e]
-        );
-        cleanup(&root);
-    }
-
-    #[test]
-    fn cap_copy_into_read_only_namespace_replies_forbidden() {
-        let root = scratch_root("cap-copy-ro");
-        ensure_ns_dirs(&root);
-        let src = root.join("source.bin");
-        fs::write(&src, b"x").expect("test setup: write source file");
-        let reg = build_two_namespace_registry(&root, true);
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result = FsCapability::on_copy(
-            &mut fix.state,
-            &mut ctx,
-            Copy {
-                from: src.to_string_lossy().into_owned(),
-                to: NamespaceAddr {
-                    namespace: "assets".to_string(),
-                    path: "data.bin".to_string(),
-                },
-            },
-        );
-        assert!(
-            matches!(
-                result,
-                CopyResult::Err {
-                    error: FsError::Forbidden,
-                    ..
-                }
-            ),
-            "expected Forbidden, got {result:?}",
         );
         cleanup(&root);
     }

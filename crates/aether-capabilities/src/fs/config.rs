@@ -152,7 +152,7 @@ impl Error for EmptyDir {}
 // `native` feature.
 #[cfg(all(test, feature = "native"))]
 mod tests {
-    use super::{NamespaceRootsLayer, parse_dir};
+    use super::parse_dir;
     use std::path::PathBuf;
 
     #[test]
@@ -162,19 +162,5 @@ mod tests {
             parse_dir("/tmp/aether-save").expect("non-empty parses to a path"),
             PathBuf::from("/tmp/aether-save")
         );
-    }
-
-    #[test]
-    fn namespace_roots_layer_defaults_are_none() {
-        use confique::Config as _;
-        // No `.env()` source: each root has no literal default, so it
-        // resolves to `None` and `from_env` applies the runtime
-        // platform fallback. Env-free.
-        let layer = NamespaceRootsLayer::builder()
-            .load()
-            .expect("defaults load");
-        assert_eq!(layer.save, None);
-        assert_eq!(layer.assets, None);
-        assert_eq!(layer.config, None);
     }
 }

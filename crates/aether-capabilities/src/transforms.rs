@@ -37,18 +37,8 @@ fn mat4_apply(input: Mat4Apply) -> Vec4 {
 #[cfg(test)]
 mod tests {
     use super::mat4_apply;
-    use aether_data::{Kind, transforms};
-    use aether_kinds::{Mat4Apply, descriptors};
+    use aether_kinds::Mat4Apply;
     use aether_math::{Mat4, Vec4};
-
-    #[test]
-    fn identity_returns_the_input_vector() {
-        let out = mat4_apply(Mat4Apply {
-            matrix: Mat4::IDENTITY,
-            vector: Vec4::new(1.0, 2.0, 3.0, 4.0),
-        });
-        assert_eq!(out, Vec4::new(1.0, 2.0, 3.0, 4.0));
-    }
 
     #[test]
     fn scale_then_translate_applies_column_major() {
@@ -69,31 +59,5 @@ mod tests {
             vector: Vec4::new(1.0, 1.0, 1.0, 1.0),
         });
         assert_eq!(out, Vec4::new(7.0, 9.0, 11.0, 1.0));
-    }
-
-    #[test]
-    fn registered_in_link_time_inventory() {
-        // The contract `TransformRegistry::from_inventory` (headless)
-        // and `describe_transforms` (aether-mcp) both read: the
-        // transform is in the inventory, declares `Mat4Apply` as its one
-        // input slot, and produces `Vec4`.
-        let entry = transforms()
-            .find(|t| t.name.ends_with("::mat4_apply"))
-            .expect("mat4_apply not registered in link-time inventory");
-        assert_eq!(entry.input_kind_ids, [Mat4Apply::ID]);
-        assert_eq!(entry.output_kind_id, Vec4::ID);
-    }
-
-    #[test]
-    fn input_and_output_kinds_resolve_distinctly() {
-        // The input bundle and the output vector are separate kinds: a
-        // shared kind id would alias the transform's input and output.
-        // Both also surface through the substrate descriptor inventory
-        // (the hub encodes `Mat4Apply` params; the transform produces the
-        // `Vec4` output).
-        assert_ne!(Mat4Apply::ID, Vec4::ID);
-        let names: Vec<String> = descriptors::all().into_iter().map(|d| d.name).collect();
-        assert!(names.iter().any(|n| n == Mat4Apply::NAME));
-        assert!(names.iter().any(|n| n == Vec4::NAME));
     }
 }

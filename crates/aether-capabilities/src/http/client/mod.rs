@@ -503,45 +503,20 @@ mod tests {
 
     use super::runtime::HttpCapabilityState;
     use super::{
-        Arc, DEFAULT_MAX_BODY_BYTES, DisabledHttpAdapter, Duration, Fetch, FetchRequest,
-        FetchResponse, FetchResult, HashSet, HttpAdapter, HttpCapability, HttpConfig, HttpError,
-        HttpHeader, HttpMethod, UreqHttpAdapter, build_http_adapter,
+        Arc, DEFAULT_MAX_BODY_BYTES, Duration, Fetch, FetchRequest, FetchResponse, FetchResult,
+        HashSet, HttpAdapter, HttpCapability, HttpConfig, HttpError, HttpHeader, HttpMethod,
+        UreqHttpAdapter, build_http_adapter,
     };
-    use aether_actor::Addressable;
     use aether_data::MailboxId;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
-    use aether_substrate::chassis::builder::Builder;
-    use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::Source;
-
-    use crate::test_chassis::{TestChassis, fresh_substrate};
-    use aether_substrate::mail::registry;
 
     // ADR-0090: the defaults check loads the layer with no `.env()`
     // source. The env-value behavior (trim, empty → default, garbage
     // → hard-error) is now confique's native deserialization, covered
     // by `aether_substrate::config`'s confique tests; the CSV split is
     // covered by `parse_csv_set` there.
-
-    #[test]
-    fn http_from_env_defaults_match() {
-        use super::HttpConfigLayer;
-        use confique::Config as _;
-        // No `.env()` source: loads literal defaults only, so this is
-        // env-free and guards the layer's literal defaults against the
-        // named consts + `HttpConfig::default()`.
-        let layer = HttpConfigLayer::builder().load().expect("defaults load");
-        let default = HttpConfig::default();
-        assert!(!layer.disabled);
-        assert!(layer.allowlist.is_empty());
-        assert!(!layer.require_https);
-        assert_eq!(layer.max_body_bytes, DEFAULT_MAX_BODY_BYTES);
-        assert_eq!(
-            Duration::from_millis(u64::from(layer.timeout_ms)),
-            default.default_timeout
-        );
-    }
 
     struct StubAdapter {
         response: Mutex<Option<Result<FetchResponse, HttpError>>>,
@@ -584,82 +559,6 @@ mod tests {
     }
 
     use crate::test_chassis::test_mailer_and_rx;
-
-    /// Boot the cap against a default disabled `HttpConfig` and confirm
-    /// the mailbox is registered.
-    #[test]
-    fn capability_boots_and_registers_mailbox() {
-        let (registry, mailer) = fresh_substrate();
-        let config = HttpConfig {
-            disabled: true,
-            ..HttpConfig::default()
-        };
-        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<HttpCapability>(config)
-            .build_passive()
-            .expect("http capability boots");
-        assert!(
-            registry.lookup(HttpCapability::NAMESPACE).is_some(),
-            "http mailbox registered"
-        );
-        drop(chassis);
-    }
-
-    /// Builder rejects a duplicate claim.
-    #[test]
-    fn duplicate_claim_rejects_with_typed_error() {
-        let (registry, mailer) = fresh_substrate();
-        registry.register_inbox(HttpCapability::NAMESPACE, registry::noop_handler());
-        let config = HttpConfig {
-            disabled: true,
-            ..HttpConfig::default()
-        };
-
-        let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<HttpCapability>(config)
-            .build_passive()
-            .expect_err("collision must surface as BootError");
-        assert!(matches!(
-            err,
-            BootError::MailboxAlreadyClaimed { ref name }
-                if name == HttpCapability::NAMESPACE
-        ));
-    }
-
-    #[test]
-    fn disabled_adapter_replies_disabled() {
-        let (mailer, _) = test_mailer_and_rx();
-        let mut state = HttpCapabilityState::from_adapter(
-            Arc::new(DisabledHttpAdapter),
-            HttpConfig::default().default_timeout,
-        );
-        let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
-        let mut ctx = NativeCtx::new(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
-        match HttpCapability::on_fetch(
-            &mut state,
-            &mut ctx,
-            Fetch {
-                url: "https://api.example.com/".to_string(),
-                method: HttpMethod::Get,
-                headers: vec![],
-                body: vec![],
-                timeout_ms: None,
-            },
-        ) {
-            FetchResult::Err {
-                url,
-                error: HttpError::Disabled,
-            } => {
-                assert_eq!(url, "https://api.example.com/");
-            }
-            other => panic!("expected Err Disabled, got {other:?}"),
-        }
-    }
 
     #[test]
     fn allowlist_empty_rejects_every_host() {

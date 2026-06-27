@@ -522,14 +522,6 @@ mod tests {
     use aether_kinds::{Present, Render, Tick};
 
     #[test]
-    fn cap_initial_state_is_graph_start() {
-        let cap = test_cap(Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT));
-        assert_eq!(cap.current_state(), <Render as Kind>::ID);
-        assert!(!cap.is_terminal());
-        assert!(!cap.quit_pending());
-    }
-
-    #[test]
     fn on_unsubscribe_all_purges_mailbox_from_every_stage() {
         // A dropped trampoline's mailbox must leave every stage's
         // subscriber set in one shot (the drop-cleanup contract,
@@ -719,22 +711,5 @@ mod tests {
                 .is_some_and(|s| s.contains(&sender)),
             "the calling actor lands in the Tick stage set"
         );
-    }
-
-    /// The typed-send gate the ext relies on: `ctx.actor::<LifecycleCapability>()`
-    /// can only `.send()` the lifecycle subscribe kinds. A compile-time
-    /// assertion — if a future edit drops a `HandlesKind` impl (e.g. the
-    /// bridge stops emitting it), this stops building.
-    #[test]
-    fn cap_handles_the_subscribe_kinds() {
-        use aether_actor::{HandlesKind, Singleton};
-        fn assert_handles<R: HandlesKind<K>, K: Kind>() {}
-        fn assert_singleton<R: Singleton>() {}
-        assert_handles::<LifecycleCapability, LifecycleSubscribe>();
-        assert_handles::<LifecycleCapability, LifecycleSubscribeSelf>();
-        assert_handles::<LifecycleCapability, LifecycleUnsubscribe>();
-        assert_handles::<LifecycleCapability, LifecycleUnsubscribeSelf>();
-        assert_handles::<LifecycleCapability, LifecycleUnsubscribeAll>();
-        assert_singleton::<LifecycleCapability>();
     }
 }

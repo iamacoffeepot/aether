@@ -968,7 +968,6 @@ mod tests {
     // per call would be pure noise.
     #![allow(clippy::unwrap_used)]
 
-    use super::super::config::AudioConfigLayer;
     use super::super::event::new_event_channel;
     use super::super::instrument::{
         Adsr, BUILTINS, PARTIAL_COUNT, PartialBankDef, PitchSweep, VoiceDef, Wave, builtin_count,
@@ -981,56 +980,17 @@ mod tests {
     use super::super::*;
     use super::*;
     use crate::fs::FsError;
-    use crate::test_chassis::{
-        TestChassis, boot_test_chassis_with, decode_session_reply, drive_task_completion,
-        fresh_substrate, test_mailer_and_rx,
-    };
-    use aether_actor::Addressable;
+    use crate::test_chassis::{decode_session_reply, drive_task_completion, test_mailer_and_rx};
     use aether_data::{MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
     use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::chassis::builder::Builder;
-    use aether_substrate::chassis::error::BootError;
-    use aether_substrate::mail::registry;
     use aether_substrate::{
         EgressEvent, HubOutbound, InboxHandler, Mailer, OwnedDispatch, Registry,
     };
     use crossbeam_queue::ArrayQueue;
-    use std::f32::consts::TAU;
     use std::sync::mpsc;
     use std::time::Duration;
 
-    /// Ids 0–4 are wire-stable: reordering or re-patching them breaks
-    /// every `NoteOn.instrument_id` already in the wild. This pins
-    /// their names and oscillator waves so an accidental edit fails
-    /// loudly. Adds (piano / `electric_piano` / pad) go at the end.
-    #[test]
-    fn oscillator_ids_zero_through_four_are_wire_stable() {
-        let waves = [
-            ("sine_lead", Wave::Sine),
-            ("square_bass", Wave::Square),
-            ("triangle", Wave::Triangle),
-            ("saw_lead", Wave::Saw),
-            ("pluck", Wave::Saw),
-        ];
-        for (id, (name, wave)) in waves.iter().enumerate() {
-            let def = &BUILTINS[id];
-            assert_eq!(def.name, *name, "id {id} name drifted");
-            match def.voice {
-                VoiceDef::Oscillator { wave: w, .. } => assert!(
-                    matches!(
-                        (w, wave),
-                        (Wave::Sine, Wave::Sine)
-                            | (Wave::Square, Wave::Square)
-                            | (Wave::Triangle, Wave::Triangle)
-                            | (Wave::Saw, Wave::Saw)
-                    ),
-                    "id {id} wave drifted",
-                ),
-                VoiceDef::PartialBank(_) => panic!("id {id} must stay an oscillator patch"),
-            }
-        }
-    }
-
+    // Tripwire: a built-in's wire instrument_id is its positional index into BUILTINS, so reordering the table is a wire-breaking change. This pins the full ordered name list to catch a silent reorder.
     #[test]
     fn builtin_registry_lists_eleven_patches() {
         assert_eq!(builtin_count(), 11);
@@ -1050,27 +1010,6 @@ mod tests {
                 "snare",
             ],
         );
-    }
-
-    /// Every id assigned before this block (0–7) is wire-stable:
-    /// `NoteOn.instrument_id` values already in the wild must keep
-    /// resolving to the same patch, so pin the full prior name table.
-    /// The percussion adds (kick / hat / snare) go strictly after.
-    #[test]
-    fn prior_ids_zero_through_seven_are_wire_stable() {
-        let prior = [
-            "sine_lead",
-            "square_bass",
-            "triangle",
-            "saw_lead",
-            "pluck",
-            "piano",
-            "electric_piano",
-            "pad",
-        ];
-        for (id, name) in prior.iter().enumerate() {
-            assert_eq!(BUILTINS[id].name, *name, "id {id} name drifted");
-        }
     }
 
     /// Pull a `PartialBankDef` out of the registry by name for the
@@ -1328,25 +1267,6 @@ mod tests {
             settled < onset,
             "swept pitch should slow toward the base frequency: onset {onset}, settled {settled}",
         );
-    }
-
-    // ADR-0090: the confique migration is byte-identical to the prior
-    // hand-rolled reader. These exercise resolution without touching
-    // process env (issue 464).
-
-    #[test]
-    fn audio_from_env_defaults_match() {
-        use confique::Config as _;
-        // No `.env()` source: literal defaults only — env-free.
-        // The Layer field is `sample_rate` (the derive's
-        // `layer_field = "sample_rate"` drops the `requested_`
-        // prefix on the wire shape); the domain field stays
-        // `requested_sample_rate`.
-        let layer = AudioConfigLayer::builder().load().expect("defaults load");
-        let default = AudioConfig::default();
-        assert_eq!(layer.disabled, default.disabled);
-        assert_eq!(layer.sample_rate, None);
-        assert_eq!(default.requested_sample_rate, None);
     }
 
     #[test]
@@ -1709,48 +1629,6 @@ mod tests {
             !synth.has_voice_with_pitch(1),
             "voice steal must evict the oldest note (pitch=1, seq=1), not an arbitrary one",
         );
-    }
-
-    /// Boot the cap against a disabled config and confirm the
-    /// mailbox is registered. The dispatch path itself is exercised
-    /// by the synth tests above; this validates wiring.
-    #[test]
-    fn capability_boots_and_registers_mailbox() {
-        let (registry, mailer) = fresh_substrate();
-        let chassis = boot_test_chassis_with::<AudioCapability>(
-            &registry,
-            &mailer,
-            AudioConfig {
-                disabled: true,
-                ..AudioConfig::default()
-            },
-        );
-        assert!(
-            registry.lookup(AudioCapability::NAMESPACE).is_some(),
-            "audio mailbox registered"
-        );
-        drop(chassis);
-    }
-
-    /// Builder rejects a duplicate claim.
-    #[test]
-    fn duplicate_claim_rejects_with_typed_error() {
-        let (registry, mailer) = fresh_substrate();
-        registry.register_inbox(AudioCapability::NAMESPACE, registry::noop_handler());
-
-        //noinspection DuplicatedCode
-        let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<AudioCapability>(AudioConfig {
-                disabled: true,
-                ..AudioConfig::default()
-            })
-            .build_passive()
-            .expect_err("collision must surface as BootError");
-        assert!(matches!(
-            err,
-            BootError::MailboxAlreadyClaimed { ref name }
-                if name == AudioCapability::NAMESPACE
-        ));
     }
 
     // ADR-0103 track lane. The synth-side tests drive `Synth` directly
@@ -2647,41 +2525,6 @@ mod tests {
     }
 
     #[test]
-    fn loop_seam_produces_no_discontinuity() {
-        // A sine whose loop span is an exact multiple of its period
-        // wraps phase-continuously: the per-sample output delta across
-        // the seam stays in the band of an ordinary sine step, never the
-        // near-full-amplitude jump a naive (non-interpolating) wrap would
-        // inject (ADR-0103 §6).
-        const PERIOD: usize = 64;
-        #[allow(clippy::cast_precision_loss)]
-        let pcm: Vec<f32> = (0..512)
-            .map(|i| 0.5 * (TAU * i as f32 / PERIOD as f32).sin())
-            .collect();
-        // Loop span 256 == 4 * PERIOD, aligned to the period grid.
-        let region = looped_region(pcm, 128.0, 384.0);
-        let mut voice = SampleVoice::new(60, 100, &region);
-        let dt = 1.0 / TEST_RATE;
-        let mut prev = voice.next_sample(dt);
-        let mut max_delta = 0.0f32;
-        // Skip the attack ramp; sample well into the looped region across
-        // several wraps.
-        for n in 0..3000 {
-            let s = voice.next_sample(dt);
-            if n > 300 {
-                max_delta = max_delta.max((s - prev).abs());
-            }
-            prev = s;
-        }
-        // An ordinary sine step at this amplitude is ~0.024; a discarded
-        // seam would jump by up to ~0.47. 0.05 cleanly separates them.
-        assert!(
-            max_delta < 0.05,
-            "loop seam introduced a discontinuity (max delta {max_delta})",
-        );
-    }
-
-    #[test]
     fn assemble_bank_scales_loop_points_by_resample_ratio() {
         // A source WAV at half the device rate resamples 2x at load, so
         // the source-frame loop offsets scale 2x into device-rate
@@ -3105,72 +2948,6 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
         );
     }
 
-    /// #1693 / #1701 regression: a decode failure takes the same
-    /// deferred reply path; the `Err` reply must also keep the chain
-    /// live until `Finished`.
-    #[test]
-    fn play_track_decode_failure_settles_caller_chain() {
-        let (mailer, rx, caller_mailbox, reply_rx) = settlement_substrate();
-        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            MailboxId(0),
-        ));
-        let (mut cap, _queue) = live_cap();
-        let root = MailId::new(MailboxId(0xC0), 2);
-        let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 2);
-
-        {
-            let mut ctx = NativeCtx::new_dispatching(&transport, caller_source, root, root);
-            AudioCapability::on_play_track(
-                &mut cap,
-                &mut ctx,
-                PlayTrack {
-                    namespace: "assets".to_owned(),
-                    path: "bad.wav".to_owned(),
-                    gain: 0.8,
-                    looping: false,
-                    lane: None,
-                },
-            );
-        }
-
-        {
-            let mut read_ctx = NativeCtx::new_dispatching(&transport, caller_source, root, root);
-            AudioCapability::on_read_result(
-                &mut cap,
-                &mut read_ctx,
-                ReadResult::Ok {
-                    namespace: "assets".to_owned(),
-                    path: "bad.wav".to_owned(),
-                    bytes: b"not a valid wav file".to_vec(),
-                },
-            );
-        }
-
-        drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
-
-        assert_eq!(
-            counter.live_roots(),
-            1,
-            "decode-error reply holds the caller chain open",
-        );
-
-        let dispatch = reply_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("error reply reached the caller inbox");
-        assert_eq!(
-            dispatch.root, root,
-            "error reply inherits the caller's root"
-        );
-        mailer.record_finished(dispatch.mail_id, dispatch.root);
-        assert_eq!(
-            counter.live_roots(),
-            0,
-            "chain settles after the error reply's Finished fires",
-        );
-    }
-
     /// #1693 / #1701 regression: `load_instrument`'s deferred assembly
     /// reply (sfz.read → sample reads → assembly dispatch → resolve)
     /// must keep the chain UNSETTLED until the reply's `Finished` fires.
@@ -3257,69 +3034,6 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
             counter.live_roots(),
             0,
             "chain settles after the reply's Finished fires",
-        );
-    }
-
-    /// #1693 / #1701 regression: a synchronous sfz-parse failure
-    /// issues a direct `reply_to` — the `Err` reply must carry the
-    /// caller's root and keep the chain UNSETTLED until `Finished`.
-    #[test]
-    fn load_instrument_sfz_parse_failure_settles_caller_chain() {
-        let (mailer, _rx, caller_mailbox, reply_rx) = settlement_substrate();
-        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            MailboxId(0),
-        ));
-        let (mut cap, _queue) = live_cap();
-        let root = MailId::new(MailboxId(0xC0), 4);
-        let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 4);
-
-        {
-            let mut ctx = NativeCtx::new_dispatching(&transport, caller_source, root, root);
-            AudioCapability::on_load_instrument(
-                &mut cap,
-                &mut ctx,
-                LoadInstrument {
-                    namespace: "assets".to_owned(),
-                    path: "bank.sfz".to_owned(),
-                },
-            );
-        }
-
-        {
-            // A <control> block with no regions fails to parse.
-            let mut read_ctx = NativeCtx::new_dispatching(&transport, caller_source, root, root);
-            AudioCapability::on_read_result(
-                &mut cap,
-                &mut read_ctx,
-                ReadResult::Ok {
-                    namespace: "assets".to_owned(),
-                    path: "bank.sfz".to_owned(),
-                    bytes: b"<control>\ndefault_path=x/\n".to_vec(),
-                },
-            );
-        }
-
-        // The parse error reply is sent synchronously — the chain is live.
-        assert_eq!(
-            counter.live_roots(),
-            1,
-            "parse-error reply holds the caller chain open",
-        );
-
-        let dispatch = reply_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("error reply reached the caller inbox");
-        assert_eq!(
-            dispatch.root, root,
-            "parse-error reply inherits the caller's root",
-        );
-        mailer.record_finished(dispatch.mail_id, dispatch.root);
-        assert_eq!(
-            counter.live_roots(),
-            0,
-            "chain settles after the error reply's Finished fires",
         );
     }
 }

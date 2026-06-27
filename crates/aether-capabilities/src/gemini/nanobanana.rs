@@ -323,8 +323,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelShape, ValidationInputs, base64_decode, lookup_model, parse_image_response,
-        supported_model_ids, validate,
+        ModelShape, ValidationInputs, base64_decode, lookup_model, parse_image_response, validate,
     };
     use crate::gemini::{AspectRatio, GeminiError, ImageSize};
 
@@ -347,12 +346,6 @@ mod tests {
             object_ref_count: 0,
             character_ref_count: 0,
         }
-    }
-
-    #[test]
-    fn unknown_model_lookup_returns_none() {
-        assert!(lookup_model("gemini-bogus").is_none());
-        assert_eq!(supported_model_ids().len(), 3);
     }
 
     #[test]

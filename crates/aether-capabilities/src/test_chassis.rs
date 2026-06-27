@@ -25,7 +25,7 @@ use aether_substrate::actor::native::binding::NativeBinding;
 use aether_substrate::actor::native::ctx::NativeCtx;
 use aether_substrate::actor::native::{NativeActor, TaskCompletionWake};
 use aether_substrate::chassis::Chassis;
-use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
+use aether_substrate::chassis::builder::{BuiltChassis, NeverDriver};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
@@ -62,31 +62,6 @@ pub fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
     let (outbound, _rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     (registry, mailer)
-}
-
-/// Boot a `TestChassis` carrying exactly one cap `A` with `config`.
-/// The minimal-boot path every single-cap cap test reaches for:
-///
-/// ```ignore
-/// let (registry, mailer) = fresh_substrate();
-/// let chassis = boot_test_chassis_with::<MyCap>(&registry, &mailer, config);
-/// ```
-///
-/// Multi-cap tests (e.g. `RpcServer` + `TraceObserver` + `TestEcho`) keep
-/// their own inline `Builder::<TestChassis>::new(...)` chain because
-/// the cap list is the load-bearing part of the scenario.
-pub fn boot_test_chassis_with<A>(
-    registry: &Arc<Registry>,
-    mailer: &Arc<Mailer>,
-    config: A::Config,
-) -> PassiveChassis<TestChassis>
-where
-    A: NativeActor,
-{
-    Builder::<TestChassis>::new(Arc::clone(registry), Arc::clone(mailer))
-        .with_actor::<A>(config)
-        .build_passive()
-        .expect("test chassis boots")
 }
 
 /// Build a `(Arc<Mailer>, Receiver<EgressEvent>)` pair where the

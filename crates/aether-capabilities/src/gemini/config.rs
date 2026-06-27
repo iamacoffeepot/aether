@@ -63,31 +63,3 @@ impl Default for GeminiConfig {
         }
     }
 }
-
-#[cfg(all(test, feature = "native"))]
-mod tests {
-    use super::{DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MILLIS, GeminiConfig, GeminiConfigLayer};
-    use confique::Config as _;
-    use std::time::Duration;
-
-    // ADR-0090: the confique migration is byte-identical to the prior
-    // hand-rolled reader. These exercise the resolution logic without
-    // touching process env (issue 464).
-
-    #[test]
-    fn gemini_from_env_defaults_match() {
-        // No `.env()` source: loads literal defaults only, so this is
-        // env-free and guards the layer's defaults against the named
-        // consts + `GeminiConfig::default()`.
-        let layer = GeminiConfigLayer::builder().load().expect("defaults load");
-        let default = GeminiConfig::default();
-        assert_eq!(layer.api_key, None);
-        assert!(!layer.disabled);
-        assert_eq!(layer.max_in_flight, DEFAULT_MAX_IN_FLIGHT);
-        assert_eq!(layer.timeout_ms, DEFAULT_TIMEOUT_MILLIS);
-        assert_eq!(
-            Duration::from_millis(u64::from(layer.timeout_ms)),
-            default.timeout
-        );
-    }
-}

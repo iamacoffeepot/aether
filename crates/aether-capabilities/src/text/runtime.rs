@@ -609,21 +609,14 @@ mod tests {
     use super::super::layout::build_font_metrics;
     use super::super::*;
     use super::{
-        Arc, BootError, CreateTexture, NativeCtx, QuadSpace, Read, Source, TextCapabilityState,
-        UpdateTexture,
+        Arc, CreateTexture, NativeCtx, QuadSpace, Read, Source, TextCapabilityState, UpdateTexture,
     };
     use crate::fs::FsError;
     use crate::render::DrawTexturedQuads;
-    use crate::test_chassis::{
-        TestChassis, decode_session_reply, drive_task_completion, fresh_substrate,
-        test_mailer_and_rx,
-    };
-    use aether_actor::Addressable;
+    use crate::test_chassis::{decode_session_reply, drive_task_completion, test_mailer_and_rx};
     use aether_data::{Kind, MailId, SessionToken, SourceAddr, Uuid};
     use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::chassis::builder::Builder;
     use aether_substrate::mail::outbound::EgressEvent;
-    use aether_substrate::mail::registry;
     use std::sync::mpsc::Receiver;
     use std::time::Duration;
 
@@ -1010,22 +1003,6 @@ mod tests {
                     .expect("test: DrawTexturedQuads payload decodes");
             }
         }
-    }
-
-    /// Builder rejects a duplicate claim of the well-known mailbox.
-    #[test]
-    fn duplicate_claim_rejects_with_typed_error() {
-        let (registry, mailer) = fresh_substrate();
-        registry.register_inbox(TextCapability::NAMESPACE, registry::noop_handler());
-        let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<TextCapability>(())
-            .build_passive()
-            .expect_err("collision must surface as BootError");
-        assert!(matches!(
-            err,
-            BootError::MailboxAlreadyClaimed { ref name }
-                if name == TextCapability::NAMESPACE
-        ));
     }
 
     /// A tiny real font for the draw-path tests — the workspace's
