@@ -50,7 +50,7 @@ pub struct TraceDispatchCapability;
 // so a transport-only build must still see it. The rest of the runtime
 // half (the `aether_substrate`-typed imports and the state struct + its
 // `with_registry` ctor) sits behind the one `feature = "runtime"` gate.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 use aether_kinds::trace::DispatchTracedAck;
 
 #[cfg(feature = "runtime")]

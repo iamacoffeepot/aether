@@ -28,7 +28,7 @@
 // `aether.anthropic` content-gen cap (ADR-0050, issue 1014). Native-
 // only — embeds the native-only contentgen dispatch helper and makes
 // blocking ureq / subprocess calls.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub mod anthropic;
 #[cfg(feature = "audio")]
 pub mod audio;
@@ -37,14 +37,14 @@ pub mod component;
 // dispatch helper, staging, and adapter traits all lean on the
 // substrate runtime (`Mailer`, `LocalFileAdapter`), so the module
 // elides cleanly on the wasm-component build.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub mod shared;
 
 pub mod engine;
 pub mod fs;
 // `aether.gemini` content-gen cap (ADR-0050, issue 1015). Native-only
 // for the same reason as `anthropic`.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub mod gemini;
 // The two HTTP capabilities, co-located under one submodule (ADR-0121):
 // the `aether.http` egress client and the `aether.http.server` inbound
@@ -99,7 +99,7 @@ pub mod trampoline;
 // Holds only the generic `mat4_apply`; the space-time reachability
 // certifier transforms + their solver / corridor / counterfactual /
 // traffic / escapability cores moved to `aether-labyrinth` (issue 1908).
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub mod transforms;
 pub mod window;
 
@@ -109,12 +109,12 @@ pub use audio::AudioCapability;
 pub use audio::AudioConfig;
 // ADR-0050 `aether.anthropic` cap (issue 1014). `AnthropicConfig` is
 // part of the same native-only module.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use anthropic::{AnthropicCapability, AnthropicConfig};
 pub use component::{ComponentHostCapability, resolve_embedded};
 // ADR-0050 §2 shared content-gen infrastructure. Native-only — the two
 // provider caps (issue 1014 / 1015) embed these.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use shared::contentgen::{
     AnthropicAdapter, GeminiAdapter, StubAnthropicAdapter, StubGeminiAdapter, TaskQueue,
     stage_gen_output,
@@ -128,10 +128,10 @@ pub use shared::contentgen::{
 #[cfg(feature = "runtime")]
 pub use component::ComponentHostConfig;
 pub use engine::EngineProxy;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use engine::EngineProxyConfig;
 pub use engine::EngineServer;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use engine::{EngineConfig, EngineConfigLayer, EngineOverlay};
 pub use http::{HttpCapability, HttpConfig};
 // ADR-0108 `aether.http.server` cap (issue 1760). `HttpServerConfig` is the
@@ -139,13 +139,13 @@ pub use http::{HttpCapability, HttpConfig};
 // `HttpServerOverlay` and the bound-port `HttpServerHandle` are native-only.
 #[cfg(feature = "native")]
 pub use http::HttpServerConfigLayer;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use http::HttpServerHandle;
 #[cfg(feature = "native")]
 pub use http::HttpServerOverlay;
 pub use http::{HttpServerCapability, HttpServerConfig};
 pub use input::InputCapability;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use input::InputConfig;
 pub use inventory::InventoryCapability;
 // ADR-0122 split: `LifecycleConfig` configures the runtime-only
@@ -157,7 +157,7 @@ pub use lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 
 pub use fs::FsCapability;
 // ADR-0050 `aether.gemini` cap (issue 1015).
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use gemini::{GeminiCapability, GeminiConfig};
 #[cfg(feature = "render")]
 pub use render::HeadlessRenderCapability;

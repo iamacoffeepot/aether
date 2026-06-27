@@ -58,9 +58,9 @@ use aether_kinds::{ListHandlers, ListKinds, Manifest, Resolve};
 
 use aether_actor::actor;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 mod manifest;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 mod resolve;
 
 /// `aether.inventory` cap **identity** (ADR-0122 identity/runtime split,
@@ -87,7 +87,7 @@ pub struct InventoryCapability;
 // so a transport-only build must still see them. The wire-projection
 // helpers, the `aether_substrate`-typed imports, and the state struct
 // sit behind the one `feature = "runtime"` gate.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 use aether_kinds::{HandlersResult, ListKindsResult, ManifestResult, ResolveResult};
 
 #[cfg(feature = "runtime")]

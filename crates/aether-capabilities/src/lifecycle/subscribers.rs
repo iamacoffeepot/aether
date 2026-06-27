@@ -12,15 +12,15 @@ use aether_kinds::{
 
 use super::LifecycleCapability;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 use aether_actor::ReplyMode;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 use aether_data::KindId;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 use aether_substrate::actor::native::{NativeActorMailbox, NativeCtx};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 use aether_substrate::mail::MailboxId as SubstrateMailboxId;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Sender-side facade for callers addressing [`LifecycleCapability`]
@@ -38,7 +38,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// - [`WasmActorMailbox<LifecycleCapability>`] — always-on, for the §12
 ///   wasm-component stage-subscribe site.
 /// - [`NativeActorMailbox<'_, LifecycleCapability>`] — native cap-to-cap
-///   sends, gated on `#[cfg(not(target_arch = "wasm32"))]`.
+///   sends, gated on `#[cfg(not(target_family = "wasm"))]`.
 ///
 /// All methods are fire-and-forget. `subscribe` / `unsubscribe` reply
 /// via `aether.lifecycle.subscribe_result`; reply handling stays on the
@@ -96,7 +96,7 @@ impl LifecycleMailboxExt for WasmActorMailbox<'_, LifecycleCapability> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 impl LifecycleMailboxExt for NativeActorMailbox<'_, LifecycleCapability> {
     fn subscribe<K: Kind>(&self) {
         self.send(&LifecycleSubscribeSelf { stage: K::ID.0 });
@@ -124,7 +124,7 @@ impl LifecycleMailboxExt for NativeActorMailbox<'_, LifecycleCapability> {
 /// state's), not a compile-site `K`; the path preserves the inbound
 /// `(parent, root)` lineage so settlement counts each child against
 /// the root (ADR-0080 §6).
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub fn broadcast_to_subscribers<M: ReplyMode>(
     ctx: &mut NativeCtx<'_, M>,
     subscribers: &BTreeMap<KindId, BTreeSet<MailboxId>>,

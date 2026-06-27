@@ -30,7 +30,7 @@ pub use config::{HttpConfigLayer, HttpOverlay};
 // `FetchRequest` / `FetchResponse` types below name them too.
 use crate::http::kinds::{Fetch, HttpError, HttpHeader, HttpMethod};
 use aether_actor::WasmActorMailbox;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
 /// Default response-body cap when `AETHER_HTTP_MAX_BODY_BYTES` is
@@ -106,7 +106,7 @@ impl HttpAdapter for DisabledHttpAdapter {
 /// - [`WasmActorMailbox<HttpCapability>`] — always-on, for
 ///   wasm-component callers.
 /// - [`NativeActorMailbox<'_, HttpCapability>`] — native cap-to-cap
-///   sends, gated on `#[cfg(not(target_arch = "wasm32"))]`.
+///   sends, gated on `#[cfg(not(target_family = "wasm"))]`.
 pub trait HttpMailboxExt {
     /// Mail `aether.http.fetch { url, method: Get, headers: [], body: [], timeout_ms: None }`
     /// to the cap. Uses the chassis default timeout.
@@ -140,7 +140,7 @@ impl HttpMailboxExt for WasmActorMailbox<'_, HttpCapability> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 impl HttpMailboxExt for NativeActorMailbox<'_, HttpCapability> {
     //noinspection DuplicatedCode
     fn get(&self, url: &str) {
@@ -194,7 +194,7 @@ use runtime::*;
 // The wire reply kind. Named by the runtime-gated handler and by the
 // always-on (non-wasm) handler-inventory submission `#[actor]` emits for
 // `on_fetch`'s reply type, so it gates on `not(wasm32)` rather than `runtime`.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 use crate::http::kinds::FetchResult;
 
 #[actor(singleton)]

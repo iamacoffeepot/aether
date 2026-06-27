@@ -49,7 +49,7 @@ use aether_kinds::{
 // arms, which declare no manifest reply kind, so it is named only by the
 // runtime handler bodies and lives in `mod runtime` behind the `runtime`
 // gate.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 use aether_kinds::LifecycleSubscribeResult;
 
 use aether_actor::actor;
