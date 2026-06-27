@@ -22,6 +22,19 @@ exclude:
   # on a linter's say-so is a supply-chain risk, so version bumps stay a
   # deliberate human decision rather than a quality-gate finding.
   - name: NewCrateVersionAvailable
+  # Verified false positive scoped to the struct-hosted #[actor] form
+  # (ADR-0123). The macro harvests a cap's identity by reading its sibling
+  # runtime.rs via proc_macro::Span::local_file(). Qodana's inspection
+  # container builds under path remapping, so local_file() returns None and
+  # the ADR-0123-recorded hard-error fallback fires, producing an
+  # RsCompileErrorMacro finding on every #[actor] invocation in this crate.
+  # Real cargo paths (clippy / nextest / doc / CI) compile every cap cleanly
+  # — the error is Qodana-container-only. Scoped to aether-capabilities (the
+  # only crate hosting the struct-hosted form) so genuine macro compile errors
+  # remain active everywhere else, including aether-actor-derive itself.
+  - name: RsCompileErrorMacro
+    paths:
+      - crates/aether-capabilities
   - name: All
     paths:
       - target
