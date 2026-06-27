@@ -658,6 +658,33 @@ mod tests {
         (binding, rx)
     }
 
+    /// Run `on_draw_text` for a `Screen`-space white string over a fresh
+    /// `NativeCtx` on `binding` — the shape the draw tests repeat. Varies
+    /// only `font_id`, `text`, `size_pixels`, and `origin`; color is
+    /// always opaque white and the space is always `Screen`.
+    fn draw_screen(
+        state: &mut TextCapabilityState,
+        binding: &Arc<NativeBinding>,
+        font_id: u32,
+        text: &str,
+        size_pixels: f32,
+        origin: [f32; 2],
+    ) {
+        let mut ctx = NativeCtx::new(binding, session_sender(), MailId::NONE, MailId::NONE);
+        TextCapability::on_draw_text(
+            state,
+            &mut ctx,
+            DrawText {
+                font_id,
+                text: text.to_owned(),
+                size_pixels,
+                color: [1.0, 1.0, 1.0, 1.0],
+                origin,
+                space: QuadSpace::Screen,
+            },
+        );
+    }
+
     #[test]
     fn load_font_parks_request_and_forwards_read() {
         let mut state = TextCapabilityState::new();
@@ -755,19 +782,7 @@ mod tests {
     fn draw_with_unknown_font_emits_nothing() {
         let mut state = TextCapabilityState::new();
         let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
-        TextCapability::on_draw_text(
-            &mut state,
-            &mut ctx,
-            DrawText {
-                font_id: 99,
-                text: "hi".to_owned(),
-                size_pixels: 32.0,
-                color: [1.0; 4],
-                origin: [0.0, 0.0],
-                space: QuadSpace::Screen,
-            },
-        );
+        draw_screen(&mut state, &binding, 99, "hi", 32.0, [0.0, 0.0]);
         assert!(
             rx.try_recv().is_err(),
             "an unknown font_id must not emit any render mail",
@@ -782,19 +797,7 @@ mod tests {
         let font = test_font();
         state.fonts.insert(0, Arc::new(font));
         let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
-        TextCapability::on_draw_text(
-            &mut state,
-            &mut ctx,
-            DrawText {
-                font_id: 0,
-                text: "hi".to_owned(),
-                size_pixels: 32.0,
-                color: [1.0; 4],
-                origin: [0.0, 0.0],
-                space: QuadSpace::Screen,
-            },
-        );
+        draw_screen(&mut state, &binding, 0, "hi", 32.0, [0.0, 0.0]);
         assert!(
             state.atlas_create_inflight,
             "first draw should kick off atlas creation",
@@ -823,19 +826,7 @@ mod tests {
         }
         assert_eq!(state.atlas_texture_id, Some(7));
 
-        let mut ctx = NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
-        TextCapability::on_draw_text(
-            &mut state,
-            &mut ctx,
-            DrawText {
-                font_id: 0,
-                text: "A".to_owned(),
-                size_pixels: 48.0,
-                color: [1.0, 1.0, 1.0, 1.0],
-                origin: [0.0, 0.0],
-                space: QuadSpace::Screen,
-            },
-        );
+        draw_screen(&mut state, &binding, 0, "A", 48.0, [0.0, 0.0]);
         // A printable glyph rasterizes once: first an update_texture for
         // the new glyph, then the draw_textured_quads batch.
         assert_next_send_kind::<UpdateTexture>(&binding, &rx);
@@ -887,19 +878,7 @@ mod tests {
         // update_texture for the resync), rasterize the glyph (another
         // update_texture), then send draw_textured_quads. The glyph renders
         // rather than drops — proving the reset freed space.
-        let mut ctx = NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
-        TextCapability::on_draw_text(
-            &mut state,
-            &mut ctx,
-            DrawText {
-                font_id: 0,
-                text: "A".to_owned(),
-                size_pixels: 48.0,
-                color: [1.0, 1.0, 1.0, 1.0],
-                origin: [0.0, 0.0],
-                space: QuadSpace::Screen,
-            },
-        );
+        draw_screen(&mut state, &binding, 0, "A", 48.0, [0.0, 0.0]);
 
         assert!(
             !state.atlas.is_full(),
@@ -935,38 +914,14 @@ mod tests {
 
         // Draw at origin [0, 0] — the glyph rasterizes on the first draw
         // (cache miss), so drain UpdateTexture before collecting quads.
-        let mut ctx = NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
-        TextCapability::on_draw_text(
-            &mut state,
-            &mut ctx,
-            DrawText {
-                font_id: 0,
-                text: "A".to_owned(),
-                size_pixels: 24.0,
-                color: [1.0, 1.0, 1.0, 1.0],
-                origin: [0.0, 0.0],
-                space: QuadSpace::Screen,
-            },
-        );
+        draw_screen(&mut state, &binding, 0, "A", 24.0, [0.0, 0.0]);
         let quads_zero = collect_draw_textured_quads(&binding, &rx).quads;
 
         // Second draw at a non-zero origin — glyph is cached, so only
         // DrawTexturedQuads is emitted (no UpdateTexture).
         let ox = 30.0f32;
         let oy = 50.0f32;
-        let mut ctx2 = NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
-        TextCapability::on_draw_text(
-            &mut state,
-            &mut ctx2,
-            DrawText {
-                font_id: 0,
-                text: "A".to_owned(),
-                size_pixels: 24.0,
-                color: [1.0, 1.0, 1.0, 1.0],
-                origin: [ox, oy],
-                space: QuadSpace::Screen,
-            },
-        );
+        draw_screen(&mut state, &binding, 0, "A", 24.0, [ox, oy]);
         let quads_offset = collect_draw_textured_quads(&binding, &rx).quads;
 
         assert_eq!(

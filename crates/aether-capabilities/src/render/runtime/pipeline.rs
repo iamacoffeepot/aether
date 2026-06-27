@@ -77,6 +77,30 @@ pub struct RenderHandles {
     pub(in crate::render) gpu: Arc<OnceLock<RenderGpu>>,
 }
 
+/// Commit a frame's live accumulator into its cache, the shared
+/// swap-or-clear both the triangle (`frame_vertices`) and quad
+/// (`quad_frame`) passes run before recording (iamacoffeepot/aether#847).
+/// Locks `live` then `last` — the documented lock ordering — and holds
+/// both across the swap so a sibling tick can't mutate `live` mid-commit.
+///
+/// - `live` non-empty: the producer emitted this frame, so swap it into
+///   `last` and clear `live` (preserving its capacity) for the next tick.
+/// - `live` empty, `replay_cache_when_idle == false`: commit-current —
+///   clear `last` so the next frame reflects "the producer chose not to
+///   emit."
+/// - `live` empty, `replay_cache_when_idle == true`: leave `last` alone
+///   so a subsequent record replays its current contents.
+fn commit_or_replay<T>(live: &Mutex<Vec<T>>, last: &Mutex<Vec<T>>, replay_cache_when_idle: bool) {
+    let mut live = live.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+    let mut last = last.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+    if !live.is_empty() {
+        mem::swap(&mut *live, &mut *last);
+        live.clear();
+    } else if !replay_cache_when_idle {
+        last.clear();
+    }
+}
+
 impl RenderHandles {
     /// Install the wgpu resources the encoder-level methods read.
     /// The driver constructs [`RenderGpu`] once it has a device +
@@ -160,33 +184,11 @@ impl RenderHandles {
         replay_cache_when_idle: bool,
     ) -> Result<(), RenderError> {
         let gpu = self.expect_gpu();
-        {
-            let mut live = self
-                .frame_vertices
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063");
-            let mut last = self
-                .last_submitted
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063");
-            if !live.is_empty() {
-                // Producer emitted: swap into cache.
-                mem::swap(&mut *live, &mut *last);
-                // Post-swap, `live` holds what `last` held before
-                // — stale geometry from however many frames ago.
-                // Clear (preserves capacity) so the next tick's
-                // `on_draw_triangle` appends into an empty buffer
-                // without reallocating.
-                live.clear();
-            } else if !replay_cache_when_idle {
-                // Commit-current: producer chose not to emit
-                // this frame, so the cache should reflect that
-                // for any subsequent replay-cache caller.
-                last.clear();
-            }
-            // else: replay-cache + empty live — leave cache
-            // alone, render its current contents.
-        }
+        commit_or_replay(
+            &self.frame_vertices,
+            &self.last_submitted,
+            replay_cache_when_idle,
+        );
         let view_proj = *self
             .camera_state
             .lock()
@@ -242,22 +244,11 @@ impl RenderHandles {
         replay_cache_when_idle: bool,
     ) {
         let gpu = self.expect_gpu();
-        {
-            let mut live = self
-                .quad_frame
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063");
-            let mut last = self
-                .quad_last_submitted
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063");
-            if !live.is_empty() {
-                mem::swap(&mut *live, &mut *last);
-                live.clear();
-            } else if !replay_cache_when_idle {
-                last.clear();
-            }
-        }
+        commit_or_replay(
+            &self.quad_frame,
+            &self.quad_last_submitted,
+            replay_cache_when_idle,
+        );
         let batches = self
             .quad_last_submitted
             .lock()

@@ -7,7 +7,7 @@ use super::super::LifecycleGraphData;
 /// Built per-chassis at builder time and consumed by `init`.
 pub struct LifecycleConfig {
     /// The compiled lifecycle graph. Built via
-    /// [`LifecycleGraphData::builder`](super::super::LifecycleGraphData::builder)
+    /// [`LifecycleGraphData::builder`](LifecycleGraphData::builder)
     /// on the chassis side.
     pub graph: LifecycleGraphData,
     /// Initial `(stage_kind, mailbox)` pairs to populate the

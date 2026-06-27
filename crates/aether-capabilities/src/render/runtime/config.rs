@@ -8,7 +8,7 @@ use super::capture::CaptureBackend;
 /// Configuration for `RenderCapability`. `vertex_buffer_bytes` is
 /// the maximum bytes the render accumulator will hold before
 /// truncating with a warn — desktop and test-bench both pass
-/// [`aether_substrate::render::VERTEX_BUFFER_BYTES`].
+/// [`VERTEX_BUFFER_BYTES`].
 ///
 /// `observed_kinds`, when set, has every successfully-dispatched
 /// inbound mail's kind name pushed to it from the cap's `#[handler]`

@@ -280,6 +280,58 @@ pub enum BankStage {
     Done,
 }
 
+impl BankStage {
+    /// Begin the `note_off` release from the ramp's current level — the
+    /// shared bank ramp both [`PartialBankVoice`] and [`SampleVoice`]
+    /// wrap. `attack_s` lets a release mid-attack start from the partial
+    /// level the swell had reached. A no-op once already releasing or
+    /// done.
+    pub(super) fn begin_release(&mut self, attack_s: f32) {
+        let from_level = match *self {
+            Self::Attack { t } => {
+                if attack_s > 0.0 {
+                    (t / attack_s).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                }
+            }
+            Self::Sustain => 1.0,
+            Self::Release { .. } | Self::Done => return,
+        };
+        *self = Self::Release { t: 0.0, from_level };
+    }
+
+    /// Advance the attack/release ramp one sample, returning its current
+    /// level — the shared bank ramp logic over the wrapping voice's own
+    /// attack/release times. Attack swells linearly to `1.0` then holds
+    /// at `Sustain`; `Release` fades from its captured level to `0.0` and
+    /// retires at `Done`.
+    pub(super) fn advance(&mut self, dt: f32, attack_s: f32, release_s: f32) -> f32 {
+        match self {
+            Self::Attack { t } => {
+                *t += dt;
+                if attack_s <= 0.0 || *t >= attack_s {
+                    *self = Self::Sustain;
+                    1.0
+                } else {
+                    *t / attack_s
+                }
+            }
+            Self::Sustain => 1.0,
+            Self::Release { t, from_level } => {
+                *t += dt;
+                if release_s <= 0.0 || *t >= release_s {
+                    *self = Self::Done;
+                    0.0
+                } else {
+                    *from_level * (1.0 - (*t / release_s))
+                }
+            }
+            Self::Done => 0.0,
+        }
+    }
+}
+
 /// The partial-bank voice kernel — a fixed array of inharmonic sine
 /// partials with per-partial exponential decay, wrapped by a global
 /// attack/release ramp. Built once at `note_on`; the per-sample path
@@ -346,18 +398,7 @@ impl PartialBankVoice {
     }
 
     pub fn note_off(&mut self) {
-        let from_level = match self.stage {
-            BankStage::Attack { t } => {
-                if self.attack_s > 0.0 {
-                    (t / self.attack_s).clamp(0.0, 1.0)
-                } else {
-                    1.0
-                }
-            }
-            BankStage::Sustain => 1.0,
-            BankStage::Release { .. } | BankStage::Done => return,
-        };
-        self.stage = BankStage::Release { t: 0.0, from_level };
+        self.stage.begin_release(self.attack_s);
     }
 
     pub fn done(&self) -> bool {
@@ -365,28 +406,7 @@ impl PartialBankVoice {
     }
 
     pub fn advance_ramp(&mut self, dt: f32) -> f32 {
-        match &mut self.stage {
-            BankStage::Attack { t } => {
-                *t += dt;
-                if self.attack_s <= 0.0 || *t >= self.attack_s {
-                    self.stage = BankStage::Sustain;
-                    1.0
-                } else {
-                    *t / self.attack_s
-                }
-            }
-            BankStage::Sustain => 1.0,
-            BankStage::Release { t, from_level } => {
-                *t += dt;
-                if self.release_s <= 0.0 || *t >= self.release_s {
-                    self.stage = BankStage::Done;
-                    0.0
-                } else {
-                    *from_level * (1.0 - (*t / self.release_s))
-                }
-            }
-            BankStage::Done => 0.0,
-        }
+        self.stage.advance(dt, self.attack_s, self.release_s)
     }
 
     pub fn next_sample(&mut self, dt: f32) -> f32 {
