@@ -67,16 +67,10 @@ mod subscribers;
 pub use subscribers::LifecycleMailboxExt;
 
 // The settlement state machine and the boot-config both name the
-// runtime-only `LifecycleCapabilityState`, so both ride the one
-// `feature = "runtime"` gate alongside the rest of the runtime half.
-#[cfg(feature = "runtime")]
-mod settlement;
-
-#[cfg(feature = "runtime")]
-mod config;
-// `LifecycleConfig` configures the runtime-only `LifecycleCapabilityState`,
-// so its re-export rides the `runtime` gate through `mod runtime` (where the
-// rest of the runtime half lives) rather than a per-import gate here.
+// runtime-only `LifecycleCapabilityState`, so both live under the `runtime`
+// directory beside the rest of the runtime half, covered by the one
+// `mod runtime;` gate. `LifecycleConfig` configures that runtime state, so its
+// re-export sources through `runtime` rather than a per-import gate here.
 #[cfg(feature = "runtime")]
 pub use runtime::LifecycleConfig;
 

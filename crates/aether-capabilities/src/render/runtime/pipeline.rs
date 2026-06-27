@@ -56,16 +56,16 @@ pub struct RenderHandles {
     /// pass` consumes by swapping with `quad_last_submitted` — the
     /// same immediate-mode cache the triangle path uses, so a
     /// `TestBench::capture` replays the last committed quads.
-    pub(super) quad_frame: Arc<Mutex<Vec<QuadBatch>>>,
+    pub(in crate::render) quad_frame: Arc<Mutex<Vec<QuadBatch>>>,
     /// Most-recently-rendered quad batches, kept across frames so an
     /// idle `capture` (no producer this frame) replays them, matching
     /// `last_submitted`'s role for triangles.
-    pub(super) quad_last_submitted: Arc<Mutex<Vec<QuadBatch>>>,
+    pub(in crate::render) quad_last_submitted: Arc<Mutex<Vec<QuadBatch>>>,
     /// Session-scoped texture registry: staged CPU pixels + lazily-
     /// realized GPU textures. Written by the cap dispatcher thread
     /// (`create_texture` / `update_texture`), realized + read by the
     /// driver thread at record time.
-    pub(super) textures: Arc<Mutex<TextureRegistry>>,
+    pub(in crate::render) textures: Arc<Mutex<TextureRegistry>>,
     /// wgpu state, installed post-cap-construction by the driver via
     /// [`Self::install_gpu`]. Boots empty because winit 0.30's
     /// `ActiveEventLoop::create_window` only fires inside `resumed`,
@@ -74,7 +74,7 @@ pub struct RenderHandles {
     /// in its `resumed` handler. Encoder-level methods panic if
     /// called before install — in practice every code path that
     /// calls them runs after the install site.
-    pub(super) gpu: Arc<OnceLock<RenderGpu>>,
+    pub(in crate::render) gpu: Arc<OnceLock<RenderGpu>>,
 }
 
 impl RenderHandles {

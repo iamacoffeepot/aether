@@ -8,7 +8,7 @@ use crossbeam_queue::ArrayQueue;
 
 use aether_data::MailboxId;
 
-use super::kinds::ScheduledEvent;
+use super::super::kinds::ScheduledEvent;
 use super::sample::SampleBank;
 
 /// Capacity of the event queue between the cap's handlers and the

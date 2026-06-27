@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 
 use aether_data::MailboxId;
 
-use super::kinds::ScheduledNote;
+use super::super::kinds::ScheduledNote;
 
 /// Maximum note events one `aether.audio.schedule` batch may carry
 /// (ADR-0104). A batch crosses the event queue as a single slot, so

@@ -48,17 +48,6 @@ use crate::render::CreateTextureResult;
 mod kinds;
 pub use kinds::*;
 
-// ADR-0105 shelf-packed RGBA8 glyph atlas (`text/atlas.rs`). Native-only —
-// it is pure CPU but only the native cap consumes it, so it rides the same
-// `text-native` gate as `fontdue`.
-#[cfg(all(not(target_arch = "wasm32"), feature = "text-native"))]
-mod atlas;
-
-// Pure layout / rasterization helpers (ADR-0121). Same `text-native` gate —
-// they run fontdue off the hot path.
-#[cfg(all(not(target_arch = "wasm32"), feature = "text-native"))]
-mod layout;
-
 /// `aether.text` cap **identity** (ADR-0122 identity/runtime split). A ZST
 /// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`),
 /// the per-handler `HandlesKind` markers, and the name-inventory entry, all

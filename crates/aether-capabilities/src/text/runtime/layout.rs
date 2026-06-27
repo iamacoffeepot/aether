@@ -2,7 +2,7 @@
 //! `aether.text` cap (ADR-0105). Native-only — they run fontdue's
 //! horizontal metrics and shape the textured-quad batch the cap emits to
 //! `aether.render` — so they ride the same `text-native` gate as the
-//! cap's runtime half (`super::runtime`).
+//! rest of the cap's runtime half (`super`, this module's parent).
 
 use std::path::Path;
 

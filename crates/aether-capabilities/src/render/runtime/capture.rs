@@ -13,7 +13,7 @@ use aether_kinds::SimilarityCheck;
 use aether_substrate::capture::{CaptureQueue, ReferenceCapture};
 use aether_substrate::mail::outbound::HubOutbound;
 
-/// Per-chassis plumbing the [`super::RenderCapability`] capture handler
+/// Per-chassis plumbing the [`super::super::RenderCapability`] capture handler
 /// needs to defer the readback to the chassis main thread. The
 /// cap's dispatcher thread can't touch the wgpu `Device` (it lives
 /// on the render thread); the handler resolves the request, parks
@@ -42,7 +42,7 @@ pub struct CaptureBackend {
 /// used (unsupported namespace, no assets dir, forbidden path, or an
 /// unreadable file) — the caller replies that message as
 /// `CaptureFrameResult::Err`.
-pub(super) fn resolve_reference(
+pub(in crate::render) fn resolve_reference(
     assets_dir: Option<&Path>,
     similarity: Option<&SimilarityCheck>,
 ) -> Result<Option<ReferenceCapture>, String> {
