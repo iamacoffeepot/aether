@@ -24,7 +24,7 @@ use core::marker::PhantomData;
 
 use aether_data::{ActorId, Kind, Tag, fold_lineage, with_tag};
 
-use crate::actor::{Addressable, HandlesKind};
+use crate::model::{Addressable, HandlesKind};
 use crate::wasm::inline::InlineRegistry;
 
 /// Phantom-typed receiver-actor handle for FFI guests, built by
@@ -150,7 +150,7 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
     }
 
     /// Send a slice of payloads as a contiguous batch. Cast-only —
-    /// see [`crate::actor::ctx::MailSender::send_many`] for the
+    /// see [`crate::model::ctx::MailSender::send_many`] for the
     /// wire-shape rationale. Inherits the handler's causal chain like
     /// [`Self::send`].
     pub fn send_many<K>(&self, payloads: &[K])

@@ -21,8 +21,8 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aether_actor::actor::ctx::{MailSender, OutboundReply};
 use aether_actor::{Addressable, HandlesKind, Manual, ReplyMode, Single, Singleton};
+use aether_actor::{MailSender, OutboundReply};
 use core::marker::PhantomData;
 use core::ptr;
 

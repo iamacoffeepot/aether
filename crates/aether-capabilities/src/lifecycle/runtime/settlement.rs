@@ -9,7 +9,7 @@
 use std::time::{Duration, Instant};
 
 use aether_actor::Manual;
-use aether_actor::actor::ctx::OutboundReply;
+use aether_actor::OutboundReply;
 use aether_data::KindId;
 use aether_kinds::LifecycleAdvanceComplete;
 use aether_substrate::actor::native::NativeCtx;

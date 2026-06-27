@@ -5,7 +5,7 @@
 //! Concrete wasm ctx structs — [`WasmInitCtx`] / [`WasmCtx`] / [`WasmDropCtx`].
 //!
 //! The ctx interface is spelled by the per-stage capability traits in
-//! [`crate::actor::ctx`]; these structs are concrete impls that route
+//! [`crate::model::ctx`]; these structs are concrete impls that route
 //! outbound calls through the per-concern bridge functions in
 //! `crate::wasm::bridge::mail` and `crate::wasm::bridge::persist`.
 //! Ctxs hold per-mail state only (mailbox id at init; reply target at
@@ -16,16 +16,16 @@ use core::ptr;
 
 use aether_data::{Kind, MailboxId, mailbox_id_from_name};
 
-use crate::actor::ctx::mail_sender::MailSender;
-use crate::actor::ctx::outbound_reply::OutboundReply;
-use crate::actor::ctx::persistence::Persistence;
-use crate::actor::ctx::reply_mode::{Manual, ReplyMode, Single};
-use crate::actor::{
+use crate::mail::ReplyHandle;
+use crate::mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
+use crate::model::ctx::mail_sender::MailSender;
+use crate::model::ctx::outbound_reply::OutboundReply;
+use crate::model::ctx::persistence::Persistence;
+use crate::model::ctx::reply_mode::{Manual, ReplyMode, Single};
+use crate::model::{
     Addressable, HandlesKind, Instanced, NamespaceError, Singleton, Subname,
     validate_namespace_segment,
 };
-use crate::mail::ReplyHandle;
-use crate::mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
 use crate::wasm::bridge::{mail, persist};
 use crate::wasm::inline::InlineRegistry;
 use crate::wasm::mailbox::WasmActorMailbox;
@@ -926,9 +926,9 @@ mod tests {
         install_inline_child,
     };
     use crate::Addressable;
-    use crate::actor::Subname;
-    use crate::actor::ctx::OutboundReply;
     use crate::mail::{Mail, PriorState};
+    use crate::model::Subname;
+    use crate::model::ctx::OutboundReply;
     use crate::wasm::inline::RouteDecision;
     use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmDropCtx, WasmInitCtx};
     use aether_data::MailboxId;

@@ -18,7 +18,7 @@
 //!
 //! Per-stage capability ctx impls in [`crate::wasm::ctx`] call these
 //! functions directly; the cross-target abstraction layer is the
-//! per-stage capability traits in [`crate::actor::ctx`], not a single
+//! per-stage capability traits in [`crate::model::ctx`], not a single
 //! transport trait.
 
 pub(crate) mod mail;

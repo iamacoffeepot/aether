@@ -12,7 +12,7 @@
 //!
 //! Native actors do not have a `replace_component`-style hot reload
 //! path — only wasm components do. The native ctx structs deliberately
-//! do not impl [`crate::actor::ctx::Persistence`].
+//! do not impl [`crate::model::ctx::Persistence`].
 
 use crate::wasm::raw;
 

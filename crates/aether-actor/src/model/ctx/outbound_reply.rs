@@ -7,7 +7,7 @@
 
 use aether_data::{Kind, MailboxId};
 
-use crate::actor::ctx::mail_sender::MailSender;
+use crate::model::ctx::mail_sender::MailSender;
 
 /// Per-handler reply surface, on top of [`MailSender`]. Handlers call
 /// [`Self::reply::<K>(&payload)`][Self::reply] to answer the inbound's
