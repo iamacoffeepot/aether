@@ -215,6 +215,13 @@ if [[ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]]; th
     git -C "$qodana_clone/scan" -c advice.detachedHead=false checkout --quiet "$HEAD_AT_START"
     qodana_dir="$qodana_clone/scan"
 fi
+# Assign a per-run unique container name so two concurrent preflight
+# invocations (e.g. parallel worktree preflights in a /implement --sweep)
+# each get their own container and neither fails with "Only one instance of
+# Qodana". PID is unique per concurrent shell — covers both the linked-worktree
+# branch (where qodana_dir is a mktemp clone) and the main-checkout branch
+# (where qodana_dir is $ROOT and the default path-hash would collide).
+export QODANA_CLI_CONTAINER_NAME="qodana-preflight-$$"
 read -ra qodana_cmd <<< "$(canonical_cmd qodana)"
 run_step "$(canonical_cmd qodana) (diff-scoped to origin/main merge-base)" \
     bash -c 'cd "$1"; shift; exec "$@"' _ "$qodana_dir" "${qodana_cmd[@]}" --diff-start "$qodana_base" -u root
