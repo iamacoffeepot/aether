@@ -1,6 +1,6 @@
 ---
 name: land
-description: Land a CI-green draft PR — un-draft, squash-merge, delete the closing issue's phase:* label (Done), sweep the worktree. `--sweep` discovers this shard's held green draft PRs and lands them in sequence, predicting and recomputing conflict state after every merge, auto-rebasing behind branches, and routing dirty content conflicts to the user rather than touching their contents.
+description: Land a CI-green draft PR — un-draft, squash-merge, delete the closing issue's phase:* label (Done), sweep the worktree. `--sweep` discovers this shard's held green draft PRs and lands them in sequence, predicting and recomputing conflict state after every merge, auto-rebasing behind branches when branch protection requires up-to-date (strict mode), and routing dirty content conflicts to the user rather than touching their contents.
 ---
 
 # /land — PR landing skill
@@ -61,7 +61,7 @@ Read PR draft state and `mergeable_state` over REST (`gh api repos/iamacoffeepot
    Land sequence (in order):
      #1801  feat(aether-data): kind-id newtype helpers     clean
      #1803  fix(aether-codec): frame decoder edge case     clean
-     #1805  feat(substrate-bundle): boot manifest          behind  → will rebase
+     #1805  feat(substrate-bundle): boot manifest          behind  → will merge direct (strict off)
      #1807  chore(workflow): /land skill                   clean
 
    Dropped:
@@ -82,7 +82,19 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
 
 2. **Predict conflict state.** Run [Conflict prediction and routing](#conflict-prediction-and-routing) for this PR's branch. If `dirty`, surface and abort — do not un-draft a dirty branch.
 
-3. **Auto-rebase a `behind` branch.** If the branch is `behind`:
+3. **Handle a `behind` branch.** Before acting on a `behind` classification, read `required_status_checks.strict` from branch protection once per `/land` invocation (cache the result for `--sweep`; it is stable across the run):
+
+   ```bash
+   gh api repos/iamacoffeepot/aether/branches/main/protection \
+     --jq '.required_status_checks.strict'
+   ```
+
+   On a read failure or absent field, default to `true` (conservative: treat as strict-on and rebase).
+
+   - **strict=false and `merge-tree`-clean** — GitHub does not require the branch to be up-to-date before merging, so behind+clean is already mergeable. Skip the rebase, re-attest, and force-push; proceed directly to step 4 (Qodana sweep) / step 5 (un-draft). Note "behind → merged direct (strict off)" in the summary.
+   - **strict=true (or read failure)** — the branch must be up-to-date before merging. Proceed with the full rebase sequence below.
+
+   **Full rebase sequence (strict=true or read failure):**
 
    The rebase runs inside the branch's own worktree (`<m>` is the closing issue; step 8 sweeps exactly this path). `git rebase origin/main` with no branch argument rebases the worktree's current HEAD in place — git refuses the `<branch>` argument when that branch is checked out in another worktree, so the argument is dropped.
 
@@ -186,7 +198,7 @@ Classify the result into one of three states:
 | State | Condition | Action |
 |-------|-----------|--------|
 | **clean** | `merge-tree` exits 0 with a valid tree hash and no conflict markers | Proceed with the landing sequence. |
-| **behind** | branch's `merge-base` with `origin/main` is not `origin/main` itself (the branch needs rebase), but `merge-tree` would produce a clean tree | Auto-rebase onto fresh `main`, re-push, re-predict. |
+| **behind** | branch's `merge-base` with `origin/main` is not `origin/main` itself (the branch needs rebase), but `merge-tree` would produce a clean tree | strict=true → auto-rebase onto fresh `main`, re-push, re-predict; strict=false → behind+clean is mergeable, merge direct (no rebase). |
 | **dirty** | `merge-tree` exits non-zero or produces output containing conflict markers (`<<<<<<<`) | Surface to the user. Never touch the branch contents. |
 
 Cross-check: after the local oracle classifies a branch, compare against `mergeable_state` from `gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.mergeable_state'`:
@@ -195,6 +207,7 @@ Cross-check: after the local oracle classifies a branch, compare against `mergea
 - `behind` → agrees with the oracle's `behind` classification.
 - `dirty` → agrees with the oracle's `dirty` classification.
 - `unknown` → transient; trust the local oracle and note the `unknown` in the plan.
+- `clean` paired with the oracle's `behind` → agreement when strict=false; GitHub reports a behind+clean branch as `clean` when up-to-date is not required. Do not route this as a disagreement.
 - A disagreement between the oracle and `mergeable_state` (e.g. oracle says `clean`, GitHub says `dirty`) → treat as `dirty` and surface the disagreement before proceeding. The local oracle can be wrong when the remote diverges from a local fetch; a fresh `git fetch origin` and re-run resolves most cases.
 
 **Dirty conflict handling.** When a branch is `dirty`, `/land` surfaces the specific conflicting files from `merge-tree`'s output and stops:
@@ -212,7 +225,7 @@ Branch contents untouched. Options:
 
 In `--sweep` mode, a `dirty` PR halts the remaining sequence — a conflict requires a human (or a delegated agent) decision, and landing subsequent PRs can change the conflict shape. Print the halt reason, list the remaining PRs that were not landed, and wait for the user to resolve before re-running.
 
-**Recompute after every merge (`--sweep` only).** After each successful merge, `origin/main` has advanced. Recompute the conflict prediction for every remaining PR in the sequence using the same local oracle before proceeding to the next land. A branch that was `clean` against the prior `main` can be `behind` (or even `dirty`, in the degenerate case) after a sibling lands.
+**Recompute after every merge (`--sweep` only).** After each successful merge, `origin/main` has advanced. Recompute the conflict prediction for every remaining PR in the sequence using the same local oracle before proceeding to the next land. A branch that was `clean` against the prior `main` can be `behind` (or even `dirty`, in the degenerate case) after a sibling lands. When strict=false, a recomputed `behind` branch that is `merge-tree`-clean stays mergeable and the sweep merges it directly — no rebase, no force-push, no CI re-run.
 
 ## Phase label reconcile
 
