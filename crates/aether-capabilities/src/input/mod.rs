@@ -27,7 +27,7 @@
 // decoded bytes so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 mod config;
 pub mod kinds;
 pub mod subscription;
@@ -35,12 +35,12 @@ pub mod subscription;
 pub use kinds::*;
 pub use subscription::InputCapability;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use config::InputConfig;
 
 use aether_actor::WasmActorMailbox;
 use aether_data::{Kind, MailboxId};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
 /// Sender-side facade for callers addressing [`InputCapability`] via
@@ -63,7 +63,7 @@ use aether_substrate::actor::native::NativeActorMailbox;
 /// - [`WasmActorMailbox<InputCapability>`] — always-on, for
 ///   wasm-component callers.
 /// - [`NativeActorMailbox<'_, InputCapability>`] — native cap-to-cap
-///   sends, gated on `#[cfg(not(target_arch = "wasm32"))]`.
+///   sends, gated on `#[cfg(not(target_family = "wasm"))]`.
 ///
 /// All methods are fire-and-forget. `subscribe` / `unsubscribe` reply
 /// via `aether.input.subscribe_result`; reply handling stays on the
@@ -128,7 +128,7 @@ impl InputMailboxExt for WasmActorMailbox<'_, InputCapability> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 impl InputMailboxExt for NativeActorMailbox<'_, InputCapability> {
     fn subscribe<K: Kind>(&self) {
         self.send(&SubscribeInputSelf { kind: K::ID });

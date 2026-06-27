@@ -14,8 +14,18 @@
 // resolved at `mod.rs` root — now sourced here beside the body.
 use aether_actor::runtime;
 
+// `load` (the `handle_load` sequence as a method on the state) and `config`
+// (the `ComponentHostConfig` init bundle), now nested under this `runtime`
+// directory so the one `mod runtime;` gate in the parent covers them (no
+// per-sibling `#[cfg]`). The `load` impl reaches the state fields through their
+// `pub(in crate::component)` visibility, unchanged by the move.
+mod config;
+mod load;
+
 use super::ComponentHostCapability;
-use super::config::ComponentHostConfig;
+// `ComponentHostConfig` rides up to the cap root through this `pub use`: the
+// cap-root `pub use runtime::ComponentHostConfig;` re-export sources it here.
+pub use self::config::ComponentHostConfig;
 
 use aether_kinds::{
     DropComponent, ListComponents, ListComponentsResult, LoadComponent, LoadResult,

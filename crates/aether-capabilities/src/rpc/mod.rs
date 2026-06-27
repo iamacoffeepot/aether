@@ -32,7 +32,7 @@ pub(crate) mod test_echo;
 pub use aether_rpc::rpc::*;
 
 pub use server::RpcServerCapability;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use server::RpcServerConfig;
 // `RpcServerHandle` is a live-server boot artifact (published only inside
 // runtime `init`), so it rides the runtime half's gate rather than the

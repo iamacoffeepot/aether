@@ -41,7 +41,7 @@ pub struct HeadlessWindowCapability;
 // typed ctx imports and the empty state struct sit behind the one
 // `feature = "runtime"` gate; the macro gates everything it emits for the
 // runtime half, so this cap's identity compiles transport-only.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 use aether_kinds::{FocusWindowResult, SetWindowModeResult, SetWindowTitleResult};
 
 #[cfg(feature = "runtime")]

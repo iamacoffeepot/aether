@@ -7,15 +7,21 @@
 //! ctx, settlement, and fan-out names through the single `use runtime::*`
 //! glob in the parent.
 
+// The settlement state machine and the boot-config seams, now nested under
+// this `runtime` directory so the one `mod runtime;` gate in the parent covers
+// them (no per-sibling `#[cfg]`).
+mod config;
+mod settlement;
+
 // Lifecycle-level names the state and handlers reach. Explicit `use
 // super::{…}` (never `use super::*` — clippy `wildcard_imports` is denied
 // and exempts only `pub use`).
 use super::{LifecycleCapability, LifecycleGraphData};
 
-pub use super::config::LifecycleConfig;
+pub use self::config::LifecycleConfig;
 #[cfg(test)]
-pub use super::settlement::ADVANCE_TIMEOUT_MS_DEFAULT;
-pub use super::settlement::{PendingAdvance, Step, resolve_edge};
+pub use self::settlement::ADVANCE_TIMEOUT_MS_DEFAULT;
+pub use self::settlement::{PendingAdvance, Step, resolve_edge};
 pub use super::subscribers::broadcast_to_subscribers;
 
 // Handler-argument and reply kinds named by the moved `#[runtime] impl`

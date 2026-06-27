@@ -140,18 +140,7 @@ impl SampleVoice {
     }
 
     pub fn note_off(&mut self) {
-        let from_level = match self.stage {
-            BankStage::Attack { t } => {
-                if self.attack_s > 0.0 {
-                    (t / self.attack_s).clamp(0.0, 1.0)
-                } else {
-                    1.0
-                }
-            }
-            BankStage::Sustain => 1.0,
-            BankStage::Release { .. } | BankStage::Done => return,
-        };
-        self.stage = BankStage::Release { t: 0.0, from_level };
+        self.stage.begin_release(self.attack_s);
     }
 
     pub fn done(&self) -> bool {
@@ -159,31 +148,10 @@ impl SampleVoice {
     }
 
     /// Advance the attack/release ramp one sample, returning its current
-    /// level — the partial bank's ramp logic over the sample voice's
-    /// own attack/release times.
+    /// level — the shared bank ramp over the sample voice's own
+    /// attack/release times.
     pub fn advance_ramp(&mut self, dt: f32) -> f32 {
-        match &mut self.stage {
-            BankStage::Attack { t } => {
-                *t += dt;
-                if self.attack_s <= 0.0 || *t >= self.attack_s {
-                    self.stage = BankStage::Sustain;
-                    1.0
-                } else {
-                    *t / self.attack_s
-                }
-            }
-            BankStage::Sustain => 1.0,
-            BankStage::Release { t, from_level } => {
-                *t += dt;
-                if self.release_s <= 0.0 || *t >= self.release_s {
-                    self.stage = BankStage::Done;
-                    0.0
-                } else {
-                    *from_level * (1.0 - (*t / self.release_s))
-                }
-            }
-            BankStage::Done => 0.0,
-        }
+        self.stage.advance(dt, self.attack_s, self.release_s)
     }
 
     // Read position and PCM lengths are bounded well below 2^24 for any

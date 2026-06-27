@@ -27,8 +27,22 @@ pub use aether_substrate::mail::mailer::Mailer;
 pub use aether_substrate::mail::registry::Registry;
 pub use aether_substrate::render::IDENTITY_VIEW_PROJ;
 
-pub use super::config::RenderConfig;
-pub use super::pipeline::RenderHandles;
+// The native impl seams, now nested under this `runtime` directory so the one
+// `mod runtime;` gate in the parent covers them (no per-sibling `#[cfg]`):
+// `pipeline` (GPU bundle + accumulator handles), `texture` (the texture
+// registry), `quad` (the quad-batch accumulator), `capture` (the cross-thread
+// readback machinery), and `config` (the per-instance `RenderConfig`).
+mod capture;
+mod config;
+mod pipeline;
+mod quad;
+mod texture;
+
+// The cap-root re-exports source these four names through `runtime`: `pub use
+// runtime::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};`.
+pub use self::capture::CaptureBackend;
+pub use self::config::RenderConfig;
+pub use self::pipeline::{RenderGpu, RenderHandles};
 
 // The moved `#[runtime] impl NativeActor for RenderCapability` body names the
 // `#[runtime]` attribute, the cap kinds (the drawing kinds via the parent's
@@ -48,14 +62,14 @@ use super::{
     DrawTexturedQuads, DrawTriangle, RenderCapability, SolidQuad, TexturedQuad, UpdateTexture,
 };
 
-// These seam items are `pub(super)` (visible in `render`), so the
-// re-export back up to the parent `#[actor] impl` keeps that visibility —
-// `pub use` would try to widen them to `pub` and fail (E0364/E0365).
-// `pub(super)` of this module resolves to `render`, the exact scope the
-// glob in `mod.rs` reaches them from.
-pub(super) use super::capture::resolve_reference;
-pub(super) use super::quad::QuadBatch;
-pub(super) use super::texture::{
+// These seam items are `pub(in crate::render)` (visible in `render`) in their
+// now-nested child modules, so the re-export up to runtime level keeps that
+// exact visibility — the `use runtime::*` glob in `mod.rs` reaches them from
+// `render`, the scope the co-located test module names them in. `pub use`
+// would try to widen them to `pub` and fail (E0364/E0365).
+pub(in crate::render) use self::capture::resolve_reference;
+pub(in crate::render) use self::quad::QuadBatch;
+pub(in crate::render) use self::texture::{
     StagedTexture, TextureRegistry, WHITE_TEXTURE_ID, expected_pixel_bytes,
 };
 

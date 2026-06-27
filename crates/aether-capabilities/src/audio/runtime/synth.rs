@@ -12,9 +12,9 @@ use crossbeam_queue::ArrayQueue;
 
 use aether_data::MailboxId;
 
+use super::super::kinds::ScheduledNote;
 use super::event::{AudioEvent, AudioEventSender, new_event_channel};
 use super::instrument::{BUILTINS, builtin_count, builtin_names, instrument_by_id};
-use super::kinds::ScheduledNote;
 use super::sample::{SampleBank, SampleVoice};
 use super::schedule::{ScheduledEntry, millis_to_frames};
 use super::track::{TRACK_FADE_SECS, TrackVoice};

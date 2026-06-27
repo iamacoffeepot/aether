@@ -37,7 +37,7 @@ pub use registry::{AdapterRegistry, build_registry};
 // for X {}` markers always-on against the identity, outside the
 // `feature = "runtime"` gate, so they reference these kinds from here.
 use aether_actor::WasmActorMailbox;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
 /// Sender-side facade for actors addressed via
@@ -57,7 +57,7 @@ use aether_substrate::actor::native::NativeActorMailbox;
 /// - [`WasmActorMailbox<FsCapability>`] — always-on, for wasm-component
 ///   callers.
 /// - [`NativeActorMailbox<'_, FsCapability>`] — native cap-to-cap
-///   sends, gated on `#[cfg(not(target_arch = "wasm32"))]`.
+///   sends, gated on `#[cfg(not(target_family = "wasm"))]`.
 ///
 /// All methods are fire-and-forget. Replies arrive as
 /// `aether.fs.read_result` / `aether.fs.write_result` /
@@ -134,7 +134,7 @@ impl FsMailboxExt for WasmActorMailbox<'_, FsCapability> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 impl FsMailboxExt for NativeActorMailbox<'_, FsCapability> {
     fn read(&self, namespace: &str, path: &str) {
         self.send(&Read {

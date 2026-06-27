@@ -19,8 +19,8 @@ pub use kinds::{
     CallSettled, EngineAlive, EngineDied, EngineHeartbeatTick, ForwardEnvelope, RouteEnvelope,
 };
 pub use proxy::EngineProxy;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use proxy::EngineProxyConfig;
 pub use server::EngineServer;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use server::{EngineConfig, EngineConfigLayer, EngineOverlay};

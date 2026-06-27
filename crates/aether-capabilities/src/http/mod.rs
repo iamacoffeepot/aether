@@ -24,7 +24,7 @@ pub use client::{HttpConfigLayer, HttpOverlay};
 // `HttpServerOverlay` and the bound-port `HttpServerHandle` are native-only.
 #[cfg(feature = "native")]
 pub use server::HttpServerConfigLayer;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use server::HttpServerHandle;
 #[cfg(feature = "native")]
 pub use server::HttpServerOverlay;

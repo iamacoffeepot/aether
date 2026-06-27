@@ -70,50 +70,14 @@ use crate::fs::ReadResult;
 
 // `AudioConfig` rides through file root for chassis-bin consumers
 // that build it from env (`from_env`) and pass it to
-// `with_actor::<AudioCapability>(cfg)`. Native-only re-export — wasm
-// components opting into the marker-only `audio` feature don't need
-// the config struct (sends are typed; config is the chassis's
-// concern).
-#[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
-pub use config::{AudioConfig, AudioConfigLayer, AudioOverlay};
-
-// ADR-0103 §1 decode/resample core (`crates/aether-capabilities/src/audio/decode.rs`).
-// Native-only — it pulls `hound` and `std`; the marker-only `audio`
-// build skips it. The track lane (`on_play_track`) and the future
-// sampled-instrument loader (#1679) both consume `decode_wav_to_mono`.
-#[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
-mod decode;
-
-// ADR-0103 §5 SFZ-subset parser for sampled instrument banks (#1679).
-// Pure (`&str → BankSpec`), no I/O — the cap fetches the `.sfz` text and
-// every referenced sample through `aether.fs`, then this module turns the
-// text into structure. Native-only alongside `decode`.
-#[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
-mod sfz;
-
-// ADR-0121 cohesion submodules. Each is native-only (gated like `decode` /
-// `sfz`); the `runtime` half and the `#[actor] impl` reach them via `super::`.
-// The seams: config (the derive-Config layer), event (the
-// cpal event queue), schedule (the ADR-0104 heap entry), instrument (the
-// built-in registry), voice (the synthesis kernels), sample (the ADR-0103
-// sampled banks), track (the ADR-0103 mixer lane), and synth (the mixer
-// aggregate + cpal pipeline build).
-#[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
-mod config;
-#[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
-mod event;
-#[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
-mod instrument;
-#[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
-mod sample;
-#[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
-mod schedule;
-#[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
-mod synth;
-#[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
-mod track;
-#[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
-mod voice;
+// `with_actor::<AudioCapability>(cfg)`. The config seam now lives under
+// the `runtime` directory beside the rest of the runtime half, so the
+// re-export sources through `runtime` and re-gates to `audio-native`
+// (the `mod runtime;` gate) — wasm components opting into the marker-only
+// `audio` feature don't need the config struct (sends are typed; config
+// is the chassis's concern).
+#[cfg(feature = "audio-native")]
+pub use runtime::{AudioConfig, AudioConfigLayer, AudioOverlay};
 
 /// `aether.audio` cap **identity** (ADR-0122 identity/runtime split). A ZST
 /// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`) plus

@@ -38,7 +38,7 @@
 //! to its bound port to wake the blocked accept; the accept returns,
 //! sees the flag, breaks; the dispatcher thread joins.
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 mod config;
 pub mod kinds;
 mod listener;
@@ -49,10 +49,10 @@ pub use listener::TcpListenerActor;
 pub use session::TcpSessionActor;
 // `TcpListenerConfig` and `TcpSessionConfig` carry `std::net`
 // types (native-only) so they live in `config` and only re-export
-// under `not(target_arch = "wasm32")`. The actor markers themselves
+// under `not(target_family = "wasm")`. The actor markers themselves
 // (above) are always-on so wasm callers can name them in
 // [`TcpWasmExt::listener`] / [`TcpWasmExt::session`] type parameters.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use config::{TcpListenerConfig, TcpSessionConfig};
 
 use aether_actor::{Addressable, WasmActorMailbox};
@@ -62,7 +62,7 @@ use aether_data::{ActorId, Tag, fold_lineage, with_tag};
 // compiles under `--target wasm32-unknown-unknown
 // --no-default-features` (issue 832 acceptance criteria).
 use aether_kinds::MonitorNotice;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
 /// ADR-0099 §3: the `MailboxId` of a tcp session — a grandchild of the
@@ -234,7 +234,7 @@ impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
 /// FFI, and a single trait can't carry both signatures. The precedent
 /// is [`crate::component::ComponentHostWasmExt`] /
 /// [`crate::component::ComponentHostNativeExt`] (issue 654).
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub trait TcpNativeExt {
     /// Mail `aether.tcp.bind_listener { addr, name }` to the cap.
     fn bind_listener(&self, addr: &str, name: Option<&str>);
@@ -271,7 +271,7 @@ pub trait TcpNativeExt {
     ) -> NativeActorMailbox<'_, R>;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
     //noinspection DuplicatedCode
     fn bind_listener(&self, addr: &str, name: Option<&str>) {
