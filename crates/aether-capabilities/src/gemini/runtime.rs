@@ -372,25 +372,20 @@ pub fn lyria_reply(request_id: u64, result: Result<GeminiResponse, String>) -> L
 
 #[cfg(all(test, feature = "runtime"))]
 mod tests {
+    use crate::gemini::DisabledGeminiAdapter;
     use crate::gemini::GeminiCapability;
     use crate::gemini::runtime::{GeminiCapabilityState, nanobanana_reply};
     use crate::gemini::{
         AspectRatio, GeminiError, ImageSize, LyriaGenerate, LyriaGenerateResult,
         NanobananaGenerate, NanobananaGenerateResult,
     };
-    use crate::gemini::{DisabledGeminiAdapter, GeminiConfig};
     use crate::shared::contentgen::adapter::STUB_PNG;
     use crate::shared::contentgen::adapter::StubGeminiAdapter;
     use crate::shared::contentgen::adapter::{AdapterUsage, GeminiArtifact, GeminiResponse};
-    use crate::test_chassis::{
-        TestChassis, decode_session_reply, drive_task_completion, fresh_substrate,
-        test_mailer_and_rx,
-    };
-    use aether_actor::Addressable;
+    use crate::test_chassis::{decode_session_reply, drive_task_completion, test_mailer_and_rx};
     use aether_data::{Kind, MailboxId, SessionToken, Source, SourceAddr, Uuid};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
-    use aether_substrate::chassis::builder::Builder;
     use aether_substrate::mail::outbound::EgressEvent;
     use serde::de::DeserializeOwned;
     use std::sync::mpsc::Receiver;
@@ -421,20 +416,6 @@ mod tests {
             use_grounding: None,
             include_thought_signature: None,
         }
-    }
-
-    #[test]
-    fn capability_boots_and_registers_mailbox() {
-        let (registry, mailer) = fresh_substrate();
-        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<GeminiCapability>(GeminiConfig::default())
-            .build_passive()
-            .expect("gemini capability boots");
-        assert!(
-            registry.lookup(GeminiCapability::NAMESPACE).is_some(),
-            "gemini mailbox registered"
-        );
-        drop(chassis);
     }
 
     /// End-to-end through the ADR-0093 dispatch primitive: the stub

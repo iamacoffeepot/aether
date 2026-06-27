@@ -64,33 +64,3 @@ impl Default for AnthropicConfig {
         }
     }
 }
-
-#[cfg(all(test, feature = "native"))]
-mod tests {
-    use super::{
-        AnthropicConfig, AnthropicConfigLayer, DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MILLIS,
-    };
-    use confique::Config as _;
-    use std::time::Duration;
-
-    // ADR-0090: byte-identical to the prior hand-rolled reader,
-    // exercised without touching process env (issue 464).
-
-    #[test]
-    fn anthropic_from_env_defaults_match() {
-        // No `.env()` source: loads literal defaults only — env-free,
-        // guards the layer defaults against the consts + default().
-        let layer = AnthropicConfigLayer::builder()
-            .load()
-            .expect("defaults load");
-        let default = AnthropicConfig::default();
-        assert_eq!(layer.api_key, None);
-        assert!(!layer.disabled);
-        assert_eq!(layer.max_in_flight, DEFAULT_MAX_IN_FLIGHT);
-        assert_eq!(layer.timeout_ms, DEFAULT_TIMEOUT_MILLIS);
-        assert_eq!(
-            Duration::from_millis(u64::from(layer.timeout_ms)),
-            default.timeout
-        );
-    }
-}

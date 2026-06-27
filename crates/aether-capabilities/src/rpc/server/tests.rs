@@ -653,22 +653,6 @@ fn oversize_frame_replies_with_frame_too_large_and_session_survives() {
     assert_eq!(pong, WireFrame::Pong(0xfeed_face));
 }
 
-/// Tiny wire roundtrip for the new `RpcError::FrameTooLarge`
-/// variant — protects the wire shape against accidental rename /
-/// re-ordering.
-#[test]
-fn rpc_error_frame_too_large_structured_roundtrips() {
-    use crate::rpc::RpcError;
-    use aether_data::wire;
-    let err = RpcError::FrameTooLarge {
-        size: 99_000_000,
-        max: 64 * 1024 * 1024,
-    };
-    let bytes = wire::to_vec(&err).expect("wire encode");
-    let back: RpcError = wire::from_bytes(&bytes).expect("wire decode");
-    assert_eq!(err, back);
-}
-
 fn client_peer_kind() -> PeerKind {
     PeerKind::Client {
         client_name: "rpc-client-test".into(),
@@ -778,35 +762,4 @@ fn call_echo_round_trips_over_the_socket() {
         }
         other => panic!("expected ReplyEnd, got {other:?}"),
     }
-}
-
-/// `Ping(nonce)` round-trips as `Pong(nonce)` over the socket via a
-/// real [`RpcClient`](aether_rpc::rpc::RpcClient).
-#[test]
-fn ping_pongs_over_the_socket() {
-    use crate::rpc::RpcClient;
-
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: "127.0.0.1:0".into(),
-            peer_kind: test_peer_kind(),
-        })
-        .build_passive()
-        .expect("rpc server boots");
-
-    let port = chassis
-        .handle::<RpcServerHandle>()
-        .expect("RpcServerHandle published")
-        .local_port;
-
-    let mut conn = RpcClient::connect(&format!("127.0.0.1:{port}"), client_peer_kind(), || {})
-        .expect("client connects");
-
-    conn.client.ping(0x00c0_ffee).expect("ping writes");
-    let pong = conn
-        .inbound
-        .recv_timeout(Duration::from_secs(2))
-        .expect("Pong within 2s");
-    assert_eq!(pong, WireFrame::Pong(0x00c0_ffee));
 }

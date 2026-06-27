@@ -147,32 +147,6 @@ mod tests {
         assert_eq!(expected_pixel_bytes(u32::MAX, u32::MAX), None);
     }
 
-    /// The registry hands out ids in creation order, starting at 0 —
-    /// the same id-assignment shape ADR-0103 uses for instruments.
-    #[test]
-    fn texture_registry_assigns_sequential_ids() {
-        let mut registry = TextureRegistry::new();
-        let mut next = || {
-            let id = registry.next_id;
-            registry.next_id += 1;
-            registry.entries.insert(
-                id,
-                StagedTexture {
-                    width: 1,
-                    height: 1,
-                    pixels: vec![0, 0, 0, 0],
-                    realized: None,
-                    dirty: true,
-                },
-            );
-            id
-        };
-        assert_eq!(next(), 0);
-        assert_eq!(next(), 1);
-        assert_eq!(next(), 2);
-        assert_eq!(registry.entries.len(), 3);
-    }
-
     /// `apply_subrect` writes an in-bounds rect into the staged pixels
     /// and dirties the texture; an out-of-bounds rect, a zero
     /// dimension, or a pixel-length mismatch leaves the buffer

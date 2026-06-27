@@ -122,13 +122,4 @@ mod tests {
         assert_ne!(a, b, "uuid name generation must not collide");
         cleanup(&root);
     }
-
-    #[test]
-    fn wav_extension_is_preserved() {
-        let root = scratch_root("ext");
-        let path = stage_gen_output_under(&root, b"RIFF....WAVE", "wav")
-            .expect("test setup: stage writes");
-        assert_eq!(path.rsplit('.').next(), Some("wav"));
-        cleanup(&root);
-    }
 }

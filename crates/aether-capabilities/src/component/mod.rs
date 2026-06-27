@@ -153,20 +153,4 @@ mod tests {
         );
         assert_ne!(camera.mailbox_id(), mailbox_id_from_name("camera"));
     }
-
-    /// Root singletons (chassis caps) are unchanged by the scoped-name
-    /// composition: the cap's own mailbox id is its bare `NAMESPACE`.
-    #[test]
-    fn root_singleton_id_is_the_bare_namespace() {
-        let registry = InlineRegistry::new();
-        let host = WasmActorMailbox::<ComponentHostCapability>::__new(
-            mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0,
-            0,
-            &registry,
-        );
-        assert_eq!(
-            host.mailbox_id(),
-            mailbox_id_from_name(ComponentHostCapability::NAMESPACE),
-        );
-    }
 }

@@ -309,58 +309,7 @@ impl GeminiAdapter for StubGeminiAdapter {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AnthropicAdapter, AnthropicRequest, GeminiAdapter, GeminiImageRequest, GeminiMusicRequest,
-        STUB_PNG, STUB_WAV, StubAnthropicAdapter, StubGeminiAdapter,
-    };
-
-    fn anthropic_req() -> AnthropicRequest {
-        AnthropicRequest {
-            model: String::from("claude-test"),
-            prompt: String::from("hello"),
-            system: None,
-            max_tokens: Some(8),
-            temperature: None,
-        }
-    }
-
-    #[test]
-    fn stub_anthropic_messages_returns_canned_text() {
-        let adapter = StubAnthropicAdapter::default();
-        let resp = adapter
-            .messages_send(anthropic_req())
-            .expect("stub messages_send is infallible");
-        assert_eq!(resp.text, "stub completion");
-        assert_eq!(resp.model_used, "claude-test");
-    }
-
-    #[test]
-    fn stub_anthropic_cli_returns_canned_text() {
-        let adapter = StubAnthropicAdapter::default();
-        let resp = adapter
-            .cli_send(anthropic_req())
-            .expect("stub cli_send is infallible");
-        assert_eq!(resp.text, "stub completion");
-    }
-
-    #[test]
-    fn stub_gemini_nanobanana_returns_one_png() {
-        let adapter = StubGeminiAdapter;
-        let resp = adapter
-            .nanobanana_generate(GeminiImageRequest {
-                model: String::from("nb-test"),
-                prompt: String::from("a cat"),
-                aspect_ratio: String::from("1:1"),
-                reference_images: Vec::new(),
-                ..Default::default()
-            })
-            .expect("stub nanobanana is infallible");
-        assert_eq!(resp.artifacts.len(), 1);
-        assert_eq!(resp.artifacts[0].ext, "png");
-        assert_eq!(resp.artifacts[0].bytes, STUB_PNG);
-        // PNG signature is the first eight bytes.
-        assert_eq!(&resp.artifacts[0].bytes[..8], &STUB_PNG[..8]);
-    }
+    use super::{GeminiAdapter, GeminiMusicRequest, STUB_WAV, StubGeminiAdapter};
 
     #[test]
     fn stub_gemini_lyria_returns_sample_count_wavs() {

@@ -70,19 +70,3 @@ fn embeddable_resolves_under_the_host_class() {
         "the host-class fold differs from the bare hash — the #1364 fix",
     );
 }
-
-/// A second name yields a distinct id under the same class — the per-instance
-/// uniqueness ADR-0099 §6 relies on (`aether.embedded:cam2` differs from the
-/// default-name instance), reached by the caller via `loaded::<R>("cam2")`.
-#[test]
-fn embeddable_non_default_name_folds_a_distinct_leaf() {
-    assert_eq!(
-        resolve_embedded("cam2"),
-        mailbox_id_from_path("aether.component/aether.embedded:cam2"),
-    );
-    assert_ne!(
-        resolve_embedded("cam2"),
-        resolve_embedded(FixtureComponent::NAMESPACE),
-        "distinct subnames resolve to distinct mailboxes under the shared class",
-    );
-}

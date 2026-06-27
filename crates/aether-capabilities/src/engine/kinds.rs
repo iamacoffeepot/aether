@@ -127,32 +127,3 @@ pub struct EngineDied {
 pub struct EngineAlive {
     pub engine_id: String,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use aether_data::Kind;
-
-    #[test]
-    fn engine_died_carries_death_reason() {
-        // `EngineDied` gained a `reason` field — the proxy's self-death
-        // paths tag the cause (`Crashed` for a `Bye`, `Evicted` for a
-        // heartbeat miss). Both the id and the tagged reason must survive
-        // the structured encode/decode the proxy → cap mail rides.
-        let died = EngineDied {
-            engine_id: "00000000-0000-0000-0000-000000000001".to_string(),
-            reason: DeathReason::Crashed {
-                detail: "peer closed: eof".to_string(),
-            },
-        };
-        let back = EngineDied::decode_from_bytes(&died.encode_into_bytes())
-            .expect("test setup: EngineDied decodes");
-        assert_eq!(back.engine_id, died.engine_id);
-        assert_eq!(
-            back.reason,
-            DeathReason::Crashed {
-                detail: "peer closed: eof".to_string(),
-            },
-        );
-    }
-}

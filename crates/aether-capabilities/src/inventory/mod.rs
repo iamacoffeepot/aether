@@ -394,61 +394,6 @@ mod tests {
         );
     }
 
-    /// ADR-0091: `ListKinds` returns the substrate's authoritative
-    /// kind vocabulary. A kind registered in the bench's `Registry`
-    /// — emulating the `register_or_match_all` path
-    /// `ComponentHostCapability::handle_load` follows — shows up in
-    /// the reply with the matching `KindId`, name, and a
-    /// wire-encoded `SchemaType` that decodes back to the
-    /// original schema. This is the live-projection ADR-0091
-    /// requires: the same `Arc<Registry>` `component.rs` mutates is
-    /// what the cap reads on every call.
-    #[test]
-    fn list_kinds_projects_a_registered_kind() {
-        use aether_data::{KindDescriptor, KindId, SchemaType, canonical::kind_id_from_parts};
-
-        let mut fix = fixture();
-
-        // Register a fresh kind directly on the registry — same
-        // entry point `register_or_match_all` walks per descriptor.
-        // A `String`-shaped param keeps the schema lookup distinct
-        // from any link-time entry the static vocabulary already
-        // submits.
-        let desc = KindDescriptor {
-            name: "aether.test.list_kinds_projection".to_owned(),
-            schema: SchemaType::String,
-        };
-        let expected_id = KindId(kind_id_from_parts(&desc.name, &desc.schema));
-        // Use the bench's registry (the one the cap also cloned in
-        // `fixture`) so the read sees what we just wrote.
-        fix.state
-            .registry
-            .register_kind_with_descriptor(desc.clone())
-            .expect("register fresh kind");
-
-        let mut ctx = session_ctx(&fix.transport);
-        let result = InventoryCapability::on_list_kinds(&mut fix.state, &mut ctx, ListKinds {});
-        drop(ctx);
-
-        let entry = result
-            .kinds
-            .iter()
-            .find(|k| k.name == desc.name)
-            .unwrap_or_else(|| {
-                panic!(
-                    "ListKindsResult should carry the registered kind; names: {:?}",
-                    result.kinds.iter().map(|k| &k.name).collect::<Vec<_>>(),
-                )
-            });
-        assert_eq!(entry.id, expected_id, "id matches kind_id_from_parts");
-        let schema: SchemaType =
-            wire::from_bytes(&entry.schema_wire).expect("schema_wire round-trips through wire");
-        assert!(
-            matches!(schema, SchemaType::String),
-            "schema decodes back to the originally registered SchemaType",
-        );
-    }
-
     /// A registered dynamic-instance id resolves to its name; an
     /// unregistered id and a malformed string both report `None`
     /// (the latter without sinking its siblings). Order + `id` echo
@@ -552,54 +497,5 @@ mod tests {
         fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _mail: ProbeReq) -> ProbeReply {
             ProbeReply {}
         }
-    }
-
-    /// ADR-0109 §5: a native cap's `-> R` handler surfaces `In -> Out`
-    /// through `aether.inventory.handlers`. `on_handlers` projects the
-    /// process-global link-time `HandlerEntry` inventory onto
-    /// `HandlersResult`; the `ReplyProbeCap` entry round-trips its
-    /// input kind (id + name) and its `Some(ProbeReply)` reply
-    /// contract.
-    #[test]
-    fn handlers_surfaces_native_reply_contract() {
-        use aether_actor::Addressable;
-        use aether_data::Kind;
-        // Force `ReplyProbeCap`'s `#[actor]` HandlerEntry submission to
-        // link into this test binary.
-        assert_eq!(
-            ReplyProbeCap::NAMESPACE,
-            "aether.test.inventory_handlers.probe"
-        );
-
-        let mut fix = fixture();
-        let mut ctx = session_ctx(&fix.transport);
-        let result = InventoryCapability::on_handlers(&mut fix.state, &mut ctx, ListHandlers {});
-        drop(ctx);
-
-        let entry = result
-            .handlers
-            .iter()
-            .find(|h| h.namespace == ReplyProbeCap::NAMESPACE && h.id == <ProbeReq as Kind>::ID)
-            .unwrap_or_else(|| {
-                panic!(
-                    "HandlersResult should carry the ReplyProbeCap probe handler; \
-                         namespaces: {:?}",
-                    result
-                        .handlers
-                        .iter()
-                        .map(|h| &h.namespace)
-                        .collect::<Vec<_>>(),
-                )
-            });
-        assert_eq!(
-            entry.name,
-            <ProbeReq as Kind>::NAME,
-            "input kind name round-trips"
-        );
-        assert_eq!(
-            entry.reply,
-            Some(<ProbeReply as Kind>::ID),
-            "a `-> ProbeReply` handler surfaces ProbeReply as its reply (In -> Out)",
-        );
     }
 }

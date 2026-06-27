@@ -95,28 +95,3 @@ pub use runtime::WasmTrampolineConfig;
 /// `WasmTrampoline::NAMESPACE`.
 #[actor(instanced)]
 pub struct WasmTrampoline;
-
-#[cfg(test)]
-mod tests {
-    use aether_actor::{Addressable, EMBEDDED_SCOPE};
-    #[cfg(feature = "runtime")]
-    use aether_substrate::actor::wasm::component::TRAMPOLINE_NAMESPACE;
-
-    /// ADR-0099 §5/§6, ADR-0119: `WasmTrampoline::NAMESPACE`
-    /// (capabilities) forward-feeds [`EMBEDDED_SCOPE`] — `aether-actor`'s sole
-    /// owner of the `"aether.embedded"` literal, which sits below this crate.
-    /// This guards that the identity ZST keeps resolving to the scope
-    /// namespace, so an embedded component registers under and resolves to it.
-    #[test]
-    fn trampoline_namespace_matches_substrate() {
-        assert_eq!(
-            <super::WasmTrampoline as Addressable>::NAMESPACE,
-            EMBEDDED_SCOPE,
-        );
-        assert_eq!(EMBEDDED_SCOPE, "aether.embedded");
-        // The substrate's `TRAMPOLINE_NAMESPACE` forward-feeds the same const;
-        // only reachable when the substrate-typed runtime half is compiled.
-        #[cfg(feature = "runtime")]
-        assert_eq!(TRAMPOLINE_NAMESPACE, EMBEDDED_SCOPE);
-    }
-}

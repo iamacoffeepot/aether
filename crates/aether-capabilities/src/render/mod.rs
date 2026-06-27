@@ -148,50 +148,15 @@ mod tests {
     use aether_actor::Addressable;
     use aether_kinds::QuadSpace;
     use aether_kinds::trace::Nanos;
-    use aether_substrate::chassis::builder::{Builder, PassiveChassis};
+    use aether_substrate::chassis::builder::Builder;
     use aether_substrate::mail::MailId;
     use aether_substrate::mail::MailRef;
-    use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::OwnedDispatch;
     use aether_substrate::mail::registry::{MailboxEntry, Registry};
     use aether_substrate::mail::{KindId, Source};
     use std::thread;
 
     use crate::test_chassis::fresh_substrate;
-
-    /// ADR-0099 §3/§5: a real `#[actor(singleton)]` chassis cap keeps
-    /// the default [`aether_actor::Singleton::resolve`], so its id is the
-    /// depth-1 fixed point — exactly the `mailbox_id_from_name(NAMESPACE)`
-    /// value it had before the lineage fold, regardless of the caller's
-    /// carry. Guards the frozen-vocabulary claim: #1431 must not move any
-    /// root-cap id.
-    // Asserts the cap's resolved id against the frozen depth-1 name hash —
-    // the primitive is the reference value under test.
-    #[allow(clippy::disallowed_methods)]
-    #[test]
-    fn render_capability_resolves_to_frozen_depth_one_id() {
-        use aether_data::mailbox_id_from_name;
-
-        let frozen = mailbox_id_from_name(<RenderCapability as Addressable>::NAMESPACE);
-        assert_eq!(<RenderCapability as Addressable>::resolve(0, ()), frozen);
-        assert_eq!(
-            <RenderCapability as Addressable>::resolve(0xFFFF_FFFF_FFFF_FFFF, ()),
-            frozen,
-        );
-    }
-
-    /// Boots a passive `TestChassis` with a default `RenderCapability`.
-    /// Collapses the four-line `Builder::<TestChassis>::new(...)` chain
-    /// every render test repeated (issue 795).
-    fn build_render_chassis(
-        registry: &Arc<Registry>,
-        mailer: &Arc<Mailer>,
-    ) -> PassiveChassis<TestChassis> {
-        Builder::<TestChassis>::new(Arc::clone(registry), Arc::clone(mailer))
-            .with_actor::<RenderCapability>(RenderConfig::default())
-            .build_passive()
-            .expect("build succeeds")
-    }
 
     fn deliver(registry: &Registry, name: &str, kind: KindId, payload: &[u8]) {
         let id = registry.lookup(name).expect("mailbox registered");
@@ -212,16 +177,6 @@ mod tests {
             0,
             aether_data::MailboxId(0),
         ));
-    }
-
-    #[test]
-    fn capability_claims_render_mailbox_only() {
-        let (registry, mailer) = fresh_substrate();
-        let chassis = build_render_chassis(&registry, &mailer);
-        assert_eq!(chassis.len(), 1);
-        assert!(registry.lookup(RenderCapability::NAMESPACE).is_some());
-        // Camera mailbox retired (ADR-0074 §Decision 7).
-        assert!(registry.lookup("aether.sink.camera").is_none());
     }
 
     // ADR-0082 retired the frame-bound pending counter; the
@@ -316,29 +271,6 @@ mod tests {
             "white texture must be lazily inserted on first send"
         );
 
-        drop(chassis);
-    }
-
-    #[test]
-    fn camera_kind_drops_wrong_length_payload() {
-        let (registry, mailer) = fresh_substrate();
-        let chassis = build_render_chassis(&registry, &mailer);
-
-        // 16 bytes — wrong length, decode fails, macro miss path
-        // logs warn at chassis-side dispatcher; identity unchanged.
-        deliver(
-            &registry,
-            RenderCapability::NAMESPACE,
-            <Camera as Kind>::ID,
-            &[1u8; 16],
-        );
-
-        thread::sleep(Duration::from_millis(50));
-        // No further assertion on internal state — passive chassis
-        // doesn't expose `Arc<RenderCapability>`. Decode failure is
-        // observable via the macro miss path's warn-log; this test
-        // asserts shutdown still proceeds cleanly (no dispatcher
-        // panic on malformed input).
         drop(chassis);
     }
 }

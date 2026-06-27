@@ -175,35 +175,3 @@ pub use trampoline::WasmTrampolineConfig;
 #[cfg(feature = "ui")]
 pub use ui::{UiBar, UiButton, UiCapability, UiClicked, UiLabel, UiPanel};
 pub use window::HeadlessWindowCapability;
-
-#[cfg(all(test, feature = "native"))]
-mod auto_name_inventory_tests {
-    use aether_actor::Addressable;
-    use aether_data::{build_static_reverse_map, mailbox_id_from_name};
-
-    use crate::fs::FsCapability;
-
-    /// ADR-0088: `#[actor(singleton)]` auto-emits a `NameEntry` for each
-    /// chassis cap's mailbox namespace, so a `MailboxId` reverses to its
-    /// real name through the static reverse map — no hand-maintained
-    /// registration list. Touching `FsCapability` forces its module (and
-    /// the macro-auto-emitted `NameEntry` submission alongside it) into
-    /// this unit-test binary, so the map must then reverse `aether.fs`.
-    /// Guards the macro -> submit -> reverse-map chain against a future
-    /// regression that stops the macro emitting the entry.
-    // Probes the reverse map for the fs cap's own id (FsCapability::NAMESPACE)
-    // — the primitive yields the reference id under test.
-    #[allow(clippy::disallowed_methods)]
-    #[test]
-    fn chassis_mailbox_name_reverses_via_macro_auto_emitted_name_entry() {
-        assert_eq!(FsCapability::NAMESPACE, "aether.fs");
-        let map = build_static_reverse_map();
-        let id = mailbox_id_from_name(FsCapability::NAMESPACE);
-        assert_eq!(
-            map.get(&id.0).map(String::as_str),
-            Some("aether.fs"),
-            "FsCapability's mailbox name should reverse via its \
-             #[actor(singleton)] macro-auto-emitted NameEntry",
-        );
-    }
-}

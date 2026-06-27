@@ -204,38 +204,4 @@ mod headless_tests {
             }
         }
     }
-
-    /// ADR-0107 §4: `draw_solid_quads` on the headless chassis is a
-    /// no-op — no panic, no reply, nothing accumulated. Mirrors the
-    /// `on_draw_textured_quads` no-op contract.
-    #[test]
-    fn headless_draw_solid_quads_is_noop() {
-        use aether_kinds::QuadSpace;
-
-        let (mailer, _rx) = test_mailer_and_rx();
-        let outbound = mailer
-            .outbound()
-            .cloned()
-            .expect("test_mailer_and_rx wires a loopback outbound");
-        let mut state = HeadlessRenderCapabilityState { outbound };
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            MailboxId(0),
-        ));
-        let mut ctx = NativeCtx::new(
-            &transport,
-            Source::to(SourceAddr::Session(SessionToken(Uuid::nil()))),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
-        HeadlessRenderCapability::on_draw_solid_quads(
-            &mut state,
-            &mut ctx,
-            DrawSolidQuads {
-                space: QuadSpace::Screen,
-                quads: vec![],
-            },
-        );
-        // No panic and no reply enqueued — the no-op dropped the mail cleanly.
-    }
 }

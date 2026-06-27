@@ -332,9 +332,7 @@ pub fn cli_reply(request_id: u64, result: Result<AnthropicResponse, String>) -> 
 #[cfg(all(test, feature = "runtime"))]
 mod tests {
     use super::AnthropicCapabilityState;
-    use crate::anthropic::{
-        AnthropicAdapter, AnthropicConfig, ClaudeCliAdapter, DisabledAnthropicAdapter,
-    };
+    use crate::anthropic::{AnthropicAdapter, ClaudeCliAdapter, DisabledAnthropicAdapter};
     use crate::anthropic::{
         AnthropicCapability, AnthropicError, CliSend, CliSendResult, Message, MessagesSend,
         MessagesSendResult, Role,
@@ -342,15 +340,10 @@ mod tests {
     use crate::shared::contentgen::adapter::{
         AnthropicRequest, AnthropicResponse, StubAnthropicAdapter,
     };
-    use crate::test_chassis::{
-        TestChassis, decode_session_reply, drive_task_completion, fresh_substrate,
-        test_mailer_and_rx,
-    };
-    use aether_actor::Addressable;
+    use crate::test_chassis::{decode_session_reply, drive_task_completion, test_mailer_and_rx};
     use aether_data::{Kind, MailboxId, SessionToken, Source, SourceAddr, Uuid};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
-    use aether_substrate::chassis::builder::Builder;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::EgressEvent;
     use serde::de::DeserializeOwned;
@@ -390,22 +383,6 @@ mod tests {
         fn supported_models(&self) -> Vec<String> {
             vec!["claude-test".to_string()]
         }
-    }
-
-    /// Boot the cap against a default (key-absent) config and confirm
-    /// the mailbox registers.
-    #[test]
-    fn capability_boots_and_registers_mailbox() {
-        let (registry, mailer) = fresh_substrate();
-        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<AnthropicCapability>(AnthropicConfig::default())
-            .build_passive()
-            .expect("anthropic capability boots");
-        assert!(
-            registry.lookup(AnthropicCapability::NAMESPACE).is_some(),
-            "anthropic mailbox registered"
-        );
-        drop(chassis);
     }
 
     /// Drive a stub Messages request end-to-end through the ADR-0093

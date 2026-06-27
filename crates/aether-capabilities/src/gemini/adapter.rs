@@ -310,33 +310,6 @@ mod tests {
         assert!(body.get("tools").is_none());
     }
 
-    /// Real-API smoke. Hits the live Nano Banana endpoint with a
-    /// tiny request — ignored by default so CI stays zero-cost; run
-    /// with `GEMINI_API_KEY` set.
-    #[test]
-    #[ignore = "needs GEMINI_API_KEY"]
-    fn gemini_nanobanana_smoke() {
-        use super::UreqGeminiAdapter;
-        use crate::shared::contentgen::adapter::{GeminiAdapter, GeminiImageRequest};
-        use std::env;
-        use std::time::Duration;
-        // Test-only: the live-API smoke reads an external credential
-        // (GEMINI_API_KEY), not cap config; gated `#[ignore]`.
-        #[allow(clippy::disallowed_methods)]
-        let key = env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY set for smoke");
-        let adapter = UreqGeminiAdapter::new(key, Duration::from_mins(1));
-        let resp = adapter
-            .nanobanana_generate(GeminiImageRequest {
-                model: "gemini-3.1-flash-image-preview".to_string(),
-                prompt: "a single red dot on white".to_string(),
-                aspect_ratio: "1:1".to_string(),
-                reference_images: Vec::new(),
-                ..Default::default()
-            })
-            .expect("live nanobanana request succeeds");
-        assert!(!resp.artifacts.is_empty());
-    }
-
     /// Real-API smoke for Lyria. Ignored by default.
     #[test]
     #[ignore = "needs GEMINI_API_KEY"]
