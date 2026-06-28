@@ -8,9 +8,11 @@
 //! tools (`send_mail`, `load_component`, `replace_component`,
 //! `capture_frame`) address a specific substrate (`engine = Some`),
 //! which the hub routes through to the matching proxy. `describe_kinds`
-//! and `describe_component` answer locally — from the substrate kind
-//! inventory baked into `aether-kinds` and from a component-capability
-//! cache populated by `load_component` / `replace_component`.
+//! queries the live engine's `aether.inventory.kinds` mailbox so it
+//! surfaces capability-owned and component-defined kinds, falling back to
+//! the static substrate baseline only when no engine is reachable.
+//! `describe_component` answers locally from a component-capability cache
+//! populated by `load_component` / `replace_component`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -915,19 +917,59 @@ impl Mcp {
     }
 
     #[tool(
-        description = "List the substrate kind vocabulary — the static aether.* kinds aether-mcp ships with (not a per-engine query; component-defined kinds use describe_component). Default (no args) returns a compact [{name, shape}] JSON array where shape is a one-line field rendering — small enough to never trip the context cap and chunk-readable. prefix (case-sensitive starts_with) filters the listing to a kind family (e.g. \"aether.fs\" for just the fs kinds). full:true returns the full [{name, schema}] with the authoritative nested SchemaType; combine with prefix to bound the payload to the kinds a task needs."
+        description = "List the substrate kind vocabulary — both the static aether.* kinds and the engine's live capability + component kinds. engine_id selects which engine to query; omit it and the tool auto-resolves the sole supervised engine (the common single-substrate harness); with zero or many engines and no engine_id it returns the static substrate baseline. Default (no args) returns a compact [{name, shape}] JSON array where shape is a one-line field rendering — small and chunk-readable. prefix (case-sensitive starts_with) filters the listing to a kind family (e.g. \"aether.fs\" for just the fs kinds). full:true returns the full [{name, schema}] with the authoritative nested SchemaType; combine with prefix to bound the payload to the kinds a task needs."
     )]
     pub async fn describe_kinds(
         &self,
         Parameters(args): Parameters<DescribeKindsArgs>,
     ) -> Result<String, McpError> {
-        let all = descriptors::all();
+        // Resolve the target engine: explicit engine_id wins; when absent,
+        // auto-resolve the sole supervised engine (the single-substrate
+        // harness used in dogfood runs) so a bare describe_kinds() covers
+        // that case without requiring the caller to know the engine_id.
+        let engine = if let Some(id) = &args.engine_id {
+            Some(parse_engine_id(id)?)
+        } else {
+            let reply = self
+                .session
+                .call_one(local_envelope(ENGINE_CAP, &ListEngines {}))
+                .await
+                .map_err(internal)?;
+            let result = ListEnginesResult::decode_from_bytes(&reply.payload)
+                .ok_or_else(|| internal_msg("undecodable ListEnginesResult"))?;
+            // Auto-resolve only when exactly one engine is supervised;
+            // zero or many is ambiguous — degrade to the static baseline.
+            if result.engines.len() == 1 {
+                result
+                    .engines
+                    .into_iter()
+                    .next()
+                    .map(|e| EngineId(Uuid::parse_str(&e.engine_id).unwrap_or_default()))
+            } else {
+                None
+            }
+        };
+
+        // When an engine is in play, prefill its cache from the static
+        // baseline then refresh from the live inventory.  The merged
+        // snapshot (static ∪ capability-owned ∪ component-defined) is the
+        // authoritative source.  When no engine resolves, fall back to the
+        // static baseline unchanged.
+        let descriptors: Vec<KindDescriptor> = if let Some(e) = engine {
+            self.prefill_engine(e);
+            self.refresh_engine_kinds(e).await;
+            self.snapshot_engine_kinds(e).into_values().collect()
+        } else {
+            descriptors::all()
+        };
+
         let filtered: Vec<_> = if let Some(prefix) = &args.prefix {
-            all.into_iter()
+            descriptors
+                .into_iter()
                 .filter(|d| d.name.starts_with(prefix.as_str()))
                 .collect()
         } else {
-            all
+            descriptors
         };
         if args.full {
             json(&filtered)
@@ -3418,16 +3460,16 @@ mod tests {
         }
     }
 
-    /// `describe_kinds` is fully local — it renders the substrate kind
-    /// inventory baked into `aether-kinds`, no hub round-trip. The
-    /// default (compact) result is a non-empty JSON array of `{name,shape}`
-    /// objects.
+    /// `describe_kinds` with no `engine_id` and an empty hub returns the
+    /// substrate static inventory.  The default (compact) result is a
+    /// non-empty JSON array of `{name,shape}` objects.
     #[tokio::test]
     async fn describe_kinds_returns_the_substrate_inventory() {
         let (_chassis, port) = boot_hub();
         let mcp = connect_mcp(port);
         let out = mcp
             .describe_kinds(Parameters(DescribeKindsArgs {
+                engine_id: None,
                 prefix: None,
                 full: false,
             }))
@@ -3458,6 +3500,7 @@ mod tests {
         let mcp = connect_mcp(port);
         let out = mcp
             .describe_kinds(Parameters(DescribeKindsArgs {
+                engine_id: None,
                 prefix: Some("aether.fs".to_owned()),
                 full: false,
             }))
@@ -3485,6 +3528,7 @@ mod tests {
         let mcp = connect_mcp(port);
         let out = mcp
             .describe_kinds(Parameters(DescribeKindsArgs {
+                engine_id: None,
                 prefix: Some("aether.fs".to_owned()),
                 full: true,
             }))
@@ -3515,6 +3559,7 @@ mod tests {
         let mcp = connect_mcp(port);
         let out = mcp
             .describe_kinds(Parameters(DescribeKindsArgs {
+                engine_id: None,
                 prefix: Some("zzz.does.not.exist".to_owned()),
                 full: false,
             }))
@@ -3524,6 +3569,81 @@ mod tests {
         assert!(
             arr.is_empty(),
             "non-matching prefix should return empty array, got {arr:?}"
+        );
+    }
+
+    /// Regression guard for the `describe_kinds` live-path bug (issue 2420):
+    /// a component-defined kind that is absent from `descriptors::all()`
+    /// appears in the `describe_kinds` output when an `engine_id` is supplied
+    /// and the per-engine cache holds that kind.
+    ///
+    /// Why this catches the bug: on buggy `main` `describe_kinds` returns
+    /// `descriptors::all()` regardless of `engine_id`, so the
+    /// component-defined kind never appears. On fixed code the function reads
+    /// the engine's cache (prefill + `refresh_engine_kinds` + snapshot), which
+    /// is pre-seeded here with the component kind before the call.
+    ///
+    /// Note on the test-binary link hazard: `aether-capabilities` is a
+    /// dev-dependency, so `descriptors::all()` in the *test* binary already
+    /// materialises the capability families (`aether.fs.*`, `aether.audio.*`,
+    /// …) that the *production* binary omits.  A test that only asserts
+    /// `aether.fs.*` appears would pass on buggy `main` in this binary.
+    /// Asserting a *component-defined* kind (not a capability family) avoids
+    /// that hazard: component kinds are inherently absent from
+    /// `descriptors::all()` in both the production and the test binary.
+    ///
+    // Tripwire: describe_kinds surfaces an engine's live kinds, not just the
+    // link-time set.
+    #[tokio::test]
+    async fn describe_kinds_live_path_surfaces_component_defined_kind() {
+        use aether_data::{KindDescriptor, SchemaType};
+
+        let component_kind = KindDescriptor {
+            name: "test.issue_2420.uniquely_named_kind".to_owned(),
+            schema: SchemaType::String,
+        };
+
+        // Pre-condition: absent from the static vocabulary in both the
+        // production and the test binary — ensures the assertion below
+        // can only pass if describe_kinds reads the engine cache.
+        assert!(
+            !descriptors::all()
+                .iter()
+                .any(|d| d.name == component_kind.name),
+            "test invariant: the component kind must not be in descriptors::all()",
+        );
+
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+
+        // Use a synthetic but well-formed engine UUID so parse_engine_id
+        // accepts it; the hub doesn't supervise it, so refresh_engine_kinds
+        // fails silently (ok().and_then() path), leaving the pre-seeded
+        // entry intact.
+        let engine = EngineId(Uuid::from_u128(0x2420_dead_beef));
+        let engine_id_str = engine.0.to_string();
+
+        // Pre-seed the per-engine cache as load_component / refresh_engine_kinds
+        // would after a component with this kind is loaded.
+        mcp.merge_into_engine_cache(engine, vec![component_kind.clone()]);
+
+        let out = mcp
+            .describe_kinds(Parameters(DescribeKindsArgs {
+                engine_id: Some(engine_id_str),
+                prefix: None,
+                full: false,
+            }))
+            .await
+            .expect("describe_kinds ok with engine_id");
+        let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+        assert!(
+            arr.iter()
+                .any(|e| e["name"].as_str() == Some(&component_kind.name)),
+            "describe_kinds must surface the component-defined kind from the engine cache; \
+             got names: {:?}",
+            arr.iter()
+                .filter_map(|e| e["name"].as_str())
+                .collect::<Vec<_>>(),
         );
     }
 
