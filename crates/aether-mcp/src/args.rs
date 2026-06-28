@@ -211,12 +211,15 @@ pub struct DeadEngineInfo {
     pub rpc_port: u16,
     /// Why it left the supervised list: `"terminated"` (a deliberate
     /// `terminate_substrate`), `"crashed"` (the substrate closed its RPC
-    /// connection on its own), or `"evicted"` (it missed the liveness
-    /// heartbeat past the hub's miss limit).
+    /// connection on its own), `"evicted"` (it missed the liveness
+    /// heartbeat past the hub's miss limit), or `"spawn_failed"` (a spawn
+    /// that never connected — the substrate failed to come up, so it was
+    /// never registered alive).
     pub reason: String,
     /// Specifics for the reason — the connection-close detail for
     /// `"crashed"`, the `heartbeat miss limit N of M` count for
-    /// `"evicted"`, empty for a clean `"terminated"`.
+    /// `"evicted"`, the proxy connect / boot error for `"spawn_failed"`,
+    /// empty for a clean `"terminated"`.
     pub detail: String,
     /// Milliseconds since the hub removed it from the supervised list.
     pub died_age_millis: u64,

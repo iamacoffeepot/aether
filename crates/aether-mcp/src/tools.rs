@@ -194,7 +194,7 @@ impl Mcp {
 #[tool_router]
 impl Mcp {
     #[tool(
-        description = "List every engine the hub currently supervises, plus a recently-died sidecar. Returns an object {engines, recently_died}: each `engines` item reports the engine_id (pass it to send_mail / terminate_substrate) and the localhost RPC port the hub assigned its substrate; each `recently_died` item reports a departed engine with why it left — reason \"terminated\" (a deliberate terminate_substrate), \"crashed\" (the substrate closed its connection), or \"evicted\" (a missed-heartbeat eviction) — plus a detail string and how long ago it left, so a clean shutdown is distinguishable from a failure."
+        description = "List every engine the hub currently supervises, plus a recently-died sidecar. Returns an object {engines, recently_died}: each `engines` item reports the engine_id (pass it to send_mail / terminate_substrate) and the localhost RPC port the hub assigned its substrate; each `recently_died` item reports a departed engine with why it left — reason \"terminated\" (a deliberate terminate_substrate), \"crashed\" (the substrate closed its connection), \"evicted\" (a missed-heartbeat eviction), or \"spawn_failed\" (a spawn that never connected — the substrate failed to come up) — plus a detail string and how long ago it left, so a clean shutdown is distinguishable from a failure."
     )]
     pub async fn list_engines(&self) -> Result<String, McpError> {
         let reply = self
@@ -234,7 +234,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Fork+exec a substrate binary as a child of the hub, resolved from the hub's content-addressed binary store (ADR-0115) — not a host path. Pass `selector` to pick the binary: a content `hash`, a `name@version`, or a `name` (upload_binary first if it isn't stored). Omit `selector` for `default` — the headless chassis — so a bare spawn_substrate with no arguments returns a working engine. When `selector` is omitted you may instead attribute-query with `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (linked-cap superset), and `target` (build triple). The hub resolves the selector to the stored bytes, materializes them to an executable temp file, assigns a free localhost RPC port (injected as AETHER_RPC_PORT), forks it, and connects a proxy. Returns the engine_id and rpc_port on success; errors if the selector resolves to no stored binary. Pass `components` (each {selector, name?, config_path?, export?}) to bring the engine up with those components already loaded in one call — each selector is a content hash, name, or module@actor resolved against the hub's component registry (ADR-0116; upload_component first). aether-mcp pre-resolves each selector to its wasm bytes, stages a temp boot-manifest the hub injects as AETHER_BOOT_MANIFEST, and the spawned substrate reads the staged wasm itself (single-host), so no follow-up load_component is needed."
+        description = "Fork+exec a substrate binary as a child of the hub, resolved from the hub's content-addressed binary store (ADR-0115) — not a host path. Pass `selector` to pick the binary: a content `hash`, a `name@version`, or a `name` (upload_binary first if it isn't stored). Omit `selector` for `default` — the headless chassis — so a bare spawn_substrate with no arguments returns a working engine. When `selector` is omitted you may instead attribute-query with `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (linked-cap superset), and `target` (build triple). The hub resolves the selector to the stored bytes, materializes them to an executable temp file, assigns a free localhost RPC port (injected as AETHER_RPC_PORT), forks it, and connects a proxy. Returns the engine_id and rpc_port on success; errors if the selector resolves to no stored binary or the substrate fails to come up. A spawn that fails after the hub allocated an engine_id carries that id in the error (and records a matching spawn_failed entry in list_engines.recently_died), so you can correlate and reap rather than guess. Pass `components` (each {selector, name?, config_path?, export?}) to bring the engine up with those components already loaded in one call — each selector is a content hash, name, or module@actor resolved against the hub's component registry (ADR-0116; upload_component first). aether-mcp pre-resolves each selector to its wasm bytes, stages a temp boot-manifest the hub injects as AETHER_BOOT_MANIFEST, and the spawned substrate reads the staged wasm itself (single-host), so no follow-up load_component is needed."
     )]
     pub async fn spawn_substrate(
         &self,
@@ -287,7 +287,19 @@ impl Mcp {
                 // A just-spawned engine is alive as of now.
                 last_heartbeat_age_millis: 0,
             },
-            Some(SpawnEngineResult::Err { error }) => return Err(internal_msg(&error)),
+            Some(SpawnEngineResult::Err { engine_id, error }) => {
+                // Carry the allocated engine_id (when the failure came
+                // after the hub minted one) so the caller can correlate
+                // the failed spawn against its `recently_died` entry and
+                // reap it rather than guessing.
+                let message = match engine_id {
+                    Some(id) => format!(
+                        "{error} (engine_id {id} — see this id's spawn_failed entry in list_engines.recently_died)"
+                    ),
+                    None => error,
+                };
+                return Err(internal_msg(&message));
+            }
             None => return Err(internal_msg("undecodable SpawnEngineResult")),
         };
 
@@ -2261,6 +2273,7 @@ fn death_reason_parts(reason: DeathReason) -> (String, String) {
         DeathReason::Terminated => ("terminated".to_owned(), String::new()),
         DeathReason::Crashed { detail } => ("crashed".to_owned(), detail),
         DeathReason::Evicted { detail } => ("evicted".to_owned(), detail),
+        DeathReason::SpawnFailed { detail } => ("spawn_failed".to_owned(), detail),
     }
 }
 

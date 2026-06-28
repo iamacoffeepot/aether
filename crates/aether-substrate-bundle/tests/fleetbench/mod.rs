@@ -351,7 +351,7 @@ impl FleetBench {
         let payload = single_reply(&replies, "SpawnEngine");
         let engine_id = match SpawnEngineResult::decode_from_bytes(&payload) {
             Some(SpawnEngineResult::Ok { engine_id, .. }) => engine_id,
-            Some(SpawnEngineResult::Err { error }) => panic!("spawn_headless failed: {error}"),
+            Some(SpawnEngineResult::Err { error, .. }) => panic!("spawn_headless failed: {error}"),
             None => panic!("undecodable SpawnEngineResult"),
         };
         let engine = EngineId(Uuid::parse_str(&engine_id).expect("engine_id parses as a UUID"));

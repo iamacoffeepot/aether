@@ -322,7 +322,7 @@ mod tests {
             },
         );
         match result {
-            SpawnEngineResult::Err { error } => {
+            SpawnEngineResult::Err { error, .. } => {
                 assert!(
                     error.contains("no binary in the registry matched selector"),
                     "unexpected error: {error}"

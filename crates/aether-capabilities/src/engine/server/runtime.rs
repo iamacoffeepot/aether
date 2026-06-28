@@ -146,6 +146,30 @@ impl EngineServerState {
             died_at: Instant::now(),
         });
     }
+
+    /// Record a post-allocation spawn failure (issue 2423): write a
+    /// `SpawnFailed` death keyed by `engine_id` to the recently-died ring
+    /// and return the id-bearing `Err` so a caller can correlate and
+    /// reap. For the failures after an `engine_id` has been minted but
+    /// before the engine was ever registered alive.
+    fn fail_spawn(
+        &mut self,
+        engine_id: EngineId,
+        rpc_port: u16,
+        error: String,
+    ) -> SpawnEngineResult {
+        self.record_death(
+            engine_id.0.to_string(),
+            rpc_port,
+            DeathReason::SpawnFailed {
+                detail: error.clone(),
+            },
+        );
+        SpawnEngineResult::Err {
+            engine_id: Some(engine_id.0.to_string()),
+            error,
+        }
+    }
 }
 
 #[runtime]
@@ -243,8 +267,13 @@ impl NativeActor for EngineServer {
     /// RPC server, injects it as `AETHER_RPC_PORT`, forks the realized
     /// binary, then boots an `aether.engine.proxy:<id>` actor that
     /// dials it. Reply: `SpawnEngineResult::Ok { engine_id, rpc_port }`
-    /// on success, or `Err { error }` if the selector resolves to no
-    /// stored binary, the fork fails, or the substrate never comes up.
+    /// on success, or `Err { engine_id, error }` if the selector
+    /// resolves to no stored binary, the fork fails, or the substrate
+    /// never comes up. A post-allocation failure carries the allocated
+    /// `engine_id` (`Some`) and records a `SpawnFailed` death in the
+    /// recently-died ring, so a caller can correlate and reap; a
+    /// pre-allocation failure (selector miss, port allocation) carries
+    /// `None`.
     #[handler]
     fn on_spawn(
         state: &mut Self::State,
@@ -255,7 +284,10 @@ impl NativeActor for EngineServer {
         // any side effect, so a miss returns without reserving a port
         // or burning an engine id (ADR-0115, #1954).
         let Some(artifact) = resolve_selector(&mut state.store, &mail.selector) else {
+            // Pre-allocation failure: no engine id minted yet, so there
+            // is nothing to correlate or reap — `engine_id` is `None`.
             return SpawnEngineResult::Err {
+                engine_id: None,
                 error: format!(
                     "no binary in the registry matched selector {:?}",
                     mail.selector
@@ -273,13 +305,21 @@ impl NativeActor for EngineServer {
         // geometrically. Any non-re-forkable failure returns
         // immediately. The proxy already kills the child it owns on a
         // failed init, so an abandoned attempt leaves no orphan.
+        //
+        // Each terminal post-allocation failure records a `SpawnFailed`
+        // death and carries the minted `engine_id` back (issue 2423) so a
+        // caller can correlate and reap; a transient re-forked attempt is
+        // recovered, not a real death, so it records nothing.
         let attempts = state.spawn_attempts;
         let mut last_error = String::new();
         for attempt in 0..attempts {
             let rpc_port = match free_local_port() {
                 Ok(port) => port,
                 Err(e) => {
+                    // Still pre-allocation — no engine id minted this
+                    // attempt, so no death record and `engine_id` is `None`.
                     return SpawnEngineResult::Err {
+                        engine_id: None,
                         error: format!("could not allocate an RPC port: {e}"),
                     };
                 }
@@ -298,13 +338,15 @@ impl NativeActor for EngineServer {
             // path.
             let exec_path = engine_store_dir.join("substrate");
             if let Err(e) = realize_executable(&artifact.path, &exec_path) {
-                return SpawnEngineResult::Err {
-                    error: format!(
-                        "materializing binary {} to {}: {e}",
-                        artifact.hash,
-                        exec_path.display()
-                    ),
-                };
+                // Post-allocation failure: an id is minted but no engine
+                // was ever registered, so record a `SpawnFailed` death and
+                // carry the id back so a caller can correlate and reap.
+                let error = format!(
+                    "materializing binary {} to {}: {e}",
+                    artifact.hash,
+                    exec_path.display()
+                );
+                return state.fail_spawn(engine_id, rpc_port, error);
             }
 
             let mut command = Command::new(&exec_path);
@@ -323,9 +365,8 @@ impl NativeActor for EngineServer {
             let child = match command.spawn() {
                 Ok(child) => child,
                 Err(e) => {
-                    return SpawnEngineResult::Err {
-                        error: format!("failed to spawn {}: {e}", exec_path.display()),
-                    };
+                    let error = format!("failed to spawn {}: {e}", exec_path.display());
+                    return state.fail_spawn(engine_id, rpc_port, error);
                 }
             };
 
@@ -383,7 +424,7 @@ impl NativeActor for EngineServer {
                         );
                         continue;
                     }
-                    return SpawnEngineResult::Err { error: last_error };
+                    return state.fail_spawn(engine_id, rpc_port, last_error);
                 }
             }
         }
@@ -391,7 +432,10 @@ impl NativeActor for EngineServer {
         // Only reached if `attempts` is 0, which `spawn_attempts()`
         // clamps away — keep an honest terminal `Err` rather than an
         // unreachable panic.
-        SpawnEngineResult::Err { error: last_error }
+        SpawnEngineResult::Err {
+            engine_id: None,
+            error: last_error,
+        }
     }
 
     /// Terminate a supervised engine.

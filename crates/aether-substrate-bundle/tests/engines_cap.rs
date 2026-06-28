@@ -18,7 +18,7 @@ use aether_capabilities::{EngineConfig, EngineServer};
 use aether_data::{Kind, mailbox_id_from_name};
 use aether_kinds::descriptors;
 use aether_kinds::{
-    BinarySelector, ListEngines, ListEnginesResult, SpawnEngine, SpawnEngineResult,
+    BinarySelector, DeathReason, ListEngines, ListEnginesResult, SpawnEngine, SpawnEngineResult,
     TerminateEngine, TerminateEngineResult,
 };
 use aether_substrate::chassis::Chassis;
@@ -306,7 +306,7 @@ mod tests {
                 assert_ne!(rpc_port, 0, "cap should report the assigned RPC port");
                 engine_id
             }
-            SpawnEngineResult::Err { error } => panic!("spawn failed: {error}"),
+            SpawnEngineResult::Err { error, .. } => panic!("spawn failed: {error}"),
         };
         let mut reaper = EngineReaper {
             mailer: Arc::clone(&mailer),
@@ -364,5 +364,128 @@ mod tests {
 
         let _ = fs::remove_dir_all(&store_dir);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A spawn that forks a substrate which never binds its RPC port
+    /// fails after the connect budget, and that failure leaves an
+    /// observable trail: the `Err` carries the allocated `engine_id`,
+    /// and a subsequent `ListEngines` shows a `recently_died` entry with
+    /// reason `SpawnFailed` whose `engine_id` matches (issue 2423).
+    ///
+    /// Tripwire: a genuinely-failed spawn must surface an id-bearing
+    /// `Err` and a `SpawnFailed` `recently_died` record — without the
+    /// surfacing, the error carries no id (`engine_id: None`) and the
+    /// failure never reaches the ring, so a caller can't correlate and
+    /// reap the orphan.
+    #[cfg(unix)]
+    #[test]
+    fn failed_spawn_surfaces_engine_id_and_records_spawn_failed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = env::temp_dir().join(format!("aether-engcap-badspawn-{}-{nanos}", process::id()));
+        fs::create_dir_all(&dir).expect("test setup: bad-spawn temp dir");
+
+        // A stand-in chassis bin that ingests cleanly (prints a headless
+        // manifest on `--describe`) but, when forked normally, `exec`s a
+        // sleep instead of binding its `AETHER_RPC_PORT`. The proxy's
+        // dial refuses for the whole (short) connect budget, so the
+        // spawn fails after the substrate forked but never connected —
+        // the post-allocation failure this test pins. `exec` makes the
+        // sleep the direct child so the proxy's SIGKILL reaps it (no
+        // orphan).
+        let stand_in = dir.join("aether-substrate-headless");
+        fs::write(
+            &stand_in,
+            "#!/bin/sh\nif [ \"$1\" = \"--describe\" ]; then printf \
+                 '{\"chassis\":\"headless\",\"caps\":[],\"git_sha\":\"deadbee\",\
+                 \"profile\":\"debug\",\"target\":\"x86_64-unknown-linux-gnu\"}'; exit 0; fi\n\
+                 exec sleep 30\n",
+        )
+        .expect("test setup: write bad-spawn stand-in");
+        fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755))
+            .expect("test setup: chmod bad-spawn stand-in");
+
+        let store_dir = dir.join("store");
+        let root = dir.join("engines");
+        // SAFETY: nextest runs each test in its own process, so this env
+        // mutation can't race a sibling. Must precede `boot()` so the
+        // cap's `engine_store_root()` resolves to this per-run dir.
+        unsafe {
+            env::set_var("AETHER_ENGINE_STORE_ROOT", &root);
+        }
+
+        // A short connect budget so the doomed dial fails quickly rather
+        // than burning the default 30 s.
+        let config = EngineConfig {
+            binary_store_dir: Some(store_dir.to_string_lossy().into_owned()),
+            binary_bootstrap: HashSet::from([stand_in.to_string_lossy().into_owned()]),
+            proxy_connect_budget_secs: 2,
+            ..EngineConfig::default()
+        };
+        let (_chassis, mailer, cells) = boot(config);
+
+        // The spawn forks the stand-in, the proxy dials for the 2 s
+        // budget, then the cap returns Err. Deadline comfortably over
+        // the budget + fork.
+        let spawn = drive(
+            &mailer,
+            &SpawnEngine {
+                selector: default_selector(),
+                args: vec![],
+                boot_manifest: None,
+            },
+            Duration::from_secs(20),
+            || {
+                cells
+                    .spawn
+                    .lock()
+                    .expect("test setup: spawn cell mutex is never poisoned")
+                    .take()
+            },
+        );
+        let engine_id = match spawn {
+            SpawnEngineResult::Err {
+                engine_id: Some(id),
+                error,
+            } => {
+                assert!(
+                    error.contains("proxy failed to connect"),
+                    "unexpected error: {error}",
+                );
+                id
+            }
+            other => panic!("expected an id-bearing spawn Err, got {other:?}"),
+        };
+
+        // The failure is recorded as a `SpawnFailed` death keyed by the
+        // same engine_id, so a caller can correlate and reap.
+        let list = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
+            cells
+                .list
+                .lock()
+                .expect("test setup: list cell mutex is never poisoned")
+                .take()
+        });
+        assert!(
+            !list.engines.iter().any(|e| e.engine_id == engine_id),
+            "a failed spawn must not register a live engine: {list:?}",
+        );
+        let record = list
+            .recently_died
+            .iter()
+            .find(|d| d.engine_id == engine_id)
+            .unwrap_or_else(|| {
+                panic!("failed spawn {engine_id} must leave a recently_died entry: {list:?}")
+            });
+        assert!(
+            matches!(record.reason, DeathReason::SpawnFailed { .. }),
+            "a failed spawn must be recorded as SpawnFailed, got {:?}",
+            record.reason,
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
