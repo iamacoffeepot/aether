@@ -32,7 +32,7 @@
 //! [`aether_actor::wasm::bridge`] free functions instead — issue 665 retired the cross-target
 //! `MailTransport` trait that previously unified them, so each side
 //! exposes its own dispatch surface and the per-stage capability
-//! traits in `aether_actor::actor::ctx` are the only cross-target
+//! traits in `aether_actor::model::ctx` are the only cross-target
 //! abstraction.
 
 use std::any::Any;
@@ -497,7 +497,7 @@ impl NativeBinding {
 /// impl; the FFI-shaped wrapper served no purpose for native (Mailer
 /// dispatch is direct), and `save_state` / `reply_mail` were stubs the
 /// trait forced on us. The capability traits in
-/// [`aether_actor::actor::ctx`] are the only cross-target trait surface
+/// [`aether_actor::model::ctx`] are the only cross-target trait surface
 /// post-665.
 impl NativeBinding {
     /// Push a typed payload at `recipient`. Mints a fresh correlation
@@ -521,7 +521,7 @@ impl NativeBinding {
     /// the in-flight handler's lineage so the outgoing [`Mail`] picks
     /// up the correct `parent_mail` and inherited `root`. The
     /// per-handler [`super::ctx::NativeCtx`]'s
-    /// [`aether_actor::actor::ctx::MailSender`] impl reads from its
+    /// [`aether_actor::model::ctx::MailSender`] impl reads from its
     /// `in_flight_mail_id()` / `in_flight_root()` accessors and threads
     /// them in.
     ///
@@ -1146,7 +1146,7 @@ mod tests {
     #[test]
     fn mailsender_send_routes_through_resolve_not_flat_hash() {
         use crate::actor::native::ctx::NativeCtx;
-        use aether_actor::actor::HandlesKind;
+        use aether_actor::model::HandlesKind;
         use aether_actor::{Addressable, Embedded, MailSender};
         use aether_data::mailbox_id_from_name;
         use aether_kinds::Tick;

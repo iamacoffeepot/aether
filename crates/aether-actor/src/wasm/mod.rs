@@ -15,7 +15,7 @@
 //!     forwards calls to the matching `raw::*` host fn.
 //!   - [`WasmInitCtx`] / [`WasmCtx`] / [`WasmDropCtx`] — concrete per-stage
 //!     ctx structs, each impling the relevant subset of the per-stage
-//!     capability traits in [`crate::actor::ctx`].
+//!     capability traits in [`crate::model::ctx`].
 //!   - [`WasmActorMailbox<R>`] — actor-typed sender returned by
 //!     `ctx.actor::<R>()` / `ctx.resolve_actor::<R>(name)`. Lifetime-
 //!     free — the bridge free functions cover dispatch.
@@ -188,9 +188,9 @@ pub trait WasmActor:
     /// [`Lifecycle::unwire`](crate::Lifecycle::unwire). Default no-op; override to serialize state the
     /// replacement instance recovers through [`Self::on_rehydrate`].
     /// Prefer
-    /// [`WasmDropCtx::save_state_kind`][crate::actor::ctx::Persistence::save_state_kind]
+    /// [`WasmDropCtx::save_state_kind`][crate::model::ctx::Persistence::save_state_kind]
     /// to let the kind system carry schema identity; reach for the raw
-    /// [`WasmDropCtx::save_state`][crate::actor::ctx::Persistence::save_state]
+    /// [`WasmDropCtx::save_state`][crate::model::ctx::Persistence::save_state]
     /// only when persisting a non-kind blob or driving an explicit
     /// migration off the leading id.
     ///

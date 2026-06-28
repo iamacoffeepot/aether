@@ -40,7 +40,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-use aether_actor::actor::{Addressable, HandlesKind};
+use aether_actor::{Addressable, HandlesKind};
 use aether_actor::{MailSender, Singleton};
 use aether_data::{Kind, MailId, mailbox_id_from_name};
 

@@ -8,7 +8,7 @@
 //! one OS thread, one `MailboxId`. Issue 665 retired the unifying
 //! `MailTransport` trait that originally tied the wasm and native
 //! halves together — the cross-target abstraction is now the
-//! per-stage capability traits in [`actor::ctx`]; the per-target
+//! per-stage capability traits in [`model::ctx`]; the per-target
 //! dispatch surfaces are [`wasm::bridge`] (wasm: `wasm::bridge::mail`,
 //! `wasm::bridge::persist`) and the inherent methods on
 //! `aether_substrate::actor::native::binding::NativeBinding`.
@@ -20,7 +20,7 @@
 //!     after issue 665 dropped the `T: MailTransport` parameter; sends
 //!     route through each ctx's send methods, not through the mailbox
 //!     itself.
-//!   - [`actor::ctx`] — per-stage capability traits ([`MailSender`],
+//!   - [`model::ctx`] — per-stage capability traits ([`MailSender`],
 //!     [`OutboundReply`], [`Persistence`]). Wasm ctxs in [`wasm::ctx`]
 //!     and substrate's `NativeCtx` family impl the relevant subset.
 //!   - [`Slot`] — single-instance backing store the consumer's
@@ -50,21 +50,21 @@ extern crate alloc;
 // Outside callers don't need this; it's a no-op for them.
 extern crate self as aether_actor;
 
-pub mod actor;
 pub mod local;
 pub mod log;
 pub mod mail;
+pub mod model;
 pub mod trace_ring;
 pub mod wasm;
 
-pub use actor::ctx::{MailSender, Manual, OutboundReply, Persistence, ReplyMode, Single, Stream};
-pub use actor::slot::Slot;
-pub use actor::{
+pub use local::Local;
+pub use model::ctx::{MailSender, Manual, OutboundReply, Persistence, ReplyMode, Single, Stream};
+pub use model::slot::Slot;
+pub use model::{
     Actor, Addressable, EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced, Lifecycle,
     Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Resolve, Singleton, Subname,
     validate_namespace_segment,
 };
-pub use local::Local;
 // Issue 665: `Mailbox<K, T>` and `ActorMailbox<'_, R, T>` retired; the
 // surviving [`mail::mailbox::Mailbox<K>`] is a transport-free
 // addressing token. Per-side actor-typed mailboxes live next to their

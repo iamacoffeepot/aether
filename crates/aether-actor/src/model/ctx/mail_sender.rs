@@ -21,7 +21,7 @@
 
 use aether_data::Kind;
 
-use crate::actor::{HandlesKind, Singleton};
+use crate::model::{HandlesKind, Singleton};
 
 /// Outbound-mail surface every actor ctx exposes.
 ///
