@@ -251,6 +251,7 @@ impl NativeActor for EngineProxy {
             wake_kind,
             retry,
             config.connect_budget,
+            config.spawned.as_mut(),
         ) {
             Ok(conn) => conn,
             Err(e) => {

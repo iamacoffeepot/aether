@@ -70,6 +70,13 @@ mod sinks;
 #[cfg(not(target_family = "wasm"))]
 pub use config::{EngineProxyConfig, HeartbeatParams};
 
+// The engines cap (`aether.engine`) classifies a failed `spawn_child`
+// with this to decide whether to re-fork on a fresh port (a stolen-port
+// child-exited death) or report a dead spawn. Native-only — it names
+// `SpawnError` / `BootError`.
+#[cfg(not(target_family = "wasm"))]
+pub use connect::is_reforkable_spawn_failure;
+
 /// `aether.engine.proxy:<id>` cap **identity** (ADR-0122 identity/runtime
 /// split). A ZST carrying only the addressing — `Addressable` (`NAMESPACE`,
 /// `Resolver`), the per-handler `HandlesKind` markers, and the instanced

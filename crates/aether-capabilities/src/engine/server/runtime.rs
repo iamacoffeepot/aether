@@ -10,7 +10,9 @@
 use super::{EngineConfig, EngineServer};
 pub use crate::engine::kinds::ForwardEnvelope;
 use crate::engine::kinds::{EngineAlive, EngineDied, RouteEnvelope};
-pub use crate::engine::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams};
+pub use crate::engine::proxy::{
+    EngineProxy, EngineProxyConfig, HeartbeatParams, is_reforkable_spawn_failure,
+};
 pub use crate::engine::store::{ArtifactStore, LAYOUT_VERSION_DIR};
 use aether_actor::runtime;
 pub use aether_data::{EngineId, Kind, MailboxId, Uuid};
@@ -105,6 +107,13 @@ pub struct EngineServerState {
     /// (issue 2072), resolved once from `EngineConfig` at init.
     /// `Some(d)` caps the retry; `None` is the wait-forever sentinel.
     pub(super) connect_budget: Option<Duration>,
+    /// How many times `on_spawn` re-forks a substrate on a fresh port
+    /// before giving up (issue 2422), resolved once from `EngineConfig`
+    /// at init. A freshly-forked substrate can lose its guessed RPC
+    /// port to another socket in `free_local_port`'s TOCTOU window and
+    /// exit on a fatal bind; a re-fork on a fresh port escapes it.
+    /// Clamped to at least 1.
+    pub(super) spawn_attempts: u32,
     /// Bounded ring of the last [`RECENTLY_DIED_CAP`] engines that
     /// left the table and why (issue 1906). `on_terminate` /
     /// `on_engine_died` push a [`DeadRecord`] at the removal site;
@@ -174,6 +183,7 @@ impl NativeActor for EngineServer {
             mailer: ctx.mailer(),
             heartbeat: config.heartbeat_params(),
             connect_budget: config.connect_budget(),
+            spawn_attempts: config.spawn_attempts(),
             recently_died: VecDeque::new(),
             store,
         })
@@ -253,98 +263,135 @@ impl NativeActor for EngineServer {
             };
         };
 
-        let rpc_port = match free_local_port() {
-            Ok(port) => port,
-            Err(e) => {
-                return SpawnEngineResult::Err {
-                    error: format!("could not allocate an RPC port: {e}"),
-                };
-            }
-        };
-
-        // Allocate a unique scratch subdirectory per spawned engine to
-        // hold its materialized executable.
-        let engine_id = EngineId(Uuid::from_u128(state.next_engine_seq));
-        state.next_engine_seq += 1;
-        let engine_store_dir = engine_store_root().join(engine_id.0.simple().to_string());
-
-        // Stored bytes are content-addressed and not directly
-        // fork-exec'able, so materialize the resolved entry to an
-        // executable temp file under this engine's scratch dir and fork
-        // that (ADR-0115 §Execution); the caller never sees the path.
-        let exec_path = engine_store_dir.join("substrate");
-        if let Err(e) = realize_executable(&artifact.path, &exec_path) {
-            return SpawnEngineResult::Err {
-                error: format!(
-                    "materializing binary {} to {}: {e}",
-                    artifact.hash,
-                    exec_path.display()
-                ),
+        // Bounded re-fork (issue 2422): a freshly-forked substrate can
+        // lose its guessed RPC port to another socket in
+        // `free_local_port`'s TOCTOU window and exit on its fatal bind,
+        // surfacing as a child-exited-during-startup failure. Each
+        // attempt allocates a *fresh* port (and engine id / scratch
+        // dir) and re-forks; the theft is per-port and independent
+        // across attempts, so N attempts drop the failure probability
+        // geometrically. Any non-re-forkable failure returns
+        // immediately. The proxy already kills the child it owns on a
+        // failed init, so an abandoned attempt leaves no orphan.
+        let attempts = state.spawn_attempts;
+        let mut last_error = String::new();
+        for attempt in 0..attempts {
+            let rpc_port = match free_local_port() {
+                Ok(port) => port,
+                Err(e) => {
+                    return SpawnEngineResult::Err {
+                        error: format!("could not allocate an RPC port: {e}"),
+                    };
+                }
             };
-        }
 
-        let mut command = Command::new(&exec_path);
-        command
-            .args(&mail.args)
-            .env("AETHER_RPC_PORT", rpc_port.to_string())
-            .stdin(Stdio::null());
-        // A spawn carrying a component list rides in as a boot-manifest
-        // path; inject it the same way as the RPC port so the spawned
-        // chassis reads the listed wasm itself and comes up with those
-        // components already loading (issue 1776).
-        if let Some(boot_manifest) = &mail.boot_manifest {
-            command.env("AETHER_BOOT_MANIFEST", boot_manifest);
-        }
-        let child = match command.spawn() {
-            Ok(child) => child,
-            Err(e) => {
+            // Allocate a unique scratch subdirectory per attempt to
+            // hold its materialized executable.
+            let engine_id = EngineId(Uuid::from_u128(state.next_engine_seq));
+            state.next_engine_seq += 1;
+            let engine_store_dir = engine_store_root().join(engine_id.0.simple().to_string());
+
+            // Stored bytes are content-addressed and not directly
+            // fork-exec'able, so materialize the resolved entry to an
+            // executable temp file under this engine's scratch dir and
+            // fork that (ADR-0115 §Execution); the caller never sees the
+            // path.
+            let exec_path = engine_store_dir.join("substrate");
+            if let Err(e) = realize_executable(&artifact.path, &exec_path) {
                 return SpawnEngineResult::Err {
-                    error: format!("failed to spawn {}: {e}", exec_path.display()),
+                    error: format!(
+                        "materializing binary {} to {}: {e}",
+                        artifact.hash,
+                        exec_path.display()
+                    ),
                 };
             }
-        };
 
-        let subname = engine_id.0.simple().to_string();
-        let rpc_addr = format!("127.0.0.1:{rpc_port}");
+            let mut command = Command::new(&exec_path);
+            command
+                .args(&mail.args)
+                .env("AETHER_RPC_PORT", rpc_port.to_string())
+                .stdin(Stdio::null());
+            // A spawn carrying a component list rides in as a
+            // boot-manifest path; inject it the same way as the RPC port
+            // so the spawned chassis reads the listed wasm itself and
+            // comes up with those components already loading (issue
+            // 1776).
+            if let Some(boot_manifest) = &mail.boot_manifest {
+                command.env("AETHER_BOOT_MANIFEST", boot_manifest);
+            }
+            let child = match command.spawn() {
+                Ok(child) => child,
+                Err(e) => {
+                    return SpawnEngineResult::Err {
+                        error: format!("failed to spawn {}: {e}", exec_path.display()),
+                    };
+                }
+            };
 
-        // `finish()` runs `EngineProxy::init` on this thread: it
-        // dials the substrate (retrying while it comes up) and, on
-        // failure, kills the child it was handed — so a failed
-        // spawn never leaves an orphan for the cap to clean up.
-        let result = ctx
-            .spawn_child::<EngineProxy>(
-                Subname::Named(&subname),
-                EngineProxyConfig {
-                    engine_id,
-                    rpc_addr,
-                    spawned: Some(child),
-                    heartbeat: state.heartbeat,
-                    connect_budget: state.connect_budget,
-                },
-            )
-            .finish();
+            let subname = engine_id.0.simple().to_string();
+            let rpc_addr = format!("127.0.0.1:{rpc_port}");
 
-        match result {
-            Ok(proxy_mailbox) => {
-                state.engines.insert(
-                    engine_id,
-                    EngineEntry {
-                        proxy_mailbox,
-                        rpc_port,
-                        // Just connected = alive; the heartbeat
-                        // refreshes this on each confirmed Pong.
-                        last_alive: Instant::now(),
+            // `finish()` runs `EngineProxy::init` on this thread: it
+            // dials the substrate (retrying while it comes up) and, on
+            // failure, kills the child it was handed — so a failed
+            // spawn never leaves an orphan for the cap to clean up.
+            let result = ctx
+                .spawn_child::<EngineProxy>(
+                    Subname::Named(&subname),
+                    EngineProxyConfig {
+                        engine_id,
+                        rpc_addr,
+                        spawned: Some(child),
+                        heartbeat: state.heartbeat,
+                        connect_budget: state.connect_budget,
                     },
-                );
-                SpawnEngineResult::Ok {
-                    engine_id: engine_id.0.to_string(),
-                    rpc_port,
+                )
+                .finish();
+
+            match result {
+                Ok(proxy_mailbox) => {
+                    state.engines.insert(
+                        engine_id,
+                        EngineEntry {
+                            proxy_mailbox,
+                            rpc_port,
+                            // Just connected = alive; the heartbeat
+                            // refreshes this on each confirmed Pong.
+                            last_alive: Instant::now(),
+                        },
+                    );
+                    return SpawnEngineResult::Ok {
+                        engine_id: engine_id.0.to_string(),
+                        rpc_port,
+                    };
+                }
+                Err(e) => {
+                    last_error = format!("proxy failed to connect to the spawned substrate: {e:?}");
+                    // Re-fork only the bind-stolen-port child-exited
+                    // death, and only if attempts remain. Any other
+                    // failure is terminal — re-forking it would just
+                    // burn the budget again.
+                    if is_reforkable_spawn_failure(&e) && attempt + 1 < attempts {
+                        tracing::warn!(
+                            target: "aether_substrate::engine_server",
+                            engine_id = %engine_id.0,
+                            rpc_port,
+                            attempt = attempt + 1,
+                            attempts,
+                            "engine spawn: substrate exited during startup (likely a stolen RPC port); re-forking on a fresh port",
+                        );
+                        continue;
+                    }
+                    return SpawnEngineResult::Err { error: last_error };
                 }
             }
-            Err(e) => SpawnEngineResult::Err {
-                error: format!("proxy failed to connect to the spawned substrate: {e:?}"),
-            },
         }
+
+        // Only reached if `attempts` is 0, which `spawn_attempts()`
+        // clamps away — keep an honest terminal `Err` rather than an
+        // unreachable panic.
+        SpawnEngineResult::Err { error: last_error }
     }
 
     /// Terminate a supervised engine.
