@@ -28,8 +28,8 @@ Much of what you'd want from "reference" is better asked of a live engine than
 read from a doc, because the engine can't drift from itself:
 
 - `describe_kinds` — the static substrate kind vocabulary with full schemas.
-- `describe_component(engine_id, mailbox_id)` — a loaded component's handler
-  kinds and per-handler docs.
+- `describe_component(engine_id, component)` — a loaded component's handler
+  kinds and per-handler docs, addressed by lineage name (or a `mbx-` id).
 - `describe_transforms` — the native `#[transform]` functions linked at build
   time.
 - `actor_logs(engine_id, mailbox_name)` — recent entries from one actor's log

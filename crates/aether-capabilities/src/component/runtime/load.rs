@@ -15,7 +15,6 @@ use wasmtime::Module;
 
 use aether_substrate::actor::native::{NativeCtx, spawn::Subname};
 use aether_substrate::actor::wasm::kind_manifest;
-use aether_substrate::mail::capability::MailboxCaps;
 use aether_substrate::mail::helpers::register_or_match_all;
 
 use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
@@ -171,10 +170,9 @@ impl ComponentHostCapabilityState {
         // both transport flavours. `aether.component.replace`
         // re-registers (same mailbox id); `aether.component.drop`
         // clears.
-        self.mailer.capability_registry().register(
-            mailbox_id,
-            MailboxCaps::from_component_capabilities(&capabilities),
-        );
+        self.mailer
+            .capability_registry()
+            .register(mailbox_id, &capabilities);
 
         // iamacoffeepot/aether#1128: the per-handler cost cells are
         // seeded inside `WasmTrampoline::init` (run just above, under
