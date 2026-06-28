@@ -33,7 +33,6 @@ use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::MailboxId;
-use crate::mail::capability::MailboxCaps;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
@@ -548,10 +547,9 @@ impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
         // macro overrides to enumerate the cap's handlers; the default
         // (empty) covers any cap the macro didn't touch.
         let capabilities = A::capabilities();
-        ctx.mail_send_handle().capability_registry().register(
-            resources.mailbox_id,
-            MailboxCaps::from_component_capabilities(&capabilities),
-        );
+        ctx.mail_send_handle()
+            .capability_registry()
+            .register(resources.mailbox_id, &capabilities);
 
         // iamacoffeepot/aether#1128: seed this native cap's per-handler
         // cost cells into the global `CostTable` (same hook as the

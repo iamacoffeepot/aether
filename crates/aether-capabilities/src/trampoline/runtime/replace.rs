@@ -9,7 +9,6 @@ use aether_substrate::actor::native::spawn::Subname;
 use aether_substrate::actor::wasm::component::{Component, ComponentCtx, PendingSpawn};
 use aether_substrate::actor::wasm::kind_manifest;
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
-use aether_substrate::mail::capability::MailboxCaps;
 use aether_substrate::mail::{CostCells, KindId};
 use wasmtime::Module;
 
@@ -269,10 +268,9 @@ impl WasmTrampolineState {
         // mailbox id is stable across replace (ADR-0022 §4), so
         // `register` overwrites the prior entry — the validator
         // sees the new accept-set immediately.
-        self.mailer.capability_registry().register(
-            self.mailbox,
-            MailboxCaps::from_component_capabilities(&capabilities),
-        );
+        self.mailer
+            .capability_registry()
+            .register(self.mailbox, &capabilities);
 
         // iamacoffeepot/aether#1128: re-seed the per-handler cost
         // cells against the post-replace handler set, into BOTH

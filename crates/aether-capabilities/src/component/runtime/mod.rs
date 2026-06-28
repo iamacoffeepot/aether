@@ -28,8 +28,8 @@ use super::ComponentHostCapability;
 pub use self::config::ComponentHostConfig;
 
 use aether_kinds::{
-    DropComponent, ListComponents, ListComponentsResult, LoadComponent, LoadResult,
-    ReplaceComponent,
+    DescribeComponent, DescribeComponentResult, DropComponent, ListComponents,
+    ListComponentsResult, LoadComponent, LoadResult, ReplaceComponent,
 };
 
 // Crate-local wiring the `#[actor] impl` handler bodies name (sibling caps it
@@ -253,5 +253,38 @@ impl NativeActor for ComponentHostCapability {
             .map(|d| d.name)
             .collect();
         ListComponentsResult { names }
+    }
+
+    /// Introspect one loaded component's ADR-0033 receive-side
+    /// `ComponentCapabilities` by lineage `name` (iamacoffeepot/aether#2421).
+    /// Resolves `name` to its mailbox id through the routing registry, then
+    /// reads the full caps the [`CapabilityRegistry`] retains for that
+    /// mailbox.
+    ///
+    /// # Agent
+    /// `DescribeComponent { name }` to the `aether.component` mailbox, where
+    /// `name` is the lineage address `ListComponents` / `LoadResult.name`
+    /// hand back (`aether.embedded:NAME`). Reply `DescribeComponentResult::Ok
+    /// { capabilities }` carries the full handler kinds, docs, fallback, and
+    /// config kind; `Err { error }` means nothing is registered at that name.
+    /// Name-addressed so a boot-manifest-loaded component (ADR-0116), whose
+    /// spawner never receives a mailbox id, stays introspectable.
+    #[handler]
+    fn on_describe_component(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        payload: DescribeComponent,
+    ) -> DescribeComponentResult {
+        let Some(mailbox) = state.registry.lookup(&payload.name) else {
+            return DescribeComponentResult::Err {
+                error: format!("no component registered at name {}", payload.name),
+            };
+        };
+        match state.mailer.capability_registry().describe(mailbox) {
+            Some(capabilities) => DescribeComponentResult::Ok { capabilities },
+            None => DescribeComponentResult::Err {
+                error: format!("no capabilities retained for name {}", payload.name),
+            },
+        }
     }
 }

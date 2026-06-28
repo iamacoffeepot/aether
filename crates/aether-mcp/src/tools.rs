@@ -38,13 +38,13 @@ use aether_data::{
 use aether_data::{EnumVariant, Primitive, SchemaType};
 use aether_kinds::{
     BinarySelector, CaptureFrame, CaptureFrameResult, ComponentCapabilities, ComponentSelector,
-    CostTail, CostTailResult, DeathReason, FrameCheck, FrameReduction, ListComponentBinaries,
-    ListComponentBinariesResult, ListComponents, ListComponentsResult, ListEngineBinaries,
-    ListEngineBinariesResult, ListEngines, ListEnginesResult, ListKinds, ListKindsResult,
-    LoadComponent, LoadResult, NamedMail, ReplaceComponent, ReplaceResult, ResolveComponent,
-    ResolveComponentResult, SimilarityCheck, SpawnEngine, SpawnEngineResult, TerminateEngine,
-    TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent,
-    UploadComponentResult,
+    CostTail, CostTailResult, DeathReason, DescribeComponent, DescribeComponentResult, FrameCheck,
+    FrameReduction, ListComponentBinaries, ListComponentBinariesResult, ListComponents,
+    ListComponentsResult, ListEngineBinaries, ListEngineBinariesResult, ListEngines,
+    ListEnginesResult, ListKinds, ListKindsResult, LoadComponent, LoadResult, NamedMail,
+    ReplaceComponent, ReplaceResult, ResolveComponent, ResolveComponentResult, SimilarityCheck,
+    SpawnEngine, SpawnEngineResult, TerminateEngine, TerminateEngineResult, UploadBinary,
+    UploadBinaryResult, UploadComponent, UploadComponentResult,
     trace::{
         DescribeTreeResult, DispatchTraced, DispatchTracedAck, MailNodeWire, TRACE_MAILBOX_NAME,
         TraceTail, TraceTailResult,
@@ -1001,30 +1001,73 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Describe a loaded component's receive-side capabilities (ADR-0033): the kinds it typed-handles with per-handler docs, whether it has a fallback catchall, its top-level doc, and (ADR-0090) its boot-config kind id+name when it declared a typed Config. Reads aether-mcp's component cache, populated by load_component / replace_component — describing a component aether-mcp didn't load (or after an aether-mcp restart) returns an error."
+        description = "Describe a loaded component's receive-side capabilities (ADR-0033): the kinds it typed-handles with per-handler docs, whether it has a fallback catchall, its top-level doc, and (ADR-0090) its boot-config kind id+name when it declared a typed Config. Address the component by its lineage name (the aether.component/aether.embedded:NAME address spawn_substrate / list_components / load_component hand back) — a name resolves live against the substrate, so a boot-manifest-loaded component is fully introspectable without a prior load_component and survives an aether-mcp restart or an in-place replace_component. A tagged mbx- id is also accepted as a local cache fast-path."
     )]
     pub async fn describe_component(
         &self,
         Parameters(args): Parameters<DescribeComponentArgs>,
     ) -> Result<String, McpError> {
         let engine = parse_engine_id(&args.engine_id)?;
-        let mailbox_id = parse_mailbox_id(&args.mailbox_id)?;
-        let caps = self
+        // Resolve the input to a cache key (and, when it is a lineage name,
+        // the forwardable name). A `mbx-` id parses directly; anything else
+        // is a lineage name folded the same way send_mail resolves a
+        // recipient and the substrate's `registry.lookup` resolves it
+        // (`mailbox_id_from_path`), so the cache key agrees across all three.
+        let (mailbox_id, forward_name) = if args.component.starts_with("mbx-") {
+            (parse_mailbox_id(&args.component)?, None)
+        } else {
+            (
+                mailbox_id_from_path(&args.component),
+                Some(args.component.clone()),
+            )
+        };
+
+        // Cache fast-path: populated by load_component / replace_component or
+        // a prior name-resolved describe.
+        let cached = self
             .components
             .lock()
             .expect("component cache mutex is never poisoned")
             .get(&(engine, mailbox_id))
             .cloned();
-        match caps {
-            Some(caps) => json(&caps),
-            None => Err(McpError::invalid_params(
+        if let Some(caps) = cached {
+            return json(&caps);
+        }
+
+        // Cache miss. With a lineage name, ask the substrate live — this is
+        // the load-bearing half: the cache is empty for a boot-loaded
+        // component, but the substrate always holds the live loaded set. With
+        // only a `mbx-` id there is no name to forward, so the cache was the
+        // only source.
+        let Some(name) = forward_name else {
+            return Err(McpError::invalid_params(
                 format!(
-                    "no component cached at {} on engine {} — load_component / replace_component \
-                     populate this cache",
-                    args.mailbox_id, args.engine_id
+                    "no component cached at {} on engine {} — address by lineage name to resolve \
+                     live, or load_component / replace_component to populate this cache",
+                    args.component, args.engine_id
                 ),
                 None,
-            )),
+            ));
+        };
+        let reply = self
+            .session
+            .call_one(engine_envelope(
+                engine,
+                COMPONENT_CAP,
+                &DescribeComponent { name: name.clone() },
+            ))
+            .await
+            .map_err(internal)?;
+        match DescribeComponentResult::decode_from_bytes(&reply.payload) {
+            Some(DescribeComponentResult::Ok { capabilities }) => {
+                self.components
+                    .lock()
+                    .expect("component cache mutex is never poisoned")
+                    .insert((engine, mailbox_id), capabilities.clone());
+                json(&capabilities)
+            }
+            Some(DescribeComponentResult::Err { error }) => Err(internal_msg(&error)),
+            None => Err(internal_msg("undecodable DescribeComponentResult")),
         }
     }
 
@@ -2774,7 +2817,7 @@ mod tests {
     };
     use aether_capabilities::trace::TraceDispatchCapability;
     use aether_capabilities::{EngineConfig, EngineServer};
-    use aether_data::{mailbox_id_from_name, with_tag};
+    use aether_data::{mailbox_id_from_name, mailbox_id_from_path, with_tag};
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
@@ -3753,16 +3796,17 @@ mod tests {
         let mailbox = mailbox_id_from_name("aether.test.fake_component");
         let tagged = tagged_id::encode(mailbox.0).expect("mailbox id is taggable");
 
-        // Empty cache → error.
+        // Empty cache, addressed by `mbx-` id → error (no name to forward
+        // live, so the cache is the only source).
         let miss = mcp
             .describe_component(Parameters(DescribeComponentArgs {
                 engine_id: engine_id.to_owned(),
-                mailbox_id: tagged.clone(),
+                component: tagged.clone(),
             }))
             .await;
         assert!(
             miss.is_err(),
-            "an uncached component should be a tool error"
+            "an uncached component addressed by id should be a tool error"
         );
 
         // Seed the cache with a handler that declares a `-> R` reply
@@ -3787,7 +3831,7 @@ mod tests {
         let hit = mcp
             .describe_component(Parameters(DescribeComponentArgs {
                 engine_id: engine_id.to_owned(),
-                mailbox_id: tagged,
+                component: tagged,
             }))
             .await
             .expect("cached component describes");
@@ -3796,6 +3840,40 @@ mod tests {
         assert!(
             !caps["handlers"][0]["reply"].is_null(),
             "the handler's ADR-0109 reply contract is surfaced: {hit}"
+        );
+
+        // Name-addressed describe resolves the lineage name to the SAME
+        // cache key the substrate registers under (`mailbox_id_from_path`,
+        // the fold `registry.lookup` uses), so a cache seeded under that key
+        // is found by name without a `mbx-` id. This is the MCP half of the
+        // boot-manifest path; the live substrate forward-on-miss is covered
+        // end-to-end by FleetBench (it needs a real loaded component).
+        let lineage = "aether.component/aether.embedded:fake_component";
+        let by_name_key = mailbox_id_from_path(lineage);
+        let named_caps = ComponentCapabilities {
+            handlers: vec![aether_kinds::HandlerCapability {
+                id: KindId(0x33),
+                name: "test.by_name".to_owned(),
+                doc: None,
+                reply: aether_data::ReplyContract::None,
+            }],
+            ..ComponentCapabilities::default()
+        };
+        mcp.components
+            .lock()
+            .expect("test setup: component cache mutex is never poisoned")
+            .insert((engine, by_name_key), named_caps);
+        let by_name = mcp
+            .describe_component(Parameters(DescribeComponentArgs {
+                engine_id: engine_id.to_owned(),
+                component: lineage.to_owned(),
+            }))
+            .await
+            .expect("name-addressed describe resolves to the cached caps");
+        let by_name_json: serde_json::Value = serde_json::from_str(&by_name).expect("json");
+        assert_eq!(
+            by_name_json["handlers"][0]["name"], "test.by_name",
+            "a lineage name resolves to the substrate-consistent cache key: {by_name}"
         );
     }
 

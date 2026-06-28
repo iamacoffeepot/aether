@@ -1294,6 +1294,34 @@ mod control_plane {
         pub names: Vec<String>,
     }
 
+    /// `aether.component.describe` — introspect one loaded component's
+    /// ADR-0033 receive-side `ComponentCapabilities` (handler kinds, docs,
+    /// fallback, config kind), addressed to its `aether.component` mailbox
+    /// by lineage `name` (the `aether.component/<name>` address that
+    /// `ListComponents` / `LoadResult.name` hand back; iamacoffeepot/aether#2421).
+    /// Name-addressed because a boot-manifest-loaded component never returns
+    /// a mailbox id to its spawner — the substrate is the only process that
+    /// always holds the live loaded set, so it owns the answer. Reply:
+    /// `DescribeComponentResult`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.component.describe")]
+    pub struct DescribeComponent {
+        /// The component's ADR-0099 lineage name (e.g.
+        /// `aether.embedded:aether.camera`), as returned by
+        /// `ListComponentsResult.names` or `LoadResult.name`.
+        pub name: String,
+    }
+
+    /// Reply to `DescribeComponent` (iamacoffeepot/aether#2421): the full
+    /// `ComponentCapabilities` on `Ok`, or a free-form reason on `Err` (no
+    /// component registered at that lineage name).
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.component.describe_result")]
+    pub enum DescribeComponentResult {
+        Ok { capabilities: ComponentCapabilities },
+        Err { error: String },
+    }
+
     /// Reference-image comparison for a `CaptureFrame.similarity` request
     /// (iamacoffeepot/aether#1780). The capture handler reads the PNG at
     /// `reference_path` from the `namespace` assets directory before

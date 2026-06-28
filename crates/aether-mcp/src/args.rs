@@ -360,8 +360,13 @@ pub struct ReplaceComponentArgs {
 pub struct DescribeComponentArgs {
     /// Engine UUID hosting the component (from `list_engines`).
     pub engine_id: String,
-    /// Tagged mailbox id (`mbx-…`) of the loaded component.
-    pub mailbox_id: String,
+    /// The component to describe: its ADR-0099 lineage name (the
+    /// `aether.embedded:NAME` address `spawn_substrate` / `list_components`
+    /// / `LoadResult.name` hand back) OR its tagged mailbox id (`mbx-…`). A
+    /// name is the general path — it resolves live against the substrate, so
+    /// a boot-manifest-loaded component is introspectable without a prior
+    /// `load_component`; a `mbx-` id is a local cache fast-path.
+    pub component: String,
 }
 
 /// One mail in a `capture_frame` bundle. Like [`MailSpec`] but without

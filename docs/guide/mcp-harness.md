@@ -107,7 +107,9 @@ field rendering per kind, small enough to read in one shot. Pass `prefix: "aethe
 to narrow the listing to a kind family. Pass `full: true` to get the full nested
 `SchemaType` (useful for codec-exact work); combine with `prefix` to keep the payload
 bounded. `describe_component` reports a loaded component's handler kinds, their docs,
-whether it has a fallback, and its boot-config kind. `describe_transforms` lists the
+whether it has a fallback, and its boot-config kind, addressed by the component's
+lineage name (the `aether.component/aether.embedded:NAME` address `spawn_substrate`
+/ `list_components` / `load_component` hand back). `describe_transforms` lists the
 native transforms registered at link time.
 
 **Components.** `load_component` and `replace_component` take a filesystem **path** to
@@ -147,9 +149,11 @@ one handler.
   desktop chassis; the headless chassis replies with an error rather than hanging.
   To read back a backgrounded or minimized window, mail `aether.window.focus`
   first to foreground it — see [Window](systems/window.md).
-- **`describe_component` reads a cache.** It's populated by `load_component` /
-  `replace_component`, so describing a component this aether-mcp didn't load — or one
-  loaded before an aether-mcp restart — returns an error; reload it.
+- **`describe_component` resolves names live.** Address it by the lineage name
+  `spawn_substrate` / `list_components` / `load_component` return and it asks the
+  substrate, which holds the live loaded set — so a boot-manifest-loaded component, an
+  aether-mcp restart, and a post-`replace_component` describe all resolve. A `mbx-` id
+  is a local cache fast-path that needs a prior `load_component` / `replace_component`.
 
 ## Where to read more
 

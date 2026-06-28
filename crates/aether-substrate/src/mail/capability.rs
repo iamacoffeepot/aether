@@ -66,9 +66,17 @@ impl MailboxCaps {
 /// routing [`Registry`](crate::mail::registry::Registry) is shared);
 /// the DAG validator reads `accepts` / `has_fallback` on the submit
 /// path, the load / replace / drop hooks mutate it.
+///
+/// Two views of the same loaded set are retained: the projected
+/// [`MailboxCaps`] (handler kind-id set + fallback flag) on the hot
+/// `accepts` path, and the full [`ComponentCapabilities`] (handler
+/// names + docs + config kind) that `describe_component` serves by
+/// name (iamacoffeepot/aether#2421). Both are written together at
+/// `register` and cleared together at `remove`.
 #[derive(Debug, Default)]
 pub struct CapabilityRegistry {
     caps: RwLock<HashMap<MailboxId, MailboxCaps>>,
+    full: RwLock<HashMap<MailboxId, ComponentCapabilities>>,
 }
 
 impl CapabilityRegistry {
@@ -78,6 +86,7 @@ impl CapabilityRegistry {
     pub fn new() -> Self {
         Self {
             caps: RwLock::new(HashMap::new()),
+            full: RwLock::new(HashMap::new()),
         }
     }
 
@@ -112,28 +121,59 @@ impl CapabilityRegistry {
     /// Register (or replace) the caps for `mailbox`. Called at
     /// component load / native-cap boot, and again on
     /// `aether.component.replace` (same mailbox id, fresh handler set).
+    /// Takes the full [`ComponentCapabilities`] and projects the hot-path
+    /// [`MailboxCaps`] internally, retaining the full surface for
+    /// `describe_component` (iamacoffeepot/aether#2421).
+    ///
+    /// # Panics
+    /// Panics if either internal lock is poisoned (see [`Self::accepts`]).
+    pub fn register(&self, mailbox: MailboxId, caps: &ComponentCapabilities) {
+        let projected = MailboxCaps::from_component_capabilities(caps);
+        {
+            let mut guard = self
+                .caps
+                .write()
+                .expect("capability registry lock poisoned");
+            guard.insert(mailbox, projected);
+        }
+        let mut full = self
+            .full
+            .write()
+            .expect("capability registry lock poisoned");
+        full.insert(mailbox, caps.clone());
+    }
+
+    /// The full [`ComponentCapabilities`] for `mailbox` — handler names,
+    /// docs, fallback doc, and config kind — as last registered.
+    /// `None` for an unknown or dropped mailbox. Backs the name-addressed
+    /// `describe_component` query (iamacoffeepot/aether#2421).
     ///
     /// # Panics
     /// Panics if the internal lock is poisoned (see [`Self::accepts`]).
-    pub fn register(&self, mailbox: MailboxId, caps: MailboxCaps) {
-        let mut guard = self
-            .caps
-            .write()
-            .expect("capability registry lock poisoned");
-        guard.insert(mailbox, caps);
+    #[must_use]
+    pub fn describe(&self, mailbox: MailboxId) -> Option<ComponentCapabilities> {
+        let guard = self.full.read().expect("capability registry lock poisoned");
+        guard.get(&mailbox).cloned()
     }
 
     /// Remove `mailbox`'s caps. Called on `aether.component.drop`. A
     /// no-op for an unknown mailbox.
     ///
     /// # Panics
-    /// Panics if the internal lock is poisoned (see [`Self::accepts`]).
+    /// Panics if either internal lock is poisoned (see [`Self::accepts`]).
     pub fn remove(&self, mailbox: MailboxId) {
-        let mut guard = self
-            .caps
+        {
+            let mut guard = self
+                .caps
+                .write()
+                .expect("capability registry lock poisoned");
+            guard.remove(&mailbox);
+        }
+        let mut full = self
+            .full
             .write()
             .expect("capability registry lock poisoned");
-        guard.remove(&mailbox);
+        full.remove(&mailbox);
     }
 }
 
@@ -163,10 +203,7 @@ mod tests {
     fn accepts_handled_kind_rejects_others() {
         let reg = CapabilityRegistry::new();
         let mbx = MailboxId(7);
-        reg.register(
-            mbx,
-            MailboxCaps::from_component_capabilities(&caps_with(&[10, 20], false)),
-        );
+        reg.register(mbx, &caps_with(&[10, 20], false));
         assert!(reg.accepts(mbx, KindId(10)));
         assert!(reg.accepts(mbx, KindId(20)));
         assert!(!reg.accepts(mbx, KindId(30)));
@@ -176,10 +213,7 @@ mod tests {
     fn fallback_accepts_anything() {
         let reg = CapabilityRegistry::new();
         let mbx = MailboxId(7);
-        reg.register(
-            mbx,
-            MailboxCaps::from_component_capabilities(&caps_with(&[10], true)),
-        );
+        reg.register(mbx, &caps_with(&[10], true));
         assert!(reg.has_fallback(mbx));
         assert!(reg.accepts(mbx, KindId(10)));
         // Not in `handlers`, but the fallback catches it.
@@ -190,10 +224,7 @@ mod tests {
     fn strict_receiver_has_no_fallback() {
         let reg = CapabilityRegistry::new();
         let mbx = MailboxId(7);
-        reg.register(
-            mbx,
-            MailboxCaps::from_component_capabilities(&caps_with(&[10], false)),
-        );
+        reg.register(mbx, &caps_with(&[10], false));
         assert!(!reg.has_fallback(mbx));
         assert!(!reg.accepts(mbx, KindId(999)));
     }
@@ -202,14 +233,8 @@ mod tests {
     fn register_replaces_prior_caps() {
         let reg = CapabilityRegistry::new();
         let mbx = MailboxId(7);
-        reg.register(
-            mbx,
-            MailboxCaps::from_component_capabilities(&caps_with(&[10], false)),
-        );
-        reg.register(
-            mbx,
-            MailboxCaps::from_component_capabilities(&caps_with(&[20], false)),
-        );
+        reg.register(mbx, &caps_with(&[10], false));
+        reg.register(mbx, &caps_with(&[20], false));
         assert!(!reg.accepts(mbx, KindId(10)));
         assert!(reg.accepts(mbx, KindId(20)));
     }
@@ -218,10 +243,7 @@ mod tests {
     fn remove_clears_caps() {
         let reg = CapabilityRegistry::new();
         let mbx = MailboxId(7);
-        reg.register(
-            mbx,
-            MailboxCaps::from_component_capabilities(&caps_with(&[10], true)),
-        );
+        reg.register(mbx, &caps_with(&[10], true));
         reg.remove(mbx);
         assert!(!reg.accepts(mbx, KindId(10)));
         assert!(!reg.has_fallback(mbx));
@@ -232,5 +254,27 @@ mod tests {
         let reg = CapabilityRegistry::new();
         assert!(!reg.accepts(MailboxId(123), KindId(10)));
         assert!(!reg.has_fallback(MailboxId(123)));
+    }
+
+    #[test]
+    fn describe_round_trips_full_caps_and_drop_clears() {
+        // Tripwire: the registry must retain the *full* ComponentCapabilities
+        // (handler names + docs), not just the lossy MailboxCaps projection,
+        // so name-addressed describe_component can serve it (aether#2421). A
+        // regression that stored only MailboxCaps would lose `name`/`doc`.
+        let reg = CapabilityRegistry::new();
+        let mbx = MailboxId(7);
+        reg.register(mbx, &caps_with(&[10, 20], true));
+
+        let described = reg.describe(mbx).expect("registered mailbox describable");
+        assert_eq!(described.handlers.len(), 2);
+        assert!(described.fallback.is_some());
+        assert!(
+            described.handlers.iter().any(|h| h.name == "test.kind.10"),
+            "full handler names must survive retention, not just kind ids",
+        );
+
+        reg.remove(mbx);
+        assert!(reg.describe(mbx).is_none());
     }
 }
