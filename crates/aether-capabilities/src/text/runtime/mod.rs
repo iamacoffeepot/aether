@@ -1,5 +1,5 @@
 //! The `aether.text` runtime half (ADR-0122 identity/runtime split). Compiled
-//! only under `feature = "text-native"` (the `mod runtime;` declaration in the
+//! only under `feature = "text-runtime"` (the `mod runtime;` declaration in the
 //! parent carries the gate), so a transport-only build of the `TextCapability`
 //! identity never names these types nor pulls `fontdue` / `aether_substrate`.
 //! The substrate-typed imports are gated once by this module rather than
@@ -608,7 +608,7 @@ impl NativeActor for TextCapability {
     }
 }
 
-#[cfg(all(test, feature = "text-native"))]
+#[cfg(all(test, feature = "text-runtime"))]
 mod tests {
     #![allow(clippy::unwrap_used)]
 

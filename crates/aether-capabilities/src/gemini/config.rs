@@ -11,25 +11,25 @@ use std::time::Duration;
 /// `#[derive(aether_substrate::Config)]` emits the env-shaped
 /// `GeminiConfigLayer`, the clap-shaped `GeminiOverlay`, the
 /// `FromArgvThenEnv` impl, and the inherent `from_env` shims under
-/// `feature = "native"`. The wasm-marker build carries only the
+/// `feature = "runtime"`. The wasm-marker build carries only the
 /// domain struct.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "native", derive(aether_substrate::Config))]
+#[cfg_attr(feature = "runtime", derive(aether_substrate::Config))]
 #[cfg_attr(
-    feature = "native",
+    feature = "runtime",
     config(env_prefix = "AETHER_GEMINI", cli_prefix = "gemini")
 )]
 pub struct GeminiConfig {
     /// The Google API key. `None` (or `disabled`) wires the
     /// `DisabledGeminiAdapter`. `env` override pins the unprefixed
     /// `GEMINI_API_KEY` key.
-    #[cfg_attr(feature = "native", config(env = "GEMINI_API_KEY"))]
+    #[cfg_attr(feature = "runtime", config(env = "GEMINI_API_KEY"))]
     pub api_key: Option<String>,
     /// `AETHER_GEMINI_DISABLE=1` forces the disabled adapter.
     /// `env` + `cli_long` overrides pin the historical wire shape
     /// (no `D` suffix on `DISABLE`).
     #[cfg_attr(
-        feature = "native",
+        feature = "runtime",
         config(
             env = "AETHER_GEMINI_DISABLE",
             cli_long = "gemini-disable",
@@ -40,14 +40,14 @@ pub struct GeminiConfig {
     /// Per-cap concurrency bound (doubles as rate-limit throttling). The
     /// `nonzero` hint coerces a resolved `0` (a zero-concurrency provider
     /// deadlocks) back to the default.
-    #[cfg_attr(feature = "native", config(default = 2, nonzero))]
+    #[cfg_attr(feature = "runtime", config(default = 2, nonzero))]
     pub max_in_flight: usize,
     /// Per-request timeout for the media APIs. The derive's
     /// `ms_duration` hint + `layer_field = "timeout_ms"` pin the
     /// Layer / env / CLI shape to the pre-derive name
     /// (`AETHER_GEMINI_TIMEOUT_MS`, `--gemini-timeout-ms`).
     #[cfg_attr(
-        feature = "native",
+        feature = "runtime",
         config(default = 180_000, ms_duration, layer_field = "timeout_ms")
     )]
     pub timeout: Duration,

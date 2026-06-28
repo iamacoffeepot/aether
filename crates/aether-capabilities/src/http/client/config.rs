@@ -18,12 +18,12 @@ use super::{DEFAULT_MAX_BODY_BYTES, DEFAULT_TIMEOUT_MILLIS};
 /// `#[derive(aether_substrate::Config)]` emits the env-shaped
 /// `HttpConfigLayer`, the clap-shaped `HttpOverlay`, the
 /// `FromArgvThenEnv` impl, and the inherent `from_env` /
-/// `from_argv_then_env` shims under `feature = "native"`. The
+/// `from_argv_then_env` shims under `feature = "runtime"`. The
 /// wasm-marker build carries only the domain struct.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "native", derive(aether_substrate::Config))]
+#[cfg_attr(feature = "runtime", derive(aether_substrate::Config))]
 #[cfg_attr(
-    feature = "native",
+    feature = "runtime",
     config(env_prefix = "AETHER_HTTP", cli_prefix = "http")
 )]
 pub struct HttpConfig {
@@ -34,7 +34,7 @@ pub struct HttpConfig {
     /// names while the domain field stays `disabled` for read-site
     /// clarity.
     #[cfg_attr(
-        feature = "native",
+        feature = "runtime",
         config(
             env = "AETHER_HTTP_DISABLE",
             cli_long = "http-disable",
@@ -45,15 +45,15 @@ pub struct HttpConfig {
     /// Hostnames the adapter will dial. Empty = deny all
     /// (deny-by-default per ADR-0043). The `csv_set` hint auto-wires the
     /// shared comma-split parser on the env side.
-    #[cfg_attr(feature = "native", config(default = [], csv_set))]
+    #[cfg_attr(feature = "runtime", config(default = [], csv_set))]
     pub allowlist: HashSet<String>,
     /// `AETHER_HTTP_REQUIRE_HTTPS=1` rejects `http://` URLs with
     /// `HttpError::InvalidUrl`.
-    #[cfg_attr(feature = "native", config(default = false))]
+    #[cfg_attr(feature = "runtime", config(default = false))]
     pub require_https: bool,
     /// Cap on inbound and outbound body bytes. Defaults to
     /// [`DEFAULT_MAX_BODY_BYTES`] (16 MB).
-    #[cfg_attr(feature = "native", config(default = 16_777_216))]
+    #[cfg_attr(feature = "runtime", config(default = 16_777_216))]
     pub max_body_bytes: usize,
     /// Default per-request timeout when `Fetch.timeout_ms` is
     /// `None`. Defaults to [`DEFAULT_TIMEOUT_MILLIS`] (30 s). The derive's
@@ -63,7 +63,7 @@ pub struct HttpConfig {
     /// the pre-derive name (`AETHER_HTTP_TIMEOUT_MS`,
     /// `--http-timeout-ms`).
     #[cfg_attr(
-        feature = "native",
+        feature = "runtime",
         config(default = 30_000, ms_duration, layer_field = "timeout_ms")
     )]
     pub default_timeout: Duration,

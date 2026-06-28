@@ -20,7 +20,7 @@ pub use config::HttpConfig;
 // The `Config` derive on `HttpConfig` emits these native-only sibling types
 // in `config`; chassis CLI / boot wiring addresses them through the
 // `client::` path, so re-export them here.
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 pub use config::{HttpConfigLayer, HttpOverlay};
 
 // Handler-signature kinds resolve at file root through this import —
@@ -180,8 +180,8 @@ pub struct HttpCapability;
 // below, gated once by `feature = "runtime"`; the `#[actor] impl` reaches it
 // through the single `use runtime::*` glob. The ureq adapter stack names
 // `ureq` / `url` (not `aether_substrate`), so it stays at file root under
-// `feature = "native"` (the `mod native` wrapper supplied that gate before;
-// `runtime` implies `native`).
+// `feature = "runtime"` (the same gate the runtime module uses; both the
+// substrate-typed runtime half and the ureq adapter ship with the runtime).
 use aether_actor::actor;
 
 // The `runtime` module is this cap's private runtime-half namespace; the impl
@@ -255,15 +255,15 @@ impl NativeActor for HttpCapability {
 }
 
 // The ureq adapter stack. Names `ureq` / `url` (both `dep:` under the
-// `native` feature) but never `aether_substrate`, so it lives at file root
-// gated on `feature = "native"` rather than in the `runtime` module.
-#[cfg(feature = "native")]
+// `runtime` feature) but never `aether_substrate`, so it lives at file root
+// gated on `feature = "runtime"` rather than in the `runtime` module.
+#[cfg(feature = "runtime")]
 use std::collections::HashSet;
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 use std::sync::Arc;
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 use ureq::http::Method;
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 use ureq::http::Request;
 
 /// `ureq`-backed adapter. Holds the shared agent, the allowlist
@@ -272,7 +272,7 @@ use ureq::http::Request;
 /// internally synchronised, so the same adapter drives the cap from
 /// one dispatch thread today and would parallelise cleanly behind a
 /// multi-thread dispatcher later.
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 pub struct UreqHttpAdapter {
     agent: ureq::Agent,
     allowlist: HashSet<String>,
@@ -280,7 +280,7 @@ pub struct UreqHttpAdapter {
     max_body_bytes: usize,
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 impl UreqHttpAdapter {
     /// Construct an adapter with explicit knobs. Chassis code uses
     /// [`build_http_adapter`] for env-derived construction;
@@ -308,7 +308,7 @@ impl UreqHttpAdapter {
     }
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 impl HttpAdapter for UreqHttpAdapter {
     fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, HttpError> {
         use ureq::RequestExt;
@@ -405,7 +405,7 @@ impl HttpAdapter for UreqHttpAdapter {
     }
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 fn http_method_to_http_crate(m: HttpMethod) -> Method {
     match m {
         HttpMethod::Get => Method::GET,
@@ -418,7 +418,7 @@ fn http_method_to_http_crate(m: HttpMethod) -> Method {
     }
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 fn ureq_error_to_http_error(e: ureq::Error) -> HttpError {
     match e {
         ureq::Error::Timeout(_) => HttpError::Timeout,
@@ -428,7 +428,7 @@ fn ureq_error_to_http_error(e: ureq::Error) -> HttpError {
 }
 
 /// Build an HTTP adapter from explicit configuration.
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 pub fn build_http_adapter(config: HttpConfig) -> Arc<dyn HttpAdapter> {
     if config.disabled {
         tracing::info!(

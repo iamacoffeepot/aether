@@ -67,8 +67,8 @@ mod config;
 ///
 /// The macro emits Layer + Overlay + `FromArgvThenEnv` impl + inherent
 /// shims **unconditionally**. Cap authors who want the emission to ride
-/// a `native` feature (so wasm builds skip confique + clap entirely)
-/// wrap the derive in `#[cfg_attr(feature = "native", derive(...))]`
+/// a `runtime` feature (so wasm builds skip confique + clap entirely)
+/// wrap the derive in `#[cfg_attr(feature = "runtime", derive(...))]`
 /// instead of `#[derive(...)]`. The domain struct itself stays
 /// unconditional.
 ///

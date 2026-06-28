@@ -5,7 +5,7 @@
 //! ADR-0103 track lane, and the ADR-0103 sampled-bank loader) — live
 //! here under the always-on `audio` marker, so a wasm guest addressing
 //! the cap through the marker feature sees the types without the
-//! `audio-native` synth stack. Re-exported at the `audio` module root
+//! `audio-runtime` synth stack. Re-exported at the `audio` module root
 //! (`pub use kinds::*`), so `aether_capabilities::audio::NoteOn`
 //! resolves for callers.
 

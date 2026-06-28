@@ -54,7 +54,7 @@ pub use kinds::*;
 /// emitted always-on by `#[actor]`. The state-bearing runtime
 /// (`TextCapabilityState`, which holds the `fontdue` font registry, the
 /// glyph atlas, and the parked `load_font` requests) lives behind the one
-/// `feature = "text-native"` gate, so a transport-only build never names
+/// `feature = "text-runtime"` gate, so a transport-only build never names
 /// `TextCapabilityState` nor pulls `fontdue` / `aether_substrate` through
 /// this cap.
 #[actor(singleton)]
@@ -64,12 +64,12 @@ pub struct TextCapability;
 // (NAMESPACE + per-handler `HandlesKind` markers + the singleton
 // name-inventory entry) from the `#[runtime] impl NativeActor` in
 // `runtime.rs`, all emitted always-on against the ZST. The behaviour and
-// state live in that runtime module, gated once by `feature = "text-native"`.
+// state live in that runtime module, gated once by `feature = "text-runtime"`.
 use aether_actor::actor;
 
 // The runtime half — the whole `fontdue` / `aether_substrate`-typed surface
 // (imports, `TextCapabilityState`, the `#[runtime] impl NativeActor`, the
 // helper methods) — lives in `runtime.rs`, gated once here. The struct-hosted
 // `#[actor(singleton)]` above reads this module off disk to lift the identity.
-#[cfg(feature = "text-native")]
+#[cfg(feature = "text-runtime")]
 mod runtime;

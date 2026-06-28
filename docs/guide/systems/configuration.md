@@ -116,12 +116,12 @@ a fresh `env::var` read. Derive `Config` on the struct and annotate the field:
 
 ```rust
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "native", derive(aether_substrate::Config))]
-#[cfg_attr(feature = "native", config(env_prefix = "AETHER_HTTP", cli_prefix = "http"))]
+#[cfg_attr(feature = "runtime", derive(aether_substrate::Config))]
+#[cfg_attr(feature = "runtime", config(env_prefix = "AETHER_HTTP", cli_prefix = "http"))]
 pub struct HttpConfig {
-    #[cfg_attr(feature = "native", config(default = false))]
+    #[cfg_attr(feature = "runtime", config(default = false))]
     pub disabled: bool,
-    #[cfg_attr(feature = "native", config(default = [], csv_set))]
+    #[cfg_attr(feature = "runtime", config(default = [], csv_set))]
     pub allowlist: HashSet<String>,
 }
 ```
@@ -136,9 +136,9 @@ a non-empty garbage value. The remaining field hints (`env`, `cli_long`,
 `parse` names a custom parser for the rare field that needs one. Two things to
 know going in:
 
-- **Gate it on the `native` feature**, as above. The capabilities crate also
+- **Gate it on the `runtime` feature**, as above. The capabilities crate also
   cross-compiles to wasm, where the config machinery isn't available; the
-  `#[cfg_attr(feature = "native", …)]` keeps the wasm build carrying only the
+  `#[cfg_attr(feature = "runtime", …)]` keeps the wasm build carrying only the
   plain struct. Clippy runs host-native and won't catch a missing gate — the
   wasm32 step in `scripts/preflight.sh` will.
 - **Wire the argument overlay into the chassis CLI** so the per-spawn layer
