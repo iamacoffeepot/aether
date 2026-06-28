@@ -695,11 +695,18 @@ mod engine {
     /// - `Evicted { detail }` — the liveness heartbeat crossed its miss
     ///   limit and the proxy declared the engine dead; `detail` is the
     ///   `heartbeat miss limit N of M` count.
+    /// - `SpawnFailed { detail }` — the spawn never connected: the
+    ///   substrate failed to come up (fork / materialize error, or the
+    ///   proxy connect/boot failed), so it was never registered alive.
+    ///   `detail` is the proxy connect / boot error. Distinct from
+    ///   `Crashed`, which is a registered substrate that later closed its
+    ///   connection.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub enum DeathReason {
         Terminated,
         Crashed { detail: String },
         Evicted { detail: String },
+        SpawnFailed { detail: String },
     }
 
     /// One recently-departed engine, as reported in a
@@ -794,12 +801,23 @@ mod engine {
     /// pass it back to [`TerminateEngine`]) and the `rpc_port` the cap
     /// assigned. `Err` carries a free-form reason — fork failure, or
     /// the proxy failing to connect within the substrate's startup
-    /// window. On `Err` no child process is left running.
+    /// window — plus `engine_id`, the allocated id when the failure came
+    /// after the cap minted one (`None` for a pre-allocation failure
+    /// like a selector miss or a port-allocation error). A failed spawn
+    /// with `engine_id = Some(_)` also leaves a matching `SpawnFailed`
+    /// entry in [`ListEnginesResult`]'s `recently_died` ring, so a caller
+    /// can correlate and reap. On `Err` no child process is left running.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.engine.spawn_result")]
     pub enum SpawnEngineResult {
-        Ok { engine_id: String, rpc_port: u16 },
-        Err { error: String },
+        Ok {
+            engine_id: String,
+            rpc_port: u16,
+        },
+        Err {
+            engine_id: Option<String>,
+            error: String,
+        },
     }
 
     /// `aether.engine.terminate` — ask the engines cap to shut down a

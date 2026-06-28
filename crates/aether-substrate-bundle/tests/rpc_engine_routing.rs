@@ -300,7 +300,7 @@ mod tests {
         assert_eq!(spawn_kind, <SpawnEngineResult as Kind>::ID);
         let engine_id = match SpawnEngineResult::decode_from_bytes(&spawn_payload) {
             Some(SpawnEngineResult::Ok { engine_id, .. }) => engine_id,
-            Some(SpawnEngineResult::Err { error }) => panic!("spawn failed: {error}"),
+            Some(SpawnEngineResult::Err { error, .. }) => panic!("spawn failed: {error}"),
             None => panic!("undecodable SpawnEngineResult"),
         };
         let engine_id = EngineId(Uuid::parse_str(&engine_id).expect("engine_id parses"));
