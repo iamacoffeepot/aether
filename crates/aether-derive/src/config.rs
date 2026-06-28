@@ -3,7 +3,7 @@
 //!
 //! Architecture: parse the container + per-field attrs into a
 //! `ConfigInput` IR, then quote out four pieces gated on
-//! `#[cfg(feature = "native")]`:
+//! `#[cfg(feature = "runtime")]`:
 //!
 //!   1. A `<Name>Layer` struct (`#[derive(confique::Config)]`) carrying
 //!      the wire-shape primitive per field.

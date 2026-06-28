@@ -17,7 +17,7 @@
 //! The cap's drawing + texture mail kinds live in [`kinds`] (ADR-0121):
 //! they ride the always-on (marker-only `render`) region so a wasm
 //! guest sees the kind types for typed addressing without the
-//! `render-native` GPU stack. The capture-request and `FrameCheck`
+//! `render-runtime` GPU stack. The capture-request and `FrameCheck`
 //! verification kinds stay in `aether-kinds` (consumed upstream by
 //! `aether-mcp` and the substrate core), as do the `QuadSpace` /
 //! `QuadScale` projection types the `aether.text` kinds share.
@@ -53,7 +53,7 @@ pub use kinds::*;
 
 // Handler-signature kinds must be importable at file root because
 // `#[actor]` emits `impl HandlesKind<K> for X {}` markers always-on
-// (outside the `render-native` gate), against the identity. The drawing
+// (outside the `render-runtime` gate), against the identity. The drawing
 // kinds come from the local `kinds` module (via the glob re-export
 // above); `CaptureFrame` stays in `aether-kinds` (consumed by
 // `aether-mcp`).
@@ -62,11 +62,11 @@ use aether_kinds::CaptureFrame;
 // Auxiliary native-only types the chassis driver consumes alongside
 // `RenderCapability`. The seams (`capture`, `pipeline`, `quad`, `texture`,
 // `config`) now live under the `runtime` directory, covered by the one
-// `mod runtime;` gate (`render-native`); their re-exports source through
+// `mod runtime;` gate (`render-runtime`); their re-exports source through
 // `runtime` so wasm components that opt into the marker-only `render` feature
 // see only the identity ZST + Actor / HandlesKind impls, not these heavy
 // GPU-bound types.
-#[cfg(feature = "render-native")]
+#[cfg(feature = "render-runtime")]
 pub use runtime::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
 
 // `#[actor]` sits on each capability struct (the struct-hosted ADR-0123
@@ -75,7 +75,7 @@ pub use runtime::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
 // The state-bearing, GPU-bound behavior of each cap — its `#[runtime] impl
 // NativeActor`, runtime state struct, the wgpu accumulator helpers, the
 // `HubOutbound` — lives in a per-cap runtime module: `runtime` for
-// [`RenderCapability`] (gated `render-native`) and `headless_runtime` for
+// [`RenderCapability`] (gated `render-runtime`) and `headless_runtime` for
 // [`HeadlessRenderCapability`] (gated the default `runtime`). The
 // `aether_substrate` ctx types each impl names (`NativeActor` / `NativeCtx`
 // / … / `Manual` / `CaptureFrameResult`) are now sourced inside each runtime
@@ -92,14 +92,14 @@ use aether_actor::actor;
 // alongside the wildcard lint. The headless companion's test moved beside its
 // `#[runtime]` impl in `headless_runtime.rs`, so no headless glob is needed
 // here.
-#[cfg(feature = "render-native")]
+#[cfg(feature = "render-runtime")]
 #[allow(clippy::wildcard_imports, unused_imports)]
 use runtime::*;
 
 // The render runtime half — the wgpu-typed surface (state, ctx imports,
 // accumulator helpers) — lives in `runtime.rs`, gated once here on the
-// `render-native` override (matching the `#[actor] impl`'s runtime gate).
-#[cfg(feature = "render-native")]
+// `render-runtime` override (matching the `#[actor] impl`'s runtime gate).
+#[cfg(feature = "render-runtime")]
 mod runtime;
 
 // The headless companion's runtime half lives in `headless_runtime.rs`,
@@ -116,7 +116,7 @@ mod headless_runtime;
 /// dragging the GPU stack. The state-bearing runtime
 /// (`RenderCapabilityState`, which holds the wgpu-typed
 /// [`RenderHandles`] plus the substrate registry + mailer) lives behind
-/// the `render-native` gate in the `runtime` module, so a transport- or
+/// the `render-runtime` gate in the `runtime` module, so a transport- or
 /// marker-only build never names it nor pulls `aether_substrate`/wgpu
 /// through this cap.
 #[actor(singleton)]
@@ -271,7 +271,7 @@ mod tests {
 /// A ZST carrying only the addressing; the state-bearing runtime
 /// (`HeadlessRenderCapabilityState`, holding the captured `HubOutbound`)
 /// lives behind the default `runtime` gate in `headless_runtime` — no
-/// `render-native` dep, so it compiles on a no-GPU headless build.
+/// `render-runtime` dep, so it compiles on a no-GPU headless build.
 ///
 /// Headless chassis composes one of [`Self`] / [`RenderCapability`], never
 /// both — the chassis builder rejects double-claiming a mailbox.

@@ -2,7 +2,7 @@
 //! split). Compiled under the default `feature = "runtime"` gate (the
 //! `mod headless_runtime;` declaration in the parent carries it) — unlike
 //! the GPU-bound [`super::RenderCapability`], the headless companion has no
-//! `render-native` dep, so its runtime half must compile on a no-GPU
+//! `render-runtime` dep, so its runtime half must compile on a no-GPU
 //! headless `runtime` build. The substrate-typed imports are gated once by
 //! this module; the `#[actor] impl` reaches the state + ctx types through
 //! the single `use headless_runtime::*` glob in the parent.
@@ -11,7 +11,7 @@
 // `HubOutbound` only by the state struct's field. The substrate ctx types
 // the `#[actor] impl` names (`NativeActor` / `NativeCtx` / `NativeInitCtx` /
 // `BootError` / `Manual` / `CaptureFrameResult`) come from the shared
-// `any(render-native, runtime)` seam in `mod.rs`, not from here, so a
+// `any(render-runtime, runtime)` seam in `mod.rs`, not from here, so a
 // desktop build doesn't re-export them through two globs.
 pub use std::io;
 
@@ -23,7 +23,7 @@ use aether_substrate::mail::outbound::HubOutbound;
 // names the `#[runtime]` attribute, the cap kinds (the drawing kinds via the
 // parent's `kinds` re-export, `CaptureFrame` / `CaptureFrameResult` from
 // `aether_kinds`), and the substrate ctx types it previously reached through
-// the parent's shared `any(render-native, runtime)` seam — now sourced here.
+// the parent's shared `any(render-runtime, runtime)` seam — now sourced here.
 use aether_actor::runtime;
 
 use aether_kinds::{CaptureFrame, CaptureFrameResult};

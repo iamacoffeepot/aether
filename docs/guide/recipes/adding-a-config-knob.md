@@ -38,7 +38,7 @@ not read out of `env::var` directly. Declare it with a `false` literal
 default; a `bool` needs no parser:
 
 ```rust
-#[cfg_attr(feature = "native", config(default = false))]
+#[cfg_attr(feature = "runtime", config(default = false))]
 pub enabled: bool,
 ```
 
@@ -61,7 +61,7 @@ Add the field to the struct in its cap crate and annotate it. The derive reads
 the hint to generate everything downstream:
 
 ```rust
-#[cfg_attr(feature = "native", config(default = false))]
+#[cfg_attr(feature = "runtime", config(default = false))]
 pub require_https: bool,
 ```
 
@@ -98,7 +98,7 @@ The container attribute on the struct sets the prefixes both names derive from:
 
 ```rust
 #[cfg_attr(
-    feature = "native",
+    feature = "runtime",
     config(env_prefix = "AETHER_HTTP", cli_prefix = "http")
 )]
 ```
@@ -126,13 +126,13 @@ fn http_from_env_defaults_match() {
 do reference it from the test. Add an assertion for your new field. It loads with
 no `.env()` source, so it's env-free and CI-safe (issue 464).
 
-> **Gotcha — the `native` feature gate.** Every `#[derive(...)]` and `#[config]`
-> attribute is wrapped in `#[cfg_attr(feature = "native", ...)]`, including the
+> **Gotcha — the `runtime` feature gate.** Every `#[derive(...)]` and `#[config]`
+> attribute is wrapped in `#[cfg_attr(feature = "runtime", ...)]`, including the
 > struct-level derive. The capabilities crate also cross-compiles to wasm, where
 > the config machinery isn't present, so the wasm build must carry only the plain
 > struct. Clippy runs host-native and won't catch a missing gate — the wasm32
 > cross-build step in `scripts/preflight.sh` (step 6) is what fails on it. Any
-> `parse` helper you add is `#[cfg(feature = "native")]` too.
+> `parse` helper you add is `#[cfg(feature = "runtime")]` too.
 
 ### 3. Wire the argv overlay into each chassis CLI
 

@@ -1,8 +1,7 @@
 //! The `aether.render` runtime half (ADR-0122 identity/runtime split).
-//! Compiled only under `feature = "render-native"` (the `mod runtime;`
-//! declaration in the parent carries the gate, matching the `#[actor(…,
-//! runtime_feature = "render-native")]` override on the impl), so a
-//! transport-only or marker-only `render` build of the [`RenderCapability`]
+//! Compiled only under `feature = "render-runtime"` (the `mod runtime;`
+//! declaration in the parent carries the gate), so a
+//! marker-only `render` build of the [`RenderCapability`]
 //! identity never names these types nor pulls the wgpu-bound substrate
 //! runtime through this cap. The substrate-typed imports + GPU-bound
 //! helpers are gated once by this module rather than line-by-line; the
@@ -10,7 +9,7 @@
 //! the single `use runtime::*` glob in the parent.
 
 // `Arc` is named here only by the state struct's field types; the parent
-// `#[actor] impl` gets its own `Arc` from the shared `any(render-native,
+// `#[actor] impl` gets its own `Arc` from the shared `any(render-runtime,
 // runtime)` import in `mod.rs`, so this stays a private import to avoid a
 // redundant re-export. The substrate ctx types (`NativeActor` / `NativeCtx`
 // / `NativeInitCtx` / `BootError` / `Manual` / `CaptureFrameResult`) the
@@ -48,7 +47,7 @@ pub use self::pipeline::{RenderGpu, RenderHandles};
 // `#[runtime]` attribute, the cap kinds (the drawing kinds via the parent's
 // `kinds` re-export, `CaptureFrame` / `CaptureFrameResult` from `aether_kinds`),
 // and the substrate ctx types it previously reached through the parent's shared
-// `any(render-native, runtime)` seam — now sourced here beside the body.
+// `any(render-runtime, runtime)` seam — now sourced here beside the body.
 use aether_actor::runtime;
 
 use aether_kinds::{CaptureFrame, CaptureFrameResult};

@@ -105,7 +105,7 @@ pub mod window;
 
 #[cfg(feature = "audio")]
 pub use audio::AudioCapability;
-#[cfg(feature = "audio-native")]
+#[cfg(feature = "audio-runtime")]
 pub use audio::AudioConfig;
 // ADR-0050 `aether.anthropic` cap (issue 1014). `AnthropicConfig` is
 // part of the same native-only module.
@@ -137,11 +137,11 @@ pub use http::{HttpCapability, HttpConfig};
 // ADR-0108 `aether.http.server` cap (issue 1760). `HttpServerConfig` is the
 // always-on domain struct; the `Config`-derive `HttpServerConfigLayer` /
 // `HttpServerOverlay` and the bound-port `HttpServerHandle` are native-only.
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 pub use http::HttpServerConfigLayer;
 #[cfg(not(target_family = "wasm"))]
 pub use http::HttpServerHandle;
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 pub use http::HttpServerOverlay;
 pub use http::{HttpServerCapability, HttpServerConfig};
 pub use input::InputCapability;
@@ -163,7 +163,7 @@ pub use gemini::{GeminiCapability, GeminiConfig};
 pub use render::HeadlessRenderCapability;
 #[cfg(feature = "render")]
 pub use render::RenderCapability;
-#[cfg(feature = "render-native")]
+#[cfg(feature = "render-runtime")]
 pub use render::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
 pub use tcp::{TcpCapability, TcpListenerActor};
 pub use test_bench::UnsupportedTestBenchCapability;

@@ -228,8 +228,8 @@ only when standing up a new chassis kind.
 A cap whose runtime half pulls a heavy native-only dependency (the
 renderer's wgpu, audio's cpal) names a cap-specific feature in its
 `runtime_feature` override: `#[actor(singleton, runtime_feature =
-"render-native")]`, with the `runtime` module gated `#[cfg(feature =
-"render-native")]`. The identity markers stay always-on (so guests still
+"render-runtime")]`, with the `runtime` module gated `#[cfg(feature =
+"render-runtime")]`. The identity markers stay always-on (so guests still
 address the cap by type) while the native dep set only enters when the
 feature is on. A cap whose runtime needs no heavy dep omits
 `runtime_feature` and gates on the default `runtime` feature.

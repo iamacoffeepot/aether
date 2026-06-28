@@ -1,5 +1,5 @@
 //! The `aether.ui` runtime half (ADR-0122 identity/runtime split). Compiled
-//! only under `feature = "ui-native"` (the `mod runtime;` declaration in the
+//! only under `feature = "ui-runtime"` (the `mod runtime;` declaration in the
 //! parent carries the gate), so a transport-only build of the `UiCapability`
 //! identity never names these types nor pulls `aether_substrate`. The
 //! substrate-typed imports are gated once by this module rather than
@@ -266,7 +266,7 @@ impl NativeActor for UiCapability {
     }
 }
 
-#[cfg(all(test, feature = "ui-native"))]
+#[cfg(all(test, feature = "ui-runtime"))]
 mod tests {
     #![allow(clippy::unwrap_used)]
 

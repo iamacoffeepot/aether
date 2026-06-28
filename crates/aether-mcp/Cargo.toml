@@ -11,8 +11,9 @@ license.workspace = true
 # No `aether-substrate` / wasmtime / wgpu in the production dep graph:
 # the coordinator depends on `aether-rpc` alone for its wire surface
 # (ADR-0102), and `aether-rpc` has no path to the substrate / wasmtime /
-# wgpu. Test builds re-enable native `aether-capabilities` through the
-# dev-dependency below for the in-process `EngineServer` they spin.
+# wgpu. Test builds re-enable the runtime `aether-capabilities` build
+# through the dev-dependency below for the in-process `EngineServer` they
+# spin.
 #
 # Until the P5d cutover the embedded `aether-substrate-bundle::hub::mcp`
 # server keeps running on its own port — this crate is additive.
@@ -78,12 +79,12 @@ uuid = { version = "1", features = ["v4"] }
 aether-substrate = { path = "../aether-substrate" }
 # ADR-0102: the `tools.rs` test module spins a real in-process
 # `EngineServer` (with `EngineConfig`) and touches
-# `TraceDispatchCapability` / `InventoryCapability` — all native
+# `TraceDispatchCapability` / `InventoryCapability` — all runtime
 # `aether-capabilities` surface. Dev-dependency feature unification
-# applies to test builds only, so re-enabling `native` here never
+# applies to test builds only, so re-enabling `runtime` here never
 # enters the production graph `cargo tree -p aether-mcp -e normal`
 # reports.
-aether-capabilities = { path = "../aether-capabilities", features = ["native"] }
+aether-capabilities = { path = "../aether-capabilities", features = ["runtime"] }
 # `StreamReader` bridges reqwest's byte stream into an `AsyncRead` so the
 # tunnel's SSE integration test can read events line-by-line as they
 # arrive (the back-pressure / no-buffering guard).

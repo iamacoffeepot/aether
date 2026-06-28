@@ -161,8 +161,8 @@ where
 /// sibling of [`decode_session_reply`]: it asserts the immediately
 /// following egress is a `ToSession` carrying `K`, rather than reading
 /// past bubble-ups. For cap tests that drive via the full dispatcher and
-/// egress channel (e.g. `render-native`) rather than direct `-> R` calls.
-// Used by render.rs tests (feature = "render-native"); dead_code fires in
+/// egress channel (e.g. `render-runtime`) rather than direct `-> R` calls.
+// Used by render.rs tests (feature = "render-runtime"); dead_code fires in
 // the default build without that feature.
 #[allow(dead_code)]
 pub fn decode_reply<K>(rx: &Receiver<EgressEvent>) -> K

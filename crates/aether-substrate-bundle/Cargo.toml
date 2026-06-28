@@ -70,7 +70,7 @@ path = "src/bin/perf-plot.rs"
 # `Lifecycle` / `NativeDispatch` impls compile only when this feature is
 # active. The bundle never builds to wasm and has no transport-only
 # consumer, so it is default-on. `aether-substrate` / `aether-capabilities`
-# already arrive with their own `runtime` / `native` defaults via the
+# already arrive with their own `runtime` defaults via the
 # non-`default-features = false` deps below, so no forwarding is needed.
 [features]
 default = ["runtime"]
@@ -78,7 +78,7 @@ runtime = []
 
 [dependencies]
 aether-substrate = { path = "../aether-substrate", features = ["render"] }
-aether-capabilities = { path = "../aether-capabilities", features = ["render-native", "audio-native", "text-native", "ui-native"] }
+aether-capabilities = { path = "../aether-capabilities", features = ["render-runtime", "audio-runtime", "text-runtime", "ui-runtime"] }
 # The space-time reachability subsystem (issue 1908). `native` pulls the
 # `TrajectoryRecorderCapability` the chassis registers; the dependency edge
 # is also what links its certifier `#[transform]`s into the headless

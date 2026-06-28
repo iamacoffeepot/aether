@@ -10,16 +10,16 @@
 //!
 //! ```ignore
 //! #[derive(Clone, Debug)]
-//! #[cfg_attr(feature = "native", derive(aether_substrate::Config))]
+//! #[cfg_attr(feature = "runtime", derive(aether_substrate::Config))]
 //! #[cfg_attr(
-//!     feature = "native",
+//!     feature = "runtime",
 //!     config(env_prefix = "AETHER_HTTP", cli_prefix = "http")
 //! )]
 //! pub struct HttpConfig {
-//!     #[cfg_attr(feature = "native", config(default = false))]
+//!     #[cfg_attr(feature = "runtime", config(default = false))]
 //!     pub disabled: bool,
 //!     #[cfg_attr(
-//!         feature = "native",
+//!         feature = "runtime",
 //!         config(default = 30_000, ms_duration)
 //!     )]
 //!     pub default_timeout: Duration,
@@ -60,7 +60,7 @@
 //! owns:
 //!
 //! ```ignore
-//! #[cfg_attr(feature = "native", config(default = false))]
+//! #[cfg_attr(feature = "runtime", config(default = false))]
 //! pub enabled: bool,
 //! ```
 //!

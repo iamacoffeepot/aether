@@ -175,7 +175,7 @@ pub struct GeminiMusicRequest {
 
 /// A minimal 1×1 opaque-black PNG. Used by [`StubGeminiAdapter`] so the
 /// staged image path decodes as a valid PNG without pulling the `png`
-/// encoder into the base `native` feature. Hand-rolled: signature +
+/// encoder into the base `runtime` feature. Hand-rolled: signature +
 /// IHDR + a single zlib-stored IDAT + IEND, with precomputed CRCs.
 pub const STUB_PNG: &[u8] = &[
     // PNG signature
@@ -204,7 +204,7 @@ pub const STUB_PNG: &[u8] = &[
 /// A minimal silent mono 16-bit PCM WAV (RIFF/WAVE, 48 kHz, a single
 /// zero sample). Used by [`StubGeminiAdapter`] so the staged audio path
 /// decodes as a valid WAV. Hand-rolled header so this crate doesn't
-/// pull a WAV encoder into the base `native` feature.
+/// pull a WAV encoder into the base `runtime` feature.
 pub const STUB_WAV: &[u8] = &[
     // RIFF header
     0x52, 0x49, 0x46, 0x46, // "RIFF"

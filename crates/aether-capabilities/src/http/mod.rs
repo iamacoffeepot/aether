@@ -16,16 +16,16 @@ pub use kinds::*;
 // domain struct; the `Config`-derive `HttpConfigLayer` / `HttpOverlay`
 // are native-only.
 pub use client::{HttpCapability, HttpConfig};
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 pub use client::{HttpConfigLayer, HttpOverlay};
 
 // Ingress server surface (`server.rs`). `HttpServerConfig` is the
 // always-on domain struct; the `Config`-derive `HttpServerConfigLayer` /
 // `HttpServerOverlay` and the bound-port `HttpServerHandle` are native-only.
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 pub use server::HttpServerConfigLayer;
 #[cfg(not(target_family = "wasm"))]
 pub use server::HttpServerHandle;
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 pub use server::HttpServerOverlay;
 pub use server::{HttpServerCapability, HttpServerConfig};

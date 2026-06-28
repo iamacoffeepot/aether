@@ -28,7 +28,7 @@ pub use config::NamespaceRoots;
 // `fs::` path, so re-export them here (native-only — the derive is
 // feature-gated). Inherent shims (`from_env` / `from_argv_then_env` /
 // `into_layer`) ride the type and need no re-export.
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 pub use config::{NamespaceRootsLayer, NamespaceRootsOverlay};
 pub use registry::{AdapterRegistry, build_registry};
 

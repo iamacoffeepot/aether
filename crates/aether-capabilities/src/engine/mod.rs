@@ -12,7 +12,7 @@
 pub mod kinds;
 pub mod proxy;
 pub mod server;
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 mod store;
 
 pub use kinds::{

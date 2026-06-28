@@ -818,7 +818,7 @@ struct ActorOpts {
     /// iamacoffeepot/aether#2330: override the `runtime` feature the split path
     /// gates its `Lifecycle`/`Dispatch`/`NativeActor` impls behind, from
     /// `#[actor(runtime_feature = "name")]`. A media cap whose native half lives
-    /// behind a cap-specific feature (`render-native` / `audio-native` / …)
+    /// behind a cap-specific feature (`render-runtime` / `audio-runtime` / …)
     /// names it here so the runtime impls gate on that feature rather than the
     /// generic `runtime`. `None` ⇒ the default `feature = "runtime"`.
     runtime_feature: Option<String>,
@@ -979,13 +979,13 @@ pub fn local(_attr: TokenStream, item: TokenStream) -> TokenStream {
 // directly.
 
 /// `#[capability]` — attribute macro for native chassis capability
-/// structs. Cfg-gates every field with `#[cfg(feature = "native")]`
-/// so the cap's runtime fields disappear from non-native builds (wasm
+/// structs. Cfg-gates every field with `#[cfg(feature = "runtime")]`
+/// so the cap's runtime fields disappear from non-runtime builds (wasm
 /// guests linking the cap's depable rlib for type/marker visibility
 /// don't pay for `cpal::Stream`, etc.).
 ///
 /// Issue 552 stage 0 ships the macro as a thin shim — fields get the
-/// blanket `#[cfg(feature = "native")]` gate and the struct itself
+/// blanket `#[cfg(feature = "runtime")]` gate and the struct itself
 /// passes through unchanged. Stage 1 may extend the macro to gate
 /// trait impls, derive `Default`, or pre-emit the empty
 /// stage-0-required `Singleton` marker; this skeleton lands now so
@@ -995,7 +995,7 @@ pub fn local(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```ignore
 /// #[capability]
 /// pub struct AudioCapability {
-///     // Both fields gain `#[cfg(feature = "native")]` automatically.
+///     // Both fields gain `#[cfg(feature = "runtime")]` automatically.
 ///     audio_sender: Option<AudioEventSender>,
 ///     audio_thread: Option<JoinHandle<()>>,
 /// }
@@ -2651,7 +2651,7 @@ fn expand_native_actor_trait(
     // HandlesKind markers, which is enough for typed
     // `ctx.actor::<R>().send(...)` against cap markers.
     //
-    // Gate is `target_arch` not `feature = "native"` because
+    // Gate is `target_arch` not `feature = "runtime"` because
     // NativeActor/NativeDispatch are wasm-incompatible by definition;
     // there's no realistic case where a host build wants to skip
     // them. Pinning the cfg in the macro means consumer crates never
@@ -2673,7 +2673,7 @@ fn expand_native_actor_trait(
     // iamacoffeepot/aether#2330: a split cap gates its runtime impls behind the
     // generic `runtime` feature by default, or a cap-specific feature when
     // `#[actor(runtime_feature = "name")]` overrides it (the media caps whose
-    // native half lives behind `render-native` / `audio-native` / … name it so
+    // native half lives behind `render-runtime` / `audio-runtime` / … name it so
     // a plain-`runtime` build never tries to compile their substrate-typed
     // impls without the heavy dep).
     let runtime_gate = match emit {

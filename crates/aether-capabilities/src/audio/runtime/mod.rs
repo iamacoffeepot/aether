@@ -1,5 +1,5 @@
 //! The `aether.audio` runtime half (ADR-0122 identity/runtime split).
-//! Compiled only under `feature = "audio-native"` (the `mod runtime;`
+//! Compiled only under `feature = "audio-runtime"` (the `mod runtime;`
 //! declaration in the parent carries the gate), so a marker-only / wasm build
 //! of the [`AudioCapability`](super::AudioCapability) identity never names
 //! these types nor pulls cpal / the synth pipeline. The substrate-typed +
@@ -984,7 +984,7 @@ impl NativeActor for AudioCapability {
     }
 }
 
-#[cfg(all(test, feature = "audio-native"))]
+#[cfg(all(test, feature = "audio-runtime"))]
 mod tests {
     // `sender.push(...).unwrap()` reads as test setup — the channel
     // is local and never full / closed during the test. `.expect`

@@ -58,7 +58,7 @@ pub use config::HttpServerConfig;
 // The `Config` derive on `HttpServerConfig` emits these native-only sibling
 // types in `config`; chassis CLI / boot wiring addresses them through the
 // `server::` path, so re-export them here.
-#[cfg(feature = "native")]
+#[cfg(feature = "runtime")]
 pub use config::{HttpServerConfigLayer, HttpServerOverlay};
 
 /// Exported handle bundle published at boot. Reachable from the chassis
