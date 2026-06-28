@@ -486,10 +486,19 @@ pub struct ActorCostResponse {
     pub rows: Vec<ActorCostRow>,
 }
 
-/// `describe_kinds` arguments. Both fields are optional and orthogonal —
-/// omit both for the compact default listing of every kind.
+/// `describe_kinds` arguments. All fields are optional and orthogonal —
+/// omit all for the compact default listing of the live engine's vocabulary.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DescribeKindsArgs {
+    /// Engine UUID (from `list_engines`) whose live kind vocabulary to
+    /// surface. When present, `describe_kinds` prefills the static substrate
+    /// baseline then merges the engine's live capability + component kinds
+    /// (via `aether.inventory.kinds`). When absent, the tool auto-resolves
+    /// the sole supervised engine if exactly one exists; with zero or many
+    /// supervised engines and no explicit `engine_id` it returns the static
+    /// baseline unchanged.
+    #[serde(default)]
+    pub engine_id: Option<String>,
     /// Case-sensitive prefix filter: when set, only kinds whose name starts
     /// with this string are included in the output (e.g. `"aether.fs"` to
     /// get just the file-system kinds). Omit to list every kind.
