@@ -48,7 +48,7 @@ use aether_actor::local::ActorSlots;
 use aether_actor::log::ActorLogRing;
 
 use crate::actor::native::local;
-use aether_actor::trace_ring::ActorTraceRing;
+use aether_actor::trace::ActorTraceRing;
 use std::sync::Weak;
 use std::time::Duration;
 

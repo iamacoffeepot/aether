@@ -35,7 +35,7 @@ use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
 // The `aether.trajectory` recorder cap moved to `aether-labyrinth` (issue
 // 1908); the mailbox NAMESPACE (and so its hash-derived id) is unchanged.
 use aether_actor::log::DEFAULT_RING_CAP;
-use aether_actor::trace_ring::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
+use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
 use aether_labyrinth::TrajectoryRecorderCapability;
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
@@ -530,7 +530,7 @@ mod tests {
     use super::SettlementConfig;
     use super::chassis_known_keys;
     use aether_actor::log::DEFAULT_RING_CAP;
-    use aether_actor::trace_ring::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
+    use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
     use aether_capabilities::LifecycleConfig;
     use std::env;
     use std::sync::Mutex;

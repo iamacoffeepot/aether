@@ -24,7 +24,7 @@ use aether_actor::OutboundReply;
 use aether_actor::log::ActorLogRing;
 
 use crate::mail::cost::CostCells;
-use aether_actor::trace_ring::ActorTraceRing;
+use aether_actor::trace::ActorTraceRing;
 use aether_data::Kind;
 use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
 use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult};
