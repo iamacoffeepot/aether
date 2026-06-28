@@ -54,7 +54,7 @@ pub mod local;
 pub mod log;
 pub mod mail;
 pub mod model;
-pub mod trace_ring;
+pub mod trace;
 pub mod wasm;
 
 pub use local::Local;

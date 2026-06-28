@@ -15,7 +15,7 @@
 //!
 //! # Distinct from the trace rings
 //!
-//! The per-actor trace rings (ADR-0081, `aether_actor::trace_ring`) are
+//! The per-actor trace rings (ADR-0081, `aether_actor::trace`) are
 //! loss-tolerant: they overwrite the oldest entry when full. This ring
 //! is **no-loss and reclaiming** — a region stays live until every
 //! consumer that holds a ref into it has released, and the producer

@@ -51,7 +51,7 @@ use aether_actor::local::ActorSlots;
 use crate::actor::native::local;
 use crate::mail::cost::CostCells;
 use aether_actor::log::ActorLogRing;
-use aether_actor::trace_ring::ActorTraceRing;
+use aether_actor::trace::ActorTraceRing;
 
 use crate::config::RingCapacities;
 use aether_kinds::trace::Settled;

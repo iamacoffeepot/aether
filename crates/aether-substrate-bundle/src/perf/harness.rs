@@ -29,7 +29,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::OutboundReply;
-use aether_actor::trace_ring::DEFAULT_TRACE_RING_CAP;
+use aether_actor::trace::DEFAULT_TRACE_RING_CAP;
 use aether_capabilities::trace_walk::fold_nodes;
 use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
 use aether_kinds::trace::{MailNodeWire, TraceRingEntry, TraceTail, TraceTailResult};

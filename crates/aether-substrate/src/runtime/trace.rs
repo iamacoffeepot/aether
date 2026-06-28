@@ -37,7 +37,7 @@ use aether_data::{KindId, MailId, MailboxId};
 use aether_kinds::trace::{Nanos, TraceEvent, TraceTail, TraceTailResult};
 
 use aether_actor::Local;
-use aether_actor::trace_ring::ActorTraceRing;
+use aether_actor::trace::ActorTraceRing;
 
 use crate::chassis::settlement::SettlementRegistry;
 use crate::chassis::settlement_table::SettlementTable;
