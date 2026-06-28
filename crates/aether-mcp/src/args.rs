@@ -177,7 +177,11 @@ pub struct MailSpec {
     /// substrate kind vocabulary baked into `aether-mcp`.
     pub kind_name: String,
     /// Structured params, schema-encoded to wire bytes against the
-    /// kind's descriptor. Omit or `null` for a fieldless kind.
+    /// kind's descriptor. Omit or `null` for a fieldless kind. For a
+    /// `Bytes`-typed field (e.g. `aether.fs.write`'s `bytes`), pass a byte
+    /// array (`[…]`, canonical) or one `$`-sigil embed: `{"$file": path}`
+    /// reads a file on the harness host, `{"$base64": s}` decodes,
+    /// `{"$text": s}` UTF-8-encodes.
     #[serde(default)]
     pub params: Option<serde_json::Value>,
 }
