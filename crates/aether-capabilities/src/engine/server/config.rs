@@ -68,6 +68,17 @@ pub struct EngineConfig {
     /// (retry until the dial succeeds or hits a terminal error).
     #[config(default = 30)]
     pub proxy_connect_budget_secs: u64,
+    /// How many times `on_spawn` re-forks a substrate on a fresh port
+    /// before giving up (`AETHER_HUB_PROXY_SPAWN_ATTEMPTS` /
+    /// `--hub-proxy-spawn-attempts`, issue 2422). A freshly-forked
+    /// substrate can lose its guessed RPC port to another socket in
+    /// `free_local_port`'s TOCTOU window and exit on a fatal bind; a
+    /// re-fork on a fresh port escapes the stolen port, since the theft
+    /// is per-port and independent across attempts, so N attempts drop
+    /// the failure probability geometrically. `1` preserves the
+    /// single-attempt behavior (no re-fork).
+    #[config(default = 3)]
+    pub proxy_spawn_attempts: u32,
     /// Layout-root override for the hub's content-addressed binary
     /// store (`AETHER_BINARY_STORE_DIR`, unprefixed — the ops escape
     /// hatch and the fleet tests' per-process isolation knob). Unset
@@ -113,6 +124,10 @@ impl Default for EngineConfig {
             // startup-dial budget — `0` would mean wait-forever and
             // hang on a genuinely dead substrate.
             proxy_connect_budget_secs: DEFAULT_PROXY_CONNECT_BUDGET_SECS,
+            // A single attempt by default in tests: the re-fork loop is
+            // a contention mitigation, and tests fork real substrates
+            // serially, so one attempt keeps the path deterministic.
+            proxy_spawn_attempts: 1,
             binary_store_dir: None,
             binary_disk_budget_bytes: DEFAULT_DISK_BUDGET_BYTES,
             binary_bootstrap: HashSet::new(),
@@ -140,6 +155,12 @@ impl EngineConfig {
     pub(super) fn connect_budget(&self) -> Option<Duration> {
         (self.proxy_connect_budget_secs != 0)
             .then(|| Duration::from_secs(self.proxy_connect_budget_secs))
+    }
+
+    /// The bounded re-fork attempt count for `on_spawn` (issue 2422),
+    /// clamped to at least 1 — `0` would never fork at all.
+    pub(super) fn spawn_attempts(&self) -> u32 {
+        self.proxy_spawn_attempts.max(1)
     }
 }
 
