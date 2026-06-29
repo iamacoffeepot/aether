@@ -13,7 +13,7 @@
 //! `save_state_kind` is the typed-state convenience (ADR-0040): the
 //! bundle is framed as `[0..8)` little-endian `K::ID` followed by the
 //! wire encoding of `value`; the replacement instance recovers `K`
-//! via [`crate::mail::PriorState::as_kind`]. Use the raw `save_state`
+//! via [`crate::mail::PriorState::decode_kind`]. Use the raw `save_state`
 //! when persisting bytes that aren't a kind or when driving an
 //! explicit migration off the leading id.
 
@@ -45,10 +45,10 @@ pub trait Persistence {
     /// Persist a typed kind value across `replace_component`
     /// (ADR-0040). The bundle is framed as `[0..8)` little-endian
     /// `K::ID` followed by the wire encoding of `value`; the
-    /// replacement instance recovers `K` via [`crate::mail::PriorState::as_kind`].
+    /// replacement instance recovers `K` via [`crate::mail::PriorState::decode_kind`].
     ///
     /// `K::ID` is the ADR-0030 schema hash — changing the shape of
-    /// `K` changes the id, which is what makes `as_kind::<K>`
+    /// `K` changes the id, which is what makes `decode_kind::<K>`
     /// automatically reject stale bytes after a schema evolution.
     /// `version` is passed through to the substrate unchanged;
     /// components typically leave it `0` since `K::ID` already

@@ -60,7 +60,7 @@ use aether_test_fixtures_kinds::{
 /// Durable state the `InlineStatefulChild` carries across `replace_component`.
 /// Uses the `aether.test_fixtures.inline_counter_state` shape so the macro
 /// frames it via `save_state_kind` on dehydrate and recovers it via
-/// `as_kind` on rehydrate.
+/// `decode_kind` on rehydrate.
 #[derive(
     aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
 )]
@@ -277,6 +277,6 @@ impl WasmActor for InlineDespawnChild {
     /// teardown). The child's own alias is the ctx's mailbox id.
     #[handler::manual]
     fn on_despawn(&mut self, ctx: &mut WasmCtx<'_, Manual>, _trigger: DespawnChild) {
-        let _ = ctx.despawn_inline_child(MailboxId(ctx.mailbox_id()));
+        let _ = ctx.despawn_inline_child(ctx.mailbox_id());
     }
 }

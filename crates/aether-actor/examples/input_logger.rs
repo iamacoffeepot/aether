@@ -24,7 +24,7 @@
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::InputCapability;
 use aether_capabilities::input::SubscribeInput;
-use aether_data::{Kind, MailboxId};
+use aether_data::Kind;
 use aether_kinds::{Key, MouseButton, MouseMove};
 
 pub struct InputLogger;
@@ -38,7 +38,7 @@ impl WasmActor for InputLogger {
     }
 
     fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
-        let me = MailboxId(ctx.mailbox_id());
+        let me = ctx.mailbox_id();
         let input = ctx.actor::<InputCapability>();
         for kind in [Key::ID, MouseMove::ID, MouseButton::ID] {
             input.send(&SubscribeInput { kind, mailbox: me });

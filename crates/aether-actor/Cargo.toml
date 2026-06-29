@@ -29,7 +29,7 @@ aether-actor-derive = { path = "../aether-actor-derive" }
 # request kinds — that whole vocabulary lives in `aether-kinds`.
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = { workspace = true, default-features = false }
-# Decoding typed payloads (e.g. `PriorState::as_kind`,
+# Decoding typed payloads (e.g. `PriorState::decode_kind`,
 # `Mail::decode_kind`) is serde-driven via `aether_data::wire`. The crate
 # stays `no_std`-friendly with `default-features = false`.
 serde = { workspace = true, default-features = false, features = ["alloc"] }

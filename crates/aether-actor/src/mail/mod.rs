@@ -22,7 +22,7 @@ pub mod mailbox;
 
 use core::marker::PhantomData;
 
-use aether_data::{Kind, MailboxId, Schema, wire};
+use aether_data::{Kind, KindId, MailboxId, Schema, wire};
 
 /// Sentinel the substrate passes as the reply-handle parameter on
 /// the `receive` shim when there is no reply target — for
@@ -156,12 +156,12 @@ impl Mail<'_> {
         }
     }
 
-    /// Raw kind id the substrate routed this mail under. The canonical
+    /// Kind id the substrate routed this mail under. The canonical
     /// way to consume it is [`Self::decode_kind::<K>()`], which matches
     /// the kind id and decodes in one call.
     #[must_use]
-    pub fn kind(&self) -> u64 {
-        self.kind
+    pub fn kind(&self) -> KindId {
+        KindId(self.kind)
     }
 
     /// Number of items carried on the mail frame — 1 for a single
@@ -316,10 +316,10 @@ impl<'a> PriorState<'a> {
     /// compiled against the new schema sees `None` from the old
     /// instance's save and boots fresh. Components that want to
     /// migrate across a schema change can reach for `bytes()` +
-    /// `schema_version()` directly, or try `as_kind::<OldShape>()`
+    /// `schema_version()` directly, or try `decode_kind::<OldShape>()`
     /// first and fall back if it returns `None`.
     #[must_use]
-    pub fn as_kind<K>(&self) -> Option<K>
+    pub fn decode_kind<K>(&self) -> Option<K>
     where
         K: Kind + Schema + DeserializeOwned,
     {
@@ -543,7 +543,7 @@ mod tests {
     // panics on the wasm transport's host stub), so these tests pair
     // a hand-built bundle matching the documented framing
     // (`[0..8) = K::ID LE`, `[8..) = wire(value)`) against
-    // `PriorState::as_kind` — the one we *can* unit-test on host. A
+    // `PriorState::decode_kind` — the one we *can* unit-test on host. A
     // mismatch between framing and decode surfaces here before either
     // diverges from the ADR's wire shape.
 
@@ -581,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn as_kind_roundtrip() {
+    fn decode_kind_roundtrip() {
         let value = StateStruct {
             tag: 11,
             label: String::from("phase-2"),
@@ -590,22 +590,22 @@ mod tests {
         let buf = frame_bundle(&value);
         let prior = prior_from(&buf, 0);
         let decoded = prior
-            .as_kind::<StateStruct>()
+            .decode_kind::<StateStruct>()
             .expect("test setup: round-trip frame decodes back to StateStruct");
         assert_eq!(decoded, value);
     }
 
     #[test]
-    fn as_kind_short_buffer_returns_none() {
+    fn decode_kind_short_buffer_returns_none() {
         // Buffer shorter than the 8-byte leading id — not a kind-
         // typed save (or corrupt). Must not panic.
         let buf: [u8; 3] = [1, 2, 3];
         let prior = prior_from(&buf, 0);
-        assert!(prior.as_kind::<StateStruct>().is_none());
+        assert!(prior.decode_kind::<StateStruct>().is_none());
     }
 
     #[test]
-    fn as_kind_empty_buffer_returns_none() {
+    fn decode_kind_empty_buffer_returns_none() {
         // `on_rehydrate` only fires when the predecessor saved
         // something, but a hypothetical zero-length buffer must
         // still fall through cleanly.
@@ -613,28 +613,28 @@ mod tests {
         // forming a slice over the null pointer; the decode reads
         // through that empty slice and short-circuits.
         let prior = unsafe { PriorState::__from_raw(0, 0, 0) };
-        assert!(prior.as_kind::<StateStruct>().is_none());
+        assert!(prior.decode_kind::<StateStruct>().is_none());
     }
 
     #[test]
-    fn as_kind_correct_id_garbage_payload_returns_none() {
+    fn decode_kind_correct_id_garbage_payload_returns_none() {
         // Leading id matches but the wire tail is truncated.
         // Decode error must surface as None, not a panic.
         let mut buf = Vec::from(StateStruct::ID.0.to_le_bytes());
         buf.push(0xff);
         let prior = prior_from(&buf, 0);
-        assert!(prior.as_kind::<StateStruct>().is_none());
+        assert!(prior.decode_kind::<StateStruct>().is_none());
     }
 
     #[test]
-    fn as_kind_preserves_raw_access_for_migration() {
+    fn decode_kind_preserves_raw_access_for_migration() {
         // ADR-0040 keeps the raw bytes + version reachable so a
-        // component that sees `as_kind::<New>() = None` can pivot to
+        // component that sees `decode_kind::<New>() = None` can pivot to
         // an explicit migration path.
         let value = OtherState { flag: false };
         let buf = frame_bundle(&value);
         let prior = prior_from(&buf, 7);
-        assert!(prior.as_kind::<StateStruct>().is_none());
+        assert!(prior.decode_kind::<StateStruct>().is_none());
         assert_eq!(prior.schema_version(), 7);
         assert_eq!(prior.bytes(), buf.as_slice());
     }

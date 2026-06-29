@@ -56,8 +56,8 @@ impl WasmInitCtx<'_> {
     /// The component's own mailbox id — the value the substrate uses to
     /// address `receive` calls to this instance.
     #[must_use]
-    pub fn mailbox_id(&self) -> u64 {
-        self.mailbox
+    pub fn mailbox_id(&self) -> MailboxId {
+        MailboxId(self.mailbox)
     }
 
     /// Resolve a kind by its `const ID`. Pure compile-time construction
@@ -279,8 +279,8 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// subscribes (sending `SubscribeInput` to the `InputCapability`)
     /// self-address through this.
     #[must_use]
-    pub fn mailbox_id(&self) -> u64 {
-        self.mailbox
+    pub fn mailbox_id(&self) -> MailboxId {
+        MailboxId(self.mailbox)
     }
 
     /// Singleton sender shortcut. Returns a ctx-bound [`WasmActorMailbox`]

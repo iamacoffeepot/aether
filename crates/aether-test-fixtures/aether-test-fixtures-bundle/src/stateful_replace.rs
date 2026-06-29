@@ -65,7 +65,7 @@ impl WasmActor for Counter {
     /// saved. A fresh load (no prior bundle) never reaches here, so the
     /// counter stays at its `init` zero.
     fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
-        if let Some(saved) = prior.as_kind::<CountReport>() {
+        if let Some(saved) = prior.decode_kind::<CountReport>() {
             self.count = saved.count;
         }
     }

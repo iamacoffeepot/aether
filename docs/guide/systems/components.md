@@ -158,7 +158,7 @@ impl WasmActor for MyComponent {
     }
 
     fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
-        if let Some(snap) = prior.as_kind::<Snapshot>() { … }
+        if let Some(snap) = prior.decode_kind::<Snapshot>() { … }
     }
 }
 

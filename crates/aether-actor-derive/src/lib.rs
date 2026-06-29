@@ -1802,7 +1802,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStrea
     // `Self::State` resolves directly inside `impl WasmActor for Self`.
     // `on_dehydrate` snapshots through `self.dehydrate()` and frames the
     // value with `save_state_kind`; `on_rehydrate` decodes via
-    // `PriorState::as_kind` and either restores through `self.rehydrate`
+    // `PriorState::decode_kind` and either restores through `self.rehydrate`
     // or boots fresh, warning only when bytes were present but did not
     // decode (a reshaped state kind — `K::ID` changed). When `type State`
     // was omitted these are empty and the actor keeps the default no-op
@@ -1821,7 +1821,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStrea
                 __aether_ctx: &mut ::aether_actor::WasmCtx<'_>,
                 __aether_prior: ::aether_actor::PriorState<'_>,
             ) {
-                match __aether_prior.as_kind::<<Self as ::aether_actor::WasmActor>::Persist>() {
+                match __aether_prior.decode_kind::<<Self as ::aether_actor::WasmActor>::Persist>() {
                     ::core::option::Option::Some(__aether_state) => {
                         self.rehydrate(__aether_state);
                     }
@@ -3441,11 +3441,10 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
                 unreachable!("parse_handler_class rejects #[handler::stream]")
             }
         };
-        // `Mail::kind()` returns the raw `u64` the FFI carried; `Kind::ID`
-        // is typed `KindId` post-issue 466, so we drop into `.0` for the
-        // comparison.
+        // `Mail::kind()` and `Kind::ID` are both the typed `KindId`
+        // newtype (`KindId: PartialEq`), so they compare directly.
         quote! {
-            if __aether_kind == <#k as ::aether_actor::__macro_internals::Kind>::ID.0 {
+            if __aether_kind == <#k as ::aether_actor::__macro_internals::Kind>::ID {
                 if let ::core::option::Option::Some(__aether_decoded) =
                     __aether_mail.decode_kind::<#k>()
                 {

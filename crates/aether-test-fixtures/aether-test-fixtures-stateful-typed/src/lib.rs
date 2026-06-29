@@ -7,7 +7,7 @@
 //!
 //! `stateful_replace_reshaped.rs` is the decode-miss companion: same
 //! `NAMESPACE`, a reshaped `CounterState` (an added field changes
-//! `Kind::ID`), so a replacement compiled against it sees `as_kind` =
+//! `Kind::ID`), so a replacement compiled against it sees `decode_kind` =
 //! `None` and boots fresh.
 
 // `rehydrate` takes its `State` by value — the macro hands the decoded
@@ -22,7 +22,7 @@ use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
 /// Durable state the `Counter` carries across `replace_component`. The
 /// `count` field is the only thing worth persisting — the macro frames it
-/// via `save_state_kind` on dehydrate and recovers it via `as_kind` on
+/// via `save_state_kind` on dehydrate and recovers it via `decode_kind` on
 /// rehydrate. The reshaped companion fixture adds a field, changing
 /// `Kind::ID` so the recovery misses.
 #[derive(

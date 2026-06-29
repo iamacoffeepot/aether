@@ -161,7 +161,7 @@ impl WasmActor for MatrixParent {
     fn on_run_matrix(&mut self, ctx: &mut WasmCtx<'_>, msg: RunMatrix) {
         let parent_id = ctx.mailbox_id();
         let child_a = ctx.child("a").expect("inline child a is resident");
-        record_ids(parent_id, child_a.mailbox_id().0);
+        record_ids(parent_id.0, child_a.mailbox_id().0);
         child_a.send(&MatrixPing {
             cell: MATRIX_CELL_PARENT_TO_CHILD,
             fan_out: 1,
