@@ -242,6 +242,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{InlineRegistry, compose_dehydrate, reconstruct_inline_children};
+    use crate::Manual;
     use crate::mail::{Mail, PriorState};
     use crate::wasm::ctx::WasmDropCtx;
     use crate::wasm::inline::bundle;
@@ -263,24 +264,15 @@ mod tests {
         fn erased_namespace(&self) -> &'static str {
             "test.inline.saving_child"
         }
-        fn erased_dispatch(
-            &mut self,
-            _ctx: &mut WasmCtx<'_, crate::Manual>,
-            _mail: Mail<'_>,
-        ) -> u32 {
+        fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
             0
         }
-        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
-        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
+        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
         fn erased_on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
             ctx.save_state(9, &self.tag.to_le_bytes());
         }
-        fn erased_on_rehydrate(
-            &mut self,
-            _ctx: &mut WasmCtx<'_, crate::Manual>,
-            _prior: PriorState<'_>,
-        ) {
-        }
+        fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
     }
 
     /// Step 3 coverage: a parent with two inline children yields a
