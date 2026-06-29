@@ -74,7 +74,7 @@ unsafe extern "C" {
     /// ADR-0081 §7: re-emit one `tracing::*` event on the host side
     /// so the trampoline's `ActorAwareLayer` lands it in this guest's
     /// per-actor `ActorLogRing`. Called from `ForwardingSubscriber::event`
-    /// (via the installed `crate::log::LogSink`)
+    /// (via the installed `crate::log::Sink`)
     /// per event. `level` follows the `0 = trace .. 4 = error`
     /// mapping the rest of `aether.log.*` uses. `target_ptr/len` and
     /// `message_ptr/len` are byte slices in guest memory; the host
