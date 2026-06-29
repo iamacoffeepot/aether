@@ -76,7 +76,7 @@ pub struct GeminiResponse {
 pub struct AdapterUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
-    pub wall_clock_ms: u32,
+    pub wall_clock_millis: u32,
     pub cost_micros: Option<u64>,
 }
 
@@ -250,7 +250,7 @@ impl AnthropicAdapter for StubAnthropicAdapter {
             usage: AdapterUsage {
                 input_tokens: 1,
                 output_tokens: 1,
-                wall_clock_ms: 0,
+                wall_clock_millis: 0,
                 cost_micros: Some(0),
             },
         })
@@ -263,7 +263,7 @@ impl AnthropicAdapter for StubAnthropicAdapter {
             usage: AdapterUsage {
                 input_tokens: 0,
                 output_tokens: 0,
-                wall_clock_ms: 0,
+                wall_clock_millis: 0,
                 cost_micros: None,
             },
         })

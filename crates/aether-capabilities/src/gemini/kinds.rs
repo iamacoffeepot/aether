@@ -90,7 +90,7 @@ pub struct GroundingMetadata {
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum GeminiError {
     RateLimited {
-        retry_after_ms: Option<u32>,
+        retry_after_millis: Option<u32>,
     },
     ContentPolicyRefused,
     Unauthorized,

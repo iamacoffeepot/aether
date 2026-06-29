@@ -291,7 +291,7 @@ fn to_usage(u: AdapterUsage) -> Usage {
     Usage {
         input_tokens: u.input_tokens,
         output_tokens: u.output_tokens,
-        wall_clock_ms: u.wall_clock_ms,
+        wall_clock_millis: u.wall_clock_millis,
         cost_micros: u.cost_micros,
     }
 }

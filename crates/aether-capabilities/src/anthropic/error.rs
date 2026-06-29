@@ -31,16 +31,16 @@ pub fn adapter_error_to_typed(raw: &str) -> AnthropicError {
         return AnthropicError::Unauthorized;
     }
     if let Some(rest) = raw.strip_prefix(TIMEOUT_SENTINEL) {
-        // `timeout=<elapsed_ms>` — parse the trailing integer the way
+        // `timeout=<elapsed_millis>` — parse the trailing integer the way
         // the `status=` prefix is parsed. A malformed tail falls back to
         // 0 rather than dropping the timeout classification.
-        let elapsed_ms = rest.trim().parse::<u32>().unwrap_or(0);
-        return AnthropicError::Timeout { elapsed_ms };
+        let elapsed_millis = rest.trim().parse::<u32>().unwrap_or(0);
+        return AnthropicError::Timeout { elapsed_millis };
     }
     if let Some(rest) = raw.strip_prefix("status=")
-        && let Some((status, retry_after_ms)) = parse_status_prefix(rest)
+        && let Some((status, retry_after_millis)) = parse_status_prefix(rest)
     {
-        return status_to_error(status, retry_after_ms, rest);
+        return status_to_error(status, retry_after_millis, rest);
     }
     AnthropicError::AdapterError(snippet(raw))
 }
@@ -51,16 +51,16 @@ pub fn adapter_error_to_typed(raw: &str) -> AnthropicError {
 /// codes that don't have a typed variant.
 ///
 /// - `401` / `403` → `Unauthorized` (bad / missing key)
-/// - `429` → `RateLimited` (the `retry_after_ms` is parsed from the
+/// - `429` → `RateLimited` (the `retry_after_millis` is parsed from the
 ///   `retry-after` header by the caller and threaded in)
 /// - `529` → `Overloaded` (Anthropic's "service overloaded")
 /// - everything else non-2xx → `AdapterError` carrying the status +
 ///   body snippet
 #[must_use]
-pub fn status_to_error(status: u16, retry_after_ms: Option<u32>, body: &str) -> AnthropicError {
+pub fn status_to_error(status: u16, retry_after_millis: Option<u32>, body: &str) -> AnthropicError {
     match status {
         401 | 403 => AnthropicError::Unauthorized,
-        429 => AnthropicError::RateLimited { retry_after_ms },
+        429 => AnthropicError::RateLimited { retry_after_millis },
         529 => AnthropicError::Overloaded,
         other => AnthropicError::AdapterError(format!("http {other}: {}", snippet(body))),
     }
@@ -77,7 +77,9 @@ mod tests {
         let raw = format!("{TIMEOUT_SENTINEL}1500");
         assert_eq!(
             adapter_error_to_typed(&raw),
-            AnthropicError::Timeout { elapsed_ms: 1500 }
+            AnthropicError::Timeout {
+                elapsed_millis: 1500
+            }
         );
     }
 
@@ -86,7 +88,7 @@ mod tests {
         let raw = format!("{TIMEOUT_SENTINEL}garbage");
         assert_eq!(
             adapter_error_to_typed(&raw),
-            AnthropicError::Timeout { elapsed_ms: 0 }
+            AnthropicError::Timeout { elapsed_millis: 0 }
         );
     }
 
@@ -101,7 +103,7 @@ mod tests {
         assert_eq!(
             status_to_error(429, Some(1500), "slow down"),
             AnthropicError::RateLimited {
-                retry_after_ms: Some(1500)
+                retry_after_millis: Some(1500)
             }
         );
     }

@@ -77,7 +77,7 @@ impl UreqAnthropicAdapter {
             // the cap's `error::status_to_error` mapping reconstructs
             // the typed variant. The cap parses the leading status.
             return Err(format!(
-                "status={status} retry_after_ms={retry_after_millis:?} body={text}"
+                "status={status} retry_after_millis={retry_after_millis:?} body={text}"
             ));
         }
 
@@ -110,7 +110,7 @@ fn build_request_body(req: &AnthropicRequest) -> Value {
 pub fn parse_messages_response(
     json: &str,
     fallback_model: &str,
-    wall_clock_ms: u32,
+    wall_clock_millis: u32,
 ) -> Result<AnthropicResponse, String> {
     let parsed: Value = serde_json::from_str(json).map_err(|e| format!("parse response: {e}"))?;
 
@@ -149,7 +149,7 @@ pub fn parse_messages_response(
         usage: AdapterUsage {
             input_tokens: clamp_u32(input_tokens),
             output_tokens: clamp_u32(output_tokens),
-            wall_clock_ms,
+            wall_clock_millis,
             cost_micros: None,
         },
     })
@@ -181,7 +181,7 @@ mod tests {
         assert_eq!(resp.model_used, "claude-opus-4-7");
         assert_eq!(resp.usage.input_tokens, 12);
         assert_eq!(resp.usage.output_tokens, 9);
-        assert_eq!(resp.usage.wall_clock_ms, 42);
+        assert_eq!(resp.usage.wall_clock_millis, 42);
     }
 
     #[test]

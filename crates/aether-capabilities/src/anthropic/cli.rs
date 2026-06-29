@@ -4,7 +4,7 @@
 //! `aether.anthropic.cli.send` is a first-class call surface: spawn
 //! `claude`, pipe the prompt to stdin, read the completion from
 //! stdout, route stderr to the actor log ring. `Usage` carries only
-//! `wall_clock_ms` — the subprocess reports no token counts.
+//! `wall_clock_millis` — the subprocess reports no token counts.
 //!
 //! The blocking `std::process::Command` call runs on issue 1013's
 //! spawn-and-die ephemeral thread, never on the dispatcher.
@@ -23,8 +23,8 @@ use crate::shared::contentgen::adapter::{AdapterUsage, AnthropicRequest, Anthrop
 pub const CLI_NOT_FOUND: &str = "cli-not-found";
 
 /// Sentinel prefix returned when the `claude` subprocess overruns its
-/// deadline and is killed. Formatted as `timeout=<elapsed_ms>` so the
-/// cap maps it onto `AnthropicError::Timeout { elapsed_ms }` (the cap
+/// deadline and is killed. Formatted as `timeout=<elapsed_millis>` so the
+/// cap maps it onto `AnthropicError::Timeout { elapsed_millis }` (the cap
 /// parses the trailing integer the way it parses `status=`).
 pub const TIMEOUT_SENTINEL: &str = "timeout=";
 
@@ -160,7 +160,7 @@ impl ClaudeCliAdapter {
         }
 
         let text = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
-        let wall_clock_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+        let wall_clock_millis = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
 
         Ok(AnthropicResponse {
             text,
@@ -168,7 +168,7 @@ impl ClaudeCliAdapter {
             usage: AdapterUsage {
                 input_tokens: 0,
                 output_tokens: 0,
-                wall_clock_ms,
+                wall_clock_millis,
                 cost_micros: None,
             },
         })

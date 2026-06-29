@@ -45,7 +45,7 @@ pub struct Message {
 pub enum AnthropicError {
     Overloaded,
     RateLimited {
-        retry_after_ms: Option<u32>,
+        retry_after_millis: Option<u32>,
     },
     ContextLengthExceeded {
         limit: u32,
@@ -58,7 +58,7 @@ pub enum AnthropicError {
         supported: Vec<String>,
     },
     Timeout {
-        elapsed_ms: u32,
+        elapsed_millis: u32,
     },
     ParamNotSupported {
         param: String,
@@ -120,7 +120,7 @@ pub enum MessagesSendResult {
 }
 
 /// Reply to [`CliSend`]. Same shape as [`MessagesSendResult`]; the
-/// CLI backend populates only `Usage.wall_clock_ms` (the subprocess
+/// CLI backend populates only `Usage.wall_clock_millis` (the subprocess
 /// reports no token counts).
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.anthropic.cli.send_result")]

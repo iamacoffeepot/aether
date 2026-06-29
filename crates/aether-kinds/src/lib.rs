@@ -2340,7 +2340,7 @@ mod control_plane {
     /// Token + wall-clock accounting returned on a successful
     /// content-gen completion. Shared across the Anthropic text kinds
     /// (issue 1014) and the Gemini media kinds (issue 1015). The CLI
-    /// backend can only report `wall_clock_ms` (the subprocess gives no
+    /// backend can only report `wall_clock_millis` (the subprocess gives no
     /// token counts), leaving the token / cost fields zero / `None`;
     /// the Messages API and the Gemini APIs populate the rest where the
     /// provider reports them.
@@ -2348,7 +2348,7 @@ mod control_plane {
     pub struct Usage {
         pub input_tokens: u32,
         pub output_tokens: u32,
-        pub wall_clock_ms: u32,
+        pub wall_clock_millis: u32,
         pub cost_micros: Option<u64>,
     }
 }
