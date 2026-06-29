@@ -2,7 +2,7 @@
 //!
 //! An inline child shares its parent's WASM instance, slot, and
 //! run-token (ADR-0114). [`WasmCtx::spawn_inline_child`] inserts
-//! the constructed child into the per-component [`InlineRegistry`] the
+//! the constructed child into the per-component [`Registry`] the
 //! [`crate::export!`] macro emits as a `static __AETHER_INLINE` (one per
 //! component, mirroring the parent's `static __AETHER_COMPONENT` slot),
 //! keyed by the child's alias [`MailboxId`]. The `export!` `receive_p32`
@@ -57,7 +57,7 @@ pub mod compose;
 /// One inline child's slot. `actor` is `None` while the child is taken
 /// out for dispatch (the slot-shaped take / reinsert) and `Some` at rest.
 /// The child's alias [`MailboxId`] is carried as the map key in
-/// [`InlineRegistry`]; there is no redundant `id` field here.
+/// [`Registry`]; there is no redundant `id` field here.
 ///
 /// ADR-0114 §5: the slot also records the metadata a `replace_component`
 /// swap needs to reconstruct the child in the fresh instance — the
@@ -82,8 +82,8 @@ struct InlineSlot {
     /// The real folded [`MailboxId`] of the actor that spawned this child
     /// (the spawning ctx's own id at `spawn_inline_child` time). The
     /// logical-tree link the relative-addressing lookups
-    /// ([`InlineRegistry::parent_of`] / [`InlineRegistry::child_of`] /
-    /// [`InlineRegistry::sibling_of`]) walk — resolution is pure registry
+    /// ([`Registry::parent_of`] / [`Registry::child_of`] /
+    /// [`Registry::sibling_of`]) walk — resolution is pure registry
     /// lookup, never a fold (a `MailboxId` is a one-way hash chain, so the
     /// guest cannot reproduce a relative's id by folding; it looks the
     /// recorded id up instead).
@@ -92,9 +92,9 @@ struct InlineSlot {
 }
 
 /// A cloneable snapshot of one resident inline child's reconstruct
-/// metadata (no actor box), produced by [`InlineRegistry::child_metas`]
+/// metadata (no actor box), produced by [`Registry::child_metas`]
 /// for the dehydrate walk. The compose path reads each child's state
-/// through [`InlineRegistry::with_child_mut`] keyed by `id`.
+/// through [`Registry::with_child_mut`] keyed by `id`.
 #[derive(Clone)]
 pub(crate) struct InlineChildMeta {
     /// The child's alias [`MailboxId`] (the registry key).
@@ -108,7 +108,7 @@ pub(crate) struct InlineChildMeta {
 }
 
 /// One intra-cluster send buffered on the per-component queue
-/// ([`InlineRegistry`]). A send whose recipient is a member of this cluster
+/// ([`Registry`]). A send whose recipient is a member of this cluster
 /// — the instance itself or one of its inline children — is pushed here
 /// rather than handed to the host; [`drain_cluster_queue`] dispatches each
 /// one through the membrane after the top-level dispatch returns, so the
@@ -132,7 +132,7 @@ struct QueuedMail {
 
 /// Whether a resolved recipient is in this cluster (dispatch in place
 /// through the queue) or outside it (hand to the host). The membership
-/// decision is factored out of [`InlineRegistry::route_or_enqueue`] as this
+/// decision is factored out of [`Registry::route_or_enqueue`] as this
 /// pure value so it is unit-testable without a live `MAIL_BRIDGE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RouteDecision {
@@ -144,7 +144,7 @@ pub(crate) enum RouteDecision {
 
 /// Whether a send inherits the handler's in-flight causal chain or starts
 /// a fresh one (ADR-0080 §7). Passed to
-/// [`InlineRegistry::route_or_enqueue`]; on the remote path it controls
+/// [`Registry::route_or_enqueue`]; on the remote path it controls
 /// whether the host stamps the dispatch's `parent`/`root` onto the outbound
 /// send (`Inherit`) or mints a new root chain (`Detached`). The local path
 /// carries no host trace ids, so the mode is irrelevant there.
@@ -171,7 +171,7 @@ pub(crate) enum ChainMode {
 /// addressable at any lineage depth; `queue` is the cluster-local mail
 /// queue an intra-cluster send is pushed to and [`drain_cluster_queue`]
 /// drains in place.
-pub struct InlineRegistry {
+pub struct Registry {
     inner: UnsafeCell<BTreeMap<MailboxId, InlineSlot>>,
     /// The instance's real folded [`MailboxId`] (`Tag::Mailbox`-tagged),
     /// set once from the `init` / `wire` shim's `mailbox_id` argument — the
@@ -199,9 +199,9 @@ pub struct InlineRegistry {
 // the added interior-mutable fields (`self_id`, `queue`): each is touched
 // only from the single run-token thread, and every borrow of `queue` is
 // taken fresh and released before return (never spanning a dispatch).
-unsafe impl Sync for InlineRegistry {}
+unsafe impl Sync for Registry {}
 
-impl InlineRegistry {
+impl Registry {
     /// An empty registry. `const` so it can back a `static`.
     #[must_use]
     pub const fn new() -> Self {
@@ -491,7 +491,7 @@ impl InlineRegistry {
     }
 }
 
-impl Default for InlineRegistry {
+impl Default for Registry {
     fn default() -> Self {
         Self::new()
     }
@@ -524,7 +524,7 @@ impl Default for InlineRegistry {
 pub fn membrane_dispatch<F>(
     own_mailbox_id: u64,
     mail: Mail<'_>,
-    registry: &InlineRegistry,
+    registry: &Registry,
     source: u64,
     dispatch_own: F,
 ) -> u32
@@ -574,7 +574,7 @@ where
 /// Reentrancy and cycles are handled by the queue, not by nested dispatch:
 /// a drained item's handler that sends to a busy cluster member just pushes
 /// a later queue item, which this same loop picks up.
-pub fn drain_cluster_queue<M, Own>(registry: &InlineRegistry, mut mk_own: M)
+pub fn drain_cluster_queue<M, Own>(registry: &Registry, mut mk_own: M)
 where
     M: FnMut(u64) -> Own,
     Own: FnOnce(Mail<'_>) -> u32,
@@ -613,7 +613,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ChainMode, InlineRegistry, RouteDecision, drain_cluster_queue, membrane_dispatch};
+    use super::{ChainMode, Registry, RouteDecision, drain_cluster_queue, membrane_dispatch};
     use crate::WasmCtx;
     use crate::mail::{Mail, PriorState};
     use crate::model::ctx::OutboundReply;
@@ -756,7 +756,7 @@ mod tests {
     /// through insert → take → reinsert → take.
     #[test]
     fn registry_insert_take_reinsert_round_trips() {
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let id = MailboxId(0x1111);
 
         assert!(registry.take(id).is_none(), "empty registry has no child");
@@ -787,7 +787,7 @@ mod tests {
     /// dehydrate walk.
     #[test]
     fn child_metas_carry_type_tag_and_subname() {
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let id = MailboxId(0x7777);
         let tag = 0xABCD_u64;
         registry.insert_child(
@@ -813,7 +813,7 @@ mod tests {
     /// the child registry.
     #[test]
     fn membrane_routes_own_recipient_to_parent() {
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let own = 0x2000_u64;
         let rc = membrane_dispatch(own, mail_to(own), &registry, MailboxId::NONE.0, |_mail| {
             OWN_CODE
@@ -826,7 +826,7 @@ mod tests {
     /// again (the take/reinsert round-trip under the membrane).
     #[test]
     fn membrane_routes_child_recipient_and_reinserts() {
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let own = 0x3000_u64;
         let child = 0x3001_u64;
         let (recording, dispatches) = RecordingChild::new();
@@ -856,7 +856,7 @@ mod tests {
     /// the parent's unmatched path rather than short-circuit dropping.
     #[test]
     fn membrane_routes_unknown_recipient_to_parent_unmatched_path() {
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let own = 0x4000_u64;
         let stray = 0x4999_u64;
         let rc = membrane_dispatch(own, mail_to(stray), &registry, MailboxId::NONE.0, |_mail| {
@@ -878,7 +878,7 @@ mod tests {
     /// through to the parent's unmatched path.
     #[test]
     fn membrane_self_despawn_drops_box_and_falls_through() {
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let own = 0x5000_u64;
         let child = 0x5001_u64;
         let drops = Rc::new(Cell::new(0));
@@ -919,7 +919,7 @@ mod tests {
     /// Install a recording child under `id` with `parent`, returning the
     /// shared dispatch counter. Shared helper for the addressing /
     /// route / drain tests below.
-    fn install_recording(registry: &InlineRegistry, id: u64, parent: u64) -> Rc<Cell<u32>> {
+    fn install_recording(registry: &Registry, id: u64, parent: u64) -> Rc<Cell<u32>> {
         let (recording, dispatches) = RecordingChild::new();
         registry.insert_child(
             MailboxId(id),
@@ -937,7 +937,7 @@ mod tests {
     /// clean `None` — never a fold.
     #[test]
     fn relative_resolution_walks_recorded_parent_links() {
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let root = 0x1000_u64;
         registry.set_self_id(root);
 
@@ -1018,7 +1018,7 @@ mod tests {
     /// live `MAIL_BRIDGE`.
     #[test]
     fn route_decision_classifies_cluster_membership() {
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let root = 0x2000_u64;
         let child = 0x2001_u64;
         registry.set_self_id(root);
@@ -1046,7 +1046,7 @@ mod tests {
     /// The queue grows by one per local send.
     #[test]
     fn route_or_enqueue_buffers_local_sends() {
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let root = 0x3000_u64;
         let child = 0x3001_u64;
         registry.set_self_id(root);
@@ -1072,7 +1072,7 @@ mod tests {
     /// call.
     #[test]
     fn drain_dispatches_a_seeded_local_item() {
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let root = 0x4000_u64;
         let child = 0x4001_u64;
         registry.set_self_id(root);
@@ -1115,7 +1115,7 @@ mod tests {
     /// child the first time it runs.
     #[test]
     fn drain_runs_a_cascade_in_one_call() {
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let root = 0x5000_u64;
         let child = 0x5001_u64;
         registry.set_self_id(root);
@@ -1181,7 +1181,7 @@ mod tests {
     /// shared dispatch counter and the shared observed-source cell, so a test
     /// can assert the in-place "from" half a drained dispatch reads.
     fn install_recording_with_source(
-        registry: &InlineRegistry,
+        registry: &Registry,
         id: u64,
         parent: u64,
     ) -> (Rc<Cell<u32>>, SourceCell) {
@@ -1204,7 +1204,7 @@ mod tests {
     /// that id, not `None`.
     #[test]
     fn drained_child_reads_enqueuing_sender_parent() {
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let root = 0x6000_u64;
         let child = 0x6001_u64;
         registry.set_self_id(root);
@@ -1232,7 +1232,7 @@ mod tests {
     /// contract directly — there is no host reply-table fallback.)
     #[test]
     fn membrane_dispatch_with_none_source_reads_no_source() {
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let own = 0x8000_u64;
         let child = 0x8001_u64;
         registry.set_self_id(own);

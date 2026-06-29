@@ -323,7 +323,7 @@ fn truncate(mut s: String) -> String {
 /// `Sync`. Mirrors `local::SLOTS_PROVIDER` — set once with `Release`,
 /// read with `Acquire`. Null until installed; an event fired before
 /// install is dropped rather than forwarded.
-pub type LogSink = fn(level: u8, target: &str, message: &str);
+pub type Sink = fn(level: u8, target: &str, message: &str);
 
 static LOG_SINK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
@@ -333,7 +333,7 @@ static LOG_SINK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 /// `ffi::bridge::mail::emit_log_event` (wasm32-only); a future C /
 /// OS-process host installs its own. This is the seam that keeps this
 /// module target-blind (issue #2078, mirroring `local.rs` #2070).
-pub fn install_log_sink(sink: LogSink) {
+pub fn install_log_sink(sink: Sink) {
     // A `fn` pointer casts cleanly to a thin data pointer; `current_sink`
     // transmutes it back (pointer → `fn` is not a plain cast).
     let raw: *mut () = sink as *mut ();
@@ -342,21 +342,21 @@ pub fn install_log_sink(sink: LogSink) {
 
 /// Read the installed sink, or `None` before any install.
 #[inline]
-fn current_sink() -> Option<LogSink> {
+fn current_sink() -> Option<Sink> {
     let raw = LOG_SINK.load(Ordering::Acquire);
     if raw.is_null() {
         return None;
     }
-    // SAFETY: `LOG_SINK` only ever holds a `LogSink` cast to a thin
+    // SAFETY: `LOG_SINK` only ever holds a `Sink` cast to a thin
     // pointer by `install_log_sink`; this reconstructs it. A data
     // pointer → `fn` pointer is not a plain cast, so `transmute` is
     // required.
-    Some(unsafe { transmute::<*mut (), LogSink>(raw) })
+    Some(unsafe { transmute::<*mut (), Sink>(raw) })
 }
 
 /// Target-blind `tracing` subscriber: renders each event via
 /// [`render_event`] and forwards `(level, target, message)` to the
-/// installed [`LogSink`]. The guest runtime sets it as `tracing`'s
+/// installed [`Sink`]. The guest runtime sets it as `tracing`'s
 /// global default and installs the FFI sink, so each guest event rides
 /// the trampoline's per-event host fn into the host process, where the
 /// host-side `ActorAwareLayer` lands it in the trampoline's

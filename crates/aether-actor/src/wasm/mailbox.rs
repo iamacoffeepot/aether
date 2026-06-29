@@ -25,7 +25,7 @@ use core::marker::PhantomData;
 use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
 
 use crate::model::{Addressable, HandlesKind};
-use crate::wasm::inline::{ChainMode, InlineRegistry};
+use crate::wasm::inline::{ChainMode, Registry};
 
 /// Phantom-typed receiver-actor handle for FFI guests, built by
 /// [`crate::wasm::WasmCtx::actor`] / [`crate::wasm::WasmCtx::resolve_actor`].
@@ -38,6 +38,8 @@ use crate::wasm::inline::{ChainMode, InlineRegistry};
 /// property of the *executing* actor — the handle cannot outlive the handler,
 /// so it can never carry a stale origin the way a stored address-only token
 /// would.
+// Dropping `Mailbox` yields `WasmActor`, colliding with the trait of the same name.
+#[allow(clippy::module_name_repetitions)]
 pub struct WasmActorMailbox<'a, R> {
     mailbox: u64,
     /// The resolving actor's own folded [`aether_data::MailboxId`] raw value —
@@ -47,12 +49,12 @@ pub struct WasmActorMailbox<'a, R> {
     /// the ctx-level constructors to the resolving ctx's own id.
     sender: u64,
     /// The per-component inline registry the send routes through
-    /// ([`InlineRegistry::route_or_enqueue`]): a cluster-member recipient
+    /// ([`Registry::route_or_enqueue`]): a cluster-member recipient
     /// dispatches in place, any other recipient hands off to the host. A typed
     /// peer / cap recipient is always cross-cluster, so this resolves to the
     /// host send — the registry borrow only keeps the routing path uniform with
     /// the in-cluster [`crate::wasm::RelativeMailbox`].
-    inline: &'a InlineRegistry,
+    inline: &'a Registry,
     _r: PhantomData<fn() -> R>,
 }
 
@@ -70,7 +72,7 @@ impl<'a, R> WasmActorMailbox<'a, R> {
     /// per-component inline registry the send routes through.
     #[doc(hidden)]
     #[must_use]
-    pub fn __new(mailbox: u64, sender: u64, inline: &'a InlineRegistry) -> Self {
+    pub fn __new(mailbox: u64, sender: u64, inline: &'a Registry) -> Self {
         Self {
             mailbox,
             sender,

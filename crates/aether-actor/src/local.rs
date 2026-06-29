@@ -27,7 +27,7 @@
 //!   below — there is one actor, so a `static` slot map is unambiguous and
 //!   no routing is needed.
 //!
-//! This mirrors the substrate's existing injection seams: `InlineRegistry`
+//! This mirrors the substrate's existing injection seams: `Registry`
 //! (a guest-owned `static` the `export!` macro creates) and `MailboxWakeSlot`
 //! (a host-installed hook whose hot-path read is a single relaxed load). The
 //! provider read here is the same shape — an `Acquire` load plus an indirect
@@ -187,7 +187,7 @@ fn current_slots() -> Option<*const ActorSlots> {
 /// that hosts exactly one actor in its address space (the wasm guest — the
 /// linear memory *is* the actor). The `unsafe impl Sync` is licensed by that
 /// single logical thread, the same argument behind `crate::Slot` and
-/// `crate::wasm::inline::InlineRegistry`.
+/// `crate::wasm::inline::Registry`.
 struct StaticBackend(ActorSlots);
 
 // SAFETY: a single-actor image runs on one logical thread (the wasm linear

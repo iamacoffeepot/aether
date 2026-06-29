@@ -53,7 +53,11 @@ pub mod inline;
 pub mod mailbox;
 pub mod raw;
 
+// Re-exports of `Wasm*` types — the `Wasm` prefix is deliberate (native/wasm split);
+// allows mirror the def-site allows on each type.
+#[allow(clippy::module_name_repetitions)]
 pub use ctx::{NO_INBOUND_SOURCE, RelativeMailbox, SpawnError, WasmCtx, WasmDropCtx, WasmInitCtx};
+#[allow(clippy::module_name_repetitions)]
 pub use mailbox::WasmActorMailbox;
 
 // Issue 665 retired the `ffi::Mailbox<K>` 1-arg alias and the
@@ -135,6 +139,8 @@ impl From<String> for ActorInitError {
 /// implements it on the addressing identity, forwarding to the inherent
 /// `__aether_dispatch` demux table; for an un-split component `S = Self`, so
 /// `&mut S == &mut self`.
+// The `Wasm` prefix is the deliberate native-vs-wasm disambiguator; public SDK trait.
+#[allow(clippy::module_name_repetitions)]
 pub trait WasmDispatch<S> {
     /// Route one inbound mail to the matching `#[handler]` over the state.
     /// Returns the dispatch result code the `receive` FFI shim relays.
@@ -143,6 +149,8 @@ pub trait WasmDispatch<S> {
     fn dispatch(state: &mut S, ctx: &mut WasmCtx<'_, crate::Manual>, mail: crate::Mail<'_>) -> u32;
 }
 
+// Bare `Actor` collides with `model::Actor`; the `Wasm` prefix is the deliberate native-vs-wasm disambiguator.
+#[allow(clippy::module_name_repetitions)]
 pub trait WasmActor:
     crate::Addressable
     + for<'a> crate::Lifecycle<
@@ -357,8 +365,8 @@ macro_rules! __export_internal {
         // membrane and the dehydrate / rehydrate shims thread
         // `&__AETHER_INLINE` to the inline-child consumers instead of
         // reaching for a crate-global static.
-        static __AETHER_INLINE: $crate::wasm::inline::InlineRegistry =
-            $crate::wasm::inline::InlineRegistry::new();
+        static __AETHER_INLINE: $crate::wasm::inline::Registry =
+            $crate::wasm::inline::Registry::new();
 
         // ADR-0033 / issue 442: pin the actor's `aether.kinds.inputs`
         // bytes into the cdylib's wasm custom section. The const data
@@ -685,7 +693,7 @@ macro_rules! __export_internal {
             // composite is byte-identical to the parent's own blob, so a
             // childless component dehydrates exactly as before; a parent
             // that saves nothing and has no children skips the host save.
-            if let Some((version, bytes)) = $crate::wasm::inline::compose::compose_dehydrate(
+            if let Some((version, bytes)) = $crate::wasm::inline::compose::dehydrate(
                 mailbox_id,
                 &__AETHER_INLINE,
                 |ctx| <$component as $crate::WasmActor>::on_dehydrate(instance, ctx),
@@ -816,8 +824,8 @@ macro_rules! __export_multi_internal {
         // and the dehydrate / rehydrate shims thread `&__AETHER_INLINE` to
         // the inline-child consumers instead of reaching for a crate-global
         // static.
-        static __AETHER_INLINE: $crate::wasm::inline::InlineRegistry =
-            $crate::wasm::inline::InlineRegistry::new();
+        static __AETHER_INLINE: $crate::wasm::inline::Registry =
+            $crate::wasm::inline::Registry::new();
 
         // ADR-0096: per-actor `aether.kinds.inputs` section. Each
         // exported type's records are preceded by an
@@ -1119,7 +1127,7 @@ macro_rules! __export_multi_internal {
             // composite, then `save_state` once (the boxed instance's
             // dehydrate routes through `erased_on_dehydrate`). Childless ⇒
             // byte-identical to the boxed parent's own blob.
-            if let Some((version, bytes)) = $crate::wasm::inline::compose::compose_dehydrate(
+            if let Some((version, bytes)) = $crate::wasm::inline::compose::dehydrate(
                 mailbox_id,
                 &__AETHER_INLINE,
                 |ctx| instance.erased_on_dehydrate(ctx),

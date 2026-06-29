@@ -108,7 +108,7 @@ mod tests {
     // trampoline-address fold against the flat name hash — the primitive is
     // the reference value under test, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
-    use aether_actor::wasm::inline::InlineRegistry;
+    use aether_actor::wasm::inline::Registry;
     use aether_actor::{Addressable, WasmActorMailbox};
     use aether_data::{ActorId, MailboxId, Tag, fold_lineage, mailbox_id_from_name, with_tag};
 
@@ -130,7 +130,7 @@ mod tests {
         // host carry + the trampoline node name. The ctx binding (sender +
         // inline registry) is irrelevant to id resolution, so a throwaway
         // registry and a zero sender suffice (issue 1987).
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let host = WasmActorMailbox::<ComponentHostCapability>::__new(
             mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0,
             0,

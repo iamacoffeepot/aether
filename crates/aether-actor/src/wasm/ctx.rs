@@ -27,7 +27,7 @@ use crate::model::{
     validate_namespace_segment,
 };
 use crate::wasm::bridge::{mail, persist};
-use crate::wasm::inline::{ChainMode, InlineRegistry};
+use crate::wasm::inline::{ChainMode, Registry};
 use crate::wasm::mailbox::WasmActorMailbox;
 use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor};
 use alloc::boxed::Box;
@@ -37,6 +37,8 @@ use alloc::vec::Vec;
 /// Init-only capability handle for FFI guests. Resolved during
 /// `WasmActor::init`; not available at runtime (the type split fences
 /// "when can I resolve?" against "when can I send?" at compile time).
+// The `Wasm` prefix carries the native/wasm split signal; bare `InitCtx` loses that.
+#[allow(clippy::module_name_repetitions)]
 pub struct WasmInitCtx<'a> {
     mailbox: u64,
     _borrow: PhantomData<&'a ()>,
@@ -105,7 +107,7 @@ pub struct RelativeMailbox<'a> {
     /// [`WasmCtx::parent`] / [`WasmCtx::child`] / [`WasmCtx::sibling`] to the
     /// resolving ctx's `mailbox`.
     sender: u64,
-    inline: &'a InlineRegistry,
+    inline: &'a Registry,
 }
 
 impl RelativeMailbox<'_> {
@@ -177,6 +179,8 @@ pub enum SpawnError {
 /// inherent [`mailbox_id`](WasmCtx::mailbox_id) so `wire`-stage explicit
 /// subscribes (sending `SubscribeInput` to the `InputCapability`) can
 /// self-address.
+// The `Wasm` prefix carries the native/wasm split signal; bare `Ctx` loses that.
+#[allow(clippy::module_name_repetitions)]
 pub struct WasmCtx<'a, M: ReplyMode = Single> {
     mailbox: u64,
     sender: Option<ReplyHandle>,
@@ -198,7 +202,7 @@ pub struct WasmCtx<'a, M: ReplyMode = Single> {
     /// host unit test threads in a local registry. Held by reference
     /// rather than reached as a global — the same discipline the parent
     /// slot (`__AETHER_COMPONENT`) already follows.
-    inline: &'a InlineRegistry,
+    inline: &'a Registry,
     _borrow: PhantomData<&'a ()>,
     /// ADR-0112: phantom reply-mode marker (a ZST, layout-neutral) that
     /// selects which reply surface this ctx exposes. Defaults to
@@ -227,7 +231,7 @@ impl<'a> WasmCtx<'a, Manual> {
     /// [`MailboxId::NONE`] (`0`) for a lifecycle hook with no inbound mail.
     #[doc(hidden)]
     #[must_use]
-    pub fn __new(mailbox: u64, inline: &'a InlineRegistry, source: u64) -> Self {
+    pub fn __new(mailbox: u64, inline: &'a Registry, source: u64) -> Self {
         Self {
             mailbox,
             sender: None,
@@ -365,7 +369,7 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// this trampoline's own slot; the SDK then runs `A::init`
     /// **synchronously** (unlike the detached `spawn_child`, whose `init`
     /// runs later on a fresh trampoline) and inserts the boxed child into
-    /// this ctx's per-component [`InlineRegistry`] keyed by the alias. Mail
+    /// this ctx's per-component [`Registry`] keyed by the alias. Mail
     /// addressed to the alias lands in this slot and the `export!`
     /// membrane demuxes it to the child; the child's own sends stamp the
     /// child's address as origin and its replies route back.
@@ -434,7 +438,7 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
 
     /// ADR-0114: tear down an **inline child** spawned by
     /// [`Self::spawn_inline_child`]. Drops the child from this ctx's
-    /// per-component [`InlineRegistry`] (running the child's `Drop`), so it
+    /// per-component [`Registry`] (running the child's `Drop`), so it
     /// stops handling mail. `child` is the alias [`MailboxId`] that
     /// `spawn_inline_child` returned (the registry key, the natural
     /// handle). Returns `true` if a resident child was removed, `false` if
@@ -584,7 +588,7 @@ fn resolve_subname(subname: Subname<'_>) -> Result<(bool, String), SpawnError> {
 /// the slot so a `replace_component` swap can reconstruct the child by
 /// type and re-fold its metadata.
 fn install_inline_child<A>(
-    registry: &InlineRegistry,
+    registry: &Registry,
     alias: MailboxId,
     type_tag: u64,
     full_subname: String,
@@ -765,6 +769,8 @@ impl CapturedState {
 /// Narrowed capability handle for the `on_dehydrate` save hook.
 /// Outbound mail still works through [`MailSender`]; the reply / resolve
 /// surfaces are intentionally absent.
+// The `Wasm` prefix carries the native/wasm split signal; bare `DropCtx` loses that.
+#[allow(clippy::module_name_repetitions)]
 pub struct WasmDropCtx<'a> {
     /// The actor's own mailbox id (its lineage carry), so a buffered
     /// `send` resolves the receiver through `R::resolve(self.mailbox)`
@@ -937,8 +943,7 @@ impl Persistence for WasmDropCtx<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        InlineRegistry, Manual, NO_INBOUND_SOURCE, Single, SpawnError, WasmCtx,
-        install_inline_child,
+        Manual, NO_INBOUND_SOURCE, Registry, Single, SpawnError, WasmCtx, install_inline_child,
     };
     use crate::Addressable;
     use crate::mail::{Mail, PriorState};
@@ -1011,7 +1016,7 @@ mod tests {
     /// it without the panicking `spawn_inline_child` host-fn stub.
     #[test]
     fn install_inline_child_reports_init_failure() {
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let result = install_inline_child::<FailingChild>(
             &registry,
             MailboxId(0x5555),
@@ -1033,7 +1038,7 @@ mod tests {
     /// host build's panicking host-fn stub is never reached).
     #[test]
     fn spawn_inline_child_rejects_invalid_subname() {
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let ctx = WasmCtx::__new(0, &registry, NO_INBOUND_SOURCE);
         let result = ctx.spawn_inline_child::<FailingChild>(Subname::Named("bad:name"), &());
         assert!(
@@ -1050,7 +1055,7 @@ mod tests {
     /// sentinel) yields `None`. No host round-trip is involved.
     #[test]
     fn source_mailbox_reads_the_threaded_source_field() {
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
 
         let source = MailboxId(0x9999_0000_1234_5678);
         let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x10, &registry, source.0);
@@ -1136,7 +1141,7 @@ mod tests {
     /// on the host build). `parent()` of the root is `None` (cross-cluster).
     #[test]
     fn ctx_relative_verbs_resolve_and_route_in_place() {
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let root = 0x7100_u64;
         registry.set_self_id(root);
         // Install a child of the root keyed by a synthetic alias; record the

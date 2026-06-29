@@ -146,7 +146,9 @@ pub const fn resolve<K: Kind>() -> KindId<K> {
 /// kind already exist on the substrate side at init time.
 // SDK compile-time name→id primitive (the documented `Mailbox<K>` token
 // path) — `mailbox_name` is a const, resolved before any runtime carry exists.
+// Bare `resolve` collides with the sibling `resolve::<K>() -> KindId`; they are distinct verbs.
 #[must_use]
+#[allow(clippy::module_name_repetitions)]
 #[allow(clippy::disallowed_methods)]
 pub const fn resolve_mailbox<K: Kind>(mailbox_name: &str) -> Mailbox<K> {
     Mailbox::__new(mailbox_id_from_name(mailbox_name).0, K::ID.0)

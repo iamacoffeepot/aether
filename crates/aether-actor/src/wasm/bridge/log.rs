@@ -23,7 +23,7 @@ use crate::wasm::raw;
 /// returning; the guest's borrows are released as soon as the
 /// FFI call completes.
 ///
-/// Only callable from wasm32 — installed as the [`crate::log::LogSink`]
+/// Only callable from wasm32 — installed as the [`crate::log::Sink`]
 /// by the guest runtime (`export!`) and invoked from
 /// [`crate::log::ForwardingSubscriber::event`].
 #[cfg(target_family = "wasm")]

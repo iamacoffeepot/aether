@@ -3,7 +3,7 @@
 //! multi-actor) so the symmetric walk lives in one place rather than
 //! being copy-pasted per arm.
 //!
-//! On dehydrate ([`compose_dehydrate`]): run the parent's `on_dehydrate`
+//! On dehydrate ([`dehydrate`]): run the parent's `on_dehydrate`
 //! into a capture buffer, walk every resident inline child running its
 //! `erased_on_dehydrate` into its own capture buffer, and pack the
 //! parent's blob plus each child's into one composite (`bundle`).
@@ -27,7 +27,7 @@ use aether_data::{Kind, MailboxId};
 
 use crate::mail::PriorState;
 use crate::wasm::ctx::{CapturedState, NO_INBOUND_SOURCE, WasmDropCtx, WasmInitCtx};
-use crate::wasm::inline::InlineRegistry;
+use crate::wasm::inline::Registry;
 use crate::wasm::inline::bundle::{self, ChildEntry};
 use crate::wasm::{ErasedWasmActor, WasmActor, WasmCtx};
 
@@ -48,9 +48,9 @@ use crate::wasm::{ErasedWasmActor, WasmActor, WasmCtx};
 /// with no inline children that is byte-identical to the parent's own
 /// blob.
 #[must_use]
-pub fn compose_dehydrate(
+pub fn dehydrate(
     mailbox_id: u64,
-    registry: &InlineRegistry,
+    registry: &Registry,
     run_parent_dehydrate: impl FnOnce(&mut WasmDropCtx<'_>),
 ) -> Option<(u32, Vec<u8>)> {
     // Parent half: capture whatever the parent's `on_dehydrate` saves.
@@ -139,9 +139,9 @@ pub struct InlineChildToReconstruct<'a> {
 pub fn reconstruct_inline_children(
     version: u32,
     bytes: &[u8],
-    registry: &InlineRegistry,
+    registry: &Registry,
     run_parent_rehydrate: impl FnOnce(u32, &[u8]),
-    mut reconstruct_child: impl FnMut(&InlineRegistry, &InlineChildToReconstruct<'_>) -> bool,
+    mut reconstruct_child: impl FnMut(&Registry, &InlineChildToReconstruct<'_>) -> bool,
 ) {
     let decomposed = bundle::decompose(version, bytes);
 
@@ -184,7 +184,7 @@ pub fn reconstruct_inline_children(
 /// by `alias` restores addressing with no host round-trip.
 #[must_use]
 pub fn reconstruct_one_child<A>(
-    registry: &InlineRegistry,
+    registry: &Registry,
     to_reconstruct: &InlineChildToReconstruct<'_>,
 ) -> bool
 where
@@ -241,7 +241,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{InlineRegistry, compose_dehydrate, reconstruct_inline_children};
+    use super::{Registry, dehydrate, reconstruct_inline_children};
     use crate::Manual;
     use crate::mail::{Mail, PriorState};
     use crate::wasm::ctx::WasmDropCtx;
@@ -282,7 +282,7 @@ mod tests {
     fn compose_dehydrate_packs_parent_and_children() {
         // Two children with distinct tags + type tags + aliases, in a
         // test-local registry (no shared-global aliasing across tests).
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let id_a = MailboxId(0xA1);
         let id_b = MailboxId(0xB2);
         registry.insert_child(
@@ -303,7 +303,7 @@ mod tests {
         );
 
         // Parent saves a marker blob of its own.
-        let (version, bytes) = compose_dehydrate(0x7000, &registry, |ctx| {
+        let (version, bytes) = dehydrate(0x7000, &registry, |ctx| {
             ctx.save_state(3, &[0xDE, 0xAD]);
         })
         .expect("a parent that saves plus two children yields a bundle");
@@ -368,7 +368,7 @@ mod tests {
         ];
         let (version, bytes) = compose(5, &[7, 7], &children);
 
-        let registry = InlineRegistry::new();
+        let registry = Registry::new();
         let mut parent_runs = 0u32;
         let mut offered: Vec<(u64, Vec<u8>)> = Vec::new();
         reconstruct_inline_children(
