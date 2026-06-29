@@ -39,10 +39,10 @@ impl Quat {
         let (sp, cp) = (libm::sinf(pitch * 0.5), libm::cosf(pitch * 0.5));
         let (sr, cr) = (libm::sinf(roll * 0.5), libm::cosf(roll * 0.5));
         Self::new(
-            cr * sp * cy - sr * cp * sy,
-            cr * cp * sy + sr * sp * cy,
-            cr * sp * sy + sr * cp * cy,
-            cr * cp * cy - sr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+            sr * cp * cy - cr * sp * sy,
+            cr * cp * cy + sr * sp * sy,
         )
     }
 
@@ -175,6 +175,20 @@ mod tests {
         let pitch = 0.4;
         let a = Quat::from_euler_yxz(0.0, pitch, 0.0);
         let b = Quat::from_axis_angle(Vec3::X, pitch);
+        let v = Vec3::new(1.0, 2.0, 3.0);
+        assert!(approx_eq_vec3(a * v, b * v));
+    }
+
+    #[test]
+    fn combined_yaw_pitch_roll_matches_axis_angle_product() {
+        // Tripwire: from_euler_yxz must equal the explicit YXZ axis-angle
+        // product Ry(yaw)·Rx(pitch)·Rz(roll); single-axis tests can't catch
+        // a reversed composition order.
+        let (yaw, pitch, roll) = (0.3, 0.5, 0.7);
+        let a = Quat::from_euler_yxz(yaw, pitch, roll);
+        let b = Quat::from_axis_angle(Vec3::Y, yaw)
+            * Quat::from_axis_angle(Vec3::X, pitch)
+            * Quat::from_axis_angle(Vec3::Z, roll);
         let v = Vec3::new(1.0, 2.0, 3.0);
         assert!(approx_eq_vec3(a * v, b * v));
     }
