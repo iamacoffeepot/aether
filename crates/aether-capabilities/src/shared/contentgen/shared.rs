@@ -26,7 +26,7 @@ pub fn agent() -> ureq::Agent {
 }
 
 /// Run a built request through `agent` with a global timeout and return
-/// `(status, retry_after_ms, body_text)`. The `retry-after` header (in
+/// `(status, retry_after_millis, body_text)`. The `retry-after` header (in
 /// seconds) is converted to milliseconds when present. Errors are
 /// free-form strings the caller maps onto its provider error taxonomy.
 pub fn run_request(
@@ -55,16 +55,16 @@ pub fn run_request(
     Ok((status, retry_after_millis, text))
 }
 
-/// Parse the `<status> retry_after_ms=<Debug-of-Option<u32>>` prefix a
+/// Parse the `<status> retry_after_millis=<Debug-of-Option<u32>>` prefix a
 /// backend prepends to a non-2xx error string (after the caller strips
-/// the leading `status=`). Returns `(status, retry_after_ms)` on a
+/// the leading `status=`). Returns `(status, retry_after_millis)` on a
 /// clean parse. Both providers format the prefix identically.
 #[must_use]
 pub fn parse_status_prefix(rest: &str) -> Option<(u16, Option<u32>)> {
     let mut parts = rest.split_whitespace();
     let status = parts.next()?.parse::<u16>().ok()?;
     let retry_after_millis = parts.next().and_then(|tok| {
-        tok.strip_prefix("retry_after_ms=").and_then(|v| {
+        tok.strip_prefix("retry_after_millis=").and_then(|v| {
             // The backend formats `Option<u32>` via Debug — `Some(1500)`
             // or `None`. Extract the inner integer when present.
             v.strip_prefix("Some(")
@@ -99,11 +99,11 @@ mod tests {
     #[test]
     fn parse_status_prefix_extracts_status_and_retry() {
         assert_eq!(
-            parse_status_prefix("429 retry_after_ms=Some(1500) body=x"),
+            parse_status_prefix("429 retry_after_millis=Some(1500) body=x"),
             Some((429, Some(1500)))
         );
         assert_eq!(
-            parse_status_prefix("500 retry_after_ms=None body=oops"),
+            parse_status_prefix("500 retry_after_millis=None body=oops"),
             Some((500, None))
         );
         assert_eq!(parse_status_prefix("not-a-status"), None);

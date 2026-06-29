@@ -15,7 +15,7 @@ use crate::shared::contentgen::shared::{parse_status_prefix, snippet};
 pub const UNAUTHORIZED_SENTINEL: &str = "unauthorized";
 
 /// Map an HTTP status code from a Gemini API onto a [`GeminiError`].
-/// `retry_after_ms` is parsed from the `retry-after` header by the
+/// `retry_after_millis` is parsed from the `retry-after` header by the
 /// caller; `body` is the response text, preserved in `AdapterError`
 /// for the codes without a typed variant.
 ///
@@ -23,10 +23,10 @@ pub const UNAUTHORIZED_SENTINEL: &str = "unauthorized";
 /// - `429` → `RateLimited`
 /// - everything else non-2xx → `AdapterError` carrying status + snippet
 #[must_use]
-pub fn status_to_error(status: u16, retry_after_ms: Option<u32>, body: &str) -> GeminiError {
+pub fn status_to_error(status: u16, retry_after_millis: Option<u32>, body: &str) -> GeminiError {
     match status {
         401 | 403 => GeminiError::Unauthorized,
-        429 => GeminiError::RateLimited { retry_after_ms },
+        429 => GeminiError::RateLimited { retry_after_millis },
         other => GeminiError::AdapterError(format!("http {other}: {}", snippet(body))),
     }
 }
@@ -41,9 +41,9 @@ pub fn adapter_error_to_typed(raw: &str) -> GeminiError {
         return GeminiError::Unauthorized;
     }
     if let Some(rest) = raw.strip_prefix("status=")
-        && let Some((status, retry_after_ms)) = parse_status_prefix(rest)
+        && let Some((status, retry_after_millis)) = parse_status_prefix(rest)
     {
-        return status_to_error(status, retry_after_ms, rest);
+        return status_to_error(status, retry_after_millis, rest);
     }
     GeminiError::AdapterError(snippet(raw))
 }
@@ -64,7 +64,7 @@ mod tests {
         assert_eq!(
             status_to_error(429, Some(2000), ""),
             GeminiError::RateLimited {
-                retry_after_ms: Some(2000)
+                retry_after_millis: Some(2000)
             }
         );
     }
@@ -79,11 +79,11 @@ mod tests {
 
     #[test]
     fn status_prefix_round_trips_through_typed() {
-        let raw = "status=429 retry_after_ms=Some(1500) body=slow down";
+        let raw = "status=429 retry_after_millis=Some(1500) body=slow down";
         assert_eq!(
             adapter_error_to_typed(raw),
             GeminiError::RateLimited {
-                retry_after_ms: Some(1500)
+                retry_after_millis: Some(1500)
             }
         );
     }

@@ -57,13 +57,13 @@ enum Role { User, Assistant }
 struct Usage {
     input_tokens: u32,
     output_tokens: u32,
-    wall_clock_ms: u32,
+    wall_clock_millis: u32,
     cost_micros: Option<u64>,   // 1/1_000_000 USD; API reports it, CLI subscription leaves it None
 }
 
 enum AnthropicError {
     Overloaded,
-    RateLimited { retry_after_ms: Option<u32> },
+    RateLimited { retry_after_millis: Option<u32> },
     ContextLengthExceeded { limit: u32 },
     Unauthorized,
     ContentPolicyRefused,
@@ -114,7 +114,7 @@ aether.gemini.lyria.generate_result : Ok  { request_id, output_path, model_used,
 
 ```rust
 enum GeminiError {
-    RateLimited { retry_after_ms: Option<u32> },
+    RateLimited { retry_after_millis: Option<u32> },
     ContentPolicyRefused,
     Unauthorized,
     UnknownModel { model: String, supported: Vec<String> },
@@ -160,7 +160,7 @@ Output PNG bytes stage to `save://gen/<uuid>.png`; `output_paths` is a `Vec` bec
 
 ```rust
 enum OpenaiError {
-    RateLimited { retry_after_ms: Option<u32> },
+    RateLimited { retry_after_millis: Option<u32> },
     ContentPolicyRefused,
     Unauthorized,
     UnknownModel { model: String, supported: Vec<String> },
@@ -213,7 +213,7 @@ There is **no `Semaphore` and no `Mutex`.** Because the actor is single-threaded
 **`aether.anthropic`** — two backend paths under one cap:
 
 - **Messages API** (`aether.anthropic.messages.send`). HTTPS to `api.anthropic.com/v1/messages`. Loaded when `ANTHROPIC_API_KEY` is set; per-token billing; reports full `Usage` including `cost_micros` from the API pricing table. Absent in the user's default workflow.
-- **CLI subprocess** (`aether.anthropic.cli.send`). Runs the local `claude` binary as a child process per request, request piped through stdin, `text` captured from stdout, stderr to the actor log ring. The load-bearing v1 path: the user runs Claude via subscription exercised through the CLI, no API key configured. Validated empirically in `spikes/prompt-pipeline-spike/` — five experiment runs across Haiku / Sonnet / Opus profiles, content-addressed caching, no failures; the spike's `src/claude.rs` is the reference. `Usage` from the CLI reports `wall_clock_ms` only; `input_tokens` / `output_tokens` are `0` and `cost_micros` is `None` (the CLI's text-output mode doesn't surface tokens, and subscription billing isn't per-call). If `claude` isn't on PATH, `cli.send` replies `Err { error: CliNotFound }`.
+- **CLI subprocess** (`aether.anthropic.cli.send`). Runs the local `claude` binary as a child process per request, request piped through stdin, `text` captured from stdout, stderr to the actor log ring. The load-bearing v1 path: the user runs Claude via subscription exercised through the CLI, no API key configured. Validated empirically in `spikes/prompt-pipeline-spike/` — five experiment runs across Haiku / Sonnet / Opus profiles, content-addressed caching, no failures; the spike's `src/claude.rs` is the reference. `Usage` from the CLI reports `wall_clock_millis` only; `input_tokens` / `output_tokens` are `0` and `cost_micros` is `None` (the CLI's text-output mode doesn't surface tokens, and subscription billing isn't per-call). If `claude` isn't on PATH, `cli.send` replies `Err { error: CliNotFound }`.
 
 Both kinds share the cap's rate-limit budget tracker when the user is on one Anthropic account — at the provider level they aren't separate buckets, though today CLI uses subscription quota and Messages uses per-token billing, so the two paths don't actually interact.
 
@@ -271,7 +271,7 @@ Per-request entries land in the per-actor log ring (ADR-0081):
 - **WARN** — adapter error, retry, ignored unsupported parameter, per-model validation rejection.
 - **ERROR** — irrecoverable failure, with the provider error variant.
 
-**Per-call cost rides the reply, not a broadcast.** Each completion's reply carries a `usage` field (`input_tokens`, `output_tokens`, `wall_clock_ms`, `cost_micros`) — the minimum cost surface, available to the caller without polling. There is no `aether.observation.llm_cost` 30-second broadcast: the broadcast sink and the entire `aether.observation.*` family retired in issue #775, so there is no fan-out target. A future user-space observer (TCP / websocket / session-targeted mail) is the path forward for engine-out cost fan-out if a long-running session wants a near-real-time roll-up; until then, callers aggregate the reply-carried `usage` themselves.
+**Per-call cost rides the reply, not a broadcast.** Each completion's reply carries a `usage` field (`input_tokens`, `output_tokens`, `wall_clock_millis`, `cost_micros`) — the minimum cost surface, available to the caller without polling. There is no `aether.observation.llm_cost` 30-second broadcast: the broadcast sink and the entire `aether.observation.*` family retired in issue #775, so there is no fan-out target. A future user-space observer (TCP / websocket / session-targeted mail) is the path forward for engine-out cost fan-out if a long-running session wants a near-real-time roll-up; until then, callers aggregate the reply-carried `usage` themselves.
 
 ### 8. Chassis coverage
 
@@ -310,7 +310,7 @@ Provider integration tests are the only place in the DAG-handles tree that touch
 
 ### Negative
 
-- **CLI path has limited usage telemetry.** `claude` text mode doesn't report token counts and subscription billing isn't per-call, so `cli.send` reports `wall_clock_ms` only and `cost_micros: None`. Fine-grained cost accounting needs the API path.
+- **CLI path has limited usage telemetry.** `claude` text mode doesn't report token counts and subscription billing isn't per-call, so `cli.send` reports `wall_clock_millis` only and `cost_micros: None`. Fine-grained cost accounting needs the API path.
 - **Per-substrate cap set, not per-component.** All components on a substrate share each cap's auth and budget. Per-component overrides are a future complication without a forcing function.
 - **No streaming, vision, or embeddings in v1.** Buffered replies only; deferred to follow-up ADRs.
 - **Credential management is env-var only.** No rotation, no per-component keys. Acceptable for v1.
