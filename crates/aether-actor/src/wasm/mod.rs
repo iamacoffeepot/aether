@@ -167,7 +167,7 @@ pub trait WasmActor:
     /// [`Self::on_rehydrate`] hooks instead of the author hand-writing
     /// them — the save side snapshots `Persist` and frames it via
     /// `save_state_kind`, the restore side decodes it via
-    /// [`PriorState::as_kind`][crate::PriorState::as_kind] and boots
+    /// [`PriorState::decode_kind`][crate::PriorState::decode_kind] and boots
     /// fresh (with a `tracing::warn!`) when a reshaped `Persist` kind no
     /// longer decodes.
     ///
@@ -207,7 +207,7 @@ pub trait WasmActor:
     /// [`Self::on_dehydrate`] (the substrate skips the call when no
     /// bundle was saved — ADR-0016 §3). Default ignores the prior state;
     /// override to rehydrate from `prior` (typically
-    /// [`PriorState::as_kind`][crate::PriorState::as_kind]).
+    /// [`PriorState::decode_kind`][crate::PriorState::decode_kind]).
     ///
     /// Concrete `&mut WasmCtx<'_>` — the post-init send surface, so an
     /// override can both restore fields and emit mail.

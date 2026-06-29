@@ -1298,7 +1298,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
 /// wasm at the same mailbox id with the same binary, then re-queries. The
 /// generated `on_dehydrate` frames the `CounterState` via
 /// `save_state_kind`; the generated `on_rehydrate` recovers it via
-/// `as_kind`, so the count survives the swap.
+/// `decode_kind`, so the count survives the swap.
 #[test]
 fn replace_preserves_state_via_typed_state_kind() {
     use aether_actor::Addressable;
@@ -1398,7 +1398,7 @@ fn replace_preserves_state_via_typed_state_kind() {
 
 /// ADR-0113: when a replacement is compiled against a reshaped `type
 /// State` kind (a different `Kind::ID`), the generated `on_rehydrate`
-/// sees `PriorState::as_kind` miss the decode and boots fresh. Loads the
+/// sees `PriorState::decode_kind` miss the decode and boots fresh. Loads the
 /// `stateful_replace_typed` fixture, bumps to 3, then replaces it with
 /// `stateful_replace_reshaped` (same `NAMESPACE`, a `CounterState` that
 /// gained a field). The recovered count is 0 — the fresh-`init` value —
