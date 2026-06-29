@@ -398,12 +398,23 @@ mod tests {
     }
 
     #[test]
-    fn transpose_round_trips() {
-        let m = Mat4::from_rigid(
-            Quat::from_axis_angle(Vec3::X, 0.3),
-            Vec3::new(7.0, -3.0, 2.0),
-        );
-        assert_eq!(m.transpose().transpose(), m);
+    fn transpose_swaps_rows_and_columns() {
+        // Tripwire: column-major transpose layout — element [r][c] moves to
+        // [c][r]; a self-roundtrip has no independent oracle so this test
+        // checks against a known asymmetric expected value instead.
+        let m = Mat4::from_cols_array([
+            1.0, 2.0, 3.0, 4.0, //
+            5.0, 6.0, 7.0, 8.0, //
+            9.0, 10.0, 11.0, 12.0, //
+            13.0, 14.0, 15.0, 16.0, //
+        ]);
+        let expected = Mat4::from_cols_array([
+            1.0, 5.0, 9.0, 13.0, //
+            2.0, 6.0, 10.0, 14.0, //
+            3.0, 7.0, 11.0, 15.0, //
+            4.0, 8.0, 12.0, 16.0, //
+        ]);
+        assert_eq!(m.transpose(), expected);
     }
 
     #[test]

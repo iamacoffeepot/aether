@@ -1,5 +1,13 @@
 use crate::vec::Vec3;
 
+/// A named world axis, used to select which component an operation acts on.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Axis {
+    X,
+    Y,
+    Z,
+}
+
 /// Axis-aligned bounding box in `f32` world coordinates.
 ///
 /// `min[i] > max[i]` along any axis denotes the empty box (no points).
@@ -76,14 +84,14 @@ impl Aabb {
         let mn = self.min;
         let mx = self.max;
         [
-            Vec3::new(mn.x, mn.y, mn.z),
+            mn,
             Vec3::new(mx.x, mn.y, mn.z),
             Vec3::new(mn.x, mx.y, mn.z),
             Vec3::new(mx.x, mx.y, mn.z),
             Vec3::new(mn.x, mn.y, mx.z),
             Vec3::new(mx.x, mn.y, mx.z),
             Vec3::new(mn.x, mx.y, mx.z),
-            Vec3::new(mx.x, mx.y, mx.z),
+            mx,
         ]
     }
 
@@ -223,36 +231,31 @@ impl Aabb {
         out
     }
 
-    /// Mirror across the plane `axis_index = 0` (`0 = X, 1 = Y, 2 = Z`).
+    /// Mirror across the plane perpendicular to `axis` through the origin.
     /// The bounds along that axis flip sign and swap; the others are
     /// unchanged.
-    ///
-    /// # Panics
-    /// Panics if `axis_index > 2` — the only valid values are `0`, `1`,
-    /// or `2`.
     #[must_use]
-    pub fn mirror(&self, axis_index: usize) -> Self {
-        assert!(axis_index < 3, "axis_index must be 0, 1, or 2");
+    pub fn mirror(&self, axis: Axis) -> Self {
         if self.is_empty() {
             return *self;
         }
         let mut out = *self;
-        let (lo, hi) = match axis_index {
-            0 => {
+        let (lo, hi) = match axis {
+            Axis::X => {
                 let lo = -self.max.x;
                 let hi = -self.min.x;
                 out.min.x = lo;
                 out.max.x = hi;
                 (lo, hi)
             }
-            1 => {
+            Axis::Y => {
                 let lo = -self.max.y;
                 let hi = -self.min.y;
                 out.min.y = lo;
                 out.max.y = hi;
                 (lo, hi)
             }
-            _ => {
+            Axis::Z => {
                 let lo = -self.max.z;
                 let hi = -self.min.z;
                 out.min.z = lo;
@@ -442,7 +445,7 @@ mod tests {
     #[test]
     fn mirror_x_flips_x_bounds() {
         let a = Aabb::from_min_max(Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0));
-        let m = a.mirror(0);
+        let m = a.mirror(Axis::X);
         assert_eq!(m.min, Vec3::new(-4.0, 2.0, 3.0));
         assert_eq!(m.max, Vec3::new(-1.0, 5.0, 6.0));
     }
@@ -450,32 +453,25 @@ mod tests {
     #[test]
     fn mirror_each_axis_only_touches_that_axis() {
         let a = Aabb::from_min_max(Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0));
-        for axis in 0..3 {
+        for axis in [Axis::X, Axis::Y, Axis::Z] {
             let m = a.mirror(axis);
-            for i in 0..3 {
-                if i == axis {
+            for other in [Axis::X, Axis::Y, Axis::Z] {
+                if other == axis {
                     continue;
                 }
-                let from_min = match i {
-                    0 => (a.min.x, m.min.x),
-                    1 => (a.min.y, m.min.y),
-                    _ => (a.min.z, m.min.z),
+                let (orig_min, mirrored_min) = match other {
+                    Axis::X => (a.min.x, m.min.x),
+                    Axis::Y => (a.min.y, m.min.y),
+                    Axis::Z => (a.min.z, m.min.z),
                 };
-                let from_max = match i {
-                    0 => (a.max.x, m.max.x),
-                    1 => (a.max.y, m.max.y),
-                    _ => (a.max.z, m.max.z),
+                let (orig_max, mirrored_max) = match other {
+                    Axis::X => (a.max.x, m.max.x),
+                    Axis::Y => (a.max.y, m.max.y),
+                    Axis::Z => (a.max.z, m.max.z),
                 };
-                assert_eq!(from_min.0, from_min.1);
-                assert_eq!(from_max.0, from_max.1);
+                assert_eq!(orig_min, mirrored_min);
+                assert_eq!(orig_max, mirrored_max);
             }
         }
-    }
-
-    #[test]
-    #[should_panic(expected = "axis_index")]
-    fn mirror_panics_on_bad_axis() {
-        // Panic is the assertion; the returned Aabb is unreachable.
-        let _ = Aabb::from_half_extents(1.0, 1.0, 1.0).mirror(3);
     }
 }

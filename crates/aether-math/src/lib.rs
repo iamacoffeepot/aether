@@ -38,7 +38,7 @@ mod quat;
 mod test_helpers;
 mod vec;
 
-pub use aabb::Aabb;
+pub use aabb::{Aabb, Axis};
 pub use mat::Mat4;
 pub use quat::Quat;
 pub use vec::{Vec2, Vec3, Vec4};

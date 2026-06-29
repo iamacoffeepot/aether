@@ -20,6 +20,9 @@ impl Quat {
         Self { x, y, z, w }
     }
 
+    /// Quaternion for a rotation of `angle_rad` radians around `axis`.
+    /// A zero-length axis returns [`IDENTITY`](Self::IDENTITY) — the same
+    /// opinion as [`Quat::normalize`] for degenerate input.
     #[inline]
     #[must_use]
     pub fn from_axis_angle(axis: Vec3, angle_rad: f32) -> Self {
@@ -27,6 +30,9 @@ impl Quat {
         let s = libm::sinf(half);
         let c = libm::cosf(half);
         let axis = axis.normalize();
+        if axis.length_squared() == 0.0 {
+            return Self::IDENTITY;
+        }
         Self::new(axis.x * s, axis.y * s, axis.z * s, c)
     }
 
@@ -129,13 +135,9 @@ impl Mul<Vec3> for Quat {
 mod tests {
     use super::*;
     use crate::PI;
-    use crate::test_helpers::approx_eq_vec3 as approx_eq_vec3_helper;
+    use crate::test_helpers::approx_eq_vec3;
 
     const EPS: f32 = 1e-5;
-
-    fn approx_eq_vec3(a: Vec3, b: Vec3) -> bool {
-        approx_eq_vec3_helper(a, b, EPS)
-    }
 
     #[test]
     fn identity_leaves_vec_unchanged() {
@@ -146,19 +148,24 @@ mod tests {
     #[test]
     fn from_axis_angle_y_rotates_x_to_negz() {
         let q = Quat::from_axis_angle(Vec3::Y, PI * 0.5);
-        assert!(approx_eq_vec3(q * Vec3::X, Vec3::new(0.0, 0.0, -1.0)));
+        assert!(approx_eq_vec3(q * Vec3::X, Vec3::new(0.0, 0.0, -1.0), EPS));
     }
 
     #[test]
     fn from_axis_angle_x_rotates_y_to_z() {
         let q = Quat::from_axis_angle(Vec3::X, PI * 0.5);
-        assert!(approx_eq_vec3(q * Vec3::Y, Vec3::Z));
+        assert!(approx_eq_vec3(q * Vec3::Y, Vec3::Z, EPS));
     }
 
     #[test]
     fn from_axis_angle_z_rotates_x_to_y() {
         let q = Quat::from_axis_angle(Vec3::Z, PI * 0.5);
-        assert!(approx_eq_vec3(q * Vec3::X, Vec3::Y));
+        assert!(approx_eq_vec3(q * Vec3::X, Vec3::Y, EPS));
+    }
+
+    #[test]
+    fn from_axis_angle_zero_axis_returns_identity() {
+        assert_eq!(Quat::from_axis_angle(Vec3::ZERO, 1.0), Quat::IDENTITY);
     }
 
     #[test]
@@ -167,7 +174,7 @@ mod tests {
         let a = Quat::from_euler_yxz(yaw, 0.0, 0.0);
         let b = Quat::from_axis_angle(Vec3::Y, yaw);
         let v = Vec3::new(1.0, 2.0, 3.0);
-        assert!(approx_eq_vec3(a * v, b * v));
+        assert!(approx_eq_vec3(a * v, b * v, EPS));
     }
 
     #[test]
@@ -176,7 +183,7 @@ mod tests {
         let a = Quat::from_euler_yxz(0.0, pitch, 0.0);
         let b = Quat::from_axis_angle(Vec3::X, pitch);
         let v = Vec3::new(1.0, 2.0, 3.0);
-        assert!(approx_eq_vec3(a * v, b * v));
+        assert!(approx_eq_vec3(a * v, b * v, EPS));
     }
 
     #[test]
@@ -190,7 +197,7 @@ mod tests {
             * Quat::from_axis_angle(Vec3::X, pitch)
             * Quat::from_axis_angle(Vec3::Z, roll);
         let v = Vec3::new(1.0, 2.0, 3.0);
-        assert!(approx_eq_vec3(a * v, b * v));
+        assert!(approx_eq_vec3(a * v, b * v, EPS));
     }
 
     #[test]
