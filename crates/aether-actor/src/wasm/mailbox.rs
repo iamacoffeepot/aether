@@ -22,10 +22,10 @@
 
 use core::marker::PhantomData;
 
-use aether_data::{ActorId, Kind, Tag, fold_lineage, with_tag};
+use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
 
 use crate::model::{Addressable, HandlesKind};
-use crate::wasm::inline::InlineRegistry;
+use crate::wasm::inline::{ChainMode, InlineRegistry};
 
 /// Phantom-typed receiver-actor handle for FFI guests, built by
 /// [`crate::wasm::WasmCtx::actor`] / [`crate::wasm::WasmCtx::resolve_actor`].
@@ -82,8 +82,8 @@ impl<'a, R> WasmActorMailbox<'a, R> {
     /// The receiver's typed mailbox id. Exposed for callers that need
     /// it for diagnostics or a host fn the SDK doesn't yet wrap.
     #[must_use]
-    pub fn mailbox_id(&self) -> aether_data::MailboxId {
-        aether_data::MailboxId(self.mailbox)
+    pub fn mailbox_id(&self) -> MailboxId {
+        MailboxId(self.mailbox)
     }
 
     /// Rewrap a precomputed `mailbox` id as a typed peer handle that
@@ -145,8 +145,14 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        self.inline
-            .route_or_enqueue(self.mailbox, K::ID.0, &bytes, 1, false, self.sender);
+        self.inline.route_or_enqueue(
+            self.mailbox,
+            K::ID.0,
+            &bytes,
+            1,
+            ChainMode::Inherit,
+            self.sender,
+        );
     }
 
     /// Send a slice of payloads as a contiguous batch. Cast-only —
@@ -164,7 +170,7 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
             K::ID.0,
             bytes,
             payloads.len() as u32,
-            false,
+            ChainMode::Inherit,
             self.sender,
         );
     }
@@ -184,7 +190,13 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        self.inline
-            .route_or_enqueue(self.mailbox, K::ID.0, &bytes, 1, true, self.sender);
+        self.inline.route_or_enqueue(
+            self.mailbox,
+            K::ID.0,
+            &bytes,
+            1,
+            ChainMode::Detached,
+            self.sender,
+        );
     }
 }

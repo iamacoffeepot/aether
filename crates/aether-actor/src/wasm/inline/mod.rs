@@ -142,6 +142,21 @@ pub(crate) enum RouteDecision {
     Remote,
 }
 
+/// Whether a send inherits the handler's in-flight causal chain or starts
+/// a fresh one (ADR-0080 §7). Passed to
+/// [`InlineRegistry::route_or_enqueue`]; on the remote path it controls
+/// whether the host stamps the dispatch's `parent`/`root` onto the outbound
+/// send (`Inherit`) or mints a new root chain (`Detached`). The local path
+/// carries no host trace ids, so the mode is irrelevant there.
+#[derive(Clone, Copy)]
+pub(crate) enum ChainMode {
+    /// Inherit the handler's in-flight causal chain (the default `send`
+    /// path, ADR-0080 §7).
+    Inherit,
+    /// Start a fresh chain root (the `send_detached` escape hatch).
+    Detached,
+}
+
 /// The per-component inline-child registry (ADR-0114 decision #3), keyed
 /// by each child's alias [`MailboxId`]. The [`crate::export!`] macro emits
 /// one as a `static __AETHER_INLINE` per component (mirroring the parent's
@@ -235,24 +250,16 @@ impl InlineRegistry {
         // live borrow of the cell (the `Sync` argument). The borrow is
         // released before this returns, so it never spans a dispatch.
         let map = unsafe { &mut *self.inner.get() };
-        if let Some(slot) = map.get_mut(&id) {
-            slot.type_tag = type_tag;
-            slot.full_subname = full_subname;
-            slot.is_counter = is_counter;
-            slot.parent = parent;
-            slot.actor = Some(actor);
-        } else {
-            map.insert(
-                id,
-                InlineSlot {
-                    type_tag,
-                    full_subname,
-                    is_counter,
-                    parent,
-                    actor: Some(actor),
-                },
-            );
-        }
+        map.insert(
+            id,
+            InlineSlot {
+                type_tag,
+                full_subname,
+                is_counter,
+                parent,
+                actor: Some(actor),
+            },
+        );
     }
 
     /// Take the child out for dispatch, leaving its slot (and its
@@ -401,10 +408,12 @@ impl InlineRegistry {
     /// instance itself or a resident inline child) the send is pushed to
     /// the cluster-local queue for in-place dispatch by
     /// [`drain_cluster_queue`]; otherwise it goes to the host
-    /// (`MAIL_BRIDGE.send_mail`) like any cross-cluster send. `detached`
-    /// rides through to the host on the remote path (the lineage signal,
-    /// ADR-0080 §7); an in-place dispatch carries no host trace ids, so the
-    /// flag is irrelevant on the local path.
+    /// (`MAIL_BRIDGE.send_mail`) like any cross-cluster send. `mode`
+    /// selects [`ChainMode::Inherit`] (the handler's causal chain carries
+    /// through to the host on the remote path, ADR-0080 §7) or
+    /// [`ChainMode::Detached`] (the host mints a fresh chain root); an
+    /// in-place dispatch carries no host trace ids, so the mode is
+    /// irrelevant on the local path.
     ///
     /// `sender` is the sending actor's own folded [`MailboxId`] raw value —
     /// the "from" half. On the `Local` branch it is stored in the
@@ -428,7 +437,7 @@ impl InlineRegistry {
         kind: u64,
         bytes: &[u8],
         count: u32,
-        detached: bool,
+        mode: ChainMode,
         sender: u64,
     ) {
         match self.route_decision(recipient) {
@@ -446,7 +455,14 @@ impl InlineRegistry {
                 });
             }
             RouteDecision::Remote => {
-                mail::send_mail(recipient, kind, bytes, count, detached, sender);
+                mail::send_mail(
+                    recipient,
+                    kind,
+                    bytes,
+                    count,
+                    matches!(mode, ChainMode::Detached),
+                    sender,
+                );
             }
         }
     }
@@ -558,9 +574,9 @@ where
 /// Reentrancy and cycles are handled by the queue, not by nested dispatch:
 /// a drained item's handler that sends to a busy cluster member just pushes
 /// a later queue item, which this same loop picks up.
-pub fn drain_cluster_queue<MakeOwn, Own>(registry: &InlineRegistry, mut mk_own: MakeOwn)
+pub fn drain_cluster_queue<M, Own>(registry: &InlineRegistry, mut mk_own: M)
 where
-    MakeOwn: FnMut(u64) -> Own,
+    M: FnMut(u64) -> Own,
     Own: FnOnce(Mail<'_>) -> u32,
 {
     let self_id = registry.self_id();
@@ -597,7 +613,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{InlineRegistry, RouteDecision, drain_cluster_queue, membrane_dispatch};
+    use super::{ChainMode, InlineRegistry, RouteDecision, drain_cluster_queue, membrane_dispatch};
     use crate::WasmCtx;
     use crate::mail::{Mail, PriorState};
     use crate::model::ctx::OutboundReply;
@@ -784,9 +800,8 @@ mod tests {
         );
 
         let metas = registry.child_metas();
-        let meta = match metas.as_slice() {
-            [one] => one,
-            other => panic!("expected exactly one child meta, got {}", other.len()),
+        let [meta] = metas.as_slice() else {
+            panic!("expected exactly one child meta, got {}", metas.len())
         };
         assert_eq!(meta.id, id, "the meta carries the alias id");
         assert_eq!(meta.type_tag, tag, "the meta carries the actor-type tag");
@@ -1038,13 +1053,13 @@ mod tests {
         install_recording(&registry, child, root);
 
         assert_eq!(registry.queued_len(), 0, "the queue starts empty");
-        registry.route_or_enqueue(root, 7, &[1, 2, 3], 1, false, root);
+        registry.route_or_enqueue(root, 7, &[1, 2, 3], 1, ChainMode::Inherit, root);
         assert_eq!(
             registry.queued_len(),
             1,
             "an own-id send enqueues locally, no host call",
         );
-        registry.route_or_enqueue(child, 8, &[4], 1, false, root);
+        registry.route_or_enqueue(child, 8, &[4], 1, ChainMode::Inherit, root);
         assert_eq!(
             registry.queued_len(),
             2,
@@ -1064,7 +1079,7 @@ mod tests {
         let dispatches = install_recording(&registry, child, root);
 
         // Seed one local send addressed to the child.
-        registry.route_or_enqueue(child, 1, &[0xAB], 1, false, root);
+        registry.route_or_enqueue(child, 1, &[0xAB], 1, ChainMode::Inherit, root);
 
         let own_dispatches = Rc::new(Cell::new(0));
         let own_counter = Rc::clone(&own_dispatches);
@@ -1108,7 +1123,7 @@ mod tests {
 
         // Seed one own-addressed item; the parent dispatch, on its first
         // run, enqueues a follow-up addressed to the child.
-        registry.route_or_enqueue(root, 1, &[0x01], 1, false, root);
+        registry.route_or_enqueue(root, 1, &[0x01], 1, ChainMode::Inherit, root);
 
         // Record the order dispatches happened in, to prove a single drain
         // loop carried both the seed and the cascaded follow-up.
@@ -1130,7 +1145,14 @@ mod tests {
                     if !own_ran_inner.get() {
                         own_ran_inner.set(true);
                         // Cascade: enqueue a follow-up to the child mid-drain.
-                        registry_ref.route_or_enqueue(child, 2, &[0x02], 1, false, root);
+                        registry_ref.route_or_enqueue(
+                            child,
+                            2,
+                            &[0x02],
+                            1,
+                            ChainMode::Inherit,
+                            root,
+                        );
                     }
                 }
                 OWN_CODE
@@ -1189,7 +1211,7 @@ mod tests {
         let (dispatches, observed) = install_recording_with_source(&registry, child, root);
 
         // The parent (root) sends to the child, stamping its own id as sender.
-        registry.route_or_enqueue(child, 1, &[0x00], 1, false, root);
+        registry.route_or_enqueue(child, 1, &[0x00], 1, ChainMode::Inherit, root);
 
         drain_cluster_queue(&registry, |_source| {
             |_mail| panic!("own dispatch must not run for a child-addressed item")

@@ -56,7 +56,7 @@ impl ReplyHandle {
     /// constructor accepts any `u32`.
     #[doc(hidden)]
     #[must_use]
-    pub fn __from_raw(raw: u32) -> Self {
+    pub(crate) fn __from_raw(raw: u32) -> Self {
         Self { raw }
     }
 

@@ -194,8 +194,8 @@ fn parse_framed(bytes: &[u8]) -> Option<Decomposed> {
 /// Narrow a `usize` length to the `u32` the frame stores. A bundle that
 /// large is already past the substrate's 1 MiB `save_state` cap, so the
 /// saturating clamp is a defensive floor that never fires in practice.
-fn len_u32(value: usize) -> u32 {
-    u32::try_from(value).unwrap_or(u32::MAX)
+fn len_u32(len: usize) -> u32 {
+    u32::try_from(len).unwrap_or(u32::MAX)
 }
 
 /// Bounds-checked forward reader over the framed bytes.

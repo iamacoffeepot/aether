@@ -27,7 +27,7 @@ use crate::model::{
     validate_namespace_segment,
 };
 use crate::wasm::bridge::{mail, persist};
-use crate::wasm::inline::InlineRegistry;
+use crate::wasm::inline::{ChainMode, InlineRegistry};
 use crate::wasm::mailbox::WasmActorMailbox;
 use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor};
 use alloc::boxed::Box;
@@ -122,8 +122,14 @@ impl RelativeMailbox<'_> {
     /// send.
     pub fn send<K: Kind>(&self, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.inline
-            .route_or_enqueue(self.id.0, K::ID.0, &bytes, 1, false, self.sender);
+        self.inline.route_or_enqueue(
+            self.id.0,
+            K::ID.0,
+            &bytes,
+            1,
+            ChainMode::Inherit,
+            self.sender,
+        );
     }
 
     /// Fire-and-forget send to this relative (ADR-0080 §7 detach signal).
@@ -132,8 +138,14 @@ impl RelativeMailbox<'_> {
     /// resolved relative never takes.
     pub fn send_detached<K: Kind>(&self, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.inline
-            .route_or_enqueue(self.id.0, K::ID.0, &bytes, 1, true, self.sender);
+        self.inline.route_or_enqueue(
+            self.id.0,
+            K::ID.0,
+            &bytes,
+            1,
+            ChainMode::Detached,
+            self.sender,
+        );
     }
 }
 
@@ -167,7 +179,7 @@ pub enum SpawnError {
 /// self-address.
 pub struct WasmCtx<'a, M: ReplyMode = Single> {
     mailbox: u64,
-    sender: Option<u32>,
+    sender: Option<ReplyHandle>,
     /// The inbound source — the folded [`MailboxId`] raw value of whoever
     /// sent the mail currently being dispatched, threaded onto the ctx at
     /// construction (issues 1987 + 2001). For an in-place (intra-cluster)
@@ -252,13 +264,14 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// broadcast mail (which have no reply target) land as `None`.
     #[doc(hidden)]
     pub fn __set_reply_to(&mut self, sender: Option<ReplyHandle>) {
-        self.sender = sender.map(ReplyHandle::raw);
+        self.sender = sender;
     }
 
     /// Reply target for the mail currently being dispatched. Mirrors
     /// [`OutboundReply::reply_target`].
+    #[must_use]
     pub fn reply_target(&self) -> Option<ReplyHandle> {
-        self.sender.map(ReplyHandle::__from_raw)
+        self.sender
     }
 
     /// The component's own mailbox id — the value the substrate uses to
@@ -334,10 +347,10 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         // ADR-0029) — this is the id definition for the new instance, computed
         // before any lineage carry exists.
         #[allow(clippy::disallowed_methods)]
-        let tag = mailbox_id_from_name(<A as Addressable>::NAMESPACE).0;
+        let type_tag = mailbox_id_from_name(<A as Addressable>::NAMESPACE).0;
         let (is_counter, full_subname) = resolve_subname(subname)?;
         let config_bytes = config.encode_into_bytes();
-        let id = mail::spawn_sibling(tag, is_counter, &full_subname, &config_bytes);
+        let id = mail::spawn_sibling(type_tag, is_counter, &full_subname, &config_bytes);
         Ok(MailboxId(id))
     }
 
@@ -519,8 +532,14 @@ impl<'a, M: ReplyMode> WasmCtx<'a, M> {
     /// handler's in-flight causal chain (ADR-0080 §7).
     pub fn send<K: Kind>(&mut self, mailbox: Mailbox<K>, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.inline
-            .route_or_enqueue(mailbox.mailbox(), K::ID.0, &bytes, 1, false, self.mailbox);
+        self.inline.route_or_enqueue(
+            mailbox.mailbox(),
+            K::ID.0,
+            &bytes,
+            1,
+            ChainMode::Inherit,
+            self.mailbox,
+        );
     }
 
     /// Issue 1987: send `payload` to a raw [`MailboxId`], threading this
@@ -533,7 +552,7 @@ impl<'a, M: ReplyMode> WasmCtx<'a, M> {
     pub fn send_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.inline
-            .route_or_enqueue(id.0, K::ID.0, &bytes, 1, false, self.mailbox);
+            .route_or_enqueue(id.0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.mailbox);
     }
 }
 
@@ -580,20 +599,16 @@ where
     <A as WasmActor>::State: ErasedWasmActor,
 {
     let mut ctx = WasmInitCtx::__new(alias.0);
-    match A::init(config, &mut ctx) {
-        Ok(child) => {
-            registry.insert_child(
-                alias,
-                type_tag,
-                full_subname,
-                is_counter,
-                parent,
-                Box::new(child),
-            );
-            Ok(alias)
-        }
-        Err(err) => Err(SpawnError::InitFailed(err)),
-    }
+    let child = A::init(config, &mut ctx).map_err(SpawnError::InitFailed)?;
+    registry.insert_child(
+        alias,
+        type_tag,
+        full_subname,
+        is_counter,
+        parent,
+        Box::new(child),
+    );
+    Ok(alias)
 }
 
 // ADR-0114 addressing amendment: every `WasmCtx` send resolves the recipient
@@ -616,7 +631,7 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
             K::ID.0,
             &bytes,
             1,
-            false,
+            ChainMode::Inherit,
             self.mailbox,
         );
     }
@@ -633,7 +648,7 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
             K::ID.0,
             bytes,
             payloads.len() as u32,
-            false,
+            ChainMode::Inherit,
             self.mailbox,
         );
     }
@@ -649,7 +664,7 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
             K::ID.0,
             &bytes,
             1,
-            false,
+            ChainMode::Inherit,
             self.mailbox,
         );
     }
@@ -670,7 +685,7 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
             K::ID.0,
             &bytes,
             1,
-            true,
+            ChainMode::Detached,
             self.mailbox,
         );
     }
@@ -685,7 +700,7 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
             K::ID.0,
             &bytes,
             1,
-            true,
+            ChainMode::Detached,
             self.mailbox,
         );
     }
@@ -699,7 +714,7 @@ impl OutboundReply for WasmCtx<'_, Manual> {
     type ReplyHandle = ReplyHandle;
 
     fn reply_target(&self) -> Option<ReplyHandle> {
-        self.sender.map(ReplyHandle::__from_raw)
+        self.sender
     }
 
     fn source_mailbox(&self) -> Option<MailboxId> {
@@ -714,9 +729,9 @@ impl OutboundReply for WasmCtx<'_, Manual> {
     }
 
     fn reply<K: Kind>(&mut self, payload: &K) {
-        if let Some(raw) = self.sender {
+        if let Some(handle) = self.sender {
             let bytes = payload.encode_into_bytes();
-            mail::reply_mail(raw, K::ID.0, &bytes, 1, self.mailbox);
+            mail::reply_mail(handle.raw(), K::ID.0, &bytes, 1, self.mailbox);
         }
     }
 
@@ -732,7 +747,7 @@ impl OutboundReply for WasmCtx<'_, Manual> {
 /// it can collect every saved blob and pack them into a single composite,
 /// then call the real host `save_state` once.
 #[derive(Default)]
-pub struct CapturedState {
+pub(crate) struct CapturedState {
     /// The most recent `(version, bytes)` the hook saved. `None` until the
     /// hook calls `save_state`; the last call wins (mirroring the host's
     /// single-`Option<StateBundle>` overwrite contract).
@@ -782,7 +797,7 @@ impl<'a> WasmDropCtx<'a> {
     /// before a single real host `save_state`.
     #[doc(hidden)]
     #[must_use]
-    pub fn __new_capturing(mailbox: u64, capture: &'a mut CapturedState) -> Self {
+    pub(crate) fn __new_capturing(mailbox: u64, capture: &'a mut CapturedState) -> Self {
         Self {
             mailbox,
             capture: Some(capture),
