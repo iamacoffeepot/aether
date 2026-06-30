@@ -1567,24 +1567,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStrea
     // compile time, spanned at the later handler. The macro has no type
     // resolution, so dedup is by token equality (`types_token_eq`), not
     // by resolved `KindId`.
-    for (i, later) in handlers.iter().enumerate() {
-        if let Some(earlier) = handlers[..i]
-            .iter()
-            .find(|earlier| types_token_eq(&earlier.kind_ty, &later.kind_ty))
-        {
-            let earlier_name = &earlier.method.sig.ident;
-            let kind_ty = &later.kind_ty;
-            return Err(syn::Error::new_spanned(
-                &later.method.sig.ident,
-                format!(
-                    "two #[handler] methods accept the same mail kind `{}` (also on \
-                     `{earlier_name}`) — each kind routes to exactly one handler. Give each \
-                     handler a distinct kind.",
-                    quote!(#kind_ty)
-                ),
-            ));
-        }
-    }
+    reject_duplicate_handler_kinds(&handlers)?;
 
     // ADR-0113 (issue 1855): declarative persistence. `type State` plus
     // the `dehydrate` / `rehydrate` accessor pair generate the
@@ -1724,33 +1707,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStrea
     // `NAMESPACE` at the type — each a pointed diagnostic rather than a
     // later "no associated const NAMESPACE" error against the surfaceless
     // `Addressable` trait.
-    let mut has_namespace = false;
-    for c in &consts {
-        if c.ident == "NAMESPACE" {
-            has_namespace = true;
-        } else if c.ident == "SCHEDULING" {
-            return Err(syn::Error::new_spanned(
-                c,
-                "`SCHEDULING` was removed (issue 1187): every actor drains on the chassis \
-                 worker pool. Drop the const — never block a handler; offload blocking work \
-                 to a `ctx.spawn`'d thread that feeds results back as mail.",
-            ));
-        } else {
-            return Err(syn::Error::new_spanned(
-                c,
-                "#[actor] impl WasmActor for X accepts only \
-                 `const NAMESPACE: &'static str = …` — the `Addressable` super-trait carries no \
-                 other authorable const",
-            ));
-        }
-    }
-    if !has_namespace {
-        return Err(syn::Error::new_spanned(
-            self_ty,
-            "#[actor] impl WasmActor for X must declare \
-             `const NAMESPACE: &'static str = ...` so the marker `impl Addressable` can carry it",
-        ));
-    }
+    validate_addressable_consts(&consts, self_ty, "WasmActor")?;
     let const_tokens = consts.iter();
     // ADR-0119: an FFI/wasm component is embedded — it resolves under the
     // reserved `aether.embedded` scope. Default `Embedded` (keyless ⇒
@@ -1867,24 +1824,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStrea
     // from the trait fn via UFCS (passing the state as the `&mut self`
     // receiver for an un-split `State = Self`). Emitted only when the user
     // provided the hook; the trait's default no-op stands otherwise.
-    let mut has_wire = false;
-    let mut has_unwire = false;
-    for m in &mut boot_hooks {
-        if m.sig.ident == "wire" {
-            has_wire = true;
-            m.sig.ident = syn::Ident::new("__aether_wire", m.sig.ident.span());
-        } else if m.sig.ident == "unwire" {
-            has_unwire = true;
-            m.sig.ident = syn::Ident::new("__aether_unwire", m.sig.ident.span());
-        }
-        // iamacoffeepot/aether#2311: the renamed hook keeps its `&mut self`
-        // receiver (the forwarding `Lifecycle<S>` fn passes `&mut S` in as
-        // `self`), so a stateless `wire`/`unwire` body trips
-        // `clippy::unused_self` on the now-inherent method — the receiver is
-        // the required ABI, so suppress it on the generated copy.
-        m.attrs
-            .push(syn::parse_quote!(#[allow(clippy::unused_self)]));
-    }
+    let (has_wire, has_unwire) = rename_lifecycle_hooks(&mut boot_hooks);
     let wire_forward = if has_wire {
         quote! {
             fn wire(
@@ -2274,24 +2214,7 @@ fn expand_native_actor_trait(
     // compile time, spanned at the later handler. The macro has no type
     // resolution, so dedup is by token equality (`types_token_eq`,
     // matching the task-handler check above), not by resolved `KindId`.
-    for (i, later) in handlers.iter().enumerate() {
-        if let Some(earlier) = handlers[..i]
-            .iter()
-            .find(|earlier| types_token_eq(&earlier.kind_ty, &later.kind_ty))
-        {
-            let earlier_name = &earlier.method.sig.ident;
-            let kind_ty = &later.kind_ty;
-            return Err(syn::Error::new_spanned(
-                &later.method.sig.ident,
-                format!(
-                    "two #[handler] methods accept the same mail kind `{}` (also on \
-                     `{earlier_name}`) — each kind routes to exactly one handler. Give each \
-                     handler a distinct kind.",
-                    quote!(#kind_ty)
-                ),
-            ));
-        }
-    }
+    reject_duplicate_handler_kinds(&handlers)?;
 
     // `NAMESPACE` is declared on the supertrait `Addressable`, but the user
     // wrote it inside `impl NativeActor for X` for the symmetric
@@ -2309,41 +2232,11 @@ fn expand_native_actor_trait(
     // presence of `NAMESPACE` is tracked so a block that omits it fails
     // here (spanned at the type) instead of at a later "no associated const
     // NAMESPACE" error against the surfaceless `Addressable` trait.
-    let mut has_namespace = false;
-    for c in &consts {
-        if c.ident == "NAMESPACE" {
-            has_namespace = true;
-        } else if c.ident == "SCHEDULING" {
-            return Err(syn::Error::new_spanned(
-                c,
-                "`SCHEDULING` was removed (issue 1187): every actor drains on the chassis \
-                 worker pool. Drop the const — never block a handler; offload blocking work \
-                 to a `ctx.spawn`'d thread that feeds results back as mail.",
-            ));
-        } else {
-            return Err(syn::Error::new_spanned(
-                c,
-                "#[actor] impl NativeActor for X accepts only \
-                 `const NAMESPACE: &'static str = …` — the `Addressable` super-trait carries no \
-                 other authorable const",
-            ));
-        }
-    }
-    if !has_namespace {
-        return Err(syn::Error::new_spanned(
-            self_ty,
-            "#[actor] impl NativeActor for X must declare \
-             `const NAMESPACE: &'static str = ...` so the marker `impl Addressable` can carry it",
-        ));
-    }
     // NAMESPACE passes through unchanged because its RHS is a primitive that
     // doesn't require resolution. The `Addressable` body restates the const
     // (built inside the helper) so the struct-hosted path (which has only the
     // harvested expr) and this path share one emission helper.
-    let namespace_expr: &Expr = consts
-        .iter()
-        .find_map(|c| (c.ident == "NAMESPACE").then_some(&c.expr))
-        .expect("has_namespace checked above");
+    let namespace_expr: &Expr = validate_addressable_consts(&consts, self_ty, "NativeActor")?;
 
     // ADR-0122 / ADR-0123: the always-on addressing markers (`Addressable` /
     // per-kind `HandlesKind` / name inventory) are shared with the struct-hosted
@@ -2400,26 +2293,7 @@ fn expand_native_actor_trait(
             rewrite_self_state_first_param(m, concrete);
         }
     }
-    let mut has_wire = false;
-    let mut has_unwire = false;
-    for m in &mut lifecycle_methods {
-        if m.sig.ident == "wire" {
-            has_wire = true;
-            m.sig.ident = syn::Ident::new("__aether_wire", m.sig.ident.span());
-        } else if m.sig.ident == "unwire" {
-            has_unwire = true;
-            m.sig.ident = syn::Ident::new("__aether_unwire", m.sig.ident.span());
-        } else {
-            continue;
-        }
-        // iamacoffeepot/aether#2311: the renamed hook keeps its `&mut self`
-        // receiver (the forwarding `Lifecycle<S>` fn passes `&mut S` in as
-        // `self`), so a stateless `wire`/`unwire` body trips
-        // `clippy::unused_self` on the now-inherent method — the receiver is
-        // the required ABI, so suppress it on the generated copy.
-        m.attrs
-            .push(syn::parse_quote!(#[allow(clippy::unused_self)]));
-    }
+    let (has_wire, has_unwire) = rename_lifecycle_hooks(&mut lifecycle_methods);
 
     // The concrete runtime state type: the declared `type State` for a split
     // cap, `Self` for an un-split one. The composed `Lifecycle<S>` /
@@ -3127,6 +3001,142 @@ struct NativeActorTaskHandlerFn {
 /// resolve by normalising).
 fn types_token_eq(a: &Type, b: &Type) -> bool {
     quote!(#a).to_string() == quote!(#b).to_string()
+}
+
+/// Shared helper: reject duplicate `#[handler]` kinds across both the wasm
+/// and native expanders. Both expander handler types share a `kind_ty: Type`
+/// and `method: syn::ImplItemFn` field; this trait abstracts over them so one
+/// dedup loop serves both paths.
+trait HasKindTy {
+    fn kind_ty(&self) -> &Type;
+    fn method_ident(&self) -> &syn::Ident;
+}
+
+impl HasKindTy for HandlerFn {
+    fn kind_ty(&self) -> &Type {
+        &self.kind_ty
+    }
+    fn method_ident(&self) -> &syn::Ident {
+        &self.method.sig.ident
+    }
+}
+
+impl HasKindTy for NativeActorHandlerFn {
+    fn kind_ty(&self) -> &Type {
+        &self.kind_ty
+    }
+    fn method_ident(&self) -> &syn::Ident {
+        &self.method.sig.ident
+    }
+}
+
+/// Reject duplicate handler kinds in an `#[actor]` impl block. Two
+/// `#[handler]` methods that accept the same mail kind would emit two
+/// `HandlesKind<K>` impls (a coherence error) plus a dead second dispatch arm
+/// the first arm always shadows. The macro has no type resolution, so dedup is
+/// by token equality (`types_token_eq`), not by resolved `KindId`.
+fn reject_duplicate_handler_kinds<H: HasKindTy>(handlers: &[H]) -> syn::Result<()> {
+    for (i, later) in handlers.iter().enumerate() {
+        if let Some(earlier) = handlers[..i]
+            .iter()
+            .find(|earlier| types_token_eq(earlier.kind_ty(), later.kind_ty()))
+        {
+            let earlier_name = earlier.method_ident();
+            let kind_ty = later.kind_ty();
+            return Err(syn::Error::new_spanned(
+                later.method_ident(),
+                format!(
+                    "two #[handler] methods accept the same mail kind `{}` (also on \
+                     `{earlier_name}`) — each kind routes to exactly one handler. Give each \
+                     handler a distinct kind.",
+                    quote!(#kind_ty)
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the `NAMESPACE` / const surface inside an `#[actor] impl <Trait>
+/// for X` block. Returns a reference to the `NAMESPACE` const's value
+/// expression (used by the native expander to wire `impl Addressable`; the
+/// wasm expander discards it and re-emits `consts` as-is). Errors are spanned
+/// at the offending const or at `self_ty` when `NAMESPACE` is absent.
+fn validate_addressable_consts<'a>(
+    consts: &'a [syn::ImplItemConst],
+    self_ty: &Type,
+    trait_name: &str,
+) -> syn::Result<&'a Expr> {
+    let mut has_namespace = false;
+    for c in consts {
+        if c.ident == "NAMESPACE" {
+            has_namespace = true;
+        } else if c.ident == "SCHEDULING" {
+            return Err(syn::Error::new_spanned(
+                c,
+                "`SCHEDULING` was removed (issue 1187): every actor drains on the chassis \
+                 worker pool. Drop the const — never block a handler; offload blocking work \
+                 to a `ctx.spawn`'d thread that feeds results back as mail.",
+            ));
+        } else {
+            return Err(syn::Error::new_spanned(
+                c,
+                format!(
+                    "#[actor] impl {trait_name} for X accepts only \
+                     `const NAMESPACE: &'static str = …` — the `Addressable` super-trait carries no \
+                     other authorable const"
+                ),
+            ));
+        }
+    }
+    if !has_namespace {
+        return Err(syn::Error::new_spanned(
+            self_ty,
+            format!(
+                "#[actor] impl {trait_name} for X must declare \
+                 `const NAMESPACE: &'static str = ...` so the marker `impl Addressable` can carry it"
+            ),
+        ));
+    }
+    consts
+        .iter()
+        .find_map(|c| (c.ident == "NAMESPACE").then_some(&c.expr))
+        .ok_or_else(|| {
+            syn::Error::new_spanned(self_ty, "internal: NAMESPACE confirmed above but not found")
+        })
+}
+
+/// Rename `wire` → `__aether_wire` and `unwire` → `__aether_unwire` in the
+/// given method slice, pushing `#[allow(clippy::unused_self)]` onto each
+/// renamed method. Returns `(has_wire, has_unwire)`.
+///
+/// The safe `else { continue; }` form is used so the helper is correct over a
+/// mixed-content slice (e.g. the native expander's full `lifecycle_methods`)
+/// as well as a pre-partitioned slice (the wasm expander's `boot_hooks`, which
+/// by construction contains only `wire`/`unwire` methods — the `else { continue;
+/// }` branch is never reached there, preserving the existing output exactly).
+fn rename_lifecycle_hooks(methods: &mut [syn::ImplItemFn]) -> (bool, bool) {
+    let mut has_wire = false;
+    let mut has_unwire = false;
+    for m in methods {
+        if m.sig.ident == "wire" {
+            has_wire = true;
+            m.sig.ident = syn::Ident::new("__aether_wire", m.sig.ident.span());
+        } else if m.sig.ident == "unwire" {
+            has_unwire = true;
+            m.sig.ident = syn::Ident::new("__aether_unwire", m.sig.ident.span());
+        } else {
+            continue;
+        }
+        // iamacoffeepot/aether#2311: the renamed hook keeps its `&mut self`
+        // receiver (the forwarding `Lifecycle<S>` fn passes `&mut S` in as
+        // `self`), so a stateless `wire`/`unwire` body trips
+        // `clippy::unused_self` on the now-inherent method — the receiver is
+        // the required ABI, so suppress it on the generated copy.
+        m.attrs
+            .push(syn::parse_quote!(#[allow(clippy::unused_self)]));
+    }
+    (has_wire, has_unwire)
 }
 
 /// Issue 576: native-side `#[fallback]` collected on a
