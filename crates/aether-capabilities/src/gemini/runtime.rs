@@ -16,7 +16,7 @@ use super::{
     GeminiCapability, GeminiError, GroundingMetadata, LyriaGenerate, LyriaGenerateResult,
     NanobananaGenerate, NanobananaGenerateResult, lyria, nanobanana,
 };
-use crate::fs::{FileAdapter, LocalFileAdapter};
+use crate::fs::{Access, FileAdapter, LocalFileAdapter};
 use crate::shared::contentgen::adapter::{
     AdapterUsage, GeminiAdapter, GeminiImageRequest, GeminiMusicRequest, GeminiResponse,
 };
@@ -268,8 +268,8 @@ pub fn read_reference_images(paths: &[String]) -> Result<Vec<Vec<u8>>, GeminiErr
         return Ok(Vec::new());
     }
     let root = gen_root();
-    let adapter =
-        LocalFileAdapter::new(root, true).map_err(|e| GeminiError::AdapterError(e.to_string()))?;
+    let adapter = LocalFileAdapter::new(root, Access::ReadWrite)
+        .map_err(|e| GeminiError::AdapterError(e.to_string()))?;
     let mut out = Vec::with_capacity(paths.len());
     for path in paths {
         let bytes = adapter

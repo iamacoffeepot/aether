@@ -18,6 +18,7 @@
 //! root; `..` and absolute prefixes are rejected at the adapter
 //! boundary as `FsError::Forbidden`.
 
+use aether_data::{KindId, TransformId};
 use serde::{Deserialize, Serialize};
 
 /// Structured failure reason for an I/O request (ADR-0041 §1).
@@ -238,7 +239,7 @@ pub enum ListResult {
 pub enum FsFoldError {
     /// No transform with this `TransformId` is registered in the
     /// link-time inventory.
-    UnknownTransform(aether_data::TransformId),
+    UnknownTransform(TransformId),
     /// The transform at `at_index` has more than one input slot —
     /// it cannot sit in a linear fold where only one input is
     /// available.
@@ -247,8 +248,8 @@ pub enum FsFoldError {
     /// match the input kind of the transform at `at_index`.
     KindMismatch {
         at_index: u64,
-        expected: aether_data::KindId,
-        found: aether_data::KindId,
+        expected: KindId,
+        found: KindId,
     },
 }
 
@@ -300,7 +301,7 @@ pub struct FsFetch {
     /// Ordered list of transforms to apply. Each `TransformId` names
     /// a link-time `#[transform]` entry (ADR-0048); the chain is
     /// validated for linear composition before any compute runs.
-    pub transforms: Vec<aether_data::TransformId>,
+    pub transforms: Vec<TransformId>,
 }
 
 /// Reply to `FsFetch`. Both arms echo `namespace` + `path` for
@@ -317,7 +318,7 @@ pub enum FsFetchResult {
         /// `None` when the transform list was empty (raw read);
         /// `Some(k)` is the output kind of the last transform in
         /// the chain.
-        output_kind: Option<aether_data::KindId>,
+        output_kind: Option<KindId>,
         /// Wire-encoded output: raw file bytes when `output_kind` is
         /// `None`, or the last transform's encoded output value.
         data: Vec<u8>,
