@@ -935,3 +935,18 @@ pub const INPUTS_SECTION: &str = "aether.kinds.inputs";
 /// `kind_manifest::KINDS_VERSION`): the two sections version
 /// independently and happen to share a number at this revision.
 pub const INPUTS_SECTION_VERSION: u8 = 0x05;
+
+/// Version byte the `aether.kinds` wasm custom section opens with —
+/// the single source of truth both the derive's writers and the
+/// substrate reader share. A format bump is a one-line edit here that
+/// const-folds into every writer site. Distinct from the
+/// `aether.kinds.inputs` section's own version
+/// ([`INPUTS_SECTION_VERSION`], also `0x05`): the two sections version
+/// independently and happen to share a number at this revision.
+pub const KINDS_SECTION_VERSION: u8 = 0x05;
+
+/// Version byte the `aether.kinds.labels` wasm custom section opens
+/// with — the single source of truth both the derive's writers and the
+/// substrate reader share. A format bump is a one-line edit here that
+/// const-folds into every writer site.
+pub const LABELS_SECTION_VERSION: u8 = 0x04;

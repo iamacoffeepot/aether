@@ -113,6 +113,10 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 pub mod __macro_internals {
     pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
     pub use aether_data::{Kind, Schema, mailbox_id_from_name};
+    // Section-version bytes the `#[actor]` / `export!` writers emit as
+    // token references so the literals const-fold from one source of
+    // truth in `aether-data`.
+    pub use aether_data::{INPUTS_SECTION_VERSION, KINDS_SECTION_VERSION, LABELS_SECTION_VERSION};
     // ADR-0096: the multi-actor `export!` arm stores the instance as
     // `Box<dyn ErasedWasmActor>`; re-export `Box` so the emitted code
     // doesn't depend on the guest crate's prelude exposing `alloc`.
