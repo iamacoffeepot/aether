@@ -30,7 +30,9 @@ use super::LifecycleCapabilityState;
 /// fires when the settlement pipeline has actually stalled —
 /// degrading a permanent wedge into a visible stutter rather than
 /// tripping on ordinary jitter.
-pub const ADVANCE_TIMEOUT_MS_DEFAULT: u64 = 1_000;
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) const ADVANCE_TIMEOUT_MS_DEFAULT: u64 = 1_000;
 
 /// Early-warning threshold for slow settlement
 /// (iamacoffeepot/aether#1052, the prevention follow-up to #1048). A
@@ -39,28 +41,32 @@ pub const ADVANCE_TIMEOUT_MS_DEFAULT: u64 = 1_000;
 /// sub-tick norm but a full 10× short of the force-complete deadline,
 /// so the warn surfaces a degrading settlement pipeline *before* it
 /// wedges, with headroom to act.
-pub const SLOW_SETTLE_DIVISOR: u32 = 10;
+pub(super) const SLOW_SETTLE_DIVISOR: u32 = 10;
 
 /// EWMA smoothing factor for the rolling settlement-latency stat, as
 /// a permille (200 ‰ = 0.2). A single spike moves the average ~20%.
-pub const SETTLE_EWMA_ALPHA_PERMILLE: u32 = 200;
+pub(super) const SETTLE_EWMA_ALPHA_PERMILLE: u32 = 200;
 
 /// Minimum spacing between slow-settlement warns. A saturating
 /// pipeline settles slowly on *every* advance, so an unguarded warn
 /// would itself spam the rings; one line per episode is enough.
-pub const SLOW_SETTLE_WARN_COOLDOWN: Duration = Duration::from_secs(5);
+pub(super) const SLOW_SETTLE_WARN_COOLDOWN: Duration = Duration::from_secs(5);
 
 /// Internal state-advance decision produced by `on_advance` before
 /// the cap mutates its own fields. Declared at module scope to keep
 /// the handler body statement-only (`clippy::items_after_statements`).
-pub enum Step {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) enum Step {
     StateAdvance { broadcast: KindId, next: KindId },
     Terminal { broadcast: KindId },
     Unknown,
 }
 
 /// Per-advance state tracked across `on_advance` → `on_settled`.
-pub struct PendingAdvance {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct PendingAdvance {
     /// Causal-chain root of the in-flight broadcast (ADR-0080 §6).
     pub(crate) root: MailId,
     /// Kind id of the state just broadcast — echoed in `completed`.
@@ -174,7 +180,9 @@ impl LifecycleCapabilityState {
 /// `quit_pending` flag (ADR-0082 §3). If `quit_pending` is set AND
 /// the state declares a `quit` edge, consume the flag and return the
 /// quit target; otherwise return the unconditional `next` target.
-pub fn resolve_edge(state: &LifecycleStateData, quit_pending: &mut bool) -> KindId {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) fn resolve_edge(state: &LifecycleStateData, quit_pending: &mut bool) -> KindId {
     if *quit_pending && let Some(quit_target) = state.quit {
         *quit_pending = false;
         return quit_target;

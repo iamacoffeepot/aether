@@ -41,7 +41,9 @@ use std::time::Duration;
     aether_data::Schema,
 )]
 #[kind(name = "aether.rpc.test.echo_request")]
-pub struct TestEchoRequest {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct TestEchoRequest {
     pub value: u64,
 }
 
@@ -59,7 +61,9 @@ pub struct TestEchoRequest {
     aether_data::Schema,
 )]
 #[kind(name = "aether.rpc.test.echo_reply")]
-pub struct TestEchoReply {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct TestEchoReply {
     pub value: u64,
 }
 
@@ -70,11 +74,15 @@ pub struct TestEchoReply {
 /// `aether.rpc.test.echo` identity (ADR-0122 split). A ZST carrying only
 /// the addressing markers `#[actor]` emits always-on; the (empty) runtime
 /// state lives in `TestEchoActorState`.
-pub struct TestEchoActor;
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct TestEchoActor;
 
 /// Runtime state for [`TestEchoActor`]: a named empty stand-in (ADR-0122
 /// hard rule — never `()` / `Self`) for an actor that holds nothing.
-pub struct TestEchoActorState;
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct TestEchoActorState;
 
 #[actor(singleton)]
 impl NativeActor for TestEchoActor {
@@ -118,7 +126,7 @@ impl NativeActor for TestEchoActor {
     aether_data::Schema,
 )]
 #[kind(name = "aether.rpc.test.deferred_echo_request")]
-pub struct DeferredEchoRequest {
+pub(super) struct DeferredEchoRequest {
     pub value: u64,
 }
 
@@ -138,7 +146,7 @@ pub struct DeferredEchoRequest {
     aether_data::Schema,
 )]
 #[kind(name = "aether.rpc.test.deferred_echo_reply")]
-pub struct DeferredEchoReply {
+pub(super) struct DeferredEchoReply {
     pub value: u64,
 }
 
@@ -153,11 +161,11 @@ pub struct DeferredEchoReply {
 /// carrying the addressing markers; its runtime state — the
 /// `TaskQueue` backing the off-thread dispatch — lives in
 /// `DeferredEchoActorState`.
-pub struct DeferredEchoActor;
+pub(super) struct DeferredEchoActor;
 
 /// Runtime state for [`DeferredEchoActor`]: the ADR-0093 hold-until-resolve
 /// task queue the deferred handler submits onto.
-pub struct DeferredEchoActorState {
+pub(super) struct DeferredEchoActorState {
     tasks: TaskQueue,
 }
 

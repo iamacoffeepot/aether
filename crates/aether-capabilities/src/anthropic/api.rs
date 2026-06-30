@@ -107,7 +107,7 @@ fn build_request_body(req: &AnthropicRequest) -> Value {
 /// reads the model the provider served (falling back to the requested
 /// `fallback_model`) and the token usage. Factored out so a
 /// fixture-replay test locks the response shape (ADR-0050 §4).
-pub fn parse_messages_response(
+pub(super) fn parse_messages_response(
     json: &str,
     fallback_model: &str,
     wall_clock_millis: u32,

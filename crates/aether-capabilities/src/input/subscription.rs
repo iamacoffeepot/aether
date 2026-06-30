@@ -53,15 +53,15 @@ use runtime::*;
 /// single `use runtime::*` glob above.
 #[cfg(feature = "runtime")]
 mod runtime {
-    pub use aether_data::{Kind, KindId};
-    pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    pub use aether_substrate::chassis::error::BootError;
-    pub use aether_substrate::mail::MailboxId;
-    pub use aether_substrate::mail::registry::{MailboxEntry, Registry};
-    pub use std::collections::{BTreeSet, HashMap};
-    pub use std::sync::Arc;
+    pub(super) use aether_data::{Kind, KindId};
+    pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    pub(super) use aether_substrate::chassis::error::BootError;
+    pub(super) use aether_substrate::mail::MailboxId;
+    pub(super) use aether_substrate::mail::registry::{MailboxEntry, Registry};
+    pub(super) use std::collections::{BTreeSet, HashMap};
+    pub(super) use std::sync::Arc;
 
-    pub use crate::input::config::InputConfig;
+    pub(super) use crate::input::config::InputConfig;
 
     /// `aether.input` runtime state (ADR-0021). Owns the substrate registry
     /// handle (for subscriber-mailbox validation) plus the subscriber table

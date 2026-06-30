@@ -14,16 +14,16 @@ use super::voice::BankStage;
 /// Attack ramp (seconds) wrapping a sample voice — a short swell so a
 /// re-pitched recording doesn't click on at full level (ADR-0103 §6,
 /// the partial bank's ramp shape).
-pub const SAMPLE_ATTACK_SECS: f32 = 0.003;
+pub(super) const SAMPLE_ATTACK_SECS: f32 = 0.003;
 
 /// Release ramp (seconds) on `note_off` for a sample voice — the
 /// damper that ends a held note faster than the sample's natural decay.
-pub const SAMPLE_RELEASE_SECS: f32 = 0.08;
+pub(super) const SAMPLE_RELEASE_SECS: f32 = 0.08;
 
 /// Base amplitude of a sample voice before velocity scaling. Sampled
 /// recordings already carry their own level; this trims headroom so a
 /// dense chord doesn't clip past the soft-clip.
-pub const SAMPLE_BASE_AMP: f32 = 0.6;
+pub(super) const SAMPLE_BASE_AMP: f32 = 0.6;
 
 /// A region's sustain loop in device-rate coordinates (ADR-0103 §6).
 /// The SFZ frame offsets are scaled at bank assembly by the load-time
@@ -32,7 +32,9 @@ pub const SAMPLE_BASE_AMP: f32 = 0.6;
 /// and `end` index the region's device-rate PCM; the voice cycles the
 /// half-open `[start, end)` interval while it sounds.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SampleLoop {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct SampleLoop {
     pub start: f32,
     pub end: f32,
 }
@@ -45,7 +47,9 @@ pub struct SampleLoop {
 /// The PCM is `Arc`'d so every region naming the same sample shares one
 /// buffer and a spawned voice holds a cheap reference, not a copy.
 #[derive(Clone, Debug)]
-pub struct SampleRegion {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct SampleRegion {
     pub lokey: u8,
     pub hikey: u8,
     pub lovel: u8,
@@ -62,7 +66,9 @@ pub struct SampleRegion {
 /// `.sfz` filename, and the total decoded PCM the bank holds resident
 /// (reported in the load reply — there is no unload in v1).
 #[derive(Debug)]
-pub struct SampleBank {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct SampleBank {
     pub name: String,
     pub regions: Vec<SampleRegion>,
     pub resident_bytes: usize,
@@ -72,7 +78,7 @@ impl SampleBank {
     /// The first region whose key and velocity ranges both contain
     /// `(pitch, velocity)`, or `None` when the note falls in a gap the
     /// bank doesn't cover (the `note_on` then drops).
-    pub fn select(&self, pitch: u8, velocity: u8) -> Option<&SampleRegion> {
+    pub(crate) fn select(&self, pitch: u8, velocity: u8) -> Option<&SampleRegion> {
         self.regions.iter().find(|r| {
             (r.lokey..=r.hikey).contains(&pitch) && (r.lovel..=r.hivel).contains(&velocity)
         })
@@ -89,7 +95,7 @@ impl SampleBank {
 /// `note_off` release ramp completes (the loop keeps cycling beneath
 /// the fade).
 #[derive(Clone, Debug)]
-pub struct SampleVoice {
+pub(super) struct SampleVoice {
     /// Device-rate mono PCM of the selected region, shared with the
     /// bank.
     pub pcm: Arc<[f32]>,
@@ -117,7 +123,7 @@ pub struct SampleVoice {
 }
 
 impl SampleVoice {
-    pub fn new(pitch: u8, velocity: u8, region: &SampleRegion) -> Self {
+    pub(super) fn new(pitch: u8, velocity: u8, region: &SampleRegion) -> Self {
         let semitones = f32::from(pitch) - f32::from(region.pitch_keycenter);
         let rate = (semitones / 12.0).exp2();
         let v = f32::from(velocity) / 127.0;
@@ -139,18 +145,18 @@ impl SampleVoice {
         }
     }
 
-    pub fn note_off(&mut self) {
+    pub(super) fn note_off(&mut self) {
         self.stage.begin_release(self.attack_s);
     }
 
-    pub fn done(&self) -> bool {
+    pub(super) fn done(&self) -> bool {
         self.finished || matches!(self.stage, BankStage::Done)
     }
 
     /// Advance the attack/release ramp one sample, returning its current
     /// level — the shared bank ramp over the sample voice's own
     /// attack/release times.
-    pub fn advance_ramp(&mut self, dt: f32) -> f32 {
+    pub(super) fn advance_ramp(&mut self, dt: f32) -> f32 {
         self.stage.advance(dt, self.attack_s, self.release_s)
     }
 
@@ -158,7 +164,7 @@ impl SampleVoice {
     // sane sample, so the index-to-float and float-to-index casts in the
     // looped / unlooped readers are exact and non-negative on the hot
     // path.
-    pub fn next_sample(&mut self, dt: f32) -> f32 {
+    pub(super) fn next_sample(&mut self, dt: f32) -> f32 {
         let ramp = self.advance_ramp(dt);
         if self.finished {
             return 0.0;
@@ -181,7 +187,7 @@ impl SampleVoice {
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
     )]
-    pub fn next_unlooped(&mut self, len: usize, ramp: f32) -> f32 {
+    pub(super) fn next_unlooped(&mut self, len: usize, ramp: f32) -> f32 {
         let i = self.pos.floor() as usize;
         if i >= len {
             self.finished = true;
@@ -210,7 +216,7 @@ impl SampleVoice {
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
     )]
-    pub fn next_looped(&mut self, lp: SampleLoop, len: usize, ramp: f32) -> f32 {
+    pub(super) fn next_looped(&mut self, lp: SampleLoop, len: usize, ramp: f32) -> f32 {
         // `pos < loop_end <= len` holds going in, so `i` is in range.
         let i = (self.pos.floor() as usize).min(len - 1);
         let a = self.pcm[i];
@@ -246,7 +252,9 @@ impl SampleVoice {
 /// `(namespace, path)` of the `.sfz`. Only the original requester's
 /// reply route lives here — the namespace / path come back on the
 /// `ReadResult`, and the bank's name is derived from the `.sfz` path.
-pub struct PendingInstrument {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct PendingInstrument {
     pub source: Source,
 }
 
@@ -254,7 +262,9 @@ pub struct PendingInstrument {
 /// in the `.sfz` (resolved against `default_path`), the fs path it is
 /// read from (joined with the `.sfz`'s own directory), and its bytes
 /// once the `aether.fs.read` lands.
-pub struct SampleSlot {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct SampleSlot {
     pub sample_rel: String,
     pub fs_path: String,
     pub bytes: Option<Vec<u8>>,
@@ -265,7 +275,9 @@ pub struct SampleSlot {
 /// the last reply lands (ADR-0103 §2). Keyed in
 /// `AudioCapabilityState::assemblies` by a minted id; the per-sample reads
 /// correlate back to it through `AudioCapabilityState::pending_samples`.
-pub struct BankAssembly {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct BankAssembly {
     /// The original `load_instrument` requester — the
     /// `LoadInstrumentResult` reply routes here.
     pub source: Source,
@@ -289,7 +301,9 @@ pub struct BankAssembly {
 /// `#[handler(task)]` arm can build the `Err` reply (`Ok` carries the
 /// assembled bank's own name / id / bytes). Mirrors
 /// [`TrackDecodeContext`] for the load path.
-pub struct BankAssemblyContext {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct BankAssemblyContext {
     pub namespace: String,
     pub path: String,
 }
@@ -297,13 +311,15 @@ pub struct BankAssemblyContext {
 /// Output of the bank-assembly dispatch worker — the assembled,
 /// device-rate bank behind an `Arc`, or a human-readable decode failure
 /// to relay as `LoadInstrumentResult::Err`.
-pub type BankAssemblyOutput = Result<Arc<SampleBank>, String>;
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) type BankAssemblyOutput = Result<Arc<SampleBank>, String>;
 
 /// Decode every unique sample to device-rate mono PCM and assemble the
 /// bank (ADR-0103 §6). Pure + `Send` so it runs on the blocking-dispatch
 /// worker, off the realtime path. A failed decode aborts with a
 /// human-readable reason the cap relays as `LoadInstrumentResult::Err`.
-pub fn assemble_bank(
+pub(super) fn assemble_bank(
     name: String,
     regions: &[SfzRegion],
     sample_bytes: &[(String, Vec<u8>)],
@@ -355,7 +371,7 @@ pub fn assemble_bank(
 /// load-time resample ratio; `decode_wav_to_mono` consumes the same
 /// header but only returns the resampled PCM. Parses the header chunk
 /// only — the sample data is not read.
-pub fn wav_source_rate(bytes: &[u8]) -> Result<u32, String> {
+pub(super) fn wav_source_rate(bytes: &[u8]) -> Result<u32, String> {
     let reader = hound::WavReader::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let rate = reader.spec().sample_rate;
     if rate == 0 {
@@ -371,7 +387,7 @@ pub fn wav_source_rate(bytes: &[u8]) -> Result<u32, String> {
 /// `None` when the resampled region is too short to loop or the bounds
 /// collapse after clamping, degrading the region to unlooped.
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-pub fn scale_loop(
+pub(super) fn scale_loop(
     lp: SfzLoop,
     source_rate: u32,
     target_rate: u32,
@@ -395,7 +411,7 @@ pub fn scale_loop(
 /// The directory portion of an fs path (everything before the last
 /// `/`), or `""` when the path has no directory. A bank's samples are
 /// addressed relative to the `.sfz`'s own directory (ADR-0103 §5).
-pub fn sfz_dir(path: &str) -> &str {
+pub(super) fn sfz_dir(path: &str) -> &str {
     match path.rsplit_once('/') {
         Some((dir, _)) => dir,
         None => "",
@@ -404,7 +420,7 @@ pub fn sfz_dir(path: &str) -> &str {
 
 /// Join a sample path onto the `.sfz`'s directory. An empty directory
 /// leaves the sample as-is.
-pub fn join_fs(dir: &str, rel: &str) -> String {
+pub(super) fn join_fs(dir: &str, rel: &str) -> String {
     if dir.is_empty() {
         rel.to_owned()
     } else {
@@ -415,7 +431,7 @@ pub fn join_fs(dir: &str, rel: &str) -> String {
 /// Derive a bank name from the `.sfz` filename stem (the last path
 /// segment without its extension). Falls back to `"instrument"` for a
 /// pathological empty stem.
-pub fn bank_name_from_path(path: &str) -> String {
+pub(super) fn bank_name_from_path(path: &str) -> String {
     let file = path.rsplit('/').next().unwrap_or(path);
     let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
     if stem.is_empty() {

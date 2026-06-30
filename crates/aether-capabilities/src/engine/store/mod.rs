@@ -55,20 +55,22 @@ use aether_substrate::atomic_write::atomic_write;
 use aether_substrate::pid_lock::LockGuard;
 use serde::{Deserialize, Serialize};
 
-pub use manifest::{ArtifactKind, Selector, StoredArtifact, StoredManifest, component_manifest};
+pub(super) use manifest::{
+    ArtifactKind, Selector, StoredArtifact, StoredManifest, component_manifest,
+};
 use manifest::{matches_binary_filter, matches_component_filter};
 use persistence::{RestoredIndex, acquire_lock, ensure_root, hash_hex, restore, write_sidecar};
 
 /// Layout-version subdirectory under the resolved root, so a future
 /// on-disk format change can land beside `v1` without a migration.
-pub const LAYOUT_VERSION_DIR: &str = "v1";
+pub(super) const LAYOUT_VERSION_DIR: &str = "v1";
 
 /// Default on-disk byte budget. 16 GiB; binaries are tens of megabytes,
 /// so this holds a deep history before LRU eviction kicks in.
 /// `EngineConfig`'s `binary_disk_budget_bytes`
 /// carries this as its literal default (`17_179_869_184`) and folds an
 /// unparseable env value back to it.
-pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+pub(super) const DEFAULT_DISK_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 const TARGET: &str = "aether_capabilities::engine::store";
 
@@ -101,7 +103,7 @@ struct Entry {
 /// (ADR-0115). Owned by the single-threaded `aether.engine` cap, so its
 /// index lives in plain fields behind `&mut self`; #1955 can wrap it
 /// behind a lock when a multi-owner registry needs one.
-pub struct ArtifactStore {
+pub(super) struct ArtifactStore {
     /// The layout-versioned root holding `entries/`, `names.json`,
     /// `lock.pid`.
     root: PathBuf,
@@ -132,7 +134,7 @@ impl ArtifactStore {
     /// [`LAYOUT_VERSION_DIR`] to a configured override or falls back here
     /// when it's unset.
     #[must_use]
-    pub fn default_root() -> PathBuf {
+    pub(super) fn default_root() -> PathBuf {
         if let Some(data) = dirs::data_dir() {
             return data
                 .join("aether")
@@ -151,7 +153,7 @@ impl ArtifactStore {
     /// lock is reclaimed; a live holder leaves the store unlocked but
     /// still operating.
     #[must_use]
-    pub fn open(root: &Path, disk_budget_bytes: u64) -> Self {
+    pub(super) fn open(root: &Path, disk_budget_bytes: u64) -> Self {
         let root = ensure_root(root);
         let lock = acquire_lock(&root);
         let RestoredIndex {
@@ -174,7 +176,7 @@ impl ArtifactStore {
     /// The layout root this store resolved to (after any temp fallback).
     #[must_use]
     #[allow(dead_code)]
-    pub fn root(&self) -> &Path {
+    pub(super) fn root(&self) -> &Path {
         &self.root
     }
 
@@ -184,7 +186,7 @@ impl ArtifactStore {
     /// hash comes back, but a fresh `name` still repoints. Returns the
     /// sha256 hex the bytes stored under. Runs LRU eviction afterward to
     /// hold the disk budget.
-    pub fn upload(
+    pub(super) fn upload(
         &mut self,
         bytes: &[u8],
         kind: ArtifactKind,
@@ -242,7 +244,7 @@ impl ArtifactStore {
     /// entry has that hash. Persistence of the pin flag is a fast-follow —
     /// today a pin holds for the store's lifetime (the hub process).
     #[allow(dead_code)]
-    pub fn set_pinned(&mut self, hash: &str, pinned: bool) -> bool {
+    pub(super) fn set_pinned(&mut self, hash: &str, pinned: bool) -> bool {
         if let Some(entry) = self.entries.get_mut(hash) {
             entry.pinned = pinned;
             true
@@ -253,7 +255,7 @@ impl ArtifactStore {
 
     /// Pin an entry by hash. Convenience for `set_pinned(hash, true)`.
     #[allow(dead_code)]
-    pub fn pin(&mut self, hash: &str) -> bool {
+    pub(super) fn pin(&mut self, hash: &str) -> bool {
         self.set_pinned(hash, true)
     }
 
@@ -264,7 +266,7 @@ impl ArtifactStore {
     /// constraint". Component entries are excluded — only `Binary`-kind
     /// artifacts are listed here.
     #[must_use]
-    pub fn list_binaries(&self, filter: &ListEngineBinaries) -> Vec<BinaryEntry> {
+    pub(super) fn list_binaries(&self, filter: &ListEngineBinaries) -> Vec<BinaryEntry> {
         self.entries
             .iter()
             .filter_map(|(hash, entry)| {
@@ -285,7 +287,7 @@ impl ArtifactStore {
     /// Each absent field is "no constraint". Binary entries are excluded —
     /// only `Component`-kind artifacts are listed here.
     #[must_use]
-    pub fn list_components(&self, filter: &ListComponentBinaries) -> Vec<ComponentEntry> {
+    pub(super) fn list_components(&self, filter: &ListComponentBinaries) -> Vec<ComponentEntry> {
         self.entries
             .iter()
             .filter_map(|(hash, entry)| {
@@ -302,7 +304,7 @@ impl ArtifactStore {
     /// Resolve an artifact by hash or name to its on-disk path + manifest
     /// (ADR-0115; the seam #1954 consumes). `None` if the hash / name
     /// isn't stored. Bumps the entry's recency.
-    pub fn get(&mut self, selector: &Selector) -> Option<StoredArtifact> {
+    pub(super) fn get(&mut self, selector: &Selector) -> Option<StoredArtifact> {
         let hash = match selector {
             Selector::Hash(h) => h.clone(),
             Selector::Name(n) => self.names.get(n)?.clone(),
@@ -326,20 +328,20 @@ impl ArtifactStore {
     /// Number of stored entries.
     #[must_use]
     #[allow(dead_code)]
-    pub fn entry_count(&self) -> usize {
+    pub(super) fn entry_count(&self) -> usize {
         self.entries.len()
     }
 
     /// Approximate on-disk byte total.
     #[must_use]
     #[allow(dead_code)]
-    pub fn total_bytes(&self) -> u64 {
+    pub(super) fn total_bytes(&self) -> u64 {
         self.total_bytes
     }
 
     /// Whether an entry with `hash` is stored.
     #[must_use]
-    pub fn contains(&self, hash: &str) -> bool {
+    pub(super) fn contains(&self, hash: &str) -> bool {
         self.entries.contains_key(hash)
     }
 

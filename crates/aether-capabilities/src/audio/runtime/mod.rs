@@ -63,19 +63,19 @@ use super::kinds::{
 // The substrate-typed + native-only surface the parent's `#[actor] impl`
 // reaches through `use runtime::*`. Gated once here so a marker-only build
 // never names any of it.
-pub use std::collections::HashMap;
-pub use std::sync::Arc;
+pub(super) use std::collections::HashMap;
+pub(super) use std::sync::Arc;
 
-pub use aether_actor::{Manual, OutboundReply};
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
-pub use aether_substrate::chassis::error::BootError;
+pub(super) use aether_actor::{Manual, OutboundReply};
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
+pub(super) use aether_substrate::chassis::error::BootError;
 
-pub use self::event::AudioEvent;
-pub use self::instrument::builtin_id_ceiling;
-pub use self::sample::{BankAssemblyContext, BankAssemblyOutput, PendingInstrument};
-pub use self::schedule::{SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS};
-pub use self::track::{DecodeOutput, PendingTrack, TrackDecodeContext};
-pub use crate::fs::{FsCapability, Read, ReadResult};
+pub(super) use self::event::AudioEvent;
+pub(super) use self::instrument::builtin_id_ceiling;
+pub(super) use self::sample::{BankAssemblyContext, BankAssemblyOutput, PendingInstrument};
+pub(super) use self::schedule::{SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS};
+pub(super) use self::track::{DecodeOutput, PendingTrack, TrackDecodeContext};
+pub(super) use crate::fs::{FsCapability, Read, ReadResult};
 
 /// Extract the sender's mailbox id for voice-table keying. Component
 /// senders come through as `EngineMailbox { mailbox_id }`; Claude

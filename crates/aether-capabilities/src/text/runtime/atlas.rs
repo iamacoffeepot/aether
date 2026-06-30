@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 /// Side length of the square atlas in pixels. One fixed texture per
 /// session; 512×512 holds a few hundred small glyphs.
-pub const ATLAS_SIZE: u32 = 512;
+pub(super) const ATLAS_SIZE: u32 = 512;
 
 /// One transparent-pixel gutter between packed glyphs so bilinear
 /// sampling at a quad edge never bleeds a neighbor's coverage in.
@@ -31,7 +31,9 @@ const GLYPH_PADDING: u32 = 1;
 /// what integer pixel size. `size_pixels` is quantized (rounded) so two
 /// draws at the same nominal size share one raster.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GlyphKey {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct GlyphKey {
     pub font_id: u32,
     pub glyph_index: u16,
     pub size_pixels: u32,
@@ -41,7 +43,9 @@ pub struct GlyphKey {
 /// matching uv sub-rect (`0,0` top-left .. `1,1` bottom-right) to thread
 /// into a `TexturedQuad`.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct AtlasEntry {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct AtlasEntry {
     pub x: u32,
     pub y: u32,
     pub width: u32,
@@ -53,7 +57,9 @@ pub struct AtlasEntry {
 }
 
 /// Outcome of looking a glyph up in the atlas.
-pub enum GlyphSlot {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) enum GlyphSlot {
     /// Cached or newly placed — sample the atlas at `entry`. `uploaded`
     /// is `true` only the frame the glyph was first rasterized, signaling
     /// the caller to emit one `update_texture` for `entry`'s rect.
@@ -79,7 +85,9 @@ fn cached_slot(entry: Option<AtlasEntry>) -> GlyphSlot {
 
 /// Fixed-size RGBA8 atlas with a left-to-right, top-to-bottom shelf
 /// packer.
-pub struct Atlas {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct Atlas {
     pixels: Vec<u8>,
     cache: HashMap<GlyphKey, Option<AtlasEntry>>,
     shelf_x: u32,
@@ -96,7 +104,7 @@ impl Default for Atlas {
 
 impl Atlas {
     /// A zeroed (fully transparent) atlas.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             pixels: vec![0u8; (ATLAS_SIZE * ATLAS_SIZE * 4) as usize],
             cache: HashMap::new(),
@@ -108,14 +116,14 @@ impl Atlas {
     }
 
     /// The full RGBA8 buffer — uploaded once via `create_texture`.
-    pub fn pixels(&self) -> &[u8] {
+    pub(crate) fn pixels(&self) -> &[u8] {
         &self.pixels
     }
 
     /// `true` once any glyph failed to pack into the atlas. The text cap
     /// checks this before each draw and calls [`Self::reset`] to free
     /// space for the next frame's glyphs.
-    pub fn is_full(&self) -> bool {
+    pub(crate) fn is_full(&self) -> bool {
         self.full
     }
 
@@ -124,7 +132,7 @@ impl Atlas {
     /// re-syncs the GPU side by emitting one full-rect `update_texture`
     /// immediately after, then re-rasterizes the frame's glyphs into the
     /// fresh atlas as cache misses.
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.pixels.fill(0);
         self.cache.clear();
         self.shelf_x = 0;
@@ -136,7 +144,7 @@ impl Atlas {
     /// Cheap cache probe: the cached slot for `key`, or `None` if the
     /// glyph has never been seen (the caller then rasterizes and calls
     /// [`Self::get_or_insert`]). Lets the cap skip rasterization on a hit.
-    pub fn cached(&self, key: &GlyphKey) -> Option<GlyphSlot> {
+    pub(crate) fn cached(&self, key: &GlyphKey) -> Option<GlyphSlot> {
         self.cache.get(key).map(|cached| cached_slot(*cached))
     }
 
@@ -147,7 +155,7 @@ impl Atlas {
     /// uv coordinates are an exact `pixel / ATLAS_SIZE` ratio; both fit in
     /// `f32` without loss for any in-bounds glyph.
     #[allow(clippy::cast_precision_loss)]
-    pub fn get_or_insert(
+    pub(crate) fn get_or_insert(
         &mut self,
         key: GlyphKey,
         width: u32,
@@ -191,7 +199,7 @@ impl Atlas {
 
     /// The RGBA8 bytes of a placed glyph's rect, row-major — the payload
     /// for the `update_texture` that uploads it.
-    pub fn rect_rgba(&self, entry: &AtlasEntry) -> Vec<u8> {
+    pub(crate) fn rect_rgba(&self, entry: &AtlasEntry) -> Vec<u8> {
         let mut out = Vec::with_capacity((entry.width * entry.height * 4) as usize);
         for row in 0..entry.height {
             let start = (((entry.y + row) * ATLAS_SIZE + entry.x) * 4) as usize;

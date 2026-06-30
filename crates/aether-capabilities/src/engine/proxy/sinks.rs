@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 /// `died` keeps the whole [`EngineDied`] (id + reason) so the death-path
 /// tests can assert the surfaced cause.
 #[derive(Clone, Default)]
-pub struct EngineCapCells {
+pub(super) struct EngineCapCells {
     pub alive: Arc<Mutex<Vec<String>>>,
     pub died: Arc<Mutex<Vec<EngineDied>>>,
 }
@@ -28,7 +28,7 @@ pub struct EngineCapCells {
 /// the reported `engine_id`s into shared vecs the heartbeat tests
 /// assert on. A field-bearing `#[cfg(test)]` actor, so it stays the
 /// un-split `type State = Self` shape (ADR-0122).
-pub struct EngineCapSink {
+pub(super) struct EngineCapSink {
     cells: EngineCapCells,
 }
 
@@ -64,7 +64,7 @@ impl NativeActor for EngineCapSink {
 /// receives into a shared cell so the round-trip test can observe a
 /// reply routed back through the proxy. A field-bearing `#[cfg(test)]`
 /// actor, so it stays the un-split `type State = Self` shape (ADR-0122).
-pub struct ProxyReplySink {
+pub(super) struct ProxyReplySink {
     recorded: Arc<Mutex<Option<u64>>>,
 }
 

@@ -15,7 +15,7 @@ use crate::shared::contentgen::shared::{parse_status_prefix, snippet};
 /// onto [`AnthropicError::Unauthorized`] without the adapter depending
 /// on the kind enum. The `DisabledAnthropicAdapter` returns this for
 /// Messages requests.
-pub const UNAUTHORIZED_SENTINEL: &str = "unauthorized";
+pub(super) const UNAUTHORIZED_SENTINEL: &str = "unauthorized";
 
 /// Convert a free-form adapter error string into the typed
 /// [`AnthropicError`]. Recognises the structured sentinels the
@@ -23,7 +23,7 @@ pub const UNAUTHORIZED_SENTINEL: &str = "unauthorized";
 /// `UNAUTHORIZED_SENTINEL`, and the `status=<n>` prefix the Messages
 /// backend uses) and falls back to `AdapterError` for everything else.
 #[must_use]
-pub fn adapter_error_to_typed(raw: &str) -> AnthropicError {
+pub(super) fn adapter_error_to_typed(raw: &str) -> AnthropicError {
     if raw == CLI_NOT_FOUND {
         return AnthropicError::CliNotFound;
     }
@@ -57,7 +57,11 @@ pub fn adapter_error_to_typed(raw: &str) -> AnthropicError {
 /// - everything else non-2xx → `AdapterError` carrying the status +
 ///   body snippet
 #[must_use]
-pub fn status_to_error(status: u16, retry_after_millis: Option<u32>, body: &str) -> AnthropicError {
+pub(super) fn status_to_error(
+    status: u16,
+    retry_after_millis: Option<u32>,
+    body: &str,
+) -> AnthropicError {
     match status {
         401 | 403 => AnthropicError::Unauthorized,
         429 => AnthropicError::RateLimited { retry_after_millis },

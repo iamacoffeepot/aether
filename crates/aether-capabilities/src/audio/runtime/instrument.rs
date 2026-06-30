@@ -15,7 +15,7 @@
 /// base frequency under the noise (`0.0` is pure noise); it is the one
 /// patch field that turns a hat patch into a snare.
 #[derive(Copy, Clone, Debug)]
-pub enum Wave {
+pub(super) enum Wave {
     Sine,
     Square,
     Triangle,
@@ -27,7 +27,7 @@ pub enum Wave {
 /// are held in seconds; the voice converts to per-sample step on
 /// instantiation so the hot loop is add-only.
 #[derive(Copy, Clone, Debug)]
-pub struct Adsr {
+pub(super) struct Adsr {
     pub attack_s: f32,
     pub decay_s: f32,
     pub sustain: f32,
@@ -41,7 +41,7 @@ pub struct Adsr {
 /// constant. The decay is precomputed as a per-sample multiplier at
 /// `note_on`, so the hot loop pays one extra multiply.
 #[derive(Copy, Clone, Debug)]
-pub struct PitchSweep {
+pub(super) struct PitchSweep {
     /// Phase-step multiplier at the note's onset. `4.0` starts two
     /// octaves above the base frequency; `1.0` is no sweep.
     pub start_ratio: f32,
@@ -54,18 +54,18 @@ pub struct PitchSweep {
 /// voice stays `Copy` and stack-friendly in the pool; the hot loop is
 /// one `sin`, one multiply-accumulate, and one decay multiply per
 /// partial.
-pub const PARTIAL_COUNT: usize = 8;
+pub(super) const PARTIAL_COUNT: usize = 8;
 
 /// Reference pitch (MIDI C4) for partial-bank decay scaling. A note's
 /// per-partial decay rates scale by `f0 / REFERENCE_FREQ`, so higher
 /// notes ring shorter and lower notes longer.
-pub const REFERENCE_FREQ: f32 = 261.625_57;
+pub(super) const REFERENCE_FREQ: f32 = 261.625_57;
 
 /// Relative amplitude below which a sustaining (un-released)
 /// partial-bank voice frees itself. Piano partials decay
 /// exponentially and never reach exactly zero, so the voice retires
 /// once its summed partial energy crosses this floor.
-pub const PARTIAL_SILENCE_FLOOR: f32 = 1.0e-4;
+pub(super) const PARTIAL_SILENCE_FLOOR: f32 = 1.0e-4;
 
 /// A struck/sustained partial-bank voice patch. Partial `n` is tuned
 /// to `n * f0 * sqrt(1 + inharmonicity * n^2)` plus a small
@@ -74,7 +74,7 @@ pub const PARTIAL_SILENCE_FLOOR: f32 = 1.0e-4;
 /// partial decays at `decay_base * (1 + i * decay_spread)` scaled by
 /// pitch. A global attack/release ramp wraps the bank.
 #[derive(Copy, Clone, Debug)]
-pub struct PartialBankDef {
+pub(super) struct PartialBankDef {
     /// Stiffness coefficient `B`: stretches overtone `n` to
     /// `n * f0 * sqrt(1 + B * n^2)`. `0.0` is perfectly harmonic.
     pub inharmonicity: f32,
@@ -105,7 +105,7 @@ pub struct PartialBankDef {
 /// `Oscillator`; the partial-bank patches add struck-string and
 /// sustained timbres without a wire change.
 #[derive(Copy, Clone, Debug)]
-pub enum VoiceDef {
+pub(super) enum VoiceDef {
     Oscillator { wave: Wave, adsr: Adsr },
     PartialBank(PartialBankDef),
 }
@@ -114,7 +114,7 @@ pub enum VoiceDef {
 /// into the built-in registry; the registry hands the voice a copy of
 /// this struct at `note_on` time so each voice is self-contained.
 #[derive(Copy, Clone, Debug)]
-pub struct InstrumentDef {
+pub(super) struct InstrumentDef {
     pub name: &'static str,
     pub voice: VoiceDef,
     pub base_amp: f32,
@@ -128,7 +128,7 @@ pub struct InstrumentDef {
 /// Reordering these is a breaking change on the wire — adds go at
 /// the end. Future follow-up: mailed patch definitions fill in past
 /// the built-ins (ADR-0039 "runtime-defined patches" parked item).
-pub const BUILTINS: &[InstrumentDef] = &[
+pub(super) const BUILTINS: &[InstrumentDef] = &[
     InstrumentDef {
         name: "sine_lead",
         voice: VoiceDef::Oscillator {
@@ -316,25 +316,27 @@ pub const BUILTINS: &[InstrumentDef] = &[
     },
 ];
 
-pub fn instrument_by_id(id: u8) -> Option<&'static InstrumentDef> {
+pub(super) fn instrument_by_id(id: u8) -> Option<&'static InstrumentDef> {
     BUILTINS.get(id as usize)
 }
 
 /// Number of built-in instruments. Used by the boot log so MCP
 /// agents can cross-reference.
-pub fn builtin_count() -> usize {
+pub(super) fn builtin_count() -> usize {
     BUILTINS.len()
 }
 
 /// Names of the built-in instruments, in id order.
-pub fn builtin_names() -> Vec<&'static str> {
+pub(super) fn builtin_names() -> Vec<&'static str> {
     BUILTINS.iter().map(|d| d.name).collect()
 }
 
 /// The first instrument id available to a loaded bank — one past the
 /// last compiled-in built-in. The cap's `next_instrument_id` starts
 /// here, the synth's bank table begins at the same offset.
-pub fn builtin_id_ceiling() -> u8 {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) fn builtin_id_ceiling() -> u8 {
     // `BUILTINS` is a small fixed table (11 today); the length fits a
     // `u8` with room to spare, and a load count that overflowed `u8`
     // would be absurd.

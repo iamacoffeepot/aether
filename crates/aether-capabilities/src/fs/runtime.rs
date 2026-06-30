@@ -19,16 +19,16 @@ use super::{
 };
 use aether_actor::runtime;
 
-pub use std::any::Any;
-pub use std::fs;
-pub use std::panic::{self, AssertUnwindSafe};
-pub use std::sync::Arc;
+pub(super) use std::any::Any;
+pub(super) use std::fs;
+pub(super) use std::panic::{self, AssertUnwindSafe};
+pub(super) use std::sync::Arc;
 
-pub use super::adapter::fs_error_from_std;
-pub use aether_data::TransformError;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::transform::{FoldError, TransformRegistry};
+pub(super) use super::adapter::fs_error_from_std;
+pub(super) use aether_data::TransformError;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub(super) use aether_substrate::chassis::error::BootError;
+pub(super) use aether_substrate::transform::{FoldError, TransformRegistry};
 
 /// `aether.fs` runtime state (ADR-0041). Owns the resolved adapter
 /// registry plus the link-time native-transform registry (ADR-0048 §2)
@@ -46,7 +46,7 @@ pub struct FsCapabilityState {
     pub(super) transforms: TransformRegistry,
 }
 
-pub fn map_fold_error(e: &FoldError) -> FsFoldError {
+pub(super) fn map_fold_error(e: &FoldError) -> FsFoldError {
     match e {
         FoldError::UnknownTransform(id) => FsFoldError::UnknownTransform(*id),
         FoldError::NonLinearArity { at_index, arity } => FsFoldError::NonLinearArity {
@@ -65,7 +65,7 @@ pub fn map_fold_error(e: &FoldError) -> FsFoldError {
     }
 }
 
-pub fn map_transform_error(e: &TransformError) -> FsTransformError {
+pub(super) fn map_transform_error(e: &TransformError) -> FsTransformError {
     match e {
         TransformError::InputDecode { slot } => {
             FsTransformError::InputDecode { slot: *slot as u64 }
@@ -81,7 +81,7 @@ pub fn map_transform_error(e: &TransformError) -> FsTransformError {
     }
 }
 
-pub fn panic_message(payload: &(dyn Any + Send)) -> String {
+pub(super) fn panic_message(payload: &(dyn Any + Send)) -> String {
     payload
         .downcast_ref::<&'static str>()
         .map(|s| (*s).to_owned())

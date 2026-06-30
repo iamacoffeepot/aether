@@ -25,6 +25,12 @@
 //! [`NativeActor`]: aether_substrate::actor::native::NativeActor
 //! [`Addressable`]: aether_actor::Addressable
 
+// Every `pub` item this crate exposes outside `lib.rs`'s re-export set is
+// reachable only within the crate, so overstating its reach misleads a
+// reader. The lint flags each such item; narrow it to its true minimal
+// visibility (the re-exported surface below stays `pub`).
+#![warn(unreachable_pub)]
+
 // `aether.anthropic` content-gen cap (ADR-0050, issue 1014). Native-
 // only — embeds the native-only contentgen dispatch helper and makes
 // blocking ureq / subprocess calls.

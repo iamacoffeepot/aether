@@ -162,7 +162,7 @@ impl FileAdapter for LocalFileAdapter {
 // `to_string()` both borrow, so technically `&Error` would work, but
 // it'd force ad-hoc closures at every call site.
 #[allow(clippy::needless_pass_by_value)]
-pub fn fs_error_from_std(err: io::Error) -> FsError {
+pub(super) fn fs_error_from_std(err: io::Error) -> FsError {
     match err.kind() {
         ErrorKind::NotFound => FsError::NotFound,
         ErrorKind::PermissionDenied => FsError::Forbidden,

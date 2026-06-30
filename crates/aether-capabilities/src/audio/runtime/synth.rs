@@ -22,7 +22,7 @@ use super::voice::{MAX_VOICES, Voice, VoiceKernel, build_builtin_kernel};
 
 /// Whole-process synth state. Lives on the cpal callback thread;
 /// the cap communicates via the event queue.
-pub struct Synth {
+pub(super) struct Synth {
     pub events: Arc<ArrayQueue<AudioEvent>>,
     pub voices: Vec<Voice>,
     /// Track playback lane (ADR-0103 §3) — separate from `voices` so a
@@ -53,7 +53,7 @@ pub struct Synth {
 }
 
 impl Synth {
-    pub fn new(events: Arc<ArrayQueue<AudioEvent>>, sample_rate: f32) -> Self {
+    pub(super) fn new(events: Arc<ArrayQueue<AudioEvent>>, sample_rate: f32) -> Self {
         Self {
             events,
             voices: Vec::with_capacity(MAX_VOICES),
@@ -72,14 +72,14 @@ impl Synth {
     /// cheap `Arc` clone (or `None` for an id still inside the built-in
     /// range or past the loaded banks). The `note_on` path falls back
     /// to this when `instrument_by_id` misses.
-    pub fn bank_for(&self, instrument_id: u8) -> Option<Arc<SampleBank>> {
+    pub(super) fn bank_for(&self, instrument_id: u8) -> Option<Arc<SampleBank>> {
         let index = (instrument_id as usize).checked_sub(BUILTINS.len())?;
         self.banks.get(index).map(Arc::clone)
     }
 
     /// Number of output samples in the `stop_track` fade-out at this
     /// device rate.
-    pub fn fade_samples(&self) -> u32 {
+    pub(super) fn fade_samples(&self) -> u32 {
         // Fade window is a few milliseconds at audio rates — well
         // within u32 and non-negative.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -94,7 +94,7 @@ impl Synth {
     /// A miss on both kernel sources (unknown id, or a bank with no
     /// region covering the note) warn-drops without touching the pool
     /// (ADR-0103 §6).
-    pub fn trigger_note_on(
+    pub(super) fn trigger_note_on(
         &mut self,
         sender_mailbox: MailboxId,
         pitch: u8,
@@ -161,7 +161,12 @@ impl Synth {
     /// pitch)`, if one is sounding. A miss is a silent no-op (a late or
     /// unmatched note-off), matching the immediate `note_off` path.
     /// Shared by the queue-drained note-off and the scheduled note-off.
-    pub fn trigger_note_off(&mut self, sender_mailbox: MailboxId, pitch: u8, instrument_id: u8) {
+    pub(super) fn trigger_note_off(
+        &mut self,
+        sender_mailbox: MailboxId,
+        pitch: u8,
+        instrument_id: u8,
+    ) {
         if let Some(v) = self.voices.iter_mut().find(|v| {
             v.sender_mailbox == sender_mailbox
                 && v.instrument_id == instrument_id
@@ -173,7 +178,7 @@ impl Synth {
 
     /// Fire one scheduled note event through the same paths the
     /// immediate mail would take (ADR-0104).
-    pub fn fire_scheduled(&mut self, sender_mailbox: MailboxId, note: &ScheduledNote) {
+    pub(super) fn fire_scheduled(&mut self, sender_mailbox: MailboxId, note: &ScheduledNote) {
         match *note {
             ScheduledNote::On {
                 pitch,
@@ -187,7 +192,7 @@ impl Synth {
         }
     }
 
-    pub fn drain_events(&mut self) {
+    pub(super) fn drain_events(&mut self) {
         while let Some(ev) = self.events.pop() {
             match ev {
                 AudioEvent::NoteOn {
@@ -268,7 +273,7 @@ impl Synth {
     /// `(sender_mailbox, lane, namespace, path)` key drops the existing
     /// track first, so a key never stacks.
     #[allow(clippy::too_many_arguments)]
-    pub fn start_track(
+    pub(super) fn start_track(
         &mut self,
         sender_mailbox: MailboxId,
         lane: Option<String>,
@@ -297,7 +302,7 @@ impl Synth {
     }
 
     /// Arm the fade-out on the track at this key, if one is playing.
-    pub fn stop_track(
+    pub(super) fn stop_track(
         &mut self,
         sender_mailbox: MailboxId,
         lane: Option<&String>,
@@ -314,7 +319,7 @@ impl Synth {
         }
     }
 
-    pub fn fill(&mut self, buffer: &mut [f32], channels: usize) {
+    pub(super) fn fill(&mut self, buffer: &mut [f32], channels: usize) {
         self.drain_events();
         let dt = 1.0 / self.sample_rate;
         let frames = buffer.len() / channels.max(1);
@@ -373,32 +378,32 @@ impl Synth {
     }
 
     #[cfg(test)]
-    pub fn voice_count(&self) -> usize {
+    pub(super) fn voice_count(&self) -> usize {
         self.voices.len()
     }
 
     #[cfg(test)]
-    pub fn has_voice_with_pitch(&self, pitch: u8) -> bool {
+    pub(super) fn has_voice_with_pitch(&self, pitch: u8) -> bool {
         self.voices.iter().any(|v| v.pitch == pitch)
     }
 
     #[cfg(test)]
-    pub fn master_gain_value(&self) -> f32 {
+    pub(super) fn master_gain_value(&self) -> f32 {
         self.master_gain
     }
 
     #[cfg(test)]
-    pub fn track_count(&self) -> usize {
+    pub(super) fn track_count(&self) -> usize {
         self.tracks.len()
     }
 
     #[cfg(test)]
-    pub fn bank_count(&self) -> usize {
+    pub(super) fn bank_count(&self) -> usize {
         self.banks.len()
     }
 
     #[cfg(test)]
-    pub fn scheduled_count(&self) -> usize {
+    pub(super) fn scheduled_count(&self) -> usize {
         self.scheduled.len()
     }
 }
@@ -408,7 +413,7 @@ impl Synth {
 /// so the stream is constructed on, owned by, and dropped from the
 /// same thread. Dropping the pipeline silences every voice and tears
 /// down the cpal stream.
-pub struct AudioPipeline {
+pub(super) struct AudioPipeline {
     pub sender: AudioEventSender,
     /// The device output rate the synth runs at. The cap reads it back
     /// (via the init channel) as the resample target for track decode
@@ -418,7 +423,9 @@ pub struct AudioPipeline {
 }
 
 #[derive(Debug)]
-pub enum AudioBuildError {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) enum AudioBuildError {
     NoDevice,
     RateUnsupported(u32),
     ConfigQuery(String),
@@ -438,7 +445,7 @@ impl fmt::Display for AudioBuildError {
     }
 }
 
-pub fn try_build_pipeline(
+pub(super) fn try_build_pipeline(
     requested_sample_rate: Option<u32>,
 ) -> Result<AudioPipeline, AudioBuildError> {
     let host = cpal::default_host();
@@ -501,7 +508,7 @@ pub fn try_build_pipeline(
     })
 }
 
-pub fn find_config_for_rate(device: &cpal::Device, rate: u32) -> Option<cpal::StreamConfig> {
+pub(super) fn find_config_for_rate(device: &cpal::Device, rate: u32) -> Option<cpal::StreamConfig> {
     let configs = device.supported_output_configs().ok()?;
     for cfg in configs {
         let min = cfg.min_sample_rate();

@@ -18,25 +18,25 @@ mod replace;
 mod state;
 
 pub use config::WasmTrampolineConfig;
-pub use state::WasmTrampolineState;
+pub(super) use state::WasmTrampolineState;
 
 // The `aether_substrate` / `wasmtime` / `std` names the parent `#[actor] impl`
 // body references, re-exported so the parent `use runtime::*` glob sees them
 // (the fs `runtime.rs` `pub use` pattern). `DropResult` / `ReplaceResult` ride
 // this glob; `DropComponent` / `ReplaceComponent` stay at the parent file root
 // (always-on, for the `HandlesKind<K>` markers).
-pub use std::io;
-pub use std::sync::Arc;
+pub(super) use std::io;
+pub(super) use std::sync::Arc;
 
 use super::WasmTrampoline;
-pub use aether_actor::Local;
+pub(super) use aether_actor::Local;
 use aether_actor::runtime;
-pub use aether_kinds::{DropComponent, DropResult, ReplaceComponent, ReplaceResult};
-pub use aether_substrate::actor::native::envelope::Envelope;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
-pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::{CostCells, KindId, Mail};
+pub(super) use aether_kinds::{DropComponent, DropResult, ReplaceComponent, ReplaceResult};
+pub(super) use aether_substrate::actor::native::envelope::Envelope;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub(super) use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
+pub(super) use aether_substrate::chassis::error::BootError;
+pub(super) use aether_substrate::mail::{CostCells, KindId, Mail};
 
 #[runtime]
 impl NativeActor for WasmTrampoline {

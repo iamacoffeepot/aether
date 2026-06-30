@@ -53,8 +53,8 @@ use runtime::*;
 /// by this module rather than per-import.
 #[cfg(feature = "runtime")]
 mod runtime {
-    pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    pub use aether_substrate::chassis::error::BootError;
+    pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    pub(super) use aether_substrate::chassis::error::BootError;
 
     /// `aether.window` headless-companion runtime state (ADR-0122 split).
     /// The cap is stateless — every handler `Err`-replies off `ctx` alone —

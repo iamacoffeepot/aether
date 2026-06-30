@@ -24,7 +24,7 @@ const PROXY_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 /// `init` so the engines cap can tell a re-forkable startup death from
 /// a genuinely unreachable substrate.
 #[derive(Debug)]
-pub enum ProxyConnectError {
+pub(super) enum ProxyConnectError {
     /// The dial never connected within the budget (or hit a terminal
     /// handshake / frame error). Genuinely unreachable — not
     /// re-forkable.
@@ -74,7 +74,7 @@ impl StdError for ProxyConnectError {
 /// [`ProxyConnectError::ChildExited`] immediately rather than dialing
 /// a dead port for the full budget, so the cap can re-fork on a fresh
 /// port. `None` for an adopted substrate (no child to watch).
-pub fn connect_proxy(
+pub(super) fn connect_proxy(
     addr: &str,
     mailer: &Arc<Mailer>,
     self_mailbox: MailboxId,

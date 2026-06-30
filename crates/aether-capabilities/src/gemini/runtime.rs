@@ -22,15 +22,15 @@ use crate::shared::contentgen::adapter::{
 };
 use crate::shared::contentgen::staging::{gen_root, stage_gen_output};
 
-pub use crate::shared::contentgen::task_queue::TaskQueue;
-pub use std::sync::Arc;
+pub(super) use crate::shared::contentgen::task_queue::TaskQueue;
+pub(super) use std::sync::Arc;
 
 use aether_actor::runtime;
 use aether_kinds::Usage;
 
-pub use aether_actor::{Manual, OutboundReply};
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
-pub use aether_substrate::chassis::error::BootError;
+pub(super) use aether_actor::{Manual, OutboundReply};
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
+pub(super) use aether_substrate::chassis::error::BootError;
 
 /// `aether.gemini` runtime state (ADR-0050). Owns the resolved adapter +
 /// the cap-level rate-limit queue over the ADR-0093 dispatch primitive.
@@ -233,7 +233,7 @@ impl NativeActor for GeminiCapability {
     }
 }
 
-pub fn build_adapter(config: &GeminiConfig) -> Arc<dyn GeminiAdapter> {
+pub(super) fn build_adapter(config: &GeminiConfig) -> Arc<dyn GeminiAdapter> {
     if config.disabled {
         tracing::info!(
             target: "aether_capabilities::gemini",
@@ -263,7 +263,7 @@ pub fn build_adapter(config: &GeminiConfig) -> Arc<dyn GeminiAdapter> {
 /// paths (tool JSON takes paths, the wire stays bytes —
 /// `feedback_no_bytes_in_llm_json`). A read failure aborts the
 /// request with an `AdapterError`.
-pub fn read_reference_images(paths: &[String]) -> Result<Vec<Vec<u8>>, GeminiError> {
+pub(super) fn read_reference_images(paths: &[String]) -> Result<Vec<Vec<u8>>, GeminiError> {
     if paths.is_empty() {
         return Ok(Vec::new());
     }
@@ -289,7 +289,7 @@ fn to_usage(u: AdapterUsage) -> Usage {
     }
 }
 
-pub fn nanobanana_reply(
+pub(super) fn nanobanana_reply(
     request_id: u64,
     include_sig: bool,
     result: Result<GeminiResponse, String>,
@@ -341,7 +341,10 @@ pub fn nanobanana_reply(
     }
 }
 
-pub fn lyria_reply(request_id: u64, result: Result<GeminiResponse, String>) -> LyriaGenerateResult {
+pub(super) fn lyria_reply(
+    request_id: u64,
+    result: Result<GeminiResponse, String>,
+) -> LyriaGenerateResult {
     match result {
         Ok(resp) => {
             let mut output_paths = Vec::with_capacity(resp.artifacts.len());

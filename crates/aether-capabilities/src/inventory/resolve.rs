@@ -15,7 +15,7 @@ use aether_substrate::runtime::thread_name::resolve_runtime;
 /// for correlation. `name` is `Some` for a dynamically-minted instance
 /// the substrate has registered; `None` on a miss or a malformed id
 /// (a malformed id does not abort its siblings).
-pub fn resolve_ids(ids: Vec<String>) -> Vec<ResolvedName> {
+pub(super) fn resolve_ids(ids: Vec<String>) -> Vec<ResolvedName> {
     ids.into_iter()
         .map(|id| {
             // A malformed tagged-id string reports `None` rather than

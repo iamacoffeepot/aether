@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 /// variant describes it, so binaries and component wasm share one store
 /// (#1955 can add more — asset bundles — without reshaping the entry).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ArtifactKind {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) enum ArtifactKind {
     /// A chassis substrate binary, described by a [`BinaryManifest`].
     Binary,
     /// A wasm component, described by a [`ComponentManifest`] (ADR-0116).
@@ -24,7 +26,9 @@ pub enum ArtifactKind {
 /// ADR-0116). The store sidecars one of these next to each entry's bytes;
 /// the variant matches the entry's [`ArtifactKind`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StoredManifest {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) enum StoredManifest {
     Binary(BinaryManifest),
     Component(ComponentManifest),
 }
@@ -32,7 +36,7 @@ pub enum StoredManifest {
 impl StoredManifest {
     /// The [`BinaryManifest`] when this artifact is a binary, else `None`.
     #[must_use]
-    pub fn as_binary(&self) -> Option<&BinaryManifest> {
+    pub(crate) fn as_binary(&self) -> Option<&BinaryManifest> {
         match self {
             Self::Binary(m) => Some(m),
             Self::Component(_) => None,
@@ -42,7 +46,7 @@ impl StoredManifest {
     /// The [`ComponentManifest`] when this artifact is a component, else
     /// `None`.
     #[must_use]
-    pub fn as_component(&self) -> Option<&ComponentManifest> {
+    pub(crate) fn as_component(&self) -> Option<&ComponentManifest> {
         match self {
             Self::Component(m) => Some(m),
             Self::Binary(_) => None,
@@ -54,7 +58,9 @@ impl StoredManifest {
 /// by its content hash or by a human-readable name. The seam #1954's
 /// spawn cutover consumes to resolve a registry reference to bytes.
 #[derive(Debug, Clone)]
-pub enum Selector {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) enum Selector {
     /// The sha256 hex content address.
     Hash(String),
     /// A name an upload pointed at a hash.
@@ -66,7 +72,9 @@ pub enum Selector {
 /// resolve-and-forward byte source for #1956), the type tag, the
 /// type-tagged manifest, and the name pointing at it (if any).
 #[derive(Debug, Clone)]
-pub struct StoredArtifact {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct StoredArtifact {
     pub hash: String,
     pub path: PathBuf,
     #[allow(dead_code)]
@@ -135,7 +143,9 @@ pub(super) fn matches_component_filter(
 /// (a malformed `aether.kinds.inputs` section). A component with no inputs
 /// section yields an empty manifest with whatever namespace / provenance is
 /// present.
-pub fn component_manifest(wasm: &[u8]) -> Result<ComponentManifest, String> {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) fn component_manifest(wasm: &[u8]) -> Result<ComponentManifest, String> {
     use aether_substrate::actor::wasm::kind_manifest;
 
     let groups = kind_manifest::read_actor_inputs_from_bytes(wasm)?;

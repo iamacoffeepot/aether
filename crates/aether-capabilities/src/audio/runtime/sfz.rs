@@ -37,7 +37,9 @@ use std::fmt;
 /// cycling through the release ramp rather than playing a post-loop tail),
 /// but the parser carries the distinction the file declared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoopMode {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) enum LoopMode {
     /// `loop_continuous`: cycle the loop region for as long as the voice
     /// sounds, including under the release ramp.
     Continuous,
@@ -53,7 +55,9 @@ pub enum LoopMode {
 /// fractional device-rate positions (ADR-0103 §6). A loop is only emitted
 /// when `start < end`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SfzLoop {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct SfzLoop {
     pub start: u32,
     pub end: u32,
     pub mode: LoopMode,
@@ -67,7 +71,9 @@ pub struct SfzLoop {
 /// joins it with the `.sfz` file's own directory to address the WAV
 /// through `aether.fs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SfzRegion {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct SfzRegion {
     pub sample: String,
     pub lokey: u8,
     pub hikey: u8,
@@ -82,7 +88,7 @@ pub struct SfzRegion {
 /// A parsed bank: the resolved region list. The referenced sample paths
 /// (deduplicated) are what the cap fans out `aether.fs.read`s for.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BankSpec {
+pub(super) struct BankSpec {
     pub regions: Vec<SfzRegion>,
 }
 
@@ -91,7 +97,7 @@ impl BankSpec {
     /// order. The cap fetches each exactly once and shares the decoded
     /// PCM across every region that names it.
     #[must_use]
-    pub fn sample_paths(&self) -> Vec<String> {
+    pub(super) fn sample_paths(&self) -> Vec<String> {
         let mut seen = Vec::new();
         for region in &self.regions {
             if !seen.iter().any(|s: &String| s == &region.sample) {
@@ -107,7 +113,7 @@ impl BankSpec {
 /// back loud rather than logged-and-dropped, matching the rest of the
 /// load path.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SfzError {
+pub(super) enum SfzError {
     /// A header tag opened with `<` but never closed with `>` on the same
     /// line — a truncated or hand-corrupted file. Carries the offending
     /// fragment.
@@ -232,7 +238,7 @@ impl OpcodeSet {
 /// inherited by following regions; `default_path` from `<control>`
 /// prefixes every region's `sample`. Opcodes outside the subset (loop
 /// points, envelopes, …) warn and are ignored so real sample sets load.
-pub fn parse_sfz(text: &str) -> Result<BankSpec, SfzError> {
+pub(super) fn parse_sfz(text: &str) -> Result<BankSpec, SfzError> {
     let mut default_path = String::new();
     let mut group = OpcodeSet::defaults();
     let mut section = Section::None;

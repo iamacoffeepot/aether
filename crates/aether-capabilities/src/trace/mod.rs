@@ -64,11 +64,11 @@ use runtime::*;
 /// glob above.
 #[cfg(feature = "runtime")]
 mod runtime {
-    pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    pub use aether_substrate::chassis::error::BootError;
-    pub use aether_substrate::mail::helpers::resolve_bundle;
-    pub use aether_substrate::mail::registry::Registry;
-    pub use std::sync::Arc;
+    pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    pub(super) use aether_substrate::chassis::error::BootError;
+    pub(super) use aether_substrate::mail::helpers::resolve_bundle;
+    pub(super) use aether_substrate::mail::registry::Registry;
+    pub(super) use std::sync::Arc;
 
     /// `aether.trace` runtime state (ADR-0086 Phase 3c). Holds the
     /// substrate registry handle for `DispatchTraced`'s per-envelope name

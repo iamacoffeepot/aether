@@ -13,13 +13,17 @@ use super::super::kinds::ScheduledNote;
 /// this bounds the synth's pending heap rather than the queue; 8192
 /// events is several minutes of a dense melody (note-on + note-off per
 /// note). An over-cap batch rejects atomically in the handler reply.
-pub const SCHEDULE_MAX_EVENTS: usize = 8192;
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) const SCHEDULE_MAX_EVENTS: usize = 8192;
 
 /// Furthest future a scheduled event may be parked, in milliseconds
 /// (ADR-0104). The horizon bounds how much future a sender can hold in
 /// the pending heap; ten minutes is generous for a tune dispatched in
 /// one call. An over-horizon `at_millis` rejects the whole batch.
-pub const SCHEDULE_MAX_MILLIS: u32 = 600_000;
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) const SCHEDULE_MAX_MILLIS: u32 = 600_000;
 
 /// One pending scheduled note in the synth's min-heap (ADR-0104).
 /// Ordered by `(due_frame, seq)` only — `seq` is a monotonic stamp in
@@ -27,7 +31,7 @@ pub const SCHEDULE_MAX_MILLIS: u32 = 600_000;
 /// the order they were sent. The note payload takes no part in
 /// ordering, which is why the ordering impls are hand-written rather
 /// than derived (`ScheduledNote` is not `Ord`).
-pub struct ScheduledEntry {
+pub(super) struct ScheduledEntry {
     pub due_frame: u64,
     pub seq: u64,
     pub sender_mailbox: MailboxId,
@@ -57,7 +61,7 @@ impl Ord for ScheduledEntry {
 /// Convert a play-at offset in milliseconds to a frame count at the
 /// device rate (ADR-0104). Added to the frame clock at receipt to land
 /// the absolute due frame.
-pub fn millis_to_frames(at_millis: u32, sample_rate: f32) -> u64 {
+pub(super) fn millis_to_frames(at_millis: u32, sample_rate: f32) -> u64 {
     // `at_millis` is bounded by `SCHEDULE_MAX_MILLIS` and the device
     // rate is a small positive integer, so the product is well within
     // u64 and non-negative.

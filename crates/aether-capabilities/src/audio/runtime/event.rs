@@ -16,7 +16,7 @@ use super::sample::SampleBank;
 /// 100-note-per-second stream; overflow is warn-dropped, which the
 /// ADR-0039 timing-quantization section already documents as a v1
 /// limitation (tight-burst percussion may drop notes under load).
-pub const EVENT_QUEUE_CAPACITY: usize = 1024;
+pub(super) const EVENT_QUEUE_CAPACITY: usize = 1024;
 
 /// Event a handler pushes into the audio callback's queue. The
 /// `sender_mailbox` is baked in here (not re-derived on the callback
@@ -26,7 +26,9 @@ pub const EVENT_QUEUE_CAPACITY: usize = 1024;
 /// (the decoded asset) and owned namespace / path strings (ADR-0103
 /// §3). The queue never required `Copy`.
 #[derive(Clone, Debug)]
-pub enum AudioEvent {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) enum AudioEvent {
     NoteOn {
         sender_mailbox: MailboxId,
         pitch: u8,
@@ -90,17 +92,19 @@ pub enum AudioEvent {
 /// building the pipeline) and pushes events on every inbound `NoteOn`
 /// / `NoteOff` / `SetMasterGain`.
 #[derive(Clone)]
-pub struct AudioEventSender {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct AudioEventSender {
     pub queue: Arc<ArrayQueue<AudioEvent>>,
 }
 
 impl AudioEventSender {
-    pub fn push(&self, event: AudioEvent) -> Result<(), AudioEvent> {
+    pub(crate) fn push(&self, event: AudioEvent) -> Result<(), AudioEvent> {
         self.queue.push(event)
     }
 }
 
-pub fn new_event_channel() -> (AudioEventSender, Arc<ArrayQueue<AudioEvent>>) {
+pub(super) fn new_event_channel() -> (AudioEventSender, Arc<ArrayQueue<AudioEvent>>) {
     let queue = Arc::new(ArrayQueue::new(EVENT_QUEUE_CAPACITY));
     (
         AudioEventSender {

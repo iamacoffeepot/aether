@@ -11,14 +11,14 @@ use super::decode::DecodeError;
 /// Linear fade-out duration (seconds) applied when a track is stopped,
 /// so `stop_track` releases through a short ramp instead of truncating
 /// to a click (ADR-0103 §3).
-pub const TRACK_FADE_SECS: f32 = 0.005;
+pub(super) const TRACK_FADE_SECS: f32 = 0.005;
 
 /// Fade state of a [`TrackVoice`]. A track plays at full level until
 /// `stop_track` arms a short linear fade-out; `remaining` counts down
 /// per output sample and the track retires when it hits zero (ADR-0103
 /// §3).
 #[derive(Clone, Debug)]
-pub enum TrackFade {
+pub(super) enum TrackFade {
     Playing,
     FadingOut { remaining: u32, total: u32 },
 }
@@ -30,7 +30,7 @@ pub enum TrackFade {
 /// be evicted by a note flurry. Keyed by `(sender_mailbox, lane,
 /// namespace, path)`, mirroring the voice key plus the caller-supplied
 /// `lane` that disambiguates senders sharing a source mailbox.
-pub struct TrackVoice {
+pub(super) struct TrackVoice {
     pub sender_mailbox: MailboxId,
     pub lane: Option<String>,
     pub namespace: String,
@@ -44,7 +44,7 @@ pub struct TrackVoice {
 }
 
 impl TrackVoice {
-    pub fn new(
+    pub(super) fn new(
         sender_mailbox: MailboxId,
         lane: Option<String>,
         namespace: String,
@@ -69,7 +69,7 @@ impl TrackVoice {
 
     /// True when this event's key matches the track's
     /// `(sender_mailbox, lane, namespace, path)`.
-    pub fn matches(
+    pub(super) fn matches(
         &self,
         sender_mailbox: MailboxId,
         lane: Option<&String>,
@@ -84,7 +84,7 @@ impl TrackVoice {
 
     /// Arm the fade-out. Idempotent — a second `stop` while already
     /// fading keeps the first fade's progress.
-    pub fn stop(&mut self, fade_samples: u32) {
+    pub(super) fn stop(&mut self, fade_samples: u32) {
         if matches!(self.fade, TrackFade::Playing) {
             let total = fade_samples.max(1);
             self.fade = TrackFade::FadingOut {
@@ -94,14 +94,14 @@ impl TrackVoice {
         }
     }
 
-    pub fn done(&self) -> bool {
+    pub(super) fn done(&self) -> bool {
         self.done
     }
 
     /// Render this track's next sample (already gained + faded) and
     /// advance the position. Returns `0.0` once retired; an empty PCM
     /// buffer retires immediately.
-    pub fn next_sample(&mut self) -> f32 {
+    pub(super) fn next_sample(&mut self) -> f32 {
         if self.done || self.pcm.is_empty() {
             self.done = true;
             return 0.0;
@@ -156,7 +156,9 @@ impl TrackVoice {
 /// by the echoed `(namespace, path)` the `ReadResult` carries; the
 /// original requester's reply route + the synth-side track key live
 /// here until the bytes land.
-pub struct PendingTrack {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct PendingTrack {
     /// The original `play_track` requester — the `PlayTrackResult`
     /// reply routes here across the fs round-trip + decode.
     pub source: Source,
@@ -176,7 +178,9 @@ pub struct PendingTrack {
 /// `#[handler(task)]` arm can build the `TrackStart` event + the reply
 /// without re-deriving anything (ADR-0093 §5). The worker produces the
 /// decoded PCM; this carries the synth key + play parameters alongside.
-pub struct TrackDecodeContext {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct TrackDecodeContext {
     pub sender_mailbox: MailboxId,
     pub lane: Option<String>,
     pub namespace: String,
@@ -187,4 +191,6 @@ pub struct TrackDecodeContext {
 
 /// Output of the decode dispatch worker — the resampled mono PCM, or
 /// the decode failure to relay as `PlayTrackResult::Err`.
-pub type DecodeOutput = Result<Vec<f32>, DecodeError>;
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) type DecodeOutput = Result<Vec<f32>, DecodeError>;

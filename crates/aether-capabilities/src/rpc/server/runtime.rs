@@ -34,28 +34,28 @@ use aether_actor::runtime;
 // `#[actor] impl` body in `mod.rs` names; it reaches them through the
 // single `use runtime::*` glob. Types named only by the inherent helper
 // methods below ride the same wall (used locally here).
-pub use crate::engine::EngineServer;
-pub use crate::engine::kinds::{CallSettled, RouteEnvelope};
-pub use crate::rpc::{
+pub(super) use crate::engine::EngineServer;
+pub(super) use crate::engine::kinds::{CallSettled, RouteEnvelope};
+pub(super) use crate::rpc::{
     Hello, HelloAck, MailEnvelope, MailboxAddress, RpcError, WIRE_VERSION, WireFrame,
 };
-pub use aether_actor::Addressable;
-pub use aether_codec::frame::{FrameError, write_frame};
-pub use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
-pub use aether_substrate::Mail;
-pub use aether_substrate::actor::native::envelope::Envelope;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::SourceAddr;
-pub use aether_substrate::mail::mailer::Mailer;
-pub use std::collections::HashMap;
-pub use std::io;
-pub use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-pub use std::sync::Arc;
-pub use std::sync::atomic::{AtomicBool, Ordering};
-pub use std::sync::mpsc;
-pub use std::thread::{self, JoinHandle};
-pub use std::time::Duration;
+pub(super) use aether_actor::Addressable;
+pub(super) use aether_codec::frame::{FrameError, write_frame};
+pub(super) use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
+pub(super) use aether_substrate::Mail;
+pub(super) use aether_substrate::actor::native::envelope::Envelope;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub(super) use aether_substrate::chassis::error::BootError;
+pub(super) use aether_substrate::mail::SourceAddr;
+pub(super) use aether_substrate::mail::mailer::Mailer;
+pub(super) use std::collections::HashMap;
+pub(super) use std::io;
+pub(super) use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+pub(super) use std::sync::Arc;
+pub(super) use std::sync::atomic::{AtomicBool, Ordering};
+pub(super) use std::sync::mpsc;
+pub(super) use std::thread::{self, JoinHandle};
+pub(super) use std::time::Duration;
 
 /// Exported handle bundle published at boot. Reachable from the
 /// chassis via `PassiveChassis::handle::<RpcServerHandle>()`;

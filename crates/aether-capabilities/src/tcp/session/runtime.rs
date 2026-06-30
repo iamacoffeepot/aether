@@ -11,19 +11,19 @@
 // dispatch contract; the by-value `SessionWrite` arg trips this lint.
 #![allow(clippy::needless_pass_by_value)]
 
-pub use std::io::{Read, Write};
-pub use std::net::{Shutdown, TcpStream};
-pub use std::sync::Arc;
-pub use std::sync::atomic::{AtomicBool, Ordering};
-pub use std::sync::mpsc;
-pub use std::thread::{self, JoinHandle};
+pub(super) use std::io::{Read, Write};
+pub(super) use std::net::{Shutdown, TcpStream};
+pub(super) use std::sync::Arc;
+pub(super) use std::sync::atomic::{AtomicBool, Ordering};
+pub(super) use std::sync::mpsc;
+pub(super) use std::thread::{self, JoinHandle};
 
-pub use aether_data::Kind;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::{KindId, Mail, Mailer};
+pub(super) use aether_data::Kind;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub(super) use aether_substrate::chassis::error::BootError;
+pub(super) use aether_substrate::{KindId, Mail, Mailer};
 
-pub use crate::tcp::config::TcpSessionConfig;
+pub(super) use crate::tcp::config::TcpSessionConfig;
 
 use aether_actor::runtime;
 // The moved handler bodies name the cap kinds backing their signatures; bring
@@ -36,7 +36,7 @@ use super::TcpSessionActor;
 /// kernel TCP buffer; any larger and we just block waiting for
 /// the kernel to fill it. Smaller adds syscall overhead per
 /// chunk.
-pub const READ_BUFFER_BYTES: usize = 64 * 1024;
+pub(super) const READ_BUFFER_BYTES: usize = 64 * 1024;
 
 /// `aether.tcp.session` runtime state (issue 607 Phase 6b, ADR-0079). One end
 /// of a split `TcpStream`: the read sidecar owns the read half; the dispatcher

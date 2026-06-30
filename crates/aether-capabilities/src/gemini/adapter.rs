@@ -217,7 +217,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 }
 
 /// Map the wire `AspectRatio` to the provider's `W:H` string.
-pub fn aspect_ratio_str(ar: AspectRatio) -> &'static str {
+pub(super) fn aspect_ratio_str(ar: AspectRatio) -> &'static str {
     use AspectRatio as A;
     match ar {
         A::ASPECT_RATIO_1_1 => "1:1",
@@ -239,7 +239,7 @@ pub fn aspect_ratio_str(ar: AspectRatio) -> &'static str {
 
 /// Map the wire `ImageSize` to the provider's `imageConfig.imageSize`
 /// string. Uppercase `K`; `"512"` has no `K`.
-pub fn image_size_str(size: ImageSize) -> &'static str {
+pub(super) fn image_size_str(size: ImageSize) -> &'static str {
     use ImageSize as S;
     match size {
         S::S512 => "512",
@@ -251,7 +251,7 @@ pub fn image_size_str(size: ImageSize) -> &'static str {
 
 /// Map the wire `ThinkingLevel` to the provider's
 /// `thinkingConfig.thinkingLevel` string.
-pub fn thinking_level_str(level: ThinkingLevel) -> &'static str {
+pub(super) fn thinking_level_str(level: ThinkingLevel) -> &'static str {
     use ThinkingLevel as T;
     match level {
         T::Minimal => "minimal",
@@ -260,7 +260,7 @@ pub fn thinking_level_str(level: ThinkingLevel) -> &'static str {
 }
 
 /// Convert an adapter error string into the typed `GeminiError`.
-pub fn map_adapter_error(raw: &str) -> GeminiError {
+pub(super) fn map_adapter_error(raw: &str) -> GeminiError {
     error::adapter_error_to_typed(raw)
 }
 

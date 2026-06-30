@@ -12,7 +12,7 @@ use crate::shared::contentgen::shared::{parse_status_prefix, snippet};
 /// Sentinel an adapter returns to mean "no API key" so the cap maps it
 /// onto [`GeminiError::Unauthorized`]. The `DisabledGeminiAdapter`
 /// returns this for every request.
-pub const UNAUTHORIZED_SENTINEL: &str = "unauthorized";
+pub(super) const UNAUTHORIZED_SENTINEL: &str = "unauthorized";
 
 /// Map an HTTP status code from a Gemini API onto a [`GeminiError`].
 /// `retry_after_millis` is parsed from the `retry-after` header by the
@@ -23,7 +23,11 @@ pub const UNAUTHORIZED_SENTINEL: &str = "unauthorized";
 /// - `429` → `RateLimited`
 /// - everything else non-2xx → `AdapterError` carrying status + snippet
 #[must_use]
-pub fn status_to_error(status: u16, retry_after_millis: Option<u32>, body: &str) -> GeminiError {
+pub(super) fn status_to_error(
+    status: u16,
+    retry_after_millis: Option<u32>,
+    body: &str,
+) -> GeminiError {
     match status {
         401 | 403 => GeminiError::Unauthorized,
         429 => GeminiError::RateLimited { retry_after_millis },
@@ -36,7 +40,7 @@ pub fn status_to_error(status: u16, retry_after_millis: Option<u32>, body: &str)
 /// `status=<n>` prefix the ureq backends prepend; falls back to
 /// `AdapterError`.
 #[must_use]
-pub fn adapter_error_to_typed(raw: &str) -> GeminiError {
+pub(super) fn adapter_error_to_typed(raw: &str) -> GeminiError {
     if raw == UNAUTHORIZED_SENTINEL {
         return GeminiError::Unauthorized;
     }

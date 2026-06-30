@@ -13,7 +13,7 @@ use super::{AspectRatio, GeminiError, ImageSize};
 /// support shape. Drives both `UnknownModel` rejection and the
 /// `aspect_ratio` / `image_size` / reference-count validation.
 #[derive(Clone, Copy)]
-pub struct ModelShape {
+pub(super) struct ModelShape {
     /// The wire model id.
     pub id: &'static str,
     /// Whether the NB2-only knobs (`thinking_level`, `include_thoughts`,
@@ -29,7 +29,7 @@ pub struct ModelShape {
 
 /// The supported Nano Banana models (2026-05 survey). Order is the
 /// `supported`-list order surfaced in `UnknownModel`.
-pub const MODELS: &[ModelShape] = &[
+pub(super) const MODELS: &[ModelShape] = &[
     // NB1 — flash image. K1 only; no reference images; not NB2.
     ModelShape {
         id: "gemini-2.5-flash-image",
@@ -81,13 +81,13 @@ const NB2_ONLY_RATIOS: &[AspectRatio] = &[
 
 /// Look up a model's shape, or `None` if unsupported.
 #[must_use]
-pub fn lookup_model(model: &str) -> Option<&'static ModelShape> {
+pub(super) fn lookup_model(model: &str) -> Option<&'static ModelShape> {
     MODELS.iter().find(|m| m.id == model)
 }
 
 /// Every supported model id, for the `UnknownModel { supported }` list.
 #[must_use]
-pub fn supported_model_ids() -> Vec<String> {
+pub(super) fn supported_model_ids() -> Vec<String> {
     MODELS.iter().map(|m| m.id.to_string()).collect()
 }
 
@@ -103,7 +103,7 @@ fn supported_ratios(shape: &ModelShape) -> Vec<AspectRatio> {
 /// The request facts a per-model validation pass needs. Bundled into a
 /// struct so [`validate`] stays under the argument cap and the cap
 /// builds it once from the wire kind.
-pub struct ValidationInputs {
+pub(super) struct ValidationInputs {
     pub aspect_ratio: AspectRatio,
     pub image_size: Option<ImageSize>,
     /// Whether the NB2-only knobs were set on the request.
@@ -121,7 +121,7 @@ pub struct ValidationInputs {
 /// rejected by the cap before this is called). Checks, in order:
 /// aspect ratio, image size, reference-path counts, and the NB2-only
 /// knobs.
-pub fn validate(shape: &ModelShape, inputs: &ValidationInputs) -> Result<(), GeminiError> {
+pub(super) fn validate(shape: &ModelShape, inputs: &ValidationInputs) -> Result<(), GeminiError> {
     let ratios = supported_ratios(shape);
     if !ratios.contains(&inputs.aspect_ratio) {
         return Err(GeminiError::AspectRatioNotSupportedByModel {
@@ -184,7 +184,7 @@ pub fn validate(shape: &ModelShape, inputs: &ValidationInputs) -> Result<(), Gem
 /// Parse the base64 image payload + grounding/thought metadata out of a
 /// Nano Banana response. Factored out so a fixture-replay test locks the
 /// shape.
-pub fn parse_image_response(json: &str) -> Result<ParsedImage, String> {
+pub(super) fn parse_image_response(json: &str) -> Result<ParsedImage, String> {
     use serde_json::Value;
 
     let parsed: Value = serde_json::from_str(json).map_err(|e| format!("parse response: {e}"))?;
@@ -267,7 +267,7 @@ fn parse_grounding(candidate: &serde_json::Value) -> Option<(Vec<String>, Vec<St
 }
 
 /// Result of [`parse_image_response`].
-pub struct ParsedImage {
+pub(super) struct ParsedImage {
     pub bytes: Vec<u8>,
     pub thought_signature: Option<String>,
     /// Grounding `(search_queries, source_urls)` parsed from
@@ -278,7 +278,7 @@ pub struct ParsedImage {
 /// Shared base64 decode for the media backends (the image path here and
 /// the Lyria clip path in `lyria.rs`). Thin re-export of the local
 /// decoder so both sit on one implementation.
-pub fn decode_base64_for_media(input: &str) -> Result<Vec<u8>, String> {
+pub(super) fn decode_base64_for_media(input: &str) -> Result<Vec<u8>, String> {
     base64_decode(input)
 }
 

@@ -14,16 +14,16 @@ use super::{
 };
 use crate::shared::contentgen::adapter::{AdapterUsage, AnthropicRequest, AnthropicResponse};
 
-pub use crate::shared::contentgen::task_queue::TaskQueue;
-pub use std::sync::Arc;
+pub(super) use crate::shared::contentgen::task_queue::TaskQueue;
+pub(super) use std::sync::Arc;
 
 use aether_actor::OutboundReply;
 use aether_actor::runtime;
 use aether_kinds::Usage;
 
-pub use aether_actor::Manual;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
-pub use aether_substrate::chassis::error::BootError;
+pub(super) use aether_actor::Manual;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
+pub(super) use aether_substrate::chassis::error::BootError;
 
 /// Which send path a request rode. The generate handler threads it
 /// into the worker closure to pick the blocking call + result kind.
@@ -243,7 +243,7 @@ impl NativeActor for AnthropicCapability {
     }
 }
 
-pub fn build_adapter(config: &AnthropicConfig) -> Arc<dyn AnthropicAdapter> {
+pub(super) fn build_adapter(config: &AnthropicConfig) -> Arc<dyn AnthropicAdapter> {
     if config.disabled {
         tracing::info!(
             target: "aether_capabilities::anthropic",
@@ -273,7 +273,7 @@ pub fn build_adapter(config: &AnthropicConfig) -> Arc<dyn AnthropicAdapter> {
 /// Flatten the conversation into a single prompt string. v1 doesn't
 /// model multi-turn API content; it concatenates the user/assistant
 /// turns so the adapter sees one prompt.
-pub fn flatten_prompt(messages: &[Message]) -> String {
+pub(super) fn flatten_prompt(messages: &[Message]) -> String {
     messages
         .iter()
         .map(|m| {
@@ -296,7 +296,7 @@ fn to_usage(u: AdapterUsage) -> Usage {
     }
 }
 
-pub fn messages_reply(
+pub(super) fn messages_reply(
     request_id: u64,
     result: Result<AnthropicResponse, String>,
 ) -> MessagesSendResult {
@@ -314,7 +314,10 @@ pub fn messages_reply(
     }
 }
 
-pub fn cli_reply(request_id: u64, result: Result<AnthropicResponse, String>) -> CliSendResult {
+pub(super) fn cli_reply(
+    request_id: u64,
+    result: Result<AnthropicResponse, String>,
+) -> CliSendResult {
     match result {
         Ok(resp) => CliSendResult::Ok {
             request_id,

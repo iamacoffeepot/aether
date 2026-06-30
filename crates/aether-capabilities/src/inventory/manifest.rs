@@ -11,7 +11,7 @@ use aether_kinds::ParamKindWire;
 /// / `Declared` carry their range / domain so the client expands the
 /// family locally; `Dynamic` carries only the shape (its instances
 /// reverse via [`Resolve`](aether_kinds::Resolve)).
-pub fn param_kind_wire(param: &ParamKind) -> ParamKindWire {
+pub(super) fn param_kind_wire(param: &ParamKind) -> ParamKindWire {
     match *param {
         ParamKind::Bounded { lo, hi } => ParamKindWire::Bounded { lo, hi },
         ParamKind::Declared { domain } => ParamKindWire::Declared {

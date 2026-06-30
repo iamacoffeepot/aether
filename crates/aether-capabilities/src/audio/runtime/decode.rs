@@ -26,7 +26,9 @@ use std::io::Cursor;
 /// common agent failure, so a bad file comes back loud rather than
 /// logged-and-dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DecodeError {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) enum DecodeError {
     /// `hound` could not parse the container or header — a truncated
     /// file, a non-WAV byte stream, or a corrupt chunk table. Carries
     /// `hound`'s own message.
@@ -62,7 +64,7 @@ impl Error for DecodeError {}
 /// file's rate to `target_rate`. Pure: no I/O, no allocation beyond the
 /// returned buffer's working set. Errors are loud — an unsupported format
 /// or a malformed header surfaces as a [`DecodeError`] the cap relays.
-pub fn decode_wav_to_mono(bytes: &[u8], target_rate: u32) -> Result<Vec<f32>, DecodeError> {
+pub(super) fn decode_wav_to_mono(bytes: &[u8], target_rate: u32) -> Result<Vec<f32>, DecodeError> {
     let cursor = Cursor::new(bytes);
     let mut reader =
         hound::WavReader::new(cursor).map_err(|e| DecodeError::Malformed(e.to_string()))?;

@@ -16,7 +16,9 @@ use aether_data::{Kind, KindId};
 /// gone (the data graph is non-generic, which is what makes the cap
 /// bridgeable).
 #[derive(Clone)]
-pub struct LifecycleStateData {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct LifecycleStateData {
     pub(crate) kind: KindId,
     pub(crate) next: KindId,
     pub(crate) quit: Option<KindId>,

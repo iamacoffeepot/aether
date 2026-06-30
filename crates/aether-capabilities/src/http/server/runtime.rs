@@ -26,23 +26,23 @@
 use super::{HttpInboundReady, HttpServerCapability, HttpServerConfig, HttpServerHandle, Settled};
 use aether_actor::runtime;
 
-pub use std::collections::HashMap;
-pub use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-pub use std::sync::Arc;
-pub use std::sync::atomic::{AtomicBool, Ordering};
-pub use std::sync::mpsc;
-pub use std::thread;
-pub use std::time::Duration;
+pub(super) use std::collections::HashMap;
+pub(super) use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+pub(super) use std::sync::Arc;
+pub(super) use std::sync::atomic::{AtomicBool, Ordering};
+pub(super) use std::sync::mpsc;
+pub(super) use std::thread;
+pub(super) use std::time::Duration;
 
-pub use aether_data::{Kind, KindId, MailboxId};
-pub use aether_substrate::actor::native::envelope::Envelope;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::mailer::Mailer;
+pub(super) use aether_data::{Kind, KindId, MailboxId};
+pub(super) use aether_substrate::actor::native::envelope::Envelope;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub(super) use aether_substrate::chassis::error::BootError;
+pub(super) use aether_substrate::mail::mailer::Mailer;
 
 // The parent `#[actor] impl` writes the `502` reply path, so it names
 // `HttpServerResponse`; the rest of the kind vocabulary is used only here.
-pub use crate::http::kinds::HttpServerResponse;
+pub(super) use crate::http::kinds::HttpServerResponse;
 use crate::http::kinds::{HttpHeader, HttpMethod, HttpServerRequest};
 
 use aether_substrate::Mail;
@@ -53,7 +53,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Per-connection identifier, monotonic within this cap. Distinct from
 /// the OS-level peer addr (one peer may reconnect; ids stay unique for
 /// the cap's lifetime).
-pub type ConnId = u64;
+pub(super) type ConnId = u64;
 
 /// Header-array size for the inbound parse (doubles as the header-count
 /// cap: a request with more headers is answered `431`). ADR-0108 §6.
@@ -63,7 +63,7 @@ const MAX_HEADER_COUNT: usize = 64;
 /// dispatcher. The method stays a raw `String` here; the dispatcher
 /// maps it to [`HttpMethod`] and answers `501` for a non-enumerated
 /// verb before any dispatch.
-pub struct ParsedRequest {
+pub(super) struct ParsedRequest {
     method: String,
     path: String,
     query: String,
@@ -75,7 +75,7 @@ pub struct ParsedRequest {
 /// dispatcher via an mpsc. The matching wake-mail kind is
 /// [`HttpInboundReady`] (empty payload) — `on_inbound_ready` drains the
 /// channel and acts per item.
-pub enum InboundEvent {
+pub(super) enum InboundEvent {
     /// The accept thread took a new connection.
     PeerAccepted { stream: TcpStream, peer: SocketAddr },
     /// A reader parsed a complete, size-bounded request.
@@ -101,7 +101,7 @@ pub enum InboundEvent {
 /// Per-connection state owned by the cap dispatcher. The reader sidecar
 /// holds `shutdown` + the read half; the dispatcher writes the response
 /// through `write_half`.
-pub struct ConnState {
+pub(super) struct ConnState {
     peer: SocketAddr,
     /// Dispatcher's half — used to write the HTTP/1.1 response.
     pub(super) write_half: TcpStream,
@@ -117,14 +117,14 @@ pub struct ConnState {
 /// `MailId.correlation_id`, which is also the root id since the cap
 /// always dispatches via `send_envelope_as_root`).
 #[derive(Copy, Clone)]
-pub struct PendingRequest {
+pub(super) struct PendingRequest {
     pub(super) conn_id: ConnId,
 }
 
 /// Wake sink shared with the accept + reader sidecar threads: push an
 /// [`InboundEvent`] over the mpsc, then fire an [`HttpInboundReady`]
 /// wake mail at the cap so the dispatcher drains.
-pub struct WakeSink {
+pub(super) struct WakeSink {
     pub(super) inbound_tx: mpsc::Sender<InboundEvent>,
     pub(super) mailer: Arc<Mailer>,
     pub(super) self_id: MailboxId,

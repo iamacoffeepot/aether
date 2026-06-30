@@ -25,7 +25,7 @@ const ENV_ENGINE_STORE_ROOT: &str = "AETHER_ENGINE_STORE_ROOT";
 /// preserved) so a routed call that the cap can't satisfy — bad
 /// `engine_id`, unknown engine — closes with a wire `ReplyEnd`
 /// instead of leaving the RPC client hanging.
-pub fn settle_err(mailer: &Arc<Mailer>, target: MailboxId, correlation: u64, error: String) {
+pub(super) fn settle_err(mailer: &Arc<Mailer>, target: MailboxId, correlation: u64, error: String) {
     mailer.push(
         Mail::new(
             target,
@@ -42,7 +42,7 @@ pub fn settle_err(mailer: &Arc<Mailer>, target: MailboxId, correlation: u64, err
 /// rebinds the port, but on localhost it's negligible — and this
 /// sidesteps both a wire change to report an ephemeral port back
 /// from the substrate and an un-recycled incrementing port pool.
-pub fn free_local_port() -> io::Result<u16> {
+pub(super) fn free_local_port() -> io::Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     drop(listener);
@@ -65,7 +65,7 @@ pub fn free_local_port() -> io::Result<u16> {
 // moved onto EngineConfig); it is a process-level deployment override, not
 // a cap config field.
 #[allow(clippy::disallowed_methods)]
-pub fn engine_store_root() -> PathBuf {
+pub(super) fn engine_store_root() -> PathBuf {
     if let Ok(raw) = env::var(ENV_ENGINE_STORE_ROOT)
         && !raw.is_empty()
     {

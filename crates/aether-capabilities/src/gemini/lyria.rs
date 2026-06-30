@@ -17,24 +17,28 @@
 use super::GeminiError;
 
 /// Supported Lyria models (2026-05-20 snapshot).
-pub const MODELS: &[&str] = &["lyria-2", "lyria-3", "lyria-3-pro"];
+pub(super) const MODELS: &[&str] = &["lyria-2", "lyria-3", "lyria-3-pro"];
 
 /// Whether `model` is a supported Lyria model.
 #[must_use]
-pub fn is_supported(model: &str) -> bool {
+pub(super) fn is_supported(model: &str) -> bool {
     MODELS.contains(&model)
 }
 
 /// Every supported model id, for `UnknownModel { supported }`.
 #[must_use]
-pub fn supported_model_ids() -> Vec<String> {
+pub(super) fn supported_model_ids() -> Vec<String> {
     MODELS.iter().map(|s| (*s).to_string()).collect()
 }
 
 /// Validate a Lyria request before dispatch. `seed` and `sample_count`
 /// are mutually exclusive — both set is rejected (the same
 /// constraint-validation pattern as Nano Banana's per-model checks).
-pub fn validate(model: &str, seed_set: bool, sample_count_set: bool) -> Result<(), GeminiError> {
+pub(super) fn validate(
+    model: &str,
+    seed_set: bool,
+    sample_count_set: bool,
+) -> Result<(), GeminiError> {
     if seed_set && sample_count_set {
         return Err(GeminiError::MissingRequiredField {
             model: model.to_string(),
@@ -47,7 +51,7 @@ pub fn validate(model: &str, seed_set: bool, sample_count_set: bool) -> Result<(
 /// Parse base64 WAV clips out of a Vertex Lyria response. Returns one
 /// `Vec<u8>` per clip. Factored out so a fixture-replay test can lock
 /// the response shape (ADR-0050 §4).
-pub fn parse_clip_response(json: &str) -> Result<Vec<Vec<u8>>, String> {
+pub(super) fn parse_clip_response(json: &str) -> Result<Vec<Vec<u8>>, String> {
     use serde_json::Value;
 
     let parsed: Value = serde_json::from_str(json).map_err(|e| format!("parse response: {e}"))?;

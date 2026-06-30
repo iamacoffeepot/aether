@@ -116,11 +116,11 @@ mod test_handlers {
     /// Replies `200` and echoes the request's method / path / query (as
     /// headers) and body (verbatim), so a test can assert the full request
     /// round-tripped to the handler.
-    pub struct EchoHttpHandler;
+    pub(super) struct EchoHttpHandler;
 
     /// Empty runtime state for the stateless echo handler (ADR-0122: a
     /// stateless cap still names a state type rather than `()` / `Self`).
-    pub struct EchoHttpHandlerState;
+    pub(super) struct EchoHttpHandlerState;
 
     #[actor(singleton)]
     impl NativeActor for EchoHttpHandler {
@@ -166,10 +166,10 @@ mod test_handlers {
 
     /// Receives the request and returns without replying — the response-less
     /// chain the `502` settlement safety net covers.
-    pub struct SilentHttpHandler;
+    pub(super) struct SilentHttpHandler;
 
     /// Empty runtime state for the stateless silent handler (ADR-0122).
-    pub struct SilentHttpHandlerState;
+    pub(super) struct SilentHttpHandlerState;
 
     #[actor(singleton)]
     impl NativeActor for SilentHttpHandler {

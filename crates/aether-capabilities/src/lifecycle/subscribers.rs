@@ -125,7 +125,7 @@ impl LifecycleMailboxExt for NativeActorMailbox<'_, LifecycleCapability> {
 /// `(parent, root)` lineage so settlement counts each child against
 /// the root (ADR-0080 §6).
 #[cfg(not(target_family = "wasm"))]
-pub fn broadcast_to_subscribers<M: ReplyMode>(
+pub(super) fn broadcast_to_subscribers<M: ReplyMode>(
     ctx: &mut NativeCtx<'_, M>,
     subscribers: &BTreeMap<KindId, BTreeSet<MailboxId>>,
     stage: KindId,

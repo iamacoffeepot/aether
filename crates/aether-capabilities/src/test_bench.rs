@@ -87,12 +87,12 @@ impl NativeActor for UnsupportedTestBenchCapability {
 // glob.
 #[cfg(feature = "runtime")]
 mod runtime {
-    pub use std::io;
-    pub use std::sync::Arc;
+    pub(super) use std::io;
+    pub(super) use std::sync::Arc;
 
-    pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    pub use aether_substrate::chassis::error::BootError;
-    pub use aether_substrate::mail::outbound::HubOutbound;
+    pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    pub(super) use aether_substrate::chassis::error::BootError;
+    pub(super) use aether_substrate::mail::outbound::HubOutbound;
 
     /// Runtime state for `UnsupportedTestBenchCapability` (ADR-0122 split).
     /// Holds the `HubOutbound` captured at `init`; read in `on_advance` to

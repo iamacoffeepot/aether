@@ -20,13 +20,13 @@ use crate::shared::contentgen::adapter::{AdapterUsage, AnthropicRequest, Anthrop
 /// Sentinel returned when the `claude` binary isn't on PATH so the cap
 /// maps it onto `AnthropicError::CliNotFound`. Matched as a string
 /// prefix — the dispatch boundary is `Result<_, String>`.
-pub const CLI_NOT_FOUND: &str = "cli-not-found";
+pub(super) const CLI_NOT_FOUND: &str = "cli-not-found";
 
 /// Sentinel prefix returned when the `claude` subprocess overruns its
 /// deadline and is killed. Formatted as `timeout=<elapsed_millis>` so the
 /// cap maps it onto `AnthropicError::Timeout { elapsed_millis }` (the cap
 /// parses the trailing integer the way it parses `status=`).
-pub const TIMEOUT_SENTINEL: &str = "timeout=";
+pub(super) const TIMEOUT_SENTINEL: &str = "timeout=";
 
 /// How often the deadline loop polls `child.try_wait()`. Short enough
 /// that a hung call is killed promptly after expiry without busy-waiting.

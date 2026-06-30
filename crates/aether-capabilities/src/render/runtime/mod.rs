@@ -16,15 +16,15 @@
 // `#[actor] impl` names come from that same shared seam, not from here.
 use std::sync::Arc;
 
-pub use std::sync::atomic::{AtomicU64, Ordering};
-pub use std::sync::{Mutex, OnceLock};
+pub(super) use std::sync::atomic::{AtomicU64, Ordering};
+pub(super) use std::sync::{Mutex, OnceLock};
 
-pub use aether_data::Kind;
-pub use aether_substrate::capture::PendingCapture;
-pub use aether_substrate::mail::helpers::resolve_bundle;
-pub use aether_substrate::mail::mailer::Mailer;
-pub use aether_substrate::mail::registry::Registry;
-pub use aether_substrate::render::IDENTITY_VIEW_PROJ;
+pub(super) use aether_data::Kind;
+pub(super) use aether_substrate::capture::PendingCapture;
+pub(super) use aether_substrate::mail::helpers::resolve_bundle;
+pub(super) use aether_substrate::mail::mailer::Mailer;
+pub(super) use aether_substrate::mail::registry::Registry;
+pub(super) use aether_substrate::render::IDENTITY_VIEW_PROJ;
 
 // The native impl seams, now nested under this `runtime` directory so the one
 // `mod runtime;` gate in the parent covers them (no per-sibling `#[cfg]`):

@@ -34,7 +34,9 @@ use aether_substrate::mail::registry::Registry;
 /// Canonical test chassis. `build()` is unreachable — every consumer
 /// drives the chassis through `Builder::<TestChassis>::new(...)` directly
 /// rather than going through `TestChassis::build(())`.
-pub struct TestChassis;
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct TestChassis;
 
 //noinspection DuplicatedCode
 impl Chassis for TestChassis {
@@ -54,7 +56,9 @@ impl Chassis for TestChassis {
 /// wired but inert — tests that never hit it (audio, fs, http handler
 /// paths) see no behavioural difference, and tests that do hit it
 /// (rpc, engine proxy) get the connected backend they need.
-pub fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
         let _ = registry.register_kind_with_descriptor(d);
@@ -71,7 +75,9 @@ pub fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
 /// sends (the cap-level reply path used by `aether.fs` / `aether.http`
 /// / `aether.audio`). The registry is bare — no kind descriptors —
 /// so tests can register only what they exercise.
-pub fn test_mailer_and_rx() -> (Arc<Mailer>, Receiver<EgressEvent>) {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) fn test_mailer_and_rx() -> (Arc<Mailer>, Receiver<EgressEvent>) {
     let (outbound, rx) = HubOutbound::attached_loopback();
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(registry).with_outbound(outbound));
@@ -97,7 +103,9 @@ pub fn test_mailer_and_rx() -> (Arc<Mailer>, Receiver<EgressEvent>) {
 /// The driving `NativeCtx` carries no inbound reply target ([`Source::NONE`]):
 /// the completion's reply routes through the reply target captured at
 /// dispatch and parked in the framework's in-flight ledger, not this ctx.
-pub fn drive_task_completion<A>(
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) fn drive_task_completion<A>(
     state: &mut A::State,
     binding: &Arc<NativeBinding>,
     rx: &Receiver<EgressEvent>,
@@ -139,7 +147,9 @@ pub fn drive_task_completion<A>(
 /// test that drives the actual re-reply via `on_*_result` reads past
 /// the bubble-up to the `ToSession` re-reply. Shared by the
 /// `aether.anthropic` / `aether.gemini` test modules.
-pub fn decode_session_reply<K>(rx: &Receiver<EgressEvent>) -> K
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) fn decode_session_reply<K>(rx: &Receiver<EgressEvent>) -> K
 where
     K: Kind,
 {
@@ -165,7 +175,9 @@ where
 // Used by render.rs tests (feature = "render-runtime"); dead_code fires in
 // the default build without that feature.
 #[allow(dead_code)]
-pub fn decode_reply<K>(rx: &Receiver<EgressEvent>) -> K
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) fn decode_reply<K>(rx: &Receiver<EgressEvent>) -> K
 where
     K: Kind,
 {
@@ -186,7 +198,9 @@ where
 /// `tag` plus the pid and a nanosecond nonce so concurrent tests never
 /// collide. Avoids pulling in the `tempfile` crate; the caller cleans up
 /// via [`cleanup`] after asserting.
-pub fn scratch_dir(prefix: &str, tag: &str) -> PathBuf {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) fn scratch_dir(prefix: &str, tag: &str) -> PathBuf {
     let pid = process::id();
     let nonce: u64 = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {
         // Nanosecond clock fits comfortably in u64 for the next ~584 years.
@@ -200,6 +214,8 @@ pub fn scratch_dir(prefix: &str, tag: &str) -> PathBuf {
 }
 
 /// Remove a [`scratch_dir`] tree, ignoring errors (best-effort teardown).
-pub fn cleanup(path: &Path) {
+// pub(crate) is its true minimal reach (re-exported / used across the crate's modules); redundant_pub_crate sees only the private-module ancestor.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) fn cleanup(path: &Path) {
     let _ = fs::remove_dir_all(path);
 }

@@ -16,14 +16,14 @@ use super::sample::SampleVoice;
 /// as "more than a string section fits in one component" — on
 /// saturation, voice-steal always evicts the oldest sounding note,
 /// never causing audio glitches.
-pub const MAX_VOICES: usize = 64;
+pub(super) const MAX_VOICES: usize = 64;
 
 /// Envelope state machine. `Release` captures the level it was at
 /// when the note was released, since a note can be released mid-attack
 /// or mid-decay — the release ramp starts from that value, not from
 /// the sustain level.
 #[derive(Copy, Clone, Debug)]
-pub enum EnvelopeStage {
+pub(super) enum EnvelopeStage {
     Attack { t: f32 },
     Decay { t: f32 },
     Sustain,
@@ -35,7 +35,7 @@ pub enum EnvelopeStage {
 /// ADSR. Every field is touched per sample, so the struct stays
 /// compact for cache friendliness in the voice pool.
 #[derive(Copy, Clone, Debug)]
-pub struct OscVoice {
+pub(super) struct OscVoice {
     /// Oscillator phase in turns (`[0.0, 1.0)`), incremented by
     /// `freq / sample_rate` per sample.
     pub phase: f32,
@@ -65,7 +65,7 @@ pub struct OscVoice {
 /// One step of an xorshift32 PRNG, mapped to white noise in `[-1.0,
 /// 1.0)`. The state is per-voice so percussion voices are independent
 /// and a fixed seed is reproducible.
-pub fn next_noise(state: &mut u32) -> f32 {
+pub(super) fn next_noise(state: &mut u32) -> f32 {
     let mut x = *state;
     x ^= x << 13;
     x ^= x >> 17;
@@ -82,7 +82,7 @@ pub fn next_noise(state: &mut u32) -> f32 {
 /// (`sender_mailbox`, `instrument_id`, `pitch`) so a fixed key renders
 /// the same noise sequence every run. Forced non-zero — xorshift32 is
 /// stuck at zero.
-pub fn voice_seed(sender_mailbox: MailboxId, instrument_id: u8, pitch: u8) -> u32 {
+pub(super) fn voice_seed(sender_mailbox: MailboxId, instrument_id: u8, pitch: u8) -> u32 {
     // Truncating the 64-bit mailbox id into the hash is intended; the
     // seed only needs to vary per key, not round-trip.
     #[allow(clippy::cast_possible_truncation)]
@@ -97,7 +97,7 @@ pub fn voice_seed(sender_mailbox: MailboxId, instrument_id: u8, pitch: u8) -> u3
 }
 
 impl OscVoice {
-    pub fn new(
+    pub(super) fn new(
         pitch: u8,
         velocity: u8,
         wave: Wave,
@@ -129,7 +129,7 @@ impl OscVoice {
     /// `next_sample` reads `1.0 + sweep_offset` as the phase-step
     /// multiplier. A non-positive time constant is treated as no
     /// sweep (the voice keeps its base frequency).
-    pub fn with_pitch_sweep(mut self, sweep: PitchSweep, sample_rate: f32) -> Self {
+    pub(super) fn with_pitch_sweep(mut self, sweep: PitchSweep, sample_rate: f32) -> Self {
         if sweep.time_constant_secs > 0.0 {
             let dt = 1.0 / sample_rate;
             self.sweep_offset = sweep.start_ratio - 1.0;
@@ -138,7 +138,7 @@ impl OscVoice {
         self
     }
 
-    pub fn note_off(&mut self) {
+    pub(super) fn note_off(&mut self) {
         let from_level = match self.envelope {
             EnvelopeStage::Attack { t } => {
                 if self.adsr.attack_s > 0.0 {
@@ -161,11 +161,11 @@ impl OscVoice {
         self.envelope = EnvelopeStage::Release { t: 0.0, from_level };
     }
 
-    pub fn done(&self) -> bool {
+    pub(super) fn done(&self) -> bool {
         matches!(self.envelope, EnvelopeStage::Done)
     }
 
-    pub fn advance_envelope(&mut self, dt: f32) -> f32 {
+    pub(super) fn advance_envelope(&mut self, dt: f32) -> f32 {
         match &mut self.envelope {
             EnvelopeStage::Attack { t } => {
                 *t += dt;
@@ -202,7 +202,7 @@ impl OscVoice {
     /// Render the raw waveform at the current phase. Takes `&mut self`
     /// because the `Noise` wave advances its PRNG and one-pole filter
     /// state; the periodic waves only read `phase`.
-    pub fn waveform(&mut self) -> f32 {
+    pub(super) fn waveform(&mut self) -> f32 {
         match self.wave {
             Wave::Sine => (self.phase * TAU).sin(),
             Wave::Square => {
@@ -236,7 +236,7 @@ impl OscVoice {
         }
     }
 
-    pub fn next_sample(&mut self, dt: f32) -> f32 {
+    pub(super) fn next_sample(&mut self, dt: f32) -> f32 {
         let env = self.advance_envelope(dt);
         let s = self.waveform() * self.amplitude * env;
         let ratio = 1.0 + self.sweep_offset;
@@ -253,7 +253,7 @@ impl OscVoice {
 /// each sample by `decay_mul = exp(-rate * dt)`, so the hot loop holds
 /// no transcendentals beyond the `sin`.
 #[derive(Copy, Clone, Debug)]
-pub struct Partial {
+pub(super) struct Partial {
     pub phase: f32,
     pub phase_step: f32,
     pub amp: f32,
@@ -273,7 +273,7 @@ impl Partial {
 /// carry their own per-sample decay; this ramp swells the voice in at
 /// `note_on` and damps it out at `note_off`.
 #[derive(Copy, Clone, Debug)]
-pub enum BankStage {
+pub(super) enum BankStage {
     Attack { t: f32 },
     Sustain,
     Release { t: f32, from_level: f32 },
@@ -337,7 +337,7 @@ impl BankStage {
 /// attack/release ramp. Built once at `note_on`; the per-sample path
 /// is `sin` + multiply-accumulate + decay multiply per partial.
 #[derive(Copy, Clone, Debug)]
-pub struct PartialBankVoice {
+pub(super) struct PartialBankVoice {
     pub partials: [Partial; PARTIAL_COUNT],
     /// Overall level after velocity scaling; the partial amps carry
     /// the (normalised) spectral shape, this carries the loudness.
@@ -348,7 +348,7 @@ pub struct PartialBankVoice {
 }
 
 impl PartialBankVoice {
-    pub fn new(
+    pub(super) fn new(
         pitch: u8,
         velocity: u8,
         def: &PartialBankDef,
@@ -397,19 +397,19 @@ impl PartialBankVoice {
         }
     }
 
-    pub fn note_off(&mut self) {
+    pub(super) fn note_off(&mut self) {
         self.stage.begin_release(self.attack_s);
     }
 
-    pub fn done(&self) -> bool {
+    pub(super) fn done(&self) -> bool {
         matches!(self.stage, BankStage::Done)
     }
 
-    pub fn advance_ramp(&mut self, dt: f32) -> f32 {
+    pub(super) fn advance_ramp(&mut self, dt: f32) -> f32 {
         self.stage.advance(dt, self.attack_s, self.release_s)
     }
 
-    pub fn next_sample(&mut self, dt: f32) -> f32 {
+    pub(super) fn next_sample(&mut self, dt: f32) -> f32 {
         let ramp = self.advance_ramp(dt);
         let mut acc = 0.0f32;
         let mut amp_sum = 0.0f32;
@@ -434,12 +434,12 @@ impl PartialBankVoice {
     }
 
     #[cfg(test)]
-    pub fn envelope_level(&self) -> f32 {
+    pub(super) fn envelope_level(&self) -> f32 {
         self.partials.iter().map(|p| p.amp.abs()).sum()
     }
 
     #[cfg(test)]
-    pub fn partial_amps(&self) -> [f32; PARTIAL_COUNT] {
+    pub(super) fn partial_amps(&self) -> [f32; PARTIAL_COUNT] {
         let mut out = [0.0f32; PARTIAL_COUNT];
         for (slot, p) in out.iter_mut().zip(self.partials.iter()) {
             *slot = p.amp;
@@ -448,7 +448,7 @@ impl PartialBankVoice {
     }
 
     #[cfg(test)]
-    pub fn in_sustain(&self) -> bool {
+    pub(super) fn in_sustain(&self) -> bool {
         matches!(self.stage, BankStage::Sustain)
     }
 }
@@ -457,7 +457,7 @@ impl PartialBankVoice {
 /// instrument at `note_on`: a built-in oscillator or partial-bank
 /// patch, or a loaded sampled instrument (ADR-0103 §6).
 #[derive(Clone, Debug)]
-pub enum VoiceKernel {
+pub(super) enum VoiceKernel {
     Oscillator(OscVoice),
     PartialBank(PartialBankVoice),
     Sample(SampleVoice),
@@ -467,7 +467,7 @@ pub enum VoiceKernel {
 /// partial bank). Split out of [`Voice`] so the `note_on` path can
 /// resolve a built-in or a loaded sample bank into a `VoiceKernel`
 /// before the steal / dedup bookkeeping, then stamp one `Voice`.
-pub fn build_builtin_kernel(
+pub(super) fn build_builtin_kernel(
     sender_mailbox: MailboxId,
     instrument_id: u8,
     pitch: u8,
@@ -506,7 +506,7 @@ pub fn build_builtin_kernel(
 /// used by voice-steal to locate the oldest voice regardless of the
 /// pool's current order (which `swap_remove` scrambles).
 #[derive(Clone, Debug)]
-pub struct Voice {
+pub(super) struct Voice {
     pub sender_mailbox: MailboxId,
     pub instrument_id: u8,
     pub pitch: u8,
@@ -515,7 +515,7 @@ pub struct Voice {
 }
 
 impl Voice {
-    pub fn note_off(&mut self) {
+    pub(super) fn note_off(&mut self) {
         match &mut self.kernel {
             VoiceKernel::Oscillator(v) => v.note_off(),
             VoiceKernel::PartialBank(v) => v.note_off(),
@@ -523,7 +523,7 @@ impl Voice {
         }
     }
 
-    pub fn done(&self) -> bool {
+    pub(super) fn done(&self) -> bool {
         match &self.kernel {
             VoiceKernel::Oscillator(v) => v.done(),
             VoiceKernel::PartialBank(v) => v.done(),
@@ -531,7 +531,7 @@ impl Voice {
         }
     }
 
-    pub fn next_sample(&mut self, dt: f32) -> f32 {
+    pub(super) fn next_sample(&mut self, dt: f32) -> f32 {
         match &mut self.kernel {
             VoiceKernel::Oscillator(v) => v.next_sample(dt),
             VoiceKernel::PartialBank(v) => v.next_sample(dt),

@@ -101,20 +101,20 @@ use runtime::*;
 /// above.
 #[cfg(feature = "runtime")]
 mod runtime {
-    pub use super::manifest::param_kind_wire;
-    pub use super::resolve::resolve_ids;
+    pub(super) use super::manifest::param_kind_wire;
+    pub(super) use super::resolve::resolve_ids;
 
-    pub use aether_data::KindId;
-    pub use aether_data::canonical::kind_id_from_parts;
-    pub use aether_data::name_inventory::{handler_entries, name_entries, template_entries};
-    pub use aether_data::wire;
-    pub use aether_kinds::{
+    pub(super) use aether_data::KindId;
+    pub(super) use aether_data::canonical::kind_id_from_parts;
+    pub(super) use aether_data::name_inventory::{handler_entries, name_entries, template_entries};
+    pub(super) use aether_data::wire;
+    pub(super) use aether_kinds::{
         HandlerEntryWire, KindDescriptorWire, NameEntryWire, TemplateEntryWire,
     };
-    pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    pub use aether_substrate::chassis::error::BootError;
-    pub use aether_substrate::mail::registry::Registry;
-    pub use std::sync::Arc;
+    pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    pub(super) use aether_substrate::chassis::error::BootError;
+    pub(super) use aether_substrate::mail::registry::Registry;
+    pub(super) use std::sync::Arc;
 
     /// `aether.inventory` runtime state (ADR-0091 §2). Holds the substrate's
     /// shared `Arc<Registry>` — the same `Arc` `ComponentHostCapability`

@@ -10,17 +10,17 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
-pub use std::sync::Arc;
+pub(super) use std::sync::Arc;
 
-pub use aether_actor::OutboundReply;
-pub use aether_data::Source;
-pub use aether_kinds::QuadSpace;
-pub use aether_substrate::Manual;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
-pub use aether_substrate::chassis::error::BootError;
+pub(super) use aether_actor::OutboundReply;
+pub(super) use aether_data::Source;
+pub(super) use aether_kinds::QuadSpace;
+pub(super) use aether_substrate::Manual;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
+pub(super) use aether_substrate::chassis::error::BootError;
 
-pub use crate::fs::{FsCapability, Read, ReadResult};
-pub use crate::render::{
+pub(super) use crate::fs::{FsCapability, Read, ReadResult};
+pub(super) use crate::render::{
     CreateTexture, CreateTextureResult, RenderCapability, TexturedQuad, UpdateTexture,
 };
 
@@ -42,7 +42,7 @@ use self::atlas::{ATLAS_SIZE, Atlas, AtlasEntry, GlyphKey, GlyphSlot};
 /// `aether.fs` fetch + parse path; this rides along so the completion
 /// arm replies in the caller's shape.
 #[derive(Clone, Copy)]
-pub enum PendingReply {
+pub(super) enum PendingReply {
     /// Reply `LoadFontResult` — the original `load_font` caller.
     LoadFont,
     /// Reply `FontMetricsResult` — a `font_metrics` grab that missed
@@ -54,14 +54,14 @@ pub enum PendingReply {
 /// keyed in [`TextCapabilityState::pending_fonts`] by the echoed
 /// `(namespace, path)`. Carries the original requester so the deferred
 /// reply lands on the caller, plus the shape that reply takes.
-pub struct PendingFont {
+pub(super) struct PendingFont {
     pub source: Source,
     pub reply: PendingReply,
 }
 
 /// Context carried through the font-parse task so the completion arm
 /// can shape the reply the parked request is owed.
-pub struct FontParseContext {
+pub(super) struct FontParseContext {
     pub namespace: String,
     pub path: String,
     pub name: String,
@@ -70,14 +70,14 @@ pub struct FontParseContext {
 
 /// A successfully parsed font plus the byte length the reply reports as
 /// `resident_bytes`.
-pub struct ParsedFont {
+pub(super) struct ParsedFont {
     pub font: Arc<fontdue::Font>,
     pub resident_bytes: u64,
 }
 
 /// Off-hot-path parse outcome — `Err` carries the reason the cap relays
 /// as `LoadFontResult::Err`.
-pub type FontParseOutput = Result<ParsedFont, String>;
+pub(super) type FontParseOutput = Result<ParsedFont, String>;
 
 /// `aether.text` runtime state (ADR-0105). CPU-only — no GPU handles,
 /// just the font registry, the glyph atlas, and the parked `load_font`

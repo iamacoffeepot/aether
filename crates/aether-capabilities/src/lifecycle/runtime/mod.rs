@@ -20,9 +20,9 @@ use super::{LifecycleCapability, LifecycleGraphData};
 
 pub use self::config::LifecycleConfig;
 #[cfg(test)]
-pub use self::settlement::ADVANCE_TIMEOUT_MS_DEFAULT;
-pub use self::settlement::{PendingAdvance, Step, resolve_edge};
-pub use super::subscribers::broadcast_to_subscribers;
+pub(super) use self::settlement::ADVANCE_TIMEOUT_MS_DEFAULT;
+pub(super) use self::settlement::{PendingAdvance, Step, resolve_edge};
+pub(super) use super::subscribers::broadcast_to_subscribers;
 
 // Handler-argument and reply kinds named by the moved `#[runtime] impl`
 // bodies. Private to this module — the identity in the parent resolves the
@@ -34,16 +34,16 @@ use aether_kinds::{
     LifecycleUnsubscribe, LifecycleUnsubscribeAll, LifecycleUnsubscribeSelf, Quit,
 };
 
-pub use aether_actor::Manual;
-pub use aether_actor::OutboundReply;
-pub use aether_data::{Kind, KindId, MailboxId as DataMailboxId, mailbox_id_from_name};
-pub use aether_kinds::LifecycleAdvanceComplete;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::mailer::Mailer;
-pub use std::collections::{BTreeMap, BTreeSet};
-pub use std::sync::Arc;
-pub use std::time::{Duration, Instant};
+pub(super) use aether_actor::Manual;
+pub(super) use aether_actor::OutboundReply;
+pub(super) use aether_data::{Kind, KindId, MailboxId as DataMailboxId, mailbox_id_from_name};
+pub(super) use aether_kinds::LifecycleAdvanceComplete;
+pub(super) use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub(super) use aether_substrate::chassis::error::BootError;
+pub(super) use aether_substrate::mail::mailer::Mailer;
+pub(super) use std::collections::{BTreeMap, BTreeSet};
+pub(super) use std::sync::Arc;
+pub(super) use std::time::{Duration, Instant};
 
 /// `aether.lifecycle` runtime state (ADR-0082). Owns the lifecycle data
 /// graph, the subscriber table, the state pointer, and the settlement
