@@ -26,6 +26,7 @@
 
 mod api;
 mod cli;
+mod config;
 mod error;
 mod kinds;
 pub use kinds::{
@@ -37,7 +38,7 @@ use std::time::Duration;
 use crate::shared::contentgen::adapter::{AnthropicAdapter, AnthropicRequest, AnthropicResponse};
 
 pub use api::UreqAnthropicAdapter;
-pub use cli::ClaudeCliAdapter;
+pub(crate) use cli::ClaudeCliAdapter;
 pub use config::{AnthropicConfig, AnthropicConfigLayer, AnthropicOverlay};
 
 /// Default per-cap concurrency bound when `AETHER_ANTHROPIC_MAX_IN_FLIGHT`
@@ -130,13 +131,9 @@ impl AnthropicAdapter for CombinedAnthropicAdapter {
     }
 }
 
-mod config;
-
 /// Convert an adapter error string into the typed `AnthropicError`.
 /// Shared by both result paths.
-fn map_adapter_error(raw: &str) -> AnthropicError {
-    error::adapter_error_to_typed(raw)
-}
+use error::adapter_error_to_typed as map_adapter_error;
 
 /// `aether.anthropic` mailbox cap **identity** (ADR-0122 identity/runtime
 /// split). A ZST carrying only the addressing — `Addressable`

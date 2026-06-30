@@ -32,26 +32,25 @@ use aether_kinds::{
     ListComponentsResult, LoadComponent, LoadResult, ReplaceComponent,
 };
 
-// Crate-local wiring the `#[actor] impl` handler bodies name (sibling caps it
-// mails, the unsubscribe kind, the `Kind` / `MailboxCategory` vocabulary),
-// re-exported so the parent reaches them through its `use runtime::*` glob.
-pub use crate::input::{InputCapability, UnsubscribeAll};
-pub use crate::lifecycle::LifecycleCapability;
-pub use aether_data::{Kind, MailboxCategory};
-pub use aether_kinds::LifecycleUnsubscribeAll;
+// Crate-local wiring the `#[runtime] impl` handler bodies name (sibling caps it
+// mails, the unsubscribe kind, the `Kind` / `MailboxCategory` vocabulary), the
+// state struct, and `forward_to_trampoline` — all used within this module.
+use crate::input::{InputCapability, UnsubscribeAll};
+use crate::lifecycle::LifecycleCapability;
+use aether_data::{Kind, MailboxCategory};
+use aether_kinds::LifecycleUnsubscribeAll;
 
-pub use std::sync::Arc;
-pub use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
-pub use wasmtime::{Engine, Linker};
+use wasmtime::{Engine, Linker};
 
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-pub use aether_substrate::actor::wasm::component::ComponentCtx;
-pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::mailer::Mailer;
-pub use aether_substrate::mail::outbound::HubOutbound;
-pub use aether_substrate::mail::registry::Registry;
-pub use aether_substrate::mail::{KindId, MailboxId};
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::wasm::component::ComponentCtx;
+use aether_substrate::chassis::error::BootError;
+use aether_substrate::mail::mailer::Mailer;
+use aether_substrate::mail::outbound::HubOutbound;
+use aether_substrate::mail::registry::Registry;
+use aether_substrate::mail::{KindId, MailboxId};
 
 /// `aether.component` runtime state (ADR-0122 split). Holds the wasmtime
 /// `engine` + `linker` every load instantiates against, the mail `registry`,
@@ -77,7 +76,7 @@ pub struct ComponentHostCapabilityState {
     pub(in crate::component) outbound: Arc<HubOutbound>,
     /// Monotonic counter for `component_N` default names when an agent passes
     /// `name: None` and the wasm doesn't declare an `aether.namespace`.
-    pub(in crate::component) default_name_counter: AtomicU64,
+    pub(in crate::component) default_name_counter: u64,
 }
 
 /// Forward an arbitrary kind to a trampoline's mailbox, preserving the
@@ -96,7 +95,7 @@ pub struct ComponentHostCapabilityState {
 /// A free fn (no `self`) under the ADR-0122 split: the state-bearing struct
 /// holds no field this helper reads, so it stays stateless and the handlers
 /// reach it through the parent's `use runtime::*` glob.
-pub fn forward_to_trampoline<P>(
+fn forward_to_trampoline<P>(
     ctx: &mut NativeCtx<'_>,
     recipient: MailboxId,
     kind: KindId,
@@ -130,7 +129,7 @@ impl NativeActor for ComponentHostCapability {
             registry,
             mailer,
             outbound: config.hub_outbound,
-            default_name_counter: AtomicU64::new(0),
+            default_name_counter: 0,
         })
     }
 

@@ -31,16 +31,16 @@ pub enum TrackFade {
 /// namespace, path)`, mirroring the voice key plus the caller-supplied
 /// `lane` that disambiguates senders sharing a source mailbox.
 pub struct TrackVoice {
-    pub sender_mailbox: MailboxId,
-    pub lane: Option<String>,
-    pub namespace: String,
-    pub path: String,
-    pub pcm: Arc<[f32]>,
-    pub position: usize,
-    pub gain: f32,
-    pub looping: bool,
-    pub fade: TrackFade,
-    pub done: bool,
+    sender_mailbox: MailboxId,
+    lane: Option<String>,
+    namespace: String,
+    path: String,
+    pcm: Arc<[f32]>,
+    position: usize,
+    gain: f32,
+    looping: bool,
+    fade: TrackFade,
+    done: bool,
 }
 
 impl TrackVoice {
@@ -134,23 +134,6 @@ impl TrackVoice {
     }
 }
 
-/// `aether.audio` mailbox cap. Holds the producer side of the synth
-/// event queue (the crate-internal `AudioEventSender`), the audio
-/// worker thread that owns the [`cpal::Stream`] (see module-level
-/// "per-cap audio worker" docs for the `!Send` rationale), and a
-/// shutdown channel that signals the worker to exit on drop.
-///
-/// `sender` is `None` when the cpal pipeline isn't running
-/// (`AETHER_AUDIO_DISABLE=1`, no audio device, init failure). In
-/// that mode `NoteOn` / `NoteOff` no-op and `SetMasterGain` replies
-/// `Err`.
-///
-/// Issue 629 / Phase B: `thread` and `shutdown` are
-/// plain fields. Pre-Phase-A they sat behind a `Mutex<AudioTeardown>`
-/// so `Drop::drop(&mut self)` could `.take()` them while handlers
-/// ran with `&self` (Arc-shared). Post-Phase-A the dispatcher owns
-/// the cap as `Box<A>` and `Drop` runs with exclusive `&mut self`,
-/// so the wrapping mutex retires.
 /// A `play_track` request parked while its `aether.fs.read` is in
 /// flight (ADR-0103 §2). Keyed in `AudioCapabilityState::pending_tracks`
 /// by the echoed `(namespace, path)` the `ReadResult` carries; the

@@ -35,6 +35,7 @@ mod config;
 mod decode;
 mod event;
 mod instrument;
+mod pipeline;
 mod sample;
 mod schedule;
 mod sfz;
@@ -50,11 +51,11 @@ use super::AudioCapability;
 pub use self::config::{AudioConfig, AudioConfigLayer, AudioOverlay};
 use self::decode::decode_wav_to_mono;
 use self::event::AudioEventSender;
+use self::pipeline::{AudioBuildError, try_build_pipeline};
 use self::sample::{
     BankAssembly, SampleSlot, assemble_bank, bank_name_from_path, join_fs, sfz_dir,
 };
 use self::sfz::parse_sfz;
-use self::synth::{AudioBuildError, try_build_pipeline};
 use super::kinds::{
     LoadInstrument, LoadInstrumentResult, NoteOff, NoteOn, PlayTrack, PlayTrackResult, Schedule,
     ScheduleResult, SetMasterGain, SetMasterGainResult, StopTrack,
@@ -153,7 +154,11 @@ impl AudioCapabilityState {
     /// Pop the oldest `play_track` parked under `(namespace, path)` —
     /// the FIFO correlation for the `aether.fs.read` reply. Removes the
     /// key's queue when it empties.
-    pub(super) fn take_pending(&mut self, namespace: &str, path: &str) -> Option<PendingTrack> {
+    pub(super) fn take_pending_track(
+        &mut self,
+        namespace: &str,
+        path: &str,
+    ) -> Option<PendingTrack> {
         let key = (namespace.to_owned(), path.to_owned());
         let queue = self.pending_tracks.get_mut(&key)?;
         let pending = queue.pop_front();
@@ -164,7 +169,7 @@ impl AudioCapabilityState {
     }
 
     /// Pop the oldest `load_instrument` parked under the `.sfz`'s
-    /// `(namespace, path)`. Sibling of [`Self::take_pending`].
+    /// `(namespace, path)`. Sibling of [`Self::take_pending_track`].
     pub(super) fn take_pending_instrument(
         &mut self,
         namespace: &str,
@@ -203,7 +208,7 @@ impl AudioCapabilityState {
         path: String,
         bytes: Vec<u8>,
     ) {
-        let Some(target_rate_f32) = self.sample_rate else {
+        let Some(device_rate) = self.sample_rate else {
             ctx.reply_to(
                 pending.source,
                 &PlayTrackResult::Err {
@@ -218,7 +223,7 @@ impl AudioCapabilityState {
         // Device rates are small positive integers — the round trip back
         // through u32 is exact.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let target_rate = target_rate_f32 as u32;
+        let target_rate = device_rate as u32;
 
         let context = TrackDecodeContext {
             sender_mailbox: pending.sender_mailbox,
@@ -358,7 +363,7 @@ impl AudioCapabilityState {
             .assemblies
             .remove(&assembly_id)
             .expect("assembly present — checked above");
-        let Some(target_rate_f32) = self.sample_rate else {
+        let Some(device_rate) = self.sample_rate else {
             ctx.reply_to(
                 assembly.source,
                 &LoadInstrumentResult::Err {
@@ -370,7 +375,7 @@ impl AudioCapabilityState {
             return;
         };
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let target_rate = target_rate_f32 as u32;
+        let target_rate = device_rate as u32;
 
         let BankAssembly {
             source,
@@ -636,7 +641,7 @@ impl NativeActor for AudioCapability {
         ctx: &mut NativeCtx<'_>,
         mail: Schedule,
     ) -> ScheduleResult {
-        let Some(s) = state.sender.as_ref() else {
+        let Some(sender) = state.sender.as_ref() else {
             return ScheduleResult::Err {
                 error: "audio pipeline not initialised on this desktop substrate".to_owned(),
             };
@@ -674,7 +679,7 @@ impl NativeActor for AudioCapability {
             sender_mailbox: sender_mailbox_id(ctx.reply_target()),
             events: mail.events,
         };
-        if s.push(ev).is_err() {
+        if sender.push(ev).is_err() {
             return ScheduleResult::Err {
                 error: "audio event queue full — schedule dropped".to_owned(),
             };
@@ -749,7 +754,7 @@ impl NativeActor for AudioCapability {
                 path,
                 bytes,
             } => {
-                if let Some(pending) = state.take_pending(&namespace, &path) {
+                if let Some(pending) = state.take_pending_track(&namespace, &path) {
                     state.start_track_decode(ctx, &pending, namespace, path, bytes);
                 } else if let Some(pending) = state.take_pending_instrument(&namespace, &path) {
                     state.on_sfz_loaded(ctx, &pending, namespace, path, &bytes);
@@ -764,7 +769,7 @@ impl NativeActor for AudioCapability {
                 error,
             } => {
                 let reason = format!("file read failed: {error:?}");
-                if let Some(pending) = state.take_pending(&namespace, &path) {
+                if let Some(pending) = state.take_pending_track(&namespace, &path) {
                     ctx.reply_to(
                         pending.source,
                         &PlayTrackResult::Err {
@@ -1183,10 +1188,10 @@ mod tests {
     /// sustain) so a kernel test reads the raw waveform without the
     /// envelope shaping the level.
     const HOLD_ADSR: Adsr = Adsr {
-        attack_s: 0.0,
-        decay_s: 0.0,
+        attack_secs: 0.0,
+        decay_secs: 0.0,
         sustain: 1.0,
-        release_s: 0.1,
+        release_secs: 0.1,
     };
 
     /// Build an oscillator voice and collect `n` samples at 48 kHz.
@@ -1530,13 +1535,13 @@ mod tests {
             .unwrap();
         let mut buf = vec![0.0f32; 64];
         synth.fill(&mut buf, 1);
-        assert!((synth.master_gain_value() - 1.0).abs() < f32::EPSILON);
+        assert!((synth.master_gain() - 1.0).abs() < f32::EPSILON);
 
         sender
             .push(AudioEvent::SetMasterGain { gain: -0.2 })
             .unwrap();
         synth.fill(&mut buf, 1);
-        assert!(synth.master_gain_value().abs() < f32::EPSILON);
+        assert!(synth.master_gain().abs() < f32::EPSILON);
     }
 
     #[test]
