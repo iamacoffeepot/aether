@@ -169,6 +169,11 @@ serde_json = { workspace = true }
 # tests; no `src/` consumer, so it rides dev-dependencies only.
 aether-codec = { path = "../aether-codec" }
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
+# iamacoffeepot/aether#2455: the dispatch-decode-failure regression test drives
+# the `Probe` fixture directly through the pub `Component::instantiate` / `deliver`
+# API, which needs `wasmtime::{Engine, Linker, Module}` in scope to build the
+# host engine + linker. Same workspace pin `aether-substrate` links against.
+wasmtime = { workspace = true }
 # iamacoffeepot/aether#1472: the FleetBench Transform-DAG test builds a
 # descriptor with `output_kind_id == Vec4::ID` and casts the observer's
 # surfaced 16 bytes back to a `Vec4` for the `M·v` assertion, so it names

@@ -3412,9 +3412,13 @@ fn validate_fallback_sig(sig: &Signature) -> syn::Result<()> {
 /// handler method. Wire shape (cast vs structured) is picked at K's
 /// `Kind` derive site, not here — `Kind::decode_from_bytes` carries
 /// the per-K body — so this dispatcher never sees the wire choice.
-/// Returns `DISPATCH_HANDLED` on a match or when the `#[fallback]`
-/// ran; returns `DISPATCH_UNKNOWN_KIND` on strict-receiver miss so
-/// the substrate's scheduler logs the drop (issue #142).
+/// Returns `DISPATCH_HANDLED` only when a recognized kind decoded and
+/// its handler ran (or when the `#[fallback]` ran); a recognized kind
+/// whose payload fails to decode falls through to the tail, as does an
+/// unrecognized kind, yielding `DISPATCH_UNKNOWN_KIND` on a strict
+/// receiver so the substrate's scheduler logs the drop (issue #142).
+/// This mirrors the native arm, which routes a failed decode to the
+/// fallback / unknown-kind path (iamacoffeepot/aether#2455).
 fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) -> TokenStream2 {
     let arms = handlers.iter().map(|h| {
         let k = &h.kind_ty;
@@ -3449,8 +3453,14 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
                     __aether_mail.decode_kind::<#k>()
                 {
                     #call
+                    return ::aether_actor::DISPATCH_HANDLED;
                 }
-                return ::aether_actor::DISPATCH_HANDLED;
+                // A recognized kind id whose payload fails to decode falls
+                // through to the tail (the `#[fallback]`, else
+                // `DISPATCH_UNKNOWN_KIND`), mirroring the native arm's
+                // `return Option::None` rather than reporting HANDLED for a
+                // handler that never ran (iamacoffeepot/aether#2455). No later
+                // arm matches, since the id already matched this one.
             }
         }
     });
