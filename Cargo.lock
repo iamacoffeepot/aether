@@ -316,6 +316,7 @@ dependencies = [
  "signal-hook",
  "thiserror 2.0.18",
  "tracing",
+ "wasmtime",
  "wgpu",
  "winit",
 ]
