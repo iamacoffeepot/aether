@@ -122,8 +122,7 @@ pub fn parse_messages_response(
                 .iter()
                 .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
                 .filter_map(|b| b.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("")
+                .collect::<String>()
         })
         .ok_or_else(|| "response missing content array".to_string())?;
 
@@ -133,12 +132,12 @@ pub fn parse_messages_response(
         .unwrap_or(fallback_model)
         .to_string();
 
-    let usage_obj = parsed.get("usage");
-    let input_tokens = usage_obj
+    let usage = parsed.get("usage");
+    let input_tokens = usage
         .and_then(|u| u.get("input_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let output_tokens = usage_obj
+    let output_tokens = usage
         .and_then(|u| u.get("output_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
@@ -160,7 +159,7 @@ fn clamp_u32(v: u64) -> u32 {
 }
 
 fn elapsed_millis(started: Instant) -> u32 {
-    clamp_u32(u64::try_from(started.elapsed().as_millis()).unwrap_or_else(|_| u64::from(u32::MAX)))
+    u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]

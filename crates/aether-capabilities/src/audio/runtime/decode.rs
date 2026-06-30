@@ -111,18 +111,28 @@ fn downmix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
     if channels <= 1 {
         return interleaved.to_vec();
     }
-    let frame_count = interleaved.len() / channels;
     // Channel count is a small positive integer — the reciprocal is exact
     // enough for an average; the cast can't lose meaningful precision.
     #[allow(clippy::cast_precision_loss)]
     let inv = 1.0 / channels as f32;
-    let mut mono = Vec::with_capacity(frame_count);
-    for frame in 0..frame_count {
-        let start = frame * channels;
-        let sum: f32 = interleaved[start..start + channels].iter().sum();
-        mono.push(sum * inv);
+    interleaved
+        .chunks_exact(channels)
+        .map(|frame| frame.iter().sum::<f32>() * inv)
+        .collect()
+}
+
+/// Read a WAV asset's source sample rate from its header (ADR-0103 §6).
+/// Bank assembly needs it to scale a region's loop frame offsets by the
+/// load-time resample ratio; [`decode_wav_to_mono`] consumes the same
+/// header but only returns the resampled PCM. Parses the header chunk
+/// only — the sample data is not read.
+pub(super) fn wav_source_rate(bytes: &[u8]) -> Result<u32, String> {
+    let reader = hound::WavReader::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let rate = reader.spec().sample_rate;
+    if rate == 0 {
+        return Err("zero sample rate".to_owned());
     }
-    mono
+    Ok(rate)
 }
 
 /// Linearly resample a mono stream from `source_rate` to `target_rate`.
