@@ -528,6 +528,11 @@ fn field_type_schema_expr(ty: &Type) -> TokenStream2 {
     }
 }
 
+/// Returns `true` when `ty` is syntactically a `Vec<u8>` (or any qualified
+/// spelling whose outer type ends in `Vec` and whose element type's last
+/// segment is `u8`, e.g. `Vec<core::primitive::u8>`). The check is purely
+/// syntactic — a type alias (`type Blob = Vec<u8>`) is not resolved by the
+/// proc macro and falls through to the generic `Vec` schema.
 fn is_vec_u8(ty: &Type) -> bool {
     let Type::Path(tp) = ty else { return false };
     let Some(seg) = tp.path.segments.last() else {
@@ -542,7 +547,13 @@ fn is_vec_u8(ty: &Type) -> bool {
     let Some(GenericArgument::Type(Type::Path(inner))) = args.args.first() else {
         return false;
     };
-    inner.path.is_ident("u8")
+    // Match on the last segment so qualified spellings like
+    // `core::primitive::u8` are recognized alongside bare `u8`.
+    inner
+        .path
+        .segments
+        .last()
+        .is_some_and(|seg| seg.ident == "u8")
 }
 
 /// Walk a field-type syntactic tree and reject `HashMap` anywhere

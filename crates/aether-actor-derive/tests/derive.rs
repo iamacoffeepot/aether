@@ -289,3 +289,45 @@ fn btreemap_kind_id_stable_across_invocations() {
     // sanity, not an exhaustive test of FNV-1a).
     assert_ne!(<Headers as Kind>::ID, <Lookup as Kind>::ID);
 }
+
+// Two structs that are wire-identical except for how `u8` is spelled —
+// bare `Vec<u8>` vs qualified `Vec<core::primitive::u8>`. Both must lower
+// to `SchemaType::Bytes` and hash to the same `Kind::ID`.
+#[derive(Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "test.blob_bare")]
+#[allow(dead_code)]
+struct BlobBare {
+    data: Vec<u8>,
+}
+
+// `#[allow(...)]` is intentional: `core::primitive::u8` is the qualified
+// spelling the test exercises — removing the path would defeat the tripwire.
+#[allow(unused_qualifications, clippy::absolute_paths)]
+#[derive(Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "test.blob_bare")]
+#[allow(dead_code)]
+struct BlobQualified {
+    data: Vec<core::primitive::u8>,
+}
+
+#[test]
+fn qualified_vec_u8_canonicalizes_to_bytes_and_matches_bare_kind_id() {
+    // Tripwire: qualified and bare `Vec<u8>` must canonicalize to the same
+    // Bytes schema, hence the same `Kind::ID`. Before the `is_vec_u8`
+    // last-segment fix, `Vec<core::primitive::u8>` fell through to
+    // `Vec(Scalar(U8))` and hashed to a different id — a silent wire-identity
+    // fork for any non-Rust peer that agrees by `(name, schema)`.
+    let SchemaType::Struct { fields, .. } = &<BlobQualified as Schema>::SCHEMA else {
+        panic!("expected Struct schema");
+    };
+    assert_eq!(
+        fields[0].ty,
+        SchemaType::Bytes,
+        "Vec<core::primitive::u8> field must lower to Bytes, not Vec(Scalar(U8))"
+    );
+    assert_eq!(
+        <BlobBare as Kind>::ID,
+        <BlobQualified as Kind>::ID,
+        "bare Vec<u8> and qualified Vec<core::primitive::u8> must share the same Kind::ID"
+    );
+}
