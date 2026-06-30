@@ -862,12 +862,12 @@ macro_rules! __export_multi_internal {
                         $crate::__macro_internals::canonical::write_inputs_actor_boundary::<BOUNDARY_LEN>(
                             <$component as $crate::Addressable>::NAMESPACE,
                         );
-                    // Per-record section version byte, in lockstep with
-                    // `INPUTS_SECTION_VERSION` (0x05, bumped by ADR-0118 /
+                    // Per-record section version byte — a token reference
+                    // to `INPUTS_SECTION_VERSION` (bumped by ADR-0118 /
                     // issue 1984; the multi-actor boundary record is a
                     // per-record frame and tracks the same version as the
                     // single-actor records emitted by the derive macro).
-                    out[pos] = 0x05;
+                    out[pos] = $crate::__macro_internals::INPUTS_SECTION_VERSION;
                     pos += 1;
                     let mut i = 0;
                     while i < BOUNDARY_LEN {

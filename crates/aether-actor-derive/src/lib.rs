@@ -206,16 +206,18 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 &#labels_ident,
             );
 
-        // ADR-0028 / ADR-0032 / ADR-0118: `aether.kinds` v0x05 ships
+        // ADR-0028 / ADR-0032 / ADR-0118: `aether.kinds` ships
         // `[version_byte][canonical_bytes]`, where the canonical bytes are
         // now the owned aether-wire encoding (issue 1984) — so every
         // `Kind::ID` regenerates, gated loudly behind this version byte.
+        // The version byte is `aether_data::KINDS_SECTION_VERSION`, the
+        // single source of truth the reader also reads.
         #[cfg(target_family = "wasm")]
         #[used]
         #[unsafe(link_section = "aether.kinds")]
         static #kind_static_ident: [u8; #canonical_len_ident + 1] = {
             let mut out = [0u8; #canonical_len_ident + 1];
-            out[0] = 0x05;
+            out[0] = ::aether_data::KINDS_SECTION_VERSION;
             let mut i = 0;
             while i < #canonical_len_ident {
                 out[i + 1] = #canonical_bytes_ident[i];
@@ -229,10 +231,12 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #[unsafe(link_section = "aether.kinds.labels")]
         static #kind_labels_static_ident: [u8; #labels_len_ident + 1] = {
             let mut out = [0u8; #labels_len_ident + 1];
-            // v0x04 (ADR-0118 / issue 1984): the labels record is the owned
+            // ADR-0118 / issue 1984: the labels record is the owned
             // aether-wire encoding of `KindLabels`. v0x03 made records
             // self-identifying (`kind_id`); the reader still pairs by id.
-            out[0] = 0x04;
+            // The version byte is `aether_data::LABELS_SECTION_VERSION`,
+            // the single source of truth the reader also reads.
+            out[0] = ::aether_data::LABELS_SECTION_VERSION;
             let mut i = 0;
             while i < #labels_len_ident {
                 out[i + 1] = #labels_bytes_ident[i];
@@ -3493,8 +3497,34 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
 /// using crate is pulled in as a wasm32 rlib by another cdylib (a
 /// rlib that doesn't call `export!()` contributes no section bytes).
 // One const-eval byte-copy block per record kind (handler / fallback /
-// component-doc / config); inlining them in one walk keeps each emitted
-// block contiguous and reads better than four near-identical helpers.
+// component-doc / config). The four blocks differ only in the two
+// const-fn calls that compute the record's length and bytes; the
+// version-byte write and the copy-loop tail are identical, so they
+// share `emit_inputs_copy_block`.
+fn emit_inputs_copy_block(
+    rec_len_expr: &TokenStream2,
+    rec_bytes_expr: &TokenStream2,
+) -> TokenStream2 {
+    quote! {
+        {
+            const REC_LEN: usize = #rec_len_expr;
+            const REC_BYTES: [u8; REC_LEN] = #rec_bytes_expr;
+            // Per-record section version byte — a token reference to
+            // `INPUTS_SECTION_VERSION` (ADR-0118 / issue 1984: the record
+            // is the owned aether-wire encoding) so the writer folds from
+            // the same source of truth the reader reads.
+            out[pos] = ::aether_actor::__macro_internals::INPUTS_SECTION_VERSION;
+            pos += 1;
+            let mut i = 0;
+            while i < REC_LEN {
+                out[pos] = REC_BYTES[i];
+                pos += 1;
+                i += 1;
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn build_inputs_manifest_consts(
     handlers: &[HandlerFn],
@@ -3536,38 +3566,26 @@ fn build_inputs_manifest_consts(
                 #reply_id_expr,
             ))
         });
-        copy_blocks.push(quote! {
-            {
-                const REC_LEN: usize =
-                    ::aether_actor::__macro_internals::canonical::inputs_handler_len(
-                        <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
-                        <#k as ::aether_actor::__macro_internals::Kind>::NAME,
-                        #doc_expr,
-                        #reply_tag_expr,
-                        #reply_id_expr,
-                    );
-                const REC_BYTES: [u8; REC_LEN] =
-                    ::aether_actor::__macro_internals::canonical::write_inputs_handler::<REC_LEN>(
-                        <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
-                        <#k as ::aether_actor::__macro_internals::Kind>::NAME,
-                        #doc_expr,
-                        #reply_tag_expr,
-                        #reply_id_expr,
-                    );
-                // Per-record section version byte, bumped to 0x05 by
-                // ADR-0118 (issue 1984) — the record is now the owned
-                // aether-wire encoding. Keep in
-                // lockstep with `INPUTS_SECTION_VERSION`.
-                out[pos] = 0x05;
-                pos += 1;
-                let mut i = 0;
-                while i < REC_LEN {
-                    out[pos] = REC_BYTES[i];
-                    pos += 1;
-                    i += 1;
-                }
-            }
-        });
+        copy_blocks.push(emit_inputs_copy_block(
+            &quote! {
+                ::aether_actor::__macro_internals::canonical::inputs_handler_len(
+                    <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
+                    <#k as ::aether_actor::__macro_internals::Kind>::NAME,
+                    #doc_expr,
+                    #reply_tag_expr,
+                    #reply_id_expr,
+                )
+            },
+            &quote! {
+                ::aether_actor::__macro_internals::canonical::write_inputs_handler::<REC_LEN>(
+                    <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
+                    <#k as ::aether_actor::__macro_internals::Kind>::NAME,
+                    #doc_expr,
+                    #reply_tag_expr,
+                    #reply_id_expr,
+                )
+            },
+        ));
     }
 
     if let Some(f) = fallback {
@@ -3575,24 +3593,14 @@ fn build_inputs_manifest_consts(
         len_terms.push(quote! {
             (1 + ::aether_actor::__macro_internals::canonical::inputs_fallback_len(#doc_expr))
         });
-        copy_blocks.push(quote! {
-            {
-                const REC_LEN: usize =
-                    ::aether_actor::__macro_internals::canonical::inputs_fallback_len(#doc_expr);
-                const REC_BYTES: [u8; REC_LEN] =
-                    ::aether_actor::__macro_internals::canonical::write_inputs_fallback::<REC_LEN>(#doc_expr);
-                // Per-record section version byte, in lockstep with
-                // `INPUTS_SECTION_VERSION` (0x05, ADR-0118 / issue 1984).
-                out[pos] = 0x05;
-                pos += 1;
-                let mut i = 0;
-                while i < REC_LEN {
-                    out[pos] = REC_BYTES[i];
-                    pos += 1;
-                    i += 1;
-                }
-            }
-        });
+        copy_blocks.push(emit_inputs_copy_block(
+            &quote! {
+                ::aether_actor::__macro_internals::canonical::inputs_fallback_len(#doc_expr)
+            },
+            &quote! {
+                ::aether_actor::__macro_internals::canonical::write_inputs_fallback::<REC_LEN>(#doc_expr)
+            },
+        ));
     }
 
     if let Some(doc) = component_doc {
@@ -3600,24 +3608,14 @@ fn build_inputs_manifest_consts(
         len_terms.push(quote! {
             (1 + ::aether_actor::__macro_internals::canonical::inputs_component_len(#doc_lit))
         });
-        copy_blocks.push(quote! {
-            {
-                const REC_LEN: usize =
-                    ::aether_actor::__macro_internals::canonical::inputs_component_len(#doc_lit);
-                const REC_BYTES: [u8; REC_LEN] =
-                    ::aether_actor::__macro_internals::canonical::write_inputs_component::<REC_LEN>(#doc_lit);
-                // Per-record section version byte, in lockstep with
-                // `INPUTS_SECTION_VERSION` (0x05, ADR-0118 / issue 1984).
-                out[pos] = 0x05;
-                pos += 1;
-                let mut i = 0;
-                while i < REC_LEN {
-                    out[pos] = REC_BYTES[i];
-                    pos += 1;
-                    i += 1;
-                }
-            }
-        });
+        copy_blocks.push(emit_inputs_copy_block(
+            &quote! {
+                ::aether_actor::__macro_internals::canonical::inputs_component_len(#doc_lit)
+            },
+            &quote! {
+                ::aether_actor::__macro_internals::canonical::write_inputs_component::<REC_LEN>(#doc_lit)
+            },
+        ));
     }
 
     // ADR-0090 (issue 1257): emit a `Config` record keyed by the
@@ -3632,30 +3630,20 @@ fn build_inputs_manifest_consts(
                 <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
             ))
         });
-        copy_blocks.push(quote! {
-            {
-                const REC_LEN: usize =
-                    ::aether_actor::__macro_internals::canonical::inputs_config_len(
-                        <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
-                        <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
-                    );
-                const REC_BYTES: [u8; REC_LEN] =
-                    ::aether_actor::__macro_internals::canonical::write_inputs_config::<REC_LEN>(
-                        <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
-                        <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
-                    );
-                // Per-record section version byte (0x05), in lockstep
-                // with `INPUTS_SECTION_VERSION` (ADR-0118 / issue 1984).
-                out[pos] = 0x05;
-                pos += 1;
-                let mut i = 0;
-                while i < REC_LEN {
-                    out[pos] = REC_BYTES[i];
-                    pos += 1;
-                    i += 1;
-                }
-            }
-        });
+        copy_blocks.push(emit_inputs_copy_block(
+            &quote! {
+                ::aether_actor::__macro_internals::canonical::inputs_config_len(
+                    <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
+                    <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
+                )
+            },
+            &quote! {
+                ::aether_actor::__macro_internals::canonical::write_inputs_config::<REC_LEN>(
+                    <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
+                    <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
+                )
+            },
+        ));
     }
 
     let len_expr = if len_terms.is_empty() {
@@ -3795,7 +3783,7 @@ fn build_kinds_section_retention_statics(
                     <#k as ::aether_actor::__macro_internals::Kind>::NAME,
                     &#schema_ident,
                 );
-            // Same v0x05 wire shape as `expand_kind`'s primary emission
+            // Same wire shape as `expand_kind`'s primary emission
             // (ADR-0118 / issue 1984: the owned aether-wire encoding) so
             // retention records (when this kind lives in a dependency
             // rlib) pair cleanly with the primary records by id.
@@ -3804,7 +3792,7 @@ fn build_kinds_section_retention_statics(
             #[unsafe(link_section = "aether.kinds")]
             static #section_ident: [u8; #len_ident + 1] = {
                 let mut out = [0u8; #len_ident + 1];
-                out[0] = 0x05;
+                out[0] = ::aether_actor::__macro_internals::KINDS_SECTION_VERSION;
                 let mut i = 0;
                 while i < #len_ident {
                     out[i + 1] = #bytes_ident[i];
@@ -3849,9 +3837,9 @@ fn build_kinds_section_retention_statics(
             #[unsafe(link_section = "aether.kinds.labels")]
             static #labels_section_ident: [u8; #labels_len_ident + 1] = {
                 let mut out = [0u8; #labels_len_ident + 1];
-                // v0x04 (ADR-0118 / issue 1984): the owned aether-wire
+                // ADR-0118 / issue 1984: the owned aether-wire
                 // encoding of `KindLabels`, matching `expand_kind`.
-                out[0] = 0x04;
+                out[0] = ::aether_actor::__macro_internals::LABELS_SECTION_VERSION;
                 let mut i = 0;
                 while i < #labels_len_ident {
                     out[i + 1] = #labels_bytes_ident[i];
