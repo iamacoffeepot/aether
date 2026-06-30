@@ -1,6 +1,6 @@
 //! `aether.fs` cap. Owns the full ADR-0041 stack — its mail kinds
-//! ([`kinds`], ADR-0121), the [`FileAdapter`] trait + [`LocalFileAdapter`]
-//! (`adapter`), the [`AdapterRegistry`] + env-driven [`NamespaceRoots`]
+//! ([`kinds`], ADR-0121), the [`FileAdapter`] trait + `LocalFileAdapter`
+//! (`adapter`), the `AdapterRegistry` + env-driven [`NamespaceRoots`]
 //! (`registry`), and the [`FsCapability`] itself. Chassis mains
 //! resolve a [`NamespaceRoots`] (typically via `NamespaceRoots::from_env`)
 //! and pass it through `with_actor::<FsCapability>(roots)` — `init`
@@ -21,7 +21,8 @@ mod registry;
 
 pub use kinds::*;
 
-pub use adapter::{FileAdapter, FsResult, LocalFileAdapter};
+pub(crate) use adapter::{Access, LocalFileAdapter};
+pub use adapter::{FileAdapter, FsResult};
 pub use config::NamespaceRoots;
 // The `Config` derive on `NamespaceRoots` emits these sibling types in
 // `config`; chassis CLI / boot wiring addresses them through the
@@ -30,7 +31,7 @@ pub use config::NamespaceRoots;
 // `into_layer`) ride the type and need no re-export.
 #[cfg(feature = "runtime")]
 pub use config::{NamespaceRootsLayer, NamespaceRootsOverlay};
-pub use registry::{AdapterRegistry, build_registry};
+pub(crate) use registry::{AdapterRegistry, build_registry};
 
 // Handler-signature kinds resolve at file root through the `pub use
 // kinds::*` re-export above — `#[actor]` emits the `impl HandlesKind<K>

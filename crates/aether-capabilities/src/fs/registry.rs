@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
-use super::adapter::{FileAdapter, LocalFileAdapter};
+use super::adapter::{Access, FileAdapter, LocalFileAdapter};
 use super::config::NamespaceRoots;
 
 /// Namespace → adapter table built at chassis boot. The cap reads
@@ -36,11 +36,6 @@ impl AdapterRegistry {
     pub fn get(&self, namespace: &str) -> Option<Arc<dyn FileAdapter>> {
         self.adapters.get(namespace).map(Arc::clone)
     }
-
-    #[must_use]
-    pub fn has(&self, namespace: &str) -> bool {
-        self.adapters.contains_key(namespace)
-    }
 }
 
 impl Default for AdapterRegistry {
@@ -57,9 +52,18 @@ impl Default for AdapterRegistry {
 /// wired.
 pub fn build_registry(roots: NamespaceRoots) -> io::Result<(Arc<AdapterRegistry>, NamespaceRoots)> {
     let mut registry = AdapterRegistry::new();
-    let save = Arc::new(LocalFileAdapter::new(roots.save.clone(), true)?);
-    let assets = Arc::new(LocalFileAdapter::new(roots.assets.clone(), false)?);
-    let config = Arc::new(LocalFileAdapter::new(roots.config.clone(), true)?);
+    let save = Arc::new(LocalFileAdapter::new(
+        roots.save.clone(),
+        Access::ReadWrite,
+    )?);
+    let assets = Arc::new(LocalFileAdapter::new(
+        roots.assets.clone(),
+        Access::ReadOnly,
+    )?);
+    let config = Arc::new(LocalFileAdapter::new(
+        roots.config.clone(),
+        Access::ReadWrite,
+    )?);
     registry.register("save", save as Arc<dyn FileAdapter>);
     registry.register("assets", assets as Arc<dyn FileAdapter>);
     registry.register("config", config as Arc<dyn FileAdapter>);

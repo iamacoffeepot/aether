@@ -7,7 +7,9 @@
 use std::fs;
 use std::io;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process;
 
 use super::kinds::FsError;
@@ -36,6 +38,14 @@ pub trait FileAdapter: Send + Sync {
     fn list(&self, prefix: &str) -> FsResult<Vec<String>>;
 }
 
+/// Access mode for a `LocalFileAdapter`. `ReadWrite` allows all four
+/// operations; `ReadOnly` rejects `write` and `delete` with `Forbidden`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    ReadOnly,
+    ReadWrite,
+}
+
 /// Local-filesystem adapter. One instance per namespace root; the
 /// chassis boots one `LocalFileAdapter` per entry in the namespace
 /// config and registers them in an `AdapterRegistry`.
@@ -56,7 +66,7 @@ pub trait FileAdapter: Send + Sync {
 /// pre-compromised disk state.
 pub struct LocalFileAdapter {
     root: PathBuf,
-    writable: bool,
+    access: Access,
 }
 
 impl LocalFileAdapter {
@@ -70,14 +80,14 @@ impl LocalFileAdapter {
     // of `dirs::data_dir()` / a `PathBuf::from(env)` straight in and
     // we shadow-rebind to the canonicalised form.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn new(root: PathBuf, writable: bool) -> io::Result<Self> {
+    pub fn new(root: PathBuf, access: Access) -> io::Result<Self> {
         fs::create_dir_all(&root)?;
         let root = root.canonicalize()?;
-        Ok(Self { root, writable })
+        Ok(Self { root, access })
     }
 
-    /// Exposed for tests and chassis boot logging. Not a routing
-    /// surface — components address by namespace name, never by root.
+    /// The adapter root, used in tests to inspect on-disk state.
+    #[cfg(test)]
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
@@ -87,10 +97,8 @@ impl LocalFileAdapter {
         if path.starts_with('/') {
             return Err(FsError::Forbidden);
         }
-        for component in path.split('/') {
-            if component == ".." {
-                return Err(FsError::Forbidden);
-            }
+        if path.split('/').any(|c| c == "..") {
+            return Err(FsError::Forbidden);
         }
         Ok(self.root.join(path))
     }
@@ -99,14 +107,11 @@ impl LocalFileAdapter {
 impl FileAdapter for LocalFileAdapter {
     fn read(&self, path: &str) -> FsResult<Vec<u8>> {
         let resolved = self.resolve(path)?;
-        match fs::read(&resolved) {
-            Ok(bytes) => Ok(bytes),
-            Err(e) => Err(fs_error_from_std(e)),
-        }
+        fs::read(&resolved).map_err(fs_error_from_std)
     }
 
     fn write(&self, path: &str, bytes: &[u8]) -> FsResult<()> {
-        if !self.writable {
+        if !matches!(self.access, Access::ReadWrite) {
             return Err(FsError::Forbidden);
         }
         let resolved = self.resolve(path)?;
@@ -121,24 +126,18 @@ impl FileAdapter for LocalFileAdapter {
             .to_string();
         tmp.set_file_name(format!("{existing}.tmp-{}", process::id()));
         fs::write(&tmp, bytes).map_err(|e| FsError::AdapterError(e.to_string()))?;
-        match fs::rename(&tmp, &resolved) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let _ = fs::remove_file(&tmp);
-                Err(FsError::AdapterError(e.to_string()))
-            }
-        }
+        fs::rename(&tmp, &resolved).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            FsError::AdapterError(e.to_string())
+        })
     }
 
     fn delete(&self, path: &str) -> FsResult<()> {
-        if !self.writable {
+        if !matches!(self.access, Access::ReadWrite) {
             return Err(FsError::Forbidden);
         }
         let resolved = self.resolve(path)?;
-        match fs::remove_file(&resolved) {
-            Ok(()) => Ok(()),
-            Err(e) => Err(fs_error_from_std(e)),
-        }
+        fs::remove_file(&resolved).map_err(fs_error_from_std)
     }
 
     fn list(&self, prefix: &str) -> FsResult<Vec<String>> {

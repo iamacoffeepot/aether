@@ -11,13 +11,13 @@
 //! `save`-namespace root the `aether.fs` cap already resolves
 //! (`AETHER_SAVE_DIR` → `dirs::data_dir()/aether/save`). The staged
 //! file lands under `gen/` within that root and writes atomically via
-//! the existing [`LocalFileAdapter`] (tmp + rename), so a crash
+//! the existing `LocalFileAdapter` (tmp + rename), so a crash
 //! mid-write leaves no torn file.
 
 use std::env;
 use std::path::{Path, PathBuf};
 
-use crate::fs::FsError;
+use crate::fs::{Access, FsError};
 use uuid::Uuid;
 
 use crate::fs::{FileAdapter, LocalFileAdapter};
@@ -59,7 +59,7 @@ pub fn gen_root() -> PathBuf {
 
 /// Stage `bytes` as a fresh `gen/<uuid>.<ext>` file under the resolved
 /// [`gen_root`] and return the relative path the reply carries. Writes
-/// atomically via the `save`-namespace [`LocalFileAdapter`] (the same
+/// atomically via the `save`-namespace `LocalFileAdapter` (the same
 /// tmp + rename the `aether.fs` cap uses). `ext` is the extension
 /// without the dot (`"png"`, `"wav"`).
 ///
@@ -74,7 +74,7 @@ pub fn stage_gen_output(bytes: &[u8], ext: &str) -> Result<String, FsError> {
 /// env-resolving wrapper; tests pin a scratch root so they never touch
 /// the user's real save dir.
 pub fn stage_gen_output_under(root: &Path, bytes: &[u8], ext: &str) -> Result<String, FsError> {
-    let adapter = LocalFileAdapter::new(root.to_path_buf(), true)
+    let adapter = LocalFileAdapter::new(root.to_path_buf(), Access::ReadWrite)
         .map_err(|e| FsError::AdapterError(e.to_string()))?;
     let path = format!("{GEN_PREFIX}/{}.{ext}", Uuid::new_v4());
     adapter.write(&path, bytes)?;
@@ -84,7 +84,7 @@ pub fn stage_gen_output_under(root: &Path, bytes: &[u8], ext: &str) -> Result<St
 #[cfg(test)]
 mod tests {
     use super::{GEN_PREFIX, stage_gen_output_under};
-    use crate::fs::{FileAdapter, LocalFileAdapter};
+    use crate::fs::{Access, FileAdapter, LocalFileAdapter};
     use crate::test_chassis::{cleanup, scratch_dir};
     use std::path::PathBuf;
 
@@ -102,7 +102,7 @@ mod tests {
         assert_eq!(path.rsplit('.').next(), Some("png"));
         // Read it back through a fresh adapter on the same root — the
         // file exists and the bytes round-trip verbatim.
-        let adapter = LocalFileAdapter::new(root.clone(), true)
+        let adapter = LocalFileAdapter::new(root.clone(), Access::ReadWrite)
             .expect("test setup: adapter constructs on scratch root");
         assert_eq!(
             adapter

@@ -40,10 +40,10 @@ pub use aether_substrate::transform::{FoldError, TransformRegistry};
 /// `pub`-enough to satisfy the `NativeActor::State` interface without
 /// exposing it as crate-public API.
 pub struct FsCapabilityState {
-    pub(super) registry: Arc<AdapterRegistry>,
+    registry: Arc<AdapterRegistry>,
     /// Link-time native-transform registry (ADR-0048 §2). Built once
     /// at `init`; immutable thereafter.
-    pub(super) transforms: TransformRegistry,
+    transforms: TransformRegistry,
 }
 
 pub fn map_fold_error(e: &FoldError) -> FsFoldError {
@@ -95,7 +95,7 @@ impl FsCapabilityState {
     /// `Builder::with_actor::<FsCapability>(roots)` which calls the
     /// generated `Lifecycle::init`; handler-unit tests that want to drive
     /// a handler without a full chassis hand a pre-built registry directly.
-    pub(crate) fn from_registry(registry: Arc<AdapterRegistry>) -> Self {
+    fn from_registry(registry: Arc<AdapterRegistry>) -> Self {
         Self {
             registry,
             transforms: TransformRegistry::from_inventory(),
@@ -387,7 +387,7 @@ impl NativeActor for FsCapability {
 mod tests {
     use super::super::FsCapability;
     use super::super::{
-        AdapterRegistry, Copy, CopyResult, Delete, DeleteResult, FileAdapter, FsError,
+        Access, AdapterRegistry, Copy, CopyResult, Delete, DeleteResult, FileAdapter, FsError,
         LocalFileAdapter, NamespaceAddr, NamespaceRoots, Read, ReadResult, Write, WriteResult,
     };
     use super::FsCapabilityState;
@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn resolve_rejects_parent_traversal() {
         let root = scratch_root("resolve-parent");
-        let a = LocalFileAdapter::new(root.clone(), true)
+        let a = LocalFileAdapter::new(root.clone(), Access::ReadWrite)
             .expect("test setup: LocalFileAdapter constructs on scratch root");
         assert!(matches!(a.read("../etc/passwd"), Err(FsError::Forbidden)));
         assert!(matches!(
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn resolve_rejects_absolute() {
         let root = scratch_root("resolve-abs");
-        let a = LocalFileAdapter::new(root.clone(), true)
+        let a = LocalFileAdapter::new(root.clone(), Access::ReadWrite)
             .expect("test setup: LocalFileAdapter constructs on scratch root");
         assert!(matches!(a.read("/etc/passwd"), Err(FsError::Forbidden)));
         cleanup(&root);
@@ -477,7 +477,7 @@ mod tests {
     #[test]
     fn resolve_permits_dot_segments() {
         let root = scratch_root("resolve-dot");
-        let a = LocalFileAdapter::new(root.clone(), true)
+        let a = LocalFileAdapter::new(root.clone(), Access::ReadWrite)
             .expect("test setup: LocalFileAdapter constructs on scratch root");
         assert!(matches!(a.read("./nonexistent"), Err(FsError::NotFound)));
         cleanup(&root);
@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn read_missing_file_returns_not_found() {
         let root = scratch_root("read-missing");
-        let a = LocalFileAdapter::new(root.clone(), true)
+        let a = LocalFileAdapter::new(root.clone(), Access::ReadWrite)
             .expect("test setup: LocalFileAdapter constructs on scratch root");
         assert!(matches!(a.read("slot.bin"), Err(FsError::NotFound)));
         cleanup(&root);
@@ -495,7 +495,7 @@ mod tests {
     #[test]
     fn write_creates_parent_directories() {
         let root = scratch_root("write-parents");
-        let a = LocalFileAdapter::new(root.clone(), true)
+        let a = LocalFileAdapter::new(root.clone(), Access::ReadWrite)
             .expect("test setup: LocalFileAdapter constructs on scratch root");
         a.write("deep/sub/dir/slot.bin", b"hi")
             .expect("test setup: adapter writes through deep path");
@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn write_is_atomic_no_tmp_left_behind() {
         let root = scratch_root("write-atomic");
-        let a = LocalFileAdapter::new(root.clone(), true)
+        let a = LocalFileAdapter::new(root.clone(), Access::ReadWrite)
             .expect("test setup: LocalFileAdapter constructs on scratch root");
         a.write("slot.bin", &[0u8; 16])
             .expect("test setup: adapter accepts atomic write");
@@ -529,7 +529,7 @@ mod tests {
     #[test]
     fn write_on_read_only_returns_forbidden() {
         let root = scratch_root("write-readonly");
-        let a = LocalFileAdapter::new(root.clone(), false)
+        let a = LocalFileAdapter::new(root.clone(), Access::ReadOnly)
             .expect("test setup: read-only LocalFileAdapter constructs on scratch root");
         assert!(matches!(a.write("x.bin", &[]), Err(FsError::Forbidden)));
         cleanup(&root);
@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn delete_missing_returns_not_found() {
         let root = scratch_root("delete-missing");
-        let a = LocalFileAdapter::new(root.clone(), true)
+        let a = LocalFileAdapter::new(root.clone(), Access::ReadWrite)
             .expect("test setup: LocalFileAdapter constructs on scratch root");
         assert!(matches!(a.delete("ghost.bin"), Err(FsError::NotFound)));
         cleanup(&root);
@@ -547,7 +547,7 @@ mod tests {
     #[test]
     fn delete_removes_file() {
         let root = scratch_root("delete-works");
-        let a = LocalFileAdapter::new(root.clone(), true)
+        let a = LocalFileAdapter::new(root.clone(), Access::ReadWrite)
             .expect("test setup: LocalFileAdapter constructs on scratch root");
         a.write("slot.bin", b"x")
             .expect("test setup: adapter accepts write");
@@ -560,7 +560,7 @@ mod tests {
     #[test]
     fn delete_on_read_only_returns_forbidden() {
         let root = scratch_root("delete-readonly");
-        let a = LocalFileAdapter::new(root.clone(), false)
+        let a = LocalFileAdapter::new(root.clone(), Access::ReadOnly)
             .expect("test setup: read-only LocalFileAdapter constructs on scratch root");
         assert!(matches!(a.delete("x.bin"), Err(FsError::Forbidden)));
         cleanup(&root);
@@ -569,7 +569,7 @@ mod tests {
     #[test]
     fn list_empty_root_returns_empty_vec() {
         let root = scratch_root("list-empty");
-        let a = LocalFileAdapter::new(root.clone(), true)
+        let a = LocalFileAdapter::new(root.clone(), Access::ReadWrite)
             .expect("test setup: LocalFileAdapter constructs on scratch root");
         assert_eq!(
             a.list("").expect("test setup: adapter lists empty root"),
@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn list_returns_sorted_names_at_root() {
         let root = scratch_root("list-root");
-        let a = LocalFileAdapter::new(root.clone(), true)
+        let a = LocalFileAdapter::new(root.clone(), Access::ReadWrite)
             .expect("test setup: LocalFileAdapter constructs on scratch root");
         a.write("c.bin", b"")
             .expect("test setup: adapter accepts c.bin write");
@@ -599,7 +599,7 @@ mod tests {
     #[test]
     fn list_under_subdirectory() {
         let root = scratch_root("list-sub");
-        let a = LocalFileAdapter::new(root.clone(), true)
+        let a = LocalFileAdapter::new(root.clone(), Access::ReadWrite)
             .expect("test setup: LocalFileAdapter constructs on scratch root");
         a.write("saves/slot1.bin", b"")
             .expect("test setup: adapter accepts saves/slot1.bin write");
@@ -617,7 +617,7 @@ mod tests {
     #[test]
     fn list_missing_directory_returns_not_found() {
         let root = scratch_root("list-missing");
-        let a = LocalFileAdapter::new(root.clone(), true)
+        let a = LocalFileAdapter::new(root.clone(), Access::ReadWrite)
             .expect("test setup: LocalFileAdapter constructs on scratch root");
         assert!(matches!(a.list("nope"), Err(FsError::NotFound)));
         cleanup(&root);
@@ -625,9 +625,9 @@ mod tests {
 
     use aether_data::{SessionToken, Uuid};
 
-    fn build_save_only_registry(root: &Path, writable: bool) -> Arc<AdapterRegistry> {
+    fn build_save_only_registry(root: &Path, access: Access) -> Arc<AdapterRegistry> {
         let adapter: Arc<dyn FileAdapter> = Arc::new(
-            LocalFileAdapter::new(root.to_path_buf(), writable)
+            LocalFileAdapter::new(root.to_path_buf(), access)
                 .expect("test setup: LocalFileAdapter constructs on supplied root"),
         );
         let mut r = AdapterRegistry::new();
@@ -687,7 +687,7 @@ mod tests {
     #[test]
     fn cap_read_ok_replies_with_bytes() {
         let root = scratch_root("cap-read");
-        let reg = build_save_only_registry(&root, true);
+        let reg = build_save_only_registry(&root, Access::ReadWrite);
         reg.get("save")
             .expect("test setup: save adapter is registered")
             .write("slot.bin", &[9, 9, 9])
@@ -720,7 +720,7 @@ mod tests {
     #[test]
     fn cap_read_unknown_namespace_replies_err() {
         let root = scratch_root("cap-ns");
-        let reg = build_save_only_registry(&root, true);
+        let reg = build_save_only_registry(&root, Access::ReadWrite);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
         let result = FsCapability::on_read(
@@ -748,7 +748,7 @@ mod tests {
     #[test]
     fn cap_read_not_found_replies_err() {
         let root = scratch_root("cap-nf");
-        let reg = build_save_only_registry(&root, true);
+        let reg = build_save_only_registry(&root, Access::ReadWrite);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
         let result = FsCapability::on_read(
@@ -772,7 +772,7 @@ mod tests {
     #[test]
     fn cap_write_ok_persists_bytes() {
         let root = scratch_root("cap-write");
-        let reg = build_save_only_registry(&root, true);
+        let reg = build_save_only_registry(&root, Access::ReadWrite);
         let reg_clone = Arc::clone(&reg);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
@@ -806,7 +806,7 @@ mod tests {
     #[test]
     fn cap_write_read_only_namespace_replies_forbidden() {
         let root = scratch_root("cap-ro");
-        let reg = build_save_only_registry(&root, false);
+        let reg = build_save_only_registry(&root, Access::ReadOnly);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
         let result = FsCapability::on_write(
@@ -831,7 +831,7 @@ mod tests {
     #[test]
     fn cap_delete_then_read_surfaces_not_found() {
         let root = scratch_root("cap-del");
-        let reg = build_save_only_registry(&root, true);
+        let reg = build_save_only_registry(&root, Access::ReadWrite);
         let reg_clone = Arc::clone(&reg);
         reg.get("save")
             .expect("test setup: save adapter is registered")
@@ -878,13 +878,13 @@ mod tests {
     // Reach for the in-bundle integration suite if a future change
     // wants the full WAT roundtrip back as targeted coverage.
 
-    fn build_two_namespace_registry(root: &Path, save_writable: bool) -> Arc<AdapterRegistry> {
+    fn build_two_namespace_registry(root: &Path, save_access: Access) -> Arc<AdapterRegistry> {
         let save_adapter: Arc<dyn FileAdapter> = Arc::new(
-            LocalFileAdapter::new(root.join("save"), save_writable)
+            LocalFileAdapter::new(root.join("save"), save_access)
                 .expect("test setup: save LocalFileAdapter constructs"),
         );
         let assets_adapter: Arc<dyn FileAdapter> = Arc::new(
-            LocalFileAdapter::new(root.join("assets"), false)
+            LocalFileAdapter::new(root.join("assets"), Access::ReadOnly)
                 .expect("test setup: assets LocalFileAdapter constructs"),
         );
         let mut r = AdapterRegistry::new();
@@ -893,7 +893,7 @@ mod tests {
         Arc::new(r)
     }
 
-    fn ensure_ns_dirs(root: &Path) {
+    fn ensure_namespace_dirs(root: &Path) {
         fs::create_dir_all(root.join("save")).expect("test setup: save dir creates");
         fs::create_dir_all(root.join("assets")).expect("test setup: assets dir creates");
     }
@@ -901,10 +901,10 @@ mod tests {
     #[test]
     fn cap_copy_host_to_save_roundtrip() {
         let root = scratch_root("cap-copy-ok");
-        ensure_ns_dirs(&root);
+        ensure_namespace_dirs(&root);
         let src = root.join("source.bin");
         fs::write(&src, b"\x0a\x14\x1e").expect("test setup: write source file");
-        let reg = build_save_only_registry(&root.join("save"), true);
+        let reg = build_save_only_registry(&root.join("save"), Access::ReadWrite);
         let reg_clone = Arc::clone(&reg);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
@@ -941,10 +941,10 @@ mod tests {
     #[test]
     fn cap_copy_unknown_destination_namespace_replies_unknown_namespace() {
         let root = scratch_root("cap-copy-unknown-ns");
-        ensure_ns_dirs(&root);
+        ensure_namespace_dirs(&root);
         let src = root.join("source.bin");
         fs::write(&src, b"y").expect("test setup: write source file");
-        let reg = build_save_only_registry(&root.join("save"), true);
+        let reg = build_save_only_registry(&root.join("save"), Access::ReadWrite);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
         let result = FsCapability::on_copy(
@@ -974,8 +974,8 @@ mod tests {
     #[test]
     fn cap_copy_missing_host_from_replies_not_found() {
         let root = scratch_root("cap-copy-missing-src");
-        ensure_ns_dirs(&root);
-        let reg = build_save_only_registry(&root.join("save"), true);
+        ensure_namespace_dirs(&root);
+        let reg = build_save_only_registry(&root.join("save"), Access::ReadWrite);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
         let result = FsCapability::on_copy(
@@ -1008,10 +1008,10 @@ mod tests {
     #[test]
     fn cap_copy_to_path_traversal_replies_forbidden() {
         let root = scratch_root("cap-copy-traversal");
-        ensure_ns_dirs(&root);
+        ensure_namespace_dirs(&root);
         let src = root.join("source.bin");
         fs::write(&src, b"z").expect("test setup: write source file");
-        let reg = build_save_only_registry(&root.join("save"), true);
+        let reg = build_save_only_registry(&root.join("save"), Access::ReadWrite);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
         let result = FsCapability::on_copy(
@@ -1124,7 +1124,7 @@ mod tests {
         let assets = root.join("assets");
         fs::create_dir_all(&assets).expect("test setup: assets dir creates");
         fs::write(assets.join("data.bin"), b"raw payload").expect("test setup: seed data.bin");
-        let reg = build_two_namespace_registry(&root, true);
+        let reg = build_two_namespace_registry(&root, Access::ReadWrite);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
         let result = FsCapability::on_fetch(
@@ -1161,7 +1161,7 @@ mod tests {
     #[test]
     fn on_fetch_unknown_namespace_returns_unknown_namespace() {
         let root = scratch_root("fetch-ns-unknown");
-        let reg = build_save_only_registry(&root, true);
+        let reg = build_save_only_registry(&root, Access::ReadWrite);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
         let result = FsCapability::on_fetch(
@@ -1199,7 +1199,7 @@ mod tests {
         let encoded = input.encode_into_bytes();
         fs::write(assets.join("number.bin"), &encoded).expect("test setup: seed number.bin");
 
-        let reg = build_two_namespace_registry(&root, true);
+        let reg = build_two_namespace_registry(&root, Access::ReadWrite);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
         let double_id = double_fs_transform_id();
@@ -1245,7 +1245,7 @@ mod tests {
         let assets = root.join("assets");
         fs::create_dir_all(&assets).expect("test setup: assets dir creates");
         fs::write(assets.join("data.bin"), b"ignored").expect("test setup: seed data.bin");
-        let reg = build_two_namespace_registry(&root, true);
+        let reg = build_two_namespace_registry(&root, Access::ReadWrite);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
 
@@ -1288,7 +1288,7 @@ mod tests {
         let assets = root.join("assets");
         fs::create_dir_all(&assets).expect("test setup: assets dir creates");
         fs::write(assets.join("garbage.bin"), [0xFF_u8]).expect("test setup: seed garbage.bin");
-        let reg = build_two_namespace_registry(&root, true);
+        let reg = build_two_namespace_registry(&root, Access::ReadWrite);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
         let double_id = double_fs_transform_id();
@@ -1323,7 +1323,7 @@ mod tests {
         let input = TestNumber { value: 1, tag: 0 };
         let encoded = input.encode_into_bytes();
         fs::write(assets.join("number.bin"), &encoded).expect("test setup: seed number.bin");
-        let reg = build_two_namespace_registry(&root, true);
+        let reg = build_two_namespace_registry(&root, Access::ReadWrite);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
         let boom_id = boom_fs_transform_id();
