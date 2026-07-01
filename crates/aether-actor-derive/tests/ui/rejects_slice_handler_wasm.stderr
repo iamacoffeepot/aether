@@ -1,0 +1,13 @@
+error: `&[K]` slice/batch handlers are native-only; a wasm `#[handler]` takes a single `arg: K` per mail
+  --> tests/ui/rejects_slice_handler_wasm.rs:35:58
+   |
+35 |     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _mail: &[Ping]) {}
+   |                                                          ^^^^^^^
+
+warning: unused import: `WasmCtx`
+ --> tests/ui/rejects_slice_handler_wasm.rs:7:20
+  |
+7 | use aether_actor::{WasmCtx, actor};
+  |                    ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

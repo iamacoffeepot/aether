@@ -1,0 +1,11 @@
+error: #[handler(task)] always uses the single reply class; drop the class marker — task replies go through `TaskDone`, not the handler class
+  --> tests/ui/rejects_manual_task_handler_native.rs:30:5
+   |
+30 | /     fn on_done(
+31 | |         &mut self,
+32 | |         ctx: &mut aether_substrate::actor::native::NativeCtx<'_>,
+33 | |         done: aether_substrate::actor::native::TaskDone<Reply>,
+34 | |     ) {
+35 | |         done.resolve(ctx);
+36 | |     }
+   | |_____^

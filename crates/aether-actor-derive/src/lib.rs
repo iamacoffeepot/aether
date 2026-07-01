@@ -568,29 +568,56 @@ fn is_vec_u8(ty: &Type) -> bool {
 /// `Vec<HashMap<String, String>>` and `Option<HashMap<...>>` are
 /// caught too — the nested case would otherwise pass through trait
 /// dispatch and emit a less actionable "trait `Schema` not
-/// implemented" error pointing at the inner `HashMap`.
+/// implemented" error pointing at the inner `HashMap`. The walk is
+/// total: it also recurses through array, slice, reference, tuple,
+/// paren, and group positions so a `HashMap` hidden inside `[_; N]`,
+/// `&[_]`, or `(_, _)` earns the same pointed error rather than the
+/// opaque downstream one. A set type (`HashSet`/`BTreeSet`) has no
+/// `Schema` impl at all, so it is rejected here too with a redirect to
+/// a sorted `Vec<T>`.
 fn reject_hashmap(ty: &Type) -> syn::Result<()> {
-    if let Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last()
-            && seg.ident == "HashMap"
-        {
-            return Err(syn::Error::new_spanned(
-                ty,
-                "HashMap is not allowed in derived kind schemas — its iteration order is \
-                 platform-dependent and would diverge canonical schema bytes (and Kind::ID) \
-                 across builds. Use `std::collections::BTreeMap` instead, which sorts by key. \
-                 See https://github.com/iamacoffeepot/aether/issues/232",
-            ));
-        }
-        for seg in &tp.path.segments {
-            if let PathArguments::AngleBracketed(args) = &seg.arguments {
-                for arg in &args.args {
-                    if let GenericArgument::Type(inner) = arg {
-                        reject_hashmap(inner)?;
+    match ty {
+        Type::Path(tp) => {
+            if let Some(seg) = tp.path.segments.last() {
+                if seg.ident == "HashMap" {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        "HashMap is not allowed in derived kind schemas — its iteration order is \
+                         platform-dependent and would diverge canonical schema bytes (and Kind::ID) \
+                         across builds. Use `std::collections::BTreeMap` instead, which sorts by key. \
+                         See https://github.com/iamacoffeepot/aether/issues/232",
+                    ));
+                }
+                if seg.ident == "HashSet" || seg.ident == "BTreeSet" {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        "a set has no `Schema` impl and is not allowed in derived kind schemas — \
+                         model it as a sorted `Vec<T>`, which encodes deterministically. \
+                         See https://github.com/iamacoffeepot/aether/issues/232",
+                    ));
+                }
+            }
+            for seg in &tp.path.segments {
+                if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                    for arg in &args.args {
+                        if let GenericArgument::Type(inner) = arg {
+                            reject_hashmap(inner)?;
+                        }
                     }
                 }
             }
         }
+        Type::Array(a) => reject_hashmap(&a.elem)?,
+        Type::Slice(s) => reject_hashmap(&s.elem)?,
+        Type::Reference(r) => reject_hashmap(&r.elem)?,
+        Type::Paren(p) => reject_hashmap(&p.elem)?,
+        Type::Group(g) => reject_hashmap(&g.elem)?,
+        Type::Tuple(t) => {
+            for elem in &t.elems {
+                reject_hashmap(elem)?;
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -917,7 +944,7 @@ pub fn handler(_attr: TokenStream, _item: TokenStream) -> TokenStream {
     // macro expansion and so rust-analyzer doesn't redline it.
     syn::Error::new(
         proc_macro2::Span::call_site(),
-        "#[handler] may only appear inside a `#[actor] impl WasmActor for T` block",
+        "#[handler] may only appear inside a `#[actor]` impl block",
     )
     .to_compile_error()
     .into()
@@ -930,7 +957,7 @@ pub fn fallback(_attr: TokenStream, _item: TokenStream) -> TokenStream {
     // compile-time error.
     syn::Error::new(
         proc_macro2::Span::call_site(),
-        "#[fallback] may only appear inside a `#[actor] impl WasmActor for T` block",
+        "#[fallback] may only appear inside a `#[actor]` impl block",
     )
     .to_compile_error()
     .into()
@@ -2128,6 +2155,20 @@ fn expand_native_actor_trait(
                             });
                         }
                         HandlerVariant::Task => {
+                            // A task handler always dispatches with the `Single`
+                            // reply class — the completion reply rides `TaskDone`,
+                            // not the handler class — so the `NativeActorTaskHandlerFn`
+                            // carries no class field and any non-`Single` marker
+                            // (e.g. `#[handler::manual(task)]`) would be silently
+                            // discarded. Reject it at the boundary instead.
+                            if class != HandlerClass::Single {
+                                return Err(syn::Error::new_spanned(
+                                    &f,
+                                    "#[handler(task)] always uses the single reply class; \
+                                     drop the class marker — task replies go through \
+                                     `TaskDone`, not the handler class",
+                                ));
+                            }
                             let (output_ty, context_ty, is_borrow) =
                                 extract_task_handler_types(&f.sig, is_split)?;
                             let mode = classify_task_reply_mode(&f.sig, is_borrow)?;
@@ -3330,7 +3371,7 @@ fn extract_handler_kind_type(sig: &Signature) -> syn::Result<Type> {
     if !matches!(first, FnArg::Receiver(_)) {
         return Err(syn::Error::new_spanned(
             first,
-            "#[handler] first parameter must be `&mut self`",
+            "#[handler] first parameter must be `&self` or `&mut self`",
         ));
     }
     let third = &sig.inputs[2];
@@ -3340,6 +3381,21 @@ fn extract_handler_kind_type(sig: &Signature) -> syn::Result<Type> {
             "#[handler] third parameter must be a typed `arg: K`",
         ));
     };
+    // `&[K]` slice/batch handlers are native-only: the wasm dispatcher
+    // decodes a single `K` per mail, so an `impl HandlesKind<&[K]>` /
+    // `decode_kind::<&[K]>()` would be emitted and fail to compile.
+    // Reject at the boundary with a pointed message rather than letting
+    // the opaque codegen error surface. (The native extractor accepts
+    // this shape — see `extract_native_actor_handler_kind`.)
+    if let Type::Reference(type_ref) = &*pt.ty
+        && let Type::Slice(_) = &*type_ref.elem
+    {
+        return Err(syn::Error::new_spanned(
+            &pt.ty,
+            "`&[K]` slice/batch handlers are native-only; a wasm `#[handler]` \
+             takes a single `arg: K` per mail",
+        ));
+    }
     Ok((*pt.ty).clone())
 }
 
@@ -3418,7 +3474,7 @@ fn validate_fallback_sig(sig: &Signature) -> syn::Result<()> {
     if !matches!(first, FnArg::Receiver(_)) {
         return Err(syn::Error::new_spanned(
             first,
-            "#[fallback] first parameter must be `&mut self`",
+            "#[fallback] first parameter must be `&self` or `&mut self`",
         ));
     }
     let third = &sig.inputs[2];
@@ -4036,6 +4092,52 @@ mod tests {
     }
 
     #[test]
+    fn rejects_hashmap_in_array() {
+        let msg = err("[HashMap<String, u32>; 4]");
+        assert!(msg.contains("BTreeMap"));
+        assert!(msg.contains("232"));
+    }
+
+    #[test]
+    fn rejects_hashmap_in_tuple() {
+        let msg = err("(u32, HashMap<String, u32>)");
+        assert!(msg.contains("BTreeMap"));
+        assert!(msg.contains("232"));
+    }
+
+    #[test]
+    fn rejects_hashmap_behind_slice_ref() {
+        let msg = err("&[HashMap<String, u32>]");
+        assert!(msg.contains("BTreeMap"));
+        assert!(msg.contains("232"));
+    }
+
+    #[test]
+    fn rejects_hashmap_behind_ref() {
+        let msg = err("&HashMap<String, u32>");
+        assert!(msg.contains("BTreeMap"));
+        assert!(msg.contains("232"));
+    }
+
+    #[test]
+    fn rejects_hashset() {
+        let msg = err("HashSet<u64>");
+        assert!(
+            msg.contains("Vec"),
+            "error must redirect to a sorted Vec, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_btreeset() {
+        let msg = err("BTreeSet<u64>");
+        assert!(
+            msg.contains("Vec"),
+            "error must redirect to a sorted Vec, got: {msg}"
+        );
+    }
+
+    #[test]
     fn allows_btreemap_field() {
         let parsed: syn::Type =
             parse_str("BTreeMap<String, String>").expect("test setup: BTreeMap type parses");
@@ -4044,13 +4146,7 @@ mod tests {
 
     #[test]
     fn allows_plain_types() {
-        for ty in [
-            "u32",
-            "String",
-            "Vec<u8>",
-            "Option<String>",
-            "BTreeSet<u64>",
-        ] {
+        for ty in ["u32", "String", "Vec<u8>", "Option<String>"] {
             let parsed: syn::Type =
                 parse_str(ty).expect("test setup: candidate type parses as syn::Type");
             assert!(

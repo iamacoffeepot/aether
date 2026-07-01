@@ -794,7 +794,7 @@ impl NativeActor for AudioCapability {
     /// PCM into the track lane and reply `Ok`; on a decode failure
     /// reply `Err`. Either way `resolve_with` re-replies through the
     /// captured `play_track` caller and drops the hold.
-    #[handler::manual(task)]
+    #[handler(task)]
     fn on_track_decoded(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -919,7 +919,7 @@ impl NativeActor for AudioCapability {
     /// and reply `Ok` with the id / name / resident bytes; on a decode
     /// failure reply `Err`. Either way `resolve_with` re-replies through
     /// the captured `load_instrument` caller and drops the hold.
-    #[handler::manual(task)]
+    #[handler(task)]
     fn on_instrument_assembled(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
