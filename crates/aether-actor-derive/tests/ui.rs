@@ -76,4 +76,12 @@ fn ui() {
     t.compile_fail("tests/ui/rejects_struct_missing_runtime.rs");
     t.compile_fail("tests/ui/rejects_struct_no_handler.rs");
     t.compile_fail("tests/ui/rejects_struct_no_namespace.rs");
+    // Issue #2460: sharpen the handler-shape diagnostics. A `&[K]` slice
+    // handler is native-only (the wasm dispatcher decodes a single `K`),
+    // a non-`Single` class on a `#[handler(task)]` is discarded so it is
+    // rejected, and a wasm `#[handler]`'s non-`self` first param earns the
+    // generalized `&self` or `&mut self` diagnostic.
+    t.compile_fail("tests/ui/rejects_slice_handler_wasm.rs");
+    t.compile_fail("tests/ui/rejects_manual_task_handler_native.rs");
+    t.compile_fail("tests/ui/rejects_nonself_handler_wasm.rs");
 }
