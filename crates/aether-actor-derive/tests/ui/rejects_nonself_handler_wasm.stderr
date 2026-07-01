@@ -1,0 +1,13 @@
+error: #[handler] first parameter must be `&self` or `&mut self`
+  --> tests/ui/rejects_nonself_handler_wasm.rs:35:16
+   |
+35 |     fn on_ping(_state: u32, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}
+   |                ^^^^^^^^^^^
+
+warning: unused import: `WasmCtx`
+ --> tests/ui/rejects_nonself_handler_wasm.rs:7:20
+  |
+7 | use aether_actor::{WasmCtx, actor};
+  |                    ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
