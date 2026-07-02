@@ -41,20 +41,20 @@ pub use aether_substrate::chassis::error::BootError;
 /// Living in this private module keeps it `pub`-enough to satisfy the
 /// `NativeActor::State` interface without exposing it as crate-public API.
 pub struct GeminiCapabilityState {
-    pub(super) adapter: Arc<dyn GeminiAdapter>,
-    pub(super) tasks: TaskQueue,
+    pub adapter: Arc<dyn GeminiAdapter>,
+    pub tasks: TaskQueue,
 }
 
 #[cfg(test)]
 impl GeminiCapabilityState {
-    pub(crate) fn from_parts(adapter: Arc<dyn GeminiAdapter>, max_in_flight: usize) -> Self {
+    fn from_parts(adapter: Arc<dyn GeminiAdapter>, max_in_flight: usize) -> Self {
         Self {
             adapter,
             tasks: TaskQueue::new(max_in_flight),
         }
     }
 
-    pub(crate) fn test_in_flight(&self) -> usize {
+    fn test_in_flight(&self) -> usize {
         self.tasks.in_flight()
     }
 }

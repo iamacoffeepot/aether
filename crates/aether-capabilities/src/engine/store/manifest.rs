@@ -76,10 +76,7 @@ pub struct StoredArtifact {
 }
 
 /// Whether a binary manifest passes a [`ListEngineBinaries`] filter.
-pub(super) fn matches_binary_filter(
-    manifest: &BinaryManifest,
-    filter: &ListEngineBinaries,
-) -> bool {
+pub fn matches_binary_filter(manifest: &BinaryManifest, filter: &ListEngineBinaries) -> bool {
     if let Some(chassis) = &filter.chassis
         && &manifest.chassis != chassis
     {
@@ -97,7 +94,7 @@ pub(super) fn matches_binary_filter(
 /// (ADR-0116): the optional `namespace` must be one of the exported actor
 /// namespaces, and the optional `handled_kind` must be in the manifest's
 /// handled-kind union. Each absent field is "no constraint".
-pub(super) fn matches_component_filter(
+pub fn matches_component_filter(
     manifest: &ComponentManifest,
     filter: &ListComponentBinaries,
 ) -> bool {

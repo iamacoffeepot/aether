@@ -18,12 +18,12 @@ use aether_substrate::render::{
 /// `RenderGpu` `OnceLock` isn't filled until the chassis driver boots
 /// the GPU). `dirty` flags staging that the GPU copy hasn't caught up
 /// to yet — the next record re-uploads the whole texture.
-pub(in crate::render) struct StagedTexture {
-    pub(in crate::render) width: u32,
-    pub(in crate::render) height: u32,
-    pub(in crate::render) pixels: Vec<u8>,
-    pub(in crate::render) realized: Option<RealizedTexture>,
-    pub(in crate::render) dirty: bool,
+pub struct StagedTexture {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+    pub realized: Option<RealizedTexture>,
+    pub dirty: bool,
 }
 
 impl StagedTexture {
@@ -32,7 +32,7 @@ impl StagedTexture {
     /// Returns `false` without touching the buffer if the rect is
     /// out of bounds, has a zero dimension, or `pixels` isn't exactly
     /// `width * height * 4` bytes — the caller logs and drops.
-    pub(in crate::render) fn apply_subrect(
+    pub fn apply_subrect(
         &mut self,
         x: u32,
         y: u32,
@@ -68,7 +68,7 @@ impl StagedTexture {
     /// staged pixels if `update_texture` dirtied them since the last
     /// record. Runs at record time on the driver thread, where a
     /// device + queue are available.
-    pub(in crate::render) fn ensure_realized(
+    pub fn ensure_realized(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -99,19 +99,19 @@ impl StagedTexture {
 /// increments, so `u32::MAX` is outside the range any caller-visible id
 /// occupies — the white texture is never handed to a caller and never
 /// collides with a user-created texture.
-pub(in crate::render) const WHITE_TEXTURE_ID: u32 = u32::MAX;
+pub const WHITE_TEXTURE_ID: u32 = u32::MAX;
 
 /// Session-scoped texture registry. `next_id` hands out the
 /// `texture_id` a `create_texture` reply carries — assigned in
 /// sequence the same way ADR-0103 assigns instrument ids, so ids are
 /// stable for the session and depend only on creation order.
-pub(in crate::render) struct TextureRegistry {
-    pub(in crate::render) next_id: u32,
-    pub(in crate::render) entries: HashMap<u32, StagedTexture>,
+pub struct TextureRegistry {
+    pub next_id: u32,
+    pub entries: HashMap<u32, StagedTexture>,
 }
 
 impl TextureRegistry {
-    pub(in crate::render) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             next_id: 0,
             entries: HashMap::new(),
@@ -123,7 +123,7 @@ impl TextureRegistry {
 /// dimensions are zero or the product overflows `usize`. Shared by the
 /// `create_texture` validation and the `update_texture` sub-rect
 /// check.
-pub(in crate::render) fn expected_pixel_bytes(width: u32, height: u32) -> Option<usize> {
+pub fn expected_pixel_bytes(width: u32, height: u32) -> Option<usize> {
     if width == 0 || height == 0 {
         return None;
     }

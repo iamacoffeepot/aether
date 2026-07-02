@@ -52,7 +52,7 @@ impl AnthropicCapabilityState {
     /// Test-only constructor. Production boots through
     /// `Builder::with_actor::<AnthropicCapability>(config)`; tests
     /// hand in a stub adapter directly.
-    pub(crate) fn from_parts(adapter: Arc<dyn AnthropicAdapter>, max_in_flight: usize) -> Self {
+    fn from_parts(adapter: Arc<dyn AnthropicAdapter>, max_in_flight: usize) -> Self {
         Self {
             adapter,
             tasks: TaskQueue::new(max_in_flight),
@@ -62,7 +62,7 @@ impl AnthropicCapabilityState {
     /// White-box accessor for tests asserting the queue's in-flight
     /// counter (e.g. that a synchronous validation error never spawned
     /// work).
-    pub(crate) fn test_in_flight(&self) -> usize {
+    fn test_in_flight(&self) -> usize {
         self.tasks.in_flight()
     }
 }

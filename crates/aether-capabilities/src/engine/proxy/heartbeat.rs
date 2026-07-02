@@ -19,7 +19,7 @@ use std::time::Duration;
 /// the RPC reader uses. `Drop` disconnects the channel (so the
 /// thread's `recv_timeout` returns `Disconnected` and it breaks)
 /// then joins, mirroring `RpcReaderHandle`'s orderly teardown.
-pub(super) struct HeartbeatHandle {
+pub struct HeartbeatHandle {
     stop: Option<mpsc::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }

@@ -52,20 +52,20 @@ pub struct RenderHandles {
     pub triangles_rendered: Arc<AtomicU64>,
     pub camera_state: Arc<Mutex<[f32; 16]>>,
     /// Per-frame textured-quad accumulator (ADR-0105). `on_draw_
-    /// textured_quads` pushes a [`QuadBatch`] here; `record_overlay_
+    /// textured_quads` pushes a `QuadBatch` here; `record_overlay_
     /// pass` consumes by swapping with `quad_last_submitted` — the
     /// same immediate-mode cache the triangle path uses, so a
     /// `TestBench::capture` replays the last committed quads.
-    pub(in crate::render) quad_frame: Arc<Mutex<Vec<QuadBatch>>>,
+    pub quad_frame: Arc<Mutex<Vec<QuadBatch>>>,
     /// Most-recently-rendered quad batches, kept across frames so an
     /// idle `capture` (no producer this frame) replays them, matching
     /// `last_submitted`'s role for triangles.
-    pub(in crate::render) quad_last_submitted: Arc<Mutex<Vec<QuadBatch>>>,
+    pub quad_last_submitted: Arc<Mutex<Vec<QuadBatch>>>,
     /// Session-scoped texture registry: staged CPU pixels + lazily-
     /// realized GPU textures. Written by the cap dispatcher thread
     /// (`create_texture` / `update_texture`), realized + read by the
     /// driver thread at record time.
-    pub(in crate::render) textures: Arc<Mutex<TextureRegistry>>,
+    pub textures: Arc<Mutex<TextureRegistry>>,
     /// wgpu state, installed post-cap-construction by the driver via
     /// [`Self::install_gpu`]. Boots empty because winit 0.30's
     /// `ActiveEventLoop::create_window` only fires inside `resumed`,
@@ -74,7 +74,7 @@ pub struct RenderHandles {
     /// in its `resumed` handler. Encoder-level methods panic if
     /// called before install — in practice every code path that
     /// calls them runs after the install site.
-    pub(in crate::render) gpu: Arc<OnceLock<RenderGpu>>,
+    pub gpu: Arc<OnceLock<RenderGpu>>,
 }
 
 /// Commit a frame's live accumulator into its cache, the shared

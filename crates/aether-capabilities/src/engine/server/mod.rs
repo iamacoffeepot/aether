@@ -120,7 +120,7 @@ mod runtime;
 /// `mailer.push` and observe what it replied. Lives at file root (not
 /// nested in `mod tests`) so the `#[actor]` macro's marker emission
 /// stays addressable.
-// `pub` (not `pub(crate)`) because it's the `NativeActor::Config` of
+// `pub` rather than private because it's the `NativeActor::Config` of
 // the test `ReplySink` below, and the `#[actor]` macro's trait impl is
 // fully public — `#[cfg(test)]` keeps it out of the real public API.
 #[cfg(test)]

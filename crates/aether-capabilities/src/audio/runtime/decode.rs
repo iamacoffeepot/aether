@@ -126,7 +126,7 @@ fn downmix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
 /// load-time resample ratio; [`decode_wav_to_mono`] consumes the same
 /// header but only returns the resampled PCM. Parses the header chunk
 /// only — the sample data is not read.
-pub(super) fn wav_source_rate(bytes: &[u8]) -> Result<u32, String> {
+pub fn wav_source_rate(bytes: &[u8]) -> Result<u32, String> {
     let reader = hound::WavReader::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let rate = reader.spec().sample_rate;
     if rate == 0 {
@@ -179,7 +179,7 @@ fn resample_linear(mono: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32>
     clippy::unwrap_used,
     reason = "test-setup unwrap: in-memory WAV fixtures never fail to encode"
 )]
-pub(super) fn wav_int16_mono(samples: &[f32], rate: u32) -> Vec<u8> {
+pub fn wav_int16_mono(samples: &[f32], rate: u32) -> Vec<u8> {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate: rate,

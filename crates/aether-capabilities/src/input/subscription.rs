@@ -70,8 +70,8 @@ mod runtime {
     /// `Mutex` / `Arc<Atomic*>` is needed. The addressing identity is the
     /// distinct ZST `InputCapability`.
     pub struct InputCapabilityState {
-        pub(super) registry: Arc<Registry>,
-        pub(super) subscribers: HashMap<KindId, BTreeSet<MailboxId>>,
+        pub registry: Arc<Registry>,
+        pub subscribers: HashMap<KindId, BTreeSet<MailboxId>>,
     }
 
     impl InputCapabilityState {
@@ -81,7 +81,7 @@ mod runtime {
         /// `inherited_root` — the trace observer sees N children
         /// fanning out under the same parent edge (ADR-0080 §6,
         /// issue iamacoffeepot/aether#723).
-        pub(super) fn fanout<K: Kind>(&self, ctx: &mut NativeCtx<'_>, payload: &K) {
+        pub fn fanout<K: Kind>(&self, ctx: &mut NativeCtx<'_>, payload: &K) {
             let Some(subs) = self.subscribers.get(&K::ID) else {
                 return;
             };
@@ -98,10 +98,7 @@ mod runtime {
     /// only address trampoline mailboxes here, but accepting `Sink`
     /// too keeps the check from rejecting legitimate sync-handler
     /// subscribers if any future driver wants one.
-    pub(super) fn validate_subscriber_mailbox(
-        registry: &Registry,
-        id: MailboxId,
-    ) -> Result<(), String> {
+    pub fn validate_subscriber_mailbox(registry: &Registry, id: MailboxId) -> Result<(), String> {
         match registry.entry(id) {
             Some(MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)) => Ok(()),
             Some(MailboxEntry::Dropped) => Err(format!("mailbox {id:?} already dropped")),

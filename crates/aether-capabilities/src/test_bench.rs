@@ -100,6 +100,6 @@ mod runtime {
     /// `pub`-enough to satisfy the `NativeActor::State` interface without
     /// exposing it as crate-public API.
     pub struct UnsupportedTestBenchCapabilityState {
-        pub(super) outbound: Arc<HubOutbound>,
+        pub outbound: Arc<HubOutbound>,
     }
 }

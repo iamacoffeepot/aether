@@ -23,7 +23,7 @@
 // Sibling / cap-level types named by the state, the helpers, and the
 // `#[runtime] impl NativeActor` block below, reached through the parent
 // module. `super::` works because `runtime` is a descendant of `server` (the
-// parent's private `use` aliases + the `pub(super)` connection items are
+// parent's private `use` aliases + the `pub` connection items are
 // visible to it). `RpcServerConfig` is named by `init`'s signature; the cap
 // struct `RpcServerCapability` is the impl's `Self` type.
 use super::connection::{ConnId, ConnState, InboundEvent, run_reader_loop};
@@ -72,12 +72,12 @@ pub struct RpcServerHandle {
 /// `correlation_id` (== `MailId.correlation_id` of the dispatched
 /// envelope, which is also the root id since we always dispatch
 /// as chassis-root via `send_envelope_as_root`). Fields are
-/// `pub(super)` so the parent's `on_settled` / `on_any` handlers can
+/// `pub` so the parent's `on_settled` / `on_any` handlers can
 /// read them after `remove` / `get`.
 #[derive(Copy, Clone)]
-pub(super) struct InFlight {
-    pub(super) conn_id: ConnId,
-    pub(super) wire_cid: u64,
+pub struct InFlight {
+    pub conn_id: ConnId,
+    pub wire_cid: u64,
 }
 
 /// `aether.rpc.server` runtime state (ADR-0122 split). Owns one TCP
@@ -87,10 +87,10 @@ pub(super) struct InFlight {
 /// [`RpcServerCapability`](super::RpcServerCapability). Living in this
 /// private module keeps it `pub`-enough to satisfy the `NativeActor::State`
 /// interface without exposing it as crate-public API; fields are
-/// `pub(super)` so the parent's handlers / `init` / `unwire` reach them.
+/// `pub` so the parent's handlers / `init` / `unwire` reach them.
 pub struct RpcServerState {
-    pub(super) peer_kind: PeerKind,
-    pub(super) self_mailbox: MailboxId,
+    pub peer_kind: PeerKind,
+    pub self_mailbox: MailboxId,
     /// Cached `Arc<Mailer>` so per-handler ctxs (`NativeCtx`,
     /// which doesn't expose `mailer()`) can fire wake mails into
     /// the cap from internal helpers — and so the `Call`
@@ -98,23 +98,23 @@ pub struct RpcServerState {
     /// `subscribe_settlement_mail`. Init grabs it from
     /// `NativeInitCtx::mailer()`; the cap is single-threaded
     /// post-ADR-0038 so direct storage is fine.
-    pub(super) mailer: Arc<Mailer>,
-    pub(super) listener_port: u16,
-    pub(super) accept_shutdown: Arc<AtomicBool>,
-    pub(super) accept_thread: Option<JoinHandle<()>>,
-    pub(super) inbound_rx: mpsc::Receiver<InboundEvent>,
-    pub(super) inbound_tx: mpsc::Sender<InboundEvent>,
-    pub(super) connections: HashMap<ConnId, ConnState>,
-    pub(super) next_conn_id: ConnId,
+    pub mailer: Arc<Mailer>,
+    pub listener_port: u16,
+    pub accept_shutdown: Arc<AtomicBool>,
+    pub accept_thread: Option<JoinHandle<()>>,
+    pub inbound_rx: mpsc::Receiver<InboundEvent>,
+    pub inbound_tx: mpsc::Sender<InboundEvent>,
+    pub connections: HashMap<ConnId, ConnState>,
+    pub next_conn_id: ConnId,
     /// Internal-correlation → connection / wire-cid. Populated on
     /// `Call { cid: Some(n) }` dispatch; cleared on settlement.
-    pub(super) in_flight: HashMap<u64, InFlight>,
+    pub in_flight: HashMap<u64, InFlight>,
 }
 
 impl RpcServerState {
     /// Allocate a fresh `ConnId`, store the connection's write half,
     /// spin a reader thread for the read half.
-    pub(super) fn spawn_reader_for_peer(
+    pub fn spawn_reader_for_peer(
         &mut self,
         _ctx: &mut NativeCtx<'_>,
         stream: TcpStream,
@@ -191,12 +191,7 @@ impl RpcServerState {
     }
 
     /// Dispatch one incoming frame.
-    pub(super) fn dispatch_frame(
-        &mut self,
-        ctx: &mut NativeCtx<'_>,
-        conn_id: ConnId,
-        frame: WireFrame,
-    ) {
+    pub fn dispatch_frame(&mut self, ctx: &mut NativeCtx<'_>, conn_id: ConnId, frame: WireFrame) {
         match frame {
             WireFrame::Hello(hello) => self.handle_hello(conn_id, hello),
             WireFrame::HelloAck(_) => {
@@ -228,7 +223,7 @@ impl RpcServerState {
         }
     }
 
-    pub(super) fn handle_hello(&mut self, conn_id: ConnId, hello: Hello) {
+    pub fn handle_hello(&mut self, conn_id: ConnId, hello: Hello) {
         if hello.wire_version != WIRE_VERSION {
             self.write_frame_to(
                 conn_id,
@@ -254,7 +249,7 @@ impl RpcServerState {
         );
     }
 
-    pub(super) fn handle_call(
+    pub fn handle_call(
         &mut self,
         ctx: &mut NativeCtx<'_>,
         conn_id: ConnId,
@@ -341,7 +336,7 @@ impl RpcServerState {
             .insert(mail_id.correlation_id, InFlight { conn_id, wire_cid });
     }
 
-    pub(super) fn close_connection(&mut self, conn_id: ConnId, reason: &str) {
+    pub fn close_connection(&mut self, conn_id: ConnId, reason: &str) {
         let Some(mut conn) = self.connections.remove(&conn_id) else {
             return;
         };
@@ -364,7 +359,7 @@ impl RpcServerState {
         );
     }
 
-    pub(super) fn write_frame_to(&mut self, conn_id: ConnId, frame: &WireFrame) {
+    pub fn write_frame_to(&mut self, conn_id: ConnId, frame: &WireFrame) {
         let Some(conn) = self.connections.get_mut(&conn_id) else {
             return;
         };

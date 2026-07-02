@@ -6,7 +6,7 @@
 //! by this module rather than line-by-line; the `#[actor] impl` reaches the
 //! state and the `forward_to_trampoline` helper through the single
 //! `use runtime::*` glob in the parent, and the `load` sibling reaches the
-//! state fields through their `pub(in crate::component)` visibility.
+//! state fields through their `pub` visibility.
 
 // The moved `#[runtime] impl NativeActor for ComponentHostCapability` body
 // names the `#[runtime]` attribute, the cap struct, the cap kinds (input +
@@ -18,7 +18,7 @@ use aether_actor::runtime;
 // (the `ComponentHostConfig` init bundle), now nested under this `runtime`
 // directory so the one `mod runtime;` gate in the parent covers them (no
 // per-sibling `#[cfg]`). The `load` impl reaches the state fields through their
-// `pub(in crate::component)` visibility, unchanged by the move.
+// `pub` visibility, unchanged by the move.
 mod config;
 mod load;
 
@@ -65,18 +65,18 @@ use aether_substrate::mail::{KindId, MailboxId};
 /// the macro-emitted `Dispatch` impl; the addressing identity is the distinct
 /// ZST `ComponentHostCapability`. Living in this private module keeps it
 /// `pub`-enough to satisfy the `NativeActor::State` interface without exposing
-/// it as crate-public API. Fields carry `pub(in crate::component)` so the
+/// it as crate-public API. Fields carry `pub` so the
 /// `load` submodule (which holds `handle_load`) can reach them as a sibling
 /// within `crate::component`.
 pub struct ComponentHostCapabilityState {
-    pub(in crate::component) engine: Arc<Engine>,
-    pub(in crate::component) linker: Arc<Linker<ComponentCtx>>,
-    pub(in crate::component) registry: Arc<Registry>,
-    pub(in crate::component) mailer: Arc<Mailer>,
-    pub(in crate::component) outbound: Arc<HubOutbound>,
+    pub engine: Arc<Engine>,
+    pub linker: Arc<Linker<ComponentCtx>>,
+    pub registry: Arc<Registry>,
+    pub mailer: Arc<Mailer>,
+    pub outbound: Arc<HubOutbound>,
     /// Monotonic counter for `component_N` default names when an agent passes
     /// `name: None` and the wasm doesn't declare an `aether.namespace`.
-    pub(in crate::component) default_name_counter: u64,
+    pub default_name_counter: u64,
 }
 
 /// Forward an arbitrary kind to a trampoline's mailbox, preserving the

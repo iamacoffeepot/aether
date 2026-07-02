@@ -29,11 +29,11 @@ pub use aether_substrate::chassis::error::BootError;
 /// `UiClicked` recipient on a hit).
 pub struct ButtonRect {
     /// `[x, y, width, height]` in window pixels.
-    pub(super) rect: [f32; 4],
+    pub rect: [f32; 4],
     /// Caller-stable widget id echoed back in `UiClicked`.
-    pub(super) id: u32,
+    pub id: u32,
     /// Mailbox of the component that sent the `UiButton`.
-    pub(super) owner: MailboxId,
+    pub owner: MailboxId,
 }
 
 /// `aether.ui` runtime state (ADR-0122 split). Owns the cursor position
@@ -51,11 +51,11 @@ pub struct ButtonRect {
 #[derive(Default)]
 pub struct UiCapabilityState {
     /// Latest cursor position from `MouseMove`, window pixels.
-    pub(super) cursor: [f32; 2],
+    pub cursor: [f32; 2],
     /// Buttons recorded during the in-progress frame.
-    pub(super) current: Vec<ButtonRect>,
+    pub current: Vec<ButtonRect>,
     /// Buttons from the last completed frame — the hit-test set.
-    pub(super) last: Vec<ButtonRect>,
+    pub last: Vec<ButtonRect>,
 }
 
 // The cap mail kinds the moved handler bodies + the always-on identity name,

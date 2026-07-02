@@ -475,8 +475,8 @@ mod runtime {
     /// module keeps it `pub`-enough to satisfy the `NativeActor::State`
     /// interface without exposing it as crate-public API.
     pub struct HttpCapabilityState {
-        pub(super) adapter: Arc<dyn HttpAdapter>,
-        pub(super) default_timeout: Duration,
+        pub adapter: Arc<dyn HttpAdapter>,
+        pub default_timeout: Duration,
     }
 
     #[cfg(test)]
@@ -485,10 +485,7 @@ mod runtime {
         /// `Builder::with_actor::<HttpCapability>(config)` which calls the
         /// generated `Lifecycle::init`; tests that drive the handler with a
         /// stub adapter hand it in directly.
-        pub(crate) fn from_adapter(
-            adapter: Arc<dyn HttpAdapter>,
-            default_timeout: Duration,
-        ) -> Self {
+        pub fn from_adapter(adapter: Arc<dyn HttpAdapter>, default_timeout: Duration) -> Self {
             Self {
                 adapter,
                 default_timeout,

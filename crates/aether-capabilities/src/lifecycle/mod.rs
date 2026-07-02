@@ -58,7 +58,7 @@ mod graph;
 // `LifecycleStateData` is named only by `mod settlement`'s `resolve_edge`,
 // which rides the `runtime` gate, so the re-export does too.
 #[cfg(feature = "runtime")]
-pub(crate) use graph::LifecycleStateData;
+use graph::LifecycleStateData;
 pub use graph::{
     BuildError, LifecycleGraphBuilder, LifecycleGraphData, NoOpen, OpenNoNext, OpenWithNext,
 };
@@ -123,10 +123,10 @@ impl LifecycleCapabilityState {
 
 /// Construction-level state fixture: a Render→Present→Shutdown
 /// data graph + a fresh mailer, built directly (no chassis boot),
-/// with the supplied advance timeout. Shared with
-/// `mod settlement`'s tests via `pub(crate)`.
+/// with the supplied advance timeout. Reachable from
+/// `mod settlement`'s descendant tests via module privacy.
 #[cfg(all(test, feature = "runtime"))]
-pub(crate) fn test_cap(advance_timeout: Duration) -> LifecycleCapabilityState {
+fn test_cap(advance_timeout: Duration) -> LifecycleCapabilityState {
     use aether_kinds::{Present, Render, Shutdown};
     use aether_substrate::mail::registry::Registry;
 
@@ -159,7 +159,7 @@ pub(crate) fn test_cap(advance_timeout: Duration) -> LifecycleCapabilityState {
 /// `Tick` as a declared stage, which [`test_cap`]'s Render-rooted
 /// graph doesn't carry).
 #[cfg(all(test, feature = "runtime"))]
-pub(crate) fn tick_start_graph_cap() -> LifecycleCapabilityState {
+fn tick_start_graph_cap() -> LifecycleCapabilityState {
     use aether_kinds::{Shutdown, Tick};
     use aether_substrate::mail::registry::Registry;
 

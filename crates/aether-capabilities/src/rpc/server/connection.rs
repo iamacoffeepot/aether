@@ -20,14 +20,14 @@ use std::thread::JoinHandle;
 /// Per-connection identifier, monotonic within this cap. Distinct
 /// from the OS-level peer addr (one peer may reconnect; ids stay
 /// unique for the cap's lifetime).
-pub(super) type ConnId = u64;
+pub type ConnId = u64;
 
 /// Internal event the accept / reader sidecar threads push to the
 /// cap dispatcher via an mpsc. The matching wake-mail kind is
 /// [`RpcInboundReady`] (empty payload) — the dispatcher's
 /// `on_inbound_ready` handler drains the channel and dispatches
 /// per item.
-pub(super) enum InboundEvent {
+pub enum InboundEvent {
     PeerAccepted {
         stream: TcpStream,
         peer: SocketAddr,
@@ -70,17 +70,17 @@ pub(super) enum InboundEvent {
 /// Per-connection state owned by the cap dispatcher. The reader
 /// sidecar holds `shutdown` + a clone of `write_half` for the
 /// reader-side socket (each thread owns one half of the split).
-pub(super) struct ConnState {
-    pub(super) peer: SocketAddr,
+pub struct ConnState {
+    pub peer: SocketAddr,
     /// Dispatcher's half — used for inline writes (`HelloAck`,
     /// `ReplyEvent`, `ReplyEnd`, Pong, Bye).
-    pub(super) write_half: TcpStream,
+    pub write_half: TcpStream,
     /// Reader thread's shutdown flag. Cap flips it + shuts down
     /// the read half to wake the blocked `read()`.
-    pub(super) shutdown: Arc<AtomicBool>,
+    pub shutdown: Arc<AtomicBool>,
     /// Reader thread handle. Joined in `unwire`.
-    pub(super) reader_thread: Option<JoinHandle<()>>,
-    pub(super) hello_received: bool,
+    pub reader_thread: Option<JoinHandle<()>>,
+    pub hello_received: bool,
 }
 
 /// Per-connection reader thread body. Reads frames from
@@ -90,7 +90,7 @@ pub(super) struct ConnState {
 /// asks the dispatcher to close it with a structured `Bye` if not
 /// (iamacoffeepot/aether#1271). Returns when the connection closes
 /// (peer EOF, read error, shutdown flag, oversize-abort).
-pub(super) fn run_reader_loop(
+pub fn run_reader_loop(
     read_half: TcpStream,
     conn_id: ConnId,
     shutdown: &AtomicBool,

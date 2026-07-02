@@ -124,7 +124,7 @@ mod runtime {
     /// link-time tables. The addressing identity is the distinct ZST
     /// `InventoryCapability`.
     pub struct InventoryCapabilityState {
-        pub(super) registry: Arc<Registry>,
+        pub registry: Arc<Registry>,
     }
 }
 

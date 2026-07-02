@@ -58,39 +58,39 @@ pub use std::time::{Duration, Instant};
 /// dispatcher thread, so no `Mutex` / `Arc<Atomic*>` is needed for the
 /// subscriber table or state pointer.
 ///
-/// Fields are `pub(crate)` so the settlement state machine
+/// Fields are `pub` so the settlement state machine
 /// (`mod settlement`) can carry its inherent-impl cluster in a sibling
 /// file and the parent's handlers can read them.
 pub struct LifecycleCapabilityState {
-    pub(crate) graph: LifecycleGraphData,
+    pub graph: LifecycleGraphData,
     /// Subscriber table keyed by stage kind id (ADR-0082 §7).
-    pub(crate) subscribers: BTreeMap<KindId, BTreeSet<DataMailboxId>>,
+    pub subscribers: BTreeMap<KindId, BTreeSet<DataMailboxId>>,
     /// Kind id of the state the cap will broadcast on the next
     /// [`LifecycleAdvance`]. Starts at
     /// `graph.start()`; mutated after each settled advance to the resolved
     /// next/quit edge target.
-    pub(crate) current_state: KindId,
+    pub current_state: KindId,
     /// True once the lifecycle reached a terminal — further advances
     /// are no-ops.
-    pub(crate) terminal_reached: bool,
+    pub terminal_reached: bool,
     /// Quit flag (ADR-0082 §3). Set by inbound [`Quit`]
     /// mail; consumed at the next state whose graph declares a `quit` edge.
-    pub(crate) quit_pending: bool,
+    pub quit_pending: bool,
     /// In-flight advance awaiting settlement (ADR-0082 §6).
-    pub(crate) pending: Option<PendingAdvance>,
+    pub pending: Option<PendingAdvance>,
     /// Deadline for a pending advance's `Settled`
     /// (iamacoffeepot/aether#1048). Set from
     /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS`.
-    pub(crate) advance_timeout: Duration,
+    pub advance_timeout: Duration,
     /// EWMA of observed `Sent`→`Settled` latency (ADR-0082 §6),
     /// updated once per settle. `None` until the first settlement.
-    pub(crate) settlement_latency_ewma: Option<Duration>,
+    pub settlement_latency_ewma: Option<Duration>,
     /// Last time a slow-settlement warn fired, for the
     /// `SLOW_SETTLE_WARN_COOLDOWN` rate limit.
-    pub(crate) last_slow_warn: Option<Instant>,
+    pub last_slow_warn: Option<Instant>,
     /// `Arc<Mailer>` cached at init for `subscribe_settlement_mail`
     /// calls inside handlers.
-    pub(crate) mailer: Arc<Mailer>,
+    pub mailer: Arc<Mailer>,
 }
 
 #[runtime]

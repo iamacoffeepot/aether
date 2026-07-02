@@ -104,12 +104,12 @@ pub enum InboundEvent {
 pub struct ConnState {
     peer: SocketAddr,
     /// Dispatcher's half — used to write the HTTP/1.1 response.
-    pub(super) write_half: TcpStream,
+    pub write_half: TcpStream,
     /// Reader thread's shutdown flag. Cap flips it + shuts down the
     /// socket to wake the blocked `read()`.
-    pub(super) shutdown: Arc<AtomicBool>,
+    pub shutdown: Arc<AtomicBool>,
     /// Reader thread handle. Joined in `unwire`, detached on close.
-    pub(super) reader_thread: Option<JoinHandle<()>>,
+    pub reader_thread: Option<JoinHandle<()>>,
 }
 
 /// Bookkeeping for one in-flight request. Looked up by the dispatch's
@@ -118,23 +118,23 @@ pub struct ConnState {
 /// always dispatches via `send_envelope_as_root`).
 #[derive(Copy, Clone)]
 pub struct PendingRequest {
-    pub(super) conn_id: ConnId,
+    pub conn_id: ConnId,
 }
 
 /// Wake sink shared with the accept + reader sidecar threads: push an
 /// [`InboundEvent`] over the mpsc, then fire an [`HttpInboundReady`]
 /// wake mail at the cap so the dispatcher drains.
 pub struct WakeSink {
-    pub(super) inbound_tx: mpsc::Sender<InboundEvent>,
-    pub(super) mailer: Arc<Mailer>,
-    pub(super) self_id: MailboxId,
-    pub(super) wake_kind: KindId,
+    pub inbound_tx: mpsc::Sender<InboundEvent>,
+    pub mailer: Arc<Mailer>,
+    pub self_id: MailboxId,
+    pub wake_kind: KindId,
 }
 
 impl WakeSink {
     /// Post one event + wake. Returns `false` when the receiver is gone
     /// (the cap tore down) so the caller stops.
-    pub(super) fn post(&self, event: InboundEvent) -> bool {
+    pub fn post(&self, event: InboundEvent) -> bool {
         if self.inbound_tx.send(event).is_err() {
             return false;
         }
@@ -155,32 +155,32 @@ impl WakeSink {
 /// Living in this private module keeps it `pub`-enough to satisfy the
 /// `NativeActor::State` interface without exposing it as crate-public API.
 pub struct HttpServerCapabilityState {
-    pub(super) handler_mailbox: String,
-    pub(super) max_request_bytes: usize,
-    pub(super) max_header_bytes: usize,
-    pub(super) request_timeout: Duration,
-    pub(super) self_mailbox: MailboxId,
+    pub handler_mailbox: String,
+    pub max_request_bytes: usize,
+    pub max_header_bytes: usize,
+    pub request_timeout: Duration,
+    pub self_mailbox: MailboxId,
     /// Cached `Arc<Mailer>` so the dispatcher can fire wake mails into
     /// the cap, resolve the handler mailbox by name at dispatch time,
     /// and subscribe to settlement. The cap is single-threaded
     /// post-ADR-0038 so direct storage is fine.
-    pub(super) mailer: Arc<Mailer>,
-    pub(super) listener_port: u16,
-    pub(super) accept_shutdown: Arc<AtomicBool>,
-    pub(super) accept_thread: Option<JoinHandle<()>>,
-    pub(super) inbound_rx: mpsc::Receiver<InboundEvent>,
-    pub(super) inbound_tx: mpsc::Sender<InboundEvent>,
-    pub(super) connections: HashMap<ConnId, ConnState>,
-    pub(super) next_conn_id: ConnId,
+    pub mailer: Arc<Mailer>,
+    pub listener_port: u16,
+    pub accept_shutdown: Arc<AtomicBool>,
+    pub accept_thread: Option<JoinHandle<()>>,
+    pub inbound_rx: mpsc::Receiver<InboundEvent>,
+    pub inbound_tx: mpsc::Sender<InboundEvent>,
+    pub connections: HashMap<ConnId, ConnState>,
+    pub next_conn_id: ConnId,
     /// Dispatch-correlation → open response socket. Populated on
     /// dispatch; cleared on reply, settlement, timeout, or close.
-    pub(super) in_flight: HashMap<u64, PendingRequest>,
+    pub in_flight: HashMap<u64, PendingRequest>,
 }
 
 impl HttpServerCapabilityState {
     /// Allocate a fresh `ConnId`, store the connection's write half, and
     /// spin a reader thread for the read half.
-    pub(super) fn spawn_reader_for_peer(&mut self, stream: TcpStream, peer: SocketAddr) {
+    pub fn spawn_reader_for_peer(&mut self, stream: TcpStream, peer: SocketAddr) {
         let conn_id = self.next_conn_id;
         self.next_conn_id += 1;
 
@@ -267,7 +267,7 @@ impl HttpServerCapabilityState {
 
     /// Map the method, resolve the handler, dispatch the request, and
     /// record the in-flight entry. Answers `501` / `503` inline.
-    pub(super) fn dispatch_request(
+    pub fn dispatch_request(
         &mut self,
         ctx: &mut NativeCtx<'_>,
         conn_id: ConnId,
@@ -313,18 +313,14 @@ impl HttpServerCapabilityState {
     }
 
     /// Format + write the handler's [`HttpServerResponse`].
-    pub(super) fn write_handler_response(
-        &mut self,
-        conn_id: ConnId,
-        response: &HttpServerResponse,
-    ) {
+    pub fn write_handler_response(&mut self, conn_id: ConnId, response: &HttpServerResponse) {
         let bytes = render_handler_response(response);
         self.write_raw_to(conn_id, &bytes);
     }
 
     /// Format + write a canned status response (the cap's own
     /// `413` / `431` / `501` / `502` / `503` / `504`).
-    pub(super) fn write_status_response(&mut self, conn_id: ConnId, status: u16, message: &str) {
+    pub fn write_status_response(&mut self, conn_id: ConnId, status: u16, message: &str) {
         let bytes = render_status_response(status, message);
         self.write_raw_to(conn_id, &bytes);
     }
@@ -347,7 +343,7 @@ impl HttpServerCapabilityState {
         }
     }
 
-    pub(super) fn close_connection(&mut self, conn_id: ConnId, reason: &str) {
+    pub fn close_connection(&mut self, conn_id: ConnId, reason: &str) {
         let Some(mut conn) = self.connections.remove(&conn_id) else {
             return;
         };

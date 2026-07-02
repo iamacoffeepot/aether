@@ -15,16 +15,16 @@ use aether_substrate::pid_lock::{LockAcquisition, LockGuard, acquire_lock_pid};
 use super::{Entry, StoredEntry, TARGET};
 
 /// The in-memory index [`restore`] rebuilds from disk.
-pub(super) struct RestoredIndex {
-    pub(super) entries: HashMap<String, Entry>,
-    pub(super) names: HashMap<String, String>,
-    pub(super) total_bytes: u64,
-    pub(super) clock: u64,
+pub struct RestoredIndex {
+    pub entries: HashMap<String, Entry>,
+    pub names: HashMap<String, String>,
+    pub total_bytes: u64,
+    pub clock: u64,
 }
 
 /// Rebuild the in-memory index from disk: every `entries/<hash>.manifest`
 /// sidecar paired with its `<hash>` bytes, plus the `names.json` map.
-pub(super) fn restore(root: &Path) -> RestoredIndex {
+pub fn restore(root: &Path) -> RestoredIndex {
     let mut entries: HashMap<String, Entry> = HashMap::new();
     let mut total_bytes: u64 = 0;
     let mut clock: u64 = 0;
@@ -85,7 +85,7 @@ fn read_sidecar(path: &Path) -> Option<StoredEntry> {
     serde_json::from_slice(&bytes).ok()
 }
 
-pub(super) fn write_sidecar(path: &Path, sidecar: &StoredEntry) -> io::Result<()> {
+pub fn write_sidecar(path: &Path, sidecar: &StoredEntry) -> io::Result<()> {
     let bytes =
         serde_json::to_vec(sidecar).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
     atomic_write(path, &bytes)
@@ -93,7 +93,7 @@ pub(super) fn write_sidecar(path: &Path, sidecar: &StoredEntry) -> io::Result<()
 
 /// Ensure `root/entries` exists, falling back to a unique temp dir when
 /// the configured root can't be created — so the store always opens.
-pub(super) fn ensure_root(root: &Path) -> PathBuf {
+pub fn ensure_root(root: &Path) -> PathBuf {
     if fs::create_dir_all(root.join("entries")).is_ok() {
         return root.to_path_buf();
     }
@@ -118,7 +118,7 @@ pub(super) fn ensure_root(root: &Path) -> PathBuf {
 /// garbage lock is reclaimed; a live holder or a write failure leaves
 /// the store unlocked (returns `None`) but still operating, since a
 /// content-addressed store tolerates a shared dir.
-pub(super) fn acquire_lock(root: &Path) -> Option<LockGuard> {
+pub fn acquire_lock(root: &Path) -> Option<LockGuard> {
     let path = root.join("lock.pid");
     match acquire_lock_pid(&path) {
         LockAcquisition::Acquired(guard) => Some(guard),
@@ -144,7 +144,7 @@ pub(super) fn acquire_lock(root: &Path) -> Option<LockGuard> {
 }
 
 /// sha256 hex over `bytes` — the content address.
-pub(super) fn hash_hex(bytes: &[u8]) -> String {
+pub fn hash_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     use std::fmt::Write as _;
     let digest = Sha256::digest(bytes);
@@ -156,7 +156,7 @@ pub(super) fn hash_hex(bytes: &[u8]) -> String {
 }
 
 /// Nanoseconds since the Unix epoch, for temp-dir and tmp-file nonces.
-pub(super) fn now_nanos() -> u128 {
+pub fn now_nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos())

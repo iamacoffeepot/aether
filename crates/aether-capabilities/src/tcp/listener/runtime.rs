@@ -37,11 +37,11 @@ use super::TcpListenerActor;
 /// `TcpSessionActor` per pending stream. The addressing identity is the
 /// distinct ZST [`TcpListenerActor`](super::TcpListenerActor).
 pub struct TcpListenerState {
-    pub(super) local_port: u16,
-    pub(super) shutdown: Arc<AtomicBool>,
-    pub(super) accept_thread: Option<JoinHandle<()>>,
-    pub(super) connection_rx: mpsc::Receiver<(TcpStream, SocketAddr)>,
-    pub(super) next_subname: u64,
+    pub local_port: u16,
+    pub shutdown: Arc<AtomicBool>,
+    pub accept_thread: Option<JoinHandle<()>>,
+    pub connection_rx: mpsc::Receiver<(TcpStream, SocketAddr)>,
+    pub next_subname: u64,
 }
 
 #[runtime]

@@ -42,7 +42,7 @@ pub struct CaptureBackend {
 /// used (unsupported namespace, no assets dir, forbidden path, or an
 /// unreadable file) — the caller replies that message as
 /// `CaptureFrameResult::Err`.
-pub(in crate::render) fn resolve_reference(
+pub fn resolve_reference(
     assets_dir: Option<&Path>,
     similarity: Option<&SimilarityCheck>,
 ) -> Result<Option<ReferenceCapture>, String> {
