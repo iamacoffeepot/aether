@@ -1,20 +1,18 @@
 //! The synth mixer aggregate (ADR-0039). `Synth` owns the voice pool, the
 //! track lanes, the loaded banks, and the scheduled heap, and renders the
-//! summed output the cpal callback drains; plus the cpal pipeline build.
+//! summed output the cpal callback drains.
 
-use core::fmt;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_queue::ArrayQueue;
 
 use aether_data::MailboxId;
 
 use super::super::kinds::ScheduledNote;
-use super::event::{AudioEvent, AudioEventSender, new_event_channel};
-use super::instrument::{BUILTINS, builtin_count, builtin_names, instrument_by_id};
+use super::event::AudioEvent;
+use super::instrument::{BUILTINS, instrument_by_id};
 use super::sample::{SampleBank, SampleVoice};
 use super::schedule::{ScheduledEntry, millis_to_frames};
 use super::track::{TRACK_FADE_SECS, TrackVoice};
@@ -23,33 +21,33 @@ use super::voice::{MAX_VOICES, Voice, VoiceKernel, build_builtin_kernel};
 /// Whole-process synth state. Lives on the cpal callback thread;
 /// the cap communicates via the event queue.
 pub struct Synth {
-    pub events: Arc<ArrayQueue<AudioEvent>>,
-    pub voices: Vec<Voice>,
+    events: Arc<ArrayQueue<AudioEvent>>,
+    voices: Vec<Voice>,
     /// Track playback lane (ADR-0103 §3) — separate from `voices` so a
     /// track is never counted against `MAX_VOICES` nor voice-stolen.
-    pub tracks: Vec<TrackVoice>,
+    tracks: Vec<TrackVoice>,
     /// Loaded sampled-instrument banks (ADR-0103 §4), appended in load
     /// order. Index `i` is `instrument_id` `BUILTINS.len() + i`, so a
     /// `note_on` whose id walks past the built-ins indexes here. The cap
     /// assigns ids the same way, so the two stay in lockstep.
-    pub banks: Vec<Arc<SampleBank>>,
-    pub sample_rate: f32,
-    pub master_gain: f32,
+    banks: Vec<Arc<SampleBank>>,
+    sample_rate: f32,
+    master_gain: f32,
     /// Monotonically increasing counter stamped into each `Voice::seq`
     /// at allocation. Voice-steal uses the minimum value to locate the
     /// oldest voice regardless of pool order.
-    pub next_seq: u64,
+    next_seq: u64,
     /// Running output-frame counter (ADR-0104). Advanced by the frame
     /// count of every `fill`; the timebase scheduled events are placed
     /// against and fire from. Callback-owned, so no locking.
-    pub frame_clock: u64,
+    frame_clock: u64,
     /// Pending scheduled note events ordered by due frame (ADR-0104),
     /// a min-heap via `Reverse`. `fill` pops the events that fall on
     /// each frame and routes them through the note-on / note-off paths.
-    pub scheduled: BinaryHeap<Reverse<ScheduledEntry>>,
+    scheduled: BinaryHeap<Reverse<ScheduledEntry>>,
     /// Monotonic stamp threaded into each `ScheduledEntry::seq` so that
     /// events on the same due frame fire in batch-arrival order.
-    pub next_schedule_seq: u64,
+    next_schedule_seq: u64,
 }
 
 impl Synth {
@@ -101,21 +99,24 @@ impl Synth {
         velocity: u8,
         instrument_id: u8,
     ) {
-        let kernel = if let Some(def) = instrument_by_id(instrument_id) {
-            Some(build_builtin_kernel(
-                sender_mailbox,
-                instrument_id,
-                pitch,
-                velocity,
-                def,
-                self.sample_rate,
-            ))
-        } else {
-            self.bank_for(instrument_id).and_then(|bank| {
-                bank.select(pitch, velocity)
-                    .map(|region| VoiceKernel::Sample(SampleVoice::new(pitch, velocity, region)))
+        let kernel = instrument_by_id(instrument_id)
+            .map(|def| {
+                build_builtin_kernel(
+                    sender_mailbox,
+                    instrument_id,
+                    pitch,
+                    velocity,
+                    def,
+                    self.sample_rate,
+                )
             })
-        };
+            .or_else(|| {
+                self.bank_for(instrument_id).and_then(|bank| {
+                    bank.select(pitch, velocity).map(|region| {
+                        VoiceKernel::Sample(SampleVoice::new(pitch, velocity, region))
+                    })
+                })
+            });
         let Some(kernel) = kernel else {
             tracing::warn!(
                 target: "aether_substrate::audio",
@@ -324,11 +325,11 @@ impl Synth {
             // for the sample it falls on — sample-accurate by
             // construction (ADR-0104).
             let absolute = self.frame_clock + frame as u64;
-            loop {
-                match self.scheduled.peek() {
-                    Some(Reverse(top)) if top.due_frame <= absolute => {}
-                    _ => break,
-                }
+            while self
+                .scheduled
+                .peek()
+                .is_some_and(|Reverse(top)| top.due_frame <= absolute)
+            {
                 let Reverse(entry) = self
                     .scheduled
                     .pop()
@@ -354,22 +355,8 @@ impl Synth {
         // Advance the clock by this block so the next drain anchors
         // scheduled offsets against the right receipt frame (ADR-0104).
         self.frame_clock += frames as u64;
-        let mut i = 0;
-        while i < self.voices.len() {
-            if self.voices[i].done() {
-                self.voices.swap_remove(i);
-            } else {
-                i += 1;
-            }
-        }
-        let mut t = 0;
-        while t < self.tracks.len() {
-            if self.tracks[t].done() {
-                self.tracks.swap_remove(t);
-            } else {
-                t += 1;
-            }
-        }
+        self.voices.retain(|v| !v.done());
+        self.tracks.retain(|t| !t.done());
     }
 
     #[cfg(test)]
@@ -383,7 +370,7 @@ impl Synth {
     }
 
     #[cfg(test)]
-    pub fn master_gain_value(&self) -> f32 {
+    pub fn master_gain(&self) -> f32 {
         self.master_gain
     }
 
@@ -401,114 +388,4 @@ impl Synth {
     pub fn scheduled_count(&self) -> usize {
         self.scheduled.len()
     }
-}
-
-/// Handle to a running cpal pipeline. Lives on the audio worker
-/// thread for the entire run — `cpal::Stream` is `!Send` on macOS,
-/// so the stream is constructed on, owned by, and dropped from the
-/// same thread. Dropping the pipeline silences every voice and tears
-/// down the cpal stream.
-pub struct AudioPipeline {
-    pub sender: AudioEventSender,
-    /// The device output rate the synth runs at. The cap reads it back
-    /// (via the init channel) as the resample target for track decode
-    /// (ADR-0103 §1) — decode happens on the dispatcher, not here.
-    pub sample_rate: u32,
-    pub _stream: cpal::Stream,
-}
-
-#[derive(Debug)]
-pub enum AudioBuildError {
-    NoDevice,
-    RateUnsupported(u32),
-    ConfigQuery(String),
-    StreamBuild(String),
-    StreamPlay(String),
-}
-
-impl fmt::Display for AudioBuildError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoDevice => write!(f, "no default audio output device"),
-            Self::RateUnsupported(r) => write!(f, "requested sample rate {r} Hz unsupported"),
-            Self::ConfigQuery(e) => write!(f, "config query failed: {e}"),
-            Self::StreamBuild(e) => write!(f, "stream build failed: {e}"),
-            Self::StreamPlay(e) => write!(f, "stream play failed: {e}"),
-        }
-    }
-}
-
-pub fn try_build_pipeline(
-    requested_sample_rate: Option<u32>,
-) -> Result<AudioPipeline, AudioBuildError> {
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or(AudioBuildError::NoDevice)?;
-
-    let config = match requested_sample_rate {
-        Some(rate) => {
-            find_config_for_rate(&device, rate).ok_or(AudioBuildError::RateUnsupported(rate))?
-        }
-        None => device
-            .default_output_config()
-            .map_err(|e| AudioBuildError::ConfigQuery(e.to_string()))?
-            .config(),
-    };
-
-    let sample_rate = config.sample_rate;
-    let channels = config.channels;
-
-    let (sender, queue) = new_event_channel();
-    // Audio sample rates are bounded well below 2^24 — exact in f32.
-    #[allow(clippy::cast_precision_loss)]
-    let mut synth = Synth::new(queue, sample_rate as f32);
-
-    let stream = device
-        .build_output_stream(
-            &config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                synth.fill(data, channels as usize);
-            },
-            |err| {
-                tracing::warn!(
-                    target: "aether_substrate::audio",
-                    error = %err,
-                    "cpal stream error",
-                );
-            },
-            None,
-        )
-        .map_err(|e| AudioBuildError::StreamBuild(e.to_string()))?;
-
-    stream
-        .play()
-        .map_err(|e| AudioBuildError::StreamPlay(e.to_string()))?;
-
-    tracing::info!(
-        target: "aether_substrate::audio",
-        sample_rate,
-        channels,
-        instruments = builtin_count(),
-        builtin_names = ?builtin_names(),
-        "audio pipeline started",
-    );
-
-    Ok(AudioPipeline {
-        sender,
-        sample_rate,
-        _stream: stream,
-    })
-}
-
-pub fn find_config_for_rate(device: &cpal::Device, rate: u32) -> Option<cpal::StreamConfig> {
-    let configs = device.supported_output_configs().ok()?;
-    for cfg in configs {
-        let min = cfg.min_sample_rate();
-        let max = cfg.max_sample_rate();
-        if rate >= min && rate <= max {
-            return Some(cfg.with_sample_rate(rate).config());
-        }
-    }
-    None
 }

@@ -18,7 +18,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// Pause between dial attempts within the connect budget.
-const PROXY_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+const RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Outcome distinctions [`connect_proxy`] surfaces to the proxy's
 /// `init` so the engines cap can tell a re-forkable startup death from
@@ -126,7 +126,7 @@ pub fn connect_proxy(
                 }
                 let within_budget = deadline.is_none_or(|d| Instant::now() < d);
                 if retry && is_transient_connect_error(&e) && within_budget {
-                    thread::sleep(PROXY_CONNECT_RETRY_INTERVAL);
+                    thread::sleep(RETRY_INTERVAL);
                     continue;
                 }
                 Err(ProxyConnectError::Dial(e))

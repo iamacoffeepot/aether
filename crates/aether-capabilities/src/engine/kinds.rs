@@ -15,6 +15,7 @@
 //! are the MCP harness's RPC protocol, and `aether-mcp` consumes them
 //! while being barred from depending on `aether-capabilities`.
 
+use aether_data::{Kind, KindId, MailboxId, Schema};
 use aether_kinds::DeathReason;
 use serde::{Deserialize, Serialize};
 
@@ -31,11 +32,11 @@ use serde::{Deserialize, Serialize};
 /// Any reply streams back through the proxy and routes to whoever
 /// sent this `ForwardEnvelope` — the proxy keys reply correlation
 /// off the inbound mail's `Source`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.engine.forward")]
 pub struct ForwardEnvelope {
-    pub mailbox: aether_data::MailboxId,
-    pub kind: aether_data::KindId,
+    pub mailbox: MailboxId,
+    pub kind: KindId,
     pub payload: Vec<u8>,
 }
 
@@ -52,12 +53,12 @@ pub struct ForwardEnvelope {
 /// `ForwardEnvelope` at the right `aether.engine.proxy:<id>`,
 /// propagating the original reply-to so the substrate's reply
 /// streams back to the originating `RpcServerCapability`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.engine.route")]
 pub struct RouteEnvelope {
     pub engine_id: String,
-    pub mailbox: aether_data::MailboxId,
-    pub kind: aether_data::KindId,
+    pub mailbox: MailboxId,
+    pub kind: KindId,
     pub payload: Vec<u8>,
 }
 
@@ -75,7 +76,7 @@ pub struct RouteEnvelope {
 /// explicit terminal signal.) `Err` carries the wire `RpcError`
 /// rendered as a string — the structured variant doesn't survive
 /// the `aether-kinds` layer, which can't depend on the RPC crate.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.engine.call_settled")]
 pub enum CallSettled {
     Ok,
@@ -90,7 +91,7 @@ pub enum CallSettled {
 /// uses for the reader sidecar. The handler pings the substrate and
 /// counts consecutive misses, evicting the engine once the miss
 /// limit is crossed.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.engine.heartbeat_tick")]
 pub struct EngineHeartbeatTick {}
 
@@ -104,7 +105,7 @@ pub struct EngineHeartbeatTick {}
 /// for an already-removed engine (e.g. one a concurrent
 /// `TerminateEngine` already dropped) is a no-op. `engine_id` is
 /// the plain UUID string, matching `TerminateEngine`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.engine.died")]
 pub struct EngineDied {
     pub engine_id: String,
@@ -122,7 +123,7 @@ pub struct EngineDied {
 /// last-seen-alive time so `ListEnginesResult` can report
 /// `last_heartbeat_age_millis`. Fire-and-forget; an `alive` for an
 /// unknown engine is a no-op. `engine_id` is the plain UUID string.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.engine.alive")]
 pub struct EngineAlive {
     pub engine_id: String,

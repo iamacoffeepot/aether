@@ -18,7 +18,7 @@ use std::time::Duration;
 /// needs, comfortably under the `FleetBench` client's own spawn cap so
 /// the hub returns a clean `Err` first rather than the client
 /// tripping its backstop. `0` is the wait-forever sentinel.
-pub(super) const DEFAULT_PROXY_CONNECT_BUDGET_SECS: u64 = 30;
+const DEFAULT_PROXY_CONNECT_BUDGET_SECS: u64 = 30;
 
 /// Resolved engines-cap configuration (ADR-0090, issue 1339): the
 /// liveness-heartbeat tuning plus the hub binary store's layout dir,
@@ -139,14 +139,12 @@ impl EngineConfig {
     /// The [`HeartbeatParams`] to arm each proxy with, or `None`
     /// when the heartbeat is disabled (`0` interval or miss limit).
     pub(super) fn heartbeat_params(&self) -> Option<HeartbeatParams> {
-        if self.heartbeat_interval_secs == 0 || self.heartbeat_miss_limit == 0 {
-            None
-        } else {
-            Some(HeartbeatParams {
+        (self.heartbeat_interval_secs != 0 && self.heartbeat_miss_limit != 0).then(|| {
+            HeartbeatParams {
                 interval: Duration::from_secs(self.heartbeat_interval_secs),
                 miss_limit: self.heartbeat_miss_limit,
-            })
-        }
+            }
+        })
     }
 
     /// The startup-dial connect budget to arm each spawned proxy

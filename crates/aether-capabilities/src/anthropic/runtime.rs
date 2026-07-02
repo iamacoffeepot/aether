@@ -28,7 +28,7 @@ pub use aether_substrate::chassis::error::BootError;
 /// Which send path a request rode. The generate handler threads it
 /// into the worker closure to pick the blocking call + result kind.
 #[derive(Copy, Clone)]
-pub enum SendPath {
+enum SendPath {
     Messages,
     Cli,
 }
@@ -43,8 +43,8 @@ pub enum SendPath {
 /// private module keeps it `pub`-enough to satisfy the `NativeActor::State`
 /// interface without exposing it as crate-public API.
 pub struct AnthropicCapabilityState {
-    pub(super) adapter: Arc<dyn AnthropicAdapter>,
-    pub(super) tasks: TaskQueue,
+    adapter: Arc<dyn AnthropicAdapter>,
+    tasks: TaskQueue,
 }
 
 #[cfg(test)]
@@ -73,7 +73,7 @@ impl AnthropicCapabilityState {
     /// supported-model table rejects it; `true` to proceed. Empty
     /// `supported` = accept-any (disabled / CLI passthrough); the CLI
     /// path always passes through.
-    pub fn gate_model(
+    fn gate_model(
         &self,
         ctx: &mut NativeCtx<'_, Manual>,
         path: SendPath,
@@ -95,7 +95,7 @@ impl AnthropicCapabilityState {
 
     /// Reply an `Err` synchronously (model validation failure)
     /// before any dispatch.
-    pub fn reply_err(
+    fn reply_err(
         ctx: &mut NativeCtx<'_, Manual>,
         path: SendPath,
         request_id: u64,
@@ -341,7 +341,7 @@ mod tests {
         AnthropicRequest, AnthropicResponse, StubAnthropicAdapter,
     };
     use crate::test_chassis::{decode_session_reply, drive_task_completion, test_mailer_and_rx};
-    use aether_data::{Kind, MailboxId, SessionToken, Source, SourceAddr, Uuid};
+    use aether_data::{Kind, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
     use aether_substrate::mail::mailer::Mailer;
@@ -403,12 +403,8 @@ mod tests {
             Arc::clone(&mailer),
             cap_mailbox,
         ));
-        let mut ctx = NativeCtx::new_dispatching(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
+        let mut ctx =
+            NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
         AnthropicCapability::on_messages_send(
             &mut state,
             &mut ctx,
@@ -450,12 +446,8 @@ mod tests {
             Arc::clone(&mailer),
             cap_mailbox,
         ));
-        let mut ctx = NativeCtx::new_dispatching(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
+        let mut ctx =
+            NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
         AnthropicCapability::on_messages_send(
             &mut state,
             &mut ctx,
@@ -501,12 +493,8 @@ mod tests {
             4,
         );
         let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(mailer), cap_mailbox));
-        let mut ctx = NativeCtx::new_dispatching(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
+        let mut ctx =
+            NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
         AnthropicCapability::on_cli_send(
             &mut state,
             &mut ctx,
@@ -611,12 +599,8 @@ mod tests {
             Arc::clone(&mailer),
             cap_mailbox,
         ));
-        let mut ctx = NativeCtx::new_dispatching(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
+        let mut ctx =
+            NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
         AnthropicCapability::on_cli_send(
             &mut state,
             &mut ctx,
@@ -655,12 +639,8 @@ mod tests {
             Arc::clone(&mailer),
             cap_mailbox,
         ));
-        let mut ctx = NativeCtx::new_dispatching(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
+        let mut ctx =
+            NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
         AnthropicCapability::on_messages_send(
             &mut state,
             &mut ctx,

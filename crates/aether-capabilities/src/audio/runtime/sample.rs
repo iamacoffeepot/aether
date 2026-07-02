@@ -2,28 +2,27 @@
 //! repitched sample voice, and the off-realtime SFZ + WAV bank assembly the
 //! `load_instrument` loader runs.
 
-use std::io::Cursor;
 use std::sync::Arc;
 
 use aether_data::Source;
 
-use super::decode::decode_wav_to_mono;
+use super::decode::{decode_wav_to_mono, wav_source_rate};
 use super::sfz::{SfzLoop, SfzRegion};
 use super::voice::BankStage;
 
 /// Attack ramp (seconds) wrapping a sample voice — a short swell so a
 /// re-pitched recording doesn't click on at full level (ADR-0103 §6,
 /// the partial bank's ramp shape).
-pub const SAMPLE_ATTACK_SECS: f32 = 0.003;
+const SAMPLE_ATTACK_SECS: f32 = 0.003;
 
 /// Release ramp (seconds) on `note_off` for a sample voice — the
 /// damper that ends a held note faster than the sample's natural decay.
-pub const SAMPLE_RELEASE_SECS: f32 = 0.08;
+const SAMPLE_RELEASE_SECS: f32 = 0.08;
 
 /// Base amplitude of a sample voice before velocity scaling. Sampled
 /// recordings already carry their own level; this trims headroom so a
 /// dense chord doesn't clip past the soft-clip.
-pub const SAMPLE_BASE_AMP: f32 = 0.6;
+const SAMPLE_BASE_AMP: f32 = 0.6;
 
 /// A region's sustain loop in device-rate coordinates (ADR-0103 §6).
 /// The SFZ frame offsets are scaled at bank assembly by the load-time
@@ -92,28 +91,28 @@ impl SampleBank {
 pub struct SampleVoice {
     /// Device-rate mono PCM of the selected region, shared with the
     /// bank.
-    pub pcm: Arc<[f32]>,
+    pcm: Arc<[f32]>,
     /// Fractional read position into `pcm`, advanced by `rate` each
     /// output sample.
-    pub pos: f32,
+    pos: f32,
     /// Playback rate ratio `2^((pitch − pitch_keycenter) / 12)` — the
     /// repitch from the region's root note. The PCM is already at the
     /// device rate, so this is the only resampling the hot loop does.
-    pub rate: f32,
+    rate: f32,
     /// Velocity-scaled amplitude the interpolated sample is multiplied
     /// by.
-    pub amplitude: f32,
+    amplitude: f32,
     /// The sustain loop bounds (device-rate fractional positions), or
     /// `None` for an unlooped region.
-    pub loop_region: Option<SampleLoop>,
+    loop_region: Option<SampleLoop>,
     /// Attack / release ramp, the partial bank's shape.
-    pub stage: BankStage,
-    pub attack_s: f32,
-    pub release_s: f32,
+    stage: BankStage,
+    attack_secs: f32,
+    release_secs: f32,
     /// Set once an unlooped region's read position walks off the end of
     /// the PCM, or the release ramp completes. A looped voice never sets
     /// it from exhaustion — it ends through the release ramp.
-    pub finished: bool,
+    finished: bool,
 }
 
 impl SampleVoice {
@@ -133,14 +132,14 @@ impl SampleVoice {
             amplitude: SAMPLE_BASE_AMP * v,
             loop_region,
             stage: BankStage::Attack { t: 0.0 },
-            attack_s: SAMPLE_ATTACK_SECS,
-            release_s: SAMPLE_RELEASE_SECS,
+            attack_secs: SAMPLE_ATTACK_SECS,
+            release_secs: SAMPLE_RELEASE_SECS,
             finished: false,
         }
     }
 
     pub fn note_off(&mut self) {
-        self.stage.begin_release(self.attack_s);
+        self.stage.begin_release(self.attack_secs);
     }
 
     pub fn done(&self) -> bool {
@@ -150,8 +149,8 @@ impl SampleVoice {
     /// Advance the attack/release ramp one sample, returning its current
     /// level — the shared bank ramp over the sample voice's own
     /// attack/release times.
-    pub fn advance_ramp(&mut self, dt: f32) -> f32 {
-        self.stage.advance(dt, self.attack_s, self.release_s)
+    fn advance_ramp(&mut self, dt: f32) -> f32 {
+        self.stage.advance(dt, self.attack_secs, self.release_secs)
     }
 
     // Read position and PCM lengths are bounded well below 2^24 for any
@@ -181,7 +180,7 @@ impl SampleVoice {
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
     )]
-    pub fn next_unlooped(&mut self, len: usize, ramp: f32) -> f32 {
+    fn next_unlooped(&mut self, len: usize, ramp: f32) -> f32 {
         let i = self.pos.floor() as usize;
         if i >= len {
             self.finished = true;
@@ -210,7 +209,7 @@ impl SampleVoice {
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
     )]
-    pub fn next_looped(&mut self, lp: SampleLoop, len: usize, ramp: f32) -> f32 {
+    fn next_looped(&mut self, lp: SampleLoop, len: usize, ramp: f32) -> f32 {
         // `pos < loop_end <= len` holds going in, so `i` is in range.
         let i = (self.pos.floor() as usize).min(len - 1);
         let a = self.pcm[i];
@@ -350,20 +349,6 @@ pub fn assemble_bank(
     }))
 }
 
-/// Read a WAV asset's source sample rate from its header (ADR-0103 §6).
-/// Bank assembly needs it to scale a region's loop frame offsets by the
-/// load-time resample ratio; `decode_wav_to_mono` consumes the same
-/// header but only returns the resampled PCM. Parses the header chunk
-/// only — the sample data is not read.
-pub fn wav_source_rate(bytes: &[u8]) -> Result<u32, String> {
-    let reader = hound::WavReader::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
-    let rate = reader.spec().sample_rate;
-    if rate == 0 {
-        return Err("zero sample rate".to_owned());
-    }
-    Ok(rate)
-}
-
 /// Scale a region's source-frame loop bounds into device-rate fractional
 /// positions (ADR-0103 §6): multiply by the resample ratio
 /// `target_rate / source_rate` — the same ratio the PCM was resampled
@@ -371,7 +356,7 @@ pub fn wav_source_rate(bytes: &[u8]) -> Result<u32, String> {
 /// `None` when the resampled region is too short to loop or the bounds
 /// collapse after clamping, degrading the region to unlooped.
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-pub fn scale_loop(
+fn scale_loop(
     lp: SfzLoop,
     source_rate: u32,
     target_rate: u32,
@@ -396,10 +381,7 @@ pub fn scale_loop(
 /// `/`), or `""` when the path has no directory. A bank's samples are
 /// addressed relative to the `.sfz`'s own directory (ADR-0103 §5).
 pub fn sfz_dir(path: &str) -> &str {
-    match path.rsplit_once('/') {
-        Some((dir, _)) => dir,
-        None => "",
-    }
+    path.rsplit_once('/').map_or("", |(dir, _)| dir)
 }
 
 /// Join a sample path onto the `.sfz`'s directory. An empty directory

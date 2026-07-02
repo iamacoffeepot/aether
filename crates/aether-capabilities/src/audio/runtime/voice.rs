@@ -23,7 +23,7 @@ pub const MAX_VOICES: usize = 64;
 /// or mid-decay — the release ramp starts from that value, not from
 /// the sustain level.
 #[derive(Copy, Clone, Debug)]
-pub enum EnvelopeStage {
+enum EnvelopeStage {
     Attack { t: f32 },
     Decay { t: f32 },
     Sustain,
@@ -38,34 +38,34 @@ pub enum EnvelopeStage {
 pub struct OscVoice {
     /// Oscillator phase in turns (`[0.0, 1.0)`), incremented by
     /// `freq / sample_rate` per sample.
-    pub phase: f32,
+    phase: f32,
     /// Turns-per-sample step — precomputed so the per-sample path is
     /// add-only.
-    pub phase_step: f32,
+    phase_step: f32,
     /// Base amplitude after velocity scaling; envelope multiplies this.
-    pub amplitude: f32,
-    pub wave: Wave,
-    pub adsr: Adsr,
-    pub envelope: EnvelopeStage,
+    amplitude: f32,
+    wave: Wave,
+    adsr: Adsr,
+    envelope: EnvelopeStage,
     /// xorshift32 PRNG state for the `Noise` wave, seeded from the
     /// voice key. Unused (but harmless) for the periodic waves.
-    pub rng: u32,
+    rng: u32,
     /// One-pole lowpass memory for the `Noise` wave (the previous
     /// filtered output).
-    pub lp_prev: f32,
+    lp_prev: f32,
     /// Current pitch-sweep offset added to `1.0` to scale `phase_step`
     /// this sample. `0.0` when the patch has no sweep.
-    pub sweep_offset: f32,
+    sweep_offset: f32,
     /// Per-sample multiplier the sweep offset decays by. `1.0` (no
     /// decay) when the patch has no sweep — the offset is then `0.0`,
     /// so the ratio stays `1.0`.
-    pub sweep_decay: f32,
+    sweep_decay: f32,
 }
 
 /// One step of an xorshift32 PRNG, mapped to white noise in `[-1.0,
 /// 1.0)`. The state is per-voice so percussion voices are independent
 /// and a fixed seed is reproducible.
-pub fn next_noise(state: &mut u32) -> f32 {
+fn next_noise(state: &mut u32) -> f32 {
     let mut x = *state;
     x ^= x << 13;
     x ^= x >> 17;
@@ -141,15 +141,15 @@ impl OscVoice {
     pub fn note_off(&mut self) {
         let from_level = match self.envelope {
             EnvelopeStage::Attack { t } => {
-                if self.adsr.attack_s > 0.0 {
-                    (t / self.adsr.attack_s).clamp(0.0, 1.0)
+                if self.adsr.attack_secs > 0.0 {
+                    (t / self.adsr.attack_secs).clamp(0.0, 1.0)
                 } else {
                     1.0
                 }
             }
             EnvelopeStage::Decay { t } => {
-                if self.adsr.decay_s > 0.0 {
-                    let fall = (1.0 - self.adsr.sustain).mul_add(-(t / self.adsr.decay_s), 1.0);
+                if self.adsr.decay_secs > 0.0 {
+                    let fall = (1.0 - self.adsr.sustain).mul_add(-(t / self.adsr.decay_secs), 1.0);
                     fall.clamp(self.adsr.sustain.min(1.0), 1.0)
                 } else {
                     self.adsr.sustain
@@ -169,30 +169,30 @@ impl OscVoice {
         match &mut self.envelope {
             EnvelopeStage::Attack { t } => {
                 *t += dt;
-                if self.adsr.attack_s <= 0.0 || *t >= self.adsr.attack_s {
+                if self.adsr.attack_secs <= 0.0 || *t >= self.adsr.attack_secs {
                     self.envelope = EnvelopeStage::Decay { t: 0.0 };
                     1.0
                 } else {
-                    *t / self.adsr.attack_s
+                    *t / self.adsr.attack_secs
                 }
             }
             EnvelopeStage::Decay { t } => {
                 *t += dt;
-                if self.adsr.decay_s <= 0.0 || *t >= self.adsr.decay_s {
+                if self.adsr.decay_secs <= 0.0 || *t >= self.adsr.decay_secs {
                     self.envelope = EnvelopeStage::Sustain;
                     self.adsr.sustain
                 } else {
-                    (1.0 - self.adsr.sustain).mul_add(-(*t / self.adsr.decay_s), 1.0)
+                    (1.0 - self.adsr.sustain).mul_add(-(*t / self.adsr.decay_secs), 1.0)
                 }
             }
             EnvelopeStage::Sustain => self.adsr.sustain,
             EnvelopeStage::Release { t, from_level } => {
                 *t += dt;
-                if self.adsr.release_s <= 0.0 || *t >= self.adsr.release_s {
+                if self.adsr.release_secs <= 0.0 || *t >= self.adsr.release_secs {
                     self.envelope = EnvelopeStage::Done;
                     0.0
                 } else {
-                    *from_level * (1.0 - (*t / self.adsr.release_s))
+                    *from_level * (1.0 - (*t / self.adsr.release_secs))
                 }
             }
             EnvelopeStage::Done => 0.0,
@@ -253,11 +253,11 @@ impl OscVoice {
 /// each sample by `decay_mul = exp(-rate * dt)`, so the hot loop holds
 /// no transcendentals beyond the `sin`.
 #[derive(Copy, Clone, Debug)]
-pub struct Partial {
-    pub phase: f32,
-    pub phase_step: f32,
-    pub amp: f32,
-    pub decay_mul: f32,
+struct Partial {
+    phase: f32,
+    phase_step: f32,
+    amp: f32,
+    decay_mul: f32,
 }
 
 impl Partial {
@@ -338,13 +338,13 @@ impl BankStage {
 /// is `sin` + multiply-accumulate + decay multiply per partial.
 #[derive(Copy, Clone, Debug)]
 pub struct PartialBankVoice {
-    pub partials: [Partial; PARTIAL_COUNT],
+    partials: [Partial; PARTIAL_COUNT],
     /// Overall level after velocity scaling; the partial amps carry
     /// the (normalised) spectral shape, this carries the loudness.
-    pub amplitude: f32,
-    pub stage: BankStage,
-    pub attack_s: f32,
-    pub release_s: f32,
+    amplitude: f32,
+    stage: BankStage,
+    attack_s: f32,
+    release_secs: f32,
 }
 
 impl PartialBankVoice {
@@ -392,8 +392,8 @@ impl PartialBankVoice {
             partials,
             amplitude,
             stage: BankStage::Attack { t: 0.0 },
-            attack_s: def.attack_s,
-            release_s: def.release_s,
+            attack_s: def.attack_secs,
+            release_secs: def.release_secs,
         }
     }
 
@@ -406,7 +406,7 @@ impl PartialBankVoice {
     }
 
     pub fn advance_ramp(&mut self, dt: f32) -> f32 {
-        self.stage.advance(dt, self.attack_s, self.release_s)
+        self.stage.advance(dt, self.attack_s, self.release_secs)
     }
 
     pub fn next_sample(&mut self, dt: f32) -> f32 {
@@ -440,11 +440,7 @@ impl PartialBankVoice {
 
     #[cfg(test)]
     pub fn partial_amps(&self) -> [f32; PARTIAL_COUNT] {
-        let mut out = [0.0f32; PARTIAL_COUNT];
-        for (slot, p) in out.iter_mut().zip(self.partials.iter()) {
-            *slot = p.amp;
-        }
-        out
+        self.partials.map(|p| p.amp)
     }
 
     #[cfg(test)]

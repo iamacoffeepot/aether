@@ -7,7 +7,6 @@
 //! same access as an inline impl block would.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use aether_actor::Addressable;
 use aether_kinds::{ComponentCapabilities, LoadComponent, LoadResult};
@@ -29,7 +28,7 @@ impl ComponentHostCapabilityState {
                   would thread the load payload + registry/engine handles through a helper \
                   for no clarity gain."
     )]
-    pub(in crate::component) fn handle_load(
+    pub(super) fn handle_load(
         &mut self,
         ctx: &mut NativeCtx<'_>,
         payload: LoadComponent,
@@ -107,18 +106,16 @@ impl ComponentHostCapabilityState {
         // default. A non-entry export defaults its mailbox name to
         // the selected type's namespace, the multi-actor analog of
         // the single-actor `aether.namespace` fallback.
-        let name = match payload.name {
+        let name = match payload.name.or(selected_namespace) {
             Some(n) => n,
-            None => match selected_namespace {
-                Some(ns) => ns,
-                None => match kind_manifest::read_namespace_from_bytes(&payload.wasm) {
-                    Ok(Some(declared)) => declared,
-                    Ok(None) => {
-                        let n = self.default_name_counter.fetch_add(1, Ordering::Relaxed);
-                        format!("component_{n}")
-                    }
-                    Err(error) => return LoadResult::Err { error },
-                },
+            None => match kind_manifest::read_namespace_from_bytes(&payload.wasm) {
+                Ok(Some(declared)) => declared,
+                Ok(None) => {
+                    let n = self.default_name_counter;
+                    self.default_name_counter += 1;
+                    format!("component_{n}")
+                }
+                Err(error) => return LoadResult::Err { error },
             },
         };
 

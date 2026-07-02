@@ -28,10 +28,10 @@ pub enum Wave {
 /// instantiation so the hot loop is add-only.
 #[derive(Copy, Clone, Debug)]
 pub struct Adsr {
-    pub attack_s: f32,
-    pub decay_s: f32,
+    pub attack_secs: f32,
+    pub decay_secs: f32,
     pub sustain: f32,
-    pub release_s: f32,
+    pub release_secs: f32,
 }
 
 /// Optional per-patch pitch envelope on the oscillator kernel — the
@@ -96,9 +96,9 @@ pub struct PartialBankDef {
     pub brightness_tilt: f32,
     /// Global attack ramp (seconds). Near-zero for a struck string,
     /// long for the pad's slow swell.
-    pub attack_s: f32,
+    pub attack_secs: f32,
     /// Global release ramp (seconds) on `note_off` — the damper.
-    pub release_s: f32,
+    pub release_secs: f32,
 }
 
 /// Voice kernel a patch selects. The five original patches stay
@@ -134,10 +134,10 @@ pub const BUILTINS: &[InstrumentDef] = &[
         voice: VoiceDef::Oscillator {
             wave: Wave::Sine,
             adsr: Adsr {
-                attack_s: 0.01,
-                decay_s: 0.08,
+                attack_secs: 0.01,
+                decay_secs: 0.08,
                 sustain: 0.7,
-                release_s: 0.18,
+                release_secs: 0.18,
             },
         },
         base_amp: 0.35,
@@ -148,10 +148,10 @@ pub const BUILTINS: &[InstrumentDef] = &[
         voice: VoiceDef::Oscillator {
             wave: Wave::Square,
             adsr: Adsr {
-                attack_s: 0.005,
-                decay_s: 0.12,
+                attack_secs: 0.005,
+                decay_secs: 0.12,
                 sustain: 0.6,
-                release_s: 0.12,
+                release_secs: 0.12,
             },
         },
         base_amp: 0.22,
@@ -162,10 +162,10 @@ pub const BUILTINS: &[InstrumentDef] = &[
         voice: VoiceDef::Oscillator {
             wave: Wave::Triangle,
             adsr: Adsr {
-                attack_s: 0.02,
-                decay_s: 0.1,
+                attack_secs: 0.02,
+                decay_secs: 0.1,
                 sustain: 0.7,
-                release_s: 0.2,
+                release_secs: 0.2,
             },
         },
         base_amp: 0.32,
@@ -176,10 +176,10 @@ pub const BUILTINS: &[InstrumentDef] = &[
         voice: VoiceDef::Oscillator {
             wave: Wave::Saw,
             adsr: Adsr {
-                attack_s: 0.01,
-                decay_s: 0.15,
+                attack_secs: 0.01,
+                decay_secs: 0.15,
                 sustain: 0.55,
-                release_s: 0.15,
+                release_secs: 0.15,
             },
         },
         base_amp: 0.2,
@@ -190,10 +190,10 @@ pub const BUILTINS: &[InstrumentDef] = &[
         voice: VoiceDef::Oscillator {
             wave: Wave::Saw,
             adsr: Adsr {
-                attack_s: 0.002,
-                decay_s: 0.35,
+                attack_secs: 0.002,
+                decay_secs: 0.35,
                 sustain: 0.0,
-                release_s: 0.05,
+                release_secs: 0.05,
             },
         },
         base_amp: 0.3,
@@ -211,8 +211,8 @@ pub const BUILTINS: &[InstrumentDef] = &[
             decay_spread: 0.6,
             detune: 0.000_8,
             brightness_tilt: 0.5,
-            attack_s: 0.002,
-            release_s: 0.15,
+            attack_secs: 0.002,
+            release_secs: 0.15,
         }),
         base_amp: 0.3,
         pitch_sweep: None,
@@ -229,8 +229,8 @@ pub const BUILTINS: &[InstrumentDef] = &[
             decay_spread: 0.4,
             detune: 0.001_2,
             brightness_tilt: 0.7,
-            attack_s: 0.003,
-            release_s: 0.1,
+            attack_secs: 0.003,
+            release_secs: 0.1,
         }),
         base_amp: 0.28,
         pitch_sweep: None,
@@ -247,8 +247,8 @@ pub const BUILTINS: &[InstrumentDef] = &[
             decay_spread: 0.0,
             detune: 0.000_6,
             brightness_tilt: 0.25,
-            attack_s: 0.8,
-            release_s: 0.6,
+            attack_secs: 0.8,
+            release_secs: 0.6,
         }),
         base_amp: 0.18,
         pitch_sweep: None,
@@ -262,10 +262,10 @@ pub const BUILTINS: &[InstrumentDef] = &[
         voice: VoiceDef::Oscillator {
             wave: Wave::Sine,
             adsr: Adsr {
-                attack_s: 0.001,
-                decay_s: 0.18,
+                attack_secs: 0.001,
+                decay_secs: 0.18,
                 sustain: 0.0,
-                release_s: 0.02,
+                release_secs: 0.02,
             },
         },
         base_amp: 0.9,
@@ -285,10 +285,10 @@ pub const BUILTINS: &[InstrumentDef] = &[
                 tone_mix: 0.0,
             },
             adsr: Adsr {
-                attack_s: 0.001,
-                decay_s: 0.04,
+                attack_secs: 0.001,
+                decay_secs: 0.04,
                 sustain: 0.0,
-                release_s: 0.02,
+                release_secs: 0.02,
             },
         },
         base_amp: 0.4,
@@ -305,10 +305,10 @@ pub const BUILTINS: &[InstrumentDef] = &[
                 tone_mix: 0.25,
             },
             adsr: Adsr {
-                attack_s: 0.001,
-                decay_s: 0.12,
+                attack_secs: 0.001,
+                decay_secs: 0.12,
                 sustain: 0.0,
-                release_s: 0.03,
+                release_secs: 0.03,
             },
         },
         base_amp: 0.5,
@@ -334,11 +334,10 @@ pub fn builtin_names() -> Vec<&'static str> {
 /// The first instrument id available to a loaded bank — one past the
 /// last compiled-in built-in. The cap's `next_instrument_id` starts
 /// here, the synth's bank table begins at the same offset.
+#[allow(clippy::cast_possible_truncation)]
 pub fn builtin_id_ceiling() -> u8 {
     // `BUILTINS` is a small fixed table (11 today); the length fits a
     // `u8` with room to spare, and a load count that overflowed `u8`
     // would be absurd.
-    #[allow(clippy::cast_possible_truncation)]
-    let n = BUILTINS.len() as u8;
-    n
+    BUILTINS.len() as u8
 }

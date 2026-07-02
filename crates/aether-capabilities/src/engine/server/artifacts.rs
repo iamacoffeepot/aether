@@ -75,21 +75,21 @@ pub fn ingest_binary(
 /// logged and skipped — a bad bootstrap entry must not fail hub boot.
 /// Idempotent via content dedup.
 pub fn bootstrap_ingest(store: &mut ArtifactStore, paths: &HashSet<String>) {
-    for path_str in paths {
-        let name = Path::new(path_str)
+    for path in paths {
+        let name = Path::new(path)
             .file_stem()
             .and_then(|stem| stem.to_str())
             .map(str::to_owned);
-        match ingest_binary(store, path_str, name) {
+        match ingest_binary(store, path, name) {
             Ok(hash) => tracing::info!(
                 target: "aether_substrate::engine_server",
-                path = path_str.as_str(),
+                path = path.as_str(),
                 hash = %hash,
                 "binary bootstrap: ingested a chassis bin",
             ),
             Err(error) => tracing::warn!(
                 target: "aether_substrate::engine_server",
-                path = path_str.as_str(),
+                path = path.as_str(),
                 error = %error,
                 "binary bootstrap: skipping a bin that failed to ingest",
             ),

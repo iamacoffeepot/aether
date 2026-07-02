@@ -22,7 +22,7 @@ use std::time::Duration;
 /// proxy doesn't manage.
 ///
 /// `heartbeat` is the liveness-probe tuning the cap resolved from
-/// its [`EngineConfig`](crate::engine::server) (issue 1339). `None`
+/// its [`EngineConfig`](crate::engine::EngineConfig) (issue 1339). `None`
 /// disables the heartbeat (the engine is then only evicted on a
 /// connection-close `Bye`, never on a wedge); `Some` arms the
 /// timer sidecar.
