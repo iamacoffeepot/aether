@@ -43,9 +43,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use aether_data::{
-    EnumVariant, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, KindDescriptor, KindLabels,
-    KindShape, LabelNode, NamedField, SchemaCell, SchemaShape, SchemaType, VariantLabel,
-    canonical::kind_id_from_shape, wire,
+    EnumVariant, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, KINDS_SECTION_VERSION,
+    KindDescriptor, KindLabels, KindShape, LABELS_SECTION_VERSION, LabelNode, NamedField,
+    SchemaCell, SchemaShape, SchemaType, VariantLabel, canonical::kind_id_from_shape, wire,
 };
 use aether_kinds::{
     ComponentCapabilities, ConfigCapability, FallbackCapability, HandlerCapability,
@@ -92,7 +92,7 @@ pub const NAMESPACE_SECTION: &str = "aether.namespace";
 /// `0x05` since ADR-0118 / issue 1984). The two sections version
 /// independently and happen to coincide at this revision — a shared
 /// number, not a shared format.
-const KINDS_VERSION: u8 = 0x05;
+const KINDS_VERSION: u8 = KINDS_SECTION_VERSION;
 
 /// Wire versions accepted in `aether.kinds.labels`. v0x03 added
 /// `kind_id` to `KindLabels`, making records self-identifying so the
@@ -100,7 +100,7 @@ const KINDS_VERSION: u8 = 0x05;
 /// / issue 1984) moved the record onto the owned
 /// aether-wire format. v0x02 / v0x03 are no longer accepted — a loud
 /// rebuild-required boundary.
-const LABELS_SUPPORTED_VERSIONS: &[u8] = &[0x04];
+const LABELS_SUPPORTED_VERSIONS: &[u8] = &[LABELS_SECTION_VERSION];
 
 /// Decode every kind record in the component's `aether.kinds` and
 /// (when present) `aether.kinds.labels` sections, merging labels into
@@ -621,7 +621,10 @@ fn merge_variant(shape: &aether_data::VariantShape, label: Option<&VariantLabel>
 )]
 mod tests {
     use super::*;
-    use aether_data::{LabelCell, LabelNode, Primitive, SchemaShape, VariantShape};
+    use aether_data::{
+        KINDS_SECTION_VERSION, LABELS_SECTION_VERSION, LabelCell, LabelNode, Primitive,
+        SchemaShape, VariantShape,
+    };
     use std::fs;
     fn wasm_with_section(section_name: &str, section: &[u8]) -> Vec<u8> {
         use core::fmt::Write as _;
@@ -654,22 +657,22 @@ mod tests {
         wat::parse_str(wat).unwrap()
     }
 
-    /// Append `[0x05][wire(KindShape)]` to `canonical`. Matches what the
+    /// Append `[KINDS_SECTION_VERSION][wire(KindShape)]` to `canonical`. Matches what the
     /// Kind derive emits into the `aether.kinds` section (ADR-0118 v0x05:
     /// the canonical body is the owned aether-wire encoding).
     fn push_shape(canonical: &mut Vec<u8>, shape: &KindShape) {
-        canonical.push(0x05);
+        canonical.push(KINDS_SECTION_VERSION);
         canonical.extend(wire::to_vec(shape).unwrap());
     }
 
-    /// Append `[0x04][wire(KindLabels)]` to `labels_bytes`, and stamp
+    /// Append `[LABELS_SECTION_VERSION][wire(KindLabels)]` to `labels_bytes`, and stamp
     /// `labels.kind_id` from the paired shape so the reader's by-id
     /// merge finds it. Matches what the Kind derive emits into
     /// `aether.kinds.labels` (ADR-0118 v0x04: the owned aether-wire
     /// encoding).
     fn push_labels(labels_bytes: &mut Vec<u8>, shape: &KindShape, labels: &mut KindLabels) {
         labels.kind_id = aether_data::KindId(kind_id_from_shape(shape));
-        labels_bytes.push(0x04);
+        labels_bytes.push(LABELS_SECTION_VERSION);
         labels_bytes.extend(wire::to_vec(labels).unwrap());
     }
 
@@ -768,7 +771,7 @@ mod tests {
                 repr_c: false,
             },
         };
-        let mut canonical = vec![0x05u8];
+        let mut canonical = vec![KINDS_SECTION_VERSION];
         canonical.extend(wire::to_vec(&shape).unwrap());
         let wasm = wasm_with_section(MANIFEST_SECTION, &canonical);
         let descs = read_from_bytes(&wasm).unwrap();
@@ -866,7 +869,7 @@ mod tests {
         let mut canonical = Vec::new();
         push_shape(&mut canonical, &shape);
         let mut labels_bytes = Vec::new();
-        labels_bytes.push(0x04);
+        labels_bytes.push(LABELS_SECTION_VERSION);
         labels_bytes.extend(wire::to_vec(&orphan).unwrap());
         let wasm = wasm_with_two_sections(&canonical, &labels_bytes);
         let descs = read_from_bytes(&wasm).unwrap();
