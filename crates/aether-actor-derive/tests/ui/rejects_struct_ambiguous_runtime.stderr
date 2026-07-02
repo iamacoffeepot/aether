@@ -1,0 +1,5 @@
+error: #[actor]: more than one `#[handler]`-bearing `impl NativeActor` in runtime module `rt_ambiguous` — the cfg-blind harvest can't choose between cfg-gated runtime impls, so it refuses rather than silently taking the first
+ --> tests/ui/rejects_struct_ambiguous_runtime.rs:8:20
+  |
+8 | #[actor(singleton, rt_ambiguous)]
+  |                    ^^^^^^^^^^^^

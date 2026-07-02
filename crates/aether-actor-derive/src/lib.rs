@@ -2841,7 +2841,7 @@ fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::Resul
         None => ("runtime".to_string(), ident.span()),
     };
 
-    let (namespace_expr, handler_kinds, has_fallback) =
+    let (namespace_expr, handler_kinds, has_fallback, runtime_path) =
         harvest_runtime_identity(&module_name, module_span)?;
 
     let markers = emit_native_identity_markers(
@@ -2856,9 +2856,20 @@ fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::Resul
         true,
     );
 
+    // ADR-0123 gap 3: a compile-time dependency edge on the runtime file so a
+    // transport-only (runtime-off) build — where `mod runtime` is cfg-stripped
+    // and so is not itself a compilation input — re-runs this harvest when the
+    // runtime module changes on disk. `include_bytes!` is the stable substitute
+    // for the unstable `proc_macro::tracked_path` API; the absolute path is
+    // emitted ungated so it rides the transport build where the staleness lives
+    // (in a runtime-on build the module is already a fingerprint input, so the
+    // edge is redundant but harmless).
+    let runtime_path_lit = syn::LitStr::new(&runtime_path, proc_macro2::Span::call_site());
+
     Ok(quote! {
         #item
         #markers
+        const _: &[u8] = include_bytes!(#runtime_path_lit);
     })
 }
 
@@ -2873,7 +2884,7 @@ fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::Resul
 fn harvest_runtime_identity(
     module_name: &str,
     module_span: proc_macro2::Span,
-) -> syn::Result<(Expr, Vec<HandlerMarker>, bool)> {
+) -> syn::Result<(Expr, Vec<HandlerMarker>, bool, String)> {
     // `Span::local_file()` (stable since 1.88) → the on-disk path of the file
     // holding the `#[actor]` invocation. It is `None` only under path remapping
     // (`--remap-path-prefix`), where the runtime file can't be located — a hard
@@ -2907,6 +2918,78 @@ fn harvest_runtime_identity(
         )
     })?;
 
+    // ADR-0123 gap 3: the absolute path of the file just read, for the
+    // `include_bytes!` rebuild edge the caller emits. Canonicalize (the read
+    // above proved the file exists) so the emitted literal resolves independent
+    // of `include_bytes!`'s span-relative base; fall back to `target` as-is on a
+    // canonicalize failure.
+    let runtime_path = fs::canonicalize(&target)
+        .unwrap_or(target)
+        .to_string_lossy()
+        .into_owned();
+
+    // ADR-0123 gap 1: select the runtime impl by trait, not by handler-presence
+    // alone — mirror the dispatch-side last-segment match (`impl NativeActor for
+    // …`) so any import style resolves. `syn` does not evaluate `cfg`, so two
+    // cfg-gated `impl NativeActor` blocks in one file are indistinguishable to
+    // this parse; collect every qualifying impl and refuse rather than silently
+    // pick the first.
+    let mut qualifying: Vec<(Expr, Vec<HandlerMarker>, bool)> = Vec::new();
+    for syn_item in &parsed.items {
+        let syn::Item::Impl(imp) = syn_item else {
+            continue;
+        };
+        let is_native_actor = imp
+            .trait_
+            .as_ref()
+            .and_then(|(_, path, _)| path.segments.last())
+            .is_some_and(|seg| seg.ident == "NativeActor");
+        if !is_native_actor {
+            continue;
+        }
+        if let Some(identity) = harvest_native_actor_impl(imp, module_name, module_span)? {
+            qualifying.push(identity);
+        }
+    }
+
+    // Exactly one qualifying impl is harvested; zero and two-or-more are the
+    // gap-1 diagnostics (nothing to lift / cfg-blind ambiguity).
+    let mut qualifying = qualifying.into_iter();
+    match (qualifying.next(), qualifying.next()) {
+        (None, _) => Err(syn::Error::new(
+            module_span,
+            format!(
+                "#[actor]: no `#[handler]`-bearing impl found in runtime module `{module_name}` — \
+                 the struct-hosted form expects a sibling `#[runtime] impl NativeActor` with at \
+                 least one `#[handler]` (or a `#[fallback]`)"
+            ),
+        )),
+        (Some((namespace_expr, handler_kinds, has_fallback)), None) => {
+            Ok((namespace_expr, handler_kinds, has_fallback, runtime_path))
+        }
+        (Some(_), Some(_)) => Err(syn::Error::new(
+            module_span,
+            format!(
+                "#[actor]: more than one `#[handler]`-bearing `impl NativeActor` in runtime \
+                 module `{module_name}` — the cfg-blind harvest can't choose between cfg-gated \
+                 runtime impls, so it refuses rather than silently taking the first"
+            ),
+        )),
+    }
+}
+
+/// Scan a single `impl NativeActor` block for the cap identity: the per-mail
+/// handler kinds (`(kind, reply)`, task completions skipped), whether a
+/// `#[fallback]` is present, and the `const NAMESPACE` expression. `Ok(None)`
+/// means the impl hosts neither a `#[handler]` nor a `#[fallback]`, so it lifts
+/// no identity; `Err` means it is handler-bearing but omits `const NAMESPACE`
+/// (or a handler signature is malformed). `module_span` anchors diagnostics back
+/// at the `#[actor]` invocation.
+fn harvest_native_actor_impl(
+    imp: &ItemImpl,
+    module_name: &str,
+    module_span: proc_macro2::Span,
+) -> syn::Result<Option<(Expr, Vec<HandlerMarker>, bool)>> {
     let remap = |e: syn::Error| {
         syn::Error::new(
             module_span,
@@ -2914,67 +2997,55 @@ fn harvest_runtime_identity(
         )
     };
 
-    for syn_item in &parsed.items {
-        let syn::Item::Impl(imp) = syn_item else {
+    let mut handler_kinds: Vec<(Type, Option<Type>)> = Vec::new();
+    let mut has_fallback = false;
+    let mut saw_handler = false;
+    for impl_item in &imp.items {
+        let ImplItem::Fn(f) = impl_item else {
             continue;
         };
-        let mut handler_kinds: Vec<(Type, Option<Type>)> = Vec::new();
-        let mut has_fallback = false;
-        let mut saw_handler = false;
-        for impl_item in &imp.items {
-            let ImplItem::Fn(f) = impl_item else {
-                continue;
-            };
-            if f.attrs.iter().any(attr_is_fallback) {
-                has_fallback = true;
-                continue;
-            }
-            let Some(handler_attr) = f.attrs.iter().find(|a| attr_is_handler(a)) else {
-                continue;
-            };
-            saw_handler = true;
-            // Task completions get no `HandlesKind` / inventory marker.
-            if matches!(
-                parse_handler_variant(handler_attr).map_err(remap)?,
-                HandlerVariant::Task
-            ) {
-                continue;
-            }
-            let (kind_ty, _is_slice) =
-                extract_native_actor_handler_kind(&f.sig, true).map_err(remap)?;
-            let reply = classify_handler_reply(&f.sig.output)
-                .manifest_kind()
-                .cloned();
-            handler_kinds.push((kind_ty, reply));
-        }
-        // Not the runtime impl — some other trait impl in the file.
-        if !saw_handler && !has_fallback {
+        if f.attrs.iter().any(attr_is_fallback) {
+            has_fallback = true;
             continue;
         }
-        let namespace_expr = imp.items.iter().find_map(|impl_item| match impl_item {
-            ImplItem::Const(c) if c.ident == "NAMESPACE" => Some(c.expr.clone()),
-            _ => None,
-        });
-        let Some(namespace_expr) = namespace_expr else {
-            return Err(syn::Error::new(
-                module_span,
-                format!(
-                    "#[actor]: the runtime impl in module `{module_name}` has #[handler]s but \
-                     no `const NAMESPACE` to lift into Addressable"
-                ),
-            ));
+        let Some(handler_attr) = f.attrs.iter().find(|a| attr_is_handler(a)) else {
+            continue;
         };
-        return Ok((namespace_expr, handler_kinds, has_fallback));
+        saw_handler = true;
+        // Task completions get no `HandlesKind` / inventory marker.
+        if matches!(
+            parse_handler_variant(handler_attr).map_err(remap)?,
+            HandlerVariant::Task
+        ) {
+            continue;
+        }
+        let (kind_ty, _is_slice) =
+            extract_native_actor_handler_kind(&f.sig, true).map_err(remap)?;
+        let reply = classify_handler_reply(&f.sig.output)
+            .manifest_kind()
+            .cloned();
+        handler_kinds.push((kind_ty, reply));
     }
 
-    Err(syn::Error::new(
-        module_span,
-        format!(
-            "#[actor]: no `#[handler]`-bearing impl found in runtime module `{module_name}` — \
-             the struct-hosted form expects a sibling `#[runtime] impl NativeActor` with at \
-             least one `#[handler]` (or a `#[fallback]`)"
-        ),
-    ))
+    // A `NativeActor` impl with neither a `#[handler]` nor a `#[fallback]`
+    // carries no identity to lift.
+    if !saw_handler && !has_fallback {
+        return Ok(None);
+    }
+    let namespace_expr = imp.items.iter().find_map(|impl_item| match impl_item {
+        ImplItem::Const(c) if c.ident == "NAMESPACE" => Some(c.expr.clone()),
+        _ => None,
+    });
+    let Some(namespace_expr) = namespace_expr else {
+        return Err(syn::Error::new(
+            module_span,
+            format!(
+                "#[actor]: the runtime impl in module `{module_name}` has #[handler]s but \
+                 no `const NAMESPACE` to lift into Addressable"
+            ),
+        ));
+    };
+    Ok(Some((namespace_expr, handler_kinds, has_fallback)))
 }
 
 struct NativeActorHandlerFn {
