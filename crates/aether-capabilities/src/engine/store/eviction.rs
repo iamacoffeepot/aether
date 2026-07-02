@@ -9,7 +9,7 @@ use super::TARGET;
 impl ArtifactStore {
     /// Evict LRU entries that are neither pinned nor named until the disk
     /// ledger is back under budget (or no eligible candidate remains).
-    pub(super) fn evict_if_needed(&mut self) {
+    pub fn evict_if_needed(&mut self) {
         while self.total_bytes > self.disk_budget_bytes {
             // Snapshot the named set once (a name protects its target), then
             // pick the oldest eligible entry. Both reads borrow disjoint

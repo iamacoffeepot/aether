@@ -9,7 +9,7 @@
 //!
 //! See issue 763 for the full design.
 
-pub(crate) mod kinds;
+pub mod kinds;
 mod proxy;
 mod server;
 #[cfg(feature = "runtime")]

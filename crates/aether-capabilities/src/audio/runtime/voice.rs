@@ -286,7 +286,7 @@ impl BankStage {
     /// wrap. `attack_s` lets a release mid-attack start from the partial
     /// level the swell had reached. A no-op once already releasing or
     /// done.
-    pub(super) fn begin_release(&mut self, attack_s: f32) {
+    pub fn begin_release(&mut self, attack_s: f32) {
         let from_level = match *self {
             Self::Attack { t } => {
                 if attack_s > 0.0 {
@@ -306,7 +306,7 @@ impl BankStage {
     /// attack/release times. Attack swells linearly to `1.0` then holds
     /// at `Sustain`; `Release` fades from its captured level to `0.0` and
     /// retires at `Done`.
-    pub(super) fn advance(&mut self, dt: f32, attack_s: f32, release_s: f32) -> f32 {
+    pub fn advance(&mut self, dt: f32, attack_s: f32, release_s: f32) -> f32 {
         match self {
             Self::Attack { t } => {
                 *t += dt;

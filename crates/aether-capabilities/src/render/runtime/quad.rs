@@ -13,8 +13,8 @@ use super::super::kinds::TexturedQuad;
 /// dispatcher thread can keep appending the next frame's batches
 /// while the driver thread expands these.
 #[derive(Clone)]
-pub(in crate::render) struct QuadBatch {
-    pub(in crate::render) texture_id: u32,
-    pub(in crate::render) space: QuadSpace,
-    pub(in crate::render) quads: Vec<TexturedQuad>,
+pub struct QuadBatch {
+    pub texture_id: u32,
+    pub space: QuadSpace,
+    pub quads: Vec<TexturedQuad>,
 }

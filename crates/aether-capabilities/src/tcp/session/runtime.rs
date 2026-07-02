@@ -46,12 +46,12 @@ pub const READ_BUFFER_BYTES: usize = 64 * 1024;
 /// `SessionData` / `SessionClosed` broadcast path). The addressing identity is
 /// the distinct ZST [`TcpSessionActor`](super::TcpSessionActor).
 pub struct TcpSessionState {
-    pub(super) peer: String,
-    pub(super) session_name: String,
-    pub(super) write_half: TcpStream,
-    pub(super) shutdown: Arc<AtomicBool>,
-    pub(super) read_thread: Option<JoinHandle<()>>,
-    pub(super) bytes_rx: mpsc::Receiver<Result<Vec<u8>, String>>,
+    pub peer: String,
+    pub session_name: String,
+    pub write_half: TcpStream,
+    pub shutdown: Arc<AtomicBool>,
+    pub read_thread: Option<JoinHandle<()>>,
+    pub bytes_rx: mpsc::Receiver<Result<Vec<u8>, String>>,
 }
 
 #[runtime]

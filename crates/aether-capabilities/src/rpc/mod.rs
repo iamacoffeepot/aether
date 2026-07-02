@@ -18,12 +18,6 @@ pub mod server;
 // `aether_capabilities::rpc::RpcInboundReady` resolves unchanged.
 pub use kinds::*;
 
-// Shared round-trip test scaffolding (echo actor + its kinds), used by
-// the `server` test modules and the `engine::proxy` test — `pub(crate)`
-// so cross-module test code outside `rpc` can reach it.
-#[cfg(test)]
-pub(crate) mod test_echo;
-
 // Re-export the wire vocabulary + the native `Call` client from
 // `aether-rpc` so `aether_capabilities::rpc::{MailEnvelope, RpcClient,
 // WireFrame, ...}` keeps resolving unchanged (ADR-0102). The client

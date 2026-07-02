@@ -59,24 +59,24 @@ const RECENTLY_DIED_CAP: usize = 16;
 /// `Instant` the cap removed the engine, so `on_list` can compute the
 /// `died_age_millis` it reports in a [`DeadEngineDescriptor`].
 pub struct DeadRecord {
-    pub(super) engine_id: String,
-    pub(super) rpc_port: u16,
-    pub(super) reason: DeathReason,
-    pub(super) died_at: Instant,
+    pub engine_id: String,
+    pub rpc_port: u16,
+    pub reason: DeathReason,
+    pub died_at: Instant,
 }
 
 /// One supervised engine in [`EngineServerState`]'s table.
 pub struct EngineEntry {
     /// Mailbox of the `aether.engine.proxy:<id>` actor — the
     /// forward target for `TerminateEngine`.
-    pub(super) proxy_mailbox: MailboxId,
+    pub proxy_mailbox: MailboxId,
     /// The localhost RPC port the cap assigned this substrate.
-    pub(super) rpc_port: u16,
+    pub rpc_port: u16,
     /// When the cap last saw this engine alive (issue 1339): set at
     /// spawn (just-connected = alive) and refreshed on each
     /// `EngineAlive` the proxy reports from a confirmed `Pong`.
     /// `on_list` reports `now - last_alive` as the heartbeat age.
-    pub(super) last_alive: Instant,
+    pub last_alive: Instant,
 }
 
 /// `aether.engine` runtime state (ADR-0122 split): supervises a fleet of
@@ -87,40 +87,40 @@ pub struct EngineEntry {
 /// `pub`-enough to satisfy the `NativeActor::State` interface without exposing
 /// it as crate-public API.
 pub struct EngineServerState {
-    pub(super) engines: HashMap<EngineId, EngineEntry>,
+    pub engines: HashMap<EngineId, EngineEntry>,
     /// Monotonic source of `EngineId`s. Engine ids only need to be
     /// unique among the engines this cap currently supervises — a
     /// process-local counter delivers that without a `uuid` rng
     /// dependency. Starts at 1 (`Uuid::from_u128(0)` is the nil
     /// uuid).
-    pub(super) next_engine_seq: u128,
+    pub next_engine_seq: u128,
     /// Cached so `on_route` can push a `ForwardEnvelope` at a proxy
     /// while *propagating the inbound reply-to* — `NativeCtx`'s
     /// sends stamp the cap as sender, but a routed call's reply
     /// must reach the originating `RpcServerCapability`, not here.
-    pub(super) mailer: Arc<Mailer>,
+    pub mailer: Arc<Mailer>,
     /// Liveness-heartbeat tuning each spawned proxy is armed with
     /// (issue 1339), resolved once from `EngineConfig` at init.
     /// `None` disables the heartbeat fleet-wide.
-    pub(super) heartbeat: Option<HeartbeatParams>,
+    pub heartbeat: Option<HeartbeatParams>,
     /// Startup-dial connect budget each spawned proxy is armed with
     /// (issue 2072), resolved once from `EngineConfig` at init.
     /// `Some(d)` caps the retry; `None` is the wait-forever sentinel.
-    pub(super) connect_budget: Option<Duration>,
+    pub connect_budget: Option<Duration>,
     /// How many times `on_spawn` re-forks a substrate on a fresh port
     /// before giving up (issue 2422), resolved once from `EngineConfig`
     /// at init. A freshly-forked substrate can lose its guessed RPC
     /// port to another socket in `free_local_port`'s TOCTOU window and
     /// exit on a fatal bind; a re-fork on a fresh port escapes it.
     /// Clamped to at least 1.
-    pub(super) spawn_attempts: u32,
+    pub spawn_attempts: u32,
     /// Bounded ring of the last [`RECENTLY_DIED_CAP`] engines that
     /// left the table and why (issue 1906). `on_terminate` /
     /// `on_engine_died` push a [`DeadRecord`] at the removal site;
     /// `on_list` renders it into the reply's `recently_died` sidecar
     /// so an observer can tell a clean terminate from a crash or a
     /// heartbeat eviction.
-    pub(super) recently_died: VecDeque<DeadRecord>,
+    pub recently_died: VecDeque<DeadRecord>,
     /// Hub-scoped content-addressed binary store (ADR-0115, issue
     /// 1953) — the storage half of the artifact registry.
     /// `on_upload_binary` ingests a staged binary content-addressed;
@@ -129,13 +129,13 @@ pub struct EngineServerState {
     /// persists across a `restart-hub` (the layout root outlives the
     /// hub child); the spawn cutover (#1954) reads it back through the
     /// store's `get` seam.
-    pub(super) store: ArtifactStore,
+    pub store: ArtifactStore,
 }
 
 impl EngineServerState {
     /// Push a [`DeadRecord`] onto the recently-died ring, evicting the
     /// oldest entry once the ring is full (issue 1906).
-    pub(super) fn record_death(&mut self, engine_id: String, rpc_port: u16, reason: DeathReason) {
+    pub fn record_death(&mut self, engine_id: String, rpc_port: u16, reason: DeathReason) {
         if self.recently_died.len() >= RECENTLY_DIED_CAP {
             self.recently_died.pop_front();
         }

@@ -45,7 +45,7 @@ use super::{
 /// keeps it `pub`-enough to satisfy the `NativeActor::State` interface
 /// without exposing it as crate-public API.
 pub struct HeadlessRenderCapabilityState {
-    pub(super) outbound: Arc<HubOutbound>,
+    pub outbound: Arc<HubOutbound>,
 }
 
 #[runtime]

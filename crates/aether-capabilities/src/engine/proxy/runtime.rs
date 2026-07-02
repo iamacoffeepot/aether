@@ -61,41 +61,41 @@ fn engine_cap_mailbox() -> MailboxId {
 /// impl. Living in this private module keeps it `pub`-enough to satisfy the
 /// `NativeActor::State` interface without exposing it as crate-public API.
 pub struct EngineProxyState {
-    pub(super) engine_id: EngineId,
+    pub engine_id: EngineId,
     /// Cached so `on_inbound_ready` can push correlation-preserving
     /// reply mail — `NativeCtx` doesn't expose `mailer()`, only
     /// `NativeInitCtx` does.
-    pub(super) mailer: Arc<Mailer>,
+    pub mailer: Arc<Mailer>,
     /// The live outbound connection: `.client` writes `Call`s,
     /// `.inbound` carries reply frames, `.reader` joins on drop.
     /// `.server` holds the substrate's `HelloAck` identity (the
     /// kind manifest P4's describe handler will read).
-    pub(super) conn: RpcConnection,
+    pub conn: RpcConnection,
     /// wire `cid` → the `Source` of the `ForwardEnvelope` that
     /// opened the call. `ReplyEvent` frames route back here;
     /// `ReplyEnd` clears the entry.
-    pub(super) in_flight: HashMap<u64, Source>,
+    pub in_flight: HashMap<u64, Source>,
     /// The forked child substrate, when the engines cap spawned it
     /// (see [`EngineProxyConfig::spawned`]). `Drop` SIGKILLs +
     /// reaps it; `None` once taken or for an adopted substrate.
-    pub(super) spawned: Option<Child>,
+    pub spawned: Option<Child>,
     /// Consecutive heartbeat pings sent without a `Pong` reply
     /// (issue 1339). Incremented each `on_heartbeat_tick`, reset to
     /// `0` on any inbound `Pong`. Crossing `miss_limit` evicts the
     /// engine.
-    pub(super) missed_heartbeats: u32,
+    pub missed_heartbeats: u32,
     /// Consecutive-miss threshold that marks the engine dead. `0`
     /// when the heartbeat is disabled (`heartbeat: None`), in which
     /// case `on_heartbeat_tick` never fires anyway.
-    pub(super) miss_limit: u32,
+    pub miss_limit: u32,
     /// Monotonic nonce stamped on each heartbeat `Ping` — for log
     /// correlation only; a `Pong` carrying any nonce counts as
     /// liveness, since there is at most one heartbeat outstanding.
-    pub(super) heartbeat_seq: u64,
+    pub heartbeat_seq: u64,
     /// The heartbeat timer thread, when armed. `Drop` stops + joins
     /// it. Held as the field's RAII guard — the leading `_` marks
     /// it as owned-for-its-Drop, not read.
-    pub(super) _heartbeat: Option<HeartbeatHandle>,
+    _heartbeat: Option<HeartbeatHandle>,
 }
 
 impl Drop for EngineProxyState {
@@ -118,7 +118,7 @@ impl EngineProxyState {
     /// 1339). Sent as a fresh root: the `Pong` that triggered it is
     /// an external event causally unrelated to whatever inbound
     /// mail woke the handler.
-    pub(super) fn report_alive(&self, ctx: &NativeCtx<'_>) {
+    pub fn report_alive(&self, ctx: &NativeCtx<'_>) {
         let alive = EngineAlive {
             engine_id: self.engine_id.0.to_string(),
         };
@@ -137,7 +137,7 @@ impl EngineProxyState {
     /// Idempotent on the cap side — a `died` for an already-evicted
     /// engine is a no-op. Sent as a fresh root for the same reason as
     /// [`Self::report_alive`].
-    pub(super) fn report_died(&self, ctx: &NativeCtx<'_>, reason: DeathReason) {
+    pub fn report_died(&self, ctx: &NativeCtx<'_>, reason: DeathReason) {
         let died = EngineDied {
             engine_id: self.engine_id.0.to_string(),
             reason,
@@ -156,7 +156,7 @@ impl EngineProxyState {
     /// original `correlation_id` echoed (reply-to `None` — nobody
     /// replies to a reply) so a correlation-matching caller picks
     /// it up.
-    pub(super) fn route_reply(&mut self, cid: u64, envelope: MailEnvelope) {
+    pub fn route_reply(&mut self, cid: u64, envelope: MailEnvelope) {
         let Some(reply_to) = self.in_flight.get(&cid).copied() else {
             tracing::debug!(
                 target: "aether_substrate::engine_proxy",
@@ -187,7 +187,7 @@ impl EngineProxyState {
     /// originating `RpcServerCapability` learns to close its wire
     /// call. The wire `RpcError` is rendered to a string; the
     /// `aether-kinds` layer can't carry the structured variant.
-    pub(super) fn route_settled(&mut self, cid: u64, result: Result<(), RpcError>) {
+    pub fn route_settled(&mut self, cid: u64, result: Result<(), RpcError>) {
         let Some(reply_to) = self.in_flight.remove(&cid) else {
             tracing::debug!(
                 target: "aether_substrate::engine_proxy",

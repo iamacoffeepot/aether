@@ -61,16 +61,14 @@ use super::{
     DrawTexturedQuads, DrawTriangle, RenderCapability, SolidQuad, TexturedQuad, UpdateTexture,
 };
 
-// These seam items are `pub(in crate::render)` (visible in `render`) in their
+// These seam items are `pub` (visible in `render`) in their
 // now-nested child modules, so the re-export up to runtime level keeps that
 // exact visibility — the `use runtime::*` glob in `mod.rs` reaches them from
 // `render`, the scope the co-located test module names them in. `pub use`
 // would try to widen them to `pub` and fail (E0364/E0365).
-pub(in crate::render) use self::capture::resolve_reference;
-pub(in crate::render) use self::quad::QuadBatch;
-pub(in crate::render) use self::texture::{
-    StagedTexture, TextureRegistry, WHITE_TEXTURE_ID, expected_pixel_bytes,
-};
+pub use self::capture::resolve_reference;
+pub use self::quad::QuadBatch;
+pub use self::texture::{StagedTexture, TextureRegistry, WHITE_TEXTURE_ID, expected_pixel_bytes};
 
 /// `aether.render` runtime state (ADR-0066). Holds [`RenderHandles`] (the
 /// driver-facing accumulator state plus GPU bundle) and the per-instance
@@ -84,13 +82,13 @@ pub(in crate::render) use self::texture::{
 /// `pub`-enough to satisfy the `NativeActor::State` interface without
 /// exposing it as crate-public API.
 pub struct RenderCapabilityState {
-    pub(super) handles: RenderHandles,
-    pub(super) config: RenderConfig,
+    pub handles: RenderHandles,
+    pub config: RenderConfig,
     /// Substrate registry and mailer captured at init for the
     /// `capture_frame` resolve-bundle / push-pre-mails path. Both are
     /// Arc-shared with every other cap and the chassis loop.
-    pub(super) registry: Arc<Registry>,
-    pub(super) mailer: Arc<Mailer>,
+    pub registry: Arc<Registry>,
+    pub mailer: Arc<Mailer>,
 }
 
 #[runtime]

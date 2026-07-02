@@ -3,7 +3,7 @@
 //! Declared as `mod load;` at the `component` level (a sibling of `runtime`).
 //! Under the ADR-0122 split the sequence is a method on
 //! `ComponentHostCapabilityState`; its fields carry
-//! `pub(in crate::component)` visibility so this sibling module retains the
+//! `pub` visibility so this sibling module retains the
 //! same access as an inline impl block would.
 
 use std::sync::Arc;
@@ -28,11 +28,7 @@ impl ComponentHostCapabilityState {
                   would thread the load payload + registry/engine handles through a helper \
                   for no clarity gain."
     )]
-    pub(super) fn handle_load(
-        &mut self,
-        ctx: &mut NativeCtx<'_>,
-        payload: LoadComponent,
-    ) -> LoadResult {
+    pub fn handle_load(&mut self, ctx: &mut NativeCtx<'_>, payload: LoadComponent) -> LoadResult {
         // 1. Parse + register kind descriptors (ADR-0028).
         let descriptors = match kind_manifest::read_from_bytes(&payload.wasm) {
             Ok(d) => d,

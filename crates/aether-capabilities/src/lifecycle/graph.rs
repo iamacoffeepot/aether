@@ -17,9 +17,9 @@ use aether_data::{Kind, KindId};
 /// bridgeable).
 #[derive(Clone)]
 pub struct LifecycleStateData {
-    pub(crate) kind: KindId,
-    pub(crate) next: KindId,
-    pub(crate) quit: Option<KindId>,
+    pub kind: KindId,
+    pub next: KindId,
+    pub quit: Option<KindId>,
 }
 
 /// A compiled lifecycle graph as plain data (ADR-0082 §1). Built via
@@ -62,17 +62,20 @@ impl LifecycleGraphData {
 
     /// Look up the state registered at `kind`. `None` for an unknown
     /// kind or a terminal.
-    pub(crate) fn state(&self, kind: KindId) -> Option<&LifecycleStateData> {
+    #[must_use]
+    pub fn state(&self, kind: KindId) -> Option<&LifecycleStateData> {
         self.states.iter().find(|s| s.kind == kind)
     }
 
     /// True if `kind` is a registered terminal.
-    pub(crate) fn is_terminal(&self, kind: KindId) -> bool {
+    #[must_use]
+    pub fn is_terminal(&self, kind: KindId) -> bool {
         self.terminals.contains(&kind)
     }
 
     /// The configured start state's kind id.
-    pub(crate) fn start(&self) -> KindId {
+    #[must_use]
+    pub fn start(&self) -> KindId {
         self.start
     }
 }

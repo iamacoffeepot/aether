@@ -7,13 +7,13 @@
 //! path the linker keeps — and so the derive registers them in
 //! `aether_kinds::descriptors::all()` for the test substrate's registry
 //! walk. The whole module is `#[cfg(test)]` (gated at the `mod`
-//! declaration in `rpc/mod.rs`): it is test scaffolding, not part of
+//! declaration in `lib.rs`): it is test scaffolding, not part of
 //! the cap's shipped surface.
 
 use serde::{Deserialize, Serialize};
 
 // The actor halves are substrate-typed (ADR-0122 split). The whole module
-// is `#[cfg(test)]` (gated at its `mod` declaration in `rpc/mod.rs`) and
+// is `#[cfg(test)]` (gated at its `mod` declaration in `lib.rs`) and
 // tests always carry `runtime`, so these resolve; the `#[actor]` macro
 // additionally gates the emitted `NativeActor` / `Dispatch` runtime impls
 // behind `feature = "runtime"`. The kind types above stay always-on so

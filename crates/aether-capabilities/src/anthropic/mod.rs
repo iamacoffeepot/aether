@@ -38,7 +38,7 @@ use std::time::Duration;
 use crate::shared::contentgen::adapter::{AnthropicAdapter, AnthropicRequest, AnthropicResponse};
 
 pub use api::UreqAnthropicAdapter;
-pub(crate) use cli::ClaudeCliAdapter;
+use cli::ClaudeCliAdapter;
 pub use config::{AnthropicConfig, AnthropicConfigLayer, AnthropicOverlay};
 
 /// Default per-cap concurrency bound when `AETHER_ANTHROPIC_MAX_IN_FLIGHT`

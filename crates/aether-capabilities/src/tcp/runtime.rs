@@ -49,30 +49,30 @@ pub struct TcpCapabilityState {
     /// full-name `MailboxId`. Each entry holds the bind metadata
     /// surfaced via `ListListeners` plus the monitor handle that
     /// pins the cap's monitor on the listener until close.
-    pub(super) listeners: HashMap<aether_data::MailboxId, ListenerEntry>,
+    pub listeners: HashMap<aether_data::MailboxId, ListenerEntry>,
     /// Outstanding unbind replies parked until `MonitorNotice`
     /// arrives from the listener being closed. Key is the same
     /// `MailboxId` as `listeners`; the cap's monitor (registered
     /// at spawn time) is what fires the notice.
-    pub(super) pending_unbinds: HashMap<aether_data::MailboxId, PendingUnbind>,
+    pub pending_unbinds: HashMap<aether_data::MailboxId, PendingUnbind>,
 }
 
 /// Cap-local supervisor state for one live listener. Drops with
 /// the entry; `MonitorHandle::Drop` is idempotent with the close
 /// path's index drain.
-pub(super) struct ListenerEntry {
-    pub(super) addr: String,
-    pub(super) port: u16,
-    pub(super) name: String,
+pub struct ListenerEntry {
+    pub addr: String,
+    pub port: u16,
+    pub name: String,
     // Held to keep the cap's monitor registered against the
     // listener for its lifetime. Drops when the entry is removed
     // (in `on_monitor_notice`).
-    pub(super) _monitor_handle: MonitorHandle,
+    _monitor_handle: MonitorHandle,
 }
 
-pub(super) struct PendingUnbind {
-    pub(super) sender: aether_data::Source,
-    pub(super) listener_name: String,
+pub struct PendingUnbind {
+    pub sender: aether_data::Source,
+    pub listener_name: String,
 }
 
 #[runtime]

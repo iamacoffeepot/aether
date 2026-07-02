@@ -89,7 +89,7 @@ pub use crate::fs::{FsCapability, Read, ReadResult};
 /// mail — collapses to `MailboxId(0)`. Callers that share this id
 /// disambiguate their tracks with the payload's `lane` field rather
 /// than the sender (ADR-0103 keying).
-pub(super) fn sender_mailbox_id(sender: Source) -> MailboxId {
+pub fn sender_mailbox_id(sender: Source) -> MailboxId {
     match sender.addr {
         SourceAddr::EngineMailbox { mailbox_id, .. } => mailbox_id,
         _ => MailboxId(0),
@@ -106,37 +106,37 @@ pub(super) fn sender_mailbox_id(sender: Source) -> MailboxId {
 /// `pub`-enough to satisfy the `NativeActor::State` interface without exposing
 /// it as crate-public API.
 pub struct AudioCapabilityState {
-    pub(super) sender: Option<AudioEventSender>,
+    pub sender: Option<AudioEventSender>,
     /// Device output rate, captured at boot — the resample target for
     /// track decode (ADR-0103 §1). `None` in nop mode (no pipeline).
-    pub(super) sample_rate: Option<f32>,
+    pub sample_rate: Option<f32>,
     /// `play_track` requests awaiting their `aether.fs.read` reply,
     /// keyed by the echoed `(namespace, path)`. A `VecDeque` per key so
     /// two concurrent plays of the same path correlate FIFO rather than
     /// clobbering each other.
-    pub(super) pending_tracks: HashMap<(String, String), VecDeque<PendingTrack>>,
+    pub pending_tracks: HashMap<(String, String), VecDeque<PendingTrack>>,
     /// `load_instrument` requests awaiting their `.sfz` read, keyed by
     /// the echoed `(namespace, path)` of the `.sfz` (ADR-0103 §5).
-    pub(super) pending_instruments: HashMap<(String, String), VecDeque<PendingInstrument>>,
+    pub pending_instruments: HashMap<(String, String), VecDeque<PendingInstrument>>,
     /// Bank loads whose `.sfz` has parsed and whose sample reads are in
     /// flight, keyed by a minted assembly id.
-    pub(super) assemblies: HashMap<u64, BankAssembly>,
+    pub assemblies: HashMap<u64, BankAssembly>,
     /// Sample reads in flight, keyed by the echoed `(namespace, fs_path)`
     /// to the assembly id(s) awaiting that sample (FIFO across banks
     /// that happen to share a sample path).
-    pub(super) pending_samples: HashMap<(String, String), VecDeque<u64>>,
+    pub pending_samples: HashMap<(String, String), VecDeque<u64>>,
     /// Monotonic source of [`BankAssembly`] keys.
-    pub(super) next_assembly_id: u64,
+    pub next_assembly_id: u64,
     /// Next instrument id to assign a loaded bank — starts at
     /// `BUILTINS.len()` and counts up in load order (ADR-0103 §4),
     /// matching the synth's append-only bank table.
-    pub(super) next_instrument_id: u8,
-    pub(super) thread: Option<JoinHandle<()>>,
-    pub(super) shutdown: Option<mpsc::Sender<()>>,
+    pub next_instrument_id: u8,
+    pub thread: Option<JoinHandle<()>>,
+    pub shutdown: Option<mpsc::Sender<()>>,
 }
 
 impl AudioCapabilityState {
-    pub(super) fn nop() -> Self {
+    pub fn nop() -> Self {
         Self {
             sender: None,
             sample_rate: None,
@@ -154,11 +154,7 @@ impl AudioCapabilityState {
     /// Pop the oldest `play_track` parked under `(namespace, path)` —
     /// the FIFO correlation for the `aether.fs.read` reply. Removes the
     /// key's queue when it empties.
-    pub(super) fn take_pending_track(
-        &mut self,
-        namespace: &str,
-        path: &str,
-    ) -> Option<PendingTrack> {
+    pub fn take_pending_track(&mut self, namespace: &str, path: &str) -> Option<PendingTrack> {
         let key = (namespace.to_owned(), path.to_owned());
         let queue = self.pending_tracks.get_mut(&key)?;
         let pending = queue.pop_front();
@@ -170,7 +166,7 @@ impl AudioCapabilityState {
 
     /// Pop the oldest `load_instrument` parked under the `.sfz`'s
     /// `(namespace, path)`. Sibling of [`Self::take_pending_track`].
-    pub(super) fn take_pending_instrument(
+    pub fn take_pending_instrument(
         &mut self,
         namespace: &str,
         path: &str,
@@ -186,7 +182,7 @@ impl AudioCapabilityState {
 
     /// Pop the oldest assembly awaiting a sample read at
     /// `(namespace, fs_path)`.
-    pub(super) fn take_pending_sample(&mut self, namespace: &str, path: &str) -> Option<u64> {
+    pub fn take_pending_sample(&mut self, namespace: &str, path: &str) -> Option<u64> {
         let key = (namespace.to_owned(), path.to_owned());
         let queue = self.pending_samples.get_mut(&key)?;
         let id = queue.pop_front();
@@ -200,7 +196,7 @@ impl AudioCapabilityState {
     /// pinning the deferred `PlayTrackResult` to the original
     /// `play_track` caller. Split out of `on_read_result` so the one
     /// handler can route three fetch paths.
-    pub(super) fn start_track_decode(
+    pub fn start_track_decode(
         &mut self,
         ctx: &mut NativeCtx<'_, Manual>,
         pending: &PendingTrack,
@@ -248,7 +244,7 @@ impl AudioCapabilityState {
     /// `aether.fs.read` per unique referenced sample (ADR-0103 §5). A
     /// bad UTF-8 / parse replies `Err` immediately; otherwise a
     /// [`BankAssembly`] is parked until the sample reads complete.
-    pub(super) fn on_sfz_loaded(
+    pub fn on_sfz_loaded(
         &mut self,
         ctx: &mut NativeCtx<'_, Manual>,
         pending: &PendingInstrument,
@@ -334,7 +330,7 @@ impl AudioCapabilityState {
     /// the last sample is in, dispatch the decode + assembly off the
     /// realtime path (ADR-0093 / ADR-0103 §6). A late / orphan reply
     /// (its assembly already failed) is dropped.
-    pub(super) fn on_sample_loaded(
+    pub fn on_sample_loaded(
         &mut self,
         ctx: &mut NativeCtx<'_, Manual>,
         assembly_id: u64,
@@ -407,7 +403,7 @@ impl AudioCapabilityState {
     /// original requester and discard the partial assembly (ADR-0103
     /// §2). Sibling sample reads still in flight prune from the pending
     /// table; their replies will find no assembly and drop.
-    pub(super) fn fail_assembly(
+    pub fn fail_assembly(
         &mut self,
         ctx: &mut NativeCtx<'_, Manual>,
         assembly_id: u64,
@@ -456,7 +452,7 @@ impl Drop for AudioCapabilityState {
 /// worker thread + shutdown sender for the cap to manage. On
 /// pipeline build failure, the worker thread exits cleanly and the
 /// caller sees the error.
-pub(super) fn spawn_audio_worker(
+pub fn spawn_audio_worker(
     requested_sample_rate: Option<u32>,
 ) -> Result<(AudioEventSender, u32, JoinHandle<()>, mpsc::Sender<()>), AudioBuildError> {
     let (init_tx, init_rx) = mpsc::channel::<Result<(AudioEventSender, u32), AudioBuildError>>();

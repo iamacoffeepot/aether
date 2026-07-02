@@ -136,9 +136,10 @@ impl Default for EngineConfig {
 }
 
 impl EngineConfig {
-    /// The [`HeartbeatParams`] to arm each proxy with, or `None`
+    /// The `HeartbeatParams` to arm each proxy with, or `None`
     /// when the heartbeat is disabled (`0` interval or miss limit).
-    pub(super) fn heartbeat_params(&self) -> Option<HeartbeatParams> {
+    #[must_use]
+    pub fn heartbeat_params(&self) -> Option<HeartbeatParams> {
         (self.heartbeat_interval_secs != 0 && self.heartbeat_miss_limit != 0).then(|| {
             HeartbeatParams {
                 interval: Duration::from_secs(self.heartbeat_interval_secs),
@@ -150,14 +151,16 @@ impl EngineConfig {
     /// The startup-dial connect budget to arm each spawned proxy
     /// with (issue 2072). `Some(d)` caps the retry; `None` (the `0`
     /// sentinel) means wait forever.
-    pub(super) fn connect_budget(&self) -> Option<Duration> {
+    #[must_use]
+    pub fn connect_budget(&self) -> Option<Duration> {
         (self.proxy_connect_budget_secs != 0)
             .then(|| Duration::from_secs(self.proxy_connect_budget_secs))
     }
 
     /// The bounded re-fork attempt count for `on_spawn` (issue 2422),
     /// clamped to at least 1 — `0` would never fork at all.
-    pub(super) fn spawn_attempts(&self) -> u32 {
+    #[must_use]
+    pub fn spawn_attempts(&self) -> u32 {
         self.proxy_spawn_attempts.max(1)
     }
 }

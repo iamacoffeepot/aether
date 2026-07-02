@@ -79,12 +79,12 @@ mod runtime {
         /// name resolution. Cloned from `ctx.mailer().registry()` at init;
         /// matches the `RenderCapability` pattern that resolves
         /// `CaptureFrame` mail bundles through the same registry.
-        pub(super) registry: Arc<Registry>,
+        pub registry: Arc<Registry>,
     }
 
     impl TraceDispatchCapabilityState {
         /// The single struct-construction site.
-        pub(super) fn with_registry(registry: Arc<Registry>) -> Self {
+        pub fn with_registry(registry: Arc<Registry>) -> Self {
             Self { registry }
         }
     }

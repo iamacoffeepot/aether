@@ -14,7 +14,7 @@ use crate::render::{DrawTexturedQuads, RenderCapability, TexturedQuad};
 use super::atlas::AtlasEntry;
 
 /// Emit the accumulated quad batch to `aether.render`.
-pub(super) fn emit_draw(
+pub fn emit_draw(
     ctx: &mut NativeCtx<'_>,
     texture_id: u32,
     space: QuadSpace,
@@ -31,7 +31,7 @@ pub(super) fn emit_draw(
 /// A glyph bitmap's pixel dimensions. fontdue bounds these well below
 /// `u32::MAX`, so the `usize → u32` narrowing is exact.
 #[allow(clippy::cast_possible_truncation)]
-pub(super) fn glyph_dimensions(metrics: &fontdue::Metrics) -> (u32, u32) {
+pub fn glyph_dimensions(metrics: &fontdue::Metrics) -> (u32, u32) {
     (metrics.width as u32, metrics.height as u32)
 }
 
@@ -41,7 +41,7 @@ pub(super) fn glyph_dimensions(metrics: &fontdue::Metrics) -> (u32, u32) {
 /// `baseline - (ymin + height)` and the left edge at `pen_x + xmin`.
 /// Glyph extents are small integers, exact in `f32`.
 #[allow(clippy::cast_precision_loss)]
-pub(super) fn glyph_quad(
+pub fn glyph_quad(
     metrics: &fontdue::Metrics,
     pen_x: f32,
     baseline: f32,
@@ -65,7 +65,7 @@ pub(super) fn glyph_quad(
 
 /// Round a pixel size to its nearest integer for the glyph cache key,
 /// clamped to at least 1.
-pub(super) fn quantize_size(size_pixels: f32) -> u32 {
+pub fn quantize_size(size_pixels: f32) -> u32 {
     // Caller already checked `size_pixels` is finite and positive.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let rounded = size_pixels.round().max(1.0) as u32;
@@ -75,7 +75,7 @@ pub(super) fn quantize_size(size_pixels: f32) -> u32 {
 /// The font's display name — the file stem of its path (e.g.
 /// `fonts/RobotoMono.ttf` → `RobotoMono`), or the whole path when it
 /// has no stem.
-pub(super) fn font_name_from_path(path: &str) -> String {
+pub fn font_name_from_path(path: &str) -> String {
     Path::new(path)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -91,7 +91,7 @@ pub(super) fn font_name_from_path(path: &str) -> String {
 /// font-unit advance with no rounding — the value a consumer scales
 /// back up with `aether_kinds::scale_units` to reproduce this cap's
 /// draw-path advance (`metrics(ch, size).advance_width`) bit-for-bit.
-pub(super) fn build_font_metrics(font: &fontdue::Font) -> FontMetrics {
+pub fn build_font_metrics(font: &fontdue::Font) -> FontMetrics {
     let units_per_em = font.units_per_em();
     let (ascent, descent, line_gap) = font
         .horizontal_line_metrics(units_per_em)

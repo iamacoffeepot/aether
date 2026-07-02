@@ -21,7 +21,7 @@ mod registry;
 
 pub use kinds::*;
 
-pub(crate) use adapter::{Access, LocalFileAdapter};
+pub use adapter::{Access, LocalFileAdapter};
 pub use adapter::{FileAdapter, FsResult};
 pub use config::NamespaceRoots;
 // The `Config` derive on `NamespaceRoots` emits these sibling types in
@@ -31,7 +31,7 @@ pub use config::NamespaceRoots;
 // `into_layer`) ride the type and need no re-export.
 #[cfg(feature = "runtime")]
 pub use config::{NamespaceRootsLayer, NamespaceRootsOverlay};
-pub(crate) use registry::{AdapterRegistry, build_registry};
+pub use registry::{AdapterRegistry, build_registry};
 
 // Handler-signature kinds resolve at file root through the `pub use
 // kinds::*` re-export above — `#[actor]` emits the `impl HandlesKind<K>

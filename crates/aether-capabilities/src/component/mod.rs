@@ -42,7 +42,7 @@
 //!   ([`ComponentHostWasmExt`], [`ComponentHostNativeExt`],
 //!   [`resolve_embedded`]).
 //! - `load.rs` — the `handle_load` sequence as a method on the state; the
-//!   state fields carry `pub(in crate::component)` so this sibling reaches
+//!   state fields carry `pub` so this sibling reaches
 //!   them.
 
 // `#[handler]` methods take their decoded payload by value per the

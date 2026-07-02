@@ -5,7 +5,7 @@
 //! its `mod` declaration), so none of it ships in the cap's surface.
 
 use crate::engine::kinds::{EngineAlive, EngineDied};
-use crate::rpc::test_echo::TestEchoReply;
+use crate::test_echo::TestEchoReply;
 use aether_actor::actor;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;

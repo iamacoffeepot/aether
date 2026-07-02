@@ -32,7 +32,7 @@ mod atlas;
 mod layout;
 
 // The atlas types the state struct + helpers name. Plain `use` (not a
-// `pub use` re-export): the submodule items are `pub(super)`, so a wider
+// `pub use` re-export): the submodule items are `pub`, so a wider
 // re-export is disallowed — the handler bodies in this module name atlas /
 // layout symbols straight from `self::atlas` / `self::layout`.
 use self::atlas::{ATLAS_SIZE, Atlas, AtlasEntry, GlyphKey, GlyphSlot};
@@ -89,30 +89,30 @@ pub type FontParseOutput = Result<ParsedFont, String>;
 pub struct TextCapabilityState {
     /// Session-scoped font registry. Index is the `font_id` a
     /// `LoadFontResult::Ok` handed back and `DrawText.font_id` names.
-    pub(super) fonts: HashMap<u32, Arc<fontdue::Font>>,
+    pub fonts: HashMap<u32, Arc<fontdue::Font>>,
     /// Reverse index from `(namespace, path)` to the `font_id` that
     /// file is resident under. Dedups the registry: a repeat load or
     /// a `font_metrics` grab of the same file reuses one resident
     /// font and a stable id rather than parsing a second copy.
-    pub(super) font_ids: HashMap<(String, String), u32>,
+    pub font_ids: HashMap<(String, String), u32>,
     /// Next `font_id` to assign — monotonic, session-scoped.
-    pub(super) next_font_id: u32,
+    pub next_font_id: u32,
     /// `load_font` requests awaiting their `aether.fs.read` reply,
     /// keyed by the echoed `(namespace, path)`. A `VecDeque` so
     /// concurrent loads of the same path correlate FIFO.
-    pub(super) pending_fonts: HashMap<(String, String), VecDeque<PendingFont>>,
+    pub pending_fonts: HashMap<(String, String), VecDeque<PendingFont>>,
     /// The shelf-packed glyph atlas (CPU-side source of truth).
-    pub(super) atlas: Atlas,
+    pub atlas: Atlas,
     /// The render-cap `texture_id` backing [`Self::atlas`], once
     /// `create_texture` has replied. `None` until then.
-    pub(super) atlas_texture_id: Option<u32>,
+    pub atlas_texture_id: Option<u32>,
     /// `true` between sending `create_texture` and its reply, so a
     /// burst of `draw`s sends exactly one creation request.
-    pub(super) atlas_create_inflight: bool,
+    pub atlas_create_inflight: bool,
 }
 
 impl TextCapabilityState {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             fonts: HashMap::new(),
             font_ids: HashMap::new(),
@@ -125,7 +125,7 @@ impl TextCapabilityState {
     }
 
     /// Pop the oldest `load_font` parked under `(namespace, path)`.
-    pub(super) fn take_pending(&mut self, namespace: &str, path: &str) -> Option<PendingFont> {
+    pub fn take_pending(&mut self, namespace: &str, path: &str) -> Option<PendingFont> {
         let key = (namespace.to_owned(), path.to_owned());
         let queue = self.pending_fonts.get_mut(&key)?;
         let pending = queue.pop_front();
@@ -140,12 +140,7 @@ impl TextCapabilityState {
     /// returns its existing id (and drops the freshly-parsed `font`),
     /// so repeat loads and metric grabs of one file share a single
     /// resident font and a stable id.
-    pub(super) fn register_font(
-        &mut self,
-        namespace: &str,
-        path: &str,
-        font: Arc<fontdue::Font>,
-    ) -> u32 {
+    pub fn register_font(&mut self, namespace: &str, path: &str, font: Arc<fontdue::Font>) -> u32 {
         let key = (namespace.to_owned(), path.to_owned());
         if let Some(&existing) = self.font_ids.get(&key) {
             return existing;
@@ -161,7 +156,7 @@ impl TextCapabilityState {
     /// `aether.fs.read`. The `ReadResult` routes back to
     /// `on_read_result`, which parses the bytes and replies in the
     /// shape `reply` selects.
-    pub(super) fn forward_font_read(
+    pub fn forward_font_read(
         &mut self,
         ctx: &mut NativeCtx<'_, Manual>,
         namespace: String,
@@ -185,7 +180,7 @@ impl TextCapabilityState {
     /// already in flight. The reply (`CreateTextureResult`) routes back
     /// to this cap's own mailbox, where `on_create_texture_result`
     /// stores the assigned id.
-    pub(super) fn ensure_atlas_texture(&mut self, ctx: &mut NativeCtx<'_>) {
+    pub fn ensure_atlas_texture(&mut self, ctx: &mut NativeCtx<'_>) {
         if self.atlas_texture_id.is_some() || self.atlas_create_inflight {
             return;
         }
@@ -202,12 +197,7 @@ impl TextCapabilityState {
     }
 
     /// Send one `update_texture` for a newly-rasterized glyph's rect.
-    pub(super) fn upload_glyph(
-        &self,
-        ctx: &mut NativeCtx<'_>,
-        texture_id: u32,
-        entry: &AtlasEntry,
-    ) {
+    pub fn upload_glyph(&self, ctx: &mut NativeCtx<'_>, texture_id: u32, entry: &AtlasEntry) {
         let update = UpdateTexture {
             texture_id,
             x: entry.x,
@@ -223,7 +213,7 @@ impl TextCapabilityState {
     /// zeroed buffer. This ensures the render cap's staged pixels are a
     /// clean mirror of the reset CPU atlas before per-glyph uploads layer
     /// on top. Uses the same `update_texture` path as `upload_glyph`.
-    pub(super) fn resync_atlas(&self, ctx: &mut NativeCtx<'_>, texture_id: u32) {
+    pub fn resync_atlas(&self, ctx: &mut NativeCtx<'_>, texture_id: u32) {
         let update = UpdateTexture {
             texture_id,
             x: 0,
