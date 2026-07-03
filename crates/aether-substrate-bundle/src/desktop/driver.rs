@@ -148,6 +148,10 @@ pub struct App {
     /// `set_window_title` mail overrides this but doesn't update the
     /// field — the current title lives on the `Window` itself.
     boot_title: String,
+    /// Resolved `AETHER_WIREFRAME` config value, threaded to `Gpu::new`
+    /// when `resumed` creates the window. `WireframeMode::from_config_value`
+    /// owns the tri-state parse.
+    boot_wireframe: Option<String>,
     /// Currently-applied window mode. Updated by `set_window_mode`
     /// and read by `platform_info`'s window-state field. Starts as
     /// `boot_mode`.
@@ -295,6 +299,15 @@ pub struct WindowConfig {
     /// `AETHER_WINDOW_TITLE=<text>` desktop window title at boot.
     /// Lowered via [`Self::to_boot_title`]; empty / unset → `"aether"`.
     pub title: Option<String>,
+    /// `AETHER_WIREFRAME=<value>` desktop GPU wireframe mode at boot:
+    /// `off` (default) / `line` / `overlay`. The env key is pinned back
+    /// to `AETHER_WIREFRAME` (not `AETHER_WINDOW_WIREFRAME`) and the
+    /// argv flag to `--wireframe` (not `--window-wireframe`) since the
+    /// knob predates joining `WindowConfig`. Threaded verbatim to
+    /// `render::WireframeMode::from_config_value`, which owns the
+    /// tri-state parse.
+    #[config(env = "AETHER_WIREFRAME", cli_long = "wireframe")]
+    pub wireframe: Option<String>,
 }
 
 impl WindowConfig {
@@ -1018,7 +1031,11 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         let window = Arc::new(event_loop.create_window(attrs).expect("create_window"));
-        self.gpu = Some(Gpu::new(Arc::clone(&window), self.render_handles.clone()));
+        self.gpu = Some(Gpu::new(
+            Arc::clone(&window),
+            self.render_handles.clone(),
+            self.boot_wireframe.as_deref(),
+        ));
         window.request_redraw();
         let initial_size = window.inner_size();
         self.window = Some(window);
@@ -1341,6 +1358,7 @@ pub struct DesktopDriverCapability {
     pub boot_mode: WindowMode,
     pub boot_size: Option<(u32, u32)>,
     pub boot_title: String,
+    pub boot_wireframe: Option<String>,
 }
 
 pub struct DesktopDriverRunning {
@@ -1357,6 +1375,10 @@ pub struct DesktopDriverRunning {
 impl DriverCapability for DesktopDriverCapability {
     type Running = DesktopDriverRunning;
 
+    // One-shot boot wiring: kind-id lookups, mailbox claims, and the
+    // `App` construction all thread through a single flat sequence;
+    // splitting would just pass the same dozen fields through a helper.
+    #[allow(clippy::too_many_lines)]
     fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
         let Self {
             event_loop,
@@ -1365,6 +1387,7 @@ impl DriverCapability for DesktopDriverCapability {
             boot_mode,
             boot_size,
             boot_title,
+            boot_wireframe,
         } = self;
 
         // Issue 629 / Phase A: render publishes its `RenderHandles`
@@ -1483,6 +1506,7 @@ impl DriverCapability for DesktopDriverCapability {
             boot_mode: boot_mode.clone(),
             boot_size,
             boot_title,
+            boot_wireframe,
             current_mode: boot_mode,
             window_inbox: window_claim.inbox,
             actor_slots: window_claim.actor_slots,
@@ -1563,6 +1587,7 @@ mod tests {
         let cfg = WindowConfig {
             mode: None,
             title: Some("my game".to_owned()),
+            wireframe: None,
         };
         assert_eq!(cfg.to_boot_title(), "my game");
     }
