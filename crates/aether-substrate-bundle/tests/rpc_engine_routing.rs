@@ -232,20 +232,16 @@ mod tests {
             process::id()
         ));
         let root = env::temp_dir().join(format!("aether-rpcroute-store-{}-{nanos}", process::id()));
-        // SAFETY: nextest runs each test in its own process, so the env
-        // mutation here doesn't race sibling tests. `AETHER_ENGINE_STORE_ROOT`
-        // must be set before `boot_hub()` so the cap's `engine_store_root()`
-        // resolves to this unique per-run dir instead of the shared default
-        // (`~/.local/share/aether/engines`), which would collide with any
-        // sibling test, leaked orphan, or live MCP engine on id 0…01.
-        unsafe {
-            env::set_var("AETHER_ENGINE_STORE_ROOT", &root);
-        }
-        // The store dir / bootstrap list ride `EngineConfig` (ADR-0090)
-        // instead of the env side-channel; the heartbeat stays disabled
-        // (the `Default`).
+        // The store dir / engine-store-root / bootstrap list ride
+        // `EngineConfig` (ADR-0090) instead of an env side-channel; the
+        // heartbeat stays disabled (the `Default`). `engine_store_root`
+        // isolates this run's per-engine spawn-dir parent (issue 1274)
+        // from the shared default (`~/.local/share/aether/engines`),
+        // which would collide with any sibling test, leaked orphan, or
+        // live MCP engine on id `0…01`.
         let engine_config = EngineConfig {
             binary_store_dir: Some(bin_store.to_string_lossy().into_owned()),
+            engine_store_root: Some(root.to_string_lossy().into_owned()),
             binary_bootstrap: HashSet::from([headless.to_owned()]),
             ..EngineConfig::default()
         };

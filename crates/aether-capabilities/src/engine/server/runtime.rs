@@ -46,7 +46,7 @@ pub use super::artifacts::{
     bootstrap_ingest, ingest_binary, ingest_component, realize_executable, resolve_component,
     resolve_selector,
 };
-pub use super::fleet::{engine_store_root, free_local_port, settle_err};
+pub use super::fleet::{free_local_port, resolve_engine_store_root, settle_err};
 
 /// How many recently-died engines [`EngineServer`](super::EngineServer)
 /// retains for `list_engines`' `recently_died` sidecar (issue 1906). A small
@@ -114,6 +114,12 @@ pub struct EngineServerState {
     /// exit on a fatal bind; a re-fork on a fresh port escapes it.
     /// Clamped to at least 1.
     pub spawn_attempts: u32,
+    /// Parent directory under which the cap allocates per-engine
+    /// spawn / handle-store dirs (issue 1274), resolved once from
+    /// `EngineConfig::engine_store_root` at init via
+    /// [`resolve_engine_store_root`]. `on_spawn` joins each freshly
+    /// minted `engine_id` onto this to get the engine's scratch dir.
+    pub engine_store_root: PathBuf,
     /// Bounded ring of the last [`RECENTLY_DIED_CAP`] engines that
     /// left the table and why (issue 1906). `on_terminate` /
     /// `on_engine_died` push a [`DeadRecord`] at the removal site;
@@ -208,6 +214,7 @@ impl NativeActor for EngineServer {
             heartbeat: config.heartbeat_params(),
             connect_budget: config.connect_budget(),
             spawn_attempts: config.spawn_attempts(),
+            engine_store_root: resolve_engine_store_root(config.engine_store_root.as_deref()),
             recently_died: VecDeque::new(),
             store,
         })
@@ -329,7 +336,9 @@ impl NativeActor for EngineServer {
             // hold its materialized executable.
             let engine_id = EngineId(Uuid::from_u128(state.next_engine_seq));
             state.next_engine_seq += 1;
-            let engine_store_dir = engine_store_root().join(engine_id.0.simple().to_string());
+            let engine_store_dir = state
+                .engine_store_root
+                .join(engine_id.0.simple().to_string());
 
             // Stored bytes are content-addressed and not directly
             // fork-exec'able, so materialize the resolved entry to an

@@ -14,13 +14,6 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Env override for the parent directory under which the cap
-/// allocates per-engine handle-store dirs (issue 1274). Absent →
-/// fall through to `dirs::data_dir().join("aether/engines")`, then
-/// to `std::env::temp_dir().join("aether-engines")` if no data dir
-/// is resolvable.
-const ENV_ENGINE_STORE_ROOT: &str = "AETHER_ENGINE_STORE_ROOT";
-
 /// Push a `CallSettled::Err` back to `target` (correlation
 /// preserved) so a routed call that the cap can't satisfy — bad
 /// `engine_id`, unknown engine — closes with a wire `ReplyEnd`
@@ -52,24 +45,17 @@ pub fn free_local_port() -> io::Result<u16> {
 /// Parent directory under which the cap allocates per-engine
 /// handle-store dirs (issue 1274). Priority:
 ///
-/// 1. `AETHER_ENGINE_STORE_ROOT` env override (ops escape hatch).
+/// 1. `override_dir`, an explicit override (`EngineConfig::engine_store_root`,
+///    resolved from `AETHER_ENGINE_STORE_ROOT` / `--hub-engine-store-root`
+///    at `EngineServer::init` — the ops escape hatch).
 /// 2. `dirs::data_dir().join("aether/engines")` (cross-platform
 ///    default — `~/Library/Application Support/aether/engines` on
 ///    macOS, `$XDG_DATA_HOME/aether/engines` on Linux, etc.).
 /// 3. `std::env::temp_dir().join("aether-engines")` if no data
 ///    dir is resolvable.
-// External ops escape hatch (AETHER_ENGINE_STORE_ROOT) for the per-engine
-// spawn-dir parent — the directory forked substrates and their handle
-// stores live under, resolved in a static spawn helper. #1968 deliberately
-// kept this knob inline (separate from the binary-artifact store, which it
-// moved onto EngineConfig); it is a process-level deployment override, not
-// a cap config field.
-#[allow(clippy::disallowed_methods)]
-pub fn engine_store_root() -> PathBuf {
-    if let Ok(raw) = env::var(ENV_ENGINE_STORE_ROOT)
-        && !raw.is_empty()
-    {
-        return PathBuf::from(raw);
+pub fn resolve_engine_store_root(override_dir: Option<&str>) -> PathBuf {
+    if let Some(dir) = override_dir.filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir);
     }
     if let Some(data) = dirs::data_dir() {
         return data.join("aether").join("engines");
