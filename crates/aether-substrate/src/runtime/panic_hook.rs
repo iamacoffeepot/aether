@@ -44,6 +44,8 @@ use aether_actor::Local;
 use aether_actor::log::ActorLogRing;
 use aether_kinds::LogEntry;
 
+use crate::config::{KnobKind, KnobRecord};
+
 use super::now_unix_millis;
 
 /// Env var that forces backtrace capture without flipping
@@ -62,6 +64,34 @@ pub const ENV_CRASH_LOG_DISABLE: &str = "AETHER_CRASH_LOG_DISABLE";
 /// ADR-0081 §4 (`$XDG_DATA_HOME/aether/crash/`, falling back to
 /// `$HOME/.local/share/aether/crash/`).
 pub const ENV_CRASH_LOG_DIR: &str = "AETHER_CRASH_LOG_DIR";
+
+/// Registered so e1's unknown-`AETHER_*` boot sweep (`validate_env`)
+/// and e2's `--config` discovery dump (ADR-0090 §4) both cover the
+/// panic-hook's three env knobs.
+pub const PANIC_KNOBS: &[KnobRecord] = &[
+    KnobRecord {
+        env_key: ENV_BACKTRACE,
+        doc: "Forces backtrace capture on a substrate panic without flipping the process-wide \
+              RUST_BACKTRACE. Unset (derived from RUST_BACKTRACE via Backtrace::capture) by \
+              default.",
+        default: None,
+        kind: KnobKind::HandRegistered,
+    },
+    KnobRecord {
+        env_key: ENV_CRASH_LOG_DISABLE,
+        doc: "Disables the ADR-0081 §4 JSONL crash-dump path entirely. Anything truthy skips \
+              the file write; the tracing event still fires.",
+        default: Some("false"),
+        kind: KnobKind::HandRegistered,
+    },
+    KnobRecord {
+        env_key: ENV_CRASH_LOG_DIR,
+        doc: "Overrides the crash-dump base directory. Unset falls back to \
+              $XDG_DATA_HOME/aether/crash/, then $HOME/.local/share/aether/crash/.",
+        default: None,
+        kind: KnobKind::HandRegistered,
+    },
+];
 
 static INIT: OnceLock<()> = OnceLock::new();
 

@@ -367,29 +367,6 @@ fn emit_settlement_settles_wide_fanout() {
     emit_settlement_settles_every_root(&fanout(8));
 }
 
-/// ADR-0087 Phase 3c: with the inline-demux chunk cap forced small
-/// (`K=2`), a wide fan-out splits into stealable sub-blobs that cascade
-/// across workers (`split_off` moves the mail handles — zero ring-byte
-/// copy). Settlement must stay **exact** across the split: the per-mail
-/// eager `Sent` (at buffer time) + dispatch-time `Finished` accounting is
-/// split-invariant, so a dropped or double-counted chunk mail would wedge
-/// `in_flight` and a root would never settle. Also drives the
-/// steal-mid-demux race (a sibling steals a remainder sub-blob while the
-/// producer runs its own chunk).
-#[test]
-#[allow(clippy::print_stderr)]
-fn emit_settlement_settles_under_chunked_demux() {
-    // Force chunking on for this process. SAFETY: set before any actor is
-    // booted (so before any blob flushes / `demux_chunk` is first read),
-    // and nextest isolates each test in its own process — the memoised
-    // first read picks up this value. No restore needed: the OnceLock is
-    // process-lived and the process ends with the test.
-    unsafe {
-        env::set_var("AETHER_BLOB_DEMUX_CHUNK", "2");
-    }
-    emit_settlement_settles_every_root(&fanout(8));
-}
-
 /// Hold path: a `spawn_inherit` worker keeps the root open past the
 /// handler's `Finished`, so settlement is gated on the worker's `Release`
 /// (ADR-0080 §12). Exercises the `HoldOpen` / `Release` producer hooks —

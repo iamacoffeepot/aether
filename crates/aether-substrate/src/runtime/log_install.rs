@@ -18,6 +18,8 @@
 use aether_actor::Local;
 use aether_actor::log::{ActorLogRing, render_event};
 
+use crate::config::{KnobKind, KnobRecord};
+
 use super::now_unix_millis;
 use std::io;
 use tracing::{Event, Subscriber};
@@ -74,6 +76,16 @@ pub fn emit_host_event(level: u32, target: &str, message: &str) {
 }
 
 const FILTER_ENV: &str = "AETHER_LOG_FILTER";
+
+/// Registered so e1's unknown-`AETHER_*` boot sweep
+/// (`validate_env`) and e2's `--config` discovery dump
+/// (ADR-0090 §4) both cover `AETHER_LOG_FILTER`.
+pub const LOG_KNOBS: &[KnobRecord] = &[KnobRecord {
+    env_key: FILTER_ENV,
+    doc: "Tracing EnvFilter directive for the substrate subscriber stack (default \"info\").",
+    default: Some("info"),
+    kind: KnobKind::HandRegistered,
+}];
 
 /// Install the tracing subscriber stack: `EnvFilter` (reads
 /// `AETHER_LOG_FILTER`, default `info`) + `tsfmt::Layer` to stderr +
