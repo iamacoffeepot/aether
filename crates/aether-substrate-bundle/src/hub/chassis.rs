@@ -22,9 +22,10 @@ use aether_substrate::chassis::builder::{
     Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError,
 };
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::config::{ConfigError, validate_env};
 use aether_substrate::{Chassis, SubstrateBoot};
 
-use crate::chassis_common::ActorRingConfig;
+use crate::chassis_common::{ActorRingConfig, hub_known_keys};
 use crate::cli::HubCli;
 use crate::hub::DEFAULT_RPC_PORT;
 use std::thread;
@@ -79,8 +80,11 @@ impl HubEnv {
     /// [`DEFAULT_RPC_PORT`] when unset or unparseable. Binds on
     /// `127.0.0.1` — intentional for the current single-host
     /// development story.
-    #[must_use]
-    pub fn from_env() -> Self {
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::from_env_with_argv`].
+    pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_env_with_argv(&HubCli::default())
     }
 
@@ -93,17 +97,26 @@ impl HubEnv {
     /// `AETHER_HUB_HEARTBEAT_*` env beats the literal default). Takes
     /// `&HubCli`, cloning the overlay rather than consuming `cli` so the
     /// bin keeps it for the `--config` dump.
-    #[must_use]
-    pub fn from_env_with_argv(cli: &HubCli) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`ConfigError`] from the ADR-0090 §4 boot sweep
+    /// ([`validate_env`]) — today the sweep only warns, but the
+    /// `Result` keeps the hard-error half free to join without a
+    /// call-site change, matching desktop / headless.
+    pub fn from_env_with_argv(cli: &HubCli) -> Result<Self, ConfigError> {
         use std::net::{IpAddr, Ipv4Addr};
+        // ADR-0090 §4 (e1): warn on any unknown AETHER_ env var before
+        // resolving — a typo / stale export is loud but non-fatal.
+        validate_env(&hub_known_keys())?;
         let rpc_port = cli
             .rpc_port
             .or_else(super::rpc_port_from_env)
             .unwrap_or(DEFAULT_RPC_PORT);
-        Self {
+        Ok(Self {
             rpc_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
             engine: EngineConfig::from_argv_then_env(cli.engine.clone().into_layer()),
-        }
+        })
     }
 }
 
