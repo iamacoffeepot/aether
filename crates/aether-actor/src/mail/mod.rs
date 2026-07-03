@@ -41,8 +41,9 @@ pub const NO_REPLY_HANDLE: u32 = u32::MAX;
 ///
 /// `Copy` because the handle is a `u32` underneath; cloning is free.
 /// Cloning is also fine for stashing across receives — the substrate
-/// guarantees the handle stays valid for the lifetime of the
-/// receiving component instance.
+/// guarantees the handle stays valid from receipt until it is
+/// answered. A handle is one-shot: the first `Ctx::reply` that uses
+/// it consumes it, and a later `reply` with the same handle fails.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ReplyHandle {
     pub(crate) raw: u32,

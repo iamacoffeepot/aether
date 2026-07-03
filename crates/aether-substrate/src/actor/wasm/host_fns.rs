@@ -412,10 +412,15 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             };
             let payload = data[start..end].to_vec();
 
-            let ctx = caller.data();
-            let Some(entry) = ctx.reply_table.resolve(sender) else {
+            // A reply handle is one-shot: take (not resolve) so the
+            // entry is removed here, capping the table at in-flight
+            // replies rather than lifetime traffic. The mutable
+            // borrow ends with this statement, before the `&self`
+            // uses below.
+            let Some(entry) = caller.data_mut().reply_table.take(sender) else {
                 return REPLY_UNKNOWN_HANDLE;
             };
+            let ctx = caller.data();
             // ADR-0042: echo the inbound correlation on every reply
             // path so the originating actor's handler can match its
             // own reply to the request it sent out of a busy inbox.
