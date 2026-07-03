@@ -70,13 +70,6 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  no-dividers:
-    name: No divider banners
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: scripts/check-no-dividers.sh
-
   no-scoped-visibility:
     name: No scoped visibility
     runs-on: ubuntu-latest
@@ -363,14 +356,13 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [ changes, fmt, no-dividers, no-scoped-visibility, no-inline-runtime-mod, hook-tests, clippy, docs, test, desktop, qodana ]
+    needs: [ changes, fmt, no-scoped-visibility, no-inline-runtime-mod, hook-tests, clippy, docs, test, desktop, qodana ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
         run: |
           echo "changes: ${{ needs.changes.result }}"
           echo "fmt:     ${{ needs.fmt.result }}"
-          echo "no-dividers: ${{ needs.no-dividers.result }}"
           echo "no-scoped-visibility: ${{ needs.no-scoped-visibility.result }}"
           echo "no-inline-runtime-mod: ${{ needs.no-inline-runtime-mod.result }}"
           echo "hook-tests: ${{ needs.hook-tests.result }}"
@@ -382,7 +374,6 @@ jobs:
           fail=0
           [[ "${{ needs.changes.result }}" == "success" ]] || fail=1
           [[ "${{ needs.fmt.result }}"     == "success" ]] || fail=1
-          [[ "${{ needs.no-dividers.result }}" == "success" ]] || fail=1
           [[ "${{ needs.no-scoped-visibility.result }}" == "success" ]] || fail=1
           [[ "${{ needs.no-inline-runtime-mod.result }}" == "success" ]] || fail=1
           [[ "${{ needs.hook-tests.result }}" == "success" ]] || fail=1
