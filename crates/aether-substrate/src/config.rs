@@ -146,6 +146,74 @@ impl Default for RingCapacities {
     }
 }
 
+/// The nine scheduler hot-path tuning knobs resolved once at chassis boot
+/// and installed into the scheduler's process-global before the pool
+/// starts (`crate::scheduler::install_tuning`). `Copy` so it rides the
+/// builder seam as an ordinary value; the deep hot-path getters (the
+/// worker loop, the blob-flush recruiter, the handoff-EWMA seed) read the
+/// installed value rather than env. The chassis-bin `SchedulerTuningConfig`
+/// derive-`Config` knob lowers to this; substrate-core never reads env
+/// (issue 464), so the resolution lives bundle-side and only the resolved
+/// values reach here.
+///
+/// Six knobs carry concrete defaults; the three adaptive knobs
+/// ([`time_budget_micros`](Self::time_budget_micros),
+/// [`handoff_cost_nanos`](Self::handoff_cost_nanos),
+/// [`wake_cost_nanos`](Self::wake_cost_nanos)) are `Option` — `None`
+/// selects the measured/derived behaviour, `Some` pins the value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SchedulerTuning {
+    /// Route-to-spinner spin-window (microseconds) before a worker parks
+    /// (env `AETHER_SPIN_WINDOW_USEC`; default `50`).
+    pub spin_window_micros: u64,
+    /// Deque-length backstop: max slots a worker keeps on its own deque
+    /// before forcing a spill (env `AETHER_LOCAL_STICKY_MAX`; default
+    /// `256`).
+    pub local_sticky_max: usize,
+    /// Keep-local time valve (microseconds): `Some` pins/disables the
+    /// burst spill valve (`0` disables it), `None` derives it from the
+    /// measured handoff cost (env `AETHER_LOCAL_TIME_BUDGET_US`; default
+    /// `None`).
+    pub time_budget_micros: Option<u64>,
+    /// Whether idle workers may raid siblings' deques (peer-deque
+    /// stealing); default owner-only (env `AETHER_PEER_STEAL`; default
+    /// `false`).
+    pub peer_steal: bool,
+    /// Every-K injector backstop for keep-local chains (env
+    /// `AETHER_LOCAL_CHAIN_BACKSTOP`; default `64`).
+    pub local_chain_backstop: u32,
+    /// Pins the cross-worker handoff-cost estimate (nanoseconds) and
+    /// freezes live refinement; `None` boot-probes and live-refines (env
+    /// `AETHER_HANDOFF_COST_NS`; default `None`).
+    pub handoff_cost_nanos: Option<u64>,
+    /// Minimum fresh-group count for a flush to broadcast-recruit siblings
+    /// (env `AETHER_BLOB_RECRUIT_MIN`; default `9`).
+    pub blob_recruit_min: usize,
+    /// Cap on the number of sibling copies a single flush injects when
+    /// recruiting (env `AETHER_BLOB_RECRUIT_MAX`; default `32`).
+    pub blob_recruit_max: usize,
+    /// Pins the recruit wake break-even (nanoseconds) and freezes live
+    /// refinement; `None` uses the box-measured handoff cost (env
+    /// `AETHER_WAKE_COST_NANOS`; default `None`).
+    pub wake_cost_nanos: Option<u64>,
+}
+
+impl Default for SchedulerTuning {
+    fn default() -> Self {
+        Self {
+            spin_window_micros: 50,
+            local_sticky_max: 256,
+            time_budget_micros: None,
+            peer_steal: false,
+            local_chain_backstop: 64,
+            handoff_cost_nanos: None,
+            blob_recruit_min: 9,
+            blob_recruit_max: 32,
+            wake_cost_nanos: None,
+        }
+    }
+}
+
 /// Build a cap config by overlaying an argv-derived partial confique
 /// layer on top of the env layer (ADR-0090 unit d).
 ///

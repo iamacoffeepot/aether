@@ -26,7 +26,8 @@ use aether_labyrinth::TrajectoryRecorderCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
-    Chassis, RingCapacities, SubstrateBoot, capture::CaptureQueue, render::VERTEX_BUFFER_BYTES,
+    Chassis, RingCapacities, SchedulerTuning, SubstrateBoot, capture::CaptureQueue,
+    render::VERTEX_BUFFER_BYTES,
 };
 
 use super::cap::{TestBenchCapConfig, TestBenchCapability};
@@ -126,6 +127,10 @@ pub struct TestBenchEnv {
     /// `aether-actor` const caps; a `TestBench` eviction test pins a small
     /// trace cap to observe `truncated_before`. Per-bench, no process env.
     pub ring_caps: RingCapacities,
+    /// Issue 2485: scheduler hot-path tuning. `SchedulerTuning::default()`
+    /// keeps the built-in scheduler literals / adaptive knobs. Per-bench,
+    /// no process env.
+    pub scheduler_tuning: SchedulerTuning,
     /// Optional observation log: when `Some`, both render and
     /// camera dispatchers push every inbound mail's kind name to it.
     /// In-process API uses this to assert what the sinks have seen;
@@ -201,6 +206,7 @@ impl TestBenchChassis {
             workers,
             pool_workers,
             ring_caps,
+            scheduler_tuning,
             observed_kinds,
             events_tx,
             capture_queue,
@@ -315,6 +321,7 @@ impl TestBenchChassis {
         let mut builder = Builder::<Self>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
             .with_workers(pool_workers)
             .with_ring_caps(ring_caps)
+            .with_scheduler_tuning(scheduler_tuning)
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<TrajectoryRecorderCapability>(())
             .with_actor::<InputCapability>(input_config)

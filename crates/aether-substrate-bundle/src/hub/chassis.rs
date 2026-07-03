@@ -25,7 +25,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::{ConfigError, validate_env};
 use aether_substrate::{Chassis, SubstrateBoot};
 
-use crate::chassis_common::{ActorRingConfig, hub_known_keys};
+use crate::chassis_common::{ActorRingConfig, SchedulerTuningConfig, hub_known_keys};
 use crate::cli::HubCli;
 use crate::hub::DEFAULT_RPC_PORT;
 use std::thread;
@@ -133,9 +133,15 @@ impl HubChassis {
         // chassis honours `AETHER_ACTOR_{LOG,TRACE}_RING_SIZE` like the
         // full-stack chassis (which thread it via `with_common_caps`).
         let ring_caps = ActorRingConfig::try_from_env()?.to_ring_capacities();
+        // Issue 2485: resolve the scheduler hot-path tuning so the hub
+        // chassis honours `AETHER_SPIN_WINDOW_USEC` / `AETHER_LOCAL_*` /
+        // etc. like the full-stack chassis (which thread it via
+        // `with_common_caps`).
+        let scheduler_tuning = SchedulerTuningConfig::try_from_env()?.to_scheduler_tuning();
 
         Builder::<Self>::new(registry, mailer)
             .with_ring_caps(ring_caps)
+            .with_scheduler_tuning(scheduler_tuning)
             .with_actor::<TraceDispatchCapability>(())
             // Liveness-heartbeat tuning (issue 1339), resolved
             // argv-then-env in `HubEnv::from_env_with_argv`.

@@ -39,6 +39,7 @@ use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::Drainable;
 use crate::scheduler::SeizeHandle;
 use crate::scheduler::WakeHandle;
+use crate::scheduler::install_tuning;
 use crate::scheduler::log_handoff_calibration;
 use crate::scheduler::{Pool, PoolConfig, PoolHandle};
 #[cfg(test)]
@@ -52,7 +53,7 @@ use crate::mail::cost::CostCells;
 use aether_actor::log::ActorLogRing;
 use aether_actor::trace::ActorTraceRing;
 
-use crate::config::RingCapacities;
+use crate::config::{RingCapacities, SchedulerTuning};
 use aether_kinds::trace::Settled;
 use std::any::Any;
 use std::any::TypeId;
@@ -771,6 +772,12 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// into the `Spawner` (instanced spawns) + the cap-claim slot path
     /// (singleton caps) + the chassis-host trace ring at boot.
     ring_caps: RingCapacities,
+    /// Scheduler hot-path tuning installed into the scheduler's
+    /// process-global immediately before `Pool::start` in `boot_passives`.
+    /// Production chassis mains populate this from the bundle-side
+    /// `SchedulerTuningConfig` derive-`Config` knob (env `AETHER_*`);
+    /// tests / `TestBench` leave it [`SchedulerTuning::default`].
+    scheduler_tuning: SchedulerTuning,
     _chassis: PhantomData<fn() -> C>,
     _state: PhantomData<fn() -> S>,
 }
@@ -790,6 +797,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             aborter: Arc::new(PanicAborter),
             workers: None,
             ring_caps: RingCapacities::default(),
+            scheduler_tuning: SchedulerTuning::default(),
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -828,6 +836,19 @@ impl<C: Chassis> Builder<C, NoDriver> {
     #[must_use]
     pub fn with_ring_caps(mut self, ring_caps: RingCapacities) -> Self {
         self.ring_caps = ring_caps;
+        self
+    }
+
+    /// Override the scheduler hot-path tuning ([`SchedulerTuning`]).
+    /// Default is [`SchedulerTuning::default`] (the built-in literals /
+    /// adaptive knobs). Production chassis mains resolve the bundle-side
+    /// `SchedulerTuningConfig` derive-`Config` knob (env `AETHER_*`) and
+    /// pass the lowered `SchedulerTuning` here; `boot_passives` installs it
+    /// into the scheduler's process-global before `Pool::start`. The
+    /// override can be applied either before or after `.driver(_)`.
+    #[must_use]
+    pub fn with_scheduler_tuning(mut self, scheduler_tuning: SchedulerTuning) -> Self {
+        self.scheduler_tuning = scheduler_tuning;
         self
     }
 
@@ -878,6 +899,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             aborter: self.aborter,
             workers: self.workers,
             ring_caps: self.ring_caps,
+            scheduler_tuning: self.scheduler_tuning,
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -907,6 +929,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             &self.aborter,
             workers,
             self.ring_caps,
+            self.scheduler_tuning,
             self.passives,
         )?;
         // ADR-0081 retired the chassis-pushed `ConfigureLogDrain` mail
@@ -959,6 +982,14 @@ impl<C: Chassis> Builder<C, HasDriver> {
         self
     }
 
+    /// Mirror of [`Builder::with_scheduler_tuning`][Builder<C, NoDriver>::with_scheduler_tuning]
+    /// for the post-driver state.
+    #[must_use]
+    pub fn with_scheduler_tuning(mut self, scheduler_tuning: SchedulerTuning) -> Self {
+        self.scheduler_tuning = scheduler_tuning;
+        self
+    }
+
     /// Boot every passive in declaration order, then boot the driver
     /// against a [`DriverCtx`]. Any failure aborts the build and
     /// shuts down the passives that already booted (via the
@@ -978,11 +1009,20 @@ impl<C: Chassis> Builder<C, HasDriver> {
             aborter,
             workers,
             ring_caps,
+            scheduler_tuning,
             ..
         } = self;
         let driver_boot = driver.expect("HasDriver state implies driver was supplied");
 
-        let mut booted = boot_passives(&registry, &mailer, &aborter, workers, ring_caps, passives)?;
+        let mut booted = boot_passives(
+            &registry,
+            &mailer,
+            &aborter,
+            workers,
+            ring_caps,
+            scheduler_tuning,
+            passives,
+        )?;
         // ADR-0081 retired the chassis-pushed `ConfigureLogDrain` mail
         // — each actor owns its own `ActorLogRing`.
         let driver_running = {
@@ -1101,6 +1141,7 @@ fn boot_passives(
     aborter: &Arc<dyn FatalAborter>,
     workers: Option<usize>,
     ring_caps: RingCapacities,
+    scheduler_tuning: SchedulerTuning,
     passives: Vec<Box<dyn PassiveBoot>>,
 ) -> Result<BootedPassives, BootError> {
     let mut shutdowns: Vec<Box<dyn DynShutdown>> = Vec::with_capacity(passives.len());
@@ -1123,6 +1164,13 @@ fn boot_passives(
         workers: n,
         ..PoolConfig::default()
     });
+    // Install the resolved scheduler tuning into the scheduler's
+    // process-global *before* the pool starts: `Pool::start` reads the
+    // spin window, and `log_handoff_calibration` below reads the handoff
+    // pin / time budget, all through the installed value. Installing first
+    // guarantees no getter reads a default before the real value lands (the
+    // install-before-`Pool::start` ordering invariant).
+    install_tuning(scheduler_tuning);
     let pool = Pool::start(pool_config, Arc::clone(aborter));
 
     // iamacoffeepot/aether#1182: calibrate this box's cross-worker handoff

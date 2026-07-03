@@ -51,61 +51,14 @@
 //! is a no-op spill and [`pop_local`] / [`steal_into_local`] yield nothing.
 
 use std::cell::{Cell, RefCell};
-use std::env;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 
-use crate::config::{KnobKind, KnobRecord};
 use crate::scheduler::calibrate::handoff_cost;
 use crate::scheduler::slot::Drainable;
-
-/// Discovery records for the four deque / keep-local-valve hot-path
-/// tuning knobs (ADR-0090 unit b2, iamacoffeepot/aether#1255). These
-/// describe the `OnceLock` getters below ([`hard_cap`], [`time_budget`],
-/// [`peer_steal_enabled`], [`chain_backstop`]) so e1's
-/// unknown-`AETHER_*`
-/// sweep doesn't flag them and e2's `--config` dump lists them. The
-/// hot-path read stays exactly as-is — these are pure `&'static`
-/// metadata assembled once at boot, never on the dispatch path. Docs +
-/// defaults are lifted verbatim from the getter doc-comments;
-/// `time_budget` is adaptive with no literal default, so its `default`
-/// is `None` (rendered "derived/unset").
-pub const DEQUE_KNOBS: &[KnobRecord] = &[
-    KnobRecord {
-        env_key: "AETHER_LOCAL_STICKY_MAX",
-        doc: "Deque-length backstop: max slots a worker keeps on its own deque \
-              before forcing a spill (values < 1 / unparseable fall back).",
-        default: Some("256"),
-        kind: KnobKind::HandRegistered,
-    },
-    KnobRecord {
-        env_key: "AETHER_LOCAL_TIME_BUDGET_US",
-        doc: "Keep-local time valve (microseconds): pins/disables the burst spill \
-              valve. Unset → adaptive, derived from the measured handoff cost; \
-              0 disables the valve (pure inline-cascade).",
-        default: None,
-        kind: KnobKind::HandRegistered,
-    },
-    KnobRecord {
-        env_key: "AETHER_PEER_STEAL",
-        doc: "Whether idle workers may raid siblings' deques (peer-deque stealing). \
-              Default off (owner-only); set 1/true to opt the sibling raid back in.",
-        default: Some("off"),
-        kind: KnobKind::HandRegistered,
-    },
-    KnobRecord {
-        env_key: "AETHER_LOCAL_CHAIN_BACKSTOP",
-        doc: "Every-K injector backstop for keep-local chains: after K consecutive \
-              own-deque pops a worker probes the injector once before continuing \
-              its chain, bounding injector starvation at ~K cycles per worker \
-              (values < 1 / unparseable fall back).",
-        default: Some("64"),
-        kind: KnobKind::HandRegistered,
-    },
-];
+use crate::scheduler::tuning;
 
 /// The unit on the deques: a chassis-registered dispatcher slot. (Phase
 /// 3b makes the blob the unit; 3a keeps the slot.)
@@ -180,25 +133,15 @@ pub fn pending_depth() -> u32 {
 /// Deque-length backstop (iamacoffeepot/aether#1160, #1174) — the max slots a
 /// worker keeps on its own deque before [`try_push_local_budgeted`] is forced
 /// to spill, so a pathological unbounded local cascade can't grow the deque
-/// without bound. Read once from `AETHER_LOCAL_STICKY_MAX` (repurposed from
-/// the pre-#1160 stickiness cap); values `< 1` and unparseable input fall
-/// back to `256`. This is the deque-growth backstop, not the primary
+/// without bound. Resolved from `AETHER_LOCAL_STICKY_MAX` (repurposed from
+/// the pre-#1160 stickiness cap); values `< 1` coerce to `256`. This is the
+/// deque-growth backstop, not the primary
 /// governor — the per-burst time valve ([`time_budget`], default 12µs) is;
 /// for any realistic cascade (well under 256 blobs queued at once) `hard_cap`
 /// never trips.
 #[must_use]
-// Process-level scheduler tuning knob (deque-growth backstop), read once at the
-// substrate level — not cap config.
-#[allow(clippy::disallowed_methods)]
 pub fn hard_cap() -> usize {
-    static CAP: OnceLock<usize> = OnceLock::new();
-    *CAP.get_or_init(|| {
-        env::var("AETHER_LOCAL_STICKY_MAX")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&k| k >= 1)
-            .unwrap_or(256)
-    })
+    tuning().local_sticky_max
 }
 
 /// Adaptive keep-local budget: spend up to this many measured cross-worker
@@ -246,19 +189,10 @@ const MAX_ADAPTIVE_BUDGET: Duration = Duration::from_micros(60);
 /// atomic loads, negligible against the dispatch it gates. The wall clock
 /// is still sampled at decision time, not per mail (#1163).
 #[must_use]
-// Process-level scheduler tuning knob (keep-local time-budget override), read once
-// at the substrate level — not cap config.
-#[allow(clippy::disallowed_methods)]
 pub fn time_budget() -> Duration {
-    // An explicit env budget wins and is fixed within a run — pin or
-    // disable (0) the valve regardless of the measured handoff cost. Cached
-    // because the override never changes.
-    static OVERRIDE_US: OnceLock<Option<u64>> = OnceLock::new();
-    if let Some(us) = *OVERRIDE_US.get_or_init(|| {
-        env::var("AETHER_LOCAL_TIME_BUDGET_US")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-    }) {
+    // An explicit budget wins and is fixed within a run — pin or disable
+    // (0) the valve regardless of the measured handoff cost.
+    if let Some(us) = tuning().time_budget_micros {
         return Duration::from_micros(us);
     }
     derive_budget(handoff_cost())
@@ -294,16 +228,8 @@ fn derive_budget(handoff: Duration) -> Duration {
 /// raising the stakes on the iamacoffeepot/aether#1128 cost classification;
 /// `AETHER_PEER_STEAL=1` restores the rescue.
 #[must_use]
-// Process-level scheduler tuning knob (peer-deque-steal opt-in), read once at the
-// substrate level — not cap config.
-#[allow(clippy::disallowed_methods)]
 pub fn peer_steal_enabled() -> bool {
-    static E: OnceLock<bool> = OnceLock::new();
-    *E.get_or_init(|| {
-        env::var("AETHER_PEER_STEAL")
-            .ok()
-            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-    })
+    tuning().peer_steal
 }
 
 /// Every-K chain backstop (iamacoffeepot/aether#1535) — how many
@@ -313,21 +239,11 @@ pub fn peer_steal_enabled() -> bool {
 /// clock read (iamacoffeepot/aether#1174), so a *self-sustaining* chain
 /// would otherwise monopolise its worker forever; this bounds injector
 /// starvation at ~K × cycle-time per worker while the chain stays warm
-/// K−1 of K cycles. Read once from `AETHER_LOCAL_CHAIN_BACKSTOP`; values
-/// `< 1` and unparseable input fall back to `64`.
+/// K−1 of K cycles. Resolved from `AETHER_LOCAL_CHAIN_BACKSTOP`; values
+/// `< 1` coerce to `64`.
 #[must_use]
-// Process-level scheduler tuning knob (every-K chain backstop), read once at the
-// substrate level — not cap config.
-#[allow(clippy::disallowed_methods)]
 pub fn chain_backstop() -> u32 {
-    static K: OnceLock<u32> = OnceLock::new();
-    *K.get_or_init(|| {
-        env::var("AETHER_LOCAL_CHAIN_BACKSTOP")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|&k| k >= 1)
-            .unwrap_or(64)
-    })
+    tuning().local_chain_backstop
 }
 
 /// Note one own-deque `pop_local` hit against the every-K chain backstop

@@ -38,12 +38,12 @@ use winit::event_loop::EventLoop;
 use super::driver::{DesktopDriverCapability, WindowConfig};
 use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use crate::chassis_common::{
-    ActorRingConfig, ChassisBootConfig, CommonBoot, chassis_known_keys, frame_lifecycle_config,
-    maybe_with_http_server, maybe_with_rpc_server, with_common_caps,
+    ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys,
+    frame_lifecycle_config, maybe_with_http_server, maybe_with_rpc_server, with_common_caps,
 };
 use crate::cli::{CommonOverlay, DesktopCli};
 use crate::hub;
-use aether_substrate::config::{ConfigError, RingCapacities, validate_env};
+use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, validate_env};
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
 use std::path::Path;
@@ -208,6 +208,11 @@ pub struct DesktopEnv {
     /// `AETHER_ACTOR_TRACE_RING_SIZE`). Default is
     /// [`RingCapacities::default`] (the `aether-actor` const caps).
     pub ring_caps: RingCapacities,
+    /// Issue 2485: scheduler hot-path tuning resolved from the
+    /// `SchedulerTuningConfig` knob (`AETHER_SPIN_WINDOW_USEC` /
+    /// `AETHER_LOCAL_STICKY_MAX` / …). Default is
+    /// [`SchedulerTuning::default`] (the built-in scheduler literals).
+    pub scheduler_tuning: SchedulerTuning,
     /// Force-complete deadline (ms) for a pending lifecycle advance's
     /// `Settled` (issue 1048). Resolved from
     /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS` via `ChassisBootConfig`;
@@ -324,6 +329,11 @@ impl DesktopEnv {
         // `AETHER_ACTOR_{LOG,TRACE}_RING_SIZE` (ADR-0090 §4 hard-error on
         // an unparseable known value, surfaced as `DesktopBootError::Config`).
         let ring_caps = ActorRingConfig::try_from_env()?.to_ring_capacities();
+        // Issue 2485: resolve the scheduler hot-path tuning from
+        // `AETHER_SPIN_WINDOW_USEC` / `AETHER_LOCAL_*` / `AETHER_BLOB_*` /
+        // `AETHER_*_COST_*` (ADR-0090 §4 hard-error on an unparseable
+        // known value, surfaced as `DesktopBootError::Config`).
+        let scheduler_tuning = SchedulerTuningConfig::try_from_env()?.to_scheduler_tuning();
 
         Ok(Self {
             event_loop,
@@ -342,6 +352,7 @@ impl DesktopEnv {
             rpc_addr,
             workers,
             ring_caps,
+            scheduler_tuning,
             lifecycle_advance_timeout_millis,
             autoload,
         })
@@ -375,6 +386,7 @@ impl DesktopChassis {
             rpc_addr,
             workers,
             ring_caps,
+            scheduler_tuning,
             lifecycle_advance_timeout_millis,
             autoload,
         } = env;
@@ -446,6 +458,7 @@ impl DesktopChassis {
             aborter,
             workers,
             ring_caps,
+            scheduler_tuning,
             input_config,
             component_host_config,
             namespace_roots,

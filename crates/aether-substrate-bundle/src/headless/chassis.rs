@@ -36,12 +36,12 @@ use aether_substrate::{Chassis, SubstrateBoot};
 use super::driver::{HeadlessTimerDriverCapability, TickConfig};
 use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use crate::chassis_common::{
-    ActorRingConfig, ChassisBootConfig, CommonBoot, chassis_known_keys, maybe_with_http_server,
-    maybe_with_rpc_server, tick_only_lifecycle_config, with_common_caps,
+    ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys,
+    maybe_with_http_server, maybe_with_rpc_server, tick_only_lifecycle_config, with_common_caps,
 };
 use crate::cli::{CommonOverlay, HeadlessCli};
 use crate::hub;
-use aether_substrate::config::{ConfigError, RingCapacities, validate_env};
+use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, validate_env};
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
@@ -120,6 +120,11 @@ pub struct HeadlessEnv {
     /// `AETHER_ACTOR_TRACE_RING_SIZE`). Default is
     /// [`RingCapacities::default`] (the `aether-actor` const caps).
     pub ring_caps: RingCapacities,
+    /// Issue 2485: scheduler hot-path tuning resolved from the
+    /// `SchedulerTuningConfig` knob (`AETHER_SPIN_WINDOW_USEC` /
+    /// `AETHER_LOCAL_STICKY_MAX` / …). Default is
+    /// [`SchedulerTuning::default`] (the built-in scheduler literals).
+    pub scheduler_tuning: SchedulerTuning,
     /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS` — timeout for one lifecycle
     /// advance step (Tick) before the scheduler logs a slow-frame warning.
     /// Resolved through `ChassisBootConfig`; default is 1000 ms.
@@ -215,6 +220,10 @@ impl HeadlessEnv {
         // `AETHER_ACTOR_{LOG,TRACE}_RING_SIZE` (ADR-0090 §4 hard-error on
         // an unparseable known value, surfaced as `ConfigError`).
         let ring_caps = ActorRingConfig::try_from_env()?.to_ring_capacities();
+        // Issue 2485: resolve the scheduler hot-path tuning (ADR-0090 §4
+        // hard-error on an unparseable known value, surfaced as
+        // `ConfigError`).
+        let scheduler_tuning = SchedulerTuningConfig::try_from_env()?.to_scheduler_tuning();
         Ok(Self {
             namespace_roots,
             http,
@@ -226,6 +235,7 @@ impl HeadlessEnv {
             rpc_addr,
             workers,
             ring_caps,
+            scheduler_tuning,
             lifecycle_advance_timeout_millis,
             autoload,
         })
@@ -252,6 +262,7 @@ impl HeadlessChassis {
             rpc_addr,
             workers,
             ring_caps,
+            scheduler_tuning,
             lifecycle_advance_timeout_millis,
             autoload,
         } = env;
@@ -333,6 +344,7 @@ impl HeadlessChassis {
             aborter,
             workers,
             ring_caps,
+            scheduler_tuning,
             input_config,
             component_host_config,
             namespace_roots,
