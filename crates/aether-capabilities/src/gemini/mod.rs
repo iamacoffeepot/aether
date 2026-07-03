@@ -20,10 +20,9 @@
 //!
 //! Per ADR-0121 the cap owns its mail kinds — the request / result types
 //! and their supporting enums live in `kinds`, decomposed alongside the
-//! `config`, `adapter`, and `capability` seams.
+//! `config` and `adapter` seams.
 
 mod adapter;
-mod capability;
 mod config;
 mod error;
 mod kinds;
@@ -31,15 +30,14 @@ mod lyria;
 mod nanobanana;
 
 // The `aether.gemini` runtime half (ADR-0122 identity/runtime split): the
-// `aether_substrate`-typed state + reply helpers the `#[actor] impl` in
-// `capability` reaches through `use super::runtime::*`. Gated once here so a
+// `aether_substrate`-typed state + reply helpers the `#[actor] impl`
+// reaches through `use super::runtime::*`. Gated once here so a
 // transport-only build of the `GeminiCapability` identity never names the
 // state nor pulls `aether_substrate` through this cap.
 #[cfg(feature = "runtime")]
 mod runtime;
 
 pub use adapter::{DisabledGeminiAdapter, UreqGeminiAdapter};
-pub use capability::GeminiCapability;
 pub use config::{GeminiConfig, GeminiConfigLayer, GeminiOverlay};
 pub use kinds::*;
 
@@ -51,3 +49,27 @@ pub const DEFAULT_MAX_IN_FLIGHT: usize = 2;
 /// Default per-request timeout when `AETHER_GEMINI_TIMEOUT_MS` is unset.
 /// Media generation can run a couple minutes.
 pub const DEFAULT_TIMEOUT_MILLIS: u32 = 180_000;
+
+/// `aether.gemini` mailbox cap **identity** (ADR-0122 identity/runtime
+/// split). A ZST carrying only the addressing — `Addressable`
+/// (`NAMESPACE`, `Resolver`), the per-handler `HandlesKind` markers, and
+/// the name-inventory entry, all emitted always-on by `#[actor]`. The
+/// state-bearing runtime (`GeminiCapabilityState`,
+/// which holds the `aether_substrate`-typed adapter + task queue) lives
+/// behind the one `feature = "runtime"` gate, so a transport-only build
+/// never names it nor pulls `aether_substrate` through this cap.
+//
+// Handler-signature kinds (`LyriaGenerate` / `NanobananaGenerate`) resolve
+// at file root through the `pub use kinds::*` re-export above — `#[actor]`
+// emits the always-on `impl HandlesKind<K>` markers against the identity,
+// outside the `feature = "runtime"` gate, so they reference these kinds
+// from here.
+#[actor(singleton)]
+pub struct GeminiCapability;
+
+// The `#[actor]` / `#[handler]` attribute path stays always-on (the macro
+// divides what it emits). Everything that names an `aether_substrate` type —
+// the handler/init ctx, the runtime state, the reply helpers — lives in the
+// `runtime` module, gated once by `feature = "runtime"`; the `#[runtime] impl`
+// sits beside its state there.
+use aether_actor::actor;

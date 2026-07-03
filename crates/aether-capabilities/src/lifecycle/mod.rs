@@ -28,8 +28,9 @@
 //!    harness) it falls back to fire-and-advance.
 //! 3. On settle, advances the resolved edge — `quit` if `quit_pending`
 //!    is set and the state declares a quit edge (consuming the flag),
-//!    otherwise `next` — and replies [`LifecycleAdvanceComplete`] to
-//!    the chassis loop that issued the advance.
+//!    otherwise `next` — and replies
+//!    [`LifecycleAdvanceComplete`](aether_kinds::LifecycleAdvanceComplete)
+//!    to the chassis loop that issued the advance.
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the
@@ -87,100 +88,8 @@ pub use runtime::LifecycleConfig;
 pub struct LifecycleCapability;
 
 // The runtime half — the whole `aether_substrate`-typed surface (imports,
-// `LifecycleCapabilityState`, the settlement + fan-out names) — lives in
-// `runtime.rs`, gated once here. The `#[actor] impl` and the state's
-// inherent-method cluster reach it through the `use runtime::*` glob.
+// `LifecycleCapabilityState`, the settlement + fan-out names, the
+// runtime-gated inspect impl, and the test fixtures) — lives in
+// `runtime.rs`, gated once here.
 #[cfg(feature = "runtime")]
 mod runtime;
-#[cfg(feature = "runtime")]
-#[allow(clippy::wildcard_imports)]
-use runtime::*;
-
-/// Read-only inspect surface on the runtime state (ADR-0122 split).
-/// Production callers observe lifecycle progress via subscribed stage
-/// broadcasts rather than peeking at these.
-#[cfg(feature = "runtime")]
-impl LifecycleCapabilityState {
-    /// Read-only access to the current state's kind id.
-    #[must_use]
-    pub fn current_state(&self) -> KindId {
-        self.current_state
-    }
-
-    /// True once the lifecycle has broadcast a terminal state and
-    /// further advances are no-ops.
-    #[must_use]
-    pub fn is_terminal(&self) -> bool {
-        self.terminal_reached
-    }
-
-    /// True if a [`Quit`] mail has arrived but not yet been consumed.
-    #[must_use]
-    pub fn quit_pending(&self) -> bool {
-        self.quit_pending
-    }
-}
-
-/// Construction-level state fixture: a Render→Present→Shutdown
-/// data graph + a fresh mailer, built directly (no chassis boot),
-/// with the supplied advance timeout. Reachable from
-/// `mod settlement`'s descendant tests via module privacy.
-#[cfg(all(test, feature = "runtime"))]
-fn test_cap(advance_timeout: Duration) -> LifecycleCapabilityState {
-    use aether_kinds::{Present, Render, Shutdown};
-    use aether_substrate::mail::registry::Registry;
-
-    let graph = LifecycleGraphData::builder()
-        .state::<Render>()
-        .next::<Present>()
-        .state::<Present>()
-        .next::<Shutdown>()
-        .quit::<Shutdown>()
-        .terminal::<Shutdown>()
-        .start::<Render>()
-        .build()
-        .expect("test setup: graph builds");
-    let mailer = Arc::new(Mailer::new(Arc::new(Registry::default())));
-    LifecycleCapabilityState {
-        current_state: graph.start(),
-        graph,
-        subscribers: BTreeMap::new(),
-        terminal_reached: false,
-        quit_pending: false,
-        pending: None,
-        advance_timeout,
-        settlement_latency_ewma: None,
-        last_slow_warn: None,
-        mailer,
-    }
-}
-
-/// A `Tick`→`Shutdown` graph fixture (the round-trip test wants
-/// `Tick` as a declared stage, which [`test_cap`]'s Render-rooted
-/// graph doesn't carry).
-#[cfg(all(test, feature = "runtime"))]
-fn tick_start_graph_cap() -> LifecycleCapabilityState {
-    use aether_kinds::{Shutdown, Tick};
-    use aether_substrate::mail::registry::Registry;
-
-    let graph = LifecycleGraphData::builder()
-        .state::<Tick>()
-        .next::<Shutdown>()
-        .terminal::<Shutdown>()
-        .start::<Tick>()
-        .build()
-        .expect("test setup: tick graph builds");
-    let mailer = Arc::new(Mailer::new(Arc::new(Registry::default())));
-    LifecycleCapabilityState {
-        current_state: graph.start(),
-        graph,
-        subscribers: BTreeMap::new(),
-        terminal_reached: false,
-        quit_pending: false,
-        pending: None,
-        advance_timeout: Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT),
-        settlement_latency_ewma: None,
-        last_slow_warn: None,
-        mailer,
-    }
-}

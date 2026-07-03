@@ -21,9 +21,9 @@
 //!   caps land scaffolding + CI smokes before any network code exists.
 
 pub mod adapter;
-pub mod shared;
 pub mod staging;
 pub mod task_queue;
+pub mod transport;
 
 pub use adapter::{
     AdapterUsage, AnthropicAdapter, AnthropicRequest, AnthropicResponse, GeminiAdapter,

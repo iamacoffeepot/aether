@@ -190,7 +190,7 @@ mod tests {
     //! ADR-0082 §3 quit-flag semantics and the #1048/#1052
     //! settlement-latency gate, pinned at the unit layer.
     use super::*;
-    use crate::lifecycle::test_cap;
+    use crate::lifecycle::runtime::test_cap;
     use aether_data::Kind;
     use aether_kinds::{Present, Render};
 
