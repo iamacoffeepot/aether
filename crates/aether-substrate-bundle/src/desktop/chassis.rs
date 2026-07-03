@@ -22,9 +22,10 @@ use aether_actor::Addressable;
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
-    AnthropicConfig, AudioCapability, CaptureBackend, ComponentHostConfig, GeminiConfig,
-    HttpServerConfig, InputConfig, RenderCapability, RenderConfig, UnsupportedTestBenchCapability,
-    audio::AudioConfig as AudioConf, fs::NamespaceRoots, http::HttpConfig as HttpConf,
+    AnthropicConfig, AudioCapability, CaptureBackend, ComponentHostConfig, ContentGenConfig,
+    GeminiConfig, HttpServerConfig, InputConfig, RenderCapability, RenderConfig,
+    UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf, fs::NamespaceRoots,
+    http::HttpConfig as HttpConf,
 };
 use aether_kinds::BinaryManifest;
 use aether_kinds::WindowMode;
@@ -177,6 +178,10 @@ pub struct DesktopEnv {
     /// ADR-0050 `aether.gemini` cap config (issue 1015). Resolved from
     /// `GEMINI_API_KEY` + `AETHER_GEMINI_*`.
     pub gemini: GeminiConfig,
+    /// Content-gen staging config (ADR-0090). Resolved from
+    /// `AETHER_GEN_DIR` / `--gen-dir`; folded into the staging root in
+    /// `with_common_caps`.
+    pub contentgen: ContentGenConfig,
     pub audio: AudioConf,
     pub boot_mode: WindowMode,
     pub boot_size: Option<(u32, u32)>,
@@ -262,6 +267,7 @@ impl DesktopEnv {
             fs,
             anthropic,
             gemini,
+            contentgen,
             chassis_boot: chassis_boot_overlay,
             rpc_port: cli_rpc_port,
         } = common;
@@ -287,6 +293,7 @@ impl DesktopEnv {
         let http = HttpConf::try_from_argv_then_env(http.into_layer())?;
         let anthropic = AnthropicConfig::try_from_argv_then_env(anthropic.into_layer())?;
         let gemini = GeminiConfig::try_from_argv_then_env(gemini.into_layer())?;
+        let contentgen = ContentGenConfig::try_from_argv_then_env(contentgen.into_layer())?;
         let namespace_roots = NamespaceRoots::from_argv_then_env(fs.into_layer());
         // The HTTP server is opt-in: resolve its config and boot the cap
         // only when `enabled` is set (ADR-0108 / issue 1761). Default-off,
@@ -325,6 +332,7 @@ impl DesktopEnv {
             http,
             anthropic,
             gemini,
+            contentgen,
             audio,
             boot_mode,
             boot_size,
@@ -358,6 +366,7 @@ impl DesktopChassis {
             http_server,
             anthropic,
             gemini,
+            contentgen,
             audio,
             boot_mode,
             boot_size,
@@ -443,6 +452,7 @@ impl DesktopChassis {
             http,
             anthropic,
             gemini,
+            contentgen,
         };
         // ADR-0082 §11 / issues 1378 + 1489: desktop drives the shared
         // `Tick → Render → Present → Tick` frame graph, with the `Quit`

@@ -34,7 +34,8 @@ use aether_substrate_bundle::Chassis as _;
 use aether_substrate_bundle::autoload::AutoloadComponent;
 use aether_substrate_bundle::capabilities::http::HttpConfig;
 use aether_substrate_bundle::capabilities::{
-    AnthropicConfig, GeminiConfig, HttpServerConfig, HttpServerHandle, WasmTrampoline,
+    AnthropicConfig, ContentGenConfig, GeminiConfig, HttpServerConfig, HttpServerHandle,
+    WasmTrampoline,
 };
 use aether_substrate_bundle::headless::{HeadlessChassis, HeadlessEnv};
 use aether_substrate_bundle::test_bench::test_helpers::{
@@ -124,6 +125,7 @@ mod tests {
             http_server: Some(server_config),
             anthropic: AnthropicConfig::default(),
             gemini: GeminiConfig::default(),
+            contentgen: ContentGenConfig::default(),
             tick_period: Duration::from_millis(100),
             rpc_addr: None,
             workers: None,

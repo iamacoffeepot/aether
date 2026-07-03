@@ -13,14 +13,17 @@
 //!   from its generate handlers and `on_complete` from its
 //!   `#[handler(task)]` completion handlers; the framework owns the
 //!   in-flight ledger (hold + reply target + worker spawn).
-//! - [`stage_gen_output`] — write generated binary bytes to a fresh
-//!   `save://gen/<uuid>.<ext>` and return the path the reply carries
-//!   (binary outputs never ride the mail wire).
+//! - [`stage_gen_output_under`] — write generated binary bytes to a fresh
+//!   `save://gen/<uuid>.<ext>` under a caller-supplied root and return the
+//!   path the reply carries (binary outputs never ride the mail wire). The
+//!   root is resolved once at chassis boot ([`ContentGenConfig`]) and
+//!   threaded into the cap.
 //! - [`adapter`] — the `AnthropicAdapter` / `GeminiAdapter` traits plus
 //!   `StubAnthropicAdapter` / `StubGeminiAdapter` no-op impls so both
 //!   caps land scaffolding + CI smokes before any network code exists.
 
 pub mod adapter;
+pub mod config;
 pub mod staging;
 pub mod task_queue;
 pub mod transport;
@@ -30,5 +33,8 @@ pub use adapter::{
     GeminiArtifact, GeminiImageRequest, GeminiMusicRequest, GeminiResponse, StubAnthropicAdapter,
     StubGeminiAdapter,
 };
-pub use staging::{GEN_PREFIX, gen_root, stage_gen_output};
+pub use config::ContentGenConfig;
+#[cfg(feature = "runtime")]
+pub use config::{ContentGenConfigLayer, ContentGenOverlay};
+pub use staging::{GEN_PREFIX, stage_gen_output_under};
 pub use task_queue::{DEFAULT_MAX_IN_FLIGHT, TaskQueue};

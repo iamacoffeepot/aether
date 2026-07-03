@@ -31,7 +31,9 @@ use aether_substrate_bundle::bundle_pack::{
     ChassisSettings, Pack, PackedComponent, decode_pack, encode_pack,
 };
 use aether_substrate_bundle::capabilities::http::HttpConfig;
-use aether_substrate_bundle::capabilities::{AnthropicConfig, GeminiConfig, WasmTrampoline};
+use aether_substrate_bundle::capabilities::{
+    AnthropicConfig, ContentGenConfig, GeminiConfig, WasmTrampoline,
+};
 use aether_substrate_bundle::headless::{AutoloadComponent, HeadlessChassis, HeadlessEnv};
 use aether_substrate_bundle::test_bench::test_helpers::{
     init_save_sandbox, locate_component_wasm, test_namespace_roots,
@@ -79,6 +81,7 @@ mod tests {
             http_server: None,
             anthropic: AnthropicConfig::default(),
             gemini: GeminiConfig::default(),
+            contentgen: ContentGenConfig::default(),
             tick_period: Duration::from_millis(16),
             rpc_addr: None,
             workers: None,
@@ -154,6 +157,7 @@ mod tests {
             http_server: None,
             anthropic: AnthropicConfig::default(),
             gemini: GeminiConfig::default(),
+            contentgen: ContentGenConfig::default(),
             tick_period: Duration::from_millis(16),
             rpc_addr: None,
             workers: None,

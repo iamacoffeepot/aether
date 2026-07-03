@@ -121,10 +121,12 @@ pub use anthropic::{AnthropicCapability, AnthropicConfig};
 pub use component::{ComponentHostCapability, resolve_embedded};
 // ADR-0050 §2 shared content-gen infrastructure. Native-only — the two
 // provider caps (issue 1014 / 1015) embed these.
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+pub use shared::contentgen::ContentGenConfigLayer;
 #[cfg(not(target_family = "wasm"))]
 pub use shared::contentgen::{
-    AnthropicAdapter, GeminiAdapter, StubAnthropicAdapter, StubGeminiAdapter, TaskQueue,
-    stage_gen_output,
+    AnthropicAdapter, ContentGenConfig, GeminiAdapter, StubAnthropicAdapter, StubGeminiAdapter,
+    TaskQueue,
 };
 // `ComponentHostConfig` is wasmtime-bound (it holds `Arc<Engine>` /
 // `Arc<Linker<ComponentCtx>>`). Under the ADR-0122 split it lives behind

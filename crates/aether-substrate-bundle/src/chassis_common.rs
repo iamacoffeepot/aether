@@ -19,7 +19,7 @@ use aether_actor::Addressable;
 use aether_capabilities::anthropic::AnthropicConfigLayer;
 use aether_capabilities::audio::AudioConfigLayer;
 use aether_capabilities::fs::NamespaceRootsLayer;
-use aether_capabilities::gemini::GeminiConfigLayer;
+use aether_capabilities::gemini::{GeminiBoot, GeminiConfigLayer};
 use aether_capabilities::http::HttpConfigLayer;
 use aether_capabilities::http::HttpServerConfigLayer;
 use aether_capabilities::lifecycle::LifecycleGraphData;
@@ -28,8 +28,11 @@ use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
     EngineConfigLayer, FsCapability, GeminiCapability, GeminiConfig, HttpCapability,
     HttpServerCapability, HttpServerConfig, InputCapability, InputConfig, InventoryCapability,
-    LifecycleConfig, TcpCapability, TextCapability, UiCapability, fs::NamespaceRoots,
-    http::HttpConfig, trace::TraceDispatchCapability,
+    LifecycleConfig, TcpCapability, TextCapability, UiCapability,
+    fs::NamespaceRoots,
+    http::HttpConfig,
+    shared::contentgen::{ContentGenConfig, ContentGenConfigLayer},
+    trace::TraceDispatchCapability,
 };
 use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
 // The `aether.trajectory` recorder cap moved to `aether-labyrinth` (issue
@@ -303,6 +306,7 @@ fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
         &HttpConfigLayer::META,
         &HttpServerConfigLayer::META,
         &GeminiConfigLayer::META,
+        &ContentGenConfigLayer::META,
         &AnthropicConfigLayer::META,
         &AudioConfigLayer::META,
         &NamespaceRootsLayer::META,
@@ -475,6 +479,10 @@ pub struct CommonBoot {
     pub http: HttpConfig,
     pub anthropic: AnthropicConfig,
     pub gemini: GeminiConfig,
+    /// Content-gen staging config (ADR-0090). `with_common_caps` folds
+    /// its `gen_dir` override (else the resolved `save`-namespace root)
+    /// into the staging root threaded into the gemini cap.
+    pub contentgen: ContentGenConfig,
 }
 
 /// Wire the aborter, worker count, and the common caps every full-
@@ -485,6 +493,16 @@ pub struct CommonBoot {
 /// `LogCapability` — every actor owns its own per-actor log ring; no
 /// boot ordering is needed for logging anymore.
 pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Builder<C> {
+    // Resolve the content-gen staging root once, here, where the resolved
+    // `NamespaceRoots.save` is in scope: the `AETHER_GEN_DIR` override wins,
+    // else staging tracks the `save`-namespace root the fs cap already owns
+    // (preserving its `AETHER_SAVE_DIR` → platform fallback without re-reading
+    // env). Threaded into the gemini cap via `GeminiBoot`.
+    let staging_root = boot
+        .contentgen
+        .gen_dir
+        .clone()
+        .unwrap_or_else(|| boot.namespace_roots.save.clone());
     builder
         .with_aborter(boot.aborter)
         .with_workers(boot.workers)
@@ -500,7 +518,10 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_actor::<HttpCapability>(boot.http)
         .with_actor::<TcpCapability>(())
         .with_actor::<AnthropicCapability>(boot.anthropic)
-        .with_actor::<GeminiCapability>(boot.gemini)
+        .with_actor::<GeminiCapability>(GeminiBoot {
+            config: boot.gemini,
+            gen_root: staging_root,
+        })
 }
 
 /// The mailbox namespaces `with_common_caps` registers — the linked
@@ -915,6 +936,7 @@ mod tests {
         // chassis knobs — the set is non-empty and covers more than scheduler.
         let known = chassis_known_keys();
         assert!(known.contains("AETHER_HTTP_DISABLE"));
+        assert!(known.contains("AETHER_GEN_DIR"));
         assert!(known.contains("AETHER_WORKERS"));
         assert!(!known.is_empty());
     }
@@ -950,6 +972,9 @@ mod tests {
         assert!(dump.contains("AETHER_HTTP_DISABLE")); // http cap
         assert!(dump.contains("AETHER_HTTP_SERVER_BIND_ADDR")); // http server cap
         assert!(dump.contains("AETHER_GEMINI_TIMEOUT_MS")); // gemini cap
+        // Tripwire: the content-gen staging knob is only in the dump if
+        // `ContentGenConfigLayer::META` stays registered in `chassis_registry`.
+        assert!(dump.contains("AETHER_GEN_DIR")); // content-gen staging cap
         assert!(dump.contains("AETHER_AUDIO_DISABLE")); // audio cap
         assert!(dump.contains("AETHER_WORKERS")); // chassis-boot derive-Config knob
         assert!(dump.contains("AETHER_LOCAL_STICKY_MAX")); // scheduler knob
