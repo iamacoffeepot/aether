@@ -42,6 +42,7 @@ use aether_substrate::chassis::builder::Builder;
 use aether_substrate::config::{
     KnobKind, KnobRecord, KnownKeys, RingCapacities, dump_config, known_keys,
 };
+use aether_substrate::runtime::RUNTIME_KNOBS;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::scheduler::SCHEDULER_KNOBS;
 use confique::Config as _;
@@ -51,19 +52,33 @@ use crate::desktop::driver::WindowConfigLayer;
 use crate::headless::driver::TickConfigLayer;
 
 /// Chassis-direct env knobs that aren't `#[derive(Config)]` fields —
-/// the remaining hand-registered knob the chassis bins read inline
-/// (`AETHER_RPC_PORT`). Registered as a [`KnobRecord`] so e1's
-/// unknown-`AETHER_*` sweep doesn't flag it and e2's `--config`
-/// dump lists it. ADR-0090 §1/§4. The scheduler hot-path knobs are
-/// registered separately by unit b2's `SCHEDULER_KNOBS`; the chassis
-/// boot / window / tick knobs are now covered by the derive-emitted
-/// `*Layer::META`s in [`chassis_registry`].
-pub const CHASSIS_KNOBS: &[KnobRecord] = &[KnobRecord {
-    env_key: "AETHER_RPC_PORT",
-    doc: "aether.rpc.server bind port (desktop/headless skip the server when unset).",
-    default: None,
-    kind: KnobKind::HandRegistered,
-}];
+/// the hand-registered knobs the chassis bins read inline
+/// (`AETHER_RPC_PORT`) plus the one orphaned codec knob that can't
+/// live substrate-side (`AETHER_MAX_FRAME_SIZE` — `aether-codec`
+/// cannot depend on `aether-substrate`, where `KnobRecord`/`KnobKind`
+/// live). Registered as [`KnobRecord`]s so e1's unknown-`AETHER_*`
+/// sweep doesn't flag them and e2's `--config` dump lists them.
+/// ADR-0090 §1/§4. The scheduler hot-path knobs are registered
+/// separately by unit b2's `SCHEDULER_KNOBS`, the runtime (log /
+/// panic-hook) knobs by `aether_substrate::runtime::RUNTIME_KNOBS`;
+/// the chassis boot / window / tick knobs are now covered by the
+/// derive-emitted `*Layer::META`s in [`chassis_registry`].
+pub const CHASSIS_KNOBS: &[KnobRecord] = &[
+    KnobRecord {
+        env_key: "AETHER_RPC_PORT",
+        doc: "aether.rpc.server bind port (desktop/headless skip the server when unset).",
+        default: None,
+        kind: KnobKind::HandRegistered,
+    },
+    KnobRecord {
+        env_key: "AETHER_MAX_FRAME_SIZE",
+        doc: "Maximum accepted wire-frame body size in bytes (see \
+              aether_codec::frame::max_frame_size); default mirrors \
+              aether_codec::frame::MAX_FRAME_SIZE (64 MiB) — keep the two in sync.",
+        default: Some("67108864"),
+        kind: KnobKind::HandRegistered,
+    },
+];
 
 /// Per-actor ring-capacity knob (issue 1990, ADR-0081 / ADR-0086). The
 /// `#[derive(aether_substrate::Config)]` emits the env-shaped
@@ -256,9 +271,12 @@ impl ChassisBootConfig {
 
 /// Assemble the chassis-wide [`KnownKeys`] set (ADR-0090 §4): every
 /// migrated `*Layer::META` (http / gemini / anthropic / audio / fs /
-/// chassis-boot / window / tick) plus the hand-registered chassis knob
-/// ([`CHASSIS_KNOBS`]) and scheduler hot-path knobs (b2's
-/// `aether_substrate::scheduler::SCHEDULER_KNOBS`). e1's
+/// chassis-boot / window / tick) plus the hand-registered chassis knobs
+/// ([`CHASSIS_KNOBS`] — the RPC port and the orphaned frame-size knob),
+/// the scheduler hot-path knobs (b2's
+/// `aether_substrate::scheduler::SCHEDULER_KNOBS`), and the runtime
+/// log-filter / panic-hook knobs
+/// (`aether_substrate::runtime::RUNTIME_KNOBS`). e1's
 /// [`validate_env`](aether_substrate::config::validate_env) sweeps the
 /// process env against this; e2's `--config` dump walks the same
 /// metas + records.
@@ -275,9 +293,10 @@ pub fn chassis_known_keys() -> KnownKeys {
 
 /// The chassis-wide config registry: the migrated cap layer `Meta`s
 /// plus the hand-registered knob records (`CHASSIS_KNOBS` + b2's
-/// `SCHEDULER_KNOBS`). Shared by [`chassis_known_keys`] (e1's sweep)
-/// and [`chassis_config_dump`] (e2's `--config`) so both read one
-/// source of truth.
+/// `SCHEDULER_KNOBS` + `aether_substrate::runtime::RUNTIME_KNOBS`).
+/// Shared by [`chassis_known_keys`] (e1's sweep) and
+/// [`chassis_config_dump`] (e2's `--config`) so both read one source
+/// of truth.
 fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
     const METAS: &[&Meta] = &[
         &HttpConfigLayer::META,
@@ -294,6 +313,7 @@ fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
     ];
     let mut records: Vec<KnobRecord> = CHASSIS_KNOBS.to_vec();
     records.extend_from_slice(SCHEDULER_KNOBS);
+    records.extend_from_slice(RUNTIME_KNOBS);
     (METAS, records)
 }
 
@@ -773,6 +793,24 @@ mod tests {
     }
 
     #[test]
+    fn chassis_known_keys_includes_infra_knobs() {
+        // Tripwire: catches a future registry refactor that drops the
+        // RUNTIME_KNOBS extend or the frame-size record, re-introducing
+        // the false `validate_env` "unknown key" warning for these five
+        // legitimately-documented process-level knobs.
+        let known = chassis_known_keys();
+        for key in [
+            "AETHER_LOG_FILTER",
+            "AETHER_BACKTRACE",
+            "AETHER_CRASH_LOG_DISABLE",
+            "AETHER_CRASH_LOG_DIR",
+            "AETHER_MAX_FRAME_SIZE",
+        ] {
+            assert!(known.contains(key), "chassis_known_keys missing {key}");
+        }
+    }
+
+    #[test]
     fn chassis_boot_config_keys_are_known() {
         // Guards the three `ChassisBootConfigLayer::META` keys joining
         // the chassis known-key set. `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS`
@@ -839,6 +877,7 @@ mod tests {
         assert!(dump.contains("AETHER_AUDIO_DISABLE")); // audio cap
         assert!(dump.contains("AETHER_WORKERS")); // chassis-boot derive-Config knob
         assert!(dump.contains("AETHER_LOCAL_STICKY_MAX")); // scheduler knob
+        assert!(dump.contains("AETHER_LOG_FILTER")); // runtime knob
     }
 
     /// Regression guard for the enable / disable convention (#1791): a
