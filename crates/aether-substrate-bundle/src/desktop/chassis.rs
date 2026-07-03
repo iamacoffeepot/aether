@@ -181,6 +181,10 @@ pub struct DesktopEnv {
     pub boot_mode: WindowMode,
     pub boot_size: Option<(u32, u32)>,
     pub boot_title: String,
+    /// Resolved `AETHER_WIREFRAME` config value (`WindowConfig::wireframe`,
+    /// argv > env > default), threaded to `Gpu::new` at window creation.
+    /// `WireframeMode::from_config_value` owns the tri-state parse.
+    pub boot_wireframe: Option<String>,
     /// Issue 1761: optional `aether.http.server` init config (ADR-0108).
     /// `Some` iff the cap's `enabled` flag is set (`AETHER_HTTP_SERVER_ENABLED`
     /// / `--http-server-enabled`); `None` (default) skips booting
@@ -298,6 +302,7 @@ impl DesktopEnv {
         // `None` / empty to `"aether"`.
         let (boot_mode, boot_size) = window_config.to_boot_mode();
         let boot_title = window_config.to_boot_title();
+        let boot_wireframe = window_config.wireframe;
 
         let rpc_addr = {
             use std::net::{IpAddr, Ipv4Addr};
@@ -324,6 +329,7 @@ impl DesktopEnv {
             boot_mode,
             boot_size,
             boot_title,
+            boot_wireframe,
             http_server,
             rpc_addr,
             workers,
@@ -356,6 +362,7 @@ impl DesktopChassis {
             boot_mode,
             boot_size,
             boot_title,
+            boot_wireframe,
             rpc_addr,
             workers,
             ring_caps,
@@ -419,6 +426,7 @@ impl DesktopChassis {
             boot_mode,
             boot_size,
             boot_title,
+            boot_wireframe,
         };
 
         // Boot order is declaration order — `with_common_caps` runs

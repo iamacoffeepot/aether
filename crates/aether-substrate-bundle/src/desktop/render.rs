@@ -24,7 +24,6 @@ use winit::window::Window;
 use crate::visual;
 
 pub use render::VERTEX_BUFFER_BYTES;
-use std::env;
 use std::iter;
 use std::slice;
 
@@ -108,11 +107,11 @@ enum WireframeMode {
 }
 
 impl WireframeMode {
-    // Process-level render debug toggle (AETHER_WIREFRAME), read at the desktop
-    // GPU layer — not cap config.
-    #[allow(clippy::disallowed_methods)]
-    fn from_env() -> Self {
-        match env::var("AETHER_WIREFRAME").ok().as_deref() {
+    /// `value` is the resolved `AETHER_WIREFRAME` config value (argv >
+    /// env > default via `WindowConfig::wireframe`), threaded in by the
+    /// caller — this no longer reads the env var itself.
+    fn from_config_value(value: Option<&str>) -> Self {
+        match value {
             None | Some("" | "0" | "off") => Self::Off,
             Some("line") => Self::Line,
             Some(_) => Self::Overlay, // "1", "overlay", etc.
@@ -144,7 +143,11 @@ impl Gpu {
     // takes a clone via `Arc::clone(&window)` for the surface; the
     // owning form mirrors the `RenderHandles` argument.
     #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
-    pub fn new(window: Arc<Window>, render_handles: RenderHandles) -> Self {
+    pub fn new(
+        window: Arc<Window>,
+        render_handles: RenderHandles,
+        wireframe: Option<&str>,
+    ) -> Self {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let surface = instance
@@ -167,7 +170,7 @@ impl Gpu {
         // feature (Metal supports it on modern macOS; some GLES-only
         // adapters don't). If unsupported we fall back to filled with
         // a warning rather than failing device creation.
-        let mut wireframe_mode = WireframeMode::from_env();
+        let mut wireframe_mode = WireframeMode::from_config_value(wireframe);
         if wireframe_mode.needs_polygon_mode_line()
             && !adapter
                 .features()
@@ -505,5 +508,20 @@ impl Gpu {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WireframeMode;
+
+    // Tripwire: pins the soft-parse mapping `WireframeMode::from_config_value`
+    // owns (`AETHER_WIREFRAME`'s tri-state semantics threaded from
+    // `WindowConfig::wireframe`) — drifts if an arm changes.
+    #[test]
+    fn from_config_value_maps_the_tri_state() {
+        assert!(WireframeMode::from_config_value(None) == WireframeMode::Off);
+        assert!(WireframeMode::from_config_value(Some("line")) == WireframeMode::Line);
+        assert!(WireframeMode::from_config_value(Some("garbage")) == WireframeMode::Overlay);
     }
 }
