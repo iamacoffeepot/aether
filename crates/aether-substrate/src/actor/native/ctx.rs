@@ -498,6 +498,15 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
                 error = %e,
                 "failed to spawn dispatch_blocking worker thread",
             );
+            // No worker will ever fill the output or push the completion
+            // wake, so the parked entry (hold + reply_to) would sit in the
+            // ledger forever and wedge the caller's chain to its timeout.
+            // Release the eagerly-acquired hold so the chain settles — the
+            // `TaskDone::Drop` "released hold, owed a reply that never went
+            // out" outcome. A thread-spawn failure is environmental (OS
+            // resource exhaustion), not a programmer bug, so it does not
+            // `debug_assert`.
+            drop(self.binding.dispatch_abandon(id));
         }
         id
     }

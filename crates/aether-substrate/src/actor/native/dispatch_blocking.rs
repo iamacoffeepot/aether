@@ -377,14 +377,44 @@ impl InflightTable {
         }
     }
 
+    /// Remove the named entry and hand back its parked `(hold, reply_to)`
+    /// **without** any `O` / `C` downcast — the worker never ran, so there
+    /// is no output to type. The spawn-error branch calls this to release
+    /// the eagerly-acquired hold when arming failed: the caller drops the
+    /// returned hold, settling the chain the dispatch would otherwise wedge
+    /// forever. A no-op (`None`) for an unknown id.
+    fn abandon(&mut self, id: DispatchId) -> Option<(SettlementHold, Source)> {
+        let entry = self.entries.remove(&id)?;
+        Some((entry.hold, entry.reply_to))
+    }
+
     /// Remove the named entry and downcast its boxed `context` + filled
     /// `output` into a typed [`TaskDone`]. Returns `None` for an unknown
     /// id (cancelled / double-landed) or if the worker hasn't filled the
     /// output yet (the completion-wake must land after the fill, so this
-    /// is the unknown-id case in practice). A type mismatch on either
-    /// downcast also yields `None` — a wiring bug where the handler's
-    /// `O` / `C` don't match the dispatch's.
+    /// is the unknown-id case in practice) — leaving the entry intact on
+    /// either miss so a parked hold is never bare-dropped. A downcast
+    /// *mismatch* against a filled output is a genuine `O` / `C` wiring bug:
+    /// it `debug_assert`s loudly (distinct from the benign unfilled case)
+    /// and returns `None` with the entry retained.
     fn take<O: 'static, C: 'static>(&mut self, id: DispatchId) -> Option<TaskDone<O, C>> {
+        let entry = self.entries.get(&id)?;
+        // Peek-then-remove, the same discipline `try_take` uses: probe the
+        // boxed `output` + `context` without disturbing the entry. An
+        // unfilled output slot returns `None` quietly (a later wake completes
+        // the still-parked entry). A type mismatch against a *filled* output
+        // is a wiring bug — loud in debug, `None` in release — and never
+        // removes the entry, so the parked hold stays reclaimable.
+        let output = entry.output.as_deref()?;
+        if output.downcast_ref::<O>().is_none() || entry.context.downcast_ref::<C>().is_none() {
+            debug_assert!(
+                false,
+                "dispatch completion type mismatch: the task handler's (O, C) do not match the \
+                 dispatch's — a wiring bug (the entry is retained, not bare-dropped)"
+            );
+            return None;
+        }
+        // Both probes passed — safe to remove and rebuild.
         let entry = self.entries.remove(&id)?;
         let InflightEntry {
             hold,
@@ -455,6 +485,10 @@ impl InflightTable {
         id: DispatchId,
     ) -> Option<TaskDone<O, C>> {
         self.take(id)
+    }
+
+    pub(crate) fn dispatch_abandon(&mut self, id: DispatchId) -> Option<(SettlementHold, Source)> {
+        self.abandon(id)
     }
 
     pub(crate) fn dispatch_try_take<O: 'static, C: 'static>(
@@ -851,6 +885,87 @@ mod tests {
             counter.held_open(root),
             0,
             "an unresolved TaskDone releases its hold on drop"
+        );
+    }
+
+    /// The Site-1 release mechanism: `abandon` removes the entry and hands
+    /// back its parked hold + `reply_to` so the spawn-error branch can drop
+    /// the hold and settle the chain, rather than orphaning it in the
+    /// ledger.
+    #[test]
+    fn abandon_removes_entry_and_returns_hold() {
+        let (_registry, mailer) = fresh_substrate();
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+        let root = root_id(10);
+        let hold = mailer.acquire_settlement_hold(root);
+        assert_eq!(counter.held_open(root), 1, "hold acquired");
+
+        let mut table = InflightTable::new();
+        let id = table.dispatch_insert(hold, Source::NONE, Box::new(()));
+        assert!(table.entries.contains_key(&id), "entry parked");
+
+        let abandoned = table.dispatch_abandon(id);
+        assert!(abandoned.is_some(), "abandon hands back the parked hold");
+        drop(abandoned);
+        assert!(
+            !table.entries.contains_key(&id),
+            "abandon removes the entry"
+        );
+        assert_eq!(
+            counter.held_open(root),
+            0,
+            "dropping the abandoned hold releases the chain"
+        );
+    }
+
+    /// An unfilled entry is left intact by `take` — no bare drop of the
+    /// parked hold, no premature remove that an early/spurious wake could
+    /// otherwise destroy.
+    #[test]
+    fn take_leaves_entry_on_unfilled() {
+        let (_registry, mailer) = fresh_substrate();
+        let root = root_id(11);
+        let hold = mailer.acquire_settlement_hold(root);
+
+        let mut table = InflightTable::new();
+        let id = table.dispatch_insert(hold, Source::NONE, Box::new(()));
+        // Output was never filled: take returns None and retains the entry.
+        assert!(table.dispatch_take::<Answer, ()>(id).is_none());
+        assert!(
+            table.entries.contains_key(&id),
+            "an unfilled entry stays parked for a later wake"
+        );
+    }
+
+    /// Tripwire: a downcast *mismatch* against a filled output is a genuine
+    /// `O` / `C` wiring bug — loud (`debug_assert`) in debug, `None` in
+    /// release — and is distinct from the benign unfilled case. Either way
+    /// the entry is retained rather than bare-dropped.
+    #[test]
+    fn take_debug_asserts_on_type_mismatch() {
+        let (_registry, mailer) = fresh_substrate();
+        let root = root_id(12);
+        let hold = mailer.acquire_settlement_hold(root);
+
+        let mut table = InflightTable::new();
+        let id = table.dispatch_insert(hold, Source::NONE, Box::new(()));
+        // Fill with a wrong-typed output (u32) where take asks for Answer.
+        table.dispatch_fill_output(id, Box::new(7u32));
+
+        let outcome = catch_unwind(AssertUnwindSafe(|| table.dispatch_take::<Answer, ()>(id)));
+        #[cfg(debug_assertions)]
+        assert!(
+            outcome.is_err(),
+            "a type mismatch debug_asserts, distinct from the benign unfilled None"
+        );
+        #[cfg(not(debug_assertions))]
+        assert!(
+            matches!(outcome, Ok(None)),
+            "a type mismatch returns None in release"
+        );
+        assert!(
+            table.entries.contains_key(&id),
+            "a mismatched entry is retained, never bare-dropped"
         );
     }
 }

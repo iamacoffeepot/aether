@@ -951,6 +951,25 @@ impl NativeBinding {
             .dispatch_take(id)
     }
 
+    /// Remove the named dispatch entry and hand back its parked
+    /// `(SettlementHold, Source)` without any downcast — the release path
+    /// for a worker that never armed. The spawn-error branch of
+    /// [`dispatch_blocking_resumed_with`](super::ctx::NativeCtx::dispatch_blocking_resumed_with)
+    /// calls this and drops the returned hold so the chain settles.
+    ///
+    /// # Panics
+    /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    pub(crate) fn dispatch_abandon(
+        &self,
+        id: super::dispatch_blocking::DispatchId,
+    ) -> Option<(SettlementHold, Source)> {
+        self.inflight
+            .lock()
+            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
+            .dispatch_abandon(id)
+    }
+
     /// Non-consuming peek-then-take of the named dispatch entry: probe its
     /// boxed output + context against `O` / `C` and only remove + rebuild
     /// the [`TaskDone`](super::dispatch_blocking::TaskDone) on a match,
