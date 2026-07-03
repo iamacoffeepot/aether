@@ -11,6 +11,7 @@
 // module.
 
 use std::cell::Cell;
+use std::mem;
 use std::sync::Arc;
 
 use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
@@ -167,13 +168,15 @@ pub struct ComponentCtx {
     /// `correlation_counter`: `prev_correlation_p32` reports a guest's
     /// own request correlations, and a reply is not one of them.
     reply_lineage_counter: Cell<u64>,
-    /// ADR-0097: a sibling-spawn request staged by the `spawn_sibling`
+    /// ADR-0097: sibling-spawn requests staged by the `spawn_sibling`
     /// host fn and drained by the trampoline after `receive_p32`
     /// returns — the same host-fn-stages / host-drains pattern as
-    /// `saved_state`. `None` outside an in-flight spawn. The trampoline
-    /// performs the actual `spawn_child::<WasmTrampoline>`; substrate
-    /// can't name that capabilities-layer type (ADR-0097 §4).
-    pub pending_spawn: Option<PendingSpawn>,
+    /// `saved_state`. Empty outside an in-flight spawn; a handler that
+    /// calls `spawn_child` more than once in one `receive` stages one
+    /// entry per call, in guest call order. The trampoline performs the
+    /// actual `spawn_child::<WasmTrampoline>`; substrate can't name that
+    /// capabilities-layer type (ADR-0097 §4).
+    pub pending_spawns: Vec<PendingSpawn>,
 }
 
 /// The mailbox-name prefix every wasm component (loaded or spawned)
@@ -236,7 +239,7 @@ impl ComponentCtx {
             in_flight_mail_id: Cell::new(MailId::NONE),
             in_flight_root: Cell::new(MailId::NONE),
             reply_lineage_counter: Cell::new(REPLY_LINEAGE_BASE),
-            pending_spawn: None,
+            pending_spawns: Vec::new(),
         }
     }
 
@@ -1234,13 +1237,13 @@ impl Component {
         self.store.data_mut().saved_state.take()
     }
 
-    /// ADR-0097: drain the sibling-spawn request the guest staged via
+    /// ADR-0097: drain every sibling-spawn request the guest staged via
     /// the `spawn_sibling` host fn during the just-returned `receive`.
-    /// The trampoline calls this after `deliver` and performs the
-    /// actual `spawn_child::<WasmTrampoline>`. Destructive — returns
-    /// `None` once drained, and `None` when the guest didn't spawn.
-    pub fn take_pending_spawn(&mut self) -> Option<PendingSpawn> {
-        self.store.data_mut().pending_spawn.take()
+    /// The trampoline calls this after `deliver` and performs one
+    /// `spawn_child::<WasmTrampoline>` per request. Destructive — empty
+    /// once drained, and empty when the guest didn't spawn.
+    pub fn drain_pending_spawns(&mut self) -> Vec<PendingSpawn> {
+        mem::take(&mut self.store.data_mut().pending_spawns)
     }
 
     /// Extract a failure recorded by `save_state` (size cap, OOB).

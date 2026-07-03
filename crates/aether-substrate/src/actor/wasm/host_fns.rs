@@ -201,7 +201,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 aether_data::Tag::Mailbox,
                 aether_data::fold_lineage(trampoline_carry, sibling_node),
             );
-            caller.data_mut().pending_spawn = Some(PendingSpawn {
+            caller.data_mut().pending_spawns.push(PendingSpawn {
                 tag,
                 subname: full_subname,
                 config,

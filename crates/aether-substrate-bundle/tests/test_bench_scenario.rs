@@ -438,6 +438,77 @@ fn multi_actor_sibling_spawn() {
     );
 }
 
+/// Issue iamacoffeepot/aether#2503: `RootManager` spawns two `Panel`
+/// siblings from a *single* `receive` (`Ping { seq: 2 }` drives two
+/// `ctx.spawn_child` calls before the handler returns). Both spawns
+/// must survive the post-`receive` drain — pre-fix, the ctx slot was
+/// `Option<PendingSpawn>` and a second stage overwrote the first, so
+/// only the last-staged sibling (Counter `1`) ever actually spawned:
+/// pinging Counter `0`'s predicted `MailboxId` warn-dropped with no
+/// broadcast, and this scenario observed `TICK_OBSERVED == 1` instead
+/// of `2`.
+#[test]
+fn multi_actor_sibling_spawn_twice_in_one_receive() {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+        return;
+    };
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    name: None,
+                    config: Vec::new(),
+                    export: Some("ui.root".to_owned()),
+                },
+            ),
+        )])
+        .expect("load sequence");
+    let root_name = match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        LoadResult::Ok { name, .. } => name,
+        LoadResult::Err { error } => panic!("multi-actor load failed: {error}"),
+    };
+
+    // Both Panels nest under RootManager's lineage; the Counter
+    // discriminator advances once per spawn_child call, in guest call
+    // order, so the two staged within one receive predict "0" then "1".
+    let panel_0 = format!("{root_name}/aether.embedded:0");
+    let panel_1 = format!("{root_name}/aether.embedded:1");
+    bench
+        .execute(vec![
+            // RootManager spawns two Panel siblings (Counter 0 and 1)
+            // from this one Ping receive.
+            (
+                "spawn_two",
+                BenchOp::send_mail::<Ping>(root_name.as_str(), &Ping { seq: 2 }),
+            ),
+            (
+                "ping_panel_0",
+                BenchOp::send_mail::<Ping>(panel_0.as_str(), &Ping { seq: 1 }),
+            ),
+            (
+                "ping_panel_1",
+                BenchOp::send_mail::<Ping>(panel_1.as_str(), &Ping { seq: 1 }),
+            ),
+        ])
+        .expect("spawn-twice + ping-both sequence");
+
+    assert_eq!(
+        bench.count_observed(TICK_OBSERVED),
+        2,
+        "both siblings staged in the one receive should have spawned and broadcast; \
+         observed kinds: {:?}",
+        bench.observed_kinds(),
+    );
+}
+
 /// Dropping the probe stops further `tick_observed` broadcasts.
 /// Validates that `aether.component.drop` removes the
 /// mailbox from the input subscriber set so subsequent ticks don't

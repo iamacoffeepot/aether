@@ -11,9 +11,11 @@
 //! Receive surfaces are deliberately distinct so a load test can prove
 //! which type was instantiated: `RootManager` is a strict receiver (one
 //! `Ping` handler, no fallback); `Panel` adds a `#[fallback]`. On `Ping`,
-//! `RootManager` spawns a `Panel` sibling and `Panel` broadcasts a
-//! `TickObserved` to the test-bench observer — so a scenario can confirm
-//! the spawned sibling is addressable and live.
+//! `RootManager` spawns `Ping.seq.max(1)` `Panel` siblings — from a
+//! single `receive` when `seq > 1`, covering issue iamacoffeepot/aether#2503's
+//! multi-spawn-per-receive path — and each spawned `Panel` broadcasts a
+//! `TickObserved` to the test-bench observer, so a scenario can confirm
+//! every spawned sibling is addressable and live.
 
 // `#[handler]` / `#[fallback]` methods take `&mut self` to match the
 // dispatch ABI even when stateless.
@@ -37,13 +39,18 @@ impl WasmActor for RootManager {
         Ok(RootManager)
     }
 
-    /// ADR-0097: on `Ping`, spawn a `Panel` sibling from the same
-    /// resident module. `Subname::Counter` gives it a bare counter
-    /// discriminator (`0`, `1`, …); the returned `MailboxId` is
+    /// ADR-0097: on `Ping`, spawn `seq.max(1)` `Panel` siblings from the
+    /// same resident module — `seq > 1` drives multiple `spawn_child`
+    /// calls within this one `receive`, which is exactly the shape
+    /// issue #2503 covers (a second staged sibling spawn must not be
+    /// dropped). `Subname::Counter` gives each spawn a bare counter
+    /// discriminator (`0`, `1`, …); the returned `MailboxId`s are
     /// fire-and-forget here.
     #[handler]
-    fn on_ping(&mut self, ctx: &mut WasmCtx<'_>, _ping: Ping) {
-        let _ = ctx.spawn_child::<Panel>(Subname::Counter, &());
+    fn on_ping(&mut self, ctx: &mut WasmCtx<'_>, ping: Ping) {
+        for _ in 0..ping.seq.max(1) {
+            let _ = ctx.spawn_child::<Panel>(Subname::Counter, &());
+        }
     }
 }
 
