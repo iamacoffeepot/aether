@@ -17,6 +17,11 @@ pub mod descriptors;
 pub mod keycode;
 pub mod text_metrics;
 pub mod trace;
+// First-party native `#[transform]`s (ADR-0048, issue 1464). Native-only
+// (no wasm consumer runs transforms) and co-located with the `Mat4Apply`
+// kind the sole transform consumes. Holds only the generic `mat4_apply`.
+#[cfg(not(target_family = "wasm"))]
+pub mod transforms;
 
 pub use text_metrics::{CachedFontMetrics, scale_units};
 

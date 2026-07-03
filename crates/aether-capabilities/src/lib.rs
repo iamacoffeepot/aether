@@ -67,12 +67,6 @@ pub mod render;
 pub mod rpc;
 pub mod tcp;
 pub mod test_bench;
-// Shared round-trip test scaffolding (echo actor + its kinds), used by the
-// `rpc::server` test modules and the `engine::proxy` test. Lives at the crate
-// root — not under `rpc` — because its consumers span families; a private
-// top-level `mod` is reachable crate-wide via module privacy.
-#[cfg(test)]
-mod test_echo;
 // `aether.text` cap (ADR-0105). CPU-only — composes the render texture
 // surface by mail — but feature-gated the two-layer way so a wasm
 // component can address it by type without pulling `fontdue` into the
@@ -83,17 +77,6 @@ pub mod trace;
 pub mod trampoline;
 #[cfg(feature = "ui")]
 pub mod ui;
-// First-party native `#[transform]`s (ADR-0048, issue 1464). The
-// link-time inventory submission populates both the headless
-// `TransformRegistry` and `describe_transforms` — both native. Native-
-// only: the `aether.fs` `fetch` verb that runs transforms is non-wasm,
-// and the `#[transform]` inventory entry is itself `cfg(not(wasm32))`-
-// gated, so on a wasm-header-only build the fn would be dead. No wasm
-// consumer runs transforms, so gate the whole module rather than carry
-// it dead.
-// Holds only the generic `mat4_apply`.
-#[cfg(not(target_family = "wasm"))]
-pub mod transforms;
 pub mod window;
 
 #[cfg(feature = "audio")]

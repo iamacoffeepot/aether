@@ -44,7 +44,7 @@ fn boot_with_rpc_server_only(timeout: Duration) -> (PassiveChassis<TestChassis>,
 /// handshake. Shared by the deferred-reply settlement tests. Returns
 /// `(chassis, stream)`; both must stay alive for the listener.
 fn boot_with_deferred_echo(timeout: Duration) -> (PassiveChassis<TestChassis>, TcpStream) {
-    use crate::test_echo::DeferredEchoActor;
+    use crate::rpc::server::test_echo::DeferredEchoActor;
     use crate::trace::TraceDispatchCapability;
 
     let (registry, mailer) = fresh_substrate();
@@ -157,8 +157,8 @@ fn ping_pong_roundtrip() {
 /// phase 2.
 #[test]
 fn call_echo_round_trip_event_then_end() {
+    use crate::rpc::server::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
     use crate::rpc::{MailEnvelope, MailboxAddress};
-    use crate::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
     use crate::trace::TraceDispatchCapability;
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
@@ -321,8 +321,10 @@ fn call_headless_window_set_mode_err_reaches_component_reply() {
 /// `ReplyEnd`, then the late reply dropped).
 #[test]
 fn call_deferred_echo_settles_after_reply() {
+    use crate::rpc::server::test_echo::{
+        DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest,
+    };
     use crate::rpc::{MailEnvelope, MailboxAddress};
-    use crate::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
 
@@ -396,8 +398,10 @@ fn call_deferred_echo_settles_after_reply() {
 /// behind 50ms sleeps); the test pairs by `value`.
 #[test]
 fn dispatch_traced_with_deferred_replies_routes_each_event_then_settles() {
+    use crate::rpc::server::test_echo::{
+        DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest,
+    };
     use crate::rpc::{MailEnvelope, MailboxAddress};
-    use crate::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
     use crate::trace::TraceDispatchCapability;
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
@@ -499,8 +503,8 @@ fn dispatch_traced_with_deferred_replies_routes_each_event_then_settles() {
 /// no stale `ReplyEvent` / `ReplyEnd` frames are in the way.
 #[test]
 fn call_without_cid_is_fire_and_forget() {
+    use crate::rpc::server::test_echo::{TestEchoActor, TestEchoRequest};
     use crate::rpc::{MailEnvelope, MailboxAddress};
-    use crate::test_echo::{TestEchoActor, TestEchoRequest};
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
 
@@ -670,8 +674,8 @@ fn client_peer_kind() -> PeerKind {
 /// ADR-0124; this integration test stays here, where the server lives).
 #[test]
 fn call_echo_round_trips_over_the_socket() {
+    use crate::rpc::server::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
     use crate::rpc::{MailEnvelope, MailboxAddress, RpcClient};
-    use crate::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
     use crate::trace::TraceDispatchCapability;
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
