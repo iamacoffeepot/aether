@@ -1,8 +1,8 @@
 use super::{HttpServerCapability, HttpServerConfig, HttpServerHandle};
-use crate::test_chassis::{TestChassis, fresh_substrate};
 use crate::trace::TraceDispatchCapability;
 use aether_actor::Addressable;
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
+use aether_substrate::testing::{TestChassis, fresh_substrate};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;

@@ -737,7 +737,7 @@ mod tests {
         use aether_substrate::mail::{MailId, MailboxId, Source, SourceAddr};
 
         use crate::lifecycle::LifecycleMailboxExt;
-        use crate::test_chassis::fresh_substrate;
+        use aether_substrate::testing::fresh_substrate;
 
         let (registry, mailer) = fresh_substrate();
 

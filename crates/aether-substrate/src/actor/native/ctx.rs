@@ -1379,10 +1379,10 @@ mod tests {
     #[test]
     fn handle_send_inherits_chain_detached_mints_fresh() {
         use crate::mail::registry::OwnedDispatch;
-        use crate::test_util::fresh_substrate;
+        use crate::testing::bare_substrate;
         use std::sync::mpsc;
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let (tx, rx) = mpsc::channel::<Envelope>();
         let recipient = registry.register_inbox(
             "test.issue_1802.sink",

@@ -67,15 +67,10 @@ pub mod render;
 pub mod rpc;
 pub mod tcp;
 pub mod test_bench;
-// Shared `TestChassis` / `fresh_substrate` / reply-decode fixtures for the
-// cap unit tests in this crate (issues 785 / 786).
-#[cfg(test)]
-mod test_chassis;
 // Shared round-trip test scaffolding (echo actor + its kinds), used by the
 // `rpc::server` test modules and the `engine::proxy` test. Lives at the crate
 // root — not under `rpc` — because its consumers span families; a private
-// top-level `mod` is reachable crate-wide via module privacy (the
-// `test_chassis` pattern).
+// top-level `mod` is reachable crate-wide via module privacy.
 #[cfg(test)]
 mod test_echo;
 // `aether.text` cap (ADR-0105). CPU-only — composes the render texture

@@ -283,8 +283,8 @@ mod tests {
     use super::UiCapabilityState;
     use super::{MouseButton, MouseMove, Tick, UiBar, UiButton, UiClicked, UiLabel, UiPanel};
     use crate::render::DrawSolidQuads;
-    use crate::test_chassis::test_mailer_and_rx;
     use crate::text::DrawText;
+    use aether_substrate::testing::test_mailer_and_rx;
 
     fn session_sender() -> Source {
         Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))

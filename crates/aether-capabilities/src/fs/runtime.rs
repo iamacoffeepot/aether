@@ -400,8 +400,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use crate::test_chassis::{TestChassis, cleanup, fresh_substrate, scratch_dir};
     use aether_substrate::mail::SourceAddr;
+    use aether_substrate::testing::{TestChassis, cleanup, fresh_substrate, scratch_dir};
     use std::fs;
 
     /// Test fixture that bundles the cap, a fully-wired test mailer,
@@ -639,7 +639,7 @@ mod tests {
         Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))
     }
 
-    use crate::test_chassis::test_mailer_and_rx;
+    use aether_substrate::testing::test_mailer_and_rx;
 
     /// Boot the cap against a fresh tempdir; assert the mailbox
     /// is registered.

@@ -409,13 +409,13 @@ mod tests {
     use crate::shared::contentgen::adapter::STUB_PNG;
     use crate::shared::contentgen::adapter::StubGeminiAdapter;
     use crate::shared::contentgen::adapter::{AdapterUsage, GeminiArtifact, GeminiResponse};
-    use crate::test_chassis::{
-        cleanup, decode_session_reply, drive_task_completion, scratch_dir, test_mailer_and_rx,
-    };
     use aether_data::{Kind, MailboxId, SessionToken, Source, SourceAddr, Uuid};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
     use aether_substrate::mail::outbound::EgressEvent;
+    use aether_substrate::testing::{
+        cleanup, decode_session_reply, drive_task_completion, scratch_dir, test_mailer_and_rx,
+    };
     use serde::de::DeserializeOwned;
     use std::fs;
     use std::sync::Arc;

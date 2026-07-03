@@ -10,7 +10,6 @@ use super::{
     BindListener, BindListenerResult, ListListeners, ListListenersResult, TcpCapability,
     UnbindListener, UnbindListenerResult,
 };
-use crate::test_chassis::TestChassis;
 use aether_actor::Addressable;
 use aether_data::{Kind, SessionToken, Uuid};
 use aether_kinds::descriptors;
@@ -22,6 +21,7 @@ use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
 use aether_substrate::mail::registry::OwnedDispatch;
 use aether_substrate::mail::registry::{MailboxEntry, Registry};
 use aether_substrate::mail::{MailRef, Source, SourceAddr};
+use aether_substrate::testing::TestChassis;
 
 fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
     let registry = Arc::new(Registry::new());

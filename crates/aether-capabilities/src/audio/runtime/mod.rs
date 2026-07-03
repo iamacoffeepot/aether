@@ -1004,9 +1004,11 @@ mod tests {
     use super::voice::{MAX_VOICES, OscVoice, PartialBankVoice, voice_seed};
     use super::*;
     use crate::fs::FsError;
-    use crate::test_chassis::{decode_session_reply, drive_task_completion, test_mailer_and_rx};
     use aether_data::{MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
     use aether_substrate::actor::native::binding::NativeBinding;
+    use aether_substrate::testing::{
+        decode_session_reply, drive_task_completion, test_mailer_and_rx,
+    };
     use aether_substrate::{
         EgressEvent, HubOutbound, InboxHandler, Mailer, OwnedDispatch, Registry,
     };

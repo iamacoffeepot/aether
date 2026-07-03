@@ -1010,7 +1010,7 @@ mod tests {
     use crate::mail::registry::{InboxHandler, OwnedDispatch};
     use crate::mail::{KindId, MailRef};
     use crate::scheduler::{SeizeSeed, SlotState, SpinPark};
-    use crate::test_util::fresh_substrate;
+    use crate::testing::bare_substrate;
     use aether_data::MailId;
     use crossbeam_deque::{Injector, Steal};
     use std::sync::mpsc;
@@ -1128,7 +1128,7 @@ mod tests {
     /// the in-place seize path (closure deposit untouched).
     #[test]
     fn fanout_dispatches_each_recipient_once_in_place() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let mut fixtures = Vec::new();
         let mut directs = Vec::new();
@@ -1160,7 +1160,7 @@ mod tests {
     /// dispatch in send order (per-recipient FIFO).
     #[test]
     fn same_recipient_grouped_in_send_order() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let (id, _fix, direct_rx, _dep) = seizable_recipient(&registry, "r");
 
@@ -1178,7 +1178,7 @@ mod tests {
     /// dispatched in place.
     #[test]
     fn busy_recipient_deposited() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let (id, fixture, direct_rx, deposit_rx) = seizable_recipient(&registry, "r");
         assert!(
@@ -1202,7 +1202,7 @@ mod tests {
     /// deposited through the router.
     #[test]
     fn closure_inbox_deposited() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let (tx, rx) = mpsc::channel::<u8>();
         let id = register_byte_forwarding_inbox(&registry, "sink", tx);
@@ -1222,7 +1222,7 @@ mod tests {
     /// recipient appends a new group; both deliver exactly once.
     #[test]
     fn second_flush_new_recipient_appends_group() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let (a, _fa, a_rx, _ad) = seizable_recipient(&registry, "a");
         let (b, _fb, b_rx, _bd) = seizable_recipient(&registry, "b");
@@ -1245,7 +1245,7 @@ mod tests {
     /// full-but-not-retired roll path — the case that previously looped.)
     #[test]
     fn overflow_rolls_fresh_blob_no_loss() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let mut producer = BlobProducer::new(Arc::clone(&mailer), wake_sink(&injector));
         // Keep every fixture (and its receivers) alive to drain time — the
@@ -1299,7 +1299,7 @@ mod tests {
     /// is driven entirely by the test — no timing dependence.
     #[test]
     fn detached_blob_keeps_same_recipient_fifo_across_overflow() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let (r, _fix, direct_rx, _dep) = seizable_recipient(&registry, "r");
         let mut producer = BlobProducer::new(Arc::clone(&mailer), wake_sink(&injector));
@@ -1370,7 +1370,7 @@ mod tests {
     /// Empty flush is a no-op.
     #[test]
     fn empty_flush_noop() {
-        let (_registry, mailer) = fresh_substrate();
+        let (_registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let mut producer = BlobProducer::new(Arc::clone(&mailer), wake_sink(&injector));
         producer.flush(Vec::new());
@@ -1481,7 +1481,7 @@ mod tests {
             },
             Arc::new(PanicAborter),
         );
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let mut producer = BlobProducer::new(Arc::clone(&mailer), pool.wake_sink());
 
         let mut fixtures = Vec::new();
@@ -1643,7 +1643,7 @@ mod tests {
     /// kind twice, so 2× the per-handler cost).
     #[test]
     fn flush_outcome_sums_group_work() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let (a, _fa, _a_dir, _a_dep) = seizable_recipient(&registry, "a");
         let (b, _fb, _b_dir, _b_dep) = seizable_recipient(&registry, "b");
@@ -1675,7 +1675,7 @@ mod tests {
     /// not `recruit_k` (which would see Σw = 0 and stay local).
     #[test]
     fn unknown_cost_falls_back_to_width_gate() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         // recruit_min default is 9; build a 12-wide fan-out of unseeded
         // recipients so the width fallback fires while Σw stays 0.
@@ -1711,7 +1711,7 @@ mod tests {
     /// exactly as the pre-#1178 width gate did.
     #[test]
     fn unknown_cost_narrow_stays_local_via_width() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let mut routed = Vec::new();
         let mut fixtures = Vec::new();
@@ -1739,7 +1739,7 @@ mod tests {
     /// touching `AETHER_BLOB_RECRUIT_MIN`.
     #[test]
     fn heavy_narrow_recruits_without_width_threshold() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let mut routed = Vec::new();
         let mut fixtures = Vec::new();
@@ -1772,7 +1772,7 @@ mod tests {
     /// (cheapness), preserving the #1116 narrow-local win.
     #[test]
     fn cheap_narrow_stays_local_via_cost() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let mut routed = Vec::new();
         let mut fixtures = Vec::new();

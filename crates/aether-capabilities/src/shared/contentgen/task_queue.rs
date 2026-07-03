@@ -143,7 +143,7 @@ mod tests {
     use aether_substrate::actor::native::ctx::NativeCtx;
     use std::sync::Arc;
 
-    use crate::test_chassis::fresh_substrate;
+    use aether_substrate::testing::fresh_substrate;
 
     /// A `#[repr(C)]` `Pod` reply kind the worker produces and `resolve`
     /// re-replies. Hand-rolled `Kind` (cast-shape) so the tests don't

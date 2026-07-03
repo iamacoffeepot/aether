@@ -1691,7 +1691,7 @@ mod tests {
     use crate::actor::native::ctx::NativeCtx;
     use crate::mail::KindId;
     use crate::mail::registry;
-    use crate::test_util::fresh_substrate;
+    use crate::testing::{TestChassis, bare_substrate};
     use std::io;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
@@ -1731,17 +1731,6 @@ mod tests {
             _payload: &[u8],
         ) -> Option<()> {
             None
-        }
-    }
-
-    /// Fixture chassis for passive-build tests.
-    struct TestChassis;
-    impl Chassis for TestChassis {
-        const PROFILE: &'static str = "test";
-        type Driver = NeverDriver;
-        type Env = ();
-        fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-            unreachable!("TestChassis is driven by Builder::new directly in unit tests");
         }
     }
 
@@ -1787,7 +1776,7 @@ mod tests {
     /// boot + run + teardown sequence.
     #[test]
     fn driver_build_runs_driver_and_tears_down_passives() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let ran = Arc::new(AtomicBool::new(false));
 
         let chassis = Builder::<DrivenTestChassis<RanDriver>>::new(registry, mailer)
@@ -1808,7 +1797,7 @@ mod tests {
     /// duplicate-claim guard.
     #[test]
     fn duplicate_passive_mailbox_aborts_build_and_shuts_down_prior() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
 
         let err = Builder::<TestChassis>::new(registry, mailer)
             .with_actor::<StubLog>(())
@@ -1859,7 +1848,7 @@ mod tests {
             }
         }
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<FailingCap>(())
             .build_passive()
@@ -1958,7 +1947,7 @@ mod tests {
             }
         }
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let received = Arc::new(AtomicU32::new(0));
 
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
@@ -2095,7 +2084,7 @@ mod tests {
             }
         }
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let observed = Arc::new(AtomicU32::new(0));
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<LocalProbe>(Arc::clone(&observed))
@@ -2278,7 +2267,7 @@ mod tests {
             }
         }
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let spawn_count = Arc::new(AtomicU32::new(0));
         let child_received = Arc::new(AtomicU32::new(0));
 
@@ -2411,7 +2400,7 @@ mod tests {
             }
         }
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let close_observed = Arc::new(AtomicU32::new(0));
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .build_passive()
@@ -2530,7 +2519,7 @@ mod tests {
             }
         }
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let close_observed = Arc::new(AtomicU32::new(0));
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .build_passive()
@@ -2609,7 +2598,7 @@ mod tests {
 
         const N: usize = 64;
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .build_passive()
             .expect("empty chassis boots");
@@ -2703,7 +2692,7 @@ mod tests {
             }
         }
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .build_passive()
             .expect("empty chassis boots");
@@ -2878,7 +2867,7 @@ mod tests {
             }
         }
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .build_passive()
             .expect("empty chassis boots");
@@ -3123,7 +3112,7 @@ mod tests {
             }
         }
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .build_passive()
             .expect("empty chassis boots");
@@ -3282,7 +3271,7 @@ mod tests {
             }
         }
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .build_passive()
             .expect("empty chassis boots");
@@ -3548,7 +3537,7 @@ mod tests {
             }
         }
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .build_passive()
             .expect("empty chassis boots");
@@ -3715,7 +3704,7 @@ mod tests {
             }
         }
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let wire_count = Arc::new(AtomicU32::new(0));
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .build_passive()
@@ -3776,7 +3765,7 @@ mod tests {
             }
         }
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let wire_count = Arc::new(AtomicU32::new(0));
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<WireProbe>(Arc::clone(&wire_count))
@@ -3889,7 +3878,7 @@ mod tests {
             }
         }
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let received = Arc::new(AtomicU32::new(0));
         let wire_ran = Arc::new(AtomicU32::new(0));
 
@@ -3929,7 +3918,7 @@ mod tests {
     /// least one worker.
     #[test]
     fn with_workers_some_zero_clamps_to_one() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let builder = Builder::<TestChassis>::new(registry, mailer).with_workers(Some(0));
         assert_eq!(builder.workers, Some(1));
     }
@@ -3939,7 +3928,7 @@ mod tests {
     /// either before or after `.driver(_)`.
     #[test]
     fn with_workers_survives_driver_transition() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let ran = Arc::new(AtomicBool::new(false));
         let builder = Builder::<DrivenTestChassis<RanDriver>>::new(registry, mailer)
             .with_workers(Some(3))

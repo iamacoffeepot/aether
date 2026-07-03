@@ -30,10 +30,10 @@ use aether_kinds::trace::Nanos;
 use aether_substrate::actor::native::{Pending, TaskDone};
 use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
 use aether_substrate::mail::{MailId, MailRef};
+use aether_substrate::testing::{TestChassis, bare_substrate};
 use aether_substrate::{
-    Addressable, BootError, Builder, BuiltChassis, Chassis, Dispatch, Mailer, Manual, NativeActor,
-    NativeBinding, NativeCtx, NativeInitCtx, NeverDriver, PassiveChassis, Registry,
-    mail::MailboxId,
+    Addressable, BootError, Builder, Dispatch, Manual, NativeActor, NativeBinding, NativeCtx,
+    NativeInitCtx, PassiveChassis, Registry, mail::MailboxId,
 };
 use std::thread;
 
@@ -110,27 +110,6 @@ impl NativeActor for MacroProbeCap {
     }
 }
 
-/// Test chassis fixture so `Builder::<C>::new` has a typed `C` to
-/// parameterise on. `NeverDriver` makes the no-driver passive build
-/// path the only valid one.
-struct TestChassis;
-impl Chassis for TestChassis {
-    const PROFILE: &'static str = "test";
-    type Driver = NeverDriver;
-    type Env = ();
-    fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-        unreachable!("TestChassis is built directly via Builder in tests");
-    }
-}
-
-fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
-    {
-        let registry = Arc::new(Registry::new());
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-        (registry, mailer)
-    }
-}
-
 fn push_envelope<K: Kind>(registry: &Registry, recipient: &str, payload: &K) {
     use aether_substrate::mail::registry::MailboxEntry;
     let id: MailboxId = registry.lookup(recipient).expect("mailbox registered");
@@ -164,7 +143,7 @@ fn wait_for(target: u32, counter: &AtomicU32, budget: Duration) -> bool {
 
 #[test]
 fn macro_emitted_cap_routes_structured_kind_through_dispatch() {
-    let (registry, mailer) = fresh_substrate();
+    let (registry, mailer) = bare_substrate();
     let greet_total = Arc::new(AtomicU32::new(0));
     let ping_total = Arc::new(AtomicU32::new(0));
 
@@ -198,7 +177,7 @@ fn seize_and_run_dispatches_seed_in_place() {
     use aether_substrate::mail::registry::MailboxEntry;
     use aether_substrate::scheduler::{BatchBudget, SlotStateLabel};
 
-    let (registry, mailer) = fresh_substrate();
+    let (registry, mailer) = bare_substrate();
     let greet_total = Arc::new(AtomicU32::new(0));
     let ping_total = Arc::new(AtomicU32::new(0));
 
@@ -274,7 +253,7 @@ fn seize_and_run_dispatches_seed_in_place() {
 
 #[test]
 fn macro_emitted_cap_routes_cast_kind_through_dispatch() {
-    let (registry, mailer) = fresh_substrate();
+    let (registry, mailer) = bare_substrate();
     let greet_total = Arc::new(AtomicU32::new(0));
     let ping_total = Arc::new(AtomicU32::new(0));
 
@@ -299,7 +278,7 @@ fn macro_emitted_cap_routes_cast_kind_through_dispatch() {
 
 #[test]
 fn macro_routes_task_completions_by_output_type() {
-    let (registry, mailer) = fresh_substrate();
+    let (registry, mailer) = bare_substrate();
     let obs = TaskObservations {
         dispatched: Arc::new(AtomicU32::new(0)),
         a_value: Arc::new(AtomicU64::new(0)),
@@ -375,7 +354,7 @@ fn macro_routes_task_completions_by_output_type() {
 /// back to the original caller.
 #[test]
 fn macro_pending_request_borrow_completion_replies_once() {
-    let (registry, mailer) = fresh_substrate();
+    let (registry, mailer) = bare_substrate();
     let obs = DeferredObs::new();
 
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
@@ -439,7 +418,7 @@ fn macro_pending_request_borrow_completion_replies_once() {
 /// nothing routes back to the caller.
 #[test]
 fn macro_borrow_task_no_reply_releases_without_replying() {
-    let (registry, mailer) = fresh_substrate();
+    let (registry, mailer) = bare_substrate();
     let obs = DeferredObs::new();
 
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
@@ -515,7 +494,7 @@ struct Unknown {
 
 #[test]
 fn macro_emitted_cap_drops_unknown_kind_via_dispatch() {
-    let (registry, mailer) = fresh_substrate();
+    let (registry, mailer) = bare_substrate();
     let greet_total = Arc::new(AtomicU32::new(0));
     let ping_total = Arc::new(AtomicU32::new(0));
 
@@ -1024,7 +1003,7 @@ impl NativeActor for ManualReplyCap {
 /// lands at the caller carrying the declared correlation.
 #[test]
 fn manual_handler_replies_through_ctx() {
-    let (registry, mailer) = fresh_substrate();
+    let (registry, mailer) = bare_substrate();
 
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
     let caller = registry.register_inbox(

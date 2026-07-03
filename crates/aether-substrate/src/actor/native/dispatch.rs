@@ -307,7 +307,7 @@ pub fn fold_handler_cost(kind: KindId, t_received: Nanos, finished: Nanos) {
 mod cost_tests {
     use super::*;
     use crate::mail::MailboxId;
-    use crate::test_util::fresh_substrate;
+    use crate::testing::bare_substrate;
     use aether_actor::local::ActorSlots;
 
     use crate::actor::native::local::with_stamped;
@@ -318,7 +318,7 @@ mod cost_tests {
     /// surfaces the moved row.
     #[test]
     fn fold_moves_seeded_handler_cell() {
-        let (_registry, mailer) = fresh_substrate();
+        let (_registry, mailer) = bare_substrate();
         let self_mbx = MailboxId(0x1128);
         let handled = KindId(10);
         // Construction seeds both indexes from the handler set — the
@@ -351,7 +351,7 @@ mod cost_tests {
     /// dispatch) leaves no cell — the fold's known-handler filter.
     #[test]
     fn fold_skips_unseeded_kind() {
-        let (_registry, mailer) = fresh_substrate();
+        let (_registry, mailer) = bare_substrate();
         let self_mbx = MailboxId(0x1128);
         let handled = KindId(10);
 
@@ -387,7 +387,7 @@ mod cost_tests {
     /// over `cost_table().tail(self_mailbox, &request)`.
     #[test]
     fn cost_tail_arm_reports_seeded_rows() {
-        let (_registry, mailer) = fresh_substrate();
+        let (_registry, mailer) = bare_substrate();
         let self_mbx = MailboxId(0x1128);
         mailer
             .cost_table()

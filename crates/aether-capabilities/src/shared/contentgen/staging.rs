@@ -51,7 +51,7 @@ pub fn stage_gen_output_under(root: &Path, bytes: &[u8], ext: &str) -> Result<St
 mod tests {
     use super::{GEN_PREFIX, stage_gen_output_under};
     use crate::fs::{Access, FileAdapter, LocalFileAdapter};
-    use crate::test_chassis::{cleanup, scratch_dir};
+    use aether_substrate::testing::{cleanup, scratch_dir};
     use std::path::PathBuf;
 
     fn scratch_root(tag: &str) -> PathBuf {

@@ -76,7 +76,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-aether-substrate = { path = "../aether-substrate" }
+# iamacoffeepot/aether#2517: `features = ["test-support"]` exposes the
+# canonical `aether_substrate::testing` fixture (`TestChassis`) the
+# `tools.rs` test module boots against. Dev-dependency feature unification
+# applies to test builds only, so it stays out of the production graph.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # ADR-0102: the `tools.rs` test module spins a real in-process
 # `EngineServer` (with `EngineConfig`) and touches
 # `TraceDispatchCapability` / `InventoryCapability` — all runtime

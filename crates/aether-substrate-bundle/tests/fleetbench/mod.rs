@@ -62,12 +62,11 @@ use aether_kinds::{
     SpawnEngineResult, TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult,
     UploadComponent, UploadComponentResult,
 };
-use aether_substrate::chassis::Chassis;
-use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
-use aether_substrate::chassis::error::BootError;
+use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
+use aether_substrate::testing::TestChassis;
 use serde::Serialize;
 
 /// Re-arm interval for the client→hub socket read: how often a blocked
@@ -191,19 +190,6 @@ pub fn is_rearm_timeout(err: &FrameError) -> bool {
         err,
         FrameError::Io(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
     )
-}
-
-/// Minimal `Chassis` so `Builder::new` can stand a passive cap set up
-/// in-process. Never built through `Chassis::build` — `Builder::new`
-/// drives the cap set directly, mirroring the seed.
-struct TestChassis;
-impl Chassis for TestChassis {
-    const PROFILE: &'static str = "test";
-    type Driver = NeverDriver;
-    type Env = ();
-    fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-        unreachable!("TestChassis is driven by Builder::new directly in FleetBench")
-    }
 }
 
 /// One driven wire `Call` and the kinds that came back, recorded in

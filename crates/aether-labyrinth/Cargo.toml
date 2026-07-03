@@ -51,5 +51,13 @@ bytemuck = { workspace = true, features = ["derive"] }
 # the transform-only consumer never pulls it.
 aether-substrate = { path = "../aether-substrate", optional = true }
 
+[dev-dependencies]
+# iamacoffeepot/aether#2517: the recorder cap's tests boot a chassis through
+# the canonical `aether_substrate::testing` fixture, enabled by the substrate
+# `test-support` feature. The fixture-using sites sit behind the `native`
+# feature, so both feature states compile; dev-dependency feature unification
+# applies to test builds only and keeps this out of the production graph.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+
 [lints]
 workspace = true

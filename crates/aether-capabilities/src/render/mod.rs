@@ -135,7 +135,6 @@ mod tests {
 
     use super::runtime::*;
     use super::*;
-    use crate::test_chassis::TestChassis;
     use aether_actor::Addressable;
     use aether_kinds::QuadSpace;
     use aether_kinds::trace::Nanos;
@@ -145,9 +144,10 @@ mod tests {
     use aether_substrate::mail::registry::OwnedDispatch;
     use aether_substrate::mail::registry::{MailboxEntry, Registry};
     use aether_substrate::mail::{KindId, Source};
+    use aether_substrate::testing::TestChassis;
     use std::thread;
 
-    use crate::test_chassis::fresh_substrate;
+    use aether_substrate::testing::fresh_substrate;
 
     fn deliver(registry: &Registry, name: &str, kind: KindId, payload: &[u8]) {
         let id = registry.lookup(name).expect("mailbox registered");

@@ -1000,7 +1000,7 @@ impl NativeBinding {
 mod tests {
     use super::*;
     use crate::mail::registry::{InboxHandler, OwnedDispatch};
-    use crate::test_util::fresh_substrate;
+    use crate::testing::bare_substrate;
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -1031,7 +1031,7 @@ mod tests {
     /// monotonic counter as `send_mail` mints new ids.
     #[test]
     fn prev_correlation_tracks_send_mail_minting() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let (tx, _rx) = mpsc::channel::<Envelope>();
         // Register a sink so push routes somewhere instead of
         // hitting the unknown-recipient warn.
@@ -1059,7 +1059,7 @@ mod tests {
         use aether_actor::OutboundReply;
         use aether_kinds::Tick;
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
         let (reply_tx, reply_rx) = mpsc::channel::<Envelope>();
@@ -1123,7 +1123,7 @@ mod tests {
         use aether_actor::OutboundReply;
         use aether_kinds::Tick;
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let (reply_tx, _reply_rx) = mpsc::channel::<Envelope>();
         let caller = registry.register_inbox(
             "test.reply_corr.caller",
@@ -1182,7 +1182,7 @@ mod tests {
         }
         impl HandlesKind<Tick> for Child {}
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let parent_carry = 0x0BAD_F00D_u64;
 
         let resolved = <Child as Addressable>::resolve(parent_carry, ());
@@ -1232,7 +1232,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "install_inbox called twice")]
     fn install_inbox_twice_panics() {
-        let (_registry, mailer) = fresh_substrate();
+        let (_registry, mailer) = bare_substrate();
         let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
         let (_tx1, rx1) = mpsc::channel::<Envelope>();
         let (_tx2, rx2) = mpsc::channel::<Envelope>();
@@ -1249,7 +1249,7 @@ mod tests {
     fn binding_teardown_settles_queued_armed_envelope() {
         use crate::chassis::settlement::SettlementRegistry;
 
-        let (_registry, mailer) = fresh_substrate();
+        let (_registry, mailer) = bare_substrate();
         let settlement = Arc::new(SettlementRegistry::new());
         mailer.install_settlement_registry(Arc::clone(&settlement));
         mailer
@@ -1300,7 +1300,7 @@ mod tests {
         use aether_actor::OutboundReply;
         use aether_kinds::Tick;
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let (reply_tx, reply_rx) = mpsc::channel::<Envelope>();
         let caller = registry.register_inbox(
             "test.binding.reply_space.caller",
@@ -1335,7 +1335,7 @@ mod tests {
     /// intact. Nothing reaches the sink before `flush_outbound`.
     #[test]
     fn buffered_sends_route_only_after_flush() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let (tx, rx) = mpsc::channel::<Envelope>();
         registry.register_inbox("test.sink", forward_to_envelope_sender(tx));
         let recipient = registry.lookup("test.sink").unwrap();
@@ -1365,7 +1365,7 @@ mod tests {
     /// bytes intact (the large-payload zero-copy path is deferred).
     #[test]
     fn buffered_oversized_payload_flushes_via_copy_out() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let (tx, rx) = mpsc::channel::<Envelope>();
         registry.register_inbox("test.sink", forward_to_envelope_sender(tx));
         let recipient = registry.lookup("test.sink").unwrap();
@@ -1388,7 +1388,7 @@ mod tests {
     /// nothing. Must not panic or allocate a ring.
     #[test]
     fn buffered_flush_empty_is_noop() {
-        let (_registry, mailer) = fresh_substrate();
+        let (_registry, mailer) = bare_substrate();
         let transport = NativeBinding::new_for_test(mailer, MailboxId(0x7373));
         transport.flush_outbound();
         transport.flush_outbound();
@@ -1405,7 +1405,7 @@ mod tests {
     fn buffered_concurrent_flush_and_consumer_release() {
         use std::thread;
 
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let (tx, rx) = mpsc::channel::<Envelope>();
         registry.register_inbox("test.sink", forward_to_envelope_sender(tx));
         let recipient = registry.lookup("test.sink").unwrap();

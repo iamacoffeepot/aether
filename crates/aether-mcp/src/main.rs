@@ -26,8 +26,6 @@ extern crate aether_labyrinth as _;
 mod args;
 mod reverse;
 mod rpc;
-#[cfg(test)]
-mod test_chassis;
 mod tools;
 
 use std::sync::Arc;

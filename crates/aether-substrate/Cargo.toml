@@ -24,6 +24,12 @@ wasm = ["dep:wasmtime", "dep:wasmparser"]
 # offscreen pipeline + capture path. Headless and hub leave it off
 # and never link wgpu.
 render = ["dep:wgpu", "dep:png"]
+# iamacoffeepot/aether#2517: exposes the canonical `testing` module (the
+# cross-crate `TestChassis` fixture) to downstream crates' test builds.
+# Adds no dependencies — `aether-kinds` / `aether-data` are already normal
+# deps. Consumers enable it from their `[dev-dependencies]` stanza, so
+# dev-dependency feature unification keeps it out of every production graph.
+test-support = []
 
 [dependencies]
 # ADR-0074 Phase 2: target-agnostic actor SDK. Capabilities own a

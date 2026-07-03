@@ -169,6 +169,12 @@ serde_json = { workspace = true }
 # tests; no `src/` consumer, so it rides dev-dependencies only.
 aether-codec = { path = "../aether-codec" }
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
+# iamacoffeepot/aether#2517: the RPC engine-routing / engines-cap / FleetBench
+# integration tests boot a passive chassis through the canonical
+# `aether_substrate::testing::TestChassis`, enabled by the substrate
+# `test-support` feature. The normal dep keeps `render`; this dev entry unions
+# the feature into test builds only, so it stays out of the production graph.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # iamacoffeepot/aether#2455: the dispatch-decode-failure regression test drives
 # the `Probe` fixture directly through the pub `Component::instantiate` / `deliver`
 # API, which needs `wasmtime::{Engine, Linker, Module}` in scope to build the

@@ -21,13 +21,13 @@ use aether_kinds::{
     BinarySelector, DeathReason, ListEngines, ListEnginesResult, SpawnEngine, SpawnEngineResult,
     TerminateEngine, TerminateEngineResult,
 };
-use aether_substrate::chassis::Chassis;
-use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
+use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
 use aether_substrate::mail::{Mail, Source, SourceAddr};
+use aether_substrate::testing::TestChassis;
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -36,16 +36,6 @@ use std::process;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-struct TestChassis;
-impl Chassis for TestChassis {
-    const PROFILE: &'static str = "test";
-    type Driver = NeverDriver;
-    type Env = ();
-    fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-        unreachable!("TestChassis is driven by Builder::new directly in this test")
-    }
-}
 
 // Reply sink config: records the latest reply of each engines-cap reply
 // kind into shared cells. Lives at module root always-on (it names no

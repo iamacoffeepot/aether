@@ -156,11 +156,11 @@ impl NativeActor for HeadlessRenderCapability {
 #[cfg(all(test, feature = "runtime"))]
 mod headless_tests {
     use super::*;
-    use crate::test_chassis::{decode_reply, test_mailer_and_rx};
     use aether_data::{MailboxId, Source, SourceAddr};
     use aether_data::{SessionToken, Uuid};
     use aether_substrate::actor::native::NativeCtx;
     use aether_substrate::actor::native::binding::NativeBinding;
+    use aether_substrate::testing::{decode_reply, test_mailer_and_rx};
 
     /// ADR-0105: `create_texture` against a headless chassis replies
     /// `Err` (fail-fast, no GPU) rather than hanging on a reply that
