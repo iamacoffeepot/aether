@@ -1,5 +1,5 @@
 export const meta = {
-  name: 'wish-deep',
+  name: 'wish',
   description: 'Deep mode for /wish — best-first fan-out drilling. Each wish node is drilled by its own fresh-context agent that writes its wish.md, returns a bounded self-summary, and is gated by an adversarial skeptic before it counts terminal. The agent boundary supplies the context erasure; per-node summaries supply the lineage hand-down.',
   whenToUse: 'Invoked by the /wish skill on `/wish --deep`. The skill runs the adversity + root-generation front of the pass inline, then hands roots + theme/role/beam/budget + an absolute wishDir to this workflow as args. Not invoked directly by the user — go through /wish --deep.',
   phases: [
@@ -8,7 +8,7 @@ export const meta = {
   ],
 }
 
-// wish-deep: best-first fan-out drilling for /wish --deep.
+// wish: best-first fan-out drilling — the deep-mode engine dispatched by /wish --deep.
 //
 // The orchestrator (this script) holds only a lightweight scored frontier in JS.
 // It has NO filesystem access — every wish.md and the final index.md is written
@@ -42,7 +42,7 @@ const groundingNotes = A.groundingNotes || ''
 const roots = Array.isArray(A.roots) ? A.roots : []
 
 if (!theme || !wishDir || roots.length === 0) {
-  return { error: 'wish-deep needs args = { theme, wishDir, roots:[...] }. Call it from /wish --deep, which runs the adversity + root-generation front of the pass inline and hands the roots over.' }
+  return { error: 'the wish workflow needs args = { theme, wishDir, roots:[...] }. Call it from /wish --deep, which runs the adversity + root-generation front of the pass inline and hands the roots over.' }
 }
 
 // ─── Schemas (the load-bearing driller / skeptic / synthesis contract) ───
