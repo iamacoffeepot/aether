@@ -1,7 +1,8 @@
 //! Engines-cap configuration (ADR-0090) — the liveness-heartbeat
 //! tuning plus the hub binary store's layout dir, disk budget, and
-//! bootstrap list. Native-only: resolved by the hub chassis and handed
-//! into [`EngineServer::init`](super::EngineServer) via
+//! bootstrap list, and the per-engine spawn-dir parent. Native-only:
+//! resolved by the hub chassis and handed into
+//! [`EngineServer::init`](super::EngineServer) via
 //! `with_actor::<EngineServer>(cfg)`.
 
 use crate::engine::proxy::HeartbeatParams;
@@ -24,8 +25,8 @@ const DEFAULT_PROXY_CONNECT_BUDGET_SECS: u64 = 30;
 /// liveness-heartbeat tuning plus the hub binary store's layout dir,
 /// disk budget, and bootstrap list (ADR-0115, #1954 — these last three
 /// moved onto the config off their pre-ADR-0090 naked `env::var`
-/// readers). The inline `AETHER_ENGINE_STORE_ROOT` reader
-/// (`engine_store_root`) is a separate, still-inline knob.
+/// readers), plus the per-engine spawn-dir parent
+/// (`engine_store_root`, #2482 — the last of the sweep).
 ///
 /// `#[derive(aether_substrate::Config)]` emits the env-shaped
 /// `EngineConfigLayer`, the clap-shaped `EngineOverlay`, and the
@@ -36,9 +37,10 @@ const DEFAULT_PROXY_CONNECT_BUDGET_SECS: u64 = 30;
 /// directly. `env_prefix = "AETHER_HUB"` + the `heartbeat_*` /
 /// `binary_disk_budget_bytes` field names compose the
 /// `AETHER_HUB_HEARTBEAT_*` / `AETHER_HUB_BINARY_DISK_BUDGET_BYTES`
-/// env keys and `--hub-*` flags; `binary_store_dir` / `binary_bootstrap`
-/// pin the unprefixed `AETHER_BINARY_STORE_DIR` / `AETHER_BINARY_BOOTSTRAP`
-/// keys via per-field `env` overrides. `Default` (the test constructor)
+/// env keys and `--hub-*` flags; `binary_store_dir` / `engine_store_root`
+/// / `binary_bootstrap` pin the unprefixed `AETHER_BINARY_STORE_DIR` /
+/// `AETHER_ENGINE_STORE_ROOT` / `AETHER_BINARY_BOOTSTRAP` keys via
+/// per-field `env` overrides. `Default` (the test constructor)
 /// resolves the heartbeat to `0/0` (disabled) and the store fields to
 /// unset / `16 GiB`; production picks up the `default = 5/3` / `16 GiB`
 /// literals and the env layers through `from_argv_then_env`.
@@ -89,6 +91,18 @@ pub struct EngineConfig {
     /// joins the store's layout-version dir to a set override.
     #[config(env = "AETHER_BINARY_STORE_DIR")]
     pub binary_store_dir: Option<String>,
+    /// Parent-dir override for the per-engine spawn / handle-store
+    /// dirs (`AETHER_ENGINE_STORE_ROOT`, unprefixed — the ops escape
+    /// hatch and the fleet tests' per-process isolation knob, issue
+    /// 1274). Unset (`None`) → `dirs::data_dir().join("aether/engines")`,
+    /// falling back to `std::env::temp_dir().join("aether-engines")`
+    /// if no data dir is resolvable. A bare `Option<String>` (not a
+    /// `PathBuf`) keeps that runtime-computed fallback chain in
+    /// `init`, so `EngineConfig` needs no `skip_from_layer`;
+    /// `EngineServer::init` resolves it once into
+    /// `EngineServerState::engine_store_root`.
+    #[config(env = "AETHER_ENGINE_STORE_ROOT")]
+    pub engine_store_root: Option<String>,
     /// On-disk byte budget for the binary store
     /// (`AETHER_HUB_BINARY_DISK_BUDGET_BYTES`, derived from the
     /// `AETHER_HUB` prefix / `--hub-binary-disk-budget-bytes`). Default
@@ -129,6 +143,7 @@ impl Default for EngineConfig {
             // serially, so one attempt keeps the path deterministic.
             proxy_spawn_attempts: 1,
             binary_store_dir: None,
+            engine_store_root: None,
             binary_disk_budget_bytes: DEFAULT_DISK_BUDGET_BYTES,
             binary_bootstrap: HashSet::new(),
         }

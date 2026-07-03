@@ -152,13 +152,20 @@ fn boot(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, Arc<Mailer
 
 /// Build the engines-cap config that isolates the hub binary store
 /// (ADR-0115) under `store_dir` and bootstraps it with the `headless` bin,
-/// so the cap resolves a `default` selector to that binary (issue 1954).
-/// The store dir / bootstrap list ride `EngineConfig` (ADR-0090) instead of
-/// the env side-channel; the heartbeat stays disabled (the `Default`).
-/// `EngineServer::init` forks `<headless> --describe` to ingest it.
-fn bootstrap_store_config(store_dir: &Path, headless: &str) -> EngineConfig {
+/// so the cap resolves a `default` selector to that binary (issue 1954),
+/// and isolates the per-engine spawn-dir parent (issue 1274) under
+/// `engine_root`. Both dirs ride `EngineConfig` (ADR-0090) instead of an
+/// env side-channel; the heartbeat stays disabled (the `Default`).
+/// `EngineServer::init` forks `<headless> --describe` to ingest the
+/// binary store and resolves `engine_root` into
+/// `EngineServerState::engine_store_root` — a per-run dir instead of the
+/// shared default (`~/.local/share/aether/engines`), which would collide
+/// with any sibling test, leaked orphan, or live MCP engine on id
+/// `0…01`.
+fn bootstrap_store_config(store_dir: &Path, engine_root: &Path, headless: &str) -> EngineConfig {
     EngineConfig {
         binary_store_dir: Some(store_dir.to_string_lossy().into_owned()),
+        engine_store_root: Some(engine_root.to_string_lossy().into_owned()),
         binary_bootstrap: HashSet::from([headless.to_owned()]),
         ..EngineConfig::default()
     }
@@ -267,17 +274,8 @@ mod tests {
         let store_dir =
             env::temp_dir().join(format!("aether-engcap-binstore-{}-{nanos}", process::id()));
         let root = env::temp_dir().join(format!("aether-engcap-store-{}-{nanos}", process::id()));
-        // SAFETY: nextest runs each test in its own process, so the env
-        // mutation here doesn't race sibling tests. `AETHER_ENGINE_STORE_ROOT`
-        // must be set before `boot()` so the cap's `engine_store_root()`
-        // resolves to this unique per-run dir instead of the shared default
-        // (`~/.local/share/aether/engines`), which would collide with any
-        // sibling test, leaked orphan, or live MCP engine on id 0…01.
-        unsafe {
-            env::set_var("AETHER_ENGINE_STORE_ROOT", &root);
-        }
 
-        let (_chassis, mailer, cells) = boot(bootstrap_store_config(&store_dir, headless));
+        let (_chassis, mailer, cells) = boot(bootstrap_store_config(&store_dir, &root, headless));
 
         // Spawn: the cap assigns a port, forks the substrate, and the
         // proxy retries the dial until the fresh process binds. Generous
@@ -410,17 +408,15 @@ mod tests {
 
         let store_dir = dir.join("store");
         let root = dir.join("engines");
-        // SAFETY: nextest runs each test in its own process, so this env
-        // mutation can't race a sibling. Must precede `boot()` so the
-        // cap's `engine_store_root()` resolves to this per-run dir.
-        unsafe {
-            env::set_var("AETHER_ENGINE_STORE_ROOT", &root);
-        }
 
         // A short connect budget so the doomed dial fails quickly rather
-        // than burning the default 30 s.
+        // than burning the default 30 s. `engine_store_root` isolates this
+        // run's per-engine spawn-dir parent (issue 1274) from the shared
+        // default, which would collide with any sibling test, leaked
+        // orphan, or live MCP engine on id `0…01`.
         let config = EngineConfig {
             binary_store_dir: Some(store_dir.to_string_lossy().into_owned()),
+            engine_store_root: Some(root.to_string_lossy().into_owned()),
             binary_bootstrap: HashSet::from([stand_in.to_string_lossy().into_owned()]),
             proxy_connect_budget_secs: 2,
             ..EngineConfig::default()

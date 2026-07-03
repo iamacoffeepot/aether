@@ -271,7 +271,7 @@ impl FleetBench {
     /// `TcpStream`, and complete the `Hello`/`HelloAck` handshake.
     pub fn start() -> Self {
         let store_root = isolate_store_root();
-        let (chassis, port) = boot_hub(&store_root.join("binaries"));
+        let (chassis, port) = boot_hub(&store_root.join("binaries"), &store_root);
         let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
             .expect("test setup: connecting to the hub's bound RPC port succeeds");
         // The read timeout is the re-arm *interval*, not a deadline: every
@@ -1075,24 +1075,19 @@ impl Drop for FleetBench {
 /// Point this bench's forked substrates at a unique per-process scratch
 /// root for their per-engine executable materialization (ADR-0115), so a
 /// concurrent fork+exec test on the shared default
-/// `dirs::data_dir()/aether/engines` root can't collide. The cap reads
-/// `AETHER_ENGINE_STORE_ROOT` when it forks (priority over the default).
+/// `dirs::data_dir()/aether/engines` root can't collide. Threaded into
+/// `boot_hub` as `EngineConfig::engine_store_root` (ADR-0090) — not an
+/// env var — so the cap resolves it at `EngineServer::init`.
 fn isolate_store_root() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let root = env::temp_dir().join(format!("aether-fleetbench-{}-{nanos}", process::id()));
-    // SAFETY: nextest runs each integration test in its own process, so
-    // this env mutation can't race a sibling test; each `FleetBench` in a
-    // process gets a fresh `nanos`-tagged root.
+    // Each `FleetBench` in a process gets a fresh `nanos`-tagged root, so
+    // a concurrent bench in the same process can't collide either.
     //
     // The hub's binary store (ADR-0115) is isolated under `root/binaries`
-    // too, but that dir rides `EngineConfig::binary_store_dir` (ADR-0090)
-    // now, threaded into `boot_hub` from the returned root — not an env var.
-    unsafe {
-        env::set_var("AETHER_ENGINE_STORE_ROOT", &root);
-    }
-    root
+    // too, but that dir rides `EngineConfig::binary_store_dir` (ADR-0090).
+    env::temp_dir().join(format!("aether-fleetbench-{}-{nanos}", process::id()))
 }
 
 /// Boot a hub-shaped passive chassis: a forwarding `RpcServerCapability`
@@ -1100,9 +1095,14 @@ fn isolate_store_root() -> PathBuf {
 /// cap, and `TraceDispatchCapability` so the `RpcServer`'s local Calls
 /// settle and close. Returns the chassis and the port the RPC server
 /// bound. Mirrors the seed's `boot_hub`. `binary_store_dir` isolates the
-/// hub's content-addressed store (ADR-0115) per-bench via `EngineConfig`
-/// (ADR-0090); the heartbeat stays disabled (the `Default`).
-fn boot_hub(binary_store_dir: &Path) -> (PassiveChassis<TestChassis>, u16) {
+/// hub's content-addressed store (ADR-0115) per-bench, and
+/// `engine_store_root` isolates the per-engine spawn-dir parent (issue
+/// 1274) per-bench — both via `EngineConfig` (ADR-0090); the heartbeat
+/// stays disabled (the `Default`).
+fn boot_hub(
+    binary_store_dir: &Path,
+    engine_store_root: &Path,
+) -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
         let _ = registry.register_kind_with_descriptor(d);
@@ -1113,6 +1113,7 @@ fn boot_hub(binary_store_dir: &Path) -> (PassiveChassis<TestChassis>, u16) {
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<EngineServer>(EngineConfig {
             binary_store_dir: Some(binary_store_dir.to_string_lossy().into_owned()),
+            engine_store_root: Some(engine_store_root.to_string_lossy().into_owned()),
             ..EngineConfig::default()
         })
         .with_actor::<RpcServerCapability>(RpcServerConfig {
