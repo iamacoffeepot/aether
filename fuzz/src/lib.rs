@@ -17,7 +17,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use aether_data::{EnumVariant, NamedField, Primitive, SchemaCell, SchemaType};
+use aether_data::{EnumVariant, MailboxId, NamedField, Primitive, SchemaCell, SchemaType};
 use serde_json::{Value, json};
 
 /// Number of schemas in the table. Selector bytes `0..TABLE_LEN` map to
@@ -37,7 +37,7 @@ pub fn schema_for(selector: u8) -> SchemaType {
         3 => string_map(),
         4 => nested_option_vec_array(),
         5 => SchemaType::Bytes,
-        6 => ref_cast_inner(),
+        6 => cast_typed_id(),
         // Default arm: route every other selector to schema 0 so the
         // mapping is total and stable.
         _ => cast_scalars(),
@@ -63,7 +63,7 @@ pub fn seeds() -> Vec<(u8, Value)> {
         ),
         (4, json!([[1, 2, 3], [4, 5, 6]])),
         (5, json!([1, 2, 3, 4, 5])),
-        (6, json!({ "Handle": { "id": 7, "kind_id": 42 } })),
+        (6, json!({ "code": 7, "mailbox": 42 })),
     ]
 }
 
@@ -160,14 +160,18 @@ fn nested_option_vec_array() -> SchemaType {
     ))))
 }
 
-/// Schema 6: a `Ref` whose inner kind is a cast struct. Exercises the
-/// ADR-0045/0100 inline-vs-handle tag plus the length-prefixed inner
-/// cast image on the inline arm.
-fn ref_cast_inner() -> SchemaType {
-    SchemaType::Ref(SchemaCell::owned(SchemaType::Struct {
-        fields: Cow::Owned(vec![scalar("code", Primitive::U32)]),
+/// Schema 6: a `#[repr(C)]` cast struct carrying a typed-id field
+/// (ADR-0065). Exercises the `TypeId` cast arm — 8 bytes, 8-byte align,
+/// same shape as a `u64` — embedded in a cast struct after a narrower
+/// scalar, so it also covers the alignment pad before the typed id.
+fn cast_typed_id() -> SchemaType {
+    SchemaType::Struct {
+        fields: Cow::Owned(vec![
+            scalar("code", Primitive::U32),
+            field("mailbox", SchemaType::TypeId(MailboxId::TYPE_ID)),
+        ]),
         repr_c: true,
-    }))
+    }
 }
 
 /// A multi-variant enum for the wire-format fuzz targets. Every arm
