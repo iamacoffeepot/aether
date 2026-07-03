@@ -401,37 +401,56 @@ impl ActorRegistry {
         watcher: MailboxId,
         target: MailboxId,
     ) -> Result<(), MonitorError> {
+        // Cheap fast-path: refuse an already-tombstoned target before
+        // taking the insert lock. The load-bearing liveness check is the
+        // re-check under the `monitors_of` write guard below.
         if self.is_tombstoned(target) {
             return Err(MonitorError::TargetTombstoned);
         }
-        // Live check goes through the actors map so callers see a
-        // consistent "is the actor running" answer regardless of
-        // whether the target slot is `Live`, `Dead`, or never inserted.
-        // Singletons booted through the chassis builder land in this
-        // map alongside instanced actors (issue 607 Phase 4b lifts the
-        // boot path to insert `Live`); callers who reach for monitor
-        // before that lift see `TargetNotFound`, which matches the
-        // wire contract for "this id has no live actor."
-        let actors = self
-            .actors
-            .read()
-            .expect("actors lock poisoned; fail-fast per ADR-0063");
-        if !matches!(actors.get(&target), Some(ActorEntry::Live { .. })) {
-            return Err(MonitorError::TargetNotFound);
-        }
-        drop(actors);
         let entry = MonitorEntry { watcher };
-        // Forward + reverse insert under separate locks. Both maps are
-        // readable individually under read locks; transient
-        // observability of forward without reverse (or vice versa) is
-        // benign — the close path also looks at both, and either
-        // direction missing just means one cleanup step is a no-op.
-        self.monitors_of
-            .write()
-            .expect("monitors_of lock poisoned; fail-fast per ADR-0063")
-            .entry(target)
-            .or_default()
-            .push(entry);
+        // Fold the liveness re-check into the forward-insert critical
+        // section: hold the `monitors_of` write guard across the re-check
+        // *and* the forward insert so a concurrent `close_actor` cannot
+        // split them. `close_actor` runs `mark_dead` before it drains
+        // `monitors_of`, and `mark_dead` releases `actors`/`tombstones`
+        // before that drain acquires `monitors_of`, so a close that races
+        // this registration serializes on this lock: if the insert lands
+        // first the drain removes it; if the drain lands first this
+        // re-check observes the tombstoned/`Dead` slot and refuses. The
+        // nested order `monitors_of → tombstones`/`actors` never inverts
+        // against the close (no thread holds `actors`/`tombstones` while
+        // waiting on `monitors_of`), so no deadlock is introduced. An early
+        // return here inserts *neither* index.
+        {
+            let mut forward = self
+                .monitors_of
+                .write()
+                .expect("monitors_of lock poisoned; fail-fast per ADR-0063");
+            if self.is_tombstoned(target) {
+                return Err(MonitorError::TargetTombstoned);
+            }
+            // Live check goes through the actors map so callers see a
+            // consistent "is the actor running" answer regardless of
+            // whether the target slot is `Live`, `Dead`, or never
+            // inserted. Singletons booted through the chassis builder land
+            // in this map alongside instanced actors (issue 607 Phase 4b
+            // lifts the boot path to insert `Live`); callers who reach for
+            // monitor before that lift see `TargetNotFound`, which matches
+            // the wire contract for "this id has no live actor."
+            let actors = self
+                .actors
+                .read()
+                .expect("actors lock poisoned; fail-fast per ADR-0063");
+            if !matches!(actors.get(&target), Some(ActorEntry::Live { .. })) {
+                return Err(MonitorError::TargetNotFound);
+            }
+            drop(actors);
+            forward.entry(target).or_default().push(entry);
+        }
+        // Reverse edge, inserted only after the forward edge committed.
+        // Transient observability of forward without reverse is benign —
+        // the close path looks at both, and either direction missing just
+        // makes one cleanup step a no-op.
         self.monitoring
             .write()
             .expect("monitoring lock poisoned; fail-fast per ADR-0063")
@@ -465,24 +484,34 @@ impl ActorRegistry {
         }
     }
 
-    /// Issue 607 Phase 4b (ADR-0079): close path. Drains
-    /// `monitors_of[id]` (returning the watcher list for the caller to
-    /// fan out [`aether_kinds::MonitorNotice`] mail), walks
-    /// `monitoring[id]` to prune `id` from each watched target's
-    /// forward index, then calls [`Self::mark_dead`] to flip the slot
-    /// `Live` → `Dead` and insert the tombstone.
+    /// Issue 607 Phase 4b (ADR-0079): close path. Calls
+    /// [`Self::mark_dead`] first to flip the slot `Live` → `Dead` and
+    /// insert the tombstone, then drains `monitors_of[id]` (returning the
+    /// watcher list for the caller to fan out
+    /// [`aether_kinds::MonitorNotice`] mail) and walks `monitoring[id]` to
+    /// prune `id` from each watched target's forward index.
+    ///
+    /// `mark_dead` runs *first* so the dead/tombstone signal is observable
+    /// before the forward index is drained: a concurrent `register_monitor`
+    /// that serializes after the drain on the `monitors_of` write lock then
+    /// re-checks liveness and sees the `Dead` slot, refusing to re-insert an
+    /// edge past the close (the ordering closes the TOCTOU that leaving
+    /// `mark_dead` last would open).
     ///
     /// One method (rather than three separate calls) so the dispatcher
     /// trampoline can't accidentally skip a step on close — the
-    /// fan-out + reverse-prune + tombstone are all part of the same
+    /// tombstone + fan-out + reverse-prune are all part of the same
     /// retire-this-id transaction. Idempotent: a second call on an
     /// already-`Dead` slot returns an empty watcher list and does no
     /// further work.
     pub(crate) fn close_actor(&self, id: MailboxId) -> Vec<MailboxId> {
-        // Forward index: take the watcher list whole. Future sends
-        // through `register_monitor` against this id now hit the
-        // tombstone branch (set by `mark_dead` below), so no race here
-        // can leak a registration past the close.
+        // Tombstone first so the dead signal is observable before the
+        // forward index is drained. A `register_monitor` that serializes
+        // after the drain below on the `monitors_of` write lock re-checks
+        // liveness and observes this `mark_dead`, so no send can leak a
+        // registration past the close.
+        self.mark_dead(id);
+        // Forward index: take the watcher list whole.
         let watchers: Vec<MailboxId> = self
             .monitors_of
             .write()
@@ -511,7 +540,6 @@ impl ActorRegistry {
                 }
             }
         }
-        self.mark_dead(id);
         watchers
     }
 
@@ -671,5 +699,68 @@ mod tests {
         let second = r.close_actor(target);
         assert!(first.is_empty(), "no monitors registered");
         assert!(second.is_empty(), "no replay of watchers on second call");
+    }
+
+    /// Tripwire: a register that races a close never leaves a `monitors_of`
+    /// edge on a dead target. Over many iterations a `register_monitor` and
+    /// a `close_actor` on the same target run concurrently from a shared
+    /// registry, released together by a barrier to maximise interleaving.
+    /// After both join the target is always tombstoned (`close_actor` always
+    /// marks dead), so the forward index must always be empty: the drain
+    /// removed the edge, or the re-check under the insert lock refused it.
+    ///
+    /// Deterministic-pass under the fixed code — with `mark_dead` ordered
+    /// before the drain and the liveness re-check folded into the
+    /// forward-insert critical section there is no surviving-edge failure
+    /// mode, so no flake. Regresses (a surviving forward edge on a dead
+    /// target) if either edit is reverted: leaving `mark_dead` last lets a
+    /// re-check still see `Live` right after the drain and re-insert, and
+    /// splitting the re-check from the insert reopens the original window.
+    ///
+    /// The reverse `monitoring` index is watcher-keyed and cleaned on the
+    /// *watcher*'s own close (or `deregister_monitor`), not the target's, so
+    /// a reverse edge to a dead target is a normal, benign state even
+    /// without a race and is deliberately not asserted here.
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "raw thread spawn is the point: this test drives register_monitor and \
+                  close_actor on two real OS threads to exercise their interleaving, not \
+                  actor work under the settlement umbrella"
+    )]
+    fn register_racing_close_never_leaves_forward_edge_on_dead_target() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        for i in 0..500u64 {
+            let r = Arc::new(ActorRegistry::new());
+            let target = MailboxId(0x0001_0000 + i);
+            let watcher = MailboxId(0x0002_0000 + i);
+            insert_live_stub(&r, target);
+
+            let gate = Arc::new(Barrier::new(2));
+            let (r_reg, g_reg) = (Arc::clone(&r), Arc::clone(&gate));
+            let (r_close, g_close) = (Arc::clone(&r), Arc::clone(&gate));
+            let t_reg = thread::spawn(move || {
+                g_reg.wait();
+                let _ = r_reg.register_monitor(watcher, target);
+            });
+            let t_close = thread::spawn(move || {
+                g_close.wait();
+                let _ = r_close.close_actor(target);
+            });
+            t_reg.join().expect("register thread joins");
+            t_close.join().expect("close thread joins");
+
+            assert!(
+                r.is_tombstoned(target),
+                "close_actor always tombstones the target",
+            );
+            assert_eq!(
+                r.monitor_count(target),
+                0,
+                "a register that raced the close left a forward edge on a dead target",
+            );
+        }
     }
 }
