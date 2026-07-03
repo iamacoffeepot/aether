@@ -1,6 +1,6 @@
 # ADR-0107: Immediate-mode UI
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — the `aether.ui` immediate-mode capability)
 - **Date:** 2026-06-13
 
 Amends **ADR-0105** (the text + textured-quad render surface): adds the one flat-fill render primitive a UI needs and a native UI capability that composes the surface — symmetric with `aether.text`, ADR-0105's own composing capability. References **ADR-0066** (the render/camera overlay pass UI draws on), **ADR-0021 / ADR-0068** (the input streams a click rides), and **ADR-0099** (the typed `ctx.actor::<Cap>()` addressing a component reaches the UI cap through).

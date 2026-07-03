@@ -1,6 +1,6 @@
 # ADR-0125: Dissolve aether-codec into aether-data and aether-capabilities
 
-- **Status:** Proposed
+- **Status:** Rejected (won't do) — the `aether-codec` dissolution is not being pursued; the crate stays as-is. ADR-0072 is therefore not superseded (it remains Accepted).
 - **Date:** 2026-07-03
 
 ## Context

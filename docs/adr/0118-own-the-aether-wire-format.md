@@ -1,6 +1,6 @@
 # ADR-0118: Own the Aether Wire Format
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — the canonical wire format in `aether-data`: `wire/` + `canonical/`)
 - **Date:** 2026-06-16
 
 ## Context

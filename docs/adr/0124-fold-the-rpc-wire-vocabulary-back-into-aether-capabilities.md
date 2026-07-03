@@ -1,6 +1,6 @@
 # ADR-0124: Fold the RPC Wire Vocabulary Back into aether-capabilities
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — the RPC wire vocabulary folded into `aether_capabilities::rpc`, #2537)
 - **Date:** 2026-07-03
 
 ## Context

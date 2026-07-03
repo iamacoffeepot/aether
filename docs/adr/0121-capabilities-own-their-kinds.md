@@ -1,6 +1,6 @@
 # ADR-0121: Capabilities own their kinds
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — capability-owned kinds across `aether-capabilities`; see `docs/guide/capability-anatomy.md`)
 - **Date:** 2026-06-22
 
 ## Context

@@ -1,6 +1,6 @@
 # ADR-0123: Actor macro on the capability, runtime impl attribute
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — `#[actor]` on the capability with the runtime impl attribute in `aether-actor-derive`)
 - **Date:** 2026-06-24
 
 ## Context

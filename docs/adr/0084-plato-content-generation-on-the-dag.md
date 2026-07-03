@@ -1,6 +1,6 @@
 # ADR-0084: Plato — content generation realized on the DAG
 
-- **Status:** Proposed
+- **Status:** Rejected — moot; the computation DAG this design builds on was removed (iamacoffeepot/aether#2136, ADR-0047 Superseded). Revisit only atop a new execution substrate.
 - **Date:** 2026-05-20
 - **Note (2026-06-21, iamacoffeepot/aether#2136):** moot — the computation DAG this design builds on was removed (ADR-0047 Superseded). The realization here would need a new execution substrate before it could proceed.
 
