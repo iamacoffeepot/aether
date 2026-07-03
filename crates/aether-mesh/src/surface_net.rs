@@ -17,19 +17,16 @@
 //! Library-only, per ADR-0053: this produces triangles, it does not
 //! render. It sits alongside the DSL mesher (`crate::mesh`) as a second
 //! triangle producer, reusing the crate's [`Triangle`] and
-//! `aether_math::Vec3`. The reachability solver's [`ScalarField`]
-//! (issue 1857) is the canonical input — its dense row-major
-//! `values[t * H * W + y * W + x]` layout *is* the stacked volume, so a
-//! caller meshes a field by passing `(x, y, t)` as `(x, y, z)` with
-//! `depth = ticks`.
+//! `aether_math::Vec3`. The canonical input is a dense scalar volume:
+//! its row-major `values[t * H * W + y * W + x]` layout *is* the stacked
+//! volume, so a caller meshes a field by passing `(x, y, t)` as
+//! `(x, y, z)` with `depth = ticks`.
 //!
 //! The sweep is iterative and dense (no recursion over geometry, per
 //! the load-bearing-code rule in `CLAUDE.md`): a single linear pass over
 //! the cells places one centroid vertex per straddling cube, and a
 //! second linear pass over the interior axis-aligned grid edges emits a
 //! sign-wound quad (two [`Triangle`]s) per sign-change edge.
-//!
-//! [`ScalarField`]: https://docs.rs/aether-labyrinth
 
 use crate::mesh::Triangle;
 use aether_math::Vec3;
@@ -49,7 +46,7 @@ const NO_VERTEX: u32 = u32::MAX;
 ///
 /// `values` is a dense row-major `width * height * depth` grid of
 /// samples, indexed `values[z * height * width + y * width + x]` — the
-/// same layout the reachability solver's `ScalarField` uses with
+/// same layout a dense scalar field uses with
 /// `(x, y, tick)` mapped to `(x, y, z)`. A sample is *inside* iff
 /// `value >= iso_threshold`; everything else is *outside*. The grid is
 /// padded by one virtual-outside layer on every side, so an inside

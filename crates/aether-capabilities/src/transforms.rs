@@ -8,10 +8,7 @@
 //! like the `aether.fs` fetch fixtures' `double_fs` / `seed_fs` transforms.
 //!
 //! `mat4_apply` is ADR-0048's first first-party transform — a generic
-//! linear-algebra node, unrelated to reachability. The space-time
-//! reachability certifier transforms (`solve`, `build_corridor_graph`,
-//! `aggregate_traffic`, …) moved to `aether-labyrinth` (issue 1908);
-//! `mat4_apply` stays here.
+//! linear-algebra node.
 
 use aether_data::transform;
 use aether_kinds::Mat4Apply;

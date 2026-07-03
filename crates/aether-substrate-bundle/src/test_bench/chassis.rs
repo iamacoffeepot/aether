@@ -21,9 +21,6 @@ use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_data::Kind;
 use aether_data::KindId;
 use aether_kinds::Tick;
-// The `aether.trajectory` recorder cap moved to `aether-labyrinth` (issue
-// 1908); the mailbox NAMESPACE (and so its hash-derived id) is unchanged.
-use aether_labyrinth::TrajectoryRecorderCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
@@ -333,7 +330,6 @@ impl TestBenchChassis {
             .with_scheduler_tuning(scheduler_tuning)
             .with_teardown_cap(teardown_cap)
             .with_actor::<TraceDispatchCapability>(())
-            .with_actor::<TrajectoryRecorderCapability>(())
             .with_actor::<InputCapability>(input_config)
             .with_actor::<ComponentHostCapability>(component_host_config)
             .with_actor::<TcpCapability>(())
