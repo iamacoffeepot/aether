@@ -98,9 +98,7 @@ pub mod trampoline;
 // gated, so on a wasm-header-only build the fn would be dead. No wasm
 // consumer runs transforms, so gate the whole module rather than carry
 // it dead.
-// Holds only the generic `mat4_apply`; the space-time reachability
-// certifier transforms + their solver / corridor / counterfactual /
-// traffic / escapability cores moved to `aether-labyrinth` (issue 1908).
+// Holds only the generic `mat4_apply`.
 #[cfg(not(target_family = "wasm"))]
 pub mod transforms;
 pub mod window;

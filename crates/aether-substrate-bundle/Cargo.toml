@@ -79,12 +79,6 @@ runtime = []
 [dependencies]
 aether-substrate = { path = "../aether-substrate", features = ["render"] }
 aether-capabilities = { path = "../aether-capabilities", features = ["render-runtime", "audio-runtime", "text-runtime", "ui-runtime"] }
-# The space-time reachability subsystem (issue 1908). `native` pulls the
-# `TrajectoryRecorderCapability` the chassis registers; the dependency edge
-# is also what links its certifier `#[transform]`s into the headless
-# binary's `TransformRegistry::from_inventory` (a dropped edge silently
-# de-registers them with no compile error).
-aether-labyrinth = { path = "../aether-labyrinth", features = ["native"] }
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }

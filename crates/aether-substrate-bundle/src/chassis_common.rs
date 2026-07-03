@@ -16,6 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_actor::Addressable;
+use aether_actor::log::DEFAULT_RING_CAP;
+use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
 use aether_capabilities::anthropic::AnthropicConfigLayer;
 use aether_capabilities::audio::AudioConfigLayer;
 use aether_capabilities::fs::NamespaceRootsLayer;
@@ -35,11 +37,6 @@ use aether_capabilities::{
     trace::TraceDispatchCapability,
 };
 use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
-// The `aether.trajectory` recorder cap moved to `aether-labyrinth` (issue
-// 1908); the mailbox NAMESPACE (and so its hash-derived id) is unchanged.
-use aether_actor::log::DEFAULT_RING_CAP;
-use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
-use aether_labyrinth::TrajectoryRecorderCapability;
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::config::{
@@ -635,7 +632,6 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_scheduler_tuning(boot.scheduler_tuning)
         .with_teardown_cap(boot.teardown_cap)
         .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<TrajectoryRecorderCapability>(())
         .with_actor::<InputCapability>(boot.input_config)
         .with_actor::<ComponentHostCapability>(boot.component_host_config)
         .with_actor::<FsCapability>(boot.namespace_roots)
@@ -664,7 +660,6 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
 pub fn common_cap_namespaces() -> Vec<&'static str> {
     vec![
         <TraceDispatchCapability as Addressable>::NAMESPACE,
-        <TrajectoryRecorderCapability as Addressable>::NAMESPACE,
         <InputCapability as Addressable>::NAMESPACE,
         <ComponentHostCapability as Addressable>::NAMESPACE,
         <FsCapability as Addressable>::NAMESPACE,

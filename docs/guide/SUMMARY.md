@@ -44,7 +44,6 @@
   - [Adding a substrate kind](recipes/adding-a-substrate-kind.md)
   - [Drawing your first text](recipes/drawing-text.md)
   - [Drawing your first UI](recipes/drawing-ui.md)
-  - [Adding a chassis capability](recipes/adding-a-chassis-capability.md)
   - [Wiring an MCP tool](recipes/wiring-an-mcp-tool.md)
   - [Writing a component](recipes/writing-a-component.md)
   - [Debugging a hung settlement](recipes/debugging-a-hung-settlement.md)
