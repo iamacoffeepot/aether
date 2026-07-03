@@ -101,7 +101,7 @@ impl Lifecycle {
     /// A fresh blob with `initial_len` groups already published (the first
     /// flush's groups, written into the array before construction).
     pub fn new(initial_len: usize) -> Self {
-        debug_assert!(
+        assert!(
             initial_len <= MAX_GROUPS,
             "initial_len exceeds field ceiling"
         );
@@ -290,6 +290,16 @@ mod tests {
         assert!(lc.complete(), "the one claimed group retires the blob");
         // Second, unpaired completion: done (1) >= len (1) — guard fires.
         lc.complete();
+    }
+
+    // Tripwire: `Lifecycle::new` rejects an `initial_len` past `MAX_GROUPS`
+    // in every build profile, not just under `debug_assertions` — an
+    // oversized `initial_len` would otherwise overflow the packed word's
+    // 21-bit `len` field into the adjacent `done`/`seal` bits.
+    #[test]
+    #[should_panic(expected = "initial_len exceeds field ceiling")]
+    fn new_past_ceiling_panics() {
+        Lifecycle::new(MAX_GROUPS + 1);
     }
 
     #[test]
