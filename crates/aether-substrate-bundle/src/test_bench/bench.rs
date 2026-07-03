@@ -429,6 +429,10 @@ impl TestBench {
             events_tx,
             capture_queue: capture_queue.clone(),
             namespace_roots,
+            // Issue #2509: the teardown gate honors the same resolved cap
+            // (env knob or programmatic override) as the settlement-await
+            // loops the bench stores this value for.
+            teardown_cap: settlement_cap,
         };
         let TestBenchBuild {
             passive,

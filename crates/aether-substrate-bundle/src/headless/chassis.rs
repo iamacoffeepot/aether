@@ -37,7 +37,8 @@ use super::driver::{HeadlessTimerDriverCapability, TickConfig};
 use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use crate::chassis_common::{
     ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys,
-    maybe_with_http_server, maybe_with_rpc_server, tick_only_lifecycle_config, with_common_caps,
+    maybe_with_http_server, maybe_with_rpc_server, resolve_teardown_cap,
+    tick_only_lifecycle_config, with_common_caps,
 };
 use crate::cli::{CommonOverlay, HeadlessCli};
 use crate::hub;
@@ -345,6 +346,10 @@ impl HeadlessChassis {
             workers,
             ring_caps,
             scheduler_tuning,
+            // Issue #2509: the instanced-actor teardown gate honors the
+            // same `AETHER_SETTLEMENT_CAP_SECS` knob (including its
+            // `0 → wait forever` sentinel) as the settlement gates.
+            teardown_cap: resolve_teardown_cap(),
             input_config,
             component_host_config,
             namespace_roots,

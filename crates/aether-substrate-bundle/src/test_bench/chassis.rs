@@ -9,6 +9,7 @@
 //! `aether.control.platform_info` was deleted entirely (Phase 4).
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::{
@@ -153,6 +154,13 @@ pub struct TestBenchEnv {
     /// pre-issue-673 silent-skip semantics. When `None`, fs is not
     /// booted at all.
     pub namespace_roots: Option<NamespaceRoots>,
+    /// Issue #2509: cumulative patience for the instanced-actor teardown
+    /// close-done gate. The in-process `TestBench` resolves this from the
+    /// same `SettlementConfig` (`AETHER_SETTLEMENT_CAP_SECS`) knob its
+    /// settlement-await loops read (honoring a programmatic
+    /// `TestBench::settlement_cap` override), so a scenario's teardown
+    /// gate uses the same patience as its settlement gates.
+    pub teardown_cap: Duration,
 }
 
 /// Output of [`TestBenchChassis::build_passive`]. Bundles the
@@ -211,6 +219,7 @@ impl TestBenchChassis {
             events_tx,
             capture_queue,
             namespace_roots,
+            teardown_cap,
         } = env;
 
         let boot = SubstrateBoot::builder(&name, &version).build()?;
@@ -322,6 +331,7 @@ impl TestBenchChassis {
             .with_workers(pool_workers)
             .with_ring_caps(ring_caps)
             .with_scheduler_tuning(scheduler_tuning)
+            .with_teardown_cap(teardown_cap)
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<TrajectoryRecorderCapability>(())
             .with_actor::<InputCapability>(input_config)
