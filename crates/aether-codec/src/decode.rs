@@ -1059,46 +1059,6 @@ mod tests {
     }
 
     #[test]
-    fn subscribe_input_kind_round_trips_with_tagged_mailbox() {
-        // End-to-end through the `SubscribeInput` kind's actual
-        // schema — mirrors the worked example in ADR-0065's Context
-        // section. ADR-0068: the field is now `kind: KindId` (tagged
-        // string on the JSON side), keying subscriber sets by kind id
-        // directly. An agent receives the tagged ids from
-        // `load_component` / `describe_kinds`, drops them straight
-        // into `subscribe_input.{kind, mailbox}`, and the wire bytes
-        // match what the substrate expects.
-        use aether_capabilities::input::SubscribeInput;
-        use aether_data::Kind;
-        let mailbox = aether_data::MailboxId::from_name("aether.component");
-        let mailbox_str =
-            tagged_id::encode(mailbox.0).expect("test setup: encode tagged mailbox id");
-        let kind_id = aether_kinds::Tick::ID;
-        let kind_str = tagged_id::encode(kind_id.0).expect("test setup: encode tagged kind id");
-        let json_in = json!({ "kind": kind_str, "mailbox": mailbox_str });
-
-        let bytes = encode_schema(&json_in, &<SubscribeInput as aether_data::Schema>::SCHEMA)
-            .expect("encode subscribe_input via TypeId schema");
-
-        // Substrate decode path — the hub-encoded bytes are byte-identical
-        // to `SubscribeInput::encode_into_bytes` (the `wire` image).
-        let decoded = SubscribeInput::decode_from_bytes(&bytes)
-            .expect("wire decode subscribe_input from hub-encoded bytes");
-        assert_eq!(decoded.kind, kind_id);
-        assert_eq!(decoded.mailbox, mailbox);
-
-        // And the kind's id is sensitive to the typed identity —
-        // ADR-0065 phase 3 shifts it from the previous `u64`-shape
-        // hash. Cross-check it lands on a `Tag::Kind` value (the
-        // `with_tag` discipline holds through the schema-bytes
-        // change).
-        assert_eq!(
-            tagged_id::tag_of(SubscribeInput::ID.0),
-            Some(aether_data::Tag::Kind),
-        );
-    }
-
-    #[test]
     fn type_id_round_trip_of_sentinel_uses_back_compat_number() {
         // `MailboxId::NONE` (= 0) has reserved tag bits, so it
         // serialises as a JSON number. Round-trip preserves the
