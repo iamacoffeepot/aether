@@ -84,6 +84,13 @@ jobs:
       - uses: actions/checkout@v4
       - run: scripts/check-no-scoped-visibility.sh
 
+  no-inline-runtime-mod:
+    name: No inline runtime mod
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/check-no-inline-runtime-mod.sh
+
   hook-tests:
     name: Guardrail hook tests
     runs-on: ubuntu-latest
@@ -356,7 +363,7 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [ changes, fmt, no-dividers, no-scoped-visibility, hook-tests, clippy, docs, test, desktop, qodana ]
+    needs: [ changes, fmt, no-dividers, no-scoped-visibility, no-inline-runtime-mod, hook-tests, clippy, docs, test, desktop, qodana ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -365,6 +372,7 @@ jobs:
           echo "fmt:     ${{ needs.fmt.result }}"
           echo "no-dividers: ${{ needs.no-dividers.result }}"
           echo "no-scoped-visibility: ${{ needs.no-scoped-visibility.result }}"
+          echo "no-inline-runtime-mod: ${{ needs.no-inline-runtime-mod.result }}"
           echo "hook-tests: ${{ needs.hook-tests.result }}"
           echo "clippy:  ${{ needs.clippy.result }}"
           echo "docs:    ${{ needs.docs.result }}"
@@ -376,6 +384,7 @@ jobs:
           [[ "${{ needs.fmt.result }}"     == "success" ]] || fail=1
           [[ "${{ needs.no-dividers.result }}" == "success" ]] || fail=1
           [[ "${{ needs.no-scoped-visibility.result }}" == "success" ]] || fail=1
+          [[ "${{ needs.no-inline-runtime-mod.result }}" == "success" ]] || fail=1
           [[ "${{ needs.hook-tests.result }}" == "success" ]] || fail=1
           [[ "${{ needs.clippy.result }}"  == "success" || "${{ needs.clippy.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.docs.result }}"    == "success" || "${{ needs.docs.result }}" == "skipped" ]] || fail=1
