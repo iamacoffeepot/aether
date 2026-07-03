@@ -1,8 +1,8 @@
 //! Manifest projection helpers for `aether.inventory`.
 //!
 //! Projects link-time [`ParamKind`] values onto their wire mirror for
-//! the `aether.inventory.manifest` reply (ADR-0088 §4). The `#[actor]
-//! impl` in `mod.rs` delegates here.
+//! the `aether.inventory.manifest` reply (ADR-0088 §4). The `#[runtime]
+//! impl` in `runtime/mod.rs` delegates here.
 
 use aether_data::name_inventory::ParamKind;
 use aether_kinds::ParamKindWire;
