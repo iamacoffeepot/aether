@@ -259,7 +259,7 @@ Default `/wish` drills the whole tree in a single main-context pass. That pass i
 
 The single-context ceiling is the constraint plain mode hits. As a branch goes deeper its accumulated reasoning crowds the one window, so the pass surfaces five or six levels and then settles a branch with "good enough" rather than reaching producibility — truncated by context pressure, not by the chain actually bottoming out at "I can write this."
 
-Deep mode moves drilling into a `Workflow`-orchestrated best-first fan-out (`.claude/workflows/wish-deep.js`) where each node is drilled by its own fresh-context agent. That fresh context is the erasure: a driller's heavy reasoning dies with its context and never reaches the orchestrator, which holds only a lightweight scored frontier in JS and sees only a bounded self-summary per node. The bounded summary is the lineage hand-down — a child driller inherits its ancestors' summaries, not their full `wish.md` bodies, so the chain stays coherent without re-accumulating the window. The orchestrator script has no filesystem access; every `wish.md` and the final `index.md` is written by the agents themselves.
+Deep mode moves drilling into a `Workflow`-orchestrated best-first fan-out (`.claude/workflows/wish.js`) where each node is drilled by its own fresh-context agent. That fresh context is the erasure: a driller's heavy reasoning dies with its context and never reaches the orchestrator, which holds only a lightweight scored frontier in JS and sees only a bounded self-summary per node. The bounded summary is the lineage hand-down — a child driller inherits its ancestors' summaries, not their full `wish.md` bodies, so the chain stays coherent without re-accumulating the window. The orchestrator script has no filesystem access; every `wish.md` and the final `index.md` is written by the agents themselves.
 
 ### The loop
 
@@ -329,12 +329,12 @@ For each root, recursively:
 
 ### 3-deep. Dispatch the deep-mode workflow (on `--deep`)
 
-On `--deep`, run steps 1 (pre-load adversity) and 2 (generate roots) inline in the main context — the judgment-and-memory-bound front of the pass — then hand drilling to the `wish-deep` workflow instead of recursing inline. The hand-off:
+On `--deep`, run steps 1 (pre-load adversity) and 2 (generate roots) inline in the main context — the judgment-and-memory-bound front of the pass — then hand drilling to the `wish` workflow instead of recursing inline. The hand-off:
 
 1. **Score each root.** For every root from step 2, assign an initial `doors_opened` (leverage, 1-5) and `unresolvedness` (distance-from-plan, 1-5). These seed the frontier's scoring.
 2. **Compute `wishDir`.** The absolute path to `wishes/<YYYY-MM-DD>-<theme-slug>/`. Create the directory so the drillers have a place to write.
 3. **Gather `groundingNotes`.** The grep-confirmed engine surfaces from step 1, as a short shared block, so the drillers extend the grounding rather than each re-deriving it.
-4. **Call the workflow.** `Workflow({name: "wish-deep", args: {theme, role, beam, budget, roots, wishDir, groundingNotes}})` — `roots` is `[{slug, wish, doors_opened, unresolvedness}]`; `beam` and `budget` come from the flags (defaults 3 and 40); `role` is null if not given. The workflow holds the best-first frontier, spawns the parallel drillers + the skeptic gate + the synthesis writer, and the agents write every `wish.md` and `index.md` themselves.
+4. **Call the workflow.** `Workflow({name: "wish", args: {theme, role, beam, budget, roots, wishDir, groundingNotes}})` — `roots` is `[{slug, wish, doors_opened, unresolvedness}]`; `beam` and `budget` come from the flags (defaults 3 and 40); `role` is null if not given. The workflow holds the best-first frontier, spawns the parallel drillers + the skeptic gate + the synthesis writer, and the agents write every `wish.md` and `index.md` themselves.
 5. **Report from the returned stats.** On completion the workflow returns `{rootCount, totalNodes, leafCount, maxDepth, skepticDemotions, undrilled, ...}`. Print the deep-mode report (step 8) from those, and surface that the tree is on disk and resumable.
 
 Deep mode does not run steps 4-7 inline — filtering, alternatives, and the on-disk write are the drillers' and synthesis agent's job inside the workflow. Step 8's report template has a deep-mode variant.
