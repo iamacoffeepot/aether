@@ -27,21 +27,69 @@
 // decoded bytes so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(feature = "runtime")]
 mod config;
 pub mod kinds;
-pub mod subscription;
 
 pub use kinds::*;
-pub use subscription::InputCapability;
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(feature = "runtime")]
 pub use config::InputConfig;
 
 use aether_actor::WasmActorMailbox;
 use aether_data::{Kind, MailboxId};
 #[cfg(not(target_family = "wasm"))]
 use aether_substrate::actor::native::NativeActorMailbox;
+
+use aether_actor::actor;
+
+// Handler-signature kinds for the input-event handlers must be importable
+// at module root too: `#[actor]` emits `impl HandlesKind<K> for
+// InputCapability {}` markers always-on, outside the `feature = "runtime"`
+// gate, for every `#[handler]` parameter type the moved `#[runtime] impl`
+// declares — including these five stream-event kinds, not just the
+// subscribe/unsubscribe family.
+use aether_kinds::{Key, KeyRelease, MouseButton, MouseMove, WindowSize};
+
+/// `aether.input` cap **identity** (ADR-0122 identity/runtime split). A
+/// ZST carrying only the addressing — the `Addressable` / `HandlesKind`
+/// markers and the name-inventory entry, all emitted always-on by
+/// `#[actor]`. The state-bearing runtime (`InputCapabilityState`,
+/// holding the substrate registry handle + the subscriber table) lives
+/// behind the one `feature = "runtime"` gate, so a transport-only build
+/// never names it nor pulls `aether_substrate` through this cap.
+///
+/// The single owner of the input-stream subscriber table. Handles two
+/// classes of mail:
+///
+/// 1. **Subscribe / Unsubscribe / `UnsubscribeAll`** — mutates the
+///    table on the runtime state. Reply target: the original sender.
+///
+/// 2. **Input events** (`Key`, `KeyRelease`, `MouseMove`,
+///    `MouseButton`, `WindowSize`) — pushed by the chassis driver
+///    after each platform event; the cap fans out one mail per
+///    subscriber. Fire-and-forget; no reply.
+#[actor(singleton)]
+pub struct InputCapability;
+
+// The reply kind (`SubscribeInputResult`) rides the native gate (not
+// `runtime`): the `#[actor]` macro's ADR-0109 `HandlerEntry` inventory
+// submission — emitted on every native build, runtime or not — names each
+// handler's reply kind `::ID`, so a transport-only build must still see
+// it. It is already always-on in scope via the unconditional
+// `pub use kinds::*;` above (no local `kinds` cfg gate to mirror), so no
+// separate import is needed here. The rest of the runtime half (the
+// `aether_substrate`-typed imports, the state struct + its `fanout`
+// helper, and the shared mailbox-validation fn) sits behind the one
+// `feature = "runtime"` gate.
+
+// The runtime half — the `aether_substrate`-typed imports, the state
+// struct + its `fanout` helper, and the `#[runtime] impl` — lives in
+// `runtime.rs`, gated once here. Nothing in this file names a runtime
+// type directly, so there is no `use runtime::*` glob (matching
+// `fs/mod.rs`).
+#[cfg(feature = "runtime")]
+mod runtime;
 
 /// Sender-side facade for callers addressing [`InputCapability`] via
 /// `ctx.actor::<InputCapability>()`.

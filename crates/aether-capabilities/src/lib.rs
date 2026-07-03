@@ -152,7 +152,7 @@ pub use http::HttpServerHandle;
 pub use http::HttpServerOverlay;
 pub use http::{HttpServerCapability, HttpServerConfig};
 pub use input::InputCapability;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(feature = "runtime")]
 pub use input::InputConfig;
 pub use inventory::InventoryCapability;
 // ADR-0122 split: `LifecycleConfig` configures the runtime-only
