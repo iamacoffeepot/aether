@@ -109,6 +109,19 @@ impl ReplyTable {
         }
         self.entries.get(&handle).copied()
     }
+
+    /// Look up and remove the entry for a guest-supplied handle. A
+    /// handle is one-shot: this is the production resolve path
+    /// (`reply_mail`), so answering caps the table at in-flight
+    /// replies rather than lifetime traffic. Returns `None` for
+    /// `NO_REPLY_HANDLE` and for handles that were never allocated
+    /// or already taken.
+    pub fn take(&mut self, handle: u32) -> Option<ReplyEntry> {
+        if handle == NO_REPLY_HANDLE {
+            return None;
+        }
+        self.entries.remove(&handle)
+    }
 }
 
 #[cfg(test)]
@@ -165,5 +178,18 @@ mod tests {
         let h = t.allocate(entry);
         let got = t.resolve(h).expect("resolves");
         assert_eq!(got.correlation_id, 0xCAFE_BABE);
+    }
+
+    #[test]
+    fn take_removes_entry() {
+        let mut t = ReplyTable::new();
+        let entry = ReplyEntry::session(token(9));
+        let h = t.allocate(entry);
+        // Tripwire: a handle is one-shot — the first `take` returns
+        // the entry and removes it, so a second take (or resolve)
+        // against the same handle sees nothing.
+        assert_eq!(t.take(h), Some(entry));
+        assert_eq!(t.take(h), None);
+        assert_eq!(t.resolve(h), None);
     }
 }
