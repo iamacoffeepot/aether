@@ -662,12 +662,12 @@ fn client_peer_kind() -> PeerKind {
 
 /// Full socket round-trip: boot `RpcServerCapability` + the echo
 /// actor + `TraceDispatchCapability`, connect a real
-/// [`RpcClient`](aether_rpc::rpc::RpcClient), fire a `Call` carrying a
+/// [`RpcClient`](crate::rpc::wire::RpcClient), fire a `Call` carrying a
 /// `TestEchoRequest`, and drain the inbound channel — expect
 /// `ReplyEvent { TestEchoReply }` then `ReplyEnd { Ok }`. This is the
 /// only test exercising the actual TCP client↔server path end to end
-/// (the `RpcClient` half moved to `aether-rpc` per ADR-0102; this
-/// integration test stays here, where the server lives).
+/// (the `RpcClient` half lives in the sibling `wire` module per
+/// ADR-0124; this integration test stays here, where the server lives).
 #[test]
 fn call_echo_round_trips_over_the_socket() {
     use crate::rpc::{MailEnvelope, MailboxAddress, RpcClient};

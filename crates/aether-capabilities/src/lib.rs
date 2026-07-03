@@ -80,16 +80,9 @@ mod test_echo;
 #[cfg(feature = "text")]
 pub mod text;
 pub mod trace;
+pub mod trampoline;
 #[cfg(feature = "ui")]
 pub mod ui;
-// ADR-0086 Phase 3b decentralized trace-tree reconstruction. Pure,
-// transport-agnostic guided walk + stitch over the per-actor trace
-// rings; the MCP and the in-process harness each supply their own
-// fetch. Extracted to `aether-rpc` (ADR-0102, no native deps) and
-// re-exported here at its original path so
-// `aether_capabilities::trace_walk::*` keeps resolving.
-pub use aether_rpc::trace_walk;
-pub mod trampoline;
 // First-party native `#[transform]`s (ADR-0048, issue 1464). The
 // link-time inventory submission populates both the headless
 // `TransformRegistry` and `describe_transforms` — both native. Native-

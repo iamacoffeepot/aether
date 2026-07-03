@@ -1,6 +1,6 @@
 # ADR-0102: Extract the RPC wire vocabulary into its own crate
 
-- **Status:** Accepted (shipped — the aether-rpc crate)
+- **Status:** Superseded by ADR-0124 (the aether-rpc crate is dissolved back into aether-capabilities)
 - **Date:** 2026-06-10
 
 ## Context

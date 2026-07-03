@@ -1,4 +1,4 @@
-use aether_rpc::rpc::PeerKind;
+use crate::rpc::wire::PeerKind;
 
 /// Init config for `RpcServerCapability`.
 ///

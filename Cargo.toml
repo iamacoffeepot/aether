@@ -14,7 +14,6 @@ members = [
     "crates/aether-mesh",
     "crates/aether-kit",
     "crates/aether-capabilities",
-    "crates/aether-rpc",
     "crates/aether-mcp",
     "crates/aether-mesh-viewer",
     # Test fixtures — a container dir of single-output crates: one shared

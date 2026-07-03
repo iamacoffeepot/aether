@@ -27,6 +27,8 @@ use std::sync::{Arc, Mutex};
 // stays short — `std::sync::Mutex` is the bare `Mutex`.
 use tokio::sync::Mutex as AsyncMutex;
 
+use aether_capabilities::rpc::{MailEnvelope, MailboxAddress};
+use aether_capabilities::trace::walk::TreeWalk;
 use aether_codec::frame::max_frame_size;
 use aether_data::MailId;
 use aether_data::canonical::kind_id_from_parts;
@@ -50,8 +52,6 @@ use aether_kinds::{
         TraceTail, TraceTailResult,
     },
 };
-use aether_rpc::rpc::{MailEnvelope, MailboxAddress};
-use aether_rpc::trace_walk::TreeWalk;
 use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;

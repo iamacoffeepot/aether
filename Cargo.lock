@@ -71,7 +71,6 @@ dependencies = [
  "aether-data",
  "aether-kinds",
  "aether-math",
- "aether-rpc",
  "aether-substrate",
  "bytemuck",
  "clap",
@@ -190,7 +189,6 @@ dependencies = [
  "aether-codec",
  "aether-data",
  "aether-kinds",
- "aether-rpc",
  "aether-substrate",
  "anyhow",
  "axum",
@@ -234,16 +232,6 @@ dependencies = [
  "inventory",
  "serde",
  "tracing",
-]
-
-[[package]]
-name = "aether-rpc"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-codec",
- "aether-data",
- "aether-kinds",
- "serde",
 ]
 
 [[package]]

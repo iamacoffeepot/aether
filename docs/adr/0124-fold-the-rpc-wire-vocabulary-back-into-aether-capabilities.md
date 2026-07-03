@@ -13,7 +13,7 @@ The crate edge, meanwhile, buys less than ADR-0102's framing implies. The tunnel
 
 ## Decision
 
-Dissolve `aether-rpc` and move its two modules into `aether-capabilities`' always-on, target-agnostic layer: the wire vocabulary becomes `aether_capabilities::rpc::wire` (glob-re-exported at the existing `aether_capabilities::rpc::*` paths, next to the `RpcServerCapability` that serves it), and `trace_walk` becomes a real top-level module at its existing `aether_capabilities::trace_walk` path. The `aether-mcp` coordinator depends on `aether-capabilities` for its wire surface.
+Dissolve `aether-rpc` and move its two modules into `aether-capabilities`' always-on, target-agnostic layer, each inside the capability it serves — neither is an actor, so neither warrants a crate-root module: the wire vocabulary becomes `aether_capabilities::rpc::wire` (glob-re-exported at the existing `aether_capabilities::rpc::*` paths, next to the `RpcServerCapability` that serves it), and the trace walk becomes `aether_capabilities::trace::walk` (next to the `aether.trace` cap whose `aether.trace.tail` it stitches). The `aether-mcp` coordinator depends on `aether-capabilities` for its wire surface.
 
 The coordinator-leanness invariant transfers from the crate edge to the feature system, in two steps:
 
@@ -29,7 +29,7 @@ ADR-0102 is superseded by this ADR.
 - Between the flatten and issue 2534, `aether-mcp` production builds link the substrate stack. The interim is bounded by the capability sweep's completion of the runtime gating.
 - `resolver.feature-unification = "package"` changes resolution semantics workspace-wide: any shared crate whose consumers disagree on features compiles once per distinct feature set. The build-time cost is measured as part of issue 2534 before the knob lands, and feature-divergence build breaks it surfaces in other members are fixed there.
 - The boundary discipline ADR-0102 enforced by topology (a coordinator change cannot reach substrate types without a visible new crate edge) is re-expressed as a graph check once issue 2534 lands: `cargo tree -p aether-mcp -e normal` carrying no `aether-substrate` / wasmtime / wgpu, enforceable in CI.
-- All existing call sites compile unchanged — the moved types keep their `aether_capabilities::rpc::*` / `::trace_walk::*` paths, and the wire format is untouched (the types serialize identically).
+- The wire types keep their `aether_capabilities::rpc::*` paths, so those call sites compile unchanged; the trace walk moves from the crate-root `::trace_walk` to `::trace::walk`, a mechanical import swap at its three consumers. The wire format is untouched (the types serialize identically).
 
 ## Alternatives considered
 

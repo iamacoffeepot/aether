@@ -17,7 +17,7 @@
 //!   longer a settlement authority.
 //! - Trace storage decentralized to per-actor rings, queried via
 //!   `aether.trace.tail` and stitched client-side by the guided walk
-//!   (`trace_walk`, Phase 3b).
+//!   (the sibling [`walk`] module, Phase 3b).
 //! - The central `ShardedTraceQueue` + drainer that fed this cap's fold
 //!   retired with the fold (Phase 3c) — there is no `BatchedTraceEvents`
 //!   stream anymore.
@@ -60,3 +60,11 @@ use aether_kinds::trace::DispatchTracedAck;
 // directly, so there is no `use runtime::*` glob (matching `fs/mod.rs`).
 #[cfg(feature = "runtime")]
 mod runtime;
+
+// ADR-0086 Phase 3b decentralized trace-tree reconstruction: the pure,
+// transport-agnostic guided walk + stitch over the per-actor trace rings
+// this cap's `aether.trace.tail` serves; the MCP and the in-process
+// harness each supply their own fetch. Not an actor, so it lives inside
+// the capability it serves — target-agnostic and always-on (folded back
+// from the dissolved `aether-rpc` crate per ADR-0124).
+pub mod walk;

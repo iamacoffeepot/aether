@@ -1,12 +1,13 @@
 //! `aether.rpc` wire vocabulary + the `Call` client primitive (issues
-//! 750 / 763, extracted to `aether-rpc` per ADR-0102).
+//! 750 / 763; folded back from the dissolved `aether-rpc` crate per
+//! ADR-0124).
 //!
 //! Length-prefix frames carrying [`WireFrame`] bodies, layered
 //! over the generic stream helpers in `aether-codec::frame` (ADR-0072).
-//! `RpcServerCapability` (in `aether-capabilities`) speaks this wire over
-//! a TCP socket; the wire is intentionally type-erased — endpoints are
-//! mail kinds, not request enums, so any new mail kind both sides
-//! understand is reachable without a wire change.
+//! The sibling [`server`](super::server) module's `RpcServerCapability`
+//! speaks this wire over a TCP socket; the wire is intentionally
+//! type-erased — endpoints are mail kinds, not request enums, so any new
+//! mail kind both sides understand is reachable without a wire change.
 //!
 //! [`RpcClient`] is the outbound counterpart: it dials an RPC server,
 //! runs the handshake, and frames inbound [`WireFrame`]s onto an mpsc.
@@ -193,7 +194,7 @@ pub enum RpcError {
     Other { reason: String },
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub use client::{RpcClient, RpcClientError, RpcConnection, RpcReaderHandle};
 
 /// `aether.rpc` client — the outbound counterpart to the
@@ -209,7 +210,7 @@ pub use client::{RpcClient, RpcClientError, RpcConnection, RpcReaderHandle};
 ///
 /// The whole module is native-only — it owns a `TcpStream` and an OS
 /// thread, so it is gated off the wasm-header build.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 mod client {
     use super::{Hello, HelloAck, MailEnvelope, PeerKind, WIRE_VERSION, WireFrame};
     use aether_codec::frame::{FrameError, read_frame, write_frame};
