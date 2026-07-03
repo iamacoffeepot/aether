@@ -43,11 +43,10 @@ use aether_labyrinth::TrajectoryRecorderCapability;
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::config::{
-    KnobKind, KnobRecord, KnownKeys, RingCapacities, dump_config, known_keys,
+    KnobKind, KnobRecord, KnownKeys, RingCapacities, SchedulerTuning, dump_config, known_keys,
 };
 use aether_substrate::runtime::RUNTIME_KNOBS;
 use aether_substrate::runtime::lifecycle::FatalAborter;
-use aether_substrate::scheduler::SCHEDULER_KNOBS;
 use confique::Config as _;
 use confique::meta::Meta;
 
@@ -61,10 +60,9 @@ use crate::headless::driver::TickConfigLayer;
 /// cannot depend on `aether-substrate`, where `KnobRecord`/`KnobKind`
 /// live). Registered as [`KnobRecord`]s so e1's unknown-`AETHER_*`
 /// sweep doesn't flag them and e2's `--config` dump lists them.
-/// ADR-0090 §1/§4. The scheduler hot-path knobs are registered
-/// separately by unit b2's `SCHEDULER_KNOBS`, the runtime (log /
-/// panic-hook) knobs by `aether_substrate::runtime::RUNTIME_KNOBS`;
-/// the chassis boot / window / tick knobs are now covered by the
+/// ADR-0090 §1/§4. The runtime (log / panic-hook) knobs are registered
+/// by `aether_substrate::runtime::RUNTIME_KNOBS`; the scheduler
+/// hot-path, chassis boot, window, and tick knobs are covered by the
 /// derive-emitted `*Layer::META`s in [`chassis_registry`].
 pub const CHASSIS_KNOBS: &[KnobRecord] = &[
     KnobRecord {
@@ -140,6 +138,113 @@ impl ActorRingConfig {
             log: self.log_ring_capacity,
             trace: self.trace_ring_capacity,
             trace_max: self.trace_ring_max_size,
+        }
+    }
+}
+
+/// The nine scheduler hot-path tuning knobs (issue 2485), resolved once
+/// at chassis boot and lowered via [`Self::to_scheduler_tuning`] to the
+/// `Copy` [`SchedulerTuning`] the chassis builder installs into the
+/// scheduler's process-global before the pool starts. The
+/// `#[derive(aether_substrate::Config)]` emits the env-shaped
+/// `SchedulerTuningConfigLayer`, the clap-shaped `SchedulerTuningOverlay`,
+/// the `FromArgvThenEnv` impl, and the inherent `from_env` /
+/// `from_argv_then_env` / `try_*` shims (ADR-0090 unit d/g) — replacing
+/// the nine hand-registered `KnobRecord`s the scheduler read directly from
+/// env. A garbage value for a concrete knob hard-errors at boot (ADR-0090
+/// §4); the `nonzero` knobs coerce a resolved `0` to their default; the
+/// three adaptive knobs are `Option` (unset / `< 1` → the measured /
+/// derived behaviour).
+///
+/// Each field pins its historical `AETHER_*` env key explicitly (the keys
+/// don't follow the `env_prefix` shape); the Rust identifiers spell the
+/// unit out (`micros` / `nanos`) while the env keys stay byte-for-byte.
+#[derive(Clone, Debug, aether_substrate::Config)]
+#[config(env_prefix = "AETHER", cli_prefix = "scheduler")]
+pub struct SchedulerTuningConfig {
+    /// `AETHER_SPIN_WINDOW_USEC=<micros>` route-to-spinner spin-window
+    /// before a worker parks (default `50`). A `0` is valid (no spin).
+    #[config(env = "AETHER_SPIN_WINDOW_USEC", default = 50)]
+    pub spin_window_micros: u64,
+    /// `AETHER_LOCAL_STICKY_MAX=<slots>` deque-length backstop (default
+    /// `256`; a resolved `0` coerces to the default).
+    #[config(env = "AETHER_LOCAL_STICKY_MAX", default = 256, nonzero)]
+    pub local_sticky_max: usize,
+    /// `AETHER_LOCAL_TIME_BUDGET_US=<micros>` keep-local time valve.
+    /// Unset → adaptive (derived from the measured handoff cost); `0`
+    /// disables the valve (pure inline-cascade).
+    #[config(env = "AETHER_LOCAL_TIME_BUDGET_US")]
+    pub time_budget_micros: Option<u64>,
+    /// `AETHER_PEER_STEAL=<bool>` whether idle workers may raid siblings'
+    /// deques (default `false` — owner-only). Accepts `1`/`true`/`yes`.
+    #[config(env = "AETHER_PEER_STEAL", default = false)]
+    pub peer_steal: bool,
+    /// `AETHER_LOCAL_CHAIN_BACKSTOP=<k>` every-K injector backstop for
+    /// keep-local chains (default `64`; a resolved `0` coerces to it).
+    #[config(env = "AETHER_LOCAL_CHAIN_BACKSTOP", default = 64, nonzero)]
+    pub local_chain_backstop: u32,
+    /// `AETHER_HANDOFF_COST_NS=<nanos>` pins the cross-worker handoff-cost
+    /// estimate and freezes live refinement. Unset / `< 1` → boot-probed
+    /// and live-refined ([`Self::to_scheduler_tuning`] filters `< 1` to
+    /// `None`).
+    #[config(env = "AETHER_HANDOFF_COST_NS")]
+    pub handoff_cost_nanos: Option<u64>,
+    /// `AETHER_BLOB_RECRUIT_MIN=<groups>` minimum fresh-group count for a
+    /// flush to broadcast-recruit siblings (default `9`; `0` coerces to
+    /// it).
+    #[config(env = "AETHER_BLOB_RECRUIT_MIN", default = 9, nonzero)]
+    pub blob_recruit_min: usize,
+    /// `AETHER_BLOB_RECRUIT_MAX=<copies>` cap on sibling copies a single
+    /// flush injects when recruiting (default `32`; `0` coerces to it).
+    #[config(env = "AETHER_BLOB_RECRUIT_MAX", default = 32, nonzero)]
+    pub blob_recruit_max: usize,
+    /// `AETHER_WAKE_COST_NANOS=<nanos>` pins the recruit wake break-even
+    /// and freezes live refinement. Unset / `< 1` → the box-measured
+    /// handoff cost ([`Self::to_scheduler_tuning`] filters `< 1` to
+    /// `None`).
+    #[config(env = "AETHER_WAKE_COST_NANOS")]
+    pub wake_cost_nanos: Option<u64>,
+}
+
+impl Default for SchedulerTuningConfig {
+    fn default() -> Self {
+        // These literals must equal `SchedulerTuning::default()`;
+        // `scheduler_tuning_defaults_match` guards the pair.
+        Self {
+            spin_window_micros: 50,
+            local_sticky_max: 256,
+            time_budget_micros: None,
+            peer_steal: false,
+            local_chain_backstop: 64,
+            handoff_cost_nanos: None,
+            blob_recruit_min: 9,
+            blob_recruit_max: 32,
+            wake_cost_nanos: None,
+        }
+    }
+}
+
+impl SchedulerTuningConfig {
+    /// Lower the resolved knob to the `Copy` [`SchedulerTuning`] the
+    /// chassis builder installs before `Pool::start`. The only logic this
+    /// crate owns is the `< 1 → None` filter on the two pin knobs
+    /// (`handoff_cost_nanos` / `wake_cost_nanos`): a `0` pin would disable
+    /// the gate it guards, so it falls through to the measured cost (the
+    /// concrete knobs' `< 1 → default` is handled by the `nonzero` hint;
+    /// `time_budget_micros`'s `0` is a meaningful "disable the valve" and
+    /// passes through).
+    #[must_use]
+    pub fn to_scheduler_tuning(&self) -> SchedulerTuning {
+        SchedulerTuning {
+            spin_window_micros: self.spin_window_micros,
+            local_sticky_max: self.local_sticky_max,
+            time_budget_micros: self.time_budget_micros,
+            peer_steal: self.peer_steal,
+            local_chain_backstop: self.local_chain_backstop,
+            handoff_cost_nanos: self.handoff_cost_nanos.filter(|&n| n >= 1),
+            blob_recruit_min: self.blob_recruit_min,
+            blob_recruit_max: self.blob_recruit_max,
+            wake_cost_nanos: self.wake_cost_nanos.filter(|&n| n >= 1),
         }
     }
 }
@@ -275,12 +380,10 @@ impl ChassisBootConfig {
 
 /// Assemble the chassis-wide [`KnownKeys`] set (ADR-0090 §4): every
 /// migrated `*Layer::META` (http / gemini / anthropic / audio / fs /
-/// chassis-boot / window / tick) plus the hand-registered chassis knobs
-/// ([`CHASSIS_KNOBS`] — the RPC port and the orphaned frame-size knob),
-/// the scheduler hot-path knobs (b2's
-/// `aether_substrate::scheduler::SCHEDULER_KNOBS`), and the runtime
-/// log-filter / panic-hook knobs
-/// (`aether_substrate::runtime::RUNTIME_KNOBS`). e1's
+/// actor-ring / scheduler-tuning / chassis-boot / window / tick) plus
+/// the hand-registered chassis knobs ([`CHASSIS_KNOBS`] — the RPC port
+/// and the orphaned frame-size knob) and the runtime log-filter /
+/// panic-hook knobs (`aether_substrate::runtime::RUNTIME_KNOBS`). e1's
 /// [`validate_env`](aether_substrate::config::validate_env) sweeps the
 /// process env against this; e2's `--config` dump walks the same
 /// metas + records.
@@ -296,11 +399,11 @@ pub fn chassis_known_keys() -> KnownKeys {
 }
 
 /// The chassis-wide config registry: the migrated cap layer `Meta`s
-/// plus the hand-registered knob records (`CHASSIS_KNOBS` + b2's
-/// `SCHEDULER_KNOBS` + `aether_substrate::runtime::RUNTIME_KNOBS`).
-/// Shared by [`chassis_known_keys`] (e1's sweep) and
-/// [`chassis_config_dump`] (e2's `--config`) so both read one source
-/// of truth.
+/// (including the scheduler hot-path knobs' `SchedulerTuningConfigLayer`)
+/// plus the hand-registered knob records (`CHASSIS_KNOBS` +
+/// `aether_substrate::runtime::RUNTIME_KNOBS`). Shared by
+/// [`chassis_known_keys`] (e1's sweep) and [`chassis_config_dump`] (e2's
+/// `--config`) so both read one source of truth.
 fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
     const METAS: &[&Meta] = &[
         &HttpConfigLayer::META,
@@ -311,13 +414,13 @@ fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
         &AudioConfigLayer::META,
         &NamespaceRootsLayer::META,
         &ActorRingConfigLayer::META,
+        &SchedulerTuningConfigLayer::META,
         &SettlementConfigLayer::META,
         &ChassisBootConfigLayer::META,
         &WindowConfigLayer::META,
         &TickConfigLayer::META,
     ];
     let mut records: Vec<KnobRecord> = CHASSIS_KNOBS.to_vec();
-    records.extend_from_slice(SCHEDULER_KNOBS);
     records.extend_from_slice(RUNTIME_KNOBS);
     (METAS, records)
 }
@@ -473,6 +576,9 @@ pub struct CommonBoot {
     /// Issue 1990: per-actor ring capacities, resolved from the
     /// `ActorRingConfig` derive-`Config` knob in the chassis main.
     pub ring_caps: RingCapacities,
+    /// Issue 2485: scheduler hot-path tuning, resolved from the
+    /// `SchedulerTuningConfig` derive-`Config` knob in the chassis main.
+    pub scheduler_tuning: SchedulerTuning,
     pub input_config: InputConfig,
     pub component_host_config: ComponentHostConfig,
     pub namespace_roots: NamespaceRoots,
@@ -507,6 +613,7 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_aborter(boot.aborter)
         .with_workers(boot.workers)
         .with_ring_caps(boot.ring_caps)
+        .with_scheduler_tuning(boot.scheduler_tuning)
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<TrajectoryRecorderCapability>(())
         .with_actor::<InputCapability>(boot.input_config)
@@ -613,11 +720,13 @@ mod tests {
     use super::ChassisBootConfigLayer;
     use super::DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS;
     use super::DEFAULT_SETTLEMENT_CAP_SECS;
+    use super::SchedulerTuningConfigLayer;
     use super::SettlementConfig;
     use super::chassis_known_keys;
     use aether_actor::log::DEFAULT_RING_CAP;
     use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
     use aether_capabilities::LifecycleConfig;
+    use aether_substrate::SchedulerTuning;
     use std::env;
     use std::sync::Mutex;
     use std::sync::PoisonError;
@@ -702,6 +811,54 @@ mod tests {
         assert!(known.contains("AETHER_ACTOR_LOG_RING_SIZE"));
         assert!(known.contains("AETHER_ACTOR_TRACE_RING_SIZE"));
         assert!(known.contains("AETHER_ACTOR_TRACE_RING_MAX_SIZE"));
+    }
+
+    #[test]
+    fn scheduler_tuning_defaults_match() {
+        use confique::Config as _;
+        // Tripwire: the `SchedulerTuningConfigLayer` `default = ...`
+        // literals must equal `SchedulerTuning::default()` (issue 2485).
+        // The confique layer and the `Copy` `SchedulerTuning` carry the
+        // scheduler defaults independently; a change to one and not the
+        // other silently shifts the resolved-vs-installed behaviour. No
+        // `.env()` source: literal defaults only — env-free.
+        let _guard = RING_ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let layer = SchedulerTuningConfigLayer::builder()
+            .load()
+            .expect("defaults load");
+        let default = SchedulerTuning::default();
+        assert_eq!(layer.spin_window_micros, default.spin_window_micros);
+        assert_eq!(layer.local_sticky_max, default.local_sticky_max);
+        assert_eq!(layer.peer_steal, default.peer_steal);
+        assert_eq!(layer.local_chain_backstop, default.local_chain_backstop);
+        assert_eq!(layer.blob_recruit_min, default.blob_recruit_min);
+        assert_eq!(layer.blob_recruit_max, default.blob_recruit_max);
+        // The three adaptive knobs default unset (None → measured/derived).
+        assert_eq!(layer.time_budget_micros, None);
+        assert_eq!(layer.handoff_cost_nanos, None);
+        assert_eq!(layer.wake_cost_nanos, None);
+    }
+
+    #[test]
+    fn scheduler_tuning_keys_are_known() {
+        // The nine scheduler hot-path env keys join the chassis known-key
+        // set via `SchedulerTuningConfigLayer::META` (they rode
+        // `SCHEDULER_KNOBS` before issue 2485), so the unknown-AETHER_*
+        // sweep (e1) doesn't flag them and the `--config` dump lists them.
+        let known = chassis_known_keys();
+        for key in [
+            "AETHER_SPIN_WINDOW_USEC",
+            "AETHER_LOCAL_STICKY_MAX",
+            "AETHER_LOCAL_TIME_BUDGET_US",
+            "AETHER_PEER_STEAL",
+            "AETHER_LOCAL_CHAIN_BACKSTOP",
+            "AETHER_HANDOFF_COST_NS",
+            "AETHER_BLOB_RECRUIT_MIN",
+            "AETHER_BLOB_RECRUIT_MAX",
+            "AETHER_WAKE_COST_NANOS",
+        ] {
+            assert!(known.contains(key), "{key} must be a known scheduler key");
+        }
     }
 
     #[test]

@@ -46,7 +46,6 @@
 //! reference iamacoffeepot/aether#1127's cost-aware recruiter needs, so it
 //! is measured once here and read by both consumers.
 
-use std::env;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -54,21 +53,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::mail::cost::ewma_step;
-
-use crate::config::{KnobKind, KnobRecord};
-
-/// Discovery records for the handoff-cost calibration knob (ADR-0090
-/// unit b2). Describes the `AETHER_HANDOFF_COST_NS` override read in
-/// [`ensure_seeded`] so the e1 sweep / e2 dump cover it; the seed path
-/// stays untouched.
-pub const CALIBRATE_KNOBS: &[KnobRecord] = &[KnobRecord {
-    env_key: "AETHER_HANDOFF_COST_NS",
-    doc: "Pins the cross-worker handoff-cost estimate (nanoseconds) and freezes \
-          live refinement — deterministic tests / a known-good number on a noisy \
-          box. Unset → boot-probed and live-refined.",
-    default: None,
-    kind: KnobKind::HandRegistered,
-}];
 
 /// Round trips measured (after warmup). Even, so the median averages the
 /// two central samples; large enough to median out scheduler jitter,
@@ -162,21 +146,20 @@ static SEEDED: OnceLock<()> = OnceLock::new();
 /// are skipped so the pinned value can't drift.
 static PINNED: AtomicBool = AtomicBool::new(false);
 
-/// Seed [`HANDOFF`] exactly once: from `AETHER_HANDOFF_COST_NS` if set
-/// (and freeze live refinement), else from the boot probe.
-// Process-level scheduler tuning knob (the handoff-cost pin), read once at boot
-// at the substrate level — not cap config.
-#[allow(clippy::disallowed_methods)]
+/// Seed [`HANDOFF`] exactly once: from the installed
+/// [`SchedulerTuning`](crate::config::SchedulerTuning)'s
+/// `handoff_cost_nanos` if pinned (`AETHER_HANDOFF_COST_NS`; and freeze
+/// live refinement), else from the boot probe. The resolution layer
+/// filters a `< 1` value to `None`, so a pinned value is always a
+/// positive nanosecond count.
 fn ensure_seeded() {
-    SEEDED.get_or_init(
-        || match parse_cost_override(env::var("AETHER_HANDOFF_COST_NS").ok()) {
-            Some(pinned) => {
-                HANDOFF.seed(pinned);
-                PINNED.store(true, Ordering::Relaxed);
-            }
-            None => HANDOFF.seed(measure_handoff_cost_nanos()),
-        },
-    );
+    SEEDED.get_or_init(|| match super::tuning().handoff_cost_nanos {
+        Some(pinned) => {
+            HANDOFF.seed(pinned);
+            PINNED.store(true, Ordering::Relaxed);
+        }
+        None => HANDOFF.seed(measure_handoff_cost_nanos()),
+    });
 }
 
 /// The calibrated cross-worker handoff cost for this process: the boot
@@ -219,14 +202,6 @@ pub fn fold_handoff_sample(nanos: u64) {
 pub fn handoff_samples() -> u64 {
     ensure_seeded();
     HANDOFF.samples()
-}
-
-/// Parse the `AETHER_HANDOFF_COST_NS` override: a positive integer
-/// nanosecond count, else `None` (unset / unparseable / `< 1` all fall
-/// back to the live probe). Split out from the env read so the parse is
-/// unit-testable without mutating process env.
-fn parse_cost_override(raw: Option<String>) -> Option<u64> {
-    raw.and_then(|v| v.parse::<u64>().ok()).filter(|&n| n >= 1)
 }
 
 /// Log the calibrated handoff cost and the keep-local time budget now
@@ -375,18 +350,6 @@ mod tests {
             nanos >= 1,
             "the 1 ns floor in handoff_cost must carry through"
         );
-    }
-
-    #[test]
-    fn cost_override_parses_positive_only() {
-        assert_eq!(parse_cost_override(Some("5000".to_string())), Some(5000));
-        assert_eq!(
-            parse_cost_override(Some("0".to_string())),
-            None,
-            "zero falls back to the live probe",
-        );
-        assert_eq!(parse_cost_override(Some("nope".to_string())), None);
-        assert_eq!(parse_cost_override(None), None);
     }
 
     #[test]

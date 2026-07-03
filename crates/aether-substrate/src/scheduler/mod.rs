@@ -49,91 +49,34 @@ pub use slot::{
 pub use spin_park::{Acquired, SpinPark};
 pub use worker_deque::{burst_note_mail, pending_depth, time_budget};
 
-use crate::actor::native::blob_work::RECRUIT_KNOBS;
-use crate::config::KnobRecord;
+use std::sync::OnceLock;
 
-/// The scheduler hot-path tuning knobs registered for config discovery
-/// (ADR-0090 unit b2, iamacoffeepot/aether#1255). Concatenates the four
-/// deque / keep-local-valve knobs (`worker_deque::DEQUE_KNOBS`), the
-/// handoff-cost calibration knob (`calibrate::CALIBRATE_KNOBS`), the three
-/// blob-recruiter knobs (`blob_work::RECRUIT_KNOBS`), and the spin-window
-/// knob (`pool::SPIN_KNOBS`) into the single slice e1's
-/// `chassis_known_keys()` folds into the known-key set and e2's `--config`
-/// dump renders. Pure `&'static` metadata — there is no change to any
-/// hot-path `OnceLock` read.
-///
-/// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS` moved to `ChassisBootConfigLayer`
-/// in `aether-substrate-bundle` (issue 2230): its record now rides the
-/// derive-emitted `META` rather than a hand-written `KnobRecord` here.
-///
-/// The element-by-element array (rather than a runtime concat) keeps
-/// `SCHEDULER_KNOBS` a `const`: each record is still *defined* once in
-/// its owning module; this only *references* it.
-pub const SCHEDULER_KNOBS: &[KnobRecord] = &[
-    worker_deque::DEQUE_KNOBS[0],
-    worker_deque::DEQUE_KNOBS[1],
-    worker_deque::DEQUE_KNOBS[2],
-    worker_deque::DEQUE_KNOBS[3],
-    calibrate::CALIBRATE_KNOBS[0],
-    RECRUIT_KNOBS[0],
-    RECRUIT_KNOBS[1],
-    RECRUIT_KNOBS[2],
-    pool::SPIN_KNOBS[0],
-];
+use crate::config::SchedulerTuning;
 
-#[cfg(test)]
-mod knob_tests {
-    use super::SCHEDULER_KNOBS;
-    use crate::config::KnobKind;
+/// The process-global scheduler tuning, installed once at chassis boot by
+/// [`install_tuning`] before the pool starts. Replaces the nine per-knob
+/// `OnceLock`s the hot-path getters used to lazily seed from env: the
+/// getters now read this single installed value (defaulting when
+/// uninstalled) rather than reading `AETHER_*` env directly, so the
+/// resolution semantics (argv-then-env, hard-error on garbage) live
+/// bundle-side in the `SchedulerTuningConfig` derive-`Config` knob and
+/// substrate-core never reads env (issue 464, ADR-0090).
+static TUNING: OnceLock<SchedulerTuning> = OnceLock::new();
 
-    #[test]
-    fn scheduler_knobs_cover_all_hot_path_env_keys() {
-        let keys: Vec<&str> = SCHEDULER_KNOBS.iter().map(|r| r.env_key).collect();
-        for expected in [
-            "AETHER_LOCAL_STICKY_MAX",
-            "AETHER_LOCAL_TIME_BUDGET_US",
-            "AETHER_PEER_STEAL",
-            "AETHER_LOCAL_CHAIN_BACKSTOP",
-            "AETHER_HANDOFF_COST_NS",
-            "AETHER_BLOB_RECRUIT_MIN",
-            "AETHER_BLOB_RECRUIT_MAX",
-            "AETHER_WAKE_COST_NANOS",
-            "AETHER_SPIN_WINDOW_USEC",
-        ] {
-            assert!(
-                keys.contains(&expected),
-                "SCHEDULER_KNOBS missing {expected}; has {keys:?}",
-            );
-        }
-        assert_eq!(SCHEDULER_KNOBS.len(), 9);
-    }
+/// Install the resolved [`SchedulerTuning`] into the scheduler's
+/// process-global. Called once at chassis boot from `boot_passives`,
+/// **before** `Pool::start`, so no hot-path getter reads the default
+/// before the real value lands. Ignore-if-already-set: a second install
+/// (a nested boot in the same process) keeps the first.
+pub fn install_tuning(t: SchedulerTuning) {
+    let _ = TUNING.set(t);
+}
 
-    #[test]
-    fn scheduler_knobs_are_all_hand_registered() {
-        // None are confique fields — they ride OnceLock getters, so
-        // every record is HandRegistered (the discriminator e2's dump
-        // uses to know there's no Meta to walk).
-        assert!(
-            SCHEDULER_KNOBS
-                .iter()
-                .all(|r| matches!(r.kind, KnobKind::HandRegistered))
-        );
-    }
-
-    #[test]
-    fn adaptive_knobs_have_no_literal_default() {
-        // time_budget / wake_cost_nanos are adaptive with no single literal
-        // default (ADR-0090 unit b2): their record default is None
-        // ("derived/unset"), satisfied by the doc text.
-        for key in ["AETHER_LOCAL_TIME_BUDGET_US", "AETHER_WAKE_COST_NANOS"] {
-            let rec = SCHEDULER_KNOBS
-                .iter()
-                .find(|r| r.env_key == key)
-                .expect("knob present");
-            assert!(
-                rec.default.is_none(),
-                "{key} should have no literal default"
-            );
-        }
-    }
+/// Read the installed [`SchedulerTuning`], or [`SchedulerTuning::default`]
+/// when nothing was installed. An uninstalled path — `TestBench`, the
+/// `ctx.rs` test harnesses that start a pool directly, unit tests — sees
+/// the defaults transparently; a boot that installs first always wins the
+/// race (the install-before-`Pool::start` ordering invariant).
+pub(crate) fn tuning() -> SchedulerTuning {
+    TUNING.get().copied().unwrap_or_default()
 }

@@ -29,15 +29,13 @@
 //! ADR.
 
 use std::any::Any;
-use std::env;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use crossbeam_deque::{Injector, Stealer, Worker};
 
-use crate::config::{KnobKind, KnobRecord};
-use crate::scheduler::spin_park::{Acquired, DEFAULT_SPIN_WINDOW_USEC, SpinPark};
+use crate::scheduler::spin_park::{Acquired, SpinPark};
 use crate::scheduler::worker_deque;
 
 use crate::runtime::lifecycle::FatalAborter;
@@ -199,7 +197,7 @@ impl Pool {
     #[allow(clippy::needless_pass_by_value)]
     pub fn start(config: PoolConfig, aborter: Arc<dyn FatalAborter>) -> PoolHandle {
         assert!(config.workers >= 1, "pool needs at least one worker");
-        let spin = Arc::new(SpinPark::with_spin_window(spin_window_from_env()));
+        let spin = Arc::new(SpinPark::with_spin_window(spin_window_from_tuning()));
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         // One LIFO deque per worker; collect every stealer so each worker
         // can steal from its siblings' tails when its own deque runs dry.
@@ -233,33 +231,14 @@ impl Pool {
     }
 }
 
-/// Config-discovery record (ADR-0090 unit b2) for the spin-window knob
-/// [`spin_window_from_env`] reads. Referenced by
-/// [`crate::scheduler::SCHEDULER_KNOBS`] so the e1 unknown-key sweep and
-/// the e2 `--config` dump cover it; the read path stays untouched. Pure
-/// `&'static` metadata.
-pub const SPIN_KNOBS: &[KnobRecord] = &[KnobRecord {
-    env_key: "AETHER_SPIN_WINDOW_USEC",
-    doc: "Route-to-spinner spin-window (microseconds) before a worker parks. The \
-          latency sweep retunes this without a recompile; malformed values fall \
-          back to 50.",
-    default: Some("50"),
-    kind: KnobKind::HandRegistered,
-}];
-
 /// Read the spin-window override (`AETHER_SPIN_WINDOW_USEC`) for the
-/// route-to-spinner coordinator, falling back to the default. The
-/// experiment's latency sweep retunes this without a recompile; a
-/// malformed value falls back rather than aborting boot.
-// Process-level scheduler tuning knob (hand-registered in the ADR-0090 config
-// dump above), read at the substrate level — not cap config.
-#[allow(clippy::disallowed_methods)]
-fn spin_window_from_env() -> Duration {
-    let usec = env::var("AETHER_SPIN_WINDOW_USEC")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_SPIN_WINDOW_USEC);
-    Duration::from_micros(usec)
+/// route-to-spinner coordinator from the installed
+/// [`SchedulerTuning`](crate::config::SchedulerTuning). The experiment's
+/// latency sweep retunes this without a recompile; the resolved value
+/// defaults to 50 microseconds when the knob is unset (the
+/// `SchedulerTuning::default()` literal).
+fn spin_window_from_tuning() -> Duration {
+    Duration::from_micros(super::tuning().spin_window_micros)
 }
 
 // All arguments are taken by value so the spawned thread owns them

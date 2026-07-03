@@ -55,6 +55,9 @@ fn main() -> anyhow::Result<()> {
         // ring caps; the in-process `TestBench` builder is the surface
         // for tuning them (per-bench, no process env).
         ring_caps: aether_substrate::RingCapacities::default(),
+        // Issue 2485: the standalone binary keeps the built-in scheduler
+        // tuning (per-bench, no process env).
+        scheduler_tuning: aether_substrate::SchedulerTuning::default(),
         observed_kinds: None,
         events_tx,
         capture_queue: capture_queue.clone(),

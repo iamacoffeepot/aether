@@ -125,58 +125,23 @@
 
 use std::any::Any;
 use std::cell::UnsafeCell;
-use std::env;
 use std::hint::spin_loop;
 use std::mem;
 use std::mem::MaybeUninit;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 
 use aether_kinds::trace::Nanos;
 use rustc_hash::FxHashMap;
 
 use crate::actor::native::Envelope;
 use crate::actor::native::blob_lifecycle::{Lifecycle, MAX_GROUPS, Published};
-use crate::config::{KnobKind, KnobRecord};
 use crate::mail::cost::CostLookup;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailboxId};
 use crate::scheduler::{
-    BatchBudget, CycleResult, Drainable, SeizeHandle, WakeSink, handoff_cost_nanos,
+    BatchBudget, CycleResult, Drainable, SeizeHandle, WakeSink, handoff_cost_nanos, tuning,
 };
-
-/// Config-discovery records (ADR-0090 unit b2) for the blob recruiter's
-/// three `OnceLock`-cached env knobs — [`recruit_min`], [`recruit_cap`],
-/// and [`wake_cost_nanos`]. Referenced by
-/// [`crate::scheduler::SCHEDULER_KNOBS`] so the e1 unknown-key sweep and
-/// the e2 `--config` dump cover them; the getters' hot-path reads stay
-/// untouched. Pure `&'static` metadata, docs/defaults lifted from the
-/// getter doc-comments.
-pub const RECRUIT_KNOBS: &[KnobRecord] = &[
-    KnobRecord {
-        env_key: "AETHER_BLOB_RECRUIT_MIN",
-        doc: "Minimum fresh-group count for a flush to broadcast-recruit siblings \
-              (the width gate). Values < 1 / unparseable fall back to 9.",
-        default: Some("9"),
-        kind: KnobKind::HandRegistered,
-    },
-    KnobRecord {
-        env_key: "AETHER_BLOB_RECRUIT_MAX",
-        doc: "Cap on the number of sibling copies a single flush injects when \
-              recruiting, bounding injector churn for a very wide fan-out. Values \
-              < 1 / unparseable fall back to 32.",
-        default: Some("32"),
-        kind: KnobKind::HandRegistered,
-    },
-    KnobRecord {
-        env_key: "AETHER_WAKE_COST_NANOS",
-        doc: "Pins the recruit wake break-even (nanoseconds) and freezes live \
-              refinement. Values < 1 / unparseable fall back to the box-measured \
-              handoff cost. Unset → measured and live-refined.",
-        default: None,
-        kind: KnobKind::HandRegistered,
-    },
-];
 
 /// Floor for a fresh blob's group-array capacity — a little headroom so a
 /// couple of subsequent flushes to *new* recipients can accumulate before
@@ -188,41 +153,23 @@ pub const RECRUIT_KNOBS: &[KnobRecord] = &[
 const GROUP_CAP_MIN: usize = 4;
 
 /// Minimum fresh-group count for a flush to broadcast-recruit siblings.
-/// Read once from `AETHER_BLOB_RECRUIT_MIN`; values `< 1` and unparseable
-/// input fall back to the default. **Default 9** keeps narrow `<= 8`
+/// Resolved from `AETHER_BLOB_RECRUIT_MIN`; values `< 1` coerce to the
+/// default. **Default 9** keeps narrow `<= 8`
 /// fan-outs on the producer-local inline path (the
 /// iamacoffeepot/aether#1116 narrow-local win) and recruits only wider
 /// fan-outs. See the module doc on the width-vs-cost proxy limitation
 /// (iamacoffeepot/aether#1127).
-// Process-level scheduler tuning knob, read once at the substrate level — not cap config.
-#[allow(clippy::disallowed_methods)]
 fn recruit_min() -> usize {
-    static MIN: OnceLock<usize> = OnceLock::new();
-    *MIN.get_or_init(|| {
-        env::var("AETHER_BLOB_RECRUIT_MIN")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&k| k >= 1)
-            .unwrap_or(9)
-    })
+    tuning().blob_recruit_min
 }
 
 /// Cap on the number of sibling copies a single flush injects when
-/// recruiting. Read once from `AETHER_BLOB_RECRUIT_MAX`; bounds the
+/// recruiting. Resolved from `AETHER_BLOB_RECRUIT_MAX`; bounds the
 /// injector churn for a very wide fan-out (over-recruiting past the worker
 /// count just re-parks the extra workers — harmless but wasteful). Default
 /// 32.
-// Process-level scheduler tuning knob, read once at the substrate level — not cap config.
-#[allow(clippy::disallowed_methods)]
 fn recruit_cap() -> usize {
-    static CAP: OnceLock<usize> = OnceLock::new();
-    *CAP.get_or_init(|| {
-        env::var("AETHER_BLOB_RECRUIT_MAX")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&k| k >= 1)
-            .unwrap_or(32)
-    })
+    tuning().blob_recruit_max
 }
 
 /// High-MAD confidence threshold: a handler whose mean-absolute-deviation
@@ -246,21 +193,13 @@ const MAD_CONFIDENCE_DEN: u64 = 1;
 /// source ([`crate::scheduler::time_budget`]), so both consumers of the
 /// shared handoff-cost seam scale with the box. The conversion's saturating
 /// floor now lives in `handoff_cost_nanos`.
-// Process-level scheduler tuning knob (wake break-even override), read once at the
-// substrate level — not cap config.
-#[allow(clippy::disallowed_methods)]
 fn wake_cost_nanos() -> u64 {
-    static OVERRIDE: OnceLock<Option<u64>> = OnceLock::new();
-    if let Some(ns) = *OVERRIDE.get_or_init(|| {
-        env::var("AETHER_WAKE_COST_NANOS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            // `>= 1`: a 0 override would disable the recruit wake gate
-            // entirely (every blob clears the break-even). Filter it out for
-            // consistency with `AETHER_HANDOFF_COST_NS` / `recruit_min` /
-            // `recruit_cap`; a rejected 0 falls through to the measured cost.
-            .filter(|&ns| ns >= 1)
-    }) {
+    // A `0` override would disable the recruit wake gate entirely (every
+    // blob clears the break-even); the resolution layer filters `< 1` to
+    // `None` for consistency with `AETHER_HANDOFF_COST_NS`, so a pinned
+    // value always exceeds the floor and an unset/rejected knob falls
+    // through to the measured cost.
+    if let Some(ns) = tuning().wake_cost_nanos {
         return ns;
     }
     handoff_cost_nanos()

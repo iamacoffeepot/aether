@@ -46,8 +46,8 @@ use aether_substrate::chassis::settlement::{
     TerminalDisposition, WaitOutcome, await_internal_signal,
 };
 use aether_substrate::{
-    EgressEvent, HubOutbound, Mailer, PassiveChassis, RecordingBackend, RingCapacities, Source,
-    SourceAddr, SubstrateBoot,
+    EgressEvent, HubOutbound, Mailer, PassiveChassis, RecordingBackend, RingCapacities,
+    SchedulerTuning, Source, SourceAddr, SubstrateBoot,
     capture::CaptureQueue,
     mail::{CapabilityRegistry, CostTable, Mail, MailId, MailboxId},
 };
@@ -424,6 +424,7 @@ impl TestBench {
             workers: WORKERS,
             pool_workers,
             ring_caps,
+            scheduler_tuning: SchedulerTuning::default(),
             observed_kinds: Some(Arc::clone(&observed_kinds)),
             events_tx,
             capture_queue: capture_queue.clone(),
