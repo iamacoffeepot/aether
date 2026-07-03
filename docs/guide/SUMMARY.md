@@ -38,6 +38,7 @@
 
 # Building with aether
 
+- [Capability module anatomy](capability-anatomy.md)
 - [Recipes](recipes.md)
   - [Adding a config knob](recipes/adding-a-config-knob.md)
   - [Adding a substrate kind](recipes/adding-a-substrate-kind.md)
