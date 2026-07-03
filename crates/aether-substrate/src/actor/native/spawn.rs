@@ -226,12 +226,16 @@ impl Spawner {
     /// cadence); `cumulative_cap` is the total patience per slot before
     /// declaring a wedge.
     pub(crate) fn shutdown_instanced(&self, round_budget: Duration, cumulative_cap: Duration) {
-        let entries: Vec<InstancedSlotEntry> = {
+        // Issue #2509: retain the slot's `MailboxId` alongside its entry
+        // (previously dropped as `_id`) so a genuine teardown wedge names
+        // the actor whose close cycle failed rather than a bare
+        // gate-name panic.
+        let entries: Vec<(MailboxId, InstancedSlotEntry)> = {
             let mut guard = self
                 .instanced_slots
                 .lock()
                 .expect("instanced_slots mutex poisoned; fail-fast per ADR-0063");
-            guard.drain().map(|(_id, entry)| entry).collect()
+            guard.drain().collect()
         };
         if entries.is_empty() {
             return;
@@ -244,7 +248,7 @@ impl Spawner {
         // by firing immediately, so there's no race window where the
         // close cycle ran without seeing the tx.
         let mut waiters: Vec<crossbeam_channel::Receiver<()>> = Vec::with_capacity(entries.len());
-        for entry in &entries {
+        for (_id, entry) in &entries {
             let (tx, rx) = crossbeam_channel::bounded::<()>(1);
             entry.slot.set_close_done_tx(tx);
             waiters.push(rx);
@@ -264,14 +268,13 @@ impl Spawner {
         } else {
             TerminalDisposition::Abort
         };
-        for rx in &waiters {
-            match await_internal_signal(
-                rx,
-                "shutdown_instanced.close_done",
-                round_budget,
-                cumulative_cap,
-                disposition,
-            ) {
+        for ((id, _entry), rx) in entries.iter().zip(&waiters) {
+            // Issue #2509: name the wedged slot in the gate label so a
+            // teardown wedge panic/abort points at the actor whose close
+            // cycle failed (e.g. `shutdown_instanced.close_done[mbx-…]`)
+            // rather than the bare `shutdown_instanced.close_done`.
+            let gate = format!("shutdown_instanced.close_done[{id}]");
+            match await_internal_signal(rx, &gate, round_budget, cumulative_cap, disposition) {
                 WaitOutcome::Settled => {}
                 WaitOutcome::Wedged(wedge) => {
                     // `Abort` disposition (release): the close cycle
@@ -739,5 +742,95 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
         } = self;
         let config = config.expect("SpawnBuilder::finish consumed exactly once");
         Spawner::spawn_actor::<A>(spawner, subname, config, after_init, sender, parent)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mail::mailer::Mailer;
+    use crate::mail::registry::Registry;
+    use crate::runtime::lifecycle::PanicAborter;
+    use crate::scheduler::{BatchBudget, CycleResult, Pool, PoolConfig, SlotState};
+    use std::any::Any;
+    use std::sync::{Arc, Mutex};
+
+    /// A `Drainable` that never runs its close cycle: it stashes the
+    /// close-done sender the teardown gate installs and holds it alive
+    /// without ever firing it. The gate's per-slot waiter therefore stays
+    /// connected but silent, so the wait exhausts its cumulative cap — the
+    /// starvation-shaped wedge (a healthy-but-slow / stuck close cycle)
+    /// #2509 guards, not an immediate channel disconnect.
+    struct NeverClosingSlot {
+        close_done: Mutex<Option<crossbeam_channel::Sender<()>>>,
+    }
+
+    impl Drainable for NeverClosingSlot {
+        fn run_cycle(&self, _budget: BatchBudget) -> CycleResult {
+            CycleResult::Idle
+        }
+        fn set_close_done_tx(&self, tx: crossbeam_channel::Sender<()>) {
+            *self
+                .close_done
+                .lock()
+                .expect("close_done mutex never poisoned in this single-threaded test") = Some(tx);
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// Tripwire (issue #2509): a wedged instanced-actor teardown gate
+    /// names the slot that failed to close. The `expected` substring pins
+    /// the gate label embedding the slot's `MailboxId` Display
+    /// (`shutdown_instanced.close_done[<id>]`) — a real tagged mailbox id
+    /// renders as `mbx-…`; this test's raw id falls back to the `{:#018x}`
+    /// hex form. If the label ever drops the id and reverts to the bare
+    /// `shutdown_instanced.close_done`, the substring stops matching and
+    /// this test fails.
+    ///
+    /// Fast by construction: the cumulative cap is injected directly as
+    /// `shutdown_instanced`'s parameter (20 ms), so the wedge fires in
+    /// milliseconds rather than blocking on the 300 s default.
+    #[test]
+    #[should_panic(expected = "shutdown_instanced.close_done[0x000000000000abcd]")]
+    fn shutdown_instanced_wedge_names_the_slot() {
+        let registry = Arc::new(Registry::new());
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+        let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
+        let actor_registry = Arc::new(ActorRegistry::new());
+        // One worker is enough — the wedge comes from the close-done
+        // signal never firing, not from anything the pool drains.
+        let pool = Pool::start(
+            PoolConfig {
+                workers: 1,
+                ..PoolConfig::default()
+            },
+            Arc::clone(&aborter),
+        );
+        let spawner = Spawner::new(
+            Arc::clone(&registry),
+            actor_registry,
+            Arc::clone(&mailer),
+            Arc::clone(&aborter),
+            pool.wake_sink(),
+            RingCapacities::default(),
+        );
+
+        let slot: Arc<dyn Drainable> = Arc::new(NeverClosingSlot {
+            close_done: Mutex::new(None),
+        });
+        let wake = WakeHandle::new(
+            Arc::new(SlotState::new()),
+            Arc::downgrade(&slot),
+            pool.wake_sink(),
+        );
+        spawner
+            .instanced_slots
+            .lock()
+            .expect("instanced_slots mutex poisoned")
+            .insert(MailboxId(0xABCD), InstancedSlotEntry { slot, wake });
+
+        spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_millis(20));
     }
 }

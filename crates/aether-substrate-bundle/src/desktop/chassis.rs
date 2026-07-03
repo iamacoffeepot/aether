@@ -39,7 +39,8 @@ use super::driver::{DesktopDriverCapability, WindowConfig};
 use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use crate::chassis_common::{
     ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys,
-    frame_lifecycle_config, maybe_with_http_server, maybe_with_rpc_server, with_common_caps,
+    frame_lifecycle_config, maybe_with_http_server, maybe_with_rpc_server, resolve_teardown_cap,
+    with_common_caps,
 };
 use crate::cli::{CommonOverlay, DesktopCli};
 use crate::hub;
@@ -459,6 +460,10 @@ impl DesktopChassis {
             workers,
             ring_caps,
             scheduler_tuning,
+            // Issue #2509: the instanced-actor teardown gate honors the
+            // same `AETHER_SETTLEMENT_CAP_SECS` knob (including its
+            // `0 → wait forever` sentinel) as the settlement gates.
+            teardown_cap: resolve_teardown_cap(),
             input_config,
             component_host_config,
             namespace_roots,

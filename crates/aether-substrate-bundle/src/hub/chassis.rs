@@ -25,7 +25,9 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::{ConfigError, validate_env};
 use aether_substrate::{Chassis, SubstrateBoot};
 
-use crate::chassis_common::{ActorRingConfig, SchedulerTuningConfig, hub_known_keys};
+use crate::chassis_common::{
+    ActorRingConfig, SchedulerTuningConfig, hub_known_keys, resolve_teardown_cap,
+};
 use crate::cli::HubCli;
 use crate::hub::DEFAULT_RPC_PORT;
 use std::thread;
@@ -138,10 +140,16 @@ impl HubChassis {
         // etc. like the full-stack chassis (which thread it via
         // `with_common_caps`).
         let scheduler_tuning = SchedulerTuningConfig::try_from_env()?.to_scheduler_tuning();
+        // Issue #2509: the instanced-actor teardown gate honors the same
+        // `AETHER_SETTLEMENT_CAP_SECS` knob (including its `0 → wait
+        // forever` sentinel) as the settlement gates, like the full-stack
+        // chassis (which thread it via `with_common_caps`).
+        let teardown_cap = resolve_teardown_cap();
 
         Builder::<Self>::new(registry, mailer)
             .with_ring_caps(ring_caps)
             .with_scheduler_tuning(scheduler_tuning)
+            .with_teardown_cap(teardown_cap)
             .with_actor::<TraceDispatchCapability>(())
             // Liveness-heartbeat tuning (issue 1339), resolved
             // argv-then-env in `HubEnv::from_env_with_argv`.

@@ -747,6 +747,16 @@ fn make_driver_boot<D: DriverCapability>(driver: D) -> DriverBoot {
 /// (iamacoffeepot/aether#1295, iamacoffeepot/aether#1142).
 const PASSIVE_DEFAULT_WORKERS: usize = 2;
 
+/// Default cumulative patience for the instanced-actor teardown
+/// close-done gate ([`Builder::with_teardown_cap`]) when no override is
+/// set. Five minutes — matches the settlement gates'
+/// `DEFAULT_SETTLEMENT_CAP_SECS` (300s): the generous backstop #2062
+/// introduced so a healthy-but-slow close cycle on a saturated box is
+/// never declared wedged (issue #2509). The constant survives only as
+/// the default; the durable retune is the `AETHER_SETTLEMENT_CAP_SECS`
+/// knob the production chassis thread in.
+const DEFAULT_TEARDOWN_CAP: Duration = Duration::from_mins(5);
+
 /// Declarative chassis builder, parametric over the chassis kind `C`
 /// and a type-state `S` tracking whether a driver has been supplied.
 /// `Builder<C, NoDriver>` accepts [`Self::with_actor`] /
@@ -778,6 +788,16 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// `SchedulerTuningConfig` derive-`Config` knob (env `AETHER_*`);
     /// tests / `TestBench` leave it [`SchedulerTuning::default`].
     scheduler_tuning: SchedulerTuning,
+    /// Issue #2509: cumulative patience the instanced-actor teardown
+    /// close-done gate (`Spawner::shutdown_instanced`) waits before
+    /// declaring a slot wedged. Defaults to the generous 300s backstop
+    /// (`DEFAULT_TEARDOWN_CAP`) — the settlement-cap analogue #2062
+    /// scoped out — so a healthy-but-slow close cycle on a saturated box
+    /// is never false-fired. Production chassis mains populate this from
+    /// the same `AETHER_SETTLEMENT_CAP_SECS` knob the settlement gates
+    /// read (via `SettlementConfig::to_cap`, including its `0 → MAX`
+    /// sentinel); tests / `TestBench` inherit the default.
+    teardown_cap: Duration,
     _chassis: PhantomData<fn() -> C>,
     _state: PhantomData<fn() -> S>,
 }
@@ -798,6 +818,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             workers: None,
             ring_caps: RingCapacities::default(),
             scheduler_tuning: SchedulerTuning::default(),
+            teardown_cap: DEFAULT_TEARDOWN_CAP,
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -852,6 +873,22 @@ impl<C: Chassis> Builder<C, NoDriver> {
         self
     }
 
+    /// Issue #2509: override the instanced-actor teardown close-done
+    /// gate's cumulative patience cap. Default is `DEFAULT_TEARDOWN_CAP`
+    /// (the 300s backstop). Production chassis mains resolve the shared
+    /// `AETHER_SETTLEMENT_CAP_SECS` knob (`SettlementConfig::to_cap`,
+    /// including its `0 → Duration::MAX` "wait forever" sentinel) and pass
+    /// the lowered `Duration` here, so one knob covers both the settlement
+    /// gates and the teardown gate; `boot_passives` stores it on
+    /// `BootedPassives`, whose `shutdown_in_place` hands it to
+    /// `Spawner::shutdown_instanced`. The override can be applied either
+    /// before or after `.driver(_)`.
+    #[must_use]
+    pub fn with_teardown_cap(mut self, teardown_cap: Duration) -> Self {
+        self.teardown_cap = teardown_cap;
+        self
+    }
+
     /// Register a fallback router — a single-shot handler the
     /// substrate consults for envelopes whose mailbox name doesn't
     /// resolve. Multiple calls collapse to a `BootError` at
@@ -900,6 +937,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             workers: self.workers,
             ring_caps: self.ring_caps,
             scheduler_tuning: self.scheduler_tuning,
+            teardown_cap: self.teardown_cap,
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -930,6 +968,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             workers,
             self.ring_caps,
             self.scheduler_tuning,
+            self.teardown_cap,
             self.passives,
         )?;
         // ADR-0081 retired the chassis-pushed `ConfigureLogDrain` mail
@@ -990,6 +1029,14 @@ impl<C: Chassis> Builder<C, HasDriver> {
         self
     }
 
+    /// Mirror of [`Builder::with_teardown_cap`][Builder<C, NoDriver>::with_teardown_cap]
+    /// for the post-driver state. Issue #2509.
+    #[must_use]
+    pub fn with_teardown_cap(mut self, teardown_cap: Duration) -> Self {
+        self.teardown_cap = teardown_cap;
+        self
+    }
+
     /// Boot every passive in declaration order, then boot the driver
     /// against a [`DriverCtx`]. Any failure aborts the build and
     /// shuts down the passives that already booted (via the
@@ -1010,6 +1057,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
             workers,
             ring_caps,
             scheduler_tuning,
+            teardown_cap,
             ..
         } = self;
         let driver_boot = driver.expect("HasDriver state implies driver was supplied");
@@ -1021,6 +1069,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
             workers,
             ring_caps,
             scheduler_tuning,
+            teardown_cap,
             passives,
         )?;
         // ADR-0081 retired the chassis-pushed `ConfigureLogDrain` mail
@@ -1090,6 +1139,11 @@ struct BootedPassives {
     /// [`Self::settlement_registry`] for PR 4 gate-site
     /// `subscribe_settlement` calls.
     settlement_registry: Arc<SettlementRegistry>,
+    /// Issue #2509: cumulative patience the instanced-actor teardown
+    /// close-done gate waits before declaring a slot wedged. Threaded from
+    /// [`Builder::with_teardown_cap`] and handed to
+    /// `Spawner::shutdown_instanced` in `Self::shutdown_in_place`.
+    teardown_cap: Duration,
 }
 
 impl BootedPassives {
@@ -1115,8 +1169,15 @@ impl BootedPassives {
         // cadence; the cumulative cap is generous (a healthy close
         // cycle resolves well before it; a genuine wedge exhausts it
         // and aborts/panics).
+        // Issue #2509: the cumulative cap is now the configured
+        // `teardown_cap` (default 300s, retunable via the shared
+        // `AETHER_SETTLEMENT_CAP_SECS` knob) rather than a hardcoded
+        // 30s, so a healthy-but-slow close cycle on a saturated box is
+        // never false-fired — the same starvation-vs-wedge fix #2062
+        // gave the settlement gates, on the gate it scoped out. The 2s
+        // round budget (the warn cadence) is unchanged.
         self.spawner
-            .shutdown_instanced(Duration::from_secs(2), Duration::from_secs(30));
+            .shutdown_instanced(Duration::from_secs(2), self.teardown_cap);
         while let Some(s) = self.shutdowns.pop() {
             s.shutdown_dyn();
         }
@@ -1135,6 +1196,10 @@ impl Drop for BootedPassives {
 // boot ordering — leaving it as one function keeps the chassis boot
 // sequence readable in one place.
 #[allow(clippy::too_many_lines)]
+// Issue #2509 added the teardown-cap arg; boot_passives already carries
+// the resolved chassis config values in argument position (mirroring the
+// `Builder` fields), so an extra `Duration` is the same shape.
+#[allow(clippy::too_many_arguments)]
 fn boot_passives(
     registry: &Arc<Registry>,
     mailer: &Arc<Mailer>,
@@ -1142,6 +1207,7 @@ fn boot_passives(
     workers: Option<usize>,
     ring_caps: RingCapacities,
     scheduler_tuning: SchedulerTuning,
+    teardown_cap: Duration,
     passives: Vec<Box<dyn PassiveBoot>>,
 ) -> Result<BootedPassives, BootError> {
     let mut shutdowns: Vec<Box<dyn DynShutdown>> = Vec::with_capacity(passives.len());
@@ -1390,6 +1456,7 @@ fn boot_passives(
         spawner,
         _pool: pool,
         settlement_registry,
+        teardown_cap,
     })
 }
 

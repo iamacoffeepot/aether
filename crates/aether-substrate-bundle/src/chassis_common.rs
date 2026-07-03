@@ -302,6 +302,19 @@ impl SettlementConfig {
     }
 }
 
+/// Issue #2509: resolve the instanced-actor teardown close-done gate's
+/// cumulative-patience cap from the shared `AETHER_SETTLEMENT_CAP_SECS`
+/// knob (`SettlementConfig::to_cap`, including its `0 → Duration::MAX`
+/// "wait forever" sentinel). Each chassis threads the result into the
+/// substrate `Builder` via `with_teardown_cap`, so one knob covers both
+/// the settlement gates and the teardown gate. A crate-root re-export
+/// keeps it reachable from the chassis bins (which cannot see the private
+/// `SettlementConfig`).
+#[must_use]
+pub fn resolve_teardown_cap() -> Duration {
+    SettlementConfig::from_env().to_cap()
+}
+
 /// Default lifecycle advance timeout in milliseconds. The literal
 /// `default = 1000` on [`ChassisBootConfig`] must equal this;
 /// `chassis_boot_config_defaults_match` guards the pair.
@@ -579,6 +592,12 @@ pub struct CommonBoot {
     /// Issue 2485: scheduler hot-path tuning, resolved from the
     /// `SchedulerTuningConfig` derive-`Config` knob in the chassis main.
     pub scheduler_tuning: SchedulerTuning,
+    /// Issue #2509: cumulative patience for the instanced-actor teardown
+    /// close-done gate, resolved from the same `SettlementConfig`
+    /// (`AETHER_SETTLEMENT_CAP_SECS`) knob the settlement gates read (via
+    /// [`SettlementConfig::to_cap`]), so one knob covers both. Threaded
+    /// into the `Builder` via `with_teardown_cap`.
+    pub teardown_cap: Duration,
     pub input_config: InputConfig,
     pub component_host_config: ComponentHostConfig,
     pub namespace_roots: NamespaceRoots,
@@ -614,6 +633,7 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_workers(boot.workers)
         .with_ring_caps(boot.ring_caps)
         .with_scheduler_tuning(boot.scheduler_tuning)
+        .with_teardown_cap(boot.teardown_cap)
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<TrajectoryRecorderCapability>(())
         .with_actor::<InputCapability>(boot.input_config)
