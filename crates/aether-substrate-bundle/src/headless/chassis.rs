@@ -22,7 +22,7 @@ use aether_capabilities::LifecycleCapability;
 use aether_capabilities::audio::{SetMasterGain, SetMasterGainResult};
 use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
-    AnthropicConfig, ComponentHostConfig, GeminiConfig, HeadlessRenderCapability,
+    AnthropicConfig, ComponentHostConfig, ContentGenConfig, GeminiConfig, HeadlessRenderCapability,
     HeadlessWindowCapability, HttpServerConfig, InputConfig, UnsupportedTestBenchCapability,
     fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
@@ -97,6 +97,10 @@ pub struct HeadlessEnv {
     /// ADR-0050 `aether.gemini` cap config (issue 1015). Resolved from
     /// `GEMINI_API_KEY` + `AETHER_GEMINI_*`.
     pub gemini: GeminiConfig,
+    /// Content-gen staging config (ADR-0090). Resolved from
+    /// `AETHER_GEN_DIR` / `--gen-dir`; folded into the staging root in
+    /// `with_common_caps`.
+    pub contentgen: ContentGenConfig,
     pub tick_period: Duration,
     /// Issue 1761: optional `aether.http.server` init config (ADR-0108).
     /// `Some` iff the cap's `enabled` flag is set (`AETHER_HTTP_SERVER_ENABLED`
@@ -170,6 +174,7 @@ impl HeadlessEnv {
             fs,
             anthropic,
             gemini,
+            contentgen,
             chassis_boot: chassis_boot_overlay,
             rpc_port: cli_rpc_port,
         } = common;
@@ -190,6 +195,7 @@ impl HeadlessEnv {
         let http = HttpConf::try_from_argv_then_env(http.into_layer())?;
         let anthropic = AnthropicConfig::try_from_argv_then_env(anthropic.into_layer())?;
         let gemini = GeminiConfig::try_from_argv_then_env(gemini.into_layer())?;
+        let contentgen = ContentGenConfig::try_from_argv_then_env(contentgen.into_layer())?;
         let namespace_roots = NamespaceRoots::from_argv_then_env(fs.into_layer());
         // The HTTP server is opt-in: resolve its config and boot the cap
         // only when `enabled` is set (ADR-0108 / issue 1761). Default-off,
@@ -214,6 +220,7 @@ impl HeadlessEnv {
             http,
             anthropic,
             gemini,
+            contentgen,
             tick_period,
             http_server,
             rpc_addr,
@@ -240,6 +247,7 @@ impl HeadlessChassis {
             http_server,
             anthropic,
             gemini,
+            contentgen,
             tick_period,
             rpc_addr,
             workers,
@@ -331,6 +339,7 @@ impl HeadlessChassis {
             http,
             anthropic,
             gemini,
+            contentgen,
         };
         // ADR-0082 §1 / PR 3b: headless uses the shared Tick-only
         // lifecycle graph (Tick self-loops, Quit escapes to Shutdown);

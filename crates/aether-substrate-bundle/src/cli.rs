@@ -46,6 +46,7 @@ pub use aether_capabilities::fs::NamespaceRootsOverlay as FsOverlay;
 pub use aether_capabilities::gemini::GeminiOverlay;
 pub use aether_capabilities::http::HttpOverlay;
 pub use aether_capabilities::http::HttpServerOverlay;
+pub use aether_capabilities::shared::contentgen::ContentGenOverlay;
 
 pub use crate::chassis_common::ChassisBootOverlay;
 pub use crate::desktop::driver::WindowOverlay;
@@ -67,6 +68,9 @@ pub struct CommonOverlay {
     pub anthropic: AnthropicOverlay,
     #[command(flatten)]
     pub gemini: GeminiOverlay,
+    /// Content-gen staging root: `--gen-dir` / `AETHER_GEN_DIR`.
+    #[command(flatten)]
+    pub contentgen: ContentGenOverlay,
     /// Shared chassis boot knobs: `--workers`, `--boot-manifest`,
     /// `--lifecycle-advance-timeout-millis`.
     #[command(flatten)]

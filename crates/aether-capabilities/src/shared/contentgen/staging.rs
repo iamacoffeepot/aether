@@ -7,15 +7,16 @@
 //! convention so both providers (issue 1014's text cap doesn't need it;
 //! issue 1015's media cap does) write through one path.
 //!
-//! Root resolution: `AETHER_GEN_DIR` overrides; absent that, the
-//! `save`-namespace root the `aether.fs` cap already resolves
-//! (`AETHER_SAVE_DIR` → `dirs::data_dir()/aether/save`). The staged
-//! file lands under `gen/` within that root and writes atomically via
-//! the existing `LocalFileAdapter` (tmp + rename), so a crash
-//! mid-write leaves no torn file.
+//! Root injection: the staging root is resolved once at chassis boot
+//! (from [`ContentGenConfig`](super::config::ContentGenConfig), which
+//! overrides via `AETHER_GEN_DIR`, else tracks the `save`-namespace root
+//! the `aether.fs` cap resolves) and threaded into the cap, which passes
+//! it to [`stage_gen_output_under`] at stage time. The staged file lands
+//! under `gen/` within that root and writes atomically via the existing
+//! `LocalFileAdapter` (tmp + rename), so a crash mid-write leaves no torn
+//! file.
 
-use std::env;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::fs::{Access, FsError};
 use uuid::Uuid;
@@ -28,51 +29,16 @@ use crate::fs::{FileAdapter, LocalFileAdapter};
 /// "save", path: "gen/<uuid>.<ext>" }`.
 pub const GEN_PREFIX: &str = "gen";
 
-/// Resolve the filesystem root generated artifacts stage under.
-/// `AETHER_GEN_DIR` overrides; absent that, the `save`-namespace
-/// default the `aether.fs` cap uses (`AETHER_SAVE_DIR` →
-/// `dirs::data_dir()/aether/save` → `temp_dir()/aether/save`).
-#[must_use]
-// External filesystem-root resolution mirroring the aether.fs cap's namespace
-// roots (ADR-0041) — AETHER_GEN_DIR overrides, else the same AETHER_SAVE_DIR
-// the `save` namespace resolves — not a cap config knob. The staging helpers
-// are free functions called from static reply builders with no config in scope,
-// so this is the fs-cap namespace-resolution case the disallowed-methods reason
-// names as legitimate, not a hand-rolled config bypass.
-#[allow(clippy::disallowed_methods)]
-pub fn gen_root() -> PathBuf {
-    if let Ok(dir) = env::var("AETHER_GEN_DIR")
-        && !dir.is_empty()
-    {
-        return PathBuf::from(dir);
-    }
-    if let Ok(dir) = env::var("AETHER_SAVE_DIR")
-        && !dir.is_empty()
-    {
-        return PathBuf::from(dir);
-    }
-    dirs::data_dir()
-        .unwrap_or_else(env::temp_dir)
-        .join("aether")
-        .join("save")
-}
-
-/// Stage `bytes` as a fresh `gen/<uuid>.<ext>` file under the resolved
-/// [`gen_root`] and return the relative path the reply carries. Writes
-/// atomically via the `save`-namespace `LocalFileAdapter` (the same
-/// tmp + rename the `aether.fs` cap uses). `ext` is the extension
-/// without the dot (`"png"`, `"wav"`).
+/// Stage `bytes` as a fresh `gen/<uuid>.<ext>` file under `root` and
+/// return the relative path the reply carries. Writes atomically via the
+/// `save`-namespace `LocalFileAdapter` (the same tmp + rename the
+/// `aether.fs` cap uses). `ext` is the extension without the dot
+/// (`"png"`, `"wav"`).
 ///
-/// The returned path is namespace-relative (`gen/<uuid>.<ext>`), not
-/// absolute — a component reads it back with `aether.fs.read {
-/// namespace: "save", path }`.
-pub fn stage_gen_output(bytes: &[u8], ext: &str) -> Result<String, FsError> {
-    stage_gen_output_under(&gen_root(), bytes, ext)
-}
-
-/// [`stage_gen_output`] against an explicit root. Production calls the
-/// env-resolving wrapper; tests pin a scratch root so they never touch
-/// the user's real save dir.
+/// `root` is the staging root resolved once at chassis boot and threaded
+/// into the cap. The returned path is namespace-relative
+/// (`gen/<uuid>.<ext>`), not absolute — a component reads it back with
+/// `aether.fs.read { namespace: "save", path }`.
 pub fn stage_gen_output_under(root: &Path, bytes: &[u8], ext: &str) -> Result<String, FsError> {
     let adapter = LocalFileAdapter::new(root.to_path_buf(), Access::ReadWrite)
         .map_err(|e| FsError::AdapterError(e.to_string()))?;

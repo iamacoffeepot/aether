@@ -20,9 +20,10 @@ use crate::fs::{Access, FileAdapter, LocalFileAdapter};
 use crate::shared::contentgen::adapter::{
     AdapterUsage, GeminiAdapter, GeminiImageRequest, GeminiMusicRequest, GeminiResponse,
 };
-use crate::shared::contentgen::staging::{gen_root, stage_gen_output};
+use crate::shared::contentgen::staging::stage_gen_output_under;
 
 pub use crate::shared::contentgen::task_queue::TaskQueue;
+pub use std::path::{Path, PathBuf};
 pub use std::sync::Arc;
 
 use aether_actor::runtime;
@@ -43,14 +44,33 @@ pub use aether_substrate::chassis::error::BootError;
 pub struct GeminiCapabilityState {
     pub adapter: Arc<dyn GeminiAdapter>,
     pub tasks: TaskQueue,
+    /// Filesystem root generated artifacts stage under, resolved once at
+    /// chassis boot ([`GeminiBoot::gen_root`]) and threaded in here.
+    pub gen_root: PathBuf,
+}
+
+/// Boot input for the `aether.gemini` cap: the resolved cap config plus
+/// the staging root the chassis resolves from `ContentGenConfig` (falling
+/// back to the `save`-namespace root). Widening `NativeActor::Config`
+/// beyond `GeminiConfig` keeps the staging-root resolution at chassis boot
+/// (where `NamespaceRoots.save` is in scope) rather than a raw env read at
+/// stage time.
+pub struct GeminiBoot {
+    pub config: GeminiConfig,
+    pub gen_root: PathBuf,
 }
 
 #[cfg(test)]
 impl GeminiCapabilityState {
-    fn from_parts(adapter: Arc<dyn GeminiAdapter>, max_in_flight: usize) -> Self {
+    fn from_parts(
+        adapter: Arc<dyn GeminiAdapter>,
+        max_in_flight: usize,
+        gen_root: PathBuf,
+    ) -> Self {
         Self {
             adapter,
             tasks: TaskQueue::new(max_in_flight),
+            gen_root,
         }
     }
 
@@ -65,18 +85,19 @@ impl NativeActor for GeminiCapability {
     /// state-bearing struct holding the adapter + the rate-limit queue.
     type State = GeminiCapabilityState;
 
-    type Config = GeminiConfig;
+    type Config = GeminiBoot;
 
     /// ADR-0050 + ADR-0074 Phase 5 chassis-owned mailbox.
     const NAMESPACE: &'static str = "aether.gemini";
 
     fn init(
-        config: GeminiConfig,
+        boot: GeminiBoot,
         _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<GeminiCapabilityState, BootError> {
         Ok(GeminiCapabilityState {
-            adapter: build_adapter(&config),
-            tasks: TaskQueue::new(config.max_in_flight),
+            adapter: build_adapter(&boot.config),
+            tasks: TaskQueue::new(boot.config.max_in_flight),
+            gen_root: boot.gen_root,
         })
     }
 
@@ -128,7 +149,7 @@ impl NativeActor for GeminiCapability {
         // local) before handing the network call off-thread.
         let mut ref_paths = mail.object_reference_paths;
         ref_paths.extend(mail.character_reference_paths);
-        let reference_images = match read_reference_images(&ref_paths) {
+        let reference_images = match read_reference_images(&state.gen_root, &ref_paths) {
             Ok(b) => b,
             Err(error) => {
                 OutboundReply::reply(ctx, &NanobananaGenerateResult::Err { request_id, error });
@@ -149,12 +170,13 @@ impl NativeActor for GeminiCapability {
             reference_images,
         };
         let adapter = Arc::clone(&state.adapter);
+        let gen_root = state.gen_root.clone();
         state.tasks.submit(ctx, move || {
             let result = adapter.nanobanana_generate(req);
             // Staging runs here on the worker (blocking disk I/O), so
             // a megabyte PNG never rides the mail wire — the reply
             // carries the staged path.
-            nanobanana_reply(request_id, include_sig, result)
+            nanobanana_reply(&gen_root, request_id, include_sig, result)
         });
     }
 
@@ -200,10 +222,11 @@ impl NativeActor for GeminiCapability {
             sample_count: mail.sample_count.unwrap_or(1),
         };
         let adapter = Arc::clone(&state.adapter);
+        let gen_root = state.gen_root.clone();
         state.tasks.submit(ctx, move || {
             let result = adapter.lyria_generate(req);
             // Staging (one path per clip) runs here on the worker.
-            lyria_reply(request_id, result)
+            lyria_reply(&gen_root, request_id, result)
         });
     }
 
@@ -263,12 +286,11 @@ pub fn build_adapter(config: &GeminiConfig) -> Arc<dyn GeminiAdapter> {
 /// paths (tool JSON takes paths, the wire stays bytes —
 /// `feedback_no_bytes_in_llm_json`). A read failure aborts the
 /// request with an `AdapterError`.
-pub fn read_reference_images(paths: &[String]) -> Result<Vec<Vec<u8>>, GeminiError> {
+pub fn read_reference_images(root: &Path, paths: &[String]) -> Result<Vec<Vec<u8>>, GeminiError> {
     if paths.is_empty() {
         return Ok(Vec::new());
     }
-    let root = gen_root();
-    let adapter = LocalFileAdapter::new(root, Access::ReadWrite)
+    let adapter = LocalFileAdapter::new(root.to_path_buf(), Access::ReadWrite)
         .map_err(|e| GeminiError::AdapterError(e.to_string()))?;
     let mut out = Vec::with_capacity(paths.len());
     for path in paths {
@@ -290,6 +312,7 @@ fn to_usage(u: AdapterUsage) -> Usage {
 }
 
 pub fn nanobanana_reply(
+    root: &Path,
     request_id: u64,
     include_sig: bool,
     result: Result<GeminiResponse, String>,
@@ -319,7 +342,7 @@ pub fn nanobanana_reply(
                     error: GeminiError::AdapterError("adapter returned no image".to_string()),
                 };
             };
-            match stage_gen_output(&artifact.bytes, &artifact.ext) {
+            match stage_gen_output_under(root, &artifact.bytes, &artifact.ext) {
                 Ok(output_path) => NanobananaGenerateResult::Ok {
                     request_id,
                     output_path,
@@ -341,12 +364,16 @@ pub fn nanobanana_reply(
     }
 }
 
-pub fn lyria_reply(request_id: u64, result: Result<GeminiResponse, String>) -> LyriaGenerateResult {
+pub fn lyria_reply(
+    root: &Path,
+    request_id: u64,
+    result: Result<GeminiResponse, String>,
+) -> LyriaGenerateResult {
     match result {
         Ok(resp) => {
             let mut output_paths = Vec::with_capacity(resp.artifacts.len());
             for artifact in &resp.artifacts {
-                match stage_gen_output(&artifact.bytes, &artifact.ext) {
+                match stage_gen_output_under(root, &artifact.bytes, &artifact.ext) {
                     Ok(path) => output_paths.push(path),
                     Err(e) => {
                         return LyriaGenerateResult::Err {
@@ -382,16 +409,17 @@ mod tests {
     use crate::shared::contentgen::adapter::STUB_PNG;
     use crate::shared::contentgen::adapter::StubGeminiAdapter;
     use crate::shared::contentgen::adapter::{AdapterUsage, GeminiArtifact, GeminiResponse};
-    use crate::test_chassis::{decode_session_reply, drive_task_completion, test_mailer_and_rx};
+    use crate::test_chassis::{
+        cleanup, decode_session_reply, drive_task_completion, scratch_dir, test_mailer_and_rx,
+    };
     use aether_data::{Kind, MailboxId, SessionToken, Source, SourceAddr, Uuid};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
     use aether_substrate::mail::outbound::EgressEvent;
     use serde::de::DeserializeOwned;
+    use std::fs;
+    use std::sync::Arc;
     use std::sync::mpsc::Receiver;
-    use std::sync::{Arc, Mutex, PoisonError};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use std::{env, fs, process};
 
     fn session_sender() -> Source {
         Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))
@@ -420,30 +448,18 @@ mod tests {
 
     /// End-to-end through the ADR-0093 dispatch primitive: the stub
     /// Nano Banana adapter runs on the real worker thread, stages a PNG
-    /// under a scratch `AETHER_GEN_DIR`, and the cap's
+    /// under a scratch staging root threaded into the cap, and the cap's
     /// `#[handler(task)]` completion re-replies the `Ok` result —
     /// carrying a staged `gen/<uuid>.png` path that exists on disk — to
     /// the original caller.
     #[test]
     fn gemini_stub_nanobanana() {
-        let _guard = GEN_DIR_ENV_LOCK
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let scratch = env::temp_dir().join(format!(
-            "aether-gemini-nb-{}-{}",
-            process::id(),
-            request_nonce()
-        ));
-        fs::create_dir_all(&scratch).expect("scratch dir creates");
-        // SAFETY: serialized by GEN_DIR_ENV_LOCK against the other
-        // gen-dir tests; the real worker stages here.
-        unsafe {
-            env::set_var("AETHER_GEN_DIR", &scratch);
-        }
+        let scratch = scratch_dir("aether-gemini-nb", "stub");
 
         let (mailer, rx) = test_mailer_and_rx();
         let cap_mailbox = MailboxId(0);
-        let mut state = GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4);
+        let mut state =
+            GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4, scratch.clone());
         let transport = Arc::new(NativeBinding::new_for_test(
             Arc::clone(&mailer),
             cap_mailbox,
@@ -482,20 +498,18 @@ mod tests {
             }
         }
 
-        // SAFETY: same lock-guarded window as the set above.
-        unsafe {
-            env::remove_var("AETHER_GEN_DIR");
-        }
-        let _ = fs::remove_dir_all(&scratch);
+        cleanup(&scratch);
     }
 
     /// Per-model validation: an unsupported aspect ratio / image
     /// size / over-count reference combo errors before any dispatch.
     #[test]
     fn gemini_nanobanana_per_model_validation() {
+        let scratch = scratch_dir("aether-gemini-nb", "validation");
         let (mailer, rx) = test_mailer_and_rx();
         let cap_mailbox = MailboxId(0);
-        let mut state = GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4);
+        let mut state =
+            GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4, scratch.clone());
         let transport = Arc::new(NativeBinding::new_for_test(
             Arc::clone(&mailer),
             cap_mailbox,
@@ -534,13 +548,16 @@ mod tests {
             } => {}
             other => panic!("expected ImageSizeNotSupportedByModel, got {other:?}"),
         }
+        cleanup(&scratch);
     }
 
     #[test]
     fn gemini_unknown_model_errors() {
+        let scratch = scratch_dir("aether-gemini-nb", "unknown-model");
         let (mailer, rx) = test_mailer_and_rx();
         let cap_mailbox = MailboxId(0);
-        let mut state = GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4);
+        let mut state =
+            GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4, scratch.clone());
         let transport = Arc::new(NativeBinding::new_for_test(
             Arc::clone(&mailer),
             cap_mailbox,
@@ -566,31 +583,21 @@ mod tests {
             }
             other => panic!("expected UnknownModel, got {other:?}"),
         }
+        cleanup(&scratch);
     }
 
     /// Lyria stub runs on the real worker, stages WAV clips under a
-    /// scratch `AETHER_GEN_DIR`, and the `#[handler(task)]` completion
-    /// re-replies an `Ok` carrying one staged path per clip.
+    /// scratch staging root threaded into the cap, and the
+    /// `#[handler(task)]` completion re-replies an `Ok` carrying one
+    /// staged path per clip.
     #[test]
     fn gemini_stub_lyria() {
-        let _guard = GEN_DIR_ENV_LOCK
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let scratch = env::temp_dir().join(format!(
-            "aether-gemini-lyria-{}-{}",
-            process::id(),
-            request_nonce()
-        ));
-        fs::create_dir_all(&scratch).expect("scratch dir creates");
-        // SAFETY: serialized by GEN_DIR_ENV_LOCK against the other
-        // gen-dir tests; the real worker stages here.
-        unsafe {
-            env::set_var("AETHER_GEN_DIR", &scratch);
-        }
+        let scratch = scratch_dir("aether-gemini-lyria", "stub");
 
         let (mailer, rx) = test_mailer_and_rx();
         let cap_mailbox = MailboxId(0);
-        let mut state = GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4);
+        let mut state =
+            GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4, scratch.clone());
         let transport = Arc::new(NativeBinding::new_for_test(
             Arc::clone(&mailer),
             cap_mailbox,
@@ -628,18 +635,16 @@ mod tests {
             other @ LyriaGenerateResult::Err { .. } => panic!("expected Ok, got {other:?}"),
         }
 
-        // SAFETY: same lock-guarded window as the set above.
-        unsafe {
-            env::remove_var("AETHER_GEN_DIR");
-        }
-        let _ = fs::remove_dir_all(&scratch);
+        cleanup(&scratch);
     }
 
     #[test]
     fn gemini_disabled_replies_unauthorized() {
+        let scratch = scratch_dir("aether-gemini-nb", "disabled");
         let (mailer, rx) = test_mailer_and_rx();
         let cap_mailbox = MailboxId(0);
-        let mut state = GeminiCapabilityState::from_parts(Arc::new(DisabledGeminiAdapter), 4);
+        let mut state =
+            GeminiCapabilityState::from_parts(Arc::new(DisabledGeminiAdapter), 4, scratch.clone());
         let transport = Arc::new(NativeBinding::new_for_test(
             Arc::clone(&mailer),
             cap_mailbox,
@@ -668,19 +673,8 @@ mod tests {
             } => {}
             other => panic!("expected Unauthorized, got {other:?}"),
         }
+        cleanup(&scratch);
     }
-
-    fn request_nonce() -> u64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {
-            #[allow(clippy::cast_possible_truncation)]
-            let n = d.as_nanos() as u64;
-            n
-        })
-    }
-
-    /// Serializes the two seam tests that pin `AETHER_GEN_DIR` so
-    /// their process-env mutation can't race nextest's other threads.
-    static GEN_DIR_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Build a single-artifact `GeminiResponse` whose parse carried a
     /// `thought_signature`, the shape the cap's reply assembly sees.
@@ -697,33 +691,15 @@ mod tests {
         }
     }
 
-    /// Stage `nanobanana_reply` under a scratch `AETHER_GEN_DIR` so
-    /// the seam tests never touch the user's real save dir. Holds the
-    /// env lock across the set/reply/clear window.
+    /// Stage `nanobanana_reply` under a scratch staging root so the seam
+    /// tests never touch the user's real save dir.
     fn reply_under_scratch_gen_dir(
         include_sig: bool,
         resp: GeminiResponse,
     ) -> NanobananaGenerateResult {
-        let _guard = GEN_DIR_ENV_LOCK
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let scratch = env::temp_dir().join(format!(
-            "aether-gemini-sig-{}-{}",
-            process::id(),
-            request_nonce()
-        ));
-        fs::create_dir_all(&scratch).expect("scratch dir creates");
-        // SAFETY: serialized by GEN_DIR_ENV_LOCK against the other
-        // seam test; no other test reads this var.
-        unsafe {
-            env::set_var("AETHER_GEN_DIR", &scratch);
-        }
-        let reply = nanobanana_reply(1, include_sig, Ok(resp));
-        // SAFETY: same lock-guarded window as the set above.
-        unsafe {
-            env::remove_var("AETHER_GEN_DIR");
-        }
-        let _ = fs::remove_dir_all(&scratch);
+        let scratch = scratch_dir("aether-gemini-sig", "reply");
+        let reply = nanobanana_reply(&scratch, 1, include_sig, Ok(resp));
+        cleanup(&scratch);
         reply
     }
 
@@ -782,9 +758,11 @@ mod tests {
         // bumps synchronously on this thread; a synchronous validation
         // error `return`s before dispatch, leaving it at 0. So we don't
         // need the reply channel at all.
+        let scratch = scratch_dir("aether-gemini-nb", "sig-accepted");
         let (mailer, _rx) = test_mailer_and_rx();
         let cap_mailbox = MailboxId(0);
-        let mut state = GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4);
+        let mut state =
+            GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4, scratch.clone());
         let transport = Arc::new(NativeBinding::new_for_test(
             Arc::clone(&mailer),
             cap_mailbox,
@@ -805,5 +783,6 @@ mod tests {
             "Pro must accept the cross-model signature flag and dispatch \
              it rather than rejecting synchronously"
         );
+        cleanup(&scratch);
     }
 }
