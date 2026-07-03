@@ -99,13 +99,6 @@ pub mod trajectory;
 #[cfg(feature = "native")]
 pub use trajectory::TrajectoryRecorderCapability;
 
-// Local `TestChassis` fixture for the recorder cap's tests. The cap-side
-// copies in `aether-capabilities` / `aether-mcp` are `#[cfg(test)]
-// pub(crate)` and not reachable cross-crate, so this crate keeps its own
-// (issues 785 / 802 precedent).
-#[cfg(all(test, feature = "native"))]
-mod test_chassis;
-
 // Baseline-replay validation harness for the reachability solver (#1860).
 // Test-only; no production code.
 #[cfg(test)]

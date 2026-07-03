@@ -3,10 +3,10 @@
 #![allow(clippy::disallowed_methods)]
 use super::*;
 use crate::rpc::{Hello, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
-use crate::test_chassis::{TestChassis, fresh_substrate};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::chassis::builder::PassiveChassis;
+use aether_substrate::testing::{TestChassis, fresh_substrate};
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;

@@ -2841,8 +2841,8 @@ mod tests {
     use std::{env as std_env, fs as std_fs};
 
     use crate::args::ActorLogsArgs;
-    use crate::test_chassis::TestChassis;
     use aether_kinds::descriptors;
+    use aether_substrate::testing::TestChassis;
 
     #[test]
     fn recipient_scope_normal_name_passes() {

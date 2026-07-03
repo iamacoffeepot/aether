@@ -184,6 +184,12 @@ inventory = { workspace = true }
 
 [dev-dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
+# iamacoffeepot/aether#2517: the cap unit tests boot a chassis through the
+# canonical `aether_substrate::testing` fixture, enabled by the substrate
+# `test-support` feature. Dev-dependency feature unification applies to test
+# builds only, so this never enters the production graph
+# `cargo tree -p aether-capabilities -e normal` reports.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 
 [lints]
 workspace = true

@@ -181,7 +181,6 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
     use super::{EngineConfig, EngineServer, ReplyCells, ReplySink};
     use crate::engine::kinds::{EngineAlive, EngineDied};
-    use crate::test_chassis::TestChassis;
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
     use aether_kinds::descriptors;
@@ -194,6 +193,7 @@ mod tests {
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
     use aether_substrate::mail::{Mail, Source, SourceAddr};
+    use aether_substrate::testing::TestChassis;
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use std::{env, process, thread};

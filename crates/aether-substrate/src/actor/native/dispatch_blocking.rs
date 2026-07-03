@@ -525,7 +525,7 @@ mod tests {
     use crate::actor::native::NativeBinding;
     use crate::actor::native::ctx::NativeCtx;
     use crate::mail::registry::{InboxHandler, OwnedDispatch};
-    use crate::test_util::fresh_substrate;
+    use crate::testing::bare_substrate;
 
     /// A `#[repr(C)]` `Pod` reply kind the worker produces and `resolve`
     /// re-replies. Carries a `u64` so a test can assert the routed reply
@@ -599,7 +599,7 @@ mod tests {
     /// the reply was sent (the chain settles).
     #[test]
     fn dispatch_blocking_replies_and_releases_after_reply() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
         // The original caller: a registered inbox we observe the re-reply
@@ -691,7 +691,7 @@ mod tests {
     /// to.
     #[test]
     fn dispatch_blocking_resumed_uses_supplied_hold_and_reply_to() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
         let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
@@ -780,7 +780,7 @@ mod tests {
     /// `(output, context)` to the reply.
     #[test]
     fn dispatch_blocking_with_context_resolve_with() {
-        let (registry, mailer) = fresh_substrate();
+        let (registry, mailer) = bare_substrate();
 
         let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
         let caller =
@@ -835,7 +835,7 @@ mod tests {
     #[should_panic(expected = "TaskDone dropped without resolve")]
     #[cfg(debug_assertions)]
     fn dropping_task_done_without_resolve_releases_and_asserts() {
-        let (_registry, mailer) = fresh_substrate();
+        let (_registry, mailer) = bare_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
         let root = root_id(3);
@@ -862,7 +862,7 @@ mod tests {
     /// isolation by catching the unwind.
     #[test]
     fn dropping_task_done_releases_hold_even_when_unresolved() {
-        let (_registry, mailer) = fresh_substrate();
+        let (_registry, mailer) = bare_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
         let root = root_id(4);
         let hold = mailer.acquire_settlement_hold(root);
@@ -894,7 +894,7 @@ mod tests {
     /// ledger.
     #[test]
     fn abandon_removes_entry_and_returns_hold() {
-        let (_registry, mailer) = fresh_substrate();
+        let (_registry, mailer) = bare_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
         let root = root_id(10);
         let hold = mailer.acquire_settlement_hold(root);
@@ -923,7 +923,7 @@ mod tests {
     /// otherwise destroy.
     #[test]
     fn take_leaves_entry_on_unfilled() {
-        let (_registry, mailer) = fresh_substrate();
+        let (_registry, mailer) = bare_substrate();
         let root = root_id(11);
         let hold = mailer.acquire_settlement_hold(root);
 
@@ -943,7 +943,7 @@ mod tests {
     /// the entry is retained rather than bare-dropped.
     #[test]
     fn take_debug_asserts_on_type_mismatch() {
-        let (_registry, mailer) = fresh_substrate();
+        let (_registry, mailer) = bare_substrate();
         let root = root_id(12);
         let hold = mailer.acquire_settlement_hold(root);
 

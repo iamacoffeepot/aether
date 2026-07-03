@@ -340,12 +340,14 @@ mod tests {
     use crate::shared::contentgen::adapter::{
         AnthropicRequest, AnthropicResponse, StubAnthropicAdapter,
     };
-    use crate::test_chassis::{decode_session_reply, drive_task_completion, test_mailer_and_rx};
     use aether_data::{Kind, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::EgressEvent;
+    use aether_substrate::testing::{
+        decode_session_reply, drive_task_completion, test_mailer_and_rx,
+    };
     use serde::de::DeserializeOwned;
     use std::sync::Arc;
     use std::sync::mpsc::Receiver;

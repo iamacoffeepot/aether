@@ -610,10 +610,12 @@ mod tests {
     };
     use crate::fs::FsError;
     use crate::render::DrawTexturedQuads;
-    use crate::test_chassis::{decode_session_reply, drive_task_completion, test_mailer_and_rx};
     use aether_data::{Kind, MailId, SessionToken, SourceAddr, Uuid};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::outbound::EgressEvent;
+    use aether_substrate::testing::{
+        decode_session_reply, drive_task_completion, test_mailer_and_rx,
+    };
     use std::sync::mpsc::Receiver;
     use std::time::Duration;
 

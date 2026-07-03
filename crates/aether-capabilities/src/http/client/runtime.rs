@@ -394,7 +394,7 @@ mod tests {
         Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))
     }
 
-    use crate::test_chassis::test_mailer_and_rx;
+    use aether_substrate::testing::test_mailer_and_rx;
 
     #[test]
     fn allowlist_empty_rejects_every_host() {

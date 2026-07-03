@@ -140,39 +140,24 @@ mod runtime {
 )]
 mod tests {
     use std::sync::Arc;
-    use std::sync::mpsc;
 
     use aether_data::{Kind, MailId, MailboxId};
-    use aether_kinds::descriptors;
     use aether_kinds::trace::Nanos;
     use aether_kinds::{
         RecordResult, TrajectoryEnd, TrajectoryEndReason, TrajectorySample, TrajectorySampleEntry,
     };
     use aether_substrate::actor::native::NativeCtx;
     use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
-    use aether_substrate::mail::registry::{OwnedDispatch, Registry};
+    use aether_substrate::mail::outbound::EgressEvent;
+    use aether_substrate::mail::registry::OwnedDispatch;
     use aether_substrate::mail::{MailRef, Source, SourceAddr};
 
     use super::TrajectoryRecorderCapability;
     use super::runtime::TrajectoryRecorderCapabilityState;
-    use crate::test_chassis::{TestChassis, boot_test_chassis_with};
     use aether_actor::Addressable;
     use aether_substrate::chassis::builder::Builder;
+    use aether_substrate::testing::{TestChassis, boot_test_chassis_with, fresh_substrate_and_rx};
     use std::collections::HashMap;
-
-    /// Build a substrate for the direct-call unit tests and the heavy
-    /// dispatcher test.
-    fn fresh_substrate() -> (Arc<Mailer>, Arc<Registry>, mpsc::Receiver<EgressEvent>) {
-        let registry = Arc::new(Registry::new());
-        for d in descriptors::all() {
-            let _ = registry.register_kind_with_descriptor(d);
-        }
-        let (outbound, rx) = HubOutbound::attached_loopback();
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
-        (mailer, registry, rx)
-    }
 
     /// Create a session-targeted `Source` for direct handler calls.
     fn session_source() -> Source {
@@ -189,7 +174,7 @@ mod tests {
     }
 
     fn direct_fixture() -> DirectFixture {
-        let (mailer, _registry, _rx) = fresh_substrate();
+        let (_registry, mailer, _rx) = fresh_substrate_and_rx();
         let transport = Arc::new(NativeBinding::new_for_test(
             Arc::clone(&mailer),
             MailboxId(0x1862),
@@ -434,7 +419,7 @@ mod tests {
     /// Sleep-polls under a multi-second deadline.
     #[test]
     fn capability_routes_end_through_dispatcher_thread() {
-        let (mailer, registry, rx) = fresh_substrate();
+        let (registry, mailer, rx) = fresh_substrate_and_rx();
 
         let chassis =
             boot_test_chassis_with::<TrajectoryRecorderCapability>(&registry, &mailer, ());
@@ -537,7 +522,7 @@ mod tests {
         use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::registry;
 
-        let (mailer, registry_arc, _rx) = fresh_substrate();
+        let (registry_arc, mailer, _rx) = fresh_substrate_and_rx();
         registry_arc.register_inbox(
             TrajectoryRecorderCapability::NAMESPACE,
             registry::noop_handler(),

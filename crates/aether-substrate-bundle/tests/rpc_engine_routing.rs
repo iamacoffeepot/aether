@@ -32,27 +32,16 @@ use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
 use aether_kinds::descriptors;
 use aether_kinds::{BinarySelector, SpawnEngine, SpawnEngineResult, TerminateEngine};
-use aether_substrate::chassis::Chassis;
-use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
-use aether_substrate::chassis::error::BootError;
+use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
+use aether_substrate::testing::TestChassis;
 use std::collections::HashSet;
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{env, fs, process};
-
-struct TestChassis;
-impl Chassis for TestChassis {
-    const PROFILE: &'static str = "test";
-    type Driver = NeverDriver;
-    type Env = ();
-    fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-        unreachable!("TestChassis is driven by Builder::new directly in this test")
-    }
-}
 
 /// Boot a hub-shaped passive chassis: a forwarding `RpcServerCapability`
 /// (engine-addressed Calls route through `aether.engine`), the engines

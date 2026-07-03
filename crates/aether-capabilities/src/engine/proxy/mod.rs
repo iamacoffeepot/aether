@@ -123,7 +123,6 @@ mod tests {
     use crate::engine::kinds::ForwardEnvelope;
     use crate::rpc::server::{RpcServerCapability, RpcServerConfig, RpcServerHandle};
     use crate::rpc::{HelloAck, PeerKind, WIRE_VERSION, WireFrame};
-    use crate::test_chassis::{TestChassis, fresh_substrate};
     use crate::test_echo::{TestEchoActor, TestEchoRequest};
     use crate::trace::TraceDispatchCapability;
     use aether_actor::Addressable;
@@ -132,6 +131,7 @@ mod tests {
     use aether_substrate::Subname;
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::mail::{Mail, Source, SourceAddr};
+    use aether_substrate::testing::{TestChassis, fresh_substrate};
     use std::io::BufReader;
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};

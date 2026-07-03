@@ -55,8 +55,8 @@ pub mod pid_lock;
 pub mod render;
 pub mod runtime;
 pub mod scheduler;
-#[cfg(test)]
-mod test_util;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
 pub mod transform;
 
 pub use actor::monitor::MonitorHandle;
