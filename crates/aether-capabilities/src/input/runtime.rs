@@ -1,113 +1,72 @@
-//! Native subscriber-table cap for `aether.input`.
+//! The `aether.input` runtime half (ADR-0122 identity/runtime split):
+//! the `aether_substrate`-typed imports, the state struct + its `fanout`
+//! helper, and the shared mailbox-validation fn, gated once by this module
+//! rather than per-import. The `#[actor] impl` reaches them through the
+//! single `use runtime::*` glob in the parent.
 
-use aether_kinds::{Key, KeyRelease, MouseButton, MouseMove, WindowSize};
-
-// Handler-signature kinds must be importable at module root because
-// `#[actor]` emits `impl HandlesKind<K> for InputCapability {}` markers
-// always-on, outside the `feature = "runtime"` gate. The reply kind
-// (`SubscribeInputResult`) is named only by the gated handler bodies, so
-// it rides the runtime gate below.
-use super::kinds::{
-    SubscribeInput, SubscribeInputSelf, UnsubscribeAll, UnsubscribeInput, UnsubscribeInputSelf,
+use super::{
+    InputCapability, Key, KeyRelease, MouseButton, MouseMove, SubscribeInput, SubscribeInputSelf,
+    UnsubscribeAll, UnsubscribeInput, UnsubscribeInputSelf, WindowSize,
 };
+use aether_actor::runtime;
 
-use aether_actor::actor;
-
-/// `aether.input` cap **identity** (ADR-0122 identity/runtime split). A
-/// ZST carrying only the addressing — the `Addressable` / `HandlesKind`
-/// markers and the name-inventory entry, all emitted always-on by
-/// `#[actor]`. The state-bearing runtime (`InputCapabilityState`,
-/// holding the substrate registry handle + the subscriber table) lives
-/// behind the one `feature = "runtime"` gate, so a transport-only build
-/// never names it nor pulls `aether_substrate` through this cap.
-///
-/// The single owner of the input-stream subscriber table. Handles two
-/// classes of mail:
-///
-/// 1. **Subscribe / Unsubscribe / `UnsubscribeAll`** — mutates the
-///    table on the runtime state. Reply target: the original sender.
-///
-/// 2. **Input events** (`Key`, `KeyRelease`, `MouseMove`,
-///    `MouseButton`, `WindowSize`) — pushed by the chassis driver
-///    after each platform event; the cap fans out one mail per
-///    subscriber. Fire-and-forget; no reply.
-pub struct InputCapability;
-
-// The reply kind rides the native gate (not `runtime`): the `#[actor]`
-// macro's ADR-0109 `HandlerEntry` inventory submission — emitted on every
-// native build, runtime or not — names each handler's reply kind `::ID`,
-// so a transport-only build must still see it. The rest of the runtime
-// half (the `aether_substrate`-typed imports, the state struct + its
-// `fanout` helper, and the shared mailbox-validation fn) sits behind the
-// one `feature = "runtime"` gate.
 #[cfg(not(target_family = "wasm"))]
-use super::kinds::SubscribeInputResult;
-#[cfg(feature = "runtime")]
-#[allow(clippy::wildcard_imports)]
-use runtime::*;
+use super::SubscribeInputResult;
 
-/// The `aether.input` runtime half (ADR-0122 identity/runtime split):
-/// the `aether_substrate`-typed imports, the state struct + its `fanout`
-/// helper, and the shared mailbox-validation fn, gated once by this module
-/// rather than per-import. The `#[actor] impl` reaches them through the
-/// single `use runtime::*` glob above.
-#[cfg(feature = "runtime")]
-mod runtime {
-    pub use aether_data::{Kind, KindId};
-    pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    pub use aether_substrate::chassis::error::BootError;
-    pub use aether_substrate::mail::MailboxId;
-    pub use aether_substrate::mail::registry::{MailboxEntry, Registry};
-    pub use std::collections::{BTreeSet, HashMap};
-    pub use std::sync::Arc;
+pub use aether_data::{Kind, KindId};
+pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub use aether_substrate::chassis::error::BootError;
+pub use aether_substrate::mail::MailboxId;
+pub use aether_substrate::mail::registry::{MailboxEntry, Registry};
+pub use std::collections::{BTreeSet, HashMap};
+pub use std::sync::Arc;
 
-    pub use crate::input::config::InputConfig;
+pub use crate::input::config::InputConfig;
 
-    /// `aether.input` runtime state (ADR-0021). Owns the substrate registry
-    /// handle (for subscriber-mailbox validation) plus the subscriber table
-    /// keyed by stream kind id. Plain-field shape (ADR-0078) — single-
-    /// threaded, every handler runs on the cap's dispatcher thread, so no
-    /// `Mutex` / `Arc<Atomic*>` is needed. The addressing identity is the
-    /// distinct ZST `InputCapability`.
-    pub struct InputCapabilityState {
-        pub registry: Arc<Registry>,
-        pub subscribers: HashMap<KindId, BTreeSet<MailboxId>>,
-    }
+/// `aether.input` runtime state (ADR-0021). Owns the substrate registry
+/// handle (for subscriber-mailbox validation) plus the subscriber table
+/// keyed by stream kind id. Plain-field shape (ADR-0078) — single-
+/// threaded, every handler runs on the cap's dispatcher thread, so no
+/// `Mutex` / `Arc<Atomic*>` is needed. The addressing identity is the
+/// distinct ZST `InputCapability`.
+pub struct InputCapabilityState {
+    pub registry: Arc<Registry>,
+    pub subscribers: HashMap<KindId, BTreeSet<MailboxId>>,
+}
 
-    impl InputCapabilityState {
-        /// Push one mail per subscriber for `K`. Routes through
-        /// [`NativeCtx::fanout`] so each subscriber-bound copy carries
-        /// the inbound `(mail_id, root)` as `parent_mail` +
-        /// `inherited_root` — the trace observer sees N children
-        /// fanning out under the same parent edge (ADR-0080 §6,
-        /// issue iamacoffeepot/aether#723).
-        pub fn fanout<K: Kind>(&self, ctx: &mut NativeCtx<'_>, payload: &K) {
-            let Some(subs) = self.subscribers.get(&K::ID) else {
-                return;
-            };
-            ctx.fanout(subs.iter().copied(), payload);
-        }
-    }
-
-    /// Shared validation: the mailbox id must name a live (non-dropped)
-    /// dispatchable mailbox. Issue 634 Phase 4 collapsed Component
-    /// and chassis-bound mailboxes into a single `Closure` variant —
-    /// trampolines and chassis caps both pass this check today.
-    /// Issue 838 added a `Sink` variant (synchronous-handler
-    /// mailboxes); production callers (the input stream fan-out)
-    /// only address trampoline mailboxes here, but accepting `Sink`
-    /// too keeps the check from rejecting legitimate sync-handler
-    /// subscribers if any future driver wants one.
-    pub fn validate_subscriber_mailbox(registry: &Registry, id: MailboxId) -> Result<(), String> {
-        match registry.entry(id) {
-            Some(MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)) => Ok(()),
-            Some(MailboxEntry::Dropped) => Err(format!("mailbox {id:?} already dropped")),
-            None => Err(format!("unknown mailbox id {id:?}")),
-        }
+impl InputCapabilityState {
+    /// Push one mail per subscriber for `K`. Routes through
+    /// [`NativeCtx::fanout`] so each subscriber-bound copy carries
+    /// the inbound `(mail_id, root)` as `parent_mail` +
+    /// `inherited_root` — the trace observer sees N children
+    /// fanning out under the same parent edge (ADR-0080 §6,
+    /// issue iamacoffeepot/aether#723).
+    pub fn fanout<K: Kind>(&self, ctx: &mut NativeCtx<'_>, payload: &K) {
+        let Some(subs) = self.subscribers.get(&K::ID) else {
+            return;
+        };
+        ctx.fanout(subs.iter().copied(), payload);
     }
 }
 
-#[actor(singleton)]
+/// Shared validation: the mailbox id must name a live (non-dropped)
+/// dispatchable mailbox. Issue 634 Phase 4 collapsed Component
+/// and chassis-bound mailboxes into a single `Closure` variant —
+/// trampolines and chassis caps both pass this check today.
+/// Issue 838 added a `Sink` variant (synchronous-handler
+/// mailboxes); production callers (the input stream fan-out)
+/// only address trampoline mailboxes here, but accepting `Sink`
+/// too keeps the check from rejecting legitimate sync-handler
+/// subscribers if any future driver wants one.
+pub fn validate_subscriber_mailbox(registry: &Registry, id: MailboxId) -> Result<(), String> {
+    match registry.entry(id) {
+        Some(MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)) => Ok(()),
+        Some(MailboxEntry::Dropped) => Err(format!("mailbox {id:?} already dropped")),
+        None => Err(format!("unknown mailbox id {id:?}")),
+    }
+}
+
+#[runtime]
 impl NativeActor for InputCapability {
     /// The runtime state this identity boots into (ADR-0122 split): the
     /// registry handle + subscriber table.
