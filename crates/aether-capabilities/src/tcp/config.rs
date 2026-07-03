@@ -1,5 +1,7 @@
 //! Init configs for the TCP listener and session actors (ADR-0090).
-//! Both carry `std::net` types and are native-only.
+//! Both are child-actor init bundles carrying raw `std::net` handles
+//! (`TcpListener` / `TcpStream`), consumed only by the runtime halves,
+//! so the module rides the `feature = "runtime"` gate.
 
 use std::net::{TcpListener, TcpStream};
 
