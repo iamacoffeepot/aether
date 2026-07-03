@@ -141,7 +141,7 @@ pub fn read_from_bytes(wasm: &[u8]) -> Result<Vec<KindDescriptor>, String> {
     for shape in kinds {
         let id = aether_data::KindId(kind_id_from_shape(&shape));
         let label = labels_by_id.get(&id);
-        descriptors.push(merge(shape, label));
+        descriptors.push(merge(shape, label)?);
     }
     Ok(descriptors)
 }
@@ -442,6 +442,25 @@ fn decode_records<T: DeserializeOwned>(
     Ok(())
 }
 
+/// Cap on `merge_schema` / `merge_variant` recursion depth. The nesting
+/// this recurses over comes straight from the component's wasm
+/// `aether.kinds` section — wire-controlled, not substrate-derived —
+/// so an unbounded depth would let a hostile or malformed manifest
+/// overflow the stack (CLAUDE.md's recursion-over-wire-data rule).
+const MAX_MERGE_DEPTH: usize = 64;
+
+/// Depth-cap check for `merge_schema`. Split out so the check reads as
+/// one line at the top of that function rather than an inline `if`
+/// block that pushes the function over clippy's line-count limit.
+fn check_merge_depth(depth: usize) -> Result<(), String> {
+    if depth > MAX_MERGE_DEPTH {
+        return Err(format!(
+            "{MANIFEST_SECTION}: schema nesting exceeds depth cap {MAX_MERGE_DEPTH}"
+        ));
+    }
+    Ok(())
+}
+
 /// Merge a positional `SchemaShape` with its parallel-shape
 /// `LabelNode` into a named `SchemaType`. `None` labels produce
 /// anonymous field/variant/type names; the shape drives every
@@ -449,14 +468,19 @@ fn decode_records<T: DeserializeOwned>(
 /// `Struct` and the other's an `Enum`) fall back to anonymous —
 /// structural decisions follow the schema side since that's what
 /// the canonical bytes (and `K::ID`) agreed on.
-fn merge(shape: KindShape, labels: Option<&KindLabels>) -> KindDescriptor {
+fn merge(shape: KindShape, labels: Option<&KindLabels>) -> Result<KindDescriptor, String> {
     let name = shape.name.into_owned();
-    let schema = merge_schema(&shape.schema, labels.map(|l| &l.root));
-    KindDescriptor { name, schema }
+    let schema = merge_schema(&shape.schema, labels.map(|l| &l.root), 0)?;
+    Ok(KindDescriptor { name, schema })
 }
 
-fn merge_schema(shape: &SchemaShape, label: Option<&LabelNode>) -> SchemaType {
-    match shape {
+fn merge_schema(
+    shape: &SchemaShape,
+    label: Option<&LabelNode>,
+    depth: usize,
+) -> Result<SchemaType, String> {
+    check_merge_depth(depth)?;
+    let schema = match shape {
         SchemaShape::Unit => SchemaType::Unit,
         SchemaShape::Bool => SchemaType::Bool,
         SchemaShape::Scalar(p) => SchemaType::Scalar(*p),
@@ -467,14 +491,16 @@ fn merge_schema(shape: &SchemaShape, label: Option<&LabelNode>) -> SchemaType {
                 Some(LabelNode::Option(cell)) => Some(&**cell),
                 _ => None,
             };
-            SchemaType::Option(SchemaCell::owned(merge_schema(inner, inner_label)))
+            let inner_ty = merge_schema(inner, inner_label, depth + 1)?;
+            SchemaType::Option(SchemaCell::owned(inner_ty))
         }
         SchemaShape::Vec(inner) => {
             let inner_label = match label {
                 Some(LabelNode::Vec(cell)) => Some(&**cell),
                 _ => None,
             };
-            SchemaType::Vec(SchemaCell::owned(merge_schema(inner, inner_label)))
+            let inner_ty = merge_schema(inner, inner_label, depth + 1)?;
+            SchemaType::Vec(SchemaCell::owned(inner_ty))
         }
         SchemaShape::Array { element, len } => {
             let element_label = match label {
@@ -482,7 +508,7 @@ fn merge_schema(shape: &SchemaShape, label: Option<&LabelNode>) -> SchemaType {
                 _ => None,
             };
             SchemaType::Array {
-                element: SchemaCell::owned(merge_schema(element, element_label)),
+                element: SchemaCell::owned(merge_schema(element, element_label, depth + 1)?),
                 len: *len,
             }
         }
@@ -504,12 +530,12 @@ fn merge_schema(shape: &SchemaShape, label: Option<&LabelNode>) -> SchemaType {
                         .cloned()
                         .unwrap_or_else(|| Cow::Owned(String::new()));
                     let field_label = field_labels.and_then(|labels| labels.get(idx));
-                    NamedField {
+                    Ok(NamedField {
                         name,
-                        ty: merge_schema(ft, field_label),
-                    }
+                        ty: merge_schema(ft, field_label, depth + 1)?,
+                    })
                 })
-                .collect();
+                .collect::<Result<Vec<_>, String>>()?;
             SchemaType::Struct {
                 fields: Cow::Owned(named_fields),
                 repr_c: *repr_c,
@@ -523,8 +549,10 @@ fn merge_schema(shape: &SchemaShape, label: Option<&LabelNode>) -> SchemaType {
             let merged: Vec<EnumVariant> = variants
                 .iter()
                 .enumerate()
-                .map(|(idx, v)| merge_variant(v, variant_labels.and_then(|vs| vs.get(idx))))
-                .collect();
+                .map(|(idx, v)| {
+                    merge_variant(v, variant_labels.and_then(|vs| vs.get(idx)), depth + 1)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
             SchemaType::Enum {
                 variants: Cow::Owned(merged),
             }
@@ -540,16 +568,21 @@ fn merge_schema(shape: &SchemaShape, label: Option<&LabelNode>) -> SchemaType {
                 _ => (None, None),
             };
             SchemaType::Map {
-                key: SchemaCell::owned(merge_schema(key, key_label)),
-                value: SchemaCell::owned(merge_schema(value, value_label)),
+                key: SchemaCell::owned(merge_schema(key, key_label, depth + 1)?),
+                value: SchemaCell::owned(merge_schema(value, value_label, depth + 1)?),
             }
         }
         SchemaShape::TypeId(id) => SchemaType::TypeId(*id),
-    }
+    };
+    Ok(schema)
 }
 
-fn merge_variant(shape: &aether_data::VariantShape, label: Option<&VariantLabel>) -> EnumVariant {
-    match shape {
+fn merge_variant(
+    shape: &aether_data::VariantShape,
+    label: Option<&VariantLabel>,
+    depth: usize,
+) -> Result<EnumVariant, String> {
+    let variant = match shape {
         aether_data::VariantShape::Unit { discriminant } => {
             let name = match label {
                 Some(VariantLabel::Unit { name }) => name.clone(),
@@ -571,8 +604,10 @@ fn merge_variant(shape: &aether_data::VariantShape, label: Option<&VariantLabel>
             let merged: Vec<SchemaType> = fields
                 .iter()
                 .enumerate()
-                .map(|(idx, ft)| merge_schema(ft, field_labels.and_then(|fl| fl.get(idx))))
-                .collect();
+                .map(|(idx, ft)| {
+                    merge_schema(ft, field_labels.and_then(|fl| fl.get(idx)), depth + 1)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
             EnumVariant::Tuple {
                 name,
                 discriminant: *discriminant,
@@ -599,19 +634,20 @@ fn merge_variant(shape: &aether_data::VariantShape, label: Option<&VariantLabel>
                         .and_then(|names| names.get(idx))
                         .cloned()
                         .unwrap_or_else(|| Cow::Owned(String::new()));
-                    NamedField {
+                    Ok(NamedField {
                         name: field_name,
-                        ty: merge_schema(ft, field_labels.and_then(|fl| fl.get(idx))),
-                    }
+                        ty: merge_schema(ft, field_labels.and_then(|fl| fl.get(idx)), depth + 1)?,
+                    })
                 })
-                .collect();
+                .collect::<Result<Vec<_>, String>>()?;
             EnumVariant::Struct {
                 name,
                 discriminant: *discriminant,
                 fields: Cow::Owned(named),
             }
         }
-    }
+    };
+    Ok(variant)
 }
 
 #[cfg(test)]
@@ -1005,6 +1041,46 @@ mod tests {
         };
         assert_eq!(inner_fields[0].name, "x");
         assert_eq!(inner_fields[1].name, "y");
+    }
+
+    /// Build a `SchemaShape::Option` chain `depth` levels deep around a
+    /// `Unit` leaf.
+    fn nested_option_shape(depth: usize) -> SchemaShape {
+        let mut shape = SchemaShape::Unit;
+        for _ in 0..depth {
+            shape = SchemaShape::Option(Box::new(shape));
+        }
+        shape
+    }
+
+    #[test]
+    fn merge_errors_past_max_merge_depth() {
+        // Tripwire: `merge`'s own depth cap must fire before native
+        // recursion over an attacker-controlled nesting depth overflows
+        // the stack (CLAUDE.md's recursion-over-wire-data rule).
+        let shape = KindShape {
+            name: Cow::Borrowed("test.deep"),
+            schema: nested_option_shape(MAX_MERGE_DEPTH + 2),
+        };
+        let err = merge(shape, None).unwrap_err();
+        assert!(err.contains("depth cap"), "err was: {err}");
+    }
+
+    #[test]
+    fn merge_succeeds_within_max_merge_depth() {
+        let shape = KindShape {
+            name: Cow::Borrowed("test.shallow"),
+            schema: nested_option_shape(4),
+        };
+        let desc = merge(shape, None).unwrap();
+        let mut schema = &desc.schema;
+        for _ in 0..4 {
+            let SchemaType::Option(inner) = schema else {
+                panic!("expected Option");
+            };
+            schema = &**inner;
+        }
+        assert_eq!(schema, &SchemaType::Unit);
     }
 
     // ADR-0033: `aether.kinds.inputs` reader. The macro emits
