@@ -2,8 +2,8 @@
 //!
 //! Projects a list of tagged-id strings onto [`ResolvedName`] via the
 //! runtime-registry arm of the ADR-0088 §2 chain
-//! (`thread_name::resolve_runtime`). The `#[actor] impl` in `mod.rs`
-//! delegates here.
+//! (`thread_name::resolve_runtime`). The `#[runtime] impl` in
+//! `runtime/mod.rs` delegates here.
 
 use aether_data::tagged_id;
 use aether_kinds::ResolvedName;

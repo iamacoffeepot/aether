@@ -1,0 +1,413 @@
+//! The `aether.inventory` runtime half (ADR-0122 identity/runtime split).
+//! Compiled only under `feature = "runtime"` (the `mod runtime;` declaration
+//! in the parent carries the gate), so a transport-only build of the
+//! `InventoryCapability` identity never names these types nor pulls
+//! `aether_substrate`. The substrate-typed imports are gated once by this
+//! module rather than line-by-line; the wire-projection helpers nest here as
+//! sibling files (`manifest.rs`, `resolve.rs`) covered by the same gate.
+
+// The moved `#[runtime] impl NativeActor for InventoryCapability` body
+// names the `#[runtime]` attribute, the cap identity, and the input/reply
+// kinds, which previously resolved at `mod.rs` root — now sourced here
+// beside the body.
+use aether_actor::runtime;
+
+use super::{InventoryCapability, ListHandlers, ListKinds, Manifest, Resolve};
+
+#[cfg(not(target_family = "wasm"))]
+use super::{HandlersResult, ListKindsResult, ManifestResult, ResolveResult};
+
+// The wire-projection helpers, nested under this `runtime` directory so the
+// one `mod runtime;` gate in the parent covers them (no per-sibling `#[cfg]`).
+mod manifest;
+mod resolve;
+
+pub use manifest::param_kind_wire;
+pub use resolve::resolve_ids;
+
+pub use aether_data::KindId;
+pub use aether_data::canonical::kind_id_from_parts;
+pub use aether_data::name_inventory::{handler_entries, name_entries, template_entries};
+pub use aether_data::wire;
+pub use aether_kinds::{HandlerEntryWire, KindDescriptorWire, NameEntryWire, TemplateEntryWire};
+pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub use aether_substrate::chassis::error::BootError;
+pub use aether_substrate::mail::registry::Registry;
+pub use std::sync::Arc;
+
+/// `aether.inventory` runtime state (ADR-0091 §2). Holds the substrate's
+/// shared `Arc<Registry>` — the same `Arc` `ComponentHostCapability`
+/// clones for `register_or_match_all` — so a load-time registration is
+/// visible to `on_list_kinds` the moment it returns. The `Manifest` /
+/// `Resolve` / `ListHandlers` arms are stateless reads of process-global
+/// link-time tables. The addressing identity is the distinct ZST
+/// `InventoryCapability`.
+pub struct InventoryCapabilityState {
+    pub registry: Arc<Registry>,
+}
+
+#[runtime]
+impl NativeActor for InventoryCapability {
+    /// The runtime state this identity boots into (ADR-0122 split): the
+    /// shared substrate `Arc<Registry>` the `ListKinds` arm projects.
+    type State = InventoryCapabilityState;
+
+    type Config = ();
+
+    /// ADR-0088 §6 chassis-owned mailbox. Registered on the desktop +
+    /// headless chassis (via `with_common_caps`), matching `aether.fs`.
+    const NAMESPACE: &'static str = "aether.inventory";
+
+    fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<InventoryCapabilityState, BootError> {
+        // Clone the substrate's shared `Arc<Registry>` — the same
+        // `Arc` `ComponentHostCapability` clones for
+        // `register_or_match_all` at `component.rs:170`. The shared
+        // `Arc` is the propagation channel per ADR-0091 §2: a
+        // load-time registration is visible to `on_list_kinds` the
+        // moment it returns.
+        let registry = Arc::clone(ctx.mailer().registry());
+        Ok(InventoryCapabilityState { registry })
+    }
+
+    /// Reply with the per-build reverse-lookup manifest: every
+    /// declared name + every instanced-family template.
+    ///
+    /// # Agent
+    /// Reply: `ManifestResult`. Carries `names` (declared mailbox
+    /// namespaces, kinds, transforms) + `templates` (instanced
+    /// families, preserving their `Bounded`/`Declared`/`Dynamic`
+    /// shape). Fold `names` into a hash → name map and expand the
+    /// `Bounded`/`Declared` templates locally; resolve `Dynamic`
+    /// families per-id via `aether.inventory.resolve`.
+    // The manifest is read from the process-global link-time
+    // inventories — `state.registry` is only consulted by
+    // `on_list_kinds`, so this arm takes `_state`.
+    #[handler]
+    fn on_manifest(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: Manifest,
+    ) -> ManifestResult {
+        let names = name_entries()
+            .map(|entry| NameEntryWire {
+                domain: entry.domain.to_vec(),
+                name: entry.name.into(),
+            })
+            .collect();
+        let templates = template_entries()
+            .map(|entry| TemplateEntryWire {
+                domain: entry.domain.to_vec(),
+                // The wire form carries the full `prefix ++ template`
+                // pattern; the split is an internal const-construction
+                // detail (ADR-0099 §5/§6 forward-feed).
+                template: entry.pattern().into_owned(),
+                param: param_kind_wire(&entry.param),
+            })
+            .collect();
+        ManifestResult { names, templates }
+    }
+
+    /// Reply with the substrate's live kind vocabulary: every
+    /// [`KindDescriptor`](aether_data::KindDescriptor) currently
+    /// registered in the engine's `Registry`, projected onto the
+    /// wire (id + name + wire-encoded
+    /// [`SchemaType`](aether_data::SchemaType)). ADR-0091 §1–§2.
+    ///
+    /// # Agent
+    /// Reply: `ListKindsResult`. The harness folds this into a
+    /// per-engine encode cache so a `send_mail` against a
+    /// component-defined kind encodes correctly the moment the
+    /// `aether.component.load` returns. Lazy-on-miss: the harness
+    /// calls this on the first `send_mail` for an unknown kind
+    /// name, then reuses the cached vocabulary until the next miss
+    /// (no TTL, no background poll). The schema rides as opaque
+    /// wire bytes (`schema_wire`) because `SchemaType` has
+    /// no `Schema` impl of its own; decode it with
+    /// `wire::from_bytes::<SchemaType>(&desc.schema_wire)`.
+    #[handler]
+    fn on_list_kinds(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: ListKinds,
+    ) -> ListKindsResult {
+        let kinds = state
+            .registry
+            .list_kind_descriptors()
+            .into_iter()
+            .map(|desc| {
+                // The schema rides as opaque wire bytes — see
+                // `KindDescriptorWire` for the rationale. The
+                // serialization is infallible for `SchemaType`
+                // (no `Map<String, _>` non-string-key edge cases
+                // because every nested field is a derive output).
+                let schema_wire = wire::to_vec(&desc.schema)
+                    .expect("SchemaType always wire-encodes (ADR-0118 canonical form)");
+                KindDescriptorWire {
+                    id: KindId(kind_id_from_parts(&desc.name, &desc.schema)),
+                    name: desc.name,
+                    schema_wire,
+                }
+            })
+            .collect();
+        ListKindsResult { kinds }
+    }
+
+    /// Resolve each requested tagged-id string to its origin name via
+    /// the runtime-registry arm of the reverse-lookup chain.
+    ///
+    /// # Agent
+    /// Reply: `ResolveResult`. One `ResolvedName { id, name }` per
+    /// requested id, in request order and echoing `id` for
+    /// correlation. `name` is `Some` for a dynamically-minted
+    /// instance the substrate has registered; `None` on a miss (or an
+    /// unparseable id), at which point the caller renders the
+    /// ADR-0064 tagged-id string itself. Call this only for ids a
+    /// locally-folded manifest couldn't resolve.
+    // Stateless arm — `resolve` reads the process-global runtime
+    // registry, not the cap state, so it takes `_state`.
+    #[handler]
+    fn on_resolve(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: Resolve,
+    ) -> ResolveResult {
+        ResolveResult {
+            resolved: resolve_ids(mail.ids),
+        }
+    }
+
+    /// Reply with the native handler manifest (ADR-0109 §5): every
+    /// `#[handler]` across every native actor linked into the
+    /// substrate, each carrying its owning `namespace`, input kind
+    /// (id + name), and declared reply kind id. Read from the
+    /// process-global link-time
+    /// [`HandlerEntry`](aether_data::name_inventory::HandlerEntry)
+    /// inventory the `#[actor]` macro populates — the native
+    /// analogue of the wasm `aether.kinds.inputs` custom section.
+    ///
+    /// # Agent
+    /// Reply: `HandlersResult`. One `HandlerEntryWire` per native
+    /// handler; `reply` is the kind a `-> R` handler answers with
+    /// (`None` for a fire-and-forget `-> ()` handler). Fold per
+    /// `namespace` to read each native cap (`aether.fs`,
+    /// `aether.render`, …) as a `describe_component`-style
+    /// `In -> Out` handler list.
+    // The manifest is read from the process-global link-time
+    // inventory, so this arm takes `_state`.
+    #[handler]
+    fn on_handlers(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: ListHandlers,
+    ) -> HandlersResult {
+        let handlers = handler_entries()
+            .map(|entry| HandlerEntryWire {
+                namespace: entry.namespace.into(),
+                id: entry.id,
+                name: entry.name.into(),
+                reply: entry.reply,
+            })
+            .collect();
+        HandlersResult { handlers }
+    }
+}
+
+#[cfg(all(test, feature = "runtime"))]
+mod tests {
+    use super::*;
+    use aether_actor::actor;
+    use aether_data::tagged_id;
+    use aether_data::{
+        MailboxId, SessionToken, ThreadId, Uuid, mailbox_id_from_name, thread_id_from_name,
+    };
+    use aether_kinds::ParamKindWire;
+    use aether_substrate::actor::native::binding::NativeBinding;
+    use aether_substrate::mail::mailer::Mailer;
+    use aether_substrate::mail::outbound::HubOutbound;
+    use aether_substrate::mail::registry::Registry;
+    use aether_substrate::mail::{Source, SourceAddr};
+    use aether_substrate::runtime::thread_name::{register, resolve_runtime};
+    use std::sync::Arc;
+
+    /// Runtime state + fully-wired test mailer + `NativeBinding`
+    /// transport. Handlers are called directly and return their
+    /// result; no egress channel decode needed (ADR-0112 `-> R`
+    /// migration).
+    struct Fixture {
+        transport: Arc<NativeBinding>,
+        state: InventoryCapabilityState,
+    }
+
+    fn fixture() -> Fixture {
+        let registry = Arc::new(Registry::new());
+        let (outbound, _rx) = HubOutbound::attached_loopback();
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
+        let transport = Arc::new(NativeBinding::new_for_test(
+            Arc::clone(&mailer),
+            MailboxId(0x1117),
+        ));
+        Fixture {
+            transport,
+            state: InventoryCapabilityState {
+                registry: Arc::clone(&registry),
+            },
+        }
+    }
+
+    fn session_ctx(transport: &Arc<NativeBinding>) -> NativeCtx<'_> {
+        let sender = Source::to(SourceAddr::Session(SessionToken(Uuid::nil())));
+        NativeCtx::new(
+            transport,
+            sender,
+            aether_data::MailId::NONE,
+            aether_data::MailId::NONE,
+        )
+    }
+
+    /// The served manifest carries a known chassis mailbox name
+    /// (`aether.fs`, a declared `NameEntry`) and a known instanced
+    /// family (`aether-worker-{N}`, a `Bounded` `TemplateEntry`).
+    /// Touching `FsCapability` forces its module — and the macro-
+    /// auto-emitted `NameEntry` — into this unit-test binary; the
+    /// substrate's `thread_name` module submits the worker template.
+    #[test]
+    fn manifest_contains_chassis_name_and_worker_template() {
+        // Force `FsCapability`'s `NameEntry` submission to link.
+        use crate::fs::FsCapability;
+        use aether_actor::Addressable;
+        assert_eq!(FsCapability::NAMESPACE, "aether.fs");
+        // Force the substrate's worker / root / instanced thread-name
+        // templates to link by referencing the resolve chain.
+        let _ = resolve_runtime(0);
+
+        let mut fix = fixture();
+        let mut ctx = session_ctx(&fix.transport);
+        let result = InventoryCapability::on_manifest(&mut fix.state, &mut ctx, Manifest {});
+        drop(ctx);
+
+        assert!(
+            result.names.iter().any(|n| n.name == "aether.fs"),
+            "manifest should carry the aether.fs chassis mailbox NameEntry; names: {:?}",
+            result.names.iter().map(|n| &n.name).collect::<Vec<_>>(),
+        );
+        // The worker template carries a `Bounded` `param` — an
+        // enumerable integer hole the client expands locally (ADR-0088 §4).
+        assert!(
+            result.templates.iter().any(|t| {
+                t.template == "aether-worker-{N}"
+                    && matches!(t.param, ParamKindWire::Bounded { .. })
+            }),
+            "manifest should carry the aether-worker-{{N}} Bounded template; templates: {:?}",
+            result
+                .templates
+                .iter()
+                .map(|t| &t.template)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// A registered dynamic-instance id resolves to its name; an
+    /// unregistered id and a malformed string both report `None`
+    /// (the latter without sinking its siblings). Order + `id` echo
+    /// are preserved.
+    // Constructs a well-formed mailbox id the runtime registry never holds
+    // to drive the miss path — incidental test data, not a real address.
+    #[allow(clippy::disallowed_methods)]
+    #[test]
+    fn resolve_returns_registered_name_and_none_on_miss() {
+        // Register a dynamic instance name the way the runtime name
+        // builders do (a name no static template instantiates).
+        let registered = ThreadId::from_name("aether-instanced-inventory-test:7");
+        register(registered.0, "aether-instanced-inventory-test:7");
+        let registered_tag = tagged_id::encode(registered.0).expect("ThreadId always tag-encodes");
+
+        // An id the registry has never seen.
+        let unseen = thread_id_from_name("aether-instanced-never-registered");
+        let unseen_tag = tagged_id::encode(unseen.0).expect("ThreadId always tag-encodes");
+
+        // A well-formed mailbox id that the runtime registry doesn't
+        // hold (statics live in the static map, not the dynamic arm),
+        // so `resolve_runtime` misses it -> None.
+        let mailbox = mailbox_id_from_name("aether.fs");
+        let mailbox_tag = tagged_id::encode(mailbox.0).expect("MailboxId tag-encodes");
+
+        let mut fix = fixture();
+        let mut ctx = session_ctx(&fix.transport);
+        let result = InventoryCapability::on_resolve(
+            &mut fix.state,
+            &mut ctx,
+            Resolve {
+                ids: vec![
+                    registered_tag.clone(),
+                    unseen_tag.clone(),
+                    mailbox_tag.clone(),
+                    "not-a-tagged-id".to_string(),
+                ],
+            },
+        );
+        drop(ctx);
+        assert_eq!(result.resolved.len(), 4, "one entry per requested id");
+
+        assert_eq!(result.resolved[0].id, registered_tag);
+        assert_eq!(
+            result.resolved[0].name.as_deref(),
+            Some("aether-instanced-inventory-test:7"),
+            "registered dynamic instance reverses to its name",
+        );
+
+        assert_eq!(result.resolved[1].id, unseen_tag);
+        assert_eq!(
+            result.resolved[1].name, None,
+            "unregistered id misses the runtime registry",
+        );
+
+        assert_eq!(result.resolved[2].id, mailbox_tag);
+        assert_eq!(
+            result.resolved[2].name, None,
+            "a static name lives in the manifest, not the dynamic arm",
+        );
+
+        assert_eq!(result.resolved[3].id, "not-a-tagged-id");
+        assert_eq!(
+            result.resolved[3].name, None,
+            "a malformed id reports None without aborting the batch",
+        );
+    }
+
+    /// A native test cap with a synchronous `-> R` handler — the
+    /// surface ADR-0109 §5 makes `aether.inventory.handlers` carry.
+    /// Its `#[actor]` expansion submits a link-time `HandlerEntry`
+    /// declaring `ProbeReq -> ProbeReply`.
+    #[derive(
+        serde::Serialize, serde::Deserialize, aether_data::Kind, aether_data::Schema, Debug, Clone,
+    )]
+    #[kind(name = "aether.test.inventory_handlers.req")]
+    struct ProbeReq {}
+
+    #[derive(
+        serde::Serialize, serde::Deserialize, aether_data::Kind, aether_data::Schema, Debug, Clone,
+    )]
+    #[kind(name = "aether.test.inventory_handlers.reply")]
+    struct ProbeReply {}
+
+    struct ReplyProbeCap;
+
+    #[actor]
+    impl NativeActor for ReplyProbeCap {
+        type Config = ();
+        const NAMESPACE: &'static str = "aether.test.inventory_handlers.probe";
+
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self)
+        }
+
+        /// A synchronous `-> ProbeReply` handler — the reply contract
+        /// the link-time inventory captures. Stateless: the link-time
+        /// `HandlerEntry` is what the test reads, not handler state.
+        #[allow(clippy::unused_self)]
+        #[handler]
+        fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _mail: ProbeReq) -> ProbeReply {
+            ProbeReply {}
+        }
+    }
+}
