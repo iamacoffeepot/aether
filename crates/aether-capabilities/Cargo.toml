@@ -190,6 +190,13 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # builds only, so this never enters the production graph
 # `cargo tree -p aether-capabilities -e normal` reports.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+# iamacoffeepot/aether#2529: `tests/source_invariants.rs` parses this crate's
+# own `src/**/*.rs` and walks each AST to enforce the pub-or-private (#2471)
+# and runtime-half-is-a-file (#2479) source-shape rules — an AST-exact check
+# the compiler is indifferent to, run through `cargo test` so both local
+# preflight and CI cover it. `syn` is already deep in the transitive graph
+# (every derive macro pulls it), so this dev-dep is near-free.
+syn = { workspace = true, features = ["full", "visit", "parsing"] }
 
 [lints]
 workspace = true
