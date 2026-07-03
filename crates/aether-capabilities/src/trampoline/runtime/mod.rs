@@ -211,11 +211,11 @@ impl NativeActor for WasmTrampoline {
     /// dispatch shim do the rest.
     #[fallback]
     fn forward_to_wasm(state: &mut Self::State, ctx: &mut NativeCtx<'_>, env: &Envelope) -> bool {
-        // ADR-0097: deliver the inbound, then drain any sibling spawn
+        // ADR-0097: deliver the inbound, then drain every sibling spawn
         // the guest staged during `deliver`. The block scopes the
         // `&mut component` borrow so `spawn_sibling` can read the
         // trampoline's other fields afterward.
-        let pending = {
+        let pendings = {
             let Some(component) = state.component.as_mut() else {
                 tracing::warn!(
                     target: "aether_capabilities::trampoline",
@@ -263,9 +263,9 @@ impl NativeActor for WasmTrampoline {
                     state.mailbox, env.kind_name,
                 ));
             }
-            component.take_pending_spawn()
+            component.drain_pending_spawns()
         };
-        if let Some(pending) = pending {
+        for pending in pendings {
             state.spawn_sibling(ctx, pending);
         }
         true
