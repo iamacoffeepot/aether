@@ -12,9 +12,8 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use aether_data::MailboxId;
-
-pub use core::iter::once;
-pub use core::mem::swap;
+use core::iter::once;
+use core::mem::swap;
 
 pub use crate::input::{InputCapability, InputMailboxExt};
 pub use crate::lifecycle::{LifecycleCapability, LifecycleMailboxExt};

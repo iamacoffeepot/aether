@@ -42,9 +42,10 @@ use aether_rpc::rpc::PeerKind;
 
 // The standalone connection plumbing (sidecar event type, per-connection
 // state, reader loop, oversize guard) lives in `connection`; the runtime
-// half `use`s it. Native-only — it owns a `TcpStream` + OS threads, elided
-// on the wasm marker build.
-#[cfg(not(target_family = "wasm"))]
+// half `use`s it. It names `aether_substrate` types and has no consumer
+// outside `runtime.rs`, so it rides the `feature = "runtime"` gate rather
+// than `not(wasm)` — a transport-only native build never compiles it.
+#[cfg(feature = "runtime")]
 mod connection;
 
 #[cfg(test)]

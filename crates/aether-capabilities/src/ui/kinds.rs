@@ -1,9 +1,10 @@
-use serde::{Deserialize, Serialize};
+//! `aether.ui` widget kinds (ADR-0107). Immediate-mode: the component
+//! lays out and sends these each frame; the [`UiCapability`](super::UiCapability)
+//! cap translates them into `draw_solid_quads` and `draw_text` calls the
+//! same tick. Screen-space; `rect` is `[x, y, width, height]` in window
+//! pixels.
 
-// ADR-0107 `aether.ui` widget kinds. Immediate-mode: the component
-// lays out and sends these each frame; the `aether.ui` cap translates
-// them to `draw_solid_quads` and `draw_text` calls the same tick.
-// Screen-space; `rect` is `[x, y, width, height]` in window pixels.
+use serde::{Deserialize, Serialize};
 
 /// `aether.ui.panel` — draw a flat-colored panel at `rect` in
 /// screen-pixel space. `color` is a linear RGBA value; the alpha

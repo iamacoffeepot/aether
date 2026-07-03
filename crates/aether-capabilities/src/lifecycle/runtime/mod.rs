@@ -93,6 +93,94 @@ pub struct LifecycleCapabilityState {
     pub mailer: Arc<Mailer>,
 }
 
+/// Read-only inspect surface on the runtime state (ADR-0122 split).
+/// Production callers observe lifecycle progress via subscribed stage
+/// broadcasts rather than peeking at these.
+impl LifecycleCapabilityState {
+    /// Read-only access to the current state's kind id.
+    #[must_use]
+    pub fn current_state(&self) -> KindId {
+        self.current_state
+    }
+
+    /// True once the lifecycle has broadcast a terminal state and
+    /// further advances are no-ops.
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        self.terminal_reached
+    }
+
+    /// True if a [`Quit`] mail has arrived but not yet been consumed.
+    #[must_use]
+    pub fn quit_pending(&self) -> bool {
+        self.quit_pending
+    }
+}
+
+/// Construction-level state fixture: a Render→Present→Shutdown
+/// data graph + a fresh mailer, built directly (no chassis boot),
+/// with the supplied advance timeout. Reachable from
+/// `mod settlement`'s descendant tests via module privacy.
+#[cfg(test)]
+fn test_cap(advance_timeout: Duration) -> LifecycleCapabilityState {
+    use aether_kinds::{Present, Render, Shutdown};
+    use aether_substrate::mail::registry::Registry;
+
+    let graph = LifecycleGraphData::builder()
+        .state::<Render>()
+        .next::<Present>()
+        .state::<Present>()
+        .next::<Shutdown>()
+        .quit::<Shutdown>()
+        .terminal::<Shutdown>()
+        .start::<Render>()
+        .build()
+        .expect("test setup: graph builds");
+    let mailer = Arc::new(Mailer::new(Arc::new(Registry::default())));
+    LifecycleCapabilityState {
+        current_state: graph.start(),
+        graph,
+        subscribers: BTreeMap::new(),
+        terminal_reached: false,
+        quit_pending: false,
+        pending: None,
+        advance_timeout,
+        settlement_latency_ewma: None,
+        last_slow_warn: None,
+        mailer,
+    }
+}
+
+/// A `Tick`→`Shutdown` graph fixture (the round-trip test wants
+/// `Tick` as a declared stage, which [`test_cap`]'s Render-rooted
+/// graph doesn't carry).
+#[cfg(test)]
+fn tick_start_graph_cap() -> LifecycleCapabilityState {
+    use aether_kinds::{Shutdown, Tick};
+    use aether_substrate::mail::registry::Registry;
+
+    let graph = LifecycleGraphData::builder()
+        .state::<Tick>()
+        .next::<Shutdown>()
+        .terminal::<Shutdown>()
+        .start::<Tick>()
+        .build()
+        .expect("test setup: tick graph builds");
+    let mailer = Arc::new(Mailer::new(Arc::new(Registry::default())));
+    LifecycleCapabilityState {
+        current_state: graph.start(),
+        graph,
+        subscribers: BTreeMap::new(),
+        terminal_reached: false,
+        quit_pending: false,
+        pending: None,
+        advance_timeout: Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT),
+        settlement_latency_ewma: None,
+        last_slow_warn: None,
+        mailer,
+    }
+}
+
 #[runtime]
 impl NativeActor for LifecycleCapability {
     /// The runtime state this identity boots into (ADR-0122 split): the
@@ -521,9 +609,8 @@ impl NativeActor for LifecycleCapability {
     }
 }
 
-#[cfg(all(test, feature = "runtime"))]
+#[cfg(test)]
 mod tests {
-    use super::super::{test_cap, tick_start_graph_cap};
     use super::*;
     use aether_kinds::{Present, Render, Tick};
 

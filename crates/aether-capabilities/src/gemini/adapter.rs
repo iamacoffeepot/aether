@@ -13,7 +13,7 @@ use crate::shared::contentgen::adapter::{
     AdapterUsage, GeminiAdapter, GeminiArtifact, GeminiImageRequest, GeminiMusicRequest,
     GeminiResponse,
 };
-use crate::shared::contentgen::shared;
+use crate::shared::contentgen::transport;
 
 use super::{AspectRatio, GeminiError, ImageSize, ThinkingLevel};
 use super::{error, lyria, nanobanana};
@@ -48,7 +48,7 @@ impl UreqGeminiAdapter {
     #[must_use]
     pub fn new(api_key: String, timeout: Duration) -> Self {
         Self {
-            agent: shared::agent(),
+            agent: transport::agent(),
             api_key,
             timeout,
         }
@@ -75,7 +75,7 @@ impl UreqGeminiAdapter {
             .body(body_bytes)
             .map_err(|e| format!("build request: {e}"))?;
         let (status, retry_after_millis, text) =
-            shared::run_request(&self.agent, http_req, self.timeout)?;
+            transport::run_request(&self.agent, http_req, self.timeout)?;
         if !(200..300).contains(&status) {
             return Err(format!(
                 "status={status} retry_after_millis={retry_after_millis:?} body={text}"

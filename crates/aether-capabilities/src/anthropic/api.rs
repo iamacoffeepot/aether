@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use ureq::http::Request;
 
 use crate::shared::contentgen::adapter::{AdapterUsage, AnthropicRequest, AnthropicResponse};
-use crate::shared::contentgen::shared;
+use crate::shared::contentgen::transport;
 
 /// Official Messages API endpoint.
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -46,7 +46,7 @@ impl UreqAnthropicAdapter {
     #[must_use]
     pub fn new(api_key: String, timeout: Duration) -> Self {
         Self {
-            agent: shared::agent(),
+            agent: transport::agent(),
             api_key,
             timeout,
         }
@@ -70,7 +70,7 @@ impl UreqAnthropicAdapter {
             .map_err(|e| format!("build request: {e}"))?;
 
         let (status, retry_after_millis, text) =
-            shared::run_request(&self.agent, http_req, self.timeout)?;
+            transport::run_request(&self.agent, http_req, self.timeout)?;
 
         if !(200..300).contains(&status) {
             // Encode the status + retry-after into the error string so
