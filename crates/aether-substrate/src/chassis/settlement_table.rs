@@ -82,7 +82,7 @@
 //! probe sweep as a fail-fast (it cannot happen at the occupancy the
 //! stress tests or realistic fleets reach).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering, fence};
 
 use aether_data::{MailId, MailboxId};
 
@@ -204,7 +204,8 @@ impl SettlementTable {
         }
         let sender = slot.sender.load(Ordering::Relaxed);
         let correlation = slot.correlation.load(Ordering::Relaxed);
-        let sv2 = slot.sv.load(Ordering::Acquire);
+        fence(Ordering::Acquire);
+        let sv2 = slot.sv.load(Ordering::Relaxed);
         (sv1 == sv2).then_some((sender, correlation))
     }
 
