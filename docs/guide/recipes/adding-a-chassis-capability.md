@@ -13,6 +13,9 @@ This is the native half of the actor model. The authoring shape — `init`
 read that first if the `#[actor]` shape is new. The capability-specific
 parts are the host machinery: where the code lives, the builder
 registration that publishes the mailbox, and the in-process test path.
+For the normative module shape every capability converges on — directory
+layout, identity/runtime split, test placement — see
+[Capability module anatomy](../capability-anatomy.md).
 
 ## The exemplar
 
