@@ -31,7 +31,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
-use aether_capabilities::trace_walk::TreeWalk;
+use aether_capabilities::trace::walk::TreeWalk;
 use aether_data::{Kind, KindId, SessionToken, Uuid, encode_empty};
 #[cfg(test)]
 use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};

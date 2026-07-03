@@ -38,7 +38,7 @@ pub use runtime::RpcServerHandle;
 
 // Named at file root so the runtime half reaches it through `super::`
 // (`RpcServerState` stores `peer_kind: PeerKind`).
-use aether_rpc::rpc::PeerKind;
+use crate::rpc::wire::PeerKind;
 
 // The standalone connection plumbing (sidecar event type, per-connection
 // state, reader loop, oversize guard) lives in `connection`; the runtime

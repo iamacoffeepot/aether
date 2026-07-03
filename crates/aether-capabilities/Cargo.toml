@@ -108,18 +108,14 @@ aether-actor = { path = "../aether-actor" }
 aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
-# ADR-0102: the RPC wire vocabulary + `Call` client + the trace walk
-# were extracted to `aether-rpc` (a crate with no native deps). This
-# crate re-exports them at their original paths (`rpc::*`,
-# `trace_walk::*`) and keeps the substrate-bound `RpcServerCapability`
-# next to them. Always-on + target-agnostic — the wire types ride the
-# wasm-header build too.
-aether-rpc = { path = "../aether-rpc" }
 # Issue 1464: the `mat4_apply` first-party transform rebuilds a `Mat4`
 # / `Vec4` from the wire `[f32; N]` arrays. Always-on + target-agnostic
 # (no_std), so it rides the wasm-header-only build too.
 aether-math = { path = "../aether-math" }
-serde = { workspace = true, default-features = false, features = ["derive"] }
+# `alloc` rides along for the `rpc::wire` + `trace_walk` modules (folded
+# in per ADR-0124), whose owned-`String`/`Vec` wire types need serde's
+# alloc impls even in the marker-only isolated build.
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 
 # Native-only: gated behind the `runtime` feature so wasm builds
 # don't drag in wasmtime / cpal / wgpu transitively.
