@@ -1,14 +1,23 @@
-//! Shared test-support: a minimal echo actor plus its request / reply
-//! kinds, used by the `rpc::server` round-trip tests (the client half
-//! lives in `aether-rpc` per ADR-0102) and the `engine::proxy` test.
+//! Test-support for the RPC server round-trip path: a minimal echo actor
+//! plus its request / reply kinds — the far-end receiver of an RPC `Call`
+//! that actually replies. Used by the `rpc::server` round-trip tests
+//! (the client half lives in `aether-rpc` per ADR-0102) and by the
+//! `engine::proxy` test, which forwards onto this same `Call` path
+//! through a booted `RpcServerCapability`.
+//!
+//! Lives under `rpc::server` (not the crate root) because both consumers
+//! are RPC-server round-trips — `engine::proxy` already reaches into
+//! `crate::rpc::server` for the server cap. The whole module is
+//! `#[cfg(test)] pub mod` (gated at its `mod` declaration in the server
+//! `mod.rs`): `pub` only exists in test builds, so it is never part of
+//! the cap's shipped surface, and it stays reachable crate-wide from the
+//! sibling `engine::proxy` subtree.
 //!
 //! The kinds live at this module's root (not nested in a `mod tests`)
 //! so the `Kind` derive's inventory submission stays addressable from a
 //! path the linker keeps — and so the derive registers them in
 //! `aether_kinds::descriptors::all()` for the test substrate's registry
-//! walk. The whole module is `#[cfg(test)]` (gated at the `mod`
-//! declaration in `lib.rs`): it is test scaffolding, not part of
-//! the cap's shipped surface.
+//! walk.
 
 use serde::{Deserialize, Serialize};
 

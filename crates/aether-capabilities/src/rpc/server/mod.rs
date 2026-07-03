@@ -51,6 +51,14 @@ mod connection;
 #[cfg(test)]
 mod tests;
 
+// Round-trip test scaffolding (echo actor + its kinds) — the far-end
+// receiver of an RPC `Call`. `pub` so the sibling `engine::proxy` subtree
+// (which forwards onto this same `Call` path through a booted
+// `RpcServerCapability`) can reach it; `#[cfg(test)]`, so the `pub` never
+// reaches the cap's shipped surface.
+#[cfg(test)]
+pub mod test_echo;
+
 /// `aether.rpc.server` cap **identity** (ADR-0122 identity/runtime split,
 /// ADR-0123 struct-hosted form). A ZST carrying only the addressing —
 /// `Addressable` (`NAMESPACE`, `Resolver`), the per-handler `HandlesKind`

@@ -2,16 +2,19 @@
 //! `#[transform]` here links into both `aether-substrate-bundle` (the
 //! headless binary's `TransformRegistry::from_inventory`) and
 //! `aether-mcp` (`describe_transforms`), so the link-time inventory
-//! submission populates both surfaces with no extra wiring.
+//! submission populates both surfaces with no extra wiring. Co-located
+//! with the `Mat4Apply` kind it consumes.
 //!
-//! These ship in the production binaries — they are not `#[cfg(test)]`
-//! like the `aether.fs` fetch fixtures' `double_fs` / `seed_fs` transforms.
+//! Native-only: the `aether.fs` `fetch` verb that runs transforms is
+//! non-wasm, and no wasm consumer runs transforms, so the whole module
+//! is `#[cfg(not(target_family = "wasm"))]`-gated at its `mod`
+//! declaration rather than carried dead on the wasm-header-only build.
 //!
 //! `mat4_apply` is ADR-0048's first first-party transform — a generic
 //! linear-algebra node.
 
+use crate::Mat4Apply;
 use aether_data::transform;
-use aether_kinds::Mat4Apply;
 use aether_math::Vec4;
 
 /// Apply a 4×4 matrix to a 4-vector, `M · v` (ADR-0048's first
@@ -34,7 +37,7 @@ fn mat4_apply(input: Mat4Apply) -> Vec4 {
 #[cfg(test)]
 mod tests {
     use super::mat4_apply;
-    use aether_kinds::Mat4Apply;
+    use crate::Mat4Apply;
     use aether_math::{Mat4, Vec4};
 
     #[test]

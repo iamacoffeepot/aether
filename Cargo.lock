@@ -70,7 +70,6 @@ dependencies = [
  "aether-codec",
  "aether-data",
  "aether-kinds",
- "aether-math",
  "aether-substrate",
  "bytemuck",
  "clap",

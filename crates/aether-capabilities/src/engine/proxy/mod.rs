@@ -121,9 +121,9 @@ mod tests {
         HeartbeatParams, ProxyReplySink,
     };
     use crate::engine::kinds::ForwardEnvelope;
+    use crate::rpc::server::test_echo::{TestEchoActor, TestEchoRequest};
     use crate::rpc::server::{RpcServerCapability, RpcServerConfig, RpcServerHandle};
     use crate::rpc::{HelloAck, PeerKind, WIRE_VERSION, WireFrame};
-    use crate::test_echo::{TestEchoActor, TestEchoRequest};
     use crate::trace::TraceDispatchCapability;
     use aether_actor::Addressable;
     use aether_codec::frame::{read_frame, write_frame};
