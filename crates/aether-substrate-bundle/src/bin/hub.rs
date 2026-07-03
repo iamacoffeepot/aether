@@ -10,31 +10,15 @@
 #![allow(clippy::print_stderr)]
 #![allow(clippy::print_stdout)]
 
-use aether_capabilities::EngineConfigLayer;
-use aether_substrate::config::{KnobKind, KnobRecord, dump_config};
 use aether_substrate_bundle::cli::HubCli;
 use aether_substrate_bundle::hub::{Chassis, HubChassis, HubEnv};
+use aether_substrate_bundle::hub_config_dump;
 use clap::Parser as _;
-use confique::Config as _;
-
-/// `AETHER_RPC_PORT` is the hub's chassis-special bind-port knob —
-/// resolved via `HubCli --rpc-port` rather than an `EngineConfig`
-/// field, so it cannot ride the `EngineConfigLayer::META` walk and
-/// stays a hand `KnobRecord`.
-const RPC_PORT_RECORD: KnobRecord = KnobRecord {
-    env_key: "AETHER_RPC_PORT",
-    doc: "aether.rpc.server bind port (default 8901).",
-    default: Some("8901"),
-    kind: KnobKind::HandRegistered,
-};
 
 fn main() -> anyhow::Result<()> {
     let cli = HubCli::parse();
     if cli.config {
-        print!(
-            "{}",
-            dump_config(&[&EngineConfigLayer::META], &[RPC_PORT_RECORD])
-        );
+        print!("{}", hub_config_dump());
         return Ok(());
     }
     // `--describe` (ADR-0115, issue 1953): print this binary's manifest —
@@ -47,7 +31,7 @@ fn main() -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    let chassis = HubChassis::build(HubEnv::from_env_with_argv(&cli))?;
+    let chassis = HubChassis::build(HubEnv::from_env_with_argv(&cli)?)?;
     eprintln!(
         "aether-substrate-bundle: hub chassis initialised (profile={})",
         HubChassis::PROFILE,

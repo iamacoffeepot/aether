@@ -26,10 +26,10 @@ use aether_capabilities::lifecycle::LifecycleGraphData;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
-    FsCapability, GeminiCapability, GeminiConfig, HttpCapability, HttpServerCapability,
-    HttpServerConfig, InputCapability, InputConfig, InventoryCapability, LifecycleConfig,
-    TcpCapability, TextCapability, UiCapability, fs::NamespaceRoots, http::HttpConfig,
-    trace::TraceDispatchCapability,
+    EngineConfigLayer, FsCapability, GeminiCapability, GeminiConfig, HttpCapability,
+    HttpServerCapability, HttpServerConfig, InputCapability, InputConfig, InventoryCapability,
+    LifecycleConfig, TcpCapability, TextCapability, UiCapability, fs::NamespaceRoots,
+    http::HttpConfig, trace::TraceDispatchCapability,
 };
 use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
 // The `aether.trajectory` recorder cap moved to `aether-labyrinth` (issue
@@ -66,7 +66,8 @@ use crate::headless::driver::TickConfigLayer;
 pub const CHASSIS_KNOBS: &[KnobRecord] = &[
     KnobRecord {
         env_key: "AETHER_RPC_PORT",
-        doc: "aether.rpc.server bind port (desktop/headless skip the server when unset).",
+        doc: "aether.rpc.server bind port; desktop/headless skip the server when unset, hub always \
+              binds (default 8901).",
         default: None,
         kind: KnobKind::HandRegistered,
     },
@@ -325,6 +326,50 @@ fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
 pub fn chassis_config_dump() -> String {
     let (metas, records) = chassis_registry();
     dump_config(metas, &records)
+}
+
+/// The hub chassis config registry: the full shared [`chassis_registry`]
+/// plus the two hub-only additions — `EngineConfigLayer::META` (the
+/// engines-cap heartbeat / proxy / disk-budget knobs only the hub wires)
+/// and the `AETHER_ENGINE_STORE_ROOT` hand knob (the engines cap's
+/// inline ops override, issue 1968). The hub reads the *full fleet* set
+/// rather than only its own knobs because a hub-spawned substrate
+/// inherits the hub's process environment, so fleet-wide cap knobs
+/// legitimately sit in the hub's env destined for the spawned engine.
+/// Shared by [`hub_known_keys`] (e1's sweep) and [`hub_config_dump`]
+/// (e2's `--config`) so both read one source of truth (ADR-0090 §4).
+fn hub_chassis_registry() -> (Vec<&'static Meta>, Vec<KnobRecord>) {
+    let (metas, mut records) = chassis_registry();
+    let mut metas: Vec<&'static Meta> = metas.to_vec();
+    metas.push(&EngineConfigLayer::META);
+    records.push(KnobRecord {
+        env_key: "AETHER_ENGINE_STORE_ROOT",
+        doc: "Parent directory for the engines cap's per-engine handle-store dirs; ops escape \
+              hatch (unset falls back to the platform data dir, then the system temp dir).",
+        default: None,
+        kind: KnobKind::HandRegistered,
+    });
+    (metas, records)
+}
+
+/// Assemble the hub chassis [`KnownKeys`] set (ADR-0090 §4): the full
+/// fleet registry (`hub_chassis_registry`). The hub's boot sweep
+/// (`HubEnv::from_env_with_argv`) validates the process env against
+/// this, mirroring the desktop / headless sweeps.
+#[must_use]
+pub fn hub_known_keys() -> KnownKeys {
+    let (metas, records) = hub_chassis_registry();
+    known_keys(&metas, &records)
+}
+
+/// Render the `--config` discovery dump for the hub chassis
+/// (ADR-0090 §4): the full fleet registry plus the hub-only engine
+/// knobs, so an operator sees every knob that will take effect on the
+/// hub and the substrates it spawns.
+#[must_use]
+pub fn hub_config_dump() -> String {
+    let (metas, records) = hub_chassis_registry();
+    dump_config(&metas, &records)
 }
 
 /// Build the single-stage lifecycle config the headless chassis runs
@@ -808,6 +853,37 @@ mod tests {
         ] {
             assert!(known.contains(key), "chassis_known_keys missing {key}");
         }
+    }
+
+    #[test]
+    fn hub_known_keys_includes_engine_and_fleet_and_store_root() {
+        // The hub composition this crate owns: the shared registry
+        // unioned with the two hub-only additions — the engines-cap
+        // `EngineConfigLayer::META` keys, the `AETHER_ENGINE_STORE_ROOT`
+        // hand knob, and (because a hub-spawned substrate inherits the
+        // hub's env) the fleet cap keys the shared registry carries.
+        let known = super::hub_known_keys();
+        assert!(
+            known.contains("AETHER_HUB_HEARTBEAT_INTERVAL_SECS"),
+            "AETHER_HUB_HEARTBEAT_INTERVAL_SECS must be a known hub key",
+        );
+        assert!(
+            known.contains("AETHER_ENGINE_STORE_ROOT"),
+            "AETHER_ENGINE_STORE_ROOT must be a known hub key",
+        );
+        assert!(
+            known.contains("AETHER_AUDIO_DISABLE"),
+            "fleet cap keys must stay in the hub known-key set (spawned substrates inherit \
+             the hub's env)",
+        );
+    }
+
+    #[test]
+    fn hub_config_dump_lists_an_engine_knob() {
+        // e2's hub `--config` walks the same registry as e1's sweep, so
+        // the hub-only engine knobs render in the dump.
+        let dump = super::hub_config_dump();
+        assert!(dump.contains("AETHER_HUB_HEARTBEAT_INTERVAL_SECS"));
     }
 
     #[test]

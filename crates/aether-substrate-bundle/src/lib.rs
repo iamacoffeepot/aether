@@ -27,7 +27,9 @@
 pub mod autoload;
 pub mod bundle_pack;
 mod chassis_common;
-pub use chassis_common::{binary_manifest, chassis_config_dump, common_cap_namespaces};
+pub use chassis_common::{
+    binary_manifest, chassis_config_dump, common_cap_namespaces, hub_config_dump, hub_known_keys,
+};
 pub mod chassis_root;
 pub mod cli;
 pub mod desktop;
