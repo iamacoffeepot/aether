@@ -50,7 +50,7 @@ use std::alloc::{Layout, alloc, dealloc};
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::slice;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 /// Backing-buffer alignment. `BlobHeader` and `MailEntry` are 8-aligned
 /// (`u64` fields), and every sub-record is padded to a multiple of 8, so
@@ -173,7 +173,7 @@ pub struct MailRing {
     /// Live bytes currently occupied by un-reclaimed blobs, tracked so
     /// free-space math is a single subtraction rather than a cursor
     /// comparison that has to disambiguate full-vs-empty.
-    live: UnsafeCell<usize>,
+    live: AtomicUsize,
     /// Producer-only FSM state for the in-place blob build (2c). Touched
     /// only by `open_blob` / `append` / `seal`, all on the producer
     /// thread — never by consumers — so it rides the same single-writer
@@ -249,7 +249,7 @@ impl MailRing {
             cap,
             write: AtomicU32::new(0),
             front: AtomicU32::new(0),
-            live: UnsafeCell::new(0),
+            live: AtomicUsize::new(0),
             build: UnsafeCell::new(BuildState::Closed),
             _backing: BufOwner { ptr, layout },
         }
@@ -265,9 +265,7 @@ impl MailRing {
     /// (reads the producer-owned `live` counter).
     #[must_use]
     pub fn live_bytes(&self) -> usize {
-        // SAFETY: `live` is only ever touched by the producer thread, which
-        // is the sole caller of this and the mutating methods.
-        unsafe { *self.live.get() }
+        self.live.load(Ordering::Relaxed)
     }
 
     /// Bytes of contiguous-or-wrapped free space the producer could use.
@@ -386,14 +384,11 @@ impl MailRing {
             start + occupied
         };
         self.write.store(new_write as u32, Ordering::Relaxed);
-        // SAFETY: producer-only mutation of the live counter.
-        unsafe {
-            *self.live.get() += occupied;
-            if start == 0 && write != 0 {
-                // We wrapped: the filler bytes over the old tail are now
-                // live too (reclaimed lazily like any other blob).
-                *self.live.get() += tail_room;
-            }
+        self.live.fetch_add(occupied, Ordering::Relaxed);
+        if start == 0 && write != 0 {
+            // We wrapped: the filler bytes over the old tail are now
+            // live too (reclaimed lazily like any other blob).
+            self.live.fetch_add(tail_room, Ordering::Relaxed);
         }
         Ok(locs)
     }
@@ -662,11 +657,7 @@ impl MailRing {
             }
             if tail_room > 0 {
                 self.write_filler(write, tail_room);
-                // SAFETY: producer-only counter; the filler bytes are now
-                // live until reclaimed.
-                unsafe {
-                    *self.live.get() += tail_room;
-                }
+                self.live.fetch_add(tail_room, Ordering::Relaxed);
             }
             self.write.store(0, Ordering::Relaxed);
             Ok(0)
@@ -707,8 +698,8 @@ impl MailRing {
             (&raw mut (*hdr).n_mails).write(n_mails);
             (&raw mut (*hdr).total_len).write(total as u32);
             (&raw mut (*hdr).is_filler).write(0);
-            *self.live.get() += total;
         }
+        self.live.fetch_add(total, Ordering::Relaxed);
         let end = header_off + total;
         let new_write = if end == self.cap { 0 } else { end };
         self.write.store(new_write as u32, Ordering::Relaxed);
@@ -770,8 +761,7 @@ impl MailRing {
     pub fn reclaim(&self) -> usize {
         let mut reclaimed = 0;
         loop {
-            // SAFETY: producer-only counter.
-            if unsafe { *self.live.get() } == 0 {
+            if self.live.load(Ordering::Relaxed) == 0 {
                 break;
             }
             let front = self.front.load(Ordering::Relaxed) as usize;
@@ -790,10 +780,7 @@ impl MailRing {
                 front + total
             };
             self.front.store(new_front as u32, Ordering::Relaxed);
-            // SAFETY: producer-only counter.
-            unsafe {
-                *self.live.get() -= total;
-            }
+            self.live.fetch_sub(total, Ordering::Relaxed);
             reclaimed += total;
         }
         reclaimed
