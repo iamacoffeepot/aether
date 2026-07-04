@@ -47,7 +47,7 @@ mod session;
 
 pub use kinds::*;
 pub use listener::TcpListenerActor;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub use route::TcpNativeExt;
 pub use route::TcpWasmExt;
 pub use session::TcpSessionActor;

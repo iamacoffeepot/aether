@@ -2,7 +2,7 @@
 //! the "routing" seam of the `aether.component` capability.
 
 use aether_actor::{Addressable, WasmActorMailbox};
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
 use super::ComponentHostCapability;
@@ -48,7 +48,7 @@ impl ComponentHostWasmExt for WasmActorMailbox<'_, ComponentHostCapability> {
 /// returned handle inherits the parent mailbox's `'a` binding ref so
 /// `.send::<K>(&mail)` dispatches through the same `NativeBinding`
 /// without re-threading the ctx.
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub trait ComponentHostNativeExt {
     /// Resolve a typed peer-component mailbox for the loaded component
     /// named `name`. The full mailbox address is
@@ -56,7 +56,7 @@ pub trait ComponentHostNativeExt {
     fn loaded<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R>;
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 impl ComponentHostNativeExt for NativeActorMailbox<'_, ComponentHostCapability> {
     fn loaded<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R> {
         self.resolve_peer_scoped::<R>(WasmTrampoline::NAMESPACE, name)

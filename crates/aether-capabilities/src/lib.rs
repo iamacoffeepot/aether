@@ -34,7 +34,7 @@ extern crate self as aether_capabilities;
 // `aether.anthropic` content-gen cap (ADR-0050, issue 1014). Native-
 // only — embeds the native-only contentgen dispatch helper and makes
 // blocking ureq / subprocess calls.
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub mod anthropic;
 #[cfg(feature = "audio")]
 pub mod audio;
@@ -43,14 +43,14 @@ pub mod component;
 // dispatch helper, staging, and adapter traits all lean on the
 // substrate runtime (`Mailer`, `LocalFileAdapter`), so the module
 // elides cleanly on the wasm-component build.
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub mod shared;
 
 pub mod engine;
 pub mod fs;
 // `aether.gemini` content-gen cap (ADR-0050, issue 1015). Native-only
 // for the same reason as `anthropic`.
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub mod gemini;
 // The two HTTP capabilities, co-located under one submodule (ADR-0121):
 // the `aether.http` egress client and the `aether.http.server` inbound
@@ -91,14 +91,14 @@ pub use audio::AudioCapability;
 pub use audio::AudioConfig;
 // ADR-0050 `aether.anthropic` cap (issue 1014). `AnthropicConfig` is
 // part of the same native-only module.
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub use anthropic::{AnthropicCapability, AnthropicConfig};
 pub use component::{ComponentHostCapability, resolve_embedded};
 // ADR-0050 §2 shared content-gen infrastructure. Native-only — the two
 // provider caps (issue 1014 / 1015) embed these.
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub use shared::contentgen::ContentGenConfigLayer;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub use shared::contentgen::{
     AnthropicAdapter, ContentGenConfig, GeminiAdapter, StubAnthropicAdapter, StubGeminiAdapter,
     TaskQueue,
@@ -115,7 +115,7 @@ pub use engine::EngineProxy;
 #[cfg(not(target_family = "wasm"))]
 pub use engine::EngineProxyConfig;
 pub use engine::EngineServer;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub use engine::{EngineConfig, EngineConfigLayer, EngineOverlay};
 pub use http::{HttpCapability, HttpConfig};
 // ADR-0108 `aether.http.server` cap (issue 1760). `HttpServerConfig` is the
@@ -141,7 +141,7 @@ pub use lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 
 pub use fs::FsCapability;
 // ADR-0050 `aether.gemini` cap (issue 1015).
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub use gemini::{GeminiCapability, GeminiConfig};
 #[cfg(feature = "render")]
 pub use render::HeadlessRenderCapability;

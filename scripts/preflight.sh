@@ -168,6 +168,16 @@ read -ra dist_cmd <<< "$(canonical_cmd dist)"
 run_step "$(canonical_cmd dist) (component wasm cross-build)" \
     "${dist_cmd[@]}"
 
+# Marker-only host build (iamacoffeepot/aether#2583). Reproduces a component
+# author's reflexive `cargo build` against a `default-features = false`
+# consumer of `aether-capabilities`: an isolated `-p` build with `runtime` off
+# on the host triple. It must stay a standalone `-p` invocation — folding it
+# into the `--workspace` clippy/test builds would let resolver-3 feature
+# unification turn `runtime` back on and mask the failure (ADR-0122 §33).
+read -ra marker_cmd <<< "$(canonical_cmd marker)"
+run_step "$(canonical_cmd marker) (marker-only host build)" \
+    "${marker_cmd[@]}"
+
 # Slowest Rust step. The whole suite runs at full parallelism — the
 # `aether-substrate-bundle` integration tests that fork real substrates carry
 # a generous per-test slow-timeout in `.config/nextest.toml`, so concurrent

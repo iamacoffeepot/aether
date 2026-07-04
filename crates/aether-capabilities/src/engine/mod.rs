@@ -19,5 +19,5 @@ pub use proxy::EngineProxy;
 #[cfg(not(target_family = "wasm"))]
 pub use proxy::EngineProxyConfig;
 pub use server::EngineServer;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub use server::{EngineConfig, EngineConfigLayer, EngineOverlay};
