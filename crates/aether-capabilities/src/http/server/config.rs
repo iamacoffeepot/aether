@@ -4,8 +4,8 @@
 
 use super::{
     DEFAULT_BIND_ADDR, DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS, DEFAULT_MAX_CONNECTIONS,
-    DEFAULT_MAX_HEADER_BYTES, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_TIMEOUT_MILLIS,
-    DEFAULT_RESPONSE_STREAM_WINDOW,
+    DEFAULT_MAX_HEADER_BYTES, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_STREAM_WINDOW,
+    DEFAULT_REQUEST_TIMEOUT_MILLIS, DEFAULT_RESPONSE_STREAM_WINDOW,
 };
 
 /// Init config for [`HttpServerCapability`](super::HttpServerCapability) (ADR-0108).
@@ -83,6 +83,17 @@ pub struct HttpServerConfig {
     /// [`HttpResponseChunk`]: crate::http::kinds::HttpResponseChunk
     #[cfg_attr(feature = "runtime", config(default = 16))]
     pub response_stream_window: u32,
+    /// Inbound request-stream credit-window depth ([`DEFAULT_REQUEST_STREAM_WINDOW`],
+    /// ADR-0128): the count of in-flight [`HttpRequestChunk`] mails the cap
+    /// delivers to a streaming handler before it parks the per-connection
+    /// reader awaiting the handler's [`HttpRequestCredit`]. A full window backs
+    /// pressure up into TCP so a fast peer cannot outrun a slow handler. A
+    /// count, not a byte or time quantity, so it carries no unit suffix.
+    ///
+    /// [`HttpRequestChunk`]: crate::http::kinds::HttpRequestChunk
+    /// [`HttpRequestCredit`]: crate::http::kinds::HttpRequestCredit
+    #[cfg_attr(feature = "runtime", config(default = 16))]
+    pub request_stream_window: u32,
 }
 
 impl Default for HttpServerConfig {
@@ -97,6 +108,7 @@ impl Default for HttpServerConfig {
             keep_alive_timeout_millis: DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             response_stream_window: DEFAULT_RESPONSE_STREAM_WINDOW,
+            request_stream_window: DEFAULT_REQUEST_STREAM_WINDOW,
         }
     }
 }

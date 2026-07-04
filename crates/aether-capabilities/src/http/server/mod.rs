@@ -37,11 +37,15 @@
 
 // Handler-signature kinds resolve at file root through these imports —
 // `#[actor]` emits the `HandlesKind<K>` markers always-on against the
-// identity, and the `init` / handler bodies name these kinds. The two
-// stream-inbound kinds (ADR-0128) are `#[handler]` kinds so a streaming
-// handler can address them at `HttpServerCapability` type-safely; the
-// route-registration kinds (ADR-0130) are `#[handler]` kinds likewise.
-use crate::http::kinds::{HttpInboundReady, HttpResponseChunk, HttpResponseStreamEnd};
+// identity, and the `init` / handler bodies name these kinds. The
+// response-stream inbound kinds (`HttpResponseChunk` / `HttpResponseStreamEnd`)
+// and the request-stream credit grant (`HttpRequestCredit`) are `#[handler]`
+// kinds so a streaming handler can address them at `HttpServerCapability`
+// type-safely; the route-registration kinds (ADR-0130) are `#[handler]` kinds
+// likewise.
+use crate::http::kinds::{
+    HttpInboundReady, HttpRequestCredit, HttpResponseChunk, HttpResponseStreamEnd,
+};
 use crate::http::kinds::{
     RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf,
     UnregisterRoutesAll,
@@ -72,6 +76,14 @@ pub const DEFAULT_MAX_CONNECTIONS: usize = 1024;
 /// count of in-flight response chunks a streaming handler may hold before the
 /// cap's per-connection writer thread drains one and replenishes credit.
 pub const DEFAULT_RESPONSE_STREAM_WINDOW: u32 = 16;
+/// Default `request_stream_window` (ADR-0128): the inbound credit-window depth,
+/// a count of in-flight [`HttpRequestChunk`] mails the cap delivers to a
+/// streaming handler before it parks the per-connection reader awaiting the
+/// handler's [`HttpRequestCredit`] replenishment.
+///
+/// [`HttpRequestChunk`]: crate::http::kinds::HttpRequestChunk
+/// [`HttpRequestCredit`]: crate::http::kinds::HttpRequestCredit
+pub const DEFAULT_REQUEST_STREAM_WINDOW: u32 = 16;
 
 mod config;
 
