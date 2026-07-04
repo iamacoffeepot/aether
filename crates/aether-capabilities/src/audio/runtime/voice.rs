@@ -462,7 +462,7 @@ pub enum VoiceKernel {
 /// Build the kernel for a built-in instrument patch (oscillator or
 /// partial bank). Split out of [`Voice`] so the `note_on` path can
 /// resolve a built-in or a loaded sample bank into a `VoiceKernel`
-/// before the steal / dedup bookkeeping, then stamp one `Voice`.
+/// before the steal bookkeeping, then stamp one `Voice`.
 pub fn build_builtin_kernel(
     sender_mailbox: MailboxId,
     instrument_id: u8,
@@ -501,6 +501,12 @@ pub fn build_builtin_kernel(
 /// `seq` is a monotonically increasing counter stamped at allocation,
 /// used by voice-steal to locate the oldest voice regardless of the
 /// pool's current order (which `swap_remove` scrambles).
+///
+/// `released` marks a voice whose `note_off` has already fired. Several
+/// voices can share the same `(sender_mailbox, instrument_id, pitch)`
+/// key now that same-key note-ons stack instead of stealing each
+/// other's slot; `released` lets note-off pick the oldest *unreleased*
+/// voice on that key rather than re-releasing one already fading out.
 #[derive(Clone, Debug)]
 pub struct Voice {
     pub sender_mailbox: MailboxId,
@@ -508,6 +514,7 @@ pub struct Voice {
     pub pitch: u8,
     pub seq: u64,
     pub kernel: VoiceKernel,
+    pub released: bool,
 }
 
 impl Voice {
@@ -517,6 +524,7 @@ impl Voice {
             VoiceKernel::PartialBank(v) => v.note_off(),
             VoiceKernel::Sample(v) => v.note_off(),
         }
+        self.released = true;
     }
 
     pub fn done(&self) -> bool {

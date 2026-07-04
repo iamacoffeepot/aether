@@ -88,10 +88,12 @@ impl Synth {
     /// Admit a `note_on`: resolve its kernel (a built-in patch, or — when
     /// the id walks past the built-ins — a loaded sample bank's region
     /// selected by `(pitch, velocity)`), then steal the oldest voice if
-    /// at capacity, replace any voice already on the same key, and push.
-    /// A miss on both kernel sources (unknown id, or a bank with no
-    /// region covering the note) warn-drops without touching the pool
-    /// (ADR-0103 §6).
+    /// at capacity, and push. A second note-on on the same
+    /// `(sender_mailbox, instrument_id, pitch)` key stacks a new voice
+    /// rather than replacing the existing one, so concurrent same-pitch
+    /// notes from one sender each sound independently. A miss on both
+    /// kernel sources (unknown id, or a bank with no region covering the
+    /// note) warn-drops without touching the pool (ADR-0103 §6).
     pub fn trigger_note_on(
         &mut self,
         sender_mailbox: MailboxId,
@@ -140,13 +142,6 @@ impl Synth {
                 self.voices.swap_remove(oldest_idx);
             }
         }
-        if let Some(existing) = self.voices.iter().position(|v| {
-            v.sender_mailbox == sender_mailbox
-                && v.instrument_id == instrument_id
-                && v.pitch == pitch
-        }) {
-            self.voices.swap_remove(existing);
-        }
         let seq = self.next_seq;
         self.next_seq += 1;
         self.voices.push(Voice {
@@ -155,19 +150,34 @@ impl Synth {
             pitch,
             seq,
             kernel,
+            released: false,
         });
     }
 
-    /// Release the voice matching `(sender_mailbox, instrument_id,
-    /// pitch)`, if one is sounding. A miss is a silent no-op (a late or
-    /// unmatched note-off), matching the immediate `note_off` path.
-    /// Shared by the queue-drained note-off and the scheduled note-off.
+    /// Release the oldest unreleased voice matching `(sender_mailbox,
+    /// instrument_id, pitch)`, if one is sounding. Several voices can
+    /// share a key now that same-key note-ons stack (no more
+    /// steal-on-retrigger), so note-off pairs oldest-note-on with
+    /// oldest-note-off: among the matching voices, pick the
+    /// minimum-`seq` one that hasn't already been released. The
+    /// `!released` filter is load-bearing — without it, a second
+    /// note-off on the same key would re-release an already-fading
+    /// voice and strand its still-sounding sibling as a stuck note. A
+    /// miss (no matching unreleased voice) is a silent no-op (a late or
+    /// unmatched note-off), matching the previous behavior. Shared by
+    /// the queue-drained note-off and the scheduled note-off.
     pub fn trigger_note_off(&mut self, sender_mailbox: MailboxId, pitch: u8, instrument_id: u8) {
-        if let Some(v) = self.voices.iter_mut().find(|v| {
-            v.sender_mailbox == sender_mailbox
-                && v.instrument_id == instrument_id
-                && v.pitch == pitch
-        }) {
+        if let Some(v) = self
+            .voices
+            .iter_mut()
+            .filter(|v| {
+                v.sender_mailbox == sender_mailbox
+                    && v.instrument_id == instrument_id
+                    && v.pitch == pitch
+                    && !v.released
+            })
+            .min_by_key(|v| v.seq)
+        {
             v.note_off();
         }
     }

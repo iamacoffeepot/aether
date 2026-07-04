@@ -1486,11 +1486,14 @@ mod tests {
         assert_eq!(synth.voice_count(), 1, "note never fired in its block");
     }
 
+    /// Tripwire: two concurrent note-ons sharing a `(sender_mailbox,
+    /// instrument_id, pitch)` key must each allocate their own voice —
+    /// the second must not steal the first's slot (issue 2524).
     #[test]
-    fn retrigger_same_key_replaces_voice() {
+    fn same_key_note_ons_stack_voices() {
         let (sender, queue) = new_event_channel();
         let mut synth = Synth::new(queue, 48_000.0);
-        for _ in 0..3 {
+        for _ in 0..2 {
             sender
                 .push(AudioEvent::NoteOn {
                     sender_mailbox: MailboxId(1),
@@ -1502,7 +1505,71 @@ mod tests {
         }
         let mut buf = vec![0.0f32; 128];
         synth.fill(&mut buf, 1);
-        assert_eq!(synth.voice_count(), 1);
+        assert_eq!(
+            synth.voice_count(),
+            2,
+            "two same-key note-ons must both sound as independent voices",
+        );
+    }
+
+    /// Tripwire: with two voices stacked on one key, `NoteOff` must
+    /// release the oldest still-sounding voice and leave its sibling
+    /// alone — pairing oldest-note-on with oldest-note-off. A second
+    /// `NoteOff` on the same key then releases the survivor (issue 2524).
+    #[test]
+    fn note_off_releases_oldest_unreleased_voice_on_shared_key() {
+        let (sender, queue) = new_event_channel();
+        let mut synth = Synth::new(queue, 48_000.0);
+        for _ in 0..2 {
+            sender
+                .push(AudioEvent::NoteOn {
+                    sender_mailbox: MailboxId(1),
+                    pitch: 60,
+                    velocity: 100,
+                    instrument_id: 0,
+                })
+                .unwrap();
+        }
+        let mut buf = vec![0.0f32; 64];
+        synth.fill(&mut buf, 1);
+        assert_eq!(synth.voice_count(), 2, "setup: both note-ons must sound");
+
+        sender
+            .push(AudioEvent::NoteOff {
+                sender_mailbox: MailboxId(1),
+                pitch: 60,
+                instrument_id: 0,
+            })
+            .unwrap();
+        // instrument 0 (sine_lead) releases in 0.18s; run well past that
+        // so the released voice finishes its release ramp and is pruned,
+        // while its never-released sibling (held in Sustain) stays
+        // resident regardless of how long we run.
+        let mut tail = vec![0.0f32; 12_000];
+        synth.fill(&mut tail, 1);
+        assert_eq!(
+            synth.voice_count(),
+            1,
+            "note-off must release exactly the oldest voice, leaving its sibling sounding",
+        );
+        assert!(
+            synth.has_voice_with_pitch(60),
+            "the un-released sibling must still be sounding",
+        );
+
+        sender
+            .push(AudioEvent::NoteOff {
+                sender_mailbox: MailboxId(1),
+                pitch: 60,
+                instrument_id: 0,
+            })
+            .unwrap();
+        synth.fill(&mut tail, 1);
+        assert_eq!(
+            synth.voice_count(),
+            0,
+            "second note-off must release the surviving voice",
+        );
     }
 
     #[test]
@@ -1579,22 +1646,30 @@ mod tests {
     }
 
     /// Voice-steal must evict the oldest note (lowest seq) even after
-    /// the pool has been reordered by `swap_remove` in the retrigger path.
+    /// the pool has been reordered by `swap_remove` inside the steal
+    /// path itself — scrambled via distinct-key note-ons (same-key
+    /// note-ons no longer replace, so they can't be used to shuffle the
+    /// pool; issue 2524).
     ///
-    /// Setup: fill to `MAX_VOICES - 1` with pitches `0..(MAX_VOICES - 1)`
-    /// (pitch 0 gets seq 0). Retrigger pitch 0 while below capacity so no
-    /// steal fires: `swap_remove` moves the last voice to index 0, making
-    /// pitch 1 (seq 1, the new oldest) sit at index 1, not index 0. Fill to
-    /// `MAX_VOICES`, then push one more and assert pitch 1 was evicted
-    /// rather than the arbitrary voice that ended up at index 0.
+    /// Setup: fill to exactly `MAX_VOICES` with distinct pitches
+    /// `0..MAX_VOICES` (pitch 0 -> seq 0, ..., pitch `MAX_VOICES - 1` ->
+    /// seq `MAX_VOICES - 1`; no steal fires yet, pool order == seq
+    /// order). Push one more distinct-pitch note: steal fires, evicting
+    /// pitch 0 (seq 0) at index 0 via `swap_remove`, which moves the
+    /// last-pushed voice (pitch `MAX_VOICES - 1`) into index 0 — so the
+    /// new oldest surviving voice (pitch 1, seq 1) now sits at index 1,
+    /// not index 0. Push one more distinct-pitch note: a naive "evict
+    /// index 0" bug would evict pitch `MAX_VOICES - 1`; seq-based steal
+    /// must evict pitch 1 instead.
     #[test]
     fn voice_steal_evicts_oldest_note() {
         let (sender, queue) = new_event_channel();
         let mut synth = Synth::new(queue, 48_000.0);
 
-        // Fill to MAX_VOICES - 1. Pitch 0 -> seq 0; pitch 1 -> seq 1.
-        // Pitch 1 will become the oldest surviving voice after the retrigger.
-        for pitch in 0..(MAX_VOICES - 1) {
+        // Fill to exactly MAX_VOICES with distinct pitches. Pitch 0 ->
+        // seq 0; pitch 1 -> seq 1. No steal fires (len < MAX_VOICES on
+        // every push), so pool order matches seq order.
+        for pitch in 0..MAX_VOICES {
             sender
                 .push(AudioEvent::NoteOn {
                     sender_mailbox: MailboxId(1),
@@ -1606,45 +1681,38 @@ mod tests {
         }
         let mut buf = vec![0.0f32; 64];
         synth.fill(&mut buf, 1);
-        assert_eq!(synth.voice_count(), MAX_VOICES - 1);
+        assert_eq!(synth.voice_count(), MAX_VOICES);
 
-        // Retrigger pitch=0 while below capacity (no steal fires).
-        // swap_remove moves the last voice to index 0; the oldest
-        // surviving voice (pitch=1, seq=1) is now at index 1, not index 0.
+        // One more distinct-pitch note-on at capacity: steal fires,
+        // evicting pitch=0 (seq=0) at index 0. swap_remove moves the
+        // last voice (pitch=MAX_VOICES-1) into index 0, scrambling the
+        // pool so pitch=1 (seq=1, the new oldest survivor) sits at
+        // index 1, not index 0.
         sender
             .push(AudioEvent::NoteOn {
                 sender_mailbox: MailboxId(1),
-                pitch: 0,
-                velocity: 100,
-                instrument_id: 0,
-            })
-            .unwrap();
-        synth.fill(&mut buf, 1);
-        assert_eq!(synth.voice_count(), MAX_VOICES - 1);
-        assert!(
-            synth.has_voice_with_pitch(1),
-            "pitch=1 (oldest after retrigger) must still be present",
-        );
-
-        // Fill the last slot — no steal yet.
-        sender
-            .push(AudioEvent::NoteOn {
-                sender_mailbox: MailboxId(1),
-                pitch: u8::try_from(MAX_VOICES - 1).unwrap(),
+                pitch: u8::try_from(MAX_VOICES).unwrap(),
                 velocity: 100,
                 instrument_id: 0,
             })
             .unwrap();
         synth.fill(&mut buf, 1);
         assert_eq!(synth.voice_count(), MAX_VOICES);
+        assert!(!synth.has_voice_with_pitch(0), "pitch=0 must be evicted");
+        assert!(
+            synth.has_voice_with_pitch(1),
+            "pitch=1 (new oldest after the first steal's scramble) must still be present",
+        );
 
-        // One more note — steal fires. The oldest voice is pitch=1 (seq=1),
-        // sitting at index 1 after the retrigger scramble. A naive remove(0)
-        // would evict the wrong voice; seq-based steal must evict pitch=1.
+        // One more distinct-pitch note — steal fires again. The oldest
+        // voice is pitch=1 (seq=1), sitting at index 1 after the
+        // scramble above. A naive "evict index 0" bug would instead
+        // evict pitch=MAX_VOICES-1 (the voice the first steal moved to
+        // index 0); seq-based steal must evict pitch=1.
         sender
             .push(AudioEvent::NoteOn {
                 sender_mailbox: MailboxId(1),
-                pitch: 100,
+                pitch: u8::try_from(MAX_VOICES + 1).unwrap(),
                 velocity: 100,
                 instrument_id: 0,
             })
@@ -1654,6 +1722,10 @@ mod tests {
         assert!(
             !synth.has_voice_with_pitch(1),
             "voice steal must evict the oldest note (pitch=1, seq=1), not an arbitrary one",
+        );
+        assert!(
+            synth.has_voice_with_pitch(u8::try_from(MAX_VOICES - 1).unwrap()),
+            "the voice the first steal scrambled to index 0 must survive the second steal",
         );
     }
 

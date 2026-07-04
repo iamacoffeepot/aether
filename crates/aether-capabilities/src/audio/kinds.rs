@@ -19,9 +19,11 @@ use serde::{Deserialize, Serialize};
 /// `instrument_id` indexes the substrate-resident instrument registry
 /// — v1 ships a fixed set; future patch-based instruments (Phase 2
 /// follow-up) will extend the id space without a wire change. The
-/// substrate keys the allocated voice by `(sender_mailbox, instrument_id,
-/// pitch)` so same-pitch notes from different senders or different
-/// instruments don't stomp each other. Fire-and-forget; no reply.
+/// substrate allocates a new voice per `NoteOn`, keyed by
+/// `(sender_mailbox, instrument_id, pitch)` — several voices can share
+/// a key, so two concurrent same-pitch notes from one sender each sound
+/// independently instead of one stealing the other's voice.
+/// Fire-and-forget; no reply.
 #[repr(C)]
 #[derive(
     Copy,
@@ -44,10 +46,14 @@ pub struct NoteOn {
 
 /// Release a note previously started with `NoteOn`. The substrate
 /// matches on `(sender_mailbox, instrument_id, pitch)` — the sender
-/// is taken from the mail envelope, not carried in the payload. A
-/// `NoteOff` that doesn't match any live voice is silently ignored
-/// (normal during race windows between envelope release and late
-/// note-offs). Fire-and-forget; no reply.
+/// is taken from the mail envelope, not carried in the payload. When
+/// several voices share that key (concurrent same-pitch notes from one
+/// sender), `NoteOff` releases the oldest one still sounding, pairing
+/// oldest-note-on with oldest-note-off — a second `NoteOff` on the same
+/// key then releases the next-oldest survivor. A `NoteOff` that doesn't
+/// match any live voice is silently ignored (normal during race windows
+/// between envelope release and late note-offs). Fire-and-forget; no
+/// reply.
 #[repr(C)]
 #[derive(
     Copy,
@@ -103,9 +109,10 @@ pub enum SetMasterGainResult {
 
 /// One note action in a scheduled batch (ADR-0104). The payload
 /// mirrors `note_on` / `note_off` exactly — a scheduled note allocates
-/// from the same voice pool, obeys the same steal policy, and keys
-/// note-off matching by the scheduling sender, as if the equivalent
-/// mail had arrived at the event's due instant.
+/// from the same voice pool, obeys the same steal policy, and matches
+/// `Off` to the oldest still-sounding voice on the scheduling sender's
+/// key, as if the equivalent mail had arrived at the event's due
+/// instant.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ScheduledNote {
     On {
