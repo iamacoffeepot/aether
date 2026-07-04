@@ -282,16 +282,21 @@ pub struct HttpRequestCredit {
     pub credit: u32,
 }
 
-// ADR-0129 HTTP server websocket upgrade. Three kinds, reusing `HttpHeader`
-// and ADR-0128's `HttpStreamCredit`. An inbound request carrying `Upgrade:
-// websocket` dispatches to the handler as an ordinary `HttpServerRequest`; the
-// handler replies `WebSocketAccept` to accept (the websocket analog of
-// `HttpResponseStreamOpen`) or an ordinary `HttpServerResponse` to decline. On
-// accept the connection carries `WebSocketMessage`s both directions — cap →
-// handler on inbound (a fresh causal root per message), handler → cap on
-// outbound (framed under the ADR-0128 credit window). `WebSocketClose` is the
-// close handshake, both directions. Ping / pong are cap-owned and never
-// surface as kinds.
+// ADR-0129 HTTP server websocket upgrade, amended by ADR-0132. Three kinds,
+// reusing `HttpHeader` and ADR-0128's `HttpStreamCredit`. An inbound request
+// carrying `Upgrade: websocket` dispatches to the handler as an ordinary
+// `HttpServerRequest`; the handler replies `WebSocketAccept` to accept (the
+// websocket analog of `HttpResponseStreamOpen`) or an ordinary
+// `HttpServerResponse` to decline. On accept the connection carries
+// `WebSocketMessage`s both directions — cap → handler on inbound (a fresh
+// causal root per message), handler → cap on outbound (framed under the
+// ADR-0128 credit window). `WebSocketClose` is the close handshake, both
+// directions. Every data-phase kind carries the connection's `stream_id`
+// (ADR-0132): the cap mints it at accept, the handler learns it from the
+// initial `HttpStreamCredit` grant, and outbound mail names its target
+// connection with it — routing that holds from any causal chain, so a
+// handler can push unprompted. Ping / pong are cap-owned and never surface
+// as kinds.
 
 /// `aether.http.server.websocket.accept` — the handler's opt-in reply to an
 /// upgrade request (ADR-0129), the websocket analog of
@@ -309,35 +314,41 @@ pub struct WebSocketAccept {
 }
 
 /// `aether.http.server.websocket.message` — one complete, de-fragmented
-/// application message, both directions (ADR-0129). Cap → handler on inbound
-/// (dispatched as a fresh causal root that settles as the handler finishes
-/// it); handler → cap on outbound (serialized to an RFC 6455 frame and framed
-/// to the peer under the ADR-0128 credit window). `binary` selects the RFC
-/// 6455 opcode (`true` = binary `0x2`, `false` = text `0x1`); `data` is the
-/// reassembled payload, raw bytes so binary messages round-trip without loss.
+/// application message, both directions (ADR-0129 / ADR-0132). Cap → handler
+/// on inbound (dispatched as a fresh causal root that settles as the handler
+/// finishes it); handler → cap on outbound (serialized to an RFC 6455 frame
+/// and framed to the peer under the ADR-0128 credit window). `binary` selects
+/// the RFC 6455 opcode (`true` = binary `0x2`, `false` = text `0x1`); `data`
+/// is the reassembled payload, raw bytes so binary messages round-trip
+/// without loss.
 ///
-/// An outbound `WebSocketMessage` carries no connection id: it rides the
-/// inbound message's causal chain (the handler sends it while handling an
-/// inbound message, inheriting that message's root), and the cap routes it to
-/// the originating connection by that root — so a handler answers the socket a
-/// message arrived on without naming it.
+/// `stream_id` names the connection (ADR-0132). Inbound, the cap stamps the
+/// upgraded connection's stream id — the same id the handler's
+/// [`HttpStreamCredit`] grants carry — so a handler serving several sockets
+/// tells their messages apart. Outbound, the handler addresses the target
+/// connection with it and the cap resolves the socket through its stream
+/// table, exactly as it routes an [`HttpResponseChunk`]; the send routes
+/// identically from any causal chain, so a handler can push with no inbound
+/// message in flight. An unknown or torn-down `stream_id` drops the message.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.http.server.websocket.message")]
 pub struct WebSocketMessage {
+    pub stream_id: u64,
     pub binary: bool,
     pub data: Vec<u8>,
 }
 
 /// `aether.http.server.websocket.close` — the close handshake, both directions
-/// (ADR-0129). Handler → cap initiates a close; cap → handler reports a
-/// peer-initiated close. The cap writes / echoes the RFC 6455 close frame and
-/// tears the connection down. `code` is the RFC 6455 close status code (`1000`
-/// = normal); `reason` is the optional UTF-8 reason phrase. Like an outbound
-/// [`WebSocketMessage`], a handler-initiated close rides the inbound chain and
-/// is routed to the connection by its root.
+/// (ADR-0129 / ADR-0132). Handler → cap initiates a close; cap → handler
+/// reports a peer-initiated close. The cap writes / echoes the RFC 6455 close
+/// frame and tears the connection down. `code` is the RFC 6455 close status
+/// code (`1000` = normal); `reason` is the optional UTF-8 reason phrase.
+/// `stream_id` names the connection like [`WebSocketMessage`]'s (ADR-0132),
+/// both directions.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.http.server.websocket.close")]
 pub struct WebSocketClose {
+    pub stream_id: u64,
     pub code: u16,
     pub reason: String,
 }

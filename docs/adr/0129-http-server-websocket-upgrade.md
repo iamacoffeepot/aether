@@ -1,6 +1,7 @@
 # ADR-0129: HTTP server websocket upgrade
 
 - **Status:** Proposed
+- **Amended by:** ADR-0132 — the data-phase kinds (`WebSocketMessage`, `WebSocketClose`) carry an explicit `stream_id` and outbound mail routes by it; the causal-chain-root routing this ADR describes for outbound messages is superseded.
 - **Date:** 2026-07-03
 
 Extends **ADR-0108** (the `aether.http.server` capability) and **ADR-0128** (response streaming with windowed flow control). ADR-0128 named websocket upgrade as a distinct later increment on its protocol foundation: "adds the `Upgrade` handshake and a bidirectional framed message protocol on the upgraded socket. It composes with the writer thread and credit mechanism but is a distinct surface." This ADR is that increment. Builds on the settlement model of **ADR-0080** / **ADR-0106** and the synchronous-inline mail routing of **ADR-0038**.
@@ -35,7 +36,7 @@ Policy lives in the handler; the fixed RFC handshake (key echo, `101` framing) l
 New wire kinds in `crates/aether-capabilities/src/http/kinds.rs` (owned by the server capability per ADR-0121), reusing `HttpHeader`:
 
 - `WebSocketAccept { subprotocol: Option<String>, headers: Vec<HttpHeader> }` — the handler's opt-in reply to an upgrade request (the websocket analog of ADR-0128's `HttpResponseStreamOpen`). Declares an optional negotiated subprotocol and any extra `101` headers; the cap supplies `Upgrade` / `Connection` / `Sec-WebSocket-Accept` itself.
-- `WebSocketMessage { binary: bool, data: Vec<u8> }` — one complete, de-fragmented application message, **both directions**. Cap → handler on inbound (dispatched as a fresh root, §4); handler → cap on outbound (framed to the peer under credit, §3). `binary` selects the RFC 6455 opcode (`0x2` binary / `0x1` text); `data` is the reassembled payload.
+- `WebSocketMessage { stream_id: u64, binary: bool, data: Vec<u8> }` — one complete, de-fragmented application message, **both directions**. Cap → handler on inbound (dispatched as a fresh root, §4); handler → cap on outbound (framed to the peer under credit, §3). `stream_id` names the connection and outbound mail routes by it (ADR-0132; `WebSocketClose` carries it identically); `binary` selects the RFC 6455 opcode (`0x2` binary / `0x1` text); `data` is the reassembled payload.
 - `WebSocketClose { code: u16, reason: String }` — the close handshake, **both directions**. Handler → cap initiates a close; cap → handler reports a peer-initiated close. The cap writes/echoes the RFC 6455 close frame and tears the connection down.
 
 Outbound backpressure reuses ADR-0128's `HttpStreamCredit { credit: u32 }` unchanged: outbound `WebSocketMessage`s ride the same per-connection writer-thread bounded channel, and the cap replenishes the handler's send window as writer slots free. Control frames (ping / pong) are **not** surfaced as kinds — the cap owns them (§5).
