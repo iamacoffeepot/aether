@@ -9,17 +9,26 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use test_handlers::{EchoHttpHandler, FixedBodyHttpHandler, SilentHttpHandler};
+use test_handlers::{
+    EchoHttpHandler, FixedBodyHttpHandler, FloodHttpHandler, STREAM_CHUNK_COUNT, SilentHttpHandler,
+    StreamHttpHandler, stream_chunk_body,
+};
 
 mod test_handlers {
     //! Minimal native handler actors behind the server in the integration
     //! tests: one that replies `200` echoing the request, one that drops
-    //! the request without replying (the `502` safety-net path).
+    //! the request without replying (the `502` safety-net path), and two
+    //! response-streaming handlers (ADR-0128) — a well-behaved one that
+    //! paces chunks against credit, and a flooder that ignores credit.
     use aether_actor::actor;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
 
-    use crate::http::kinds::{HttpHeader, HttpServerRequest, HttpServerResponse};
+    use crate::http::kinds::{
+        HttpHeader, HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen,
+        HttpServerRequest, HttpServerResponse, HttpStreamCredit,
+    };
+    use crate::http::server::HttpServerCapability;
 
     /// Replies `200` and echoes the request's method / path / query /
     /// peer address (as headers) and body (verbatim), so a test can
@@ -141,6 +150,141 @@ mod test_handlers {
             // Intentionally drops the request without replying.
         }
     }
+
+    /// The number of body chunks [`StreamHttpHandler`] emits. Chosen well
+    /// above the test's credit window so the round trip exercises credit
+    /// replenishment across many refills, not just the initial grant.
+    pub const STREAM_CHUNK_COUNT: u32 = 40;
+
+    /// The bytes of chunk `index`: its zero-padded index, so the reassembled
+    /// body is the deterministic concatenation `"000001…039"` a test can
+    /// rebuild and compare against.
+    pub fn stream_chunk_body(index: u32) -> Vec<u8> {
+        format!("{index:03}").into_bytes()
+    }
+
+    /// A well-behaved response-streaming handler (ADR-0128): replies
+    /// `HttpResponseStreamOpen`, then emits [`STREAM_CHUNK_COUNT`] chunks
+    /// paced strictly against the credit it is granted, and terminates with
+    /// `HttpResponseStreamEnd`.
+    pub struct StreamHttpHandler;
+
+    /// Per-stream progress for [`StreamHttpHandler`].
+    pub struct StreamHttpHandlerState {
+        stream_id: u64,
+        next_index: u32,
+        ended: bool,
+    }
+
+    #[actor(singleton)]
+    impl NativeActor for StreamHttpHandler {
+        type State = StreamHttpHandlerState;
+        type Config = ();
+        const NAMESPACE: &'static str = "aether.http.test_stream_handler";
+
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<StreamHttpHandlerState, BootError> {
+            Ok(StreamHttpHandlerState {
+                stream_id: 0,
+                next_index: 0,
+                ended: false,
+            })
+        }
+
+        #[handler]
+        fn on_request(
+            state: &mut Self::State,
+            _ctx: &mut NativeCtx<'_>,
+            _request: HttpServerRequest,
+        ) -> HttpResponseStreamOpen {
+            state.next_index = 0;
+            state.ended = false;
+            HttpResponseStreamOpen {
+                status: 200,
+                headers: vec![HttpHeader {
+                    name: "content-type".to_string(),
+                    value: "text/plain".to_string(),
+                }],
+            }
+        }
+
+        /// Spend the granted credit: send up to `credit.credit` more chunks,
+        /// then terminate once all [`STREAM_CHUNK_COUNT`] have gone out.
+        #[handler]
+        fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, credit: HttpStreamCredit) {
+            state.stream_id = credit.stream_id;
+            let mut budget = credit.credit;
+            while budget > 0 && state.next_index < STREAM_CHUNK_COUNT {
+                ctx.actor::<HttpServerCapability>()
+                    .send(&HttpResponseChunk {
+                        stream_id: state.stream_id,
+                        body: stream_chunk_body(state.next_index),
+                    });
+                state.next_index += 1;
+                budget -= 1;
+            }
+            if state.next_index >= STREAM_CHUNK_COUNT && !state.ended {
+                ctx.actor::<HttpServerCapability>()
+                    .send(&HttpResponseStreamEnd {
+                        stream_id: state.stream_id,
+                    });
+                state.ended = true;
+            }
+        }
+    }
+
+    /// The number of chunks [`FloodHttpHandler`] blasts on its first credit,
+    /// far more than any small test window — enough that the cap's credit
+    /// accounting hits zero and the over-window guard tears the stream down.
+    pub const FLOOD_CHUNK_COUNT: u32 = 200;
+
+    /// A misbehaving response-streaming handler (ADR-0128 trust boundary):
+    /// it replies `HttpResponseStreamOpen`, then on its first credit ignores
+    /// the granted amount entirely and floods [`FLOOD_CHUNK_COUNT`] chunks.
+    pub struct FloodHttpHandler;
+
+    /// Guards [`FloodHttpHandler`] against re-flooding on replenishment
+    /// credit (which never arrives once the cap tears the stream down).
+    pub struct FloodHttpHandlerState {
+        flooded: bool,
+    }
+
+    #[actor(singleton)]
+    impl NativeActor for FloodHttpHandler {
+        type State = FloodHttpHandlerState;
+        type Config = ();
+        const NAMESPACE: &'static str = "aether.http.test_flood_handler";
+
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<FloodHttpHandlerState, BootError> {
+            Ok(FloodHttpHandlerState { flooded: false })
+        }
+
+        #[handler]
+        fn on_request(
+            _state: &mut Self::State,
+            _ctx: &mut NativeCtx<'_>,
+            _request: HttpServerRequest,
+        ) -> HttpResponseStreamOpen {
+            HttpResponseStreamOpen {
+                status: 200,
+                headers: Vec::new(),
+            }
+        }
+
+        #[handler]
+        fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, credit: HttpStreamCredit) {
+            if state.flooded {
+                return;
+            }
+            state.flooded = true;
+            for _ in 0..FLOOD_CHUNK_COUNT {
+                ctx.actor::<HttpServerCapability>()
+                    .send(&HttpResponseChunk {
+                        stream_id: credit.stream_id,
+                        body: vec![b'x'; 8],
+                    });
+            }
+        }
+    }
 }
 
 fn config_for(handler: &str, max_request_bytes: usize) -> HttpServerConfig {
@@ -151,6 +295,49 @@ fn config_for(handler: &str, max_request_bytes: usize) -> HttpServerConfig {
         request_timeout_millis: 5_000,
         ..HttpServerConfig::default()
     }
+}
+
+/// Server config for the streaming tests (ADR-0128): a small credit window
+/// so a multi-chunk response must replenish credit repeatedly, and a flood
+/// overruns it fast.
+fn stream_config_for(handler: &str, window: u32) -> HttpServerConfig {
+    HttpServerConfig {
+        bind_addr: "127.0.0.1:0".to_string(),
+        handler_mailbox: handler.to_string(),
+        request_timeout_millis: 5_000,
+        response_stream_window: window,
+        ..HttpServerConfig::default()
+    }
+}
+
+/// Index of the first `\r\n` at or after `from`, or `None`.
+fn find_crlf(bytes: &[u8], from: usize) -> Option<usize> {
+    (from..bytes.len().saturating_sub(1)).find(|&i| bytes[i] == b'\r' && bytes[i + 1] == b'\n')
+}
+
+/// Reassemble a chunked transfer-encoding body (everything after the head's
+/// blank line) into its payload, stopping at the zero-length terminator.
+fn dechunk(body: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut pos = 0;
+    let mut out: Vec<u8> = Vec::new();
+    while pos < bytes.len() {
+        let Some(crlf) = find_crlf(bytes, pos) else {
+            break;
+        };
+        let size = usize::from_str_radix(body[pos..crlf].trim(), 16).unwrap_or(0);
+        pos = crlf + 2;
+        if size == 0 {
+            break;
+        }
+        if pos + size > bytes.len() {
+            break;
+        }
+        out.extend_from_slice(&bytes[pos..pos + size]);
+        // Advance past the chunk body and its trailing CRLF.
+        pos += size + 2;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn port_of(chassis: &PassiveChassis<TestChassis>) -> u16 {
@@ -546,4 +733,78 @@ fn over_capacity_connection_is_503() {
     );
 
     drop(held);
+}
+
+/// A streaming handler (ADR-0128) emits its body across more chunks than the
+/// credit window, and the cap streams them as chunked transfer-encoding that
+/// the client reassembles intact — exercising credit replenishment across
+/// many refills, not just the initial grant.
+#[test]
+fn streamed_response_reassembles_across_credit_window() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<StreamHttpHandler>(())
+        .with_actor::<HttpServerCapability>(stream_config_for(
+            <StreamHttpHandler as Addressable>::NAMESPACE,
+            // Window well below the chunk count so credit must replenish.
+            8,
+        ))
+        .build_passive()
+        .expect("caps boot");
+
+    let response = round_trip(
+        port_of(&chassis),
+        b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
+    assert!(
+        response.contains("Transfer-Encoding: chunked\r\n"),
+        "streamed response is chunked: {response:?}",
+    );
+    assert!(
+        !response.contains("Content-Length:"),
+        "streamed response omits Content-Length: {response:?}",
+    );
+
+    let expected: Vec<u8> = (0..STREAM_CHUNK_COUNT)
+        .flat_map(stream_chunk_body)
+        .collect();
+    assert_eq!(
+        dechunk(body_of(&response)).into_bytes(),
+        expected,
+        "reassembled body matches every emitted chunk in order",
+    );
+}
+
+/// Tripwire: a handler that floods chunks past its granted credit
+/// (ADR-0128 §Consequences trust boundary) is torn down by the cap — the
+/// response head and some chunks arrive, but the stream never reaches its
+/// terminating zero-length chunk, so a misbehaving producer cannot outrun
+/// the window unbounded.
+#[test]
+fn over_window_flood_tears_the_stream_down() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<FloodHttpHandler>(())
+        .with_actor::<HttpServerCapability>(stream_config_for(
+            <FloodHttpHandler as Addressable>::NAMESPACE,
+            // Tiny window so the flood overruns credit within a few chunks.
+            2,
+        ))
+        .build_passive()
+        .expect("caps boot");
+
+    let response = round_trip(
+        port_of(&chassis),
+        b"GET /flood HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
+    assert!(
+        response.contains("Transfer-Encoding: chunked\r\n"),
+        "flood stream head is chunked before teardown: {response:?}",
+    );
+    assert!(
+        !response.contains("0\r\n\r\n"),
+        "flood stream is torn down before the terminator: {response:?}",
+    );
 }

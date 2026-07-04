@@ -43,7 +43,10 @@ pub use aether_substrate::mail::mailer::Mailer;
 // The parent `#[actor] impl` writes the `502` reply path, so it names
 // `HttpServerResponse`; the rest of the kind vocabulary is used only here.
 pub use crate::http::kinds::HttpServerResponse;
-use crate::http::kinds::{HttpHeader, HttpMethod, HttpServerRequest};
+use crate::http::kinds::{
+    HttpHeader, HttpMethod, HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen,
+    HttpServerRequest, HttpStreamCredit,
+};
 
 use aether_substrate::Mail;
 use std::io::{self, Read, Write};
@@ -96,6 +99,23 @@ pub enum InboundEvent {
     /// The handler didn't reply within `request_timeout`; the
     /// dispatcher writes `504` if the request is still in-flight.
     RequestTimedOut { conn_id: ConnId },
+    /// A response-stream writer thread drained one chunk to the socket,
+    /// freeing a window slot (ADR-0128) — the dispatcher replenishes the
+    /// handler's credit.
+    StreamSlotFreed { stream_id: u64 },
+    /// A response-stream writer thread finished — the terminating chunk was
+    /// written, the peer disconnected, an idle-write deadline fired, or a
+    /// socket error occurred — so the dispatcher tears the stream +
+    /// connection down (ADR-0128).
+    StreamFinished { stream_id: u64 },
+}
+
+/// One frame handed to a per-connection response-stream writer thread over
+/// the bounded hand-off channel (ADR-0128). `Chunk` frames one body piece as
+/// chunked transfer-encoding; `End` writes the terminating zero-length chunk.
+enum WriterMsg {
+    Chunk(Vec<u8>),
+    End,
 }
 
 /// Per-connection state owned by the cap dispatcher. The reader sidecar
@@ -122,6 +142,34 @@ pub struct PendingRequest {
     /// The request's method, carried so the reply path can suppress the
     /// body on a HEAD response (message-body semantics forbid one).
     pub method: HttpMethod,
+}
+
+/// Per-connection response-stream state (ADR-0128), keyed in
+/// [`HttpServerCapabilityState::streams`] by `stream_id` (== the request's
+/// dispatch correlation id `C`). The dispatcher owns all of this
+/// single-threaded, exactly like [`PendingRequest`]; the writer thread owns
+/// only the socket write.
+pub struct StreamState {
+    /// The connection this stream writes to. Teardown paths locate a stream
+    /// by connection through this field.
+    conn_id: ConnId,
+    /// Bounded hand-off to the writer thread. `try_send` never blocks the
+    /// dispatcher: the credit accounting keeps the invariant
+    /// `credit_outstanding + queued <= window`, so a slot is always free when
+    /// a within-credit chunk arrives.
+    tx: mpsc::SyncSender<WriterMsg>,
+    /// Writer thread handle. Detached on teardown / close (the dispatcher
+    /// must never block joining a slow-peer write); joined in `unwire` after
+    /// the sender is dropped.
+    writer_thread: Option<JoinHandle<()>>,
+    /// Credits granted to the handler it has not yet spent, bounded by the
+    /// window. A chunk arriving with this at zero is an over-window flood
+    /// (ADR-0128 §Consequences trust boundary) → the stream is torn down.
+    credit_outstanding: u32,
+    /// The handler sent `HttpResponseStreamEnd` but the terminator did not
+    /// fit the bounded channel yet (chunks still queued). Flushed as slots
+    /// free so the terminating chunk always follows the body in order.
+    pending_end: bool,
 }
 
 /// Wake sink shared with the accept + reader sidecar threads: push an
@@ -181,6 +229,15 @@ pub struct HttpServerCapabilityState {
     /// Dispatch-correlation → open response socket. Populated on
     /// dispatch; cleared on reply, settlement, timeout, or close.
     pub in_flight: HashMap<u64, PendingRequest>,
+    /// Credit-window depth (ADR-0128): the count of in-flight response
+    /// chunks a stream may hold; also the bounded hand-off channel's
+    /// capacity and the initial credit grant.
+    pub response_stream_window: u32,
+    /// Active response streams (ADR-0128), keyed by `stream_id` (== the
+    /// request's dispatch correlation id). Promoted from `in_flight` on
+    /// `HttpResponseStreamOpen`; torn down on stream end, flood, timeout, or
+    /// connection close.
+    pub streams: HashMap<u64, StreamState>,
 }
 
 impl HttpServerCapabilityState {
@@ -390,6 +447,18 @@ impl HttpServerCapabilityState {
         // not block on it. The thread sees the shutdown (or its own EOF)
         // and exits; the JoinHandle drop detaches.
         drop(conn.reader_thread.take());
+        // Tear down any response stream bound to this connection (ADR-0128).
+        // The socket shutdown above unblocks a write-blocked writer; dropping
+        // the sender (in `teardown_stream`) unblocks a recv-blocked one.
+        let stream_ids: Vec<u64> = self
+            .streams
+            .iter()
+            .filter(|(_, stream)| stream.conn_id == conn_id)
+            .map(|(id, _)| *id)
+            .collect();
+        for stream_id in stream_ids {
+            self.teardown_stream(stream_id);
+        }
         // Drop any in-flight entry pinned to this connection so we don't
         // write to a dead socket.
         self.in_flight
@@ -401,6 +470,201 @@ impl HttpServerCapabilityState {
             reason,
             "http conn closed",
         );
+    }
+
+    /// Promote a buffered request to a response stream (ADR-0128): drop its
+    /// in-flight entry so the settlement safety net no longer trips `502` on
+    /// this chain, write the chunked response head, spawn the per-connection
+    /// writer thread, and grant the handler its initial credit window.
+    /// `stream_id` == the request's dispatch correlation id `C`.
+    pub fn open_stream(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        stream_id: u64,
+        conn_id: ConnId,
+        open: &HttpResponseStreamOpen,
+    ) {
+        // The stream chain settles here; the request is no longer in-flight
+        // (ADR-0128 §4), so `on_settled` won't `502` it.
+        self.in_flight.remove(&stream_id);
+        let head = render_stream_head(open);
+        self.write_raw_to(conn_id, &head);
+
+        let Some(conn) = self.connections.get(&conn_id) else {
+            // Connection already gone — nothing to stream to.
+            return;
+        };
+        let write_half = match conn.write_half.try_clone() {
+            Ok(half) => half,
+            Err(e) => {
+                tracing::warn!(
+                    target: "aether_substrate::http_server",
+                    conn = conn_id,
+                    error = %e,
+                    "http stream: writer clone failed; closing",
+                );
+                self.close_connection(conn_id, "stream writer clone failed");
+                return;
+            }
+        };
+
+        let window = self.response_stream_window.max(1);
+        let (tx, rx) = mpsc::sync_channel::<WriterMsg>(window as usize);
+        let sink = WakeSink {
+            inbound_tx: self.inbound_tx.clone(),
+            mailer: Arc::clone(&self.mailer),
+            self_id: self.self_mailbox,
+            wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
+        };
+        let idle_deadline = self.request_timeout;
+
+        // Per-connection writer below the mail layer, mirroring the reader
+        // sidecar — it owns only the socket write, never the cap state.
+        #[allow(clippy::disallowed_methods)]
+        let writer_thread = match thread::Builder::new()
+            .name(format!("aether-http-writer-{conn_id}"))
+            .spawn(move || {
+                run_writer_loop(write_half, stream_id, &rx, &sink, idle_deadline);
+            }) {
+            Ok(thread) => thread,
+            Err(e) => {
+                tracing::warn!(
+                    target: "aether_substrate::http_server",
+                    conn = conn_id,
+                    error = %e,
+                    "http stream: writer thread spawn failed; closing",
+                );
+                self.close_connection(conn_id, "stream writer spawn failed");
+                return;
+            }
+        };
+
+        self.streams.insert(
+            stream_id,
+            StreamState {
+                conn_id,
+                tx,
+                writer_thread: Some(writer_thread),
+                credit_outstanding: window,
+                pending_end: false,
+            },
+        );
+        // Grant the initial credit window — the handler learns its
+        // `stream_id` from this first credit mail.
+        self.send_stream_credit(ctx, stream_id, window);
+        tracing::debug!(
+            target: "aether_substrate::http_server",
+            conn = conn_id,
+            stream = stream_id,
+            window,
+            "http response stream opened",
+        );
+    }
+
+    /// Accept one body chunk from the handler (ADR-0128): a chunk arriving
+    /// with zero outstanding credit is an over-window flood and tears the
+    /// stream down; otherwise it spends one credit and hands the bytes to the
+    /// writer thread over the bounded channel.
+    pub fn push_chunk(&mut self, stream_id: u64, body: Vec<u8>) {
+        let Some((conn_id, has_credit)) = self
+            .streams
+            .get(&stream_id)
+            .map(|stream| (stream.conn_id, stream.credit_outstanding > 0))
+        else {
+            // No such stream — already ended / torn down, or never opened.
+            return;
+        };
+        if !has_credit {
+            // Over-window flood (ADR-0128 §Consequences trust boundary).
+            self.teardown_stream(stream_id);
+            self.close_connection(conn_id, "stream credit exceeded");
+            return;
+        }
+        let send_result = {
+            let stream = self
+                .streams
+                .get_mut(&stream_id)
+                .expect("stream present under the same borrow");
+            stream.credit_outstanding -= 1;
+            stream.tx.try_send(WriterMsg::Chunk(body))
+        };
+        if send_result.is_err() {
+            // Writer gone, or (defensively) the channel was full despite the
+            // credit invariant — tear the stream down rather than block.
+            self.teardown_stream(stream_id);
+            self.close_connection(conn_id, "stream writer unavailable");
+        }
+    }
+
+    /// The handler terminated the stream (ADR-0128): hand the terminator to
+    /// the writer. If the bounded channel is full it is deferred and flushed
+    /// as slots free ([`Self::try_flush_end`]), so the terminating chunk
+    /// always follows the body in order.
+    pub fn end_stream(&mut self, stream_id: u64) {
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
+            stream.pending_end = true;
+        }
+        self.try_flush_end(stream_id);
+    }
+
+    /// A writer slot freed (ADR-0128): grant one more credit to the handler
+    /// (unless the stream is ending, when no more chunks are expected) and
+    /// try to flush a deferred terminator.
+    pub fn replenish_credit(&mut self, ctx: &mut NativeCtx<'_>, stream_id: u64) {
+        let grant = match self.streams.get_mut(&stream_id) {
+            Some(stream) if !stream.pending_end => {
+                stream.credit_outstanding += 1;
+                true
+            }
+            Some(_) => false,
+            None => return,
+        };
+        if grant {
+            self.send_stream_credit(ctx, stream_id, 1);
+        }
+        self.try_flush_end(stream_id);
+    }
+
+    /// A writer thread finished (ADR-0128) — tear the stream down and close
+    /// its connection.
+    pub fn finish_stream(&mut self, stream_id: u64) {
+        let Some(conn_id) = self.streams.get(&stream_id).map(|stream| stream.conn_id) else {
+            return;
+        };
+        self.teardown_stream(stream_id);
+        self.close_connection(conn_id, "stream finished");
+    }
+
+    /// Try to hand a deferred terminator to the writer; on success clear the
+    /// pending flag so it is sent exactly once.
+    fn try_flush_end(&mut self, stream_id: u64) {
+        if let Some(stream) = self.streams.get_mut(&stream_id)
+            && stream.pending_end
+            && stream.tx.try_send(WriterMsg::End).is_ok()
+        {
+            stream.pending_end = false;
+        }
+    }
+
+    /// Resolve the handler mailbox and send it a credit grant on `stream_id`.
+    /// A fresh causal root per grant keeps credit mails settling per-chunk,
+    /// never holding one chain open across the stream (ADR-0128 §4).
+    fn send_stream_credit(&self, ctx: &mut NativeCtx<'_>, stream_id: u64, credit: u32) {
+        let Some(handler) = self.mailer.registry().lookup(&self.handler_mailbox) else {
+            return;
+        };
+        let payload = HttpStreamCredit { stream_id, credit }.encode_into_bytes();
+        let _ = ctx.send_envelope_as_root(handler, <HttpStreamCredit as Kind>::ID, &payload);
+    }
+
+    /// Remove a stream and detach its writer thread without joining inline —
+    /// the dispatcher must never block on a slow-peer write. Dropping the
+    /// sender unblocks a recv-waiting writer; a socket shutdown by the caller
+    /// unblocks a write-blocked one.
+    fn teardown_stream(&mut self, stream_id: u64) {
+        if let Some(mut stream) = self.streams.remove(&stream_id) {
+            drop(stream.writer_thread.take());
+        }
     }
 }
 
@@ -756,6 +1020,94 @@ fn render_status_response(status: u16, message: &str) -> Vec<u8> {
     out
 }
 
+/// Render the response head for a streamed response (ADR-0128): the status
+/// line, the handler's headers (cap-owned ones stripped), `Transfer-Encoding:
+/// chunked` in place of `Content-Length`, and `Date` / `Connection`.
+fn render_stream_head(open: &HttpResponseStreamOpen) -> Vec<u8> {
+    use std::fmt::Write as _;
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\n",
+        open.status,
+        reason_phrase(open.status)
+    );
+    for header in &open.headers {
+        if is_cap_owned_header(&header.name) {
+            continue;
+        }
+        let _ = write!(head, "{}: {}\r\n", header.name, header.value);
+    }
+    head.push_str("Transfer-Encoding: chunked\r\n");
+    let _ = write!(head, "Date: {}\r\n", http_date(SystemTime::now()));
+    head.push_str("Connection: close\r\n\r\n");
+    head.into_bytes()
+}
+
+/// Per-connection response-stream writer thread body (ADR-0128). Drains the
+/// bounded hand-off channel, framing each chunk as chunked transfer-encoding
+/// and writing the terminating chunk on `End`. TCP backpressure blocks this
+/// thread on the socket write, never the dispatcher. A `recv_timeout` past
+/// `idle_deadline` is the idle-write / no-progress deadline: a handler that
+/// stalled mid-stream tears the stream down.
+fn run_writer_loop(
+    write_half: TcpStream,
+    stream_id: u64,
+    rx: &mpsc::Receiver<WriterMsg>,
+    sink: &WakeSink,
+    idle_deadline: Duration,
+) {
+    let mut write_half = write_half;
+    loop {
+        match rx.recv_timeout(idle_deadline) {
+            Ok(WriterMsg::Chunk(body)) => {
+                if write_chunk(&mut write_half, &body).is_err() {
+                    // Peer disconnected / socket error mid-stream.
+                    sink.post(InboundEvent::StreamFinished { stream_id });
+                    return;
+                }
+                // One window slot freed — let the dispatcher replenish credit.
+                if !sink.post(InboundEvent::StreamSlotFreed { stream_id }) {
+                    return;
+                }
+            }
+            Ok(WriterMsg::End) => {
+                let _ = write_terminator(&mut write_half);
+                sink.post(InboundEvent::StreamFinished { stream_id });
+                return;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Idle-write deadline (ADR-0128 §4): the handler stalled.
+                sink.post(InboundEvent::StreamFinished { stream_id });
+                return;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // The dispatcher dropped the sender (stream torn down
+                // elsewhere) — nothing more to write.
+                return;
+            }
+        }
+    }
+}
+
+/// Frame one body piece as a chunked transfer-encoding chunk (`hexlen CRLF
+/// body CRLF`) and flush it. An empty body is skipped rather than framed — a
+/// zero-length chunk is the transfer terminator, which only `End` may write.
+fn write_chunk(write_half: &mut TcpStream, body: &[u8]) -> io::Result<()> {
+    if body.is_empty() {
+        return Ok(());
+    }
+    let header = format!("{:x}\r\n", body.len());
+    write_half.write_all(header.as_bytes())?;
+    write_half.write_all(body)?;
+    write_half.write_all(b"\r\n")?;
+    write_half.flush()
+}
+
+/// Write the chunked transfer terminator (the zero-length chunk) and flush.
+fn write_terminator(write_half: &mut TcpStream) -> io::Result<()> {
+    write_half.write_all(b"0\r\n\r\n")?;
+    write_half.flush()
+}
+
 /// Map a raw HTTP method token to the typed [`HttpMethod`]; `None` for a
 /// non-enumerated verb (answered `501` before any dispatch).
 fn parse_http_method(method: &str) -> Option<HttpMethod> {
@@ -918,6 +1270,8 @@ impl NativeActor for HttpServerCapability {
             connections: HashMap::new(),
             next_conn_id: 0,
             in_flight: HashMap::new(),
+            response_stream_window: config.response_stream_window,
+            streams: HashMap::new(),
         })
     }
 
@@ -937,6 +1291,17 @@ impl NativeActor for HttpServerCapability {
             conn.shutdown.store(true, Ordering::Release);
             let _ = conn.write_half.shutdown(Shutdown::Both);
             if let Some(thread) = conn.reader_thread.take() {
+                let _ = thread.join();
+            }
+        }
+        // Stop every response-stream writer (ADR-0128). The socket shutdown
+        // above unblocks a write-blocked writer; dropping the sender unblocks
+        // a recv-blocked one, so drop it before joining to keep `unwire`
+        // prompt (never waiting out the idle-write deadline).
+        for (_, mut stream) in state.streams.drain() {
+            let writer = stream.writer_thread.take();
+            drop(stream);
+            if let Some(thread) = writer {
                 let _ = thread.join();
             }
         }
@@ -975,13 +1340,59 @@ impl NativeActor for HttpServerCapability {
                     state.close_connection(conn_id, &reason);
                 }
                 InboundEvent::RequestTimedOut { conn_id } => {
-                    if state.in_flight.values().any(|p| p.conn_id == conn_id) {
-                        state.write_status_response(conn_id, 504, "gateway timeout");
+                    // A streaming connection's writer thread owns the
+                    // idle-write deadline (ADR-0128 §4), so the reader's
+                    // response-deadline timeout must not tear an active
+                    // stream down — a stream making progress isn't stalled.
+                    let streaming = state.streams.values().any(|s| s.conn_id == conn_id);
+                    if !streaming {
+                        if state.in_flight.values().any(|p| p.conn_id == conn_id) {
+                            state.write_status_response(conn_id, 504, "gateway timeout");
+                        }
+                        state.close_connection(conn_id, "request timeout");
                     }
-                    state.close_connection(conn_id, "request timeout");
+                }
+                InboundEvent::StreamSlotFreed { stream_id } => {
+                    state.replenish_credit(ctx, stream_id);
+                }
+                InboundEvent::StreamFinished { stream_id } => {
+                    state.finish_stream(stream_id);
                 }
             }
         }
+    }
+
+    /// One streamed response body chunk from the handler (ADR-0128).
+    /// Matched by the payload's `stream_id` against the `streams` table —
+    /// not by envelope correlation, since a handler's `ctx.send` mints a
+    /// fresh correlation the request's in-flight key would not match.
+    ///
+    /// # Agent
+    /// Not user-callable — a streaming handler sends this after replying
+    /// [`HttpResponseStreamOpen`], paced by the cap's
+    /// [`HttpStreamCredit`](crate::http::kinds::HttpStreamCredit) grants.
+    #[handler]
+    fn on_response_chunk(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        chunk: HttpResponseChunk,
+    ) {
+        state.push_chunk(chunk.stream_id, chunk.body);
+    }
+
+    /// The handler's stream terminator (ADR-0128). Matched by the payload's
+    /// `stream_id` like [`Self::on_response_chunk`].
+    ///
+    /// # Agent
+    /// Not user-callable — a streaming handler sends this once after its
+    /// final [`HttpResponseChunk`] to close the stream.
+    #[handler]
+    fn on_response_stream_end(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        end: HttpResponseStreamEnd,
+    ) {
+        state.end_stream(end.stream_id);
     }
 
     /// Settlement notice. The root corresponds to a dispatched request
@@ -1011,13 +1422,30 @@ impl NativeActor for HttpServerCapability {
     /// Not user-callable — this is the cap's reply-interception path. A
     /// by-value `#[handler]` can't read the inbound `sender.correlation_id`,
     /// so reply correlation goes through this envelope fallback
-    /// (ADR-0108 §5).
+    /// (ADR-0108 §5). The handler's one-shot reply is either an
+    /// [`HttpServerResponse`] (buffered, ADR-0108) or an
+    /// [`HttpResponseStreamOpen`] (streamed, ADR-0128); both key on the
+    /// request's in-flight correlation id. The mid-stream chunk / end mails
+    /// carry a fresh send-correlation and are routed to their own
+    /// `#[handler]`s ([`Self::on_response_chunk`] / [`Self::on_response_stream_end`]),
+    /// keyed by their explicit `stream_id` payload — a second correlation
+    /// regime living beside this one.
     #[fallback]
-    fn on_any(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, env: &Envelope) {
+    fn on_any(state: &mut Self::State, ctx: &mut NativeCtx<'_>, env: &Envelope) {
         let correlation = env.sender.correlation_id;
         let Some(pending) = state.in_flight.get(&correlation).copied() else {
             return;
         };
+        if env.kind == <HttpResponseStreamOpen as Kind>::ID {
+            if let Some(open) = HttpResponseStreamOpen::decode_from_bytes(env.payload.bytes()) {
+                state.open_stream(ctx, correlation, pending.conn_id, &open);
+            } else {
+                state.in_flight.remove(&correlation);
+                state.write_status_response(pending.conn_id, 502, "malformed stream open");
+                state.close_connection(pending.conn_id, "malformed stream open");
+            }
+            return;
+        }
         if env.kind != <HttpServerResponse as Kind>::ID {
             // Unexpected kind with a matching correlation — leave the
             // in-flight entry for the settlement / timeout safety net.
@@ -1086,8 +1514,8 @@ mod unit_tests {
     fn config_layer_defaults_match_the_named_consts() {
         use super::super::{
             DEFAULT_BIND_ADDR, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_HEADER_BYTES,
-            DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_TIMEOUT_MILLIS, HttpServerConfig,
-            HttpServerConfigLayer,
+            DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_TIMEOUT_MILLIS,
+            DEFAULT_RESPONSE_STREAM_WINDOW, HttpServerConfig, HttpServerConfigLayer,
         };
         use confique::Config as _;
         // No `.env()` source: loads the literal defaults only, so this is
@@ -1105,5 +1533,10 @@ mod unit_tests {
         assert_eq!(layer.request_timeout_millis, DEFAULT_REQUEST_TIMEOUT_MILLIS);
         assert_eq!(layer.max_connections, DEFAULT_MAX_CONNECTIONS);
         assert_eq!(layer.max_connections, default.max_connections);
+        assert_eq!(layer.response_stream_window, DEFAULT_RESPONSE_STREAM_WINDOW);
+        assert_eq!(
+            default.response_stream_window,
+            DEFAULT_RESPONSE_STREAM_WINDOW
+        );
     }
 }

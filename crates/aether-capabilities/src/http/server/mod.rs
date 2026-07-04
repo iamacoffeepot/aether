@@ -37,8 +37,10 @@
 
 // Handler-signature kinds resolve at file root through these imports —
 // `#[actor]` emits the `HandlesKind<K>` markers always-on against the
-// identity, and the `init` / handler bodies name these kinds.
-use crate::http::kinds::HttpInboundReady;
+// identity, and the `init` / handler bodies name these kinds. The two
+// stream-inbound kinds (ADR-0128) are `#[handler]` kinds so a streaming
+// handler can address them at `HttpServerCapability` type-safely.
+use crate::http::kinds::{HttpInboundReady, HttpResponseChunk, HttpResponseStreamEnd};
 use aether_kinds::trace::Settled;
 
 // Default bind address. Loopback per ADR-0108 §6 — binding a public
@@ -56,6 +58,10 @@ pub const DEFAULT_REQUEST_TIMEOUT_MILLIS: u64 = 30_000;
 /// without tripping legitimate loopback use. Operator-tunable; each unit
 /// costs roughly one reader-thread stack.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 1024;
+/// Default `response_stream_window` (ADR-0128): the credit-window depth, a
+/// count of in-flight response chunks a streaming handler may hold before the
+/// cap's per-connection writer thread drains one and replenishes credit.
+pub const DEFAULT_RESPONSE_STREAM_WINDOW: u32 = 16;
 
 mod config;
 

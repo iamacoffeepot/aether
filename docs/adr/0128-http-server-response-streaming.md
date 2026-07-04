@@ -1,6 +1,6 @@
 # ADR-0128: HTTP server response streaming with windowed flow control
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-03
 
 Extends **ADR-0108** (the `aether.http.server` capability), which parked streaming in its §4 and named a chunk-kind protocol with backpressure as the natural next surface. Builds on the settlement model of **ADR-0080** / **ADR-0106**, the synchronous-inline mail routing of **ADR-0038**, and the off-hot-path staging stance of **ADR-0103**. Reuses the accept → dispatch → reply spine ADR-0108 established.
@@ -30,7 +30,7 @@ New wire kinds in `crates/aether-capabilities/src/http/kinds.rs` (owned by the s
 - `HttpResponseStreamEnd {}` — the handler's terminator. The cap writes the terminating chunk (and any close/keep-alive disposition) and finalizes the stream.
 - `HttpStreamCredit { credit: u32 }` — the flow-control mail the **cap sends to the handler**. It grants the handler permission to send up to `credit` more chunks. This is the backpressure signal the mail layer lacks, modeled one level up as an explicit typed mail between the two endpoints.
 
-Correlation reuses the ADR-0108 in-flight table: the stream is keyed by the original dispatch's correlation id, so every chunk mail and every credit mail rides the same correlation the request opened.
+Correlation reuses the ADR-0108 in-flight table: the stream is keyed by the original dispatch's correlation id. The `HttpResponseStreamOpen` reply rides that correlation directly (the one-shot correlation-echoed reply path), so the open handshake keys on it as written. The chunk / end / credit mails carry the key as an explicit `stream_id: u64` payload field set to that same id, rather than on the transport envelope: a guest reply handle is one-shot (the first reply consumes it), so a handler cannot re-echo the request correlation across many chunks, and each `ctx.send` mints a fresh correlation. Carrying the id in the payload preserves the "keyed by the original dispatch" intent without an SDK or host change — the handler learns its `stream_id` from the first `HttpStreamCredit` and stamps it on every chunk and the terminator, and the cap matches on the field. The two mid-stream inbound kinds (`HttpResponseChunk`, `HttpResponseStreamEnd`) are ordinary `#[handler]` kinds on the cap so a handler addresses them at `HttpServerCapability` type-safely; the open reply stays a fallback interception because a by-value handler cannot read the envelope correlation the open handshake needs.
 
 ### 3. Per-connection writer thread + bounded hand-off — where socket backpressure lives
 
