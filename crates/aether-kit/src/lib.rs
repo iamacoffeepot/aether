@@ -4,10 +4,13 @@
 //! hosts both the trunk types (the mail shapes peers send a system) at
 //! the root and the runtime actors in [`runtime`]. The systems are
 //! [`runtime::Locomotion`] (tile-grid movement on a fixed-point ground
-//! plane — the module entry) and [`runtime::camera::CameraComponent`]
+//! plane — the module entry), [`runtime::camera::CameraComponent`]
 //! (the multi-camera driver, selected by the `aether_kit@aether.camera`
-//! export, ADR-0096). The camera's `aether.camera.*` driver kinds live
-//! in [`camera`].
+//! export, ADR-0096), and [`runtime::mesh_viewer::MeshViewer`] (loads a
+//! `.dsl` / `.obj` mesh file and replays it to the render sink,
+//! selected by the `aether_kit@aether.mesh_viewer` export). The
+//! camera's `aether.camera.*` driver kinds live in [`camera`]; the
+//! mesh viewer's `aether.mesh.load` kind lives in [`mesh`].
 //!
 //! # Units
 //!
@@ -28,6 +31,7 @@ extern crate alloc;
 use serde::{Deserialize, Serialize};
 
 pub mod camera;
+pub mod mesh;
 
 #[cfg(feature = "runtime")]
 pub mod runtime;

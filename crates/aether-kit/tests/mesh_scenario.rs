@@ -1,15 +1,16 @@
 //! Mesh-viewer scenario tests. Each test boots a `TestBench`, loads
-//! this crate's own wasm artifact (built separately for
-//! `wasm32-unknown-unknown`), seeds a fixture `.dsl` / `.obj` file
-//! into the substrate's `save://` namespace, and drives the component
-//! through `aether.mesh.load` to verify the load → parse → render
-//! pipeline end-to-end.
+//! `aether-kit`'s wasm artifact (built separately for
+//! `wasm32-unknown-unknown`) selecting the non-entry `mesh_viewer`
+//! export (ADR-0096), seeds a fixture `.dsl` / `.obj` file into the
+//! substrate's `save://` namespace, and drives the component through
+//! `aether.mesh.load` to verify the load → parse → render pipeline
+//! end-to-end.
 //!
 //! Skipped when:
 //! - No wgpu adapter is available (driverless Linux runners without
 //!   `mesa-vulkan-drivers`).
 //! - The component's wasm hasn't been built — tests read
-//!   `target/wasm32-unknown-unknown/{debug,release}/aether_mesh_viewer.wasm`
+//!   `target/wasm32-unknown-unknown/{debug,release}/aether_kit.wasm`
 //!   and skip with an `eprintln!` when both paths are absent. CI
 //!   builds the wasm before invoking `cargo test`.
 //!
@@ -21,20 +22,20 @@
 //! mutation.
 
 use aether_kinds::{LoadComponent, LoadResult, MeshLoadResult};
-use aether_mesh_viewer::LoadMesh;
+use aether_kit::mesh::LoadMesh;
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
     test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots, write_fixture},
 };
 use aether_substrate_bundle::visual::{decode_png, differs_from_background};
 
-// Force linkage of `aether-mesh-viewer`'s `inventory::submit!`
-// `KindDescriptor` entries into this test binary. Cargo treats
-// integration tests as separate crates that link against the test
-// target's host rlib, but the linker strips inventory submits for
-// kinds the test code doesn't statically reference.
+// Force linkage of `aether-kit`'s `inventory::submit!` `KindDescriptor`
+// entries into this test binary. Cargo treats integration tests as
+// separate crates that link against the test target's host rlib, but
+// the linker strips inventory submits for kinds the test code doesn't
+// statically reference.
 #[allow(unused_imports)]
-use aether_mesh_viewer as _;
+use aether_kit as _;
 use std::fs;
 use std::path::Path;
 
@@ -68,11 +69,13 @@ f 1 2 3 4
 ";
 const BAD_DSL: &[u8] = b"(box not-a-number 1 1)\n";
 
-/// Load this crate's pre-built wasm into the bench and await
-/// `LoadResult`. Panics on load failure so the calling test surfaces
-/// the error message rather than wedging on a missing subscription.
+/// Load `aether-kit`'s pre-built wasm into the bench, selecting the
+/// non-entry `mesh_viewer` export (ADR-0096; the bare entry is
+/// `Locomotion`), and await `LoadResult`. Panics on load failure so
+/// the calling test surfaces the error message rather than wedging on
+/// a missing subscription.
 fn load_viewer(bench: &mut TestBench, wasm_path: &Path) {
-    let wasm = fs::read(wasm_path).expect("read mesh-viewer wasm");
+    let wasm = fs::read(wasm_path).expect("read kit wasm");
     let loaded = bench
         .execute(vec![(
             "load",
@@ -82,7 +85,7 @@ fn load_viewer(bench: &mut TestBench, wasm_path: &Path) {
                     wasm,
                     name: Some(COMPONENT_NAME.to_owned()),
                     config: Vec::new(),
-                    export: None,
+                    export: Some("aether.mesh_viewer".to_owned()),
                 },
             ),
         )])
@@ -115,10 +118,10 @@ fn assert_draw_triangle_observed(bench: &TestBench) {
 /// emission, and the per-tick render-sink replay.
 #[test]
 fn dsl_box_loads_and_renders() {
-    let Some(wasm_path) = require_runtime("aether_mesh_viewer") else {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let sandbox = init_save_sandbox("mesh-viewer");
+    let sandbox = init_save_sandbox("kit-mesh");
     let path = write_fixture("dsl_box.dsl", BOX_DSL);
 
     let mut bench = TestBench::builder()
@@ -161,10 +164,10 @@ fn dsl_box_loads_and_renders() {
 /// regressing while the DSL branch keeps working.
 #[test]
 fn obj_quad_loads_and_renders() {
-    let Some(wasm_path) = require_runtime("aether_mesh_viewer") else {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let sandbox = init_save_sandbox("mesh-viewer");
+    let sandbox = init_save_sandbox("kit-mesh");
     let path = write_fixture("obj_quad.obj", QUAD_OBJ);
 
     let mut bench = TestBench::builder()
@@ -206,10 +209,10 @@ fn obj_quad_loads_and_renders() {
 /// the clear color.
 #[test]
 fn parse_failure_keeps_prior_mesh() {
-    let Some(wasm_path) = require_runtime("aether_mesh_viewer") else {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let sandbox = init_save_sandbox("mesh-viewer");
+    let sandbox = init_save_sandbox("kit-mesh");
     let good = write_fixture("good.dsl", BOX_DSL);
     let bad = write_fixture("bad.dsl", BAD_DSL);
 
@@ -273,10 +276,10 @@ fn parse_failure_keeps_prior_mesh() {
 /// from rendered geometry.
 #[test]
 fn good_dsl_load_replies_ok() {
-    let Some(wasm_path) = require_runtime("aether_mesh_viewer") else {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let sandbox = init_save_sandbox("mesh-viewer");
+    let sandbox = init_save_sandbox("kit-mesh");
     let path = write_fixture("reply_good.dsl", BOX_DSL);
 
     let mut bench = TestBench::builder()
@@ -319,10 +322,10 @@ fn good_dsl_load_replies_ok() {
 /// `engine_logs`.
 #[test]
 fn bad_dsl_load_replies_err() {
-    let Some(wasm_path) = require_runtime("aether_mesh_viewer") else {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let sandbox = init_save_sandbox("mesh-viewer");
+    let sandbox = init_save_sandbox("kit-mesh");
     let path = write_fixture("reply_bad.dsl", BAD_DSL);
 
     let mut bench = TestBench::builder()

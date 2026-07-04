@@ -15,7 +15,6 @@ members = [
     "crates/aether-kit",
     "crates/aether-capabilities",
     "crates/aether-mcp",
-    "crates/aether-mesh-viewer",
     # Test fixtures — a container dir of single-output crates: one shared
     # `kinds` rlib plus three component cdylibs (the main bundle and the
     # typed↔reshaped replace-pair satellites). Listed explicitly (not a

@@ -164,6 +164,7 @@ dependencies = [
  "aether-data",
  "aether-kinds",
  "aether-math",
+ "aether-mesh",
  "aether-substrate-bundle",
  "inventory",
  "serde",
@@ -213,22 +214,6 @@ dependencies = [
  "lexpr",
  "pretty_assertions",
  "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "aether-mesh-viewer"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-capabilities",
- "aether-data",
- "aether-kinds",
- "aether-math",
- "aether-mesh",
- "aether-substrate-bundle",
- "inventory",
- "serde",
  "tracing",
 ]
 

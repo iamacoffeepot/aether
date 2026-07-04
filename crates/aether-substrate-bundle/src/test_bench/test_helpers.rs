@@ -182,7 +182,7 @@ pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
 ///
 /// `label` is baked into the dirname so the tempdir is self-describing
 /// (`/tmp/aether-<label>-tests-<pid>`); pass a stable per-crate label
-/// like `"mesh-viewer"` or `"test-bench-io"`. Each integration test
+/// like `"kit-mesh"` or `"test-bench-io"`. Each integration test
 /// binary is its own process, so the label is only ever set once per
 /// process and collisions across binaries don't arise.
 ///
