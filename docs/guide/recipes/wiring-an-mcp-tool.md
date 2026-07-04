@@ -155,8 +155,9 @@ mis-serves the agent.
 
 - **Paths, not byte buffers.** If a tool needs file content (a wasm, a payload),
   the argument is a `String` path the harness reads — tool JSON never carries a
-  byte buffer. `actor_cost` has no payload arg, but `load_component`'s
-  `binary_path` is the rule.
+  byte buffer. `actor_cost` has no payload arg, but `upload_component` /
+  `upload_binary`'s `staged_path` is the rule — `load_component` itself takes a
+  registry `selector`, not a path.
 - **Ids cross the wire as tagged strings, parsed at the edges.** In via
   `parse_*` (rejecting a malformed id as `invalid_params`), out via
   `tagged_id::encode`. The agent only ever sees `mbx-…` / `knd-…` / `hdl-…` and

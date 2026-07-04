@@ -64,11 +64,15 @@ already bound, otherwise it launches the tunnel detached). Ports and the rest ar
 
 Everything is keyed by `engine_id`. A session has a recognizable arc:
 
-1. **Get an engine.** `spawn_substrate(binary_path)` forks a fresh substrate and
-   returns its `engine_id` (and RPC port); `list_engines` shows the ones already
-   running. You hand that `engine_id` to every later call.
-2. **Set it up.** `load_component(engine_id, binary_path)` loads a wasm component
-   and returns its `mailbox_id`, resolved `name`, and advertised capabilities.
+1. **Get an engine.** `spawn_substrate(selector)` forks a fresh substrate and
+   returns its `engine_id` (and RPC port); omit `selector` for `default` — the
+   headless chassis. `list_engines` shows the ones already running. You hand
+   that `engine_id` to every later call.
+2. **Set it up.** Stage the wasm into the hub's component registry with
+   `upload_component(staged_path)` — it returns `{hash, name}` — then
+   `load_component(engine_id, selector)` resolves that selector and loads the
+   component, returning its `mailbox_id`, resolved `name`, and advertised
+   capabilities.
 3. **Drive it.** `send_mail(…)` delivers a kind to a mailbox. By default it blocks
    until the dispatch chain settles and hands you the correlated reply.
 4. **Watch it.** `capture_frame` reads the rendered frame back as a PNG;

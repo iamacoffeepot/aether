@@ -73,14 +73,24 @@ logging, rate-limiting, or allowlisting.
 
 ## 3. Load the handler
 
-Load the handler component with `load_component` over the MCP harness once the
-substrate is up:
+`load_component` resolves against the hub's content-addressed component
+registry (ADR-0116), so stage the compiled wasm with `upload_component` first:
+
+```jsonc
+// upload_component
+{
+  "staged_path": "/path/to/web.wasm"
+}
+// → { "hash": "<hash>", "name": null }
+```
+
+Then load it by selector over the MCP harness once the substrate is up:
 
 ```jsonc
 // load_component
 {
   "engine_id": "<engine>",
-  "binary_path": "/path/to/web.wasm"
+  "selector": "<hash-or-name>"
 }
 ```
 
