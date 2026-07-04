@@ -44,7 +44,8 @@
 // type-safely; the route-registration kinds (ADR-0130) are `#[handler]` kinds
 // likewise.
 use crate::http::kinds::{
-    HttpInboundReady, HttpRequestCredit, HttpResponseChunk, HttpResponseStreamEnd,
+    HttpInboundReady, HttpRequestCredit, HttpResponseChunk, HttpResponseStreamEnd, WebSocketClose,
+    WebSocketMessage,
 };
 use crate::http::kinds::{
     RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf,
@@ -84,6 +85,13 @@ pub const DEFAULT_RESPONSE_STREAM_WINDOW: u32 = 16;
 /// [`HttpRequestChunk`]: crate::http::kinds::HttpRequestChunk
 /// [`HttpRequestCredit`]: crate::http::kinds::HttpRequestCredit
 pub const DEFAULT_REQUEST_STREAM_WINDOW: u32 = 16;
+/// Default `websocket_idle_timeout_millis` (ADR-0129): the read deadline on an
+/// upgraded websocket connection between frames, 5 minutes. Distinct from
+/// `request_timeout_millis` (the slow-loris in-flight read deadline) and much
+/// longer — an idle websocket sitting between messages is normal, not a
+/// slow-loris attack, so it is bounded by a generous keepalive window rather
+/// than the request deadline.
+pub const DEFAULT_WS_IDLE_TIMEOUT_MILLIS: u64 = 300_000;
 
 mod config;
 

@@ -5,7 +5,7 @@
 use super::{
     DEFAULT_BIND_ADDR, DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS, DEFAULT_MAX_CONNECTIONS,
     DEFAULT_MAX_HEADER_BYTES, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_STREAM_WINDOW,
-    DEFAULT_REQUEST_TIMEOUT_MILLIS, DEFAULT_RESPONSE_STREAM_WINDOW,
+    DEFAULT_REQUEST_TIMEOUT_MILLIS, DEFAULT_RESPONSE_STREAM_WINDOW, DEFAULT_WS_IDLE_TIMEOUT_MILLIS,
 };
 
 /// Init config for [`HttpServerCapability`](super::HttpServerCapability) (ADR-0108).
@@ -94,6 +94,14 @@ pub struct HttpServerConfig {
     /// [`HttpRequestCredit`]: crate::http::kinds::HttpRequestCredit
     #[cfg_attr(feature = "runtime", config(default = 16))]
     pub request_stream_window: u32,
+    /// Websocket idle timeout in milliseconds ([`DEFAULT_WS_IDLE_TIMEOUT_MILLIS`],
+    /// ADR-0129): the read deadline between frames on an upgraded websocket
+    /// connection. Distinct from `request_timeout_millis` (the slow-loris
+    /// in-flight read deadline) and much longer — an idle websocket between
+    /// messages is normal, so it is bounded by a generous keepalive window, on
+    /// expiry the idle socket is torn down rather than pinning a reader thread.
+    #[cfg_attr(feature = "runtime", config(default = 300_000))]
+    pub websocket_idle_timeout_millis: u64,
 }
 
 impl Default for HttpServerConfig {
@@ -109,6 +117,7 @@ impl Default for HttpServerConfig {
             max_connections: DEFAULT_MAX_CONNECTIONS,
             response_stream_window: DEFAULT_RESPONSE_STREAM_WINDOW,
             request_stream_window: DEFAULT_REQUEST_STREAM_WINDOW,
+            websocket_idle_timeout_millis: DEFAULT_WS_IDLE_TIMEOUT_MILLIS,
         }
     }
 }

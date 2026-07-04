@@ -48,11 +48,15 @@ use crate::http::kinds::{
     HttpHeader, HttpMethod, HttpRequestChunk, HttpRequestCredit, HttpRequestStreamEnd,
     HttpRequestStreamOpen, HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen,
     HttpServerRequest, HttpStreamCredit, RegisterRoute, RegisterRouteResult, RegisterRouteSelf,
-    UnregisterRoute, UnregisterRouteSelf, UnregisterRoutesAll,
+    UnregisterRoute, UnregisterRouteSelf, UnregisterRoutesAll, WebSocketAccept, WebSocketClose,
+    WebSocketMessage,
 };
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
 use aether_substrate::Mail;
 use std::io::{self, Read, Write};
+use std::mem;
 use std::str::from_utf8;
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -115,6 +119,12 @@ pub enum ReaderControl {
     /// Keep-alive resume: the response was written; read the next request on
     /// the same socket.
     Resume,
+    /// Websocket upgrade accepted (ADR-0129): the `101` was written and the
+    /// connection is now in websocket mode. The parked reader leaves the
+    /// HTTP request lifecycle and enters the RFC 6455 frame loop, reading
+    /// under the websocket idle deadline (not `request_timeout`), carrying
+    /// forward any bytes it over-read past the handshake head.
+    Upgrade,
 }
 
 /// One parsed inbound HTTP/1.1 request the reader hands to the
@@ -185,6 +195,27 @@ pub enum InboundEvent {
     /// socket error occurred — so the dispatcher tears the stream +
     /// connection down (ADR-0128).
     StreamFinished { stream_id: u64 },
+    /// A websocket reader reassembled one complete application message
+    /// (ADR-0129); the dispatcher delivers it to the handler as a
+    /// [`WebSocketMessage`] on its own fresh causal root.
+    WebSocketMessage {
+        conn_id: ConnId,
+        binary: bool,
+        data: Vec<u8>,
+    },
+    /// A websocket reader received a ping frame (ADR-0129); the dispatcher
+    /// answers it with a pong on the writer thread, transparently — the ping
+    /// never reaches the handler. Carries the ping payload the pong echoes.
+    WebSocketPing { conn_id: ConnId, payload: Vec<u8> },
+    /// A websocket reader received a peer close frame, or hit a protocol error
+    /// / oversize frame / idle timeout on the upgraded socket (ADR-0129). The
+    /// dispatcher reports a [`WebSocketClose`] to the handler, echoes the close
+    /// frame on the writer, and tears the connection down.
+    WebSocketClose {
+        conn_id: ConnId,
+        code: u16,
+        reason: String,
+    },
 }
 
 /// One frame handed to a per-connection response-stream writer thread over
@@ -193,6 +224,19 @@ pub enum InboundEvent {
 enum WriterMsg {
     Chunk(Vec<u8>),
     End,
+    /// A pre-serialized websocket data frame (ADR-0129), written verbatim.
+    /// Consumes one credit like [`Self::Chunk`]: on write the writer posts
+    /// [`InboundEvent::StreamSlotFreed`] so the cap replenishes the handler's
+    /// outbound send window.
+    WsData(Vec<u8>),
+    /// A pre-serialized websocket control frame (ADR-0129) — a cap-owned pong,
+    /// written verbatim. Uncredited (control frames are not paced by the
+    /// handler's window), so no slot-freed event follows.
+    WsControl(Vec<u8>),
+    /// A pre-serialized websocket close frame (ADR-0129). Written verbatim,
+    /// then the writer posts [`InboundEvent::StreamFinished`] and exits — the
+    /// close handshake's final write, after which the connection tears down.
+    WsClose(Vec<u8>),
 }
 
 /// Per-connection state owned by the cap dispatcher. The reader sidecar
@@ -220,6 +264,27 @@ pub struct ConnState {
     pub active_stream: Option<u64>,
     /// Reader thread handle. Joined in `unwire`, detached on close.
     pub reader_thread: Option<JoinHandle<()>>,
+    /// The connection's `Sec-WebSocket-Key`, stashed by the dispatcher when it
+    /// validates an inbound RFC 6455 upgrade handshake (ADR-0129) and consumed
+    /// when the handler accepts (to compute `Sec-WebSocket-Accept`). `None` on
+    /// a non-upgrade connection; cleared once consumed.
+    pub ws_pending_key: Option<String>,
+    /// Per-connection websocket state once upgraded (ADR-0129). `None` until
+    /// the handler replies `WebSocketAccept` and the cap flips the connection
+    /// into websocket mode.
+    pub websocket: Option<WsConn>,
+}
+
+/// Per-connection websocket state (ADR-0129), set on accept. Outbound frames
+/// ride the ADR-0128 writer thread through the [`StreamState`] keyed by
+/// `stream_id` in [`HttpServerCapabilityState::streams`]; `handler` is the
+/// mailbox each inbound message is dispatched to.
+pub struct WsConn {
+    /// The handler mailbox resolved at handshake — inbound messages dispatch
+    /// here, and outbound credit grants address it.
+    pub handler: MailboxId,
+    /// The `stream_id` of this connection's outbound writer [`StreamState`].
+    pub stream_id: u64,
 }
 
 /// Bookkeeping for one in-flight request. Looked up by the dispatch's
@@ -236,6 +301,10 @@ pub struct PendingRequest {
     /// `Connection: keep-alive` and resumes the reader) rather than
     /// closing it. Set from the [`ParsedRequest`] at dispatch.
     pub keep_alive: bool,
+    /// The handler this request dispatched to. Carried so a `WebSocketAccept`
+    /// reply (ADR-0129) resolves the same handler for the upgraded
+    /// connection's inbound dispatch + credit grants without re-resolving.
+    pub handler: MailboxId,
 }
 
 /// Per-connection response-stream state (ADR-0128), keyed in
@@ -247,6 +316,11 @@ pub struct StreamState {
     /// The connection this stream writes to. Teardown paths locate a stream
     /// by connection through this field.
     conn_id: ConnId,
+    /// The handler mailbox this stream's credit grants address. For a response
+    /// stream (ADR-0128) it is the late-bound `handler_mailbox`; for a
+    /// websocket (ADR-0129) it is the handler resolved at handshake. Stored so
+    /// credit replenishment addresses the right actor without a re-lookup.
+    handler: MailboxId,
     /// Bounded hand-off to the writer thread. `try_send` never blocks the
     /// dispatcher: the credit accounting keeps the invariant
     /// `credit_outstanding + queued <= window`, so a slot is always free when
@@ -436,6 +510,16 @@ pub struct HttpServerCapabilityState {
     /// stream ids (those reuse the request's dispatch correlation), so the two
     /// tables never collide.
     pub next_stream_id: u64,
+    /// Read deadline between frames on an upgraded websocket connection
+    /// (ADR-0129), from `websocket_idle_timeout_millis` — longer than
+    /// `request_timeout`, since an idle websocket is normal.
+    pub ws_idle_timeout: Duration,
+    /// Routing index for outbound websocket frames (ADR-0129). Each inbound
+    /// `WebSocketMessage` dispatches on its own fresh root; the handler answers
+    /// on that same causal chain, so this maps an in-flight inbound message's
+    /// root `correlation_id` to its connection. Cleared when the chain settles
+    /// (`on_settled`) or the connection closes.
+    pub ws_message_conn: HashMap<u64, ConnId>,
 }
 
 impl HttpServerCapabilityState {
@@ -575,6 +659,8 @@ impl HttpServerCapabilityState {
             request_timeout: self.request_timeout,
             idle_timeout: self.keep_alive_timeout,
             max_header_bytes: self.max_header_bytes,
+            ws_idle_timeout: self.ws_idle_timeout,
+            ws_max_message_bytes: self.max_request_bytes,
         };
 
         // Per-connection transport reader below the mail layer — carries
@@ -614,6 +700,8 @@ impl HttpServerCapabilityState {
                 control_tx,
                 active_stream: None,
                 reader_thread: Some(thread),
+                ws_pending_key: None,
+                websocket: None,
             },
         );
         tracing::debug!(
@@ -696,6 +784,7 @@ impl HttpServerCapabilityState {
                 conn_id,
                 method,
                 keep_alive,
+                handler,
             },
         );
     }
@@ -741,6 +830,27 @@ impl HttpServerCapabilityState {
             self.close_connection(conn_id, "handler unresolved");
             return;
         };
+        // ADR-0129: a websocket upgrade handshake. The cap validates the
+        // protocol layer (`426`/`400`, cap-owned) before dispatch; on a valid
+        // handshake it stashes the `Sec-WebSocket-Key` and dispatches the
+        // request as an ordinary buffered `HttpServerRequest` the handler
+        // answers with `WebSocketAccept` (accept) or `HttpServerResponse`
+        // (decline). An upgrade request carries no body, so it always buffers.
+        if header_has_token(&head.headers, "upgrade", "websocket") {
+            match validate_ws_handshake(&head.headers) {
+                Ok(key) => {
+                    if let Some(conn) = self.connections.get_mut(&conn_id) {
+                        conn.ws_pending_key = Some(key);
+                    }
+                    self.signal_reader(conn_id, ReaderControl::Buffered);
+                }
+                Err((status, message)) => {
+                    self.write_status_response(conn_id, status, message);
+                    self.close_connection(conn_id, "invalid websocket handshake");
+                }
+            }
+            return;
+        }
         let streaming = self
             .mailer
             .capability_registry()
@@ -863,6 +973,7 @@ impl HttpServerCapabilityState {
                 conn_id,
                 method: stream.method,
                 keep_alive: stream.keep_alive,
+                handler: stream.handler,
             },
         );
     }
@@ -968,6 +1079,10 @@ impl HttpServerCapabilityState {
         // write to a dead socket.
         self.in_flight
             .retain(|_, pending| pending.conn_id != conn_id);
+        // Drop websocket outbound-routing entries for this connection (ADR-0129)
+        // so a late handler reply on a settled chain doesn't route to a dead
+        // socket.
+        self.ws_message_conn.retain(|_, mapped| *mapped != conn_id);
         tracing::debug!(
             target: "aether_substrate::http_server",
             conn = conn_id,
@@ -990,8 +1105,16 @@ impl HttpServerCapabilityState {
         open: &HttpResponseStreamOpen,
     ) {
         // The stream chain settles here; the request is no longer in-flight
-        // (ADR-0128 §4), so `on_settled` won't `502` it.
+        // (ADR-0128 §4), so `on_settled` won't `502` it. Resolve the handler
+        // once here (it just replied, so it is live) and store it on the
+        // stream for credit grants; a missing handler leaves the sentinel and
+        // credit sends drop harmlessly, the pre-store no-op behavior.
         self.in_flight.remove(&stream_id);
+        let handler = self
+            .mailer
+            .registry()
+            .lookup(&self.handler_mailbox)
+            .unwrap_or(MailboxId(0));
         let head = render_stream_head(open);
         self.write_raw_to(conn_id, &head);
 
@@ -1048,6 +1171,7 @@ impl HttpServerCapabilityState {
             stream_id,
             StreamState {
                 conn_id,
+                handler,
                 tx,
                 writer_thread: Some(writer_thread),
                 credit_outstanding: window,
@@ -1151,11 +1275,13 @@ impl HttpServerCapabilityState {
         }
     }
 
-    /// Resolve the handler mailbox and send it a credit grant on `stream_id`.
-    /// A fresh causal root per grant keeps credit mails settling per-chunk,
-    /// never holding one chain open across the stream (ADR-0128 §4).
+    /// Send the stream's handler a credit grant on `stream_id`. A fresh causal
+    /// root per grant keeps credit mails settling per-chunk, never holding one
+    /// chain open across the stream (ADR-0128 §4). The handler is the one
+    /// resolved and stored at stream open (a response stream's late-bound
+    /// `handler_mailbox`, or a websocket's handshake handler, ADR-0129).
     fn send_stream_credit(&self, ctx: &mut NativeCtx<'_>, stream_id: u64, credit: u32) {
-        let Some(handler) = self.mailer.registry().lookup(&self.handler_mailbox) else {
+        let Some(handler) = self.streams.get(&stream_id).map(|stream| stream.handler) else {
             return;
         };
         let payload = HttpStreamCredit { stream_id, credit }.encode_into_bytes();
@@ -1169,6 +1295,261 @@ impl HttpServerCapabilityState {
     fn teardown_stream(&mut self, stream_id: u64) {
         if let Some(mut stream) = self.streams.remove(&stream_id) {
             drop(stream.writer_thread.take());
+        }
+    }
+
+    /// Accept a websocket upgrade (ADR-0129 §1): the handler replied
+    /// `WebSocketAccept` to a stashed-key upgrade request. Compute
+    /// `Sec-WebSocket-Accept`, write the `101 Switching Protocols` head
+    /// (inline, strictly before the writer thread starts, so the two never
+    /// interleave on the shared fd), spawn the ADR-0128 writer thread for
+    /// outbound frames, grant the handler its initial outbound credit window,
+    /// and flip the reader into the RFC 6455 frame loop. `correlation` is the
+    /// handshake request's in-flight key.
+    fn accept_websocket(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        correlation: u64,
+        conn_id: ConnId,
+        handler: MailboxId,
+        accept: &WebSocketAccept,
+    ) {
+        self.in_flight.remove(&correlation);
+        let Some(key) = self
+            .connections
+            .get_mut(&conn_id)
+            .and_then(|conn| conn.ws_pending_key.take())
+        else {
+            // A `WebSocketAccept` with no stashed key — the handler replied it
+            // to a non-upgrade request. Cap-level error, close the connection.
+            self.write_status_response(conn_id, 500, "websocket accept without upgrade");
+            self.close_connection(conn_id, "websocket accept without upgrade");
+            return;
+        };
+        let head = render_ws_accept(&key, accept);
+        self.write_raw_to(conn_id, &head);
+
+        let Some(conn) = self.connections.get(&conn_id) else {
+            return;
+        };
+        let write_half = match conn.write_half.try_clone() {
+            Ok(half) => half,
+            Err(e) => {
+                tracing::warn!(
+                    target: "aether_substrate::http_server",
+                    conn = conn_id,
+                    error = %e,
+                    "http websocket: writer clone failed; closing",
+                );
+                self.close_connection(conn_id, "websocket writer clone failed");
+                return;
+            }
+        };
+
+        let stream_id = self.next_stream_id;
+        self.next_stream_id += 1;
+        let window = self.response_stream_window.max(1);
+        let (tx, rx) = mpsc::sync_channel::<WriterMsg>(window as usize);
+        let sink = WakeSink {
+            inbound_tx: self.inbound_tx.clone(),
+            mailer: Arc::clone(&self.mailer),
+            self_id: self.self_mailbox,
+            wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
+        };
+        // The writer's idle deadline is the websocket idle timeout: an upgraded
+        // socket with nothing to write for minutes is normal, unlike a stalled
+        // response stream.
+        let idle_deadline = self.ws_idle_timeout;
+
+        #[allow(clippy::disallowed_methods)]
+        let writer_thread = match thread::Builder::new()
+            .name(format!("aether-http-writer-{conn_id}"))
+            .spawn(move || {
+                run_writer_loop(write_half, stream_id, &rx, &sink, idle_deadline);
+            }) {
+            Ok(thread) => thread,
+            Err(e) => {
+                tracing::warn!(
+                    target: "aether_substrate::http_server",
+                    conn = conn_id,
+                    error = %e,
+                    "http websocket: writer thread spawn failed; closing",
+                );
+                self.close_connection(conn_id, "websocket writer spawn failed");
+                return;
+            }
+        };
+
+        self.streams.insert(
+            stream_id,
+            StreamState {
+                conn_id,
+                handler,
+                tx,
+                writer_thread: Some(writer_thread),
+                credit_outstanding: window,
+                pending_end: false,
+            },
+        );
+        if let Some(conn) = self.connections.get_mut(&conn_id) {
+            conn.websocket = Some(WsConn { handler, stream_id });
+        }
+        // Grant the initial outbound window; the handler learns its `stream_id`
+        // from this first credit mail (ADR-0128 / ADR-0129 §3).
+        self.send_stream_credit(ctx, stream_id, window);
+        // Flip the parked reader into the frame loop.
+        self.signal_reader(conn_id, ReaderControl::Upgrade);
+        tracing::debug!(
+            target: "aether_substrate::http_server",
+            conn = conn_id,
+            stream = stream_id,
+            window,
+            "http websocket upgraded",
+        );
+    }
+
+    /// Deliver one reassembled inbound websocket message to the handler
+    /// (ADR-0129 §4) as a `WebSocketMessage` on its own fresh causal root, and
+    /// record the root → connection routing so the handler's answer (an
+    /// outbound `WebSocketMessage` / `WebSocketClose` inheriting the chain)
+    /// routes back to this socket. Subscribes to settlement so the routing
+    /// entry is reclaimed when the message's chain drains.
+    fn dispatch_ws_message(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        conn_id: ConnId,
+        binary: bool,
+        data: Vec<u8>,
+    ) {
+        let Some(handler) = self
+            .connections
+            .get(&conn_id)
+            .and_then(|conn| conn.websocket.as_ref())
+            .map(|ws| ws.handler)
+        else {
+            return;
+        };
+        let payload = WebSocketMessage { binary, data }.encode_into_bytes();
+        let mail_id = ctx.send_envelope_as_root(handler, <WebSocketMessage as Kind>::ID, &payload);
+        self.ws_message_conn.insert(mail_id.correlation_id, conn_id);
+        if let Some(registry) = self.mailer.settlement_registry() {
+            registry.subscribe_settlement_mail(
+                mail_id,
+                self.self_mailbox,
+                <Settled as Kind>::ID,
+                Arc::clone(&self.mailer),
+            );
+        }
+    }
+
+    /// Report a peer-initiated websocket close to the handler (ADR-0129 §5) as
+    /// a `WebSocketClose` on its own fresh root — the inbound-close analog of
+    /// [`Self::dispatch_ws_message`], so the handler observes the disconnect.
+    fn report_ws_close(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        conn_id: ConnId,
+        code: u16,
+        reason: &str,
+    ) {
+        let Some(handler) = self
+            .connections
+            .get(&conn_id)
+            .and_then(|conn| conn.websocket.as_ref())
+            .map(|ws| ws.handler)
+        else {
+            return;
+        };
+        let payload = WebSocketClose {
+            code,
+            reason: reason.to_string(),
+        }
+        .encode_into_bytes();
+        let _ = ctx.send_envelope_as_root(handler, <WebSocketClose as Kind>::ID, &payload);
+    }
+
+    /// Frame an outbound application message and hand it to the connection's
+    /// writer thread (ADR-0129 §3). Mirrors [`Self::push_chunk`]: a message
+    /// arriving with zero outstanding credit is an over-window flood and tears
+    /// the connection down; otherwise it spends one credit and queues the
+    /// serialized frame.
+    fn send_ws_message(&mut self, conn_id: ConnId, binary: bool, data: &[u8]) {
+        let Some(stream_id) = self
+            .connections
+            .get(&conn_id)
+            .and_then(|conn| conn.websocket.as_ref())
+            .map(|ws| ws.stream_id)
+        else {
+            return;
+        };
+        let opcode = if binary { OPCODE_BINARY } else { OPCODE_TEXT };
+        let frame = serialize_ws_frame(opcode, data, None);
+        let Some(has_credit) = self
+            .streams
+            .get(&stream_id)
+            .map(|stream| stream.credit_outstanding > 0)
+        else {
+            return;
+        };
+        if !has_credit {
+            self.teardown_stream(stream_id);
+            self.close_connection(conn_id, "websocket send credit exceeded");
+            return;
+        }
+        let send_result = {
+            let stream = self
+                .streams
+                .get_mut(&stream_id)
+                .expect("stream present under the same borrow");
+            stream.credit_outstanding -= 1;
+            stream.tx.try_send(WriterMsg::WsData(frame))
+        };
+        if send_result.is_err() {
+            self.teardown_stream(stream_id);
+            self.close_connection(conn_id, "websocket writer unavailable");
+        }
+    }
+
+    /// Queue a cap-owned pong answering an inbound ping (ADR-0129 §5) on the
+    /// connection's writer thread. Uncredited and best-effort — a full writer
+    /// channel drops the pong rather than blocking or tearing down.
+    fn send_ws_pong(&mut self, conn_id: ConnId, payload: &[u8]) {
+        let Some(stream_id) = self
+            .connections
+            .get(&conn_id)
+            .and_then(|conn| conn.websocket.as_ref())
+            .map(|ws| ws.stream_id)
+        else {
+            return;
+        };
+        let frame = serialize_ws_frame(OPCODE_PONG, payload, None);
+        if let Some(stream) = self.streams.get(&stream_id) {
+            let _ = stream.tx.try_send(WriterMsg::WsControl(frame));
+        }
+    }
+
+    /// Initiate / complete a websocket close (ADR-0129 §5): queue a close frame
+    /// on the writer as its final write (the writer posts `StreamFinished`,
+    /// which tears the connection down). Serves both a handler-initiated close
+    /// and the echo of a peer close frame.
+    fn send_ws_close(&mut self, conn_id: ConnId, code: u16, reason: &str) {
+        let Some(stream_id) = self
+            .connections
+            .get(&conn_id)
+            .and_then(|conn| conn.websocket.as_ref())
+            .map(|ws| ws.stream_id)
+        else {
+            return;
+        };
+        let frame = serialize_ws_close_frame(code, reason);
+        if let Some(stream) = self.streams.get(&stream_id) {
+            if stream.tx.try_send(WriterMsg::WsClose(frame)).is_err() {
+                // Writer gone — tear down directly.
+                self.teardown_stream(stream_id);
+                self.close_connection(conn_id, "websocket close write failed");
+            }
+        } else {
+            self.close_connection(conn_id, "websocket already closed");
         }
     }
 }
@@ -1357,6 +1738,13 @@ struct ReaderTuning {
     request_timeout: Duration,
     idle_timeout: Duration,
     max_header_bytes: usize,
+    /// Read deadline between frames once the connection upgrades to a websocket
+    /// (ADR-0129). The frame loop reads under this rather than `request_timeout`.
+    ws_idle_timeout: Duration,
+    /// Cap on a single reassembled websocket message (ADR-0129), reusing the
+    /// request-body cap — an inbound message past this is a protocol error the
+    /// reader answers with a close rather than buffering unboundedly.
+    ws_max_message_bytes: usize,
 }
 
 /// Whether the `Connection` header names `token` (case-insensitive), across
@@ -1372,6 +1760,49 @@ fn connection_has_token(headers: &[HttpHeader], token: &str) -> bool {
                 .split(',')
                 .any(|value| value.trim().eq_ignore_ascii_case(token))
         })
+}
+
+/// First value of the header named `name` (case-insensitive), or `None` if the
+/// request carries no such header. Trimmed of surrounding whitespace.
+fn first_header_value<'a>(headers: &'a [HttpHeader], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case(name))
+        .map(|header| header.value.trim())
+}
+
+/// Whether the header named `name` lists `token` (case-insensitive), across
+/// comma-separated values and repeated header lines — the general form of
+/// [`connection_has_token`], used for `Upgrade: websocket`.
+fn header_has_token(headers: &[HttpHeader], name: &str, token: &str) -> bool {
+    headers
+        .iter()
+        .filter(|header| header.name.eq_ignore_ascii_case(name))
+        .any(|header| {
+            header
+                .value
+                .split(',')
+                .any(|value| value.trim().eq_ignore_ascii_case(token))
+        })
+}
+
+/// Validate an RFC 6455 upgrade handshake's protocol layer (ADR-0129 §1),
+/// cap-owned before any dispatch. The caller has already seen `Upgrade:
+/// websocket`; this checks `Connection: Upgrade`, `Sec-WebSocket-Version: 13`,
+/// and a non-empty `Sec-WebSocket-Key`, returning the key on success or the
+/// canned status the cap answers (`426` for a wrong version, `400` for a
+/// malformed handshake) on failure.
+fn validate_ws_handshake(headers: &[HttpHeader]) -> Result<String, (u16, &'static str)> {
+    if !connection_has_token(headers, "upgrade") {
+        return Err((400, "websocket upgrade requires Connection: Upgrade"));
+    }
+    if first_header_value(headers, "sec-websocket-version") != Some("13") {
+        return Err((426, "unsupported websocket version"));
+    }
+    match first_header_value(headers, "sec-websocket-key") {
+        Some(key) if !key.is_empty() => Ok(key.to_string()),
+        _ => Err((400, "missing sec-websocket-key")),
+    }
 }
 
 /// Whether a request wants its connection kept alive after the response.
@@ -1421,6 +1852,7 @@ fn run_reader_loop(
         request_timeout,
         idle_timeout,
         max_header_bytes,
+        ..
     } = tuning;
     let mut stream = read_half;
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
@@ -1606,9 +2038,11 @@ fn run_reader_loop(
                     StreamOutcome::Closed => return,
                 }
             }
-            // The dispatcher never sends a bare credit / resume as the first
-            // control after a head — treat it as a torn-down connection.
-            ReaderControl::Credit { .. } | ReaderControl::Resume => return,
+            // The dispatcher never sends a bare credit / resume / upgrade as
+            // the first control after a head (an upgrade rides the Buffered
+            // dispatch, then arrives at the response wait) — treat it as a
+            // torn-down connection.
+            ReaderControl::Credit { .. } | ReaderControl::Resume | ReaderControl::Upgrade => return,
         };
 
         // Phase 3: response deadline. Wait for the dispatcher's resume signal
@@ -1618,6 +2052,13 @@ fn run_reader_loop(
         match control_rx.recv_timeout(request_timeout) {
             Ok(ReaderControl::Resume) => {
                 buf = next_buf;
+            }
+            Ok(ReaderControl::Upgrade) => {
+                // ADR-0129: the handshake was accepted (`101` written) — leave
+                // the HTTP request lifecycle for the RFC 6455 frame loop,
+                // carrying any bytes over-read past the handshake head.
+                run_ws_reader_loop(&mut stream, conn_id, shutdown, sink, next_buf, tuning);
+                return;
             }
             Ok(_) => return,
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -1842,9 +2283,9 @@ impl BodyStreamer<'_> {
                 Ok(ReaderControl::Credit { credit } | ReaderControl::Stream { credit }) => {
                     self.credit = self.credit.saturating_add(credit);
                 }
-                // A bare buffered / resume mid-stream, or the control channel
-                // dropped, means a torn-down connection — stop.
-                Ok(ReaderControl::Buffered | ReaderControl::Resume)
+                // A bare buffered / resume / upgrade mid-stream, or the control
+                // channel dropped, means a torn-down connection — stop.
+                Ok(ReaderControl::Buffered | ReaderControl::Resume | ReaderControl::Upgrade)
                 | Err(mpsc::RecvTimeoutError::Disconnected) => return Err(()),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     self.post_closed("stream credit timeout");
@@ -2070,6 +2511,32 @@ fn run_writer_loop(
                 sink.post(InboundEvent::StreamFinished { stream_id });
                 return;
             }
+            Ok(WriterMsg::WsData(frame)) => {
+                // A pre-serialized websocket data frame (ADR-0129): write it
+                // verbatim, then free a credit slot like a response chunk.
+                if write_all_flush(&mut write_half, &frame).is_err() {
+                    sink.post(InboundEvent::StreamFinished { stream_id });
+                    return;
+                }
+                if !sink.post(InboundEvent::StreamSlotFreed { stream_id }) {
+                    return;
+                }
+            }
+            Ok(WriterMsg::WsControl(frame)) => {
+                // A cap-owned pong (ADR-0129 §5): verbatim, uncredited — no
+                // slot-freed event, so it never inflates the handler's window.
+                if write_all_flush(&mut write_half, &frame).is_err() {
+                    sink.post(InboundEvent::StreamFinished { stream_id });
+                    return;
+                }
+            }
+            Ok(WriterMsg::WsClose(frame)) => {
+                // The close handshake's final write (ADR-0129 §5): verbatim,
+                // then finish so the dispatcher tears the connection down.
+                let _ = write_all_flush(&mut write_half, &frame);
+                sink.post(InboundEvent::StreamFinished { stream_id });
+                return;
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // Idle-write deadline (ADR-0128 §4): the handler stalled.
                 sink.post(InboundEvent::StreamFinished { stream_id });
@@ -2104,6 +2571,494 @@ fn write_terminator(write_half: &mut TcpStream) -> io::Result<()> {
     write_half.flush()
 }
 
+/// Write `bytes` verbatim and flush — a pre-serialized websocket frame
+/// (ADR-0129), with no chunked-transfer framing layered on.
+fn write_all_flush(write_half: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
+    write_half.write_all(bytes)?;
+    write_half.flush()
+}
+
+// ADR-0129 websocket support: the RFC 6455 handshake accept-key (hand-rolled
+// SHA-1 + base64), the frame codec (parse / serialize / masking / continuation
+// reassembly), the `101` render, and the reader-thread frame loop. All under
+// `feature = "runtime"` with the rest of this module — the wasm-safe `kinds.rs`
+// half is untouched.
+
+/// RFC 6455 §1.3 handshake GUID, concatenated with the client
+/// `Sec-WebSocket-Key` before the SHA-1 that forms `Sec-WebSocket-Accept`.
+const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+/// RFC 6455 opcodes the cap emits / matches.
+const OPCODE_CONTINUATION: u8 = 0x0;
+const OPCODE_TEXT: u8 = 0x1;
+const OPCODE_BINARY: u8 = 0x2;
+const OPCODE_CLOSE: u8 = 0x8;
+const OPCODE_PING: u8 = 0x9;
+const OPCODE_PONG: u8 = 0xA;
+
+/// Compute `Sec-WebSocket-Accept` (RFC 6455 §4.2.2): base64(SHA-1(key + GUID)).
+fn sec_websocket_accept(key: &str) -> String {
+    let mut input = key.as_bytes().to_vec();
+    input.extend_from_slice(WS_GUID.as_bytes());
+    BASE64_STANDARD.encode(sha1(&input))
+}
+
+/// Hand-rolled SHA-1 (RFC 3174) over `data`, returning the 20-byte digest. Not
+/// a general crypto primitive — a fixed, short, non-secret hash for the RFC
+/// 6455 handshake (ADR-0129 §6), pinned by the RFC's own worked vector rather
+/// than earning a `sha1` crate. SHA-1 is broken for collision resistance; the
+/// handshake does not rely on that property (it echoes a nonce), so this use is
+/// correct.
+// SHA-1's working variables are single letters by the RFC 3174 spec
+// (a/b/c/d/e/f/h/w/k); renaming them would obscure the transcription.
+#[allow(clippy::many_single_char_names)]
+fn sha1(data: &[u8]) -> [u8; 20] {
+    let mut h: [u32; 5] = [
+        0x6745_2301,
+        0xEFCD_AB89,
+        0x98BA_DCFE,
+        0x1032_5476,
+        0xC3D2_E1F0,
+    ];
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    // Pad: append 0x80, zero-fill to 56 mod 64, then the 64-bit big-endian
+    // message length in bits.
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+
+    let mut w = [0u32; 80];
+    for block in msg.chunks_exact(64) {
+        for (i, word) in w.iter_mut().take(16).enumerate() {
+            let j = i * 4;
+            *word = u32::from_be_bytes([block[j], block[j + 1], block[j + 2], block[j + 3]]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e] = h;
+        for (i, &word) in w.iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999),
+                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
+                _ => (b ^ c ^ d, 0xCA62_C1D6),
+            };
+            let tmp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(word);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = tmp;
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+    }
+
+    let mut out = [0u8; 20];
+    for (i, word) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    out
+}
+
+/// Serialize one RFC 6455 frame with FIN set: `opcode`, `payload`, optionally
+/// masked with `mask`. A server→client frame is unmasked (`mask = None`, ADR-0129
+/// §3); the masked path exists for the codec's own round-trip tests.
+fn serialize_ws_frame(opcode: u8, payload: &[u8], mask: Option<[u8; 4]>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + 14);
+    out.push(0x80 | (opcode & 0x0F));
+    let masked_bit: u8 = if mask.is_some() { 0x80 } else { 0x00 };
+    let len = payload.len();
+    if len < 126 {
+        out.push(masked_bit | u8::try_from(len).unwrap_or(0));
+    } else if let Ok(short) = u16::try_from(len) {
+        out.push(masked_bit | 0x7E);
+        out.extend_from_slice(&short.to_be_bytes());
+    } else {
+        out.push(masked_bit | 0x7F);
+        out.extend_from_slice(&(len as u64).to_be_bytes());
+    }
+    match mask {
+        Some(key) => {
+            out.extend_from_slice(&key);
+            for (i, byte) in payload.iter().enumerate() {
+                out.push(byte ^ key[i % 4]);
+            }
+        }
+        None => out.extend_from_slice(payload),
+    }
+    out
+}
+
+/// Serialize an RFC 6455 close frame (opcode `0x8`): a 2-byte big-endian status
+/// code followed by the UTF-8 reason, unmasked.
+fn serialize_ws_close_frame(code: u16, reason: &str) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(2 + reason.len());
+    payload.extend_from_slice(&code.to_be_bytes());
+    payload.extend_from_slice(reason.as_bytes());
+    serialize_ws_frame(OPCODE_CLOSE, &payload, None)
+}
+
+/// One parsed RFC 6455 frame — header decoded, payload unmasked.
+struct WsFrame {
+    fin: bool,
+    opcode: u8,
+    payload: Vec<u8>,
+}
+
+/// Outcome of [`parse_ws_frame`].
+enum WsFrameParse {
+    Complete {
+        frame: WsFrame,
+        consumed: usize,
+    },
+    NeedMore,
+    /// A protocol violation (an unmasked client frame, a reserved bit set, or a
+    /// length past the cap). Carries the RFC 6455 close code + reason the cap
+    /// answers before tearing down — untrusted input never panics (ADR-0129).
+    Error {
+        code: u16,
+        reason: &'static str,
+    },
+}
+
+/// Parse one frame from the front of `buf`. A client→server frame MUST be
+/// masked (RFC 6455 §5.1); `max_payload` bounds one frame's payload so an
+/// oversize length is a protocol error, not an allocation.
+fn parse_ws_frame(buf: &[u8], max_payload: usize) -> WsFrameParse {
+    if buf.len() < 2 {
+        return WsFrameParse::NeedMore;
+    }
+    let b0 = buf[0];
+    let b1 = buf[1];
+    if b0 & 0x70 != 0 {
+        return WsFrameParse::Error {
+            code: 1002,
+            reason: "reserved bits set",
+        };
+    }
+    let fin = b0 & 0x80 != 0;
+    let opcode = b0 & 0x0F;
+    if b1 & 0x80 == 0 {
+        return WsFrameParse::Error {
+            code: 1002,
+            reason: "client frame not masked",
+        };
+    }
+    let len7 = usize::from(b1 & 0x7F);
+    let mut cursor = 2;
+    let payload_len = match len7 {
+        126 => {
+            if buf.len() < cursor + 2 {
+                return WsFrameParse::NeedMore;
+            }
+            let n = usize::from(u16::from_be_bytes([buf[cursor], buf[cursor + 1]]));
+            cursor += 2;
+            n
+        }
+        127 => {
+            if buf.len() < cursor + 8 {
+                return WsFrameParse::NeedMore;
+            }
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&buf[cursor..cursor + 8]);
+            cursor += 8;
+            match usize::try_from(u64::from_be_bytes(arr)) {
+                Ok(n) => n,
+                Err(_) => {
+                    return WsFrameParse::Error {
+                        code: 1009,
+                        reason: "frame too large",
+                    };
+                }
+            }
+        }
+        n => n,
+    };
+    if payload_len > max_payload {
+        return WsFrameParse::Error {
+            code: 1009,
+            reason: "frame too large",
+        };
+    }
+    if buf.len() < cursor + 4 + payload_len {
+        return WsFrameParse::NeedMore;
+    }
+    let mask = [
+        buf[cursor],
+        buf[cursor + 1],
+        buf[cursor + 2],
+        buf[cursor + 3],
+    ];
+    cursor += 4;
+    let mut payload = Vec::with_capacity(payload_len);
+    for (i, &byte) in buf[cursor..cursor + payload_len].iter().enumerate() {
+        payload.push(byte ^ mask[i % 4]);
+    }
+    cursor += payload_len;
+    WsFrameParse::Complete {
+        frame: WsFrame {
+            fin,
+            opcode,
+            payload,
+        },
+        consumed: cursor,
+    }
+}
+
+/// Decode a close frame payload: an optional 2-byte big-endian status code
+/// followed by a UTF-8 reason. An absent code is reported as `1005` (RFC 6455
+/// "no status received").
+fn parse_ws_close_payload(payload: &[u8]) -> (u16, String) {
+    if payload.len() < 2 {
+        return (1005, String::new());
+    }
+    let code = u16::from_be_bytes([payload[0], payload[1]]);
+    (code, String::from_utf8_lossy(&payload[2..]).into_owned())
+}
+
+/// Render the RFC 6455 `101 Switching Protocols` handshake response (ADR-0129
+/// §1): the mandated `Upgrade` / `Connection` / `Sec-WebSocket-Accept`, the
+/// handler's optional negotiated subprotocol, and any extra handler headers
+/// (the three cap-owned handshake headers are stripped so a handler cannot
+/// double them).
+fn render_ws_accept(key: &str, accept: &WebSocketAccept) -> Vec<u8> {
+    use std::fmt::Write as _;
+    let mut head = String::from("HTTP/1.1 101 Switching Protocols\r\n");
+    head.push_str("Upgrade: websocket\r\n");
+    head.push_str("Connection: Upgrade\r\n");
+    let _ = write!(
+        head,
+        "Sec-WebSocket-Accept: {}\r\n",
+        sec_websocket_accept(key)
+    );
+    if let Some(protocol) = &accept.subprotocol {
+        let _ = write!(head, "Sec-WebSocket-Protocol: {protocol}\r\n");
+    }
+    for header in &accept.headers {
+        if header.name.eq_ignore_ascii_case("upgrade")
+            || header.name.eq_ignore_ascii_case("connection")
+            || header.name.eq_ignore_ascii_case("sec-websocket-accept")
+        {
+            continue;
+        }
+        let _ = write!(head, "{}: {}\r\n", header.name, header.value);
+    }
+    head.push_str("\r\n");
+    head.into_bytes()
+}
+
+/// Whether the reader's frame loop keeps running or stops (peer close /
+/// protocol error / receiver gone).
+enum WsLoop {
+    Continue,
+    Stop,
+}
+
+/// Act on one parsed inbound frame (ADR-0129 §4/§5), driving continuation
+/// reassembly and control-frame handling. Application messages / pings / peer
+/// closes post an [`InboundEvent`]; the cap (dispatcher + writer thread) does
+/// all the writing — the reader only reads and reports.
+#[allow(clippy::too_many_arguments)]
+fn handle_ws_frame(
+    frame: WsFrame,
+    conn_id: ConnId,
+    sink: &WakeSink,
+    msg: &mut Vec<u8>,
+    msg_binary: &mut bool,
+    fragmenting: &mut bool,
+    max_message_bytes: usize,
+) -> WsLoop {
+    let protocol_close = |code: u16, reason: &str| {
+        sink.post(InboundEvent::WebSocketClose {
+            conn_id,
+            code,
+            reason: reason.to_string(),
+        });
+        WsLoop::Stop
+    };
+    match frame.opcode {
+        OPCODE_PING => {
+            if !frame.fin {
+                return protocol_close(1002, "fragmented control frame");
+            }
+            if sink.post(InboundEvent::WebSocketPing {
+                conn_id,
+                payload: frame.payload,
+            }) {
+                WsLoop::Continue
+            } else {
+                WsLoop::Stop
+            }
+        }
+        // A pong (peer keepalive answer) is transparent — nothing to do.
+        OPCODE_PONG => WsLoop::Continue,
+        OPCODE_CLOSE => {
+            let (code, reason) = parse_ws_close_payload(&frame.payload);
+            sink.post(InboundEvent::WebSocketClose {
+                conn_id,
+                code,
+                reason,
+            });
+            WsLoop::Stop
+        }
+        OPCODE_TEXT | OPCODE_BINARY => {
+            if *fragmenting {
+                return protocol_close(1002, "interleaved data frame");
+            }
+            let binary = frame.opcode == OPCODE_BINARY;
+            if frame.fin {
+                if sink.post(InboundEvent::WebSocketMessage {
+                    conn_id,
+                    binary,
+                    data: frame.payload,
+                }) {
+                    WsLoop::Continue
+                } else {
+                    WsLoop::Stop
+                }
+            } else {
+                *msg = frame.payload;
+                *msg_binary = binary;
+                *fragmenting = true;
+                WsLoop::Continue
+            }
+        }
+        OPCODE_CONTINUATION => {
+            if !*fragmenting {
+                return protocol_close(1002, "unexpected continuation frame");
+            }
+            if msg.len() + frame.payload.len() > max_message_bytes {
+                return protocol_close(1009, "message too large");
+            }
+            msg.extend_from_slice(&frame.payload);
+            if frame.fin {
+                *fragmenting = false;
+                let data = mem::take(msg);
+                if sink.post(InboundEvent::WebSocketMessage {
+                    conn_id,
+                    binary: *msg_binary,
+                    data,
+                }) {
+                    WsLoop::Continue
+                } else {
+                    WsLoop::Stop
+                }
+            } else {
+                WsLoop::Continue
+            }
+        }
+        _ => protocol_close(1002, "unknown opcode"),
+    }
+}
+
+/// The websocket frame loop (ADR-0129 §4): once upgraded, the reader reads RFC
+/// 6455 frames under the idle deadline, reassembles continuation frames into
+/// complete messages, and posts each application message / ping / peer close as
+/// an [`InboundEvent`]. It writes nothing — every outbound byte (pong, close
+/// echo, and the handler's messages) goes through the single writer thread, so
+/// no two writers race on the shared fd. `leftover` carries any bytes over-read
+/// past the handshake head. Exits on peer close / protocol error / EOF / idle
+/// timeout, posting a [`InboundEvent::WebSocketClose`] so the dispatcher tears
+/// the connection down.
+fn run_ws_reader_loop(
+    stream: &mut TcpStream,
+    conn_id: ConnId,
+    shutdown: &AtomicBool,
+    sink: &WakeSink,
+    leftover: Vec<u8>,
+    tuning: ReaderTuning,
+) {
+    let ReaderTuning {
+        ws_idle_timeout,
+        ws_max_message_bytes,
+        ..
+    } = tuning;
+    // An idle websocket is normal — read under the (longer) idle deadline.
+    let _ = stream.set_read_timeout(Some(ws_idle_timeout));
+    let mut buf = leftover;
+    let mut msg: Vec<u8> = Vec::new();
+    let mut msg_binary = false;
+    let mut fragmenting = false;
+    let mut chunk = [0u8; 8 * 1024];
+
+    loop {
+        // Drain every whole frame the buffer already holds before reading more.
+        loop {
+            if shutdown.load(Ordering::Acquire) {
+                return;
+            }
+            match parse_ws_frame(&buf, ws_max_message_bytes) {
+                WsFrameParse::Complete { frame, consumed } => {
+                    buf.drain(..consumed);
+                    if matches!(
+                        handle_ws_frame(
+                            frame,
+                            conn_id,
+                            sink,
+                            &mut msg,
+                            &mut msg_binary,
+                            &mut fragmenting,
+                            ws_max_message_bytes,
+                        ),
+                        WsLoop::Stop
+                    ) {
+                        return;
+                    }
+                }
+                WsFrameParse::NeedMore => break,
+                WsFrameParse::Error { code, reason } => {
+                    sink.post(InboundEvent::WebSocketClose {
+                        conn_id,
+                        code,
+                        reason: reason.to_string(),
+                    });
+                    return;
+                }
+            }
+        }
+        match read_more(stream, &mut chunk) {
+            ReadStep::Filled(n) => buf.extend_from_slice(&chunk[..n]),
+            ReadStep::Eof => {
+                sink.post(InboundEvent::WebSocketClose {
+                    conn_id,
+                    code: 1006,
+                    reason: "peer disconnected".to_string(),
+                });
+                return;
+            }
+            ReadStep::Timeout => {
+                sink.post(InboundEvent::WebSocketClose {
+                    conn_id,
+                    code: 1001,
+                    reason: "idle timeout".to_string(),
+                });
+                return;
+            }
+            ReadStep::Error(reason) => {
+                sink.post(InboundEvent::WebSocketClose {
+                    conn_id,
+                    code: 1006,
+                    reason,
+                });
+                return;
+            }
+        }
+    }
+}
+
 /// Map a raw HTTP method token to the typed [`HttpMethod`]; `None` for a
 /// non-enumerated verb (answered `501` before any dispatch).
 fn parse_http_method(method: &str) -> Option<HttpMethod> {
@@ -2130,6 +3085,7 @@ fn reason_phrase(status: u16) -> &'static str {
         411 => "Length Required",
         413 => "Payload Too Large",
         414 => "URI Too Long",
+        426 => "Upgrade Required",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         501 => "Not Implemented",
@@ -2273,6 +3229,8 @@ impl NativeActor for HttpServerCapability {
             request_stream_window: config.request_stream_window,
             request_streams: HashMap::new(),
             next_stream_id: 0,
+            ws_idle_timeout: Duration::from_millis(config.websocket_idle_timeout_millis),
+            ws_message_conn: HashMap::new(),
         })
     }
 
@@ -2367,6 +3325,27 @@ impl NativeActor for HttpServerCapability {
                 }
                 InboundEvent::StreamFinished { stream_id } => {
                     state.finish_stream(stream_id);
+                }
+                InboundEvent::WebSocketMessage {
+                    conn_id,
+                    binary,
+                    data,
+                } => {
+                    state.dispatch_ws_message(ctx, conn_id, binary, data);
+                }
+                InboundEvent::WebSocketPing { conn_id, payload } => {
+                    state.send_ws_pong(conn_id, &payload);
+                }
+                InboundEvent::WebSocketClose {
+                    conn_id,
+                    code,
+                    reason,
+                } => {
+                    // Report the close to the handler on its own root, echo the
+                    // close frame on the writer (its final write finishes the
+                    // stream, tearing the connection down, ADR-0129 §5).
+                    state.report_ws_close(ctx, conn_id, code, &reason);
+                    state.send_ws_close(conn_id, code, &reason);
                 }
             }
         }
@@ -2541,6 +3520,11 @@ impl NativeActor for HttpServerCapability {
     #[handler]
     fn on_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Settled) {
         let correlation = mail.root.correlation_id;
+        // An inbound websocket message's chain settled (ADR-0129): reclaim its
+        // outbound-routing entry. Not an `in_flight` request, so no `502`.
+        if state.ws_message_conn.remove(&correlation).is_some() {
+            return;
+        }
         let Some(pending) = state.in_flight.remove(&correlation) else {
             // Already answered (the reply landed first) or never ours.
             return;
@@ -2567,12 +3551,63 @@ impl NativeActor for HttpServerCapability {
     /// `#[handler]`s ([`Self::on_response_chunk`] / [`Self::on_response_stream_end`]),
     /// keyed by their explicit `stream_id` payload — a second correlation
     /// regime living beside this one.
+    /// An outbound websocket message from the handler (ADR-0129 §3). Routed by
+    /// the causal chain, not the payload: the handler answers an inbound
+    /// message on its chain (a wasm `ctx.send` inherits the inbound `root`), so
+    /// `in_flight_root` names the originating connection through
+    /// `ws_message_conn` — the fresh-root-per-message model gives the routing
+    /// key without a connection id on the wire.
+    ///
+    /// # Agent
+    /// Not user-callable — an upgraded connection's handler sends this to
+    /// answer the peer; the cap frames it and drains it under the credit
+    /// window.
+    #[handler]
+    fn on_websocket_message(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        msg: WebSocketMessage,
+    ) {
+        let root = ctx.in_flight_root().correlation_id;
+        if let Some(&conn_id) = state.ws_message_conn.get(&root) {
+            state.send_ws_message(conn_id, msg.binary, &msg.data);
+        }
+    }
+
+    /// A handler-initiated websocket close (ADR-0129 §5). Routed by the causal
+    /// chain like [`Self::on_websocket_message`]: the cap writes the close
+    /// frame on the connection's writer and tears it down.
+    ///
+    /// # Agent
+    /// Not user-callable — an upgraded connection's handler sends this to close
+    /// the socket.
+    #[handler]
+    fn on_websocket_close(state: &mut Self::State, ctx: &mut NativeCtx<'_>, close: WebSocketClose) {
+        let root = ctx.in_flight_root().correlation_id;
+        if let Some(&conn_id) = state.ws_message_conn.get(&root) {
+            state.send_ws_close(conn_id, close.code, &close.reason);
+        }
+    }
+
     #[fallback]
     fn on_any(state: &mut Self::State, ctx: &mut NativeCtx<'_>, env: &Envelope) {
         let correlation = env.sender.correlation_id;
         let Some(pending) = state.in_flight.get(&correlation).copied() else {
             return;
         };
+        // ADR-0129: the handler accepted the upgrade. `WebSocketAccept` is a
+        // one-shot reply (correlation-echoed) keyed on the handshake request's
+        // in-flight correlation, like `HttpResponseStreamOpen`.
+        if env.kind == <WebSocketAccept as Kind>::ID {
+            if let Some(accept) = WebSocketAccept::decode_from_bytes(env.payload.bytes()) {
+                state.accept_websocket(ctx, correlation, pending.conn_id, pending.handler, &accept);
+            } else {
+                state.in_flight.remove(&correlation);
+                state.write_status_response(pending.conn_id, 502, "malformed websocket accept");
+                state.close_connection(pending.conn_id, "malformed websocket accept");
+            }
+            return;
+        }
         if env.kind == <HttpResponseStreamOpen as Kind>::ID {
             if let Some(open) = HttpResponseStreamOpen::decode_from_bytes(env.payload.bytes()) {
                 state.open_stream(ctx, correlation, pending.conn_id, &open);
@@ -2614,8 +3649,9 @@ impl NativeActor for HttpServerCapability {
 #[cfg(test)]
 mod unit_tests {
     use super::{
-        http_date, normalize_prefix, parse_http_method, percent_decode_path, reason_phrase,
-        request_keeps_alive, route_matches,
+        OPCODE_BINARY, OPCODE_CONTINUATION, OPCODE_TEXT, WsFrameParse, http_date, normalize_prefix,
+        parse_http_method, parse_ws_frame, percent_decode_path, reason_phrase, request_keeps_alive,
+        route_matches, sec_websocket_accept, serialize_ws_frame, sha1, validate_ws_handshake,
     };
     use crate::http::kinds::{HttpHeader, HttpMethod};
     use std::time::{Duration, UNIX_EPOCH};
@@ -2713,12 +3749,187 @@ mod unit_tests {
     }
 
     #[test]
+    fn sha1_matches_the_rfc_3174_vector() {
+        // Tripwire: RFC 3174 §7.3 worked example sha1("abc"). A computed digest
+        // that drifts if the block schedule / padding / round logic breaks.
+        use std::fmt::Write as _;
+        let digest = sha1(b"abc");
+        let hex = digest.iter().fold(String::new(), |mut acc, byte| {
+            let _ = write!(acc, "{byte:02x}");
+            acc
+        });
+        assert_eq!(hex, "a9993e364706816aba3e25717850c26c9cd0d89d");
+    }
+
+    #[test]
+    fn sec_websocket_accept_matches_the_rfc_6455_vector() {
+        // Tripwire: RFC 6455 §1.3 worked handshake vector — base64(SHA-1(key +
+        // GUID)). A computed value pinning the SHA-1, the GUID, and the base64
+        // together; it drifts if any of the three is wrong (the GUID's last
+        // byte especially).
+        assert_eq!(
+            sec_websocket_accept("dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
+    }
+
+    #[test]
+    fn ws_frame_serialize_matches_rfc_6455_examples() {
+        // Tripwire: RFC 6455 §5.7 byte-layout examples — computed frame bytes.
+        // #1 single unmasked text "Hello".
+        assert_eq!(
+            serialize_ws_frame(OPCODE_TEXT, b"Hello", None),
+            vec![0x81, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f]
+        );
+        // #2 single masked text "Hello" (mask 0x37fa213d).
+        assert_eq!(
+            serialize_ws_frame(OPCODE_TEXT, b"Hello", Some([0x37, 0xfa, 0x21, 0x3d])),
+            vec![
+                0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58
+            ]
+        );
+        // #4 256-byte binary: the 16-bit extended-length header.
+        let big = serialize_ws_frame(OPCODE_BINARY, &[0u8; 256], None);
+        assert_eq!(&big[..4], &[0x82, 0x7e, 0x01, 0x00]);
+        // #5 65536-byte binary: the 64-bit extended-length header.
+        let huge = serialize_ws_frame(OPCODE_BINARY, &vec![0u8; 65_536], None);
+        assert_eq!(
+            &huge[..10],
+            &[0x82, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn ws_frame_parse_unmasks_the_rfc_6455_masked_example() {
+        // Tripwire: parse RFC 6455 §5.7 #2 (masked "Hello") back to its
+        // payload — the mask XOR and header decode as a round-trip of the
+        // serialize tripwire above.
+        let bytes = [
+            0x81u8, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58,
+        ];
+        match parse_ws_frame(&bytes, 1024) {
+            WsFrameParse::Complete { frame, consumed } => {
+                assert!(frame.fin);
+                assert_eq!(frame.opcode, OPCODE_TEXT);
+                assert_eq!(frame.payload, b"Hello");
+                assert_eq!(consumed, bytes.len());
+            }
+            _ => panic!("expected a complete frame"),
+        }
+    }
+
+    #[test]
+    fn ws_frame_parse_rejects_an_unmasked_client_frame() {
+        // A client→server frame MUST be masked (RFC 6455 §5.1); an unmasked one
+        // is a `1002` protocol error, never a panic on untrusted input.
+        let bytes = [0x81u8, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f];
+        assert!(matches!(
+            parse_ws_frame(&bytes, 1024),
+            WsFrameParse::Error { code: 1002, .. }
+        ));
+    }
+
+    #[test]
+    fn ws_frame_parse_needs_more_on_a_partial_frame() {
+        // A header that announces more payload than is buffered yields NeedMore,
+        // not a panic or a wrong-length read.
+        let bytes = [0x81u8, 0x85, 0x37, 0xfa, 0x21]; // header cut mid-mask-key
+        assert!(matches!(
+            parse_ws_frame(&bytes, 1024),
+            WsFrameParse::NeedMore
+        ));
+    }
+
+    #[test]
+    fn ws_continuation_frames_decode_as_a_fragmented_message() {
+        // Tripwire: a fragmented text message "Hel" + "lo" as masked frames —
+        // the first non-final (FIN clear, opcode text), the second final (FIN
+        // set, opcode continuation). Field-by-field decode of masking + the FIN
+        // bit + the continuation opcode; concatenating the payloads yields the
+        // original message (the reassembly the frame loop performs).
+        let mask = [0x01u8, 0x02, 0x03, 0x04];
+        let mut first = serialize_ws_frame(OPCODE_TEXT, b"Hel", Some(mask));
+        first[0] &= 0x7f; // clear FIN — a non-final fragment
+        let second = serialize_ws_frame(OPCODE_CONTINUATION, b"lo", Some(mask));
+
+        let WsFrameParse::Complete { frame: f1, .. } = parse_ws_frame(&first, 1024) else {
+            panic!("first fragment must parse");
+        };
+        assert!(!f1.fin);
+        assert_eq!(f1.opcode, OPCODE_TEXT);
+        assert_eq!(f1.payload, b"Hel");
+
+        let WsFrameParse::Complete { frame: f2, .. } = parse_ws_frame(&second, 1024) else {
+            panic!("continuation fragment must parse");
+        };
+        assert!(f2.fin);
+        assert_eq!(f2.opcode, OPCODE_CONTINUATION);
+        assert_eq!(f2.payload, b"lo");
+
+        let mut message = f1.payload;
+        message.extend_from_slice(&f2.payload);
+        assert_eq!(message, b"Hello");
+    }
+
+    #[test]
+    fn ws_handshake_validation_enforces_version_and_key() {
+        let base = |extra: &[(&str, &str)]| -> Vec<HttpHeader> {
+            let mut headers = vec![HttpHeader {
+                name: "Connection".to_string(),
+                value: "Upgrade".to_string(),
+            }];
+            for (name, value) in extra {
+                headers.push(HttpHeader {
+                    name: (*name).to_string(),
+                    value: (*value).to_string(),
+                });
+            }
+            headers
+        };
+        // Valid: version 13 + a key echoes the key back.
+        assert_eq!(
+            validate_ws_handshake(&base(&[
+                ("Sec-WebSocket-Version", "13"),
+                ("Sec-WebSocket-Key", "abc"),
+            ])),
+            Ok("abc".to_string())
+        );
+        // Wrong version → 426.
+        assert!(matches!(
+            validate_ws_handshake(&base(&[
+                ("Sec-WebSocket-Version", "8"),
+                ("Sec-WebSocket-Key", "abc"),
+            ])),
+            Err((426, _))
+        ));
+        // Missing key → 400.
+        assert!(matches!(
+            validate_ws_handshake(&base(&[("Sec-WebSocket-Version", "13")])),
+            Err((400, _))
+        ));
+        // Missing Connection: Upgrade → 400.
+        assert!(matches!(
+            validate_ws_handshake(&[
+                HttpHeader {
+                    name: "Sec-WebSocket-Version".to_string(),
+                    value: "13".to_string(),
+                },
+                HttpHeader {
+                    name: "Sec-WebSocket-Key".to_string(),
+                    value: "abc".to_string(),
+                },
+            ]),
+            Err((400, _))
+        ));
+    }
+
+    #[test]
     fn config_layer_defaults_match_the_named_consts() {
         use super::super::{
             DEFAULT_BIND_ADDR, DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS, DEFAULT_MAX_CONNECTIONS,
             DEFAULT_MAX_HEADER_BYTES, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_STREAM_WINDOW,
-            DEFAULT_REQUEST_TIMEOUT_MILLIS, DEFAULT_RESPONSE_STREAM_WINDOW, HttpServerConfig,
-            HttpServerConfigLayer,
+            DEFAULT_REQUEST_TIMEOUT_MILLIS, DEFAULT_RESPONSE_STREAM_WINDOW,
+            DEFAULT_WS_IDLE_TIMEOUT_MILLIS, HttpServerConfig, HttpServerConfigLayer,
         };
         use confique::Config as _;
         // No `.env()` source: loads the literal defaults only, so this is
@@ -2751,5 +3962,13 @@ mod unit_tests {
         );
         assert_eq!(layer.request_stream_window, DEFAULT_REQUEST_STREAM_WINDOW);
         assert_eq!(default.request_stream_window, DEFAULT_REQUEST_STREAM_WINDOW);
+        assert_eq!(
+            layer.websocket_idle_timeout_millis,
+            DEFAULT_WS_IDLE_TIMEOUT_MILLIS
+        );
+        assert_eq!(
+            default.websocket_idle_timeout_millis,
+            DEFAULT_WS_IDLE_TIMEOUT_MILLIS
+        );
     }
 }
