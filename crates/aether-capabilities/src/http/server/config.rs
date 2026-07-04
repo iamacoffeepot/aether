@@ -3,8 +3,9 @@
 //! `with_actor::<HttpServerCapability>(config)`.
 
 use super::{
-    DEFAULT_BIND_ADDR, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_HEADER_BYTES,
-    DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_TIMEOUT_MILLIS, DEFAULT_RESPONSE_STREAM_WINDOW,
+    DEFAULT_BIND_ADDR, DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS, DEFAULT_MAX_CONNECTIONS,
+    DEFAULT_MAX_HEADER_BYTES, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_TIMEOUT_MILLIS,
+    DEFAULT_RESPONSE_STREAM_WINDOW,
 };
 
 /// Init config for [`HttpServerCapability`](super::HttpServerCapability) (ADR-0108).
@@ -60,6 +61,14 @@ pub struct HttpServerConfig {
     /// handler that doesn't reply in time yields `504`.
     #[cfg_attr(feature = "runtime", config(default = 30_000))]
     pub request_timeout_millis: u64,
+    /// Idle timeout in milliseconds ([`DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS`])
+    /// bounding a kept-alive connection sitting between requests (and a
+    /// fresh connection that never sends its first byte); on expiry the
+    /// idle connection is closed rather than pinning a reader thread.
+    /// Distinct from `request_timeout_millis`, which stays the in-flight
+    /// read (slow-loris) timeout and the handler response deadline.
+    #[cfg_attr(feature = "runtime", config(default = 5_000))]
+    pub keep_alive_timeout_millis: u64,
     /// Cap on live connections ([`DEFAULT_MAX_CONNECTIONS`]); once the
     /// connection table is at capacity a newly-accepted peer is refused
     /// `503` and closed rather than getting a reader thread.
@@ -85,6 +94,7 @@ impl Default for HttpServerConfig {
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
             max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
             request_timeout_millis: DEFAULT_REQUEST_TIMEOUT_MILLIS,
+            keep_alive_timeout_millis: DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             response_stream_window: DEFAULT_RESPONSE_STREAM_WINDOW,
         }

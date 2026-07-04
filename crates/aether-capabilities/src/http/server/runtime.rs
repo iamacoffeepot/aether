@@ -74,6 +74,12 @@ pub struct ParsedRequest {
     query: String,
     headers: Vec<HttpHeader>,
     body: Vec<u8>,
+    /// Whether this request wants the connection kept alive after its
+    /// response (HTTP/1.1 default, or HTTP/1.0 with `Connection:
+    /// keep-alive`), computed by [`request_keeps_alive`]. Carried to the
+    /// dispatcher so it renders `Connection: keep-alive` vs `close` and
+    /// either resumes the reader or closes the socket.
+    keep_alive: bool,
 }
 
 /// Internal event the accept / reader sidecar threads push to the cap
@@ -130,6 +136,12 @@ pub struct ConnState {
     /// Reader thread's shutdown flag. Cap flips it + shuts down the
     /// socket to wake the blocked `read()`.
     pub shutdown: Arc<AtomicBool>,
+    /// Per-connection resume signal (keep-alive). After a successful
+    /// keep-alive response the dispatcher sends `()` here to release the
+    /// reader for the next request; dropping this sender (on
+    /// [`Self::close_connection`]) makes the reader's `recv_timeout` return
+    /// `Disconnected`, its close-path exit.
+    pub resume_tx: mpsc::Sender<()>,
     /// Reader thread handle. Joined in `unwire`, detached on close.
     pub reader_thread: Option<JoinHandle<()>>,
 }
@@ -144,6 +156,10 @@ pub struct PendingRequest {
     /// The request's method, carried so the reply path can suppress the
     /// body on a HEAD response (message-body semantics forbid one).
     pub method: HttpMethod,
+    /// Whether the reply path keeps the connection alive (renders
+    /// `Connection: keep-alive` and resumes the reader) rather than
+    /// closing it. Set from the [`ParsedRequest`] at dispatch.
+    pub keep_alive: bool,
 }
 
 /// Per-connection response-stream state (ADR-0128), keyed in
@@ -278,6 +294,11 @@ pub struct HttpServerCapabilityState {
     /// this is refused `503` before a reader thread is spawned.
     pub max_connections: usize,
     pub request_timeout: Duration,
+    /// Idle timeout between requests on a kept-alive connection (and for a
+    /// fresh connection that never sends its first byte). Distinct from
+    /// `request_timeout`, which stays the in-flight read + response
+    /// deadline.
+    pub keep_alive_timeout: Duration,
     pub self_mailbox: MailboxId,
     /// Cached `Arc<Mailer>` so the dispatcher can fire wake mails into
     /// the cap, resolve the handler mailbox by name at dispatch time,
@@ -427,6 +448,9 @@ impl HttpServerCapabilityState {
         let write_half = stream;
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_for_thread = Arc::clone(&shutdown);
+        // Per-connection resume signal (keep-alive): the dispatcher's half is
+        // stored in `ConnState`, the reader's half moves into the thread.
+        let (resume_tx, resume_rx) = mpsc::channel::<()>();
 
         let sink = WakeSink {
             inbound_tx: self.inbound_tx.clone(),
@@ -434,8 +458,12 @@ impl HttpServerCapabilityState {
             self_id: self.self_mailbox,
             wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
         };
-        let max_request_bytes = self.max_request_bytes;
-        let max_header_bytes = self.max_header_bytes;
+        let tuning = ReaderTuning {
+            request_timeout: self.request_timeout,
+            idle_timeout: self.keep_alive_timeout,
+            max_request_bytes: self.max_request_bytes,
+            max_header_bytes: self.max_header_bytes,
+        };
 
         // Per-connection transport reader below the mail layer — carries
         // inbound mail in; no inbound chain to inherit, no settlement
@@ -449,8 +477,8 @@ impl HttpServerCapabilityState {
                     conn_id,
                     &shutdown_for_thread,
                     &sink,
-                    max_request_bytes,
-                    max_header_bytes,
+                    &resume_rx,
+                    tuning,
                 );
             }) {
             Ok(thread) => thread,
@@ -471,6 +499,7 @@ impl HttpServerCapabilityState {
                 peer,
                 write_half,
                 shutdown,
+                resume_tx,
                 reader_thread: Some(thread),
             },
         );
@@ -495,6 +524,7 @@ impl HttpServerCapabilityState {
             self.close_connection(conn_id, "unsupported method");
             return;
         };
+        let keep_alive = request.keep_alive;
         // Route resolution (ADR-0130): a registered route names its
         // handler by stable `MailboxId` and the kind its requests
         // dispatch as; a dead routed mailbox is answered `503`, the
@@ -547,8 +577,14 @@ impl HttpServerCapabilityState {
                 Arc::clone(&self.mailer),
             );
         }
-        self.in_flight
-            .insert(mail_id.correlation_id, PendingRequest { conn_id, method });
+        self.in_flight.insert(
+            mail_id.correlation_id,
+            PendingRequest {
+                conn_id,
+                method,
+                keep_alive,
+            },
+        );
     }
 
     /// Format + write the handler's [`HttpServerResponse`]. `is_head`
@@ -560,9 +596,24 @@ impl HttpServerCapabilityState {
         conn_id: ConnId,
         response: &HttpServerResponse,
         is_head: bool,
+        keep_alive: bool,
     ) {
-        let bytes = render_handler_response(response, is_head);
+        let bytes = render_handler_response(response, is_head, keep_alive);
         self.write_raw_to(conn_id, &bytes);
+    }
+
+    /// Release the reader for the next request on a kept-alive connection by
+    /// signalling its resume channel. A send failure means the reader
+    /// already exited (its own read error / EOF), so the connection is
+    /// closed instead.
+    pub fn resume_connection(&mut self, conn_id: ConnId) {
+        let resumed = self
+            .connections
+            .get(&conn_id)
+            .is_some_and(|conn| conn.resume_tx.send(()).is_ok());
+        if !resumed {
+            self.close_connection(conn_id, "reader gone");
+        }
     }
 
     /// Format + write a canned status response (the cap's own
@@ -856,6 +907,9 @@ struct RequestHead {
     query: String,
     headers: Vec<HttpHeader>,
     content_length: usize,
+    /// httparse minor version: `Some(0)` = HTTP/1.0, `Some(1)` = HTTP/1.1.
+    /// Drives the keep-alive default ([`request_keeps_alive`]).
+    version: Option<u8>,
 }
 
 /// Outcome of [`parse_head`].
@@ -904,6 +958,7 @@ fn parse_head(buf: &[u8], max_header_bytes: usize) -> HeadParse {
     match request.parse(buf) {
         Ok(httparse::Status::Complete(head_len)) => {
             let method = request.method.unwrap_or_default().to_string();
+            let version = request.version;
             let raw_path = request.path.unwrap_or("/");
             let (path, query) = match raw_path.split_once('?') {
                 Some((before, after)) => (percent_decode_path(before), after.to_string()),
@@ -948,6 +1003,7 @@ fn parse_head(buf: &[u8], max_header_bytes: usize) -> HeadParse {
                 query,
                 headers: out_headers,
                 content_length,
+                version,
             })
         }
         Ok(httparse::Status::Partial) => {
@@ -971,151 +1027,277 @@ fn parse_head(buf: &[u8], max_header_bytes: usize) -> HeadParse {
     }
 }
 
-/// Per-connection reader thread body. Reads one HTTP/1.1 request (head +
-/// `Content-Length`-bounded body), posts it, then blocks until the
-/// dispatcher writes the response and closes the socket (EOF) or the
-/// read timeout fires (`504`). Returns when the connection closes.
+/// Per-connection reader tuning, grouped so the reader thread body takes one
+/// bundle rather than four scalars: the in-flight read + response deadline,
+/// the idle timeout between requests, and the request byte caps.
+#[derive(Copy, Clone)]
+struct ReaderTuning {
+    request_timeout: Duration,
+    idle_timeout: Duration,
+    max_request_bytes: usize,
+    max_header_bytes: usize,
+}
+
+/// Whether the `Connection` header names `token` (case-insensitive), across
+/// comma-separated values and repeated header lines (`Connection: keep-alive,
+/// Upgrade`).
+fn connection_has_token(headers: &[HttpHeader], token: &str) -> bool {
+    headers
+        .iter()
+        .filter(|header| header.name.eq_ignore_ascii_case("connection"))
+        .any(|header| {
+            header
+                .value
+                .split(',')
+                .any(|value| value.trim().eq_ignore_ascii_case(token))
+        })
+}
+
+/// Whether a request wants its connection kept alive after the response.
+/// An explicit `Connection` token wins either way; absent one, the HTTP
+/// version decides — HTTP/1.1 (`Some(1)`) keeps alive by default, HTTP/1.0
+/// (`Some(0)`, or an unknown/absent version) closes by default.
+fn request_keeps_alive(version: Option<u8>, headers: &[HttpHeader]) -> bool {
+    if connection_has_token(headers, "close") {
+        return false;
+    }
+    if connection_has_token(headers, "keep-alive") {
+        return true;
+    }
+    matches!(version, Some(1))
+}
+
+/// Per-connection reader thread body. An outer per-request loop reads one
+/// HTTP/1.1 request (head + `Content-Length`-bounded body), posts it, then
+/// waits on the per-connection resume channel: on a keep-alive response the
+/// dispatcher signals `()` and the loop reads the next request off the same
+/// socket (carrying any over-read pipelined bytes forward); on a close
+/// response the dispatcher drops the sender and the reader exits. A fresh /
+/// idle connection between requests reads under `idle_timeout`; once a
+/// request's bytes start arriving the in-flight `request_timeout` (slow-loris)
+/// governs, and the handler-response deadline is the resume wait.
 #[allow(clippy::too_many_lines)]
 fn run_reader_loop(
     read_half: TcpStream,
     conn_id: ConnId,
     shutdown: &AtomicBool,
     sink: &WakeSink,
-    max_request_bytes: usize,
-    max_header_bytes: usize,
+    resume_rx: &mpsc::Receiver<()>,
+    tuning: ReaderTuning,
 ) {
+    let ReaderTuning {
+        request_timeout,
+        idle_timeout,
+        max_request_bytes,
+        max_header_bytes,
+    } = tuning;
     let mut stream = read_half;
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
     let mut chunk = [0u8; 8 * 1024];
+    // `spawn_reader_for_peer` set the socket read timeout to `request_timeout`
+    // before spawning; track it so a read only re-issues `set_read_timeout`
+    // when the desired timeout actually changes.
+    let mut current_timeout = request_timeout;
 
-    // Phase 1: accumulate the request head.
-    let head = loop {
-        if shutdown.load(Ordering::Acquire) {
-            return;
-        }
-        match parse_head(&buf, max_header_bytes) {
-            HeadParse::Complete(head) => break head,
-            HeadParse::Reject { status, message } => {
-                sink.post(InboundEvent::RequestRejected {
-                    conn_id,
-                    status,
-                    message,
-                });
-                return;
-            }
-            HeadParse::NeedMore => {}
-        }
-        match read_more(&mut stream, &mut chunk) {
-            ReadStep::Filled(n) => buf.extend_from_slice(&chunk[..n]),
-            ReadStep::Eof => {
-                sink.post(InboundEvent::ReaderClosed {
-                    conn_id,
-                    reason: "eof before request head".to_string(),
-                });
-                return;
-            }
-            ReadStep::Timeout => {
-                sink.post(InboundEvent::ReaderClosed {
-                    conn_id,
-                    reason: "read timeout (head)".to_string(),
-                });
-                return;
-            }
-            ReadStep::Error(reason) => {
-                sink.post(InboundEvent::ReaderClosed { conn_id, reason });
-                return;
-            }
-        }
-    };
-
-    // Body cap (ADR-0108 §6): reject before reading any body bytes.
-    if head.content_length > max_request_bytes {
-        sink.post(InboundEvent::RequestRejected {
-            conn_id,
-            status: 413,
-            message: "request body exceeds limit",
-        });
-        return;
-    }
-
-    // `Expect: 100-continue` (only once we've decided to accept the
-    // body): the reader owns a full-duplex clone of the socket, so it
-    // writes the interim response inline, strictly before the body
-    // read — the final response still goes out the dispatcher's
-    // `write_half`, so the two writes never interleave on the shared fd.
-    let expects_continue = head.content_length > 0
-        && head.headers.iter().any(|header| {
-            header.name.eq_ignore_ascii_case("expect")
-                && header.value.to_ascii_lowercase().contains("100-continue")
-        });
-    if expects_continue && let Err(e) = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n") {
-        tracing::debug!(
-            target: "aether_substrate::http_server",
-            conn = conn_id,
-            error = %e,
-            "http conn: 100-continue write failed",
-        );
-    }
-
-    // Phase 2: read the `Content-Length`-bounded body. Leftover bytes
-    // already in `buf` past the head come first.
-    let mut body: Vec<u8> = Vec::with_capacity(head.content_length);
-    let leftover = &buf[head.head_len..];
-    let take = leftover.len().min(head.content_length);
-    body.extend_from_slice(&leftover[..take]);
-    while body.len() < head.content_length {
-        if shutdown.load(Ordering::Acquire) {
-            return;
-        }
-        match read_more(&mut stream, &mut chunk) {
-            ReadStep::Filled(n) => {
-                let want = head.content_length - body.len();
-                body.extend_from_slice(&chunk[..n.min(want)]);
-            }
-            ReadStep::Eof => {
-                sink.post(InboundEvent::ReaderClosed {
-                    conn_id,
-                    reason: "eof mid-body".to_string(),
-                });
-                return;
-            }
-            ReadStep::Timeout => {
-                sink.post(InboundEvent::ReaderClosed {
-                    conn_id,
-                    reason: "read timeout (body)".to_string(),
-                });
-                return;
-            }
-            ReadStep::Error(reason) => {
-                sink.post(InboundEvent::ReaderClosed { conn_id, reason });
-                return;
-            }
-        }
-    }
-
-    let request = ParsedRequest {
-        method: head.method,
-        path: head.path,
-        query: head.query,
-        headers: head.headers,
-        body,
-    };
-    if !sink.post(InboundEvent::RequestParsed { conn_id, request }) {
-        return;
-    }
-
-    // Phase 3: response deadline. Block until the dispatcher writes the
-    // response and closes the socket (EOF) or the read timeout fires
-    // (handler too slow → `504`). v1 serves one request per connection.
+    // Outer per-request loop (keep-alive): serve requests in sequence on one
+    // socket, one in flight at a time.
     loop {
-        if shutdown.load(Ordering::Acquire) {
+        // Phase 1: accumulate the request head. Before the first byte of a
+        // new request the read waits under the idle timeout (a kept-alive /
+        // fresh connection between requests); once head bytes are buffered
+        // it waits under the in-flight request timeout (slow-loris).
+        let head = loop {
+            if shutdown.load(Ordering::Acquire) {
+                return;
+            }
+            match parse_head(&buf, max_header_bytes) {
+                HeadParse::Complete(head) => break head,
+                HeadParse::Reject { status, message } => {
+                    sink.post(InboundEvent::RequestRejected {
+                        conn_id,
+                        status,
+                        message,
+                    });
+                    return;
+                }
+                HeadParse::NeedMore => {}
+            }
+            let want_timeout = if buf.is_empty() {
+                idle_timeout
+            } else {
+                request_timeout
+            };
+            if want_timeout != current_timeout {
+                if stream.set_read_timeout(Some(want_timeout)).is_err() {
+                    sink.post(InboundEvent::ReaderClosed {
+                        conn_id,
+                        reason: "set read timeout failed".to_string(),
+                    });
+                    return;
+                }
+                current_timeout = want_timeout;
+            }
+            match read_more(&mut stream, &mut chunk) {
+                ReadStep::Filled(n) => buf.extend_from_slice(&chunk[..n]),
+                ReadStep::Eof => {
+                    let reason = if buf.is_empty() {
+                        "eof between requests"
+                    } else {
+                        "eof before request head"
+                    };
+                    sink.post(InboundEvent::ReaderClosed {
+                        conn_id,
+                        reason: reason.to_string(),
+                    });
+                    return;
+                }
+                ReadStep::Timeout => {
+                    // An idle-timeout expiry with no partial request buffered
+                    // is a silent close of a kept-alive / fresh idle
+                    // connection; a timeout mid-head is the slow-loris guard.
+                    let reason = if buf.is_empty() {
+                        "idle"
+                    } else {
+                        "read timeout (head)"
+                    };
+                    sink.post(InboundEvent::ReaderClosed {
+                        conn_id,
+                        reason: reason.to_string(),
+                    });
+                    return;
+                }
+                ReadStep::Error(reason) => {
+                    sink.post(InboundEvent::ReaderClosed { conn_id, reason });
+                    return;
+                }
+            }
+        };
+
+        // Body cap (ADR-0108 §6): reject before reading any body bytes.
+        if head.content_length > max_request_bytes {
+            sink.post(InboundEvent::RequestRejected {
+                conn_id,
+                status: 413,
+                message: "request body exceeds limit",
+            });
             return;
         }
-        match read_more(&mut stream, &mut chunk) {
-            ReadStep::Eof | ReadStep::Error(_) => return,
-            ReadStep::Filled(_) => {}
-            ReadStep::Timeout => {
+
+        // The body read and the `Expect: 100-continue` write run under the
+        // in-flight timeout — a request has started arriving.
+        if current_timeout != request_timeout {
+            if stream.set_read_timeout(Some(request_timeout)).is_err() {
+                sink.post(InboundEvent::ReaderClosed {
+                    conn_id,
+                    reason: "set read timeout failed".to_string(),
+                });
+                return;
+            }
+            current_timeout = request_timeout;
+        }
+
+        // `Expect: 100-continue` (only once we've decided to accept the
+        // body): the reader owns a full-duplex clone of the socket, so it
+        // writes the interim response inline, strictly before the body
+        // read — the final response still goes out the dispatcher's
+        // `write_half`, so the two writes never interleave on the shared fd.
+        let expects_continue = head.content_length > 0
+            && head.headers.iter().any(|header| {
+                header.name.eq_ignore_ascii_case("expect")
+                    && header.value.to_ascii_lowercase().contains("100-continue")
+            });
+        if expects_continue && let Err(e) = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n") {
+            tracing::debug!(
+                target: "aether_substrate::http_server",
+                conn = conn_id,
+                error = %e,
+                "http conn: 100-continue write failed",
+            );
+        }
+
+        // Phase 2: read the `Content-Length`-bounded body. Leftover bytes
+        // already in `buf` past the head come first; any over-read past the
+        // body (a pipelined next request) is preserved into `next_buf` and
+        // carried to the next iteration so keep-alive framing stays intact.
+        let mut body: Vec<u8> = Vec::with_capacity(head.content_length);
+        let mut next_buf: Vec<u8> = Vec::new();
+        {
+            let after_head = &buf[head.head_len..];
+            if after_head.len() >= head.content_length {
+                body.extend_from_slice(&after_head[..head.content_length]);
+                next_buf.extend_from_slice(&after_head[head.content_length..]);
+            } else {
+                body.extend_from_slice(after_head);
+            }
+        }
+        let mut body_error = false;
+        while body.len() < head.content_length {
+            if shutdown.load(Ordering::Acquire) {
+                return;
+            }
+            match read_more(&mut stream, &mut chunk) {
+                ReadStep::Filled(n) => {
+                    let want = head.content_length - body.len();
+                    if n <= want {
+                        body.extend_from_slice(&chunk[..n]);
+                    } else {
+                        body.extend_from_slice(&chunk[..want]);
+                        next_buf.extend_from_slice(&chunk[want..n]);
+                    }
+                }
+                ReadStep::Eof => {
+                    sink.post(InboundEvent::ReaderClosed {
+                        conn_id,
+                        reason: "eof mid-body".to_string(),
+                    });
+                    body_error = true;
+                    break;
+                }
+                ReadStep::Timeout => {
+                    sink.post(InboundEvent::ReaderClosed {
+                        conn_id,
+                        reason: "read timeout (body)".to_string(),
+                    });
+                    body_error = true;
+                    break;
+                }
+                ReadStep::Error(reason) => {
+                    sink.post(InboundEvent::ReaderClosed { conn_id, reason });
+                    body_error = true;
+                    break;
+                }
+            }
+        }
+        if body_error {
+            return;
+        }
+
+        let keep_alive = request_keeps_alive(head.version, &head.headers);
+        let request = ParsedRequest {
+            method: head.method,
+            path: head.path,
+            query: head.query,
+            headers: head.headers,
+            body,
+            keep_alive,
+        };
+        if !sink.post(InboundEvent::RequestParsed { conn_id, request }) {
+            return;
+        }
+
+        // Phase 3: response deadline. Wait for the dispatcher's resume signal
+        // (a keep-alive response was written — loop to the next request), the
+        // handler-response timeout (`504`), or the sender being dropped (the
+        // dispatcher took the close path — the connection is torn down).
+        match resume_rx.recv_timeout(request_timeout) {
+            Ok(()) => {
+                buf = next_buf;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
                 sink.post(InboundEvent::RequestTimedOut { conn_id });
+                return;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return;
             }
         }
@@ -1135,8 +1317,14 @@ fn is_cap_owned_header(name: &str) -> bool {
 /// supplying `Content-Length` / `Date` / `Connection` (ADR-0108 §2).
 /// `is_head` emits the full head — including the `Content-Length` the
 /// body would have had — but appends no body bytes (HEAD semantics: a
-/// message with no message body).
-fn render_handler_response(response: &HttpServerResponse, is_head: bool) -> Vec<u8> {
+/// message with no message body). `keep_alive` renders `Connection:
+/// keep-alive` (the connection is held for the next request) vs
+/// `Connection: close`.
+fn render_handler_response(
+    response: &HttpServerResponse,
+    is_head: bool,
+    keep_alive: bool,
+) -> Vec<u8> {
     use std::fmt::Write as _;
     let mut head = format!(
         "HTTP/1.1 {} {}\r\n",
@@ -1151,7 +1339,11 @@ fn render_handler_response(response: &HttpServerResponse, is_head: bool) -> Vec<
     }
     let _ = write!(head, "Content-Length: {}\r\n", response.body.len());
     let _ = write!(head, "Date: {}\r\n", http_date(SystemTime::now()));
-    head.push_str("Connection: close\r\n\r\n");
+    if keep_alive {
+        head.push_str("Connection: keep-alive\r\n\r\n");
+    } else {
+        head.push_str("Connection: close\r\n\r\n");
+    }
     let mut out = head.into_bytes();
     if !is_head {
         out.extend_from_slice(&response.body);
@@ -1414,6 +1606,7 @@ impl NativeActor for HttpServerCapability {
             max_header_bytes: config.max_header_bytes,
             max_connections: config.max_connections,
             request_timeout: Duration::from_millis(config.request_timeout_millis),
+            keep_alive_timeout: Duration::from_millis(config.keep_alive_timeout_millis),
             self_mailbox: self_id,
             mailer,
             listener_port: port,
@@ -1712,17 +1905,26 @@ impl NativeActor for HttpServerCapability {
             // in-flight entry for the settlement / timeout safety net.
             return;
         }
-        match HttpServerResponse::decode_from_bytes(env.payload.bytes()) {
-            Some(response) => {
-                let is_head = pending.method == HttpMethod::Head;
-                state.write_handler_response(pending.conn_id, &response, is_head);
+        if let Some(response) = HttpServerResponse::decode_from_bytes(env.payload.bytes()) {
+            let is_head = pending.method == HttpMethod::Head;
+            state.write_handler_response(pending.conn_id, &response, is_head, pending.keep_alive);
+            state.in_flight.remove(&correlation);
+            // A successful keep-alive response holds the connection and
+            // releases the reader for the next request; otherwise the
+            // connection closes (HTTP/1.0, or `Connection: close`).
+            if pending.keep_alive {
+                state.resume_connection(pending.conn_id);
+            } else {
+                state.close_connection(pending.conn_id, "response written");
             }
-            None => {
-                state.write_status_response(pending.conn_id, 502, "malformed handler response");
-            }
+        } else {
+            // A cap-level error ends the connection (canned responses stay
+            // `Connection: close`), which keeps the keep-alive path scoped to
+            // the normal success round-trip.
+            state.write_status_response(pending.conn_id, 502, "malformed handler response");
+            state.in_flight.remove(&correlation);
+            state.close_connection(pending.conn_id, "malformed handler response");
         }
-        state.in_flight.remove(&correlation);
-        state.close_connection(pending.conn_id, "response written");
     }
 }
 
@@ -1730,10 +1932,39 @@ impl NativeActor for HttpServerCapability {
 mod unit_tests {
     use super::{
         http_date, normalize_prefix, parse_http_method, percent_decode_path, reason_phrase,
-        route_matches,
+        request_keeps_alive, route_matches,
     };
-    use crate::http::kinds::HttpMethod;
+    use crate::http::kinds::{HttpHeader, HttpMethod};
     use std::time::{Duration, UNIX_EPOCH};
+
+    fn conn_header(value: &str) -> Vec<HttpHeader> {
+        vec![HttpHeader {
+            name: "Connection".to_string(),
+            value: value.to_string(),
+        }]
+    }
+
+    /// Tripwire: keep-alive defaulting is branch logic over the HTTP version
+    /// and the `Connection` header, not a derived mirror — HTTP/1.1 keeps
+    /// alive unless told to close, HTTP/1.0 closes unless told to keep alive,
+    /// and an explicit token wins over the version default either way.
+    #[test]
+    fn keep_alive_defaults_by_version_and_connection_header() {
+        // HTTP/1.1 (version 1): keep-alive by default, `close` overrides.
+        assert!(request_keeps_alive(Some(1), &[]));
+        assert!(!request_keeps_alive(Some(1), &conn_header("close")));
+        assert!(request_keeps_alive(Some(1), &conn_header("keep-alive")));
+        // HTTP/1.0 (version 0): close by default, `keep-alive` overrides.
+        assert!(!request_keeps_alive(Some(0), &[]));
+        assert!(request_keeps_alive(Some(0), &conn_header("keep-alive")));
+        assert!(!request_keeps_alive(Some(0), &conn_header("close")));
+        // Case-insensitive, and a token among comma-separated values counts.
+        assert!(!request_keeps_alive(Some(1), &conn_header("Close")));
+        assert!(request_keeps_alive(
+            Some(0),
+            &conn_header("keep-alive, Upgrade")
+        ));
+    }
 
     /// Segment-boundary semantics (ADR-0130): a prefix matches at `/`
     /// boundaries only, so `/api` never captures `/apiary`.
@@ -1801,8 +2032,8 @@ mod unit_tests {
     #[test]
     fn config_layer_defaults_match_the_named_consts() {
         use super::super::{
-            DEFAULT_BIND_ADDR, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_HEADER_BYTES,
-            DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_TIMEOUT_MILLIS,
+            DEFAULT_BIND_ADDR, DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS, DEFAULT_MAX_CONNECTIONS,
+            DEFAULT_MAX_HEADER_BYTES, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_TIMEOUT_MILLIS,
             DEFAULT_RESPONSE_STREAM_WINDOW, HttpServerConfig, HttpServerConfigLayer,
         };
         use confique::Config as _;
@@ -1819,6 +2050,14 @@ mod unit_tests {
         assert_eq!(layer.max_request_bytes, DEFAULT_MAX_REQUEST_BYTES);
         assert_eq!(layer.max_header_bytes, DEFAULT_MAX_HEADER_BYTES);
         assert_eq!(layer.request_timeout_millis, DEFAULT_REQUEST_TIMEOUT_MILLIS);
+        assert_eq!(
+            layer.keep_alive_timeout_millis,
+            DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS
+        );
+        assert_eq!(
+            default.keep_alive_timeout_millis,
+            DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS
+        );
         assert_eq!(layer.max_connections, DEFAULT_MAX_CONNECTIONS);
         assert_eq!(layer.max_connections, default.max_connections);
         assert_eq!(layer.response_stream_window, DEFAULT_RESPONSE_STREAM_WINDOW);

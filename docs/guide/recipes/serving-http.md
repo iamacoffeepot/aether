@@ -29,7 +29,10 @@ the handler component can load or reload without restarting the server.
 A handler is a wasm component with one `#[handler]` for
 `aether.http.server.request`. It replies `aether.http.server.response` with a
 status code, optional headers, and a byte body. The server writes the formatted
-HTTP/1.1 response to the client socket and closes the connection.
+HTTP/1.1 response to the client socket. On HTTP/1.1 the connection is kept alive
+by default and serves the next request on the same socket; a client that sends
+`Connection: close` (and HTTP/1.0, which closes by default) terminates it, and
+an idle kept-alive connection is closed after `keep_alive_timeout_millis`.
 
 ```rust
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, OutboundReply, Resolver, actor};
@@ -96,8 +99,9 @@ curl http://127.0.0.1:8080/
 
 The server reads the request, dispatches `aether.http.server.request` to the
 handler mailbox, waits for the `aether.http.server.response` reply, and writes
-the formatted response to the client. The server adds `Connection: close` and
-an appropriate `Content-Length` header; your handler sets the status code,
+the formatted response to the client. The server adds the `Connection` header
+(`keep-alive` on a persistent HTTP/1.1 connection, `close` otherwise) and an
+appropriate `Content-Length` header; your handler sets the status code,
 optional extra headers, and the body.
 
 ## Claiming routes
@@ -166,7 +170,7 @@ ctx.reply(&HttpServerResponse {
 });
 ```
 
-The server sends these after its own `Connection: close` and `Content-Length`
+The server sends these after its own `Connection` and `Content-Length`
 headers.
 
 ## Streaming a response
