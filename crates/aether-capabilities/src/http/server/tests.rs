@@ -534,16 +534,39 @@ fn port_of(chassis: &PassiveChassis<TestChassis>) -> u16 {
         .local_port
 }
 
-/// Open a client `TcpStream` to the server's OS-picked port, write the
-/// raw request, and read the full response (the cap sends
-/// `Connection: close`, so the read terminates at EOF).
+/// Insert `Connection: close` as the last header of a complete request's
+/// head. Keep-alive is the HTTP/1.1 default, so a single-shot round-trip
+/// that reads to EOF must opt the connection into close; injecting it here
+/// keeps every single-shot test's request literal focused on what it
+/// exercises. The keep-alive / HTTP-1.0 / idle-timeout tests drive their own
+/// sockets and do not go through this helper.
+fn with_connection_close(request: &[u8]) -> Vec<u8> {
+    let terminator = b"\r\n\r\n";
+    let Some(pos) = request
+        .windows(terminator.len())
+        .position(|window| window == terminator)
+    else {
+        return request.to_vec();
+    };
+    let mut out = Vec::with_capacity(request.len() + 19);
+    out.extend_from_slice(&request[..pos]);
+    out.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+    out.extend_from_slice(&request[pos + terminator.len()..]);
+    out
+}
+
+/// Open a client `TcpStream` to the server's OS-picked port, write the raw
+/// request (with `Connection: close` appended, see [`with_connection_close`]),
+/// and read the full response (the cap closes after the single response, so
+/// the read terminates at EOF).
 fn round_trip(port: u16, request: &[u8]) -> String {
+    let request = with_connection_close(request);
     let mut stream =
         TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("set_read_timeout");
-    stream.write_all(request).expect("write request");
+    stream.write_all(&request).expect("write request");
     stream.flush().expect("flush request");
 
     let mut response = Vec::new();
@@ -1160,5 +1183,231 @@ fn self_unregister_releases_route() {
         port,
         b"GET /tmp HTTP/1.1\r\nHost: localhost\r\n\r\n",
         "fixed body",
+    );
+}
+
+/// Server config with a short idle (keep-alive) timeout, for the
+/// idle-close test — every other field matches [`config_for`].
+fn keep_alive_config_for(handler: &str, keep_alive_timeout_millis: u64) -> HttpServerConfig {
+    HttpServerConfig {
+        bind_addr: "127.0.0.1:0".to_string(),
+        handler_mailbox: handler.to_string(),
+        request_timeout_millis: 5_000,
+        keep_alive_timeout_millis,
+        ..HttpServerConfig::default()
+    }
+}
+
+/// Read exactly one HTTP/1.1 response off `stream` — the head up to its
+/// blank line, then its `Content-Length` body — leaving any bytes read past
+/// it (a pipelined next response) in `carry` for the following call. Panics
+/// on EOF mid-response, so a test that expects the connection to close reads
+/// one response and then asserts EOF separately.
+fn read_one_response(stream: &mut TcpStream, carry: &mut Vec<u8>) -> String {
+    let mut chunk = [0u8; 4096];
+    let head_end = loop {
+        if let Some(pos) = carry.windows(4).position(|window| window == b"\r\n\r\n") {
+            break pos + 4;
+        }
+        let n = stream.read(&mut chunk).expect("read response head");
+        assert!(
+            n > 0,
+            "eof before response head; buffered: {:?}",
+            String::from_utf8_lossy(carry),
+        );
+        carry.extend_from_slice(&chunk[..n]);
+    };
+    let content_length = content_length_of(&carry[..head_end]);
+    while carry.len() < head_end + content_length {
+        let n = stream.read(&mut chunk).expect("read response body");
+        assert!(n > 0, "eof mid response body");
+        carry.extend_from_slice(&chunk[..n]);
+    }
+    let response = String::from_utf8_lossy(&carry[..head_end + content_length]).into_owned();
+    carry.drain(..head_end + content_length);
+    response
+}
+
+/// Parse the `Content-Length` from a response head (case-insensitive), `0`
+/// when absent.
+fn content_length_of(head: &[u8]) -> usize {
+    let text = String::from_utf8_lossy(head);
+    for line in text.split("\r\n") {
+        if let Some((name, value)) = line.split_once(':')
+            && name.trim().eq_ignore_ascii_case("content-length")
+        {
+            return value.trim().parse().unwrap_or(0);
+        }
+    }
+    0
+}
+
+/// Assert that the next read on `stream` observes the server's close (EOF).
+/// The stream's read timeout bounds this so a server that failed to close
+/// surfaces as a timeout rather than a hang.
+fn assert_closed(stream: &mut TcpStream) {
+    let mut tail = [0u8; 64];
+    let read = stream.read(&mut tail);
+    assert!(
+        matches!(read, Ok(0)),
+        "expected the server to close the connection, got: {read:?}",
+    );
+}
+
+/// Two requests round-trip in order on one kept-alive socket (HTTP/1.1
+/// default, no `Connection: close`), each response carrying `Connection:
+/// keep-alive`; a final `Connection: close` request then terminates the
+/// connection. The two requests are written pipelined (both before the first
+/// response is read), so this also exercises the reader carrying request 2's
+/// over-read bytes across the resume signal.
+#[test]
+fn keep_alive_serves_sequential_requests_on_one_socket() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<EchoHttpHandler>(())
+        .with_actor::<HttpServerCapability>(config_for(
+            <EchoHttpHandler as Addressable>::NAMESPACE,
+            1024,
+        ))
+        .build_passive()
+        .expect("caps boot");
+    let port = port_of(&chassis);
+
+    let mut stream =
+        TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set_read_timeout");
+    let mut carry: Vec<u8> = Vec::new();
+
+    // Pipeline both requests, then read both responses in order.
+    stream
+        .write_all(
+            b"GET /one HTTP/1.1\r\nHost: localhost\r\n\r\n\
+              GET /two HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .expect("write pipelined requests");
+    stream.flush().expect("flush");
+
+    let first = read_one_response(&mut stream, &mut carry);
+    assert!(
+        first.starts_with("HTTP/1.1 200 OK\r\n"),
+        "first response 200: {first:?}",
+    );
+    assert!(
+        first.contains("x-aether-path: /one\r\n"),
+        "first response is /one: {first:?}",
+    );
+    assert!(
+        first.contains("Connection: keep-alive\r\n"),
+        "first response keeps alive: {first:?}",
+    );
+
+    let second = read_one_response(&mut stream, &mut carry);
+    assert!(
+        second.contains("x-aether-path: /two\r\n"),
+        "second response is /two, in order: {second:?}",
+    );
+    assert!(
+        second.contains("Connection: keep-alive\r\n"),
+        "second response keeps alive: {second:?}",
+    );
+
+    // A final `Connection: close` request terminates the connection.
+    stream
+        .write_all(b"GET /three HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .expect("write closing request");
+    stream.flush().expect("flush");
+    let third = read_one_response(&mut stream, &mut carry);
+    assert!(
+        third.contains("x-aether-path: /three\r\n"),
+        "third response is /three: {third:?}",
+    );
+    assert!(
+        third.contains("Connection: close\r\n"),
+        "third response closes: {third:?}",
+    );
+    assert_closed(&mut stream);
+}
+
+/// An HTTP/1.0 request with no `Connection` header closes by default: the
+/// response carries `Connection: close` and the server closes the socket.
+#[test]
+fn http_1_0_defaults_to_close() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<EchoHttpHandler>(())
+        .with_actor::<HttpServerCapability>(config_for(
+            <EchoHttpHandler as Addressable>::NAMESPACE,
+            1024,
+        ))
+        .build_passive()
+        .expect("caps boot");
+    let port = port_of(&chassis);
+
+    let mut stream =
+        TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set_read_timeout");
+    stream
+        .write_all(b"GET /ten HTTP/1.0\r\nHost: localhost\r\n\r\n")
+        .expect("write request");
+    stream.flush().expect("flush");
+
+    let mut carry: Vec<u8> = Vec::new();
+    let response = read_one_response(&mut stream, &mut carry);
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK\r\n"),
+        "expected 200, got: {response:?}",
+    );
+    assert!(
+        response.contains("Connection: close\r\n"),
+        "HTTP/1.0 defaults to close: {response:?}",
+    );
+    assert_closed(&mut stream);
+}
+
+/// A kept-alive connection left idle between requests is closed by the
+/// server after the configured `keep_alive_timeout_millis`, rather than
+/// pinning the reader thread for the full request timeout.
+#[test]
+fn idle_kept_alive_connection_closes_after_timeout() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<EchoHttpHandler>(())
+        .with_actor::<HttpServerCapability>(keep_alive_config_for(
+            <EchoHttpHandler as Addressable>::NAMESPACE,
+            300,
+        ))
+        .build_passive()
+        .expect("caps boot");
+    let port = port_of(&chassis);
+
+    let mut stream =
+        TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set_read_timeout");
+    stream
+        .write_all(b"GET /keep HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .expect("write request");
+    stream.flush().expect("flush");
+
+    let mut carry: Vec<u8> = Vec::new();
+    let response = read_one_response(&mut stream, &mut carry);
+    assert!(
+        response.contains("Connection: keep-alive\r\n"),
+        "kept-alive response: {response:?}",
+    );
+
+    // Now idle. The 300 ms idle timeout closes the connection well before the
+    // 5 s request timeout / read timeout would — the elapsed bound is the
+    // tripwire distinguishing the idle close from a slow read timeout.
+    let started = Instant::now();
+    assert_closed(&mut stream);
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "idle connection closed via the keep-alive timeout, not the request timeout",
     );
 }

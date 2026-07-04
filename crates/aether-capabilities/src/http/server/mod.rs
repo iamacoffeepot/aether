@@ -58,6 +58,11 @@ pub const DEFAULT_MAX_REQUEST_BYTES: usize = 1_048_576;
 pub const DEFAULT_MAX_HEADER_BYTES: usize = 65_536;
 /// Default `request_timeout_millis` (slow-loris read + response deadline): 30 s.
 pub const DEFAULT_REQUEST_TIMEOUT_MILLIS: u64 = 30_000;
+/// Default `keep_alive_timeout_millis` (idle timeout between keep-alive
+/// requests, and for a fresh connection that never sends): 5 s. Short by
+/// design — a kept-alive connection sitting idle must not pin a reader
+/// thread for the full request timeout.
+pub const DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS: u64 = 5_000;
 /// Default `max_connections` (live connection-table ceiling): a generous
 /// bound that stops unbounded thread-per-connection resource exhaustion
 /// without tripping legitimate loopback use. Operator-tunable; each unit
