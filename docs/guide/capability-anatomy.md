@@ -13,8 +13,10 @@ Every native capability under `crates/aether-capabilities/src/` — `fs`,
 same way. The shape below is that convention, grounded against the current
 exemplars. A capability that deviates from it without a stated reason is
 drifting; use this page, alongside `CLAUDE.md` and the two ADRs, as the
-oracle for judging that drift. This page is the catalog of rules across
-all of the exemplars.
+oracle for judging that drift. For *how to write* a capability, start from
+[Adding a chassis capability](recipes/adding-a-chassis-capability.md) — that
+recipe walks one exemplar end to end; this page is the catalog of rules
+across all of them.
 
 ## 1. One directory per capability
 
@@ -190,6 +192,8 @@ than one `Headless*` type per absent subsystem.
 
 ## Where to read more
 
+- The step-by-step version of rules 1–3 — writing a new capability from
+  scratch — [Adding a chassis capability](recipes/adding-a-chassis-capability.md).
 - The identity/runtime split's full reasoning and alternatives —
   [ADR-0122](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0122-split-actor-identity-from-runtime-state.md).
 - The kind-ownership decision and its must-stay rules — [ADR-0121](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0121-capabilities-own-their-kinds.md).
