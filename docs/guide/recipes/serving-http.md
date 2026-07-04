@@ -24,7 +24,28 @@ let the OS pick a free port. `AETHER_HTTP_SERVER_HANDLER_MAILBOX` is the late-
 bound mailbox name (ADR-0108 §3): the server resolves it at dispatch time, so
 the handler component can load or reload without restarting the server.
 
-## 2. Write the handler
+## 2. Set up the crate
+
+The http server cap needs **no marker feature** — unlike `render` / `audio` /
+`text` / `ui`, `aether_capabilities::http` and its kinds are always-on, so a
+default-features-off wasm build sees them with no extra feature wiring:
+
+```toml
+# crates/my-http-component/Cargo.toml
+[package]
+name = "my-http-component"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-capabilities = { path = "../aether-capabilities", default-features = false }
+```
+
+## 3. Write the handler
 
 A handler is a wasm component with one `#[handler]` for
 `aether.http.server.request`. It replies `aether.http.server.response` with a
@@ -35,8 +56,8 @@ by default and serves the next request on the same socket; a client that sends
 an idle kept-alive connection is closed after `keep_alive_timeout_millis`.
 
 ```rust
-use aether_actor::{ActorInitError, WasmActor, WasmCtx, OutboundReply, Resolver, actor};
-use aether_kinds::{HttpServerRequest, HttpServerResponse};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_capabilities::http::kinds::{HttpServerRequest, HttpServerResponse};
 
 pub struct Web;
 
@@ -44,26 +65,32 @@ pub struct Web;
 impl WasmActor for Web {
     const NAMESPACE: &'static str = "web";
 
-    fn init<C: Resolver>(_ctx: &mut C) -> Result<Self, ActorInitError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Web)
     }
 
     #[handler]
-    fn on_request(&mut self, ctx: &mut WasmCtx<'_>, req: HttpServerRequest) {
+    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpServerResponse {
         let (status, body): (u16, &[u8]) = match req.path.as_str() {
             "/" => (200, b"hello"),
             _ => (404, b"not found"),
         };
-        ctx.reply(&HttpServerResponse {
+        HttpServerResponse {
             status,
             headers: Vec::new(),
             body: body.to_vec(),
-        });
+        }
     }
 }
 
 aether_actor::export!(Web);
 ```
+
+A bare `#[handler]` is the `Single` class: it replies by *returning* its kind, as
+above. `#[handler::manual]` opts into the `Manual` ctx (`WasmCtx<'_, Manual>`)
+whose `ctx.reply(&…)` sends the reply explicitly — reach for it when one handler
+needs to reply one of *several* kinds (see "Mixing buffered and streamed routes"
+below), since a single return type can't express that choice.
 
 The component registers at `aether.component/aether.embedded:web` (its
 `NAMESPACE` const rendered through the ADR-0099 lineage), which is the same
@@ -71,7 +98,7 @@ address you put in `AETHER_HTTP_SERVER_HANDLER_MAILBOX`. `req.peer_addr`
 carries the connecting client's address (`ip:port`, IPv6 bracketed) for
 logging, rate-limiting, or allowlisting.
 
-## 3. Load the handler
+## 4. Load the handler
 
 Load the handler component with `load_component` over the MCP harness once the
 substrate is up:
@@ -88,7 +115,7 @@ substrate is up:
 (`aether.component/aether.embedded:web`). After that, any inbound HTTP request
 on the bound port routes to your handler.
 
-## 4. Send a request
+## 5. Send a request
 
 From a shell, or from any HTTP client that speaks HTTP/1.1:
 
@@ -230,19 +257,19 @@ yet) returns `503 Service Unavailable`.
 
 ## Adding response headers
 
-Pass a `Vec<HttpHeader>` in the reply:
+Pass a `Vec<HttpHeader>` in the returned `HttpServerResponse`:
 
 ```rust
-use aether_kinds::HttpHeader;
+use aether_capabilities::http::kinds::HttpHeader;
 
-ctx.reply(&HttpServerResponse {
+HttpServerResponse {
     status: 200,
     headers: vec![HttpHeader {
         name: "content-type".to_string(),
         value: "application/json".to_string(),
     }],
     body: br#"{"ok":true}"#.to_vec(),
-});
+}
 ```
 
 The server sends these after its own `Connection` and `Content-Length`
@@ -265,9 +292,11 @@ one credit; when credit reaches zero the handler pauses until the next
 scheduler, and the handler cannot outrun the socket:
 
 ```rust
+use aether_actor::WasmInitCtx;
 use aether_capabilities::http::HttpServerCapability;
 use aether_capabilities::http::kinds::{
-    HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen, HttpStreamCredit,
+    HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen, HttpServerRequest,
+    HttpStreamCredit,
 };
 
 pub struct Feed {
@@ -280,7 +309,7 @@ pub struct Feed {
 impl WasmActor for Feed {
     const NAMESPACE: &'static str = "feed";
 
-    fn init<C: Resolver>(_ctx: &mut C) -> Result<Self, ActorInitError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Feed { stream_id: 0, next: 0, done: false })
     }
 
@@ -319,6 +348,37 @@ impl WasmActor for Feed {
 The buffered `HttpServerResponse` path is unchanged — a handler that replies it
 gets a single `Content-Length`-framed response exactly as before. Streaming is
 purely opt-in per reply.
+
+## Mixing buffered and streamed routes
+
+"Stream one route, buffer the rest" is a single handler choosing between two
+reply kinds per request — a bare `#[handler]`'s return type can only be one
+kind, so this is exactly the case that needs `#[handler::manual]` and its
+`Manual` ctx, whose `ctx.reply(&…)` sends the reply explicitly instead of
+returning it:
+
+```rust
+use aether_actor::{Manual, OutboundReply, WasmCtx};
+use aether_capabilities::http::kinds::{HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse};
+
+#[handler::manual]
+fn on_request(&mut self, ctx: &mut WasmCtx<'_, Manual>, req: HttpServerRequest) {
+    match req.path.as_str() {
+        "/download" => ctx.reply(&HttpResponseStreamOpen {
+            status: 200,
+            headers: Vec::new(),
+        }),
+        _ => ctx.reply(&HttpServerResponse {
+            status: 404,
+            headers: Vec::new(),
+            body: b"not found".to_vec(),
+        }),
+    }
+}
+```
+
+Use `#[handler::manual]` + `ctx.reply` when a single route chooses between
+reply shapes; return from a bare `#[handler]` otherwise.
 
 ## Verify against current code
 
