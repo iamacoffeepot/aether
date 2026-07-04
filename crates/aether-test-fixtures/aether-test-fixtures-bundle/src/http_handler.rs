@@ -148,24 +148,30 @@ impl WasmActor for StreamingHttpHandler {
     }
 }
 
-/// Reference websocket handler fixture (ADR-0129) for the `serving-http`
-/// websocket e2e test. On an upgrade request it opts in with `WebSocketAccept`
-/// (any inbound request is treated as an upgrade — the cap only dispatches here
-/// after it has validated the RFC 6455 handshake); thereafter it echoes each
-/// inbound `WebSocketMessage` straight back, preserving the text/binary flag,
-/// so the client reads back exactly what it sent. The echo is sent on the
-/// inbound message's causal chain (a plain `.send`), so the cap routes it to
-/// the originating socket (ADR-0129 §3).
+/// Reference websocket handler fixture (ADR-0129 / ADR-0132) for the
+/// `serving-http` websocket e2e test. On an upgrade request it opts in with
+/// `WebSocketAccept` (any inbound request is treated as an upgrade — the cap
+/// only dispatches here after it has validated the RFC 6455 handshake). On the
+/// first `HttpStreamCredit` grant — before any peer traffic — it pushes an
+/// unsolicited text greeting to the granted `stream_id`, exercising the
+/// ADR-0132 push path from a chain with no inbound websocket message.
+/// Thereafter it echoes each inbound `WebSocketMessage` straight back
+/// (preserving `stream_id` and the text/binary flag), except the text message
+/// `misroute`, which it echoes to a deliberately wrong `stream_id` so the e2e
+/// can assert the cap drops an unknown-stream send without tearing the
+/// connection down.
 ///
 /// Registered at `aether.component/aether.embedded:web_socket` after load.
-pub struct WebSocketHandler;
+pub struct WebSocketHandler {
+    greeted: bool,
+}
 
 #[actor]
 impl WasmActor for WebSocketHandler {
     const NAMESPACE: &'static str = "web_socket";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(WebSocketHandler)
+        Ok(WebSocketHandler { greeted: false })
     }
 
     /// Accept every upgrade the cap routes here (the cap has already validated
@@ -183,24 +189,46 @@ impl WasmActor for WebSocketHandler {
         }
     }
 
-    /// Echo one inbound message back to the peer on the same causal chain.
+    /// Echo one inbound message back to the peer by its `stream_id`
+    /// (ADR-0132). The `misroute` text message instead echoes to a wrong
+    /// stream id, which the cap must drop without touching the connection.
     ///
     /// # Agent
     /// Not sent manually — the cap dispatches one per complete inbound
     /// websocket message on the upgraded connection.
     #[handler]
     fn on_message(&mut self, ctx: &mut WasmCtx<'_>, msg: WebSocketMessage) {
+        if !msg.binary && msg.data == b"misroute" {
+            ctx.actor::<HttpServerCapability>().send(&WebSocketMessage {
+                stream_id: msg.stream_id.wrapping_add(1000),
+                binary: msg.binary,
+                data: msg.data,
+            });
+            return;
+        }
         ctx.actor::<HttpServerCapability>().send(&msg);
     }
 
-    /// The cap's outbound send window (ADR-0128 / ADR-0129 §3). The echo never
-    /// outruns the window, so this handler tracks no credit — it accepts the
-    /// grant to keep the log quiet.
+    /// The cap's outbound send window (ADR-0128 / ADR-0129 §3). The first
+    /// grant is the accept-time window (ADR-0132): it names this connection's
+    /// `stream_id`, so push the unsolicited greeting here — no inbound
+    /// websocket message exists yet, proving outbound routing holds off the
+    /// inbound chain. Beyond that the echo never outruns the window, so no
+    /// credit is tracked.
     ///
     /// # Agent
     /// Not sent manually — the cap grants credit as writer slots free.
     #[handler]
-    fn on_credit(&mut self, _ctx: &mut WasmCtx<'_>, _credit: HttpStreamCredit) {}
+    fn on_credit(&mut self, ctx: &mut WasmCtx<'_>, credit: HttpStreamCredit) {
+        if !self.greeted {
+            self.greeted = true;
+            ctx.actor::<HttpServerCapability>().send(&WebSocketMessage {
+                stream_id: credit.stream_id,
+                binary: false,
+                data: b"server greeting".to_vec(),
+            });
+        }
+    }
 
     /// A peer-initiated close (ADR-0129 §5). Nothing to do — the cap has
     /// already echoed the close frame and is tearing the connection down.

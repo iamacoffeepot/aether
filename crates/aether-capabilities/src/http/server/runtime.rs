@@ -514,12 +514,6 @@ pub struct HttpServerCapabilityState {
     /// (ADR-0129), from `websocket_idle_timeout_millis` — longer than
     /// `request_timeout`, since an idle websocket is normal.
     pub ws_idle_timeout: Duration,
-    /// Routing index for outbound websocket frames (ADR-0129). Each inbound
-    /// `WebSocketMessage` dispatches on its own fresh root; the handler answers
-    /// on that same causal chain, so this maps an in-flight inbound message's
-    /// root `correlation_id` to its connection. Cleared when the chain settles
-    /// (`on_settled`) or the connection closes.
-    pub ws_message_conn: HashMap<u64, ConnId>,
 }
 
 impl HttpServerCapabilityState {
@@ -1079,10 +1073,6 @@ impl HttpServerCapabilityState {
         // write to a dead socket.
         self.in_flight
             .retain(|_, pending| pending.conn_id != conn_id);
-        // Drop websocket outbound-routing entries for this connection (ADR-0129)
-        // so a late handler reply on a settled chain doesn't route to a dead
-        // socket.
-        self.ws_message_conn.retain(|_, mapped| *mapped != conn_id);
         tracing::debug!(
             target: "aether_substrate::http_server",
             conn = conn_id,
@@ -1409,11 +1399,10 @@ impl HttpServerCapabilityState {
     }
 
     /// Deliver one reassembled inbound websocket message to the handler
-    /// (ADR-0129 §4) as a `WebSocketMessage` on its own fresh causal root, and
-    /// record the root → connection routing so the handler's answer (an
-    /// outbound `WebSocketMessage` / `WebSocketClose` inheriting the chain)
-    /// routes back to this socket. Subscribes to settlement so the routing
-    /// entry is reclaimed when the message's chain drains.
+    /// (ADR-0129 §4) as a `WebSocketMessage` on its own fresh causal root,
+    /// stamped with the connection's `stream_id` (ADR-0132) so the handler
+    /// knows which socket it arrived on and can answer — or push later — by
+    /// naming that id.
     fn dispatch_ws_message(
         &mut self,
         ctx: &mut NativeCtx<'_>,
@@ -1421,25 +1410,21 @@ impl HttpServerCapabilityState {
         binary: bool,
         data: Vec<u8>,
     ) {
-        let Some(handler) = self
+        let Some((handler, stream_id)) = self
             .connections
             .get(&conn_id)
             .and_then(|conn| conn.websocket.as_ref())
-            .map(|ws| ws.handler)
+            .map(|ws| (ws.handler, ws.stream_id))
         else {
             return;
         };
-        let payload = WebSocketMessage { binary, data }.encode_into_bytes();
-        let mail_id = ctx.send_envelope_as_root(handler, <WebSocketMessage as Kind>::ID, &payload);
-        self.ws_message_conn.insert(mail_id.correlation_id, conn_id);
-        if let Some(registry) = self.mailer.settlement_registry() {
-            registry.subscribe_settlement_mail(
-                mail_id,
-                self.self_mailbox,
-                <Settled as Kind>::ID,
-                Arc::clone(&self.mailer),
-            );
+        let payload = WebSocketMessage {
+            stream_id,
+            binary,
+            data,
         }
+        .encode_into_bytes();
+        let _ = ctx.send_envelope_as_root(handler, <WebSocketMessage as Kind>::ID, &payload);
     }
 
     /// Report a peer-initiated websocket close to the handler (ADR-0129 §5) as
@@ -1452,15 +1437,16 @@ impl HttpServerCapabilityState {
         code: u16,
         reason: &str,
     ) {
-        let Some(handler) = self
+        let Some((handler, stream_id)) = self
             .connections
             .get(&conn_id)
             .and_then(|conn| conn.websocket.as_ref())
-            .map(|ws| ws.handler)
+            .map(|ws| (ws.handler, ws.stream_id))
         else {
             return;
         };
         let payload = WebSocketClose {
+            stream_id,
             code,
             reason: reason.to_string(),
         }
@@ -3230,7 +3216,6 @@ impl NativeActor for HttpServerCapability {
             request_streams: HashMap::new(),
             next_stream_id: 0,
             ws_idle_timeout: Duration::from_millis(config.websocket_idle_timeout_millis),
-            ws_message_conn: HashMap::new(),
         })
     }
 
@@ -3520,17 +3505,64 @@ impl NativeActor for HttpServerCapability {
     #[handler]
     fn on_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Settled) {
         let correlation = mail.root.correlation_id;
-        // An inbound websocket message's chain settled (ADR-0129): reclaim its
-        // outbound-routing entry. Not an `in_flight` request, so no `502`.
-        if state.ws_message_conn.remove(&correlation).is_some() {
-            return;
-        }
         let Some(pending) = state.in_flight.remove(&correlation) else {
             // Already answered (the reply landed first) or never ours.
             return;
         };
         state.write_status_response(pending.conn_id, 502, "no response from handler");
         state.close_connection(pending.conn_id, "settled without response");
+    }
+
+    /// An outbound websocket message from the handler (ADR-0129 §3), routed by
+    /// the payload's `stream_id` through the stream table like
+    /// [`Self::on_response_chunk`] (ADR-0132) — so the send routes identically
+    /// from any causal chain, and a handler can push with no inbound message
+    /// in flight. An unknown or torn-down stream drops the message.
+    ///
+    /// # Agent
+    /// Not user-callable — an upgraded connection's handler sends this to
+    /// speak to the peer; the cap frames it and drains it under the credit
+    /// window.
+    #[handler]
+    fn on_websocket_message(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        msg: WebSocketMessage,
+    ) {
+        if let Some(conn_id) = state.streams.get(&msg.stream_id).map(|s| s.conn_id) {
+            state.send_ws_message(conn_id, msg.binary, &msg.data);
+        } else {
+            tracing::debug!(
+                target: "aether_substrate::http_server",
+                stream = msg.stream_id,
+                "outbound websocket message for unknown stream dropped",
+            );
+        }
+    }
+
+    /// A handler-initiated websocket close (ADR-0129 §5), routed by the
+    /// payload's `stream_id` like [`Self::on_websocket_message`] (ADR-0132):
+    /// the cap writes the close frame on the connection's writer and tears it
+    /// down. An unknown or torn-down stream drops the close.
+    ///
+    /// # Agent
+    /// Not user-callable — an upgraded connection's handler sends this to close
+    /// the socket.
+    #[handler]
+    fn on_websocket_close(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        close: WebSocketClose,
+    ) {
+        if let Some(conn_id) = state.streams.get(&close.stream_id).map(|s| s.conn_id) {
+            state.send_ws_close(conn_id, close.code, &close.reason);
+        } else {
+            tracing::debug!(
+                target: "aether_substrate::http_server",
+                stream = close.stream_id,
+                "outbound websocket close for unknown stream dropped",
+            );
+        }
     }
 
     /// Reply interception. Any mail addressed at this cap that isn't one
@@ -3548,47 +3580,9 @@ impl NativeActor for HttpServerCapability {
     /// [`HttpResponseStreamOpen`] (streamed, ADR-0128); both key on the
     /// request's in-flight correlation id. The mid-stream chunk / end mails
     /// carry a fresh send-correlation and are routed to their own
-    /// `#[handler]`s ([`Self::on_response_chunk`] / [`Self::on_response_stream_end`]),
-    /// keyed by their explicit `stream_id` payload — a second correlation
-    /// regime living beside this one.
-    /// An outbound websocket message from the handler (ADR-0129 §3). Routed by
-    /// the causal chain, not the payload: the handler answers an inbound
-    /// message on its chain (a wasm `ctx.send` inherits the inbound `root`), so
-    /// `in_flight_root` names the originating connection through
-    /// `ws_message_conn` — the fresh-root-per-message model gives the routing
-    /// key without a connection id on the wire.
-    ///
-    /// # Agent
-    /// Not user-callable — an upgraded connection's handler sends this to
-    /// answer the peer; the cap frames it and drains it under the credit
-    /// window.
-    #[handler]
-    fn on_websocket_message(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        msg: WebSocketMessage,
-    ) {
-        let root = ctx.in_flight_root().correlation_id;
-        if let Some(&conn_id) = state.ws_message_conn.get(&root) {
-            state.send_ws_message(conn_id, msg.binary, &msg.data);
-        }
-    }
-
-    /// A handler-initiated websocket close (ADR-0129 §5). Routed by the causal
-    /// chain like [`Self::on_websocket_message`]: the cap writes the close
-    /// frame on the connection's writer and tears it down.
-    ///
-    /// # Agent
-    /// Not user-callable — an upgraded connection's handler sends this to close
-    /// the socket.
-    #[handler]
-    fn on_websocket_close(state: &mut Self::State, ctx: &mut NativeCtx<'_>, close: WebSocketClose) {
-        let root = ctx.in_flight_root().correlation_id;
-        if let Some(&conn_id) = state.ws_message_conn.get(&root) {
-            state.send_ws_close(conn_id, close.code, &close.reason);
-        }
-    }
-
+    /// `#[handler]`s ([`Self::on_response_chunk`] / [`Self::on_response_stream_end`]
+    /// / [`Self::on_websocket_message`]), keyed by their explicit `stream_id`
+    /// payload — a second correlation regime living beside this one.
     #[fallback]
     fn on_any(state: &mut Self::State, ctx: &mut NativeCtx<'_>, env: &Envelope) {
         let correlation = env.sender.correlation_id;

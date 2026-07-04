@@ -454,11 +454,15 @@ mod tests {
     }
 
     /// Boot a headless chassis with `HttpServerCapability` bound and the
-    /// `WebSocketHandler` wasm fixture loaded (ADR-0129). Over a real
-    /// `TcpStream`: perform the RFC 6455 upgrade handshake, exchange a message
-    /// each direction (a single frame, then a fragmented message to exercise
-    /// continuation reassembly), and close cleanly — the end-to-end proof that
-    /// a wasm handler serves a live bidirectional websocket.
+    /// `WebSocketHandler` wasm fixture loaded (ADR-0129 / ADR-0132). Over a
+    /// real `TcpStream`: perform the RFC 6455 upgrade handshake, read the
+    /// fixture's unsolicited greeting (stream-id-addressed push with no
+    /// inbound message in flight — the ADR-0132 case chain-root routing could
+    /// not serve), exchange a message each direction (a single frame, then a
+    /// fragmented message to exercise continuation reassembly), prove an
+    /// unknown-stream send is dropped without teardown, and close cleanly —
+    /// the end-to-end proof that a wasm handler serves a live bidirectional
+    /// websocket.
     #[test]
     #[allow(clippy::too_many_lines)]
     fn wasm_handler_serves_a_websocket_round_trip() {
@@ -566,6 +570,16 @@ mod tests {
             "101 should echo the computed accept key, got: {head:?}",
         );
 
+        // The fixture pushes an unsolicited greeting on its first credit
+        // grant (ADR-0132) — read it before sending anything: outbound
+        // routing holds with no inbound websocket message in flight.
+        let (opcode, payload) = read_server_frame(&mut stream);
+        assert_eq!(opcode, WS_OPCODE_TEXT, "greeting should be a text frame");
+        assert_eq!(
+            payload, b"server greeting",
+            "the fixture's unsolicited push should arrive before any client frame",
+        );
+
         // A single-frame message echoes back verbatim.
         stream
             .write_all(&ws_client_frame(WS_OPCODE_TEXT, b"hello websocket", true))
@@ -592,6 +606,27 @@ mod tests {
         assert_eq!(
             payload, b"frag-ment",
             "the cap should reassemble the fragmented message before dispatch",
+        );
+
+        // An outbound send naming an unknown stream id is dropped without
+        // tearing the connection down (ADR-0132): the fixture echoes
+        // `misroute` to a deliberately wrong stream id, so the next frame the
+        // client reads must be the echo of the following message — server
+        // writes are ordered, so reading the second echo first proves the
+        // misrouted frame never reached the socket, and reading it at all
+        // proves the connection survived the drop.
+        stream
+            .write_all(&ws_client_frame(WS_OPCODE_TEXT, b"misroute", true))
+            .expect("write misroute frame");
+        stream
+            .write_all(&ws_client_frame(WS_OPCODE_TEXT, b"after misroute", true))
+            .expect("write post-misroute frame");
+        stream.flush().expect("flush misroute frames");
+        let (opcode, payload) = read_server_frame(&mut stream);
+        assert_eq!(opcode, WS_OPCODE_TEXT, "post-misroute echo is a text frame");
+        assert_eq!(
+            payload, b"after misroute",
+            "the misrouted echo must be dropped and the connection must survive",
         );
 
         // Clean close: send a close frame, read the cap's echoed close.
