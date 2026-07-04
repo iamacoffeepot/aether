@@ -51,6 +51,11 @@ pub const DEFAULT_MAX_REQUEST_BYTES: usize = 1_048_576;
 pub const DEFAULT_MAX_HEADER_BYTES: usize = 65_536;
 /// Default `request_timeout_millis` (slow-loris read + response deadline): 30 s.
 pub const DEFAULT_REQUEST_TIMEOUT_MILLIS: u64 = 30_000;
+/// Default `max_connections` (live connection-table ceiling): a generous
+/// bound that stops unbounded thread-per-connection resource exhaustion
+/// without tripping legitimate loopback use. Operator-tunable; each unit
+/// costs roughly one reader-thread stack.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 1024;
 
 mod config;
 

@@ -161,6 +161,9 @@ pub struct HttpServerCapabilityState {
     pub handler_mailbox: String,
     pub max_request_bytes: usize,
     pub max_header_bytes: usize,
+    /// Live-connection-table ceiling (ADR-0108 §6); a peer accepted past
+    /// this is refused `503` before a reader thread is spawned.
+    pub max_connections: usize,
     pub request_timeout: Duration,
     pub self_mailbox: MailboxId,
     /// Cached `Arc<Mailer>` so the dispatcher can fire wake mails into
@@ -182,8 +185,25 @@ pub struct HttpServerCapabilityState {
 
 impl HttpServerCapabilityState {
     /// Allocate a fresh `ConnId`, store the connection's write half, and
-    /// spin a reader thread for the read half.
-    pub fn spawn_reader_for_peer(&mut self, stream: TcpStream, peer: SocketAddr) {
+    /// spin a reader thread for the read half. Refuses `503` and closes
+    /// without spawning a reader when the live connection table is
+    /// already at `max_connections` (ADR-0108 §6) — `connections` is the
+    /// single authoritative live-connection count, so no separate
+    /// counter is kept.
+    pub fn spawn_reader_for_peer(&mut self, mut stream: TcpStream, peer: SocketAddr) {
+        if self.connections.len() >= self.max_connections {
+            let bytes = render_status_response(503, "server at connection capacity");
+            let _ = stream.write_all(&bytes).and_then(|()| stream.flush());
+            let _ = stream.shutdown(Shutdown::Both);
+            tracing::warn!(
+                target: "aether_substrate::http_server",
+                %peer,
+                live = self.connections.len(),
+                "http conn refused: at capacity",
+            );
+            return;
+        }
+
         let conn_id = self.next_conn_id;
         self.next_conn_id += 1;
 
@@ -886,6 +906,7 @@ impl NativeActor for HttpServerCapability {
             handler_mailbox: config.handler_mailbox,
             max_request_bytes: config.max_request_bytes,
             max_header_bytes: config.max_header_bytes,
+            max_connections: config.max_connections,
             request_timeout: Duration::from_millis(config.request_timeout_millis),
             self_mailbox: self_id,
             mailer,
@@ -1064,8 +1085,9 @@ mod unit_tests {
     #[test]
     fn config_layer_defaults_match_the_named_consts() {
         use super::super::{
-            DEFAULT_BIND_ADDR, DEFAULT_MAX_HEADER_BYTES, DEFAULT_MAX_REQUEST_BYTES,
-            DEFAULT_REQUEST_TIMEOUT_MILLIS, HttpServerConfig, HttpServerConfigLayer,
+            DEFAULT_BIND_ADDR, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_HEADER_BYTES,
+            DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_TIMEOUT_MILLIS, HttpServerConfig,
+            HttpServerConfigLayer,
         };
         use confique::Config as _;
         // No `.env()` source: loads the literal defaults only, so this is
@@ -1081,5 +1103,7 @@ mod unit_tests {
         assert_eq!(layer.max_request_bytes, DEFAULT_MAX_REQUEST_BYTES);
         assert_eq!(layer.max_header_bytes, DEFAULT_MAX_HEADER_BYTES);
         assert_eq!(layer.request_timeout_millis, DEFAULT_REQUEST_TIMEOUT_MILLIS);
+        assert_eq!(layer.max_connections, DEFAULT_MAX_CONNECTIONS);
+        assert_eq!(layer.max_connections, default.max_connections);
     }
 }

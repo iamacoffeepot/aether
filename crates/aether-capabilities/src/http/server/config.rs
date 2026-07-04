@@ -3,8 +3,8 @@
 //! `with_actor::<HttpServerCapability>(config)`.
 
 use super::{
-    DEFAULT_BIND_ADDR, DEFAULT_MAX_HEADER_BYTES, DEFAULT_MAX_REQUEST_BYTES,
-    DEFAULT_REQUEST_TIMEOUT_MILLIS,
+    DEFAULT_BIND_ADDR, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_HEADER_BYTES,
+    DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_TIMEOUT_MILLIS,
 };
 
 /// Init config for [`HttpServerCapability`](super::HttpServerCapability) (ADR-0108).
@@ -14,9 +14,10 @@ use super::{
 /// single component mailbox every request is dispatched to — resolved by
 /// name at dispatch time (late binding), so the handler component can load
 /// or reload independently of the server. `max_request_bytes` caps the
-/// request body, `max_header_bytes` caps the request line + headers, and
+/// request body, `max_header_bytes` caps the request line + headers,
 /// `request_timeout_millis` bounds both the per-read slow-loris timeout and
-/// the handler response deadline.
+/// the handler response deadline, and `max_connections` caps the live
+/// connection table.
 ///
 /// `#[derive(aether_substrate::Config)]` (ADR-0090) emits the env-shaped
 /// `HttpServerConfigLayer`, the clap-shaped `HttpServerOverlay`, and the
@@ -59,6 +60,11 @@ pub struct HttpServerConfig {
     /// handler that doesn't reply in time yields `504`.
     #[cfg_attr(feature = "runtime", config(default = 30_000))]
     pub request_timeout_millis: u64,
+    /// Cap on live connections ([`DEFAULT_MAX_CONNECTIONS`]); once the
+    /// connection table is at capacity a newly-accepted peer is refused
+    /// `503` and closed rather than getting a reader thread.
+    #[cfg_attr(feature = "runtime", config(default = 1024))]
+    pub max_connections: usize,
 }
 
 impl Default for HttpServerConfig {
@@ -70,6 +76,7 @@ impl Default for HttpServerConfig {
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
             max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
             request_timeout_millis: DEFAULT_REQUEST_TIMEOUT_MILLIS,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
         }
     }
 }

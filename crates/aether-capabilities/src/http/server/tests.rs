@@ -6,6 +6,7 @@ use aether_substrate::testing::{TestChassis, fresh_substrate};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use test_handlers::{EchoHttpHandler, FixedBodyHttpHandler, SilentHttpHandler};
@@ -493,4 +494,56 @@ fn head_response_suppresses_body() {
 
     let get_response = round_trip(port, b"GET /x HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(body_of(&get_response), "fixed body");
+}
+
+/// A peer accepted past `max_connections` is refused a canned `503`
+/// and closed before a reader thread is spawned; it never reaches the
+/// handler.
+///
+/// Tripwire: without the capacity guard in `spawn_reader_for_peer`,
+/// this connection is accepted and dispatched (or hangs waiting on
+/// the handler) instead of being refused.
+#[test]
+fn over_capacity_connection_is_503() {
+    let (registry, mailer) = fresh_substrate();
+    let max_connections = 2;
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<EchoHttpHandler>(())
+        .with_actor::<HttpServerCapability>(HttpServerConfig {
+            bind_addr: "127.0.0.1:0".to_string(),
+            handler_mailbox: <EchoHttpHandler as Addressable>::NAMESPACE.to_string(),
+            request_timeout_millis: 5_000,
+            max_connections,
+            ..HttpServerConfig::default()
+        })
+        .build_passive()
+        .expect("caps boot");
+
+    let port = port_of(&chassis);
+
+    // Fill the connection table: each socket sends a partial request
+    // head (no terminating blank line), so its reader thread blocks
+    // waiting for more bytes and its `ConnState` stays resident.
+    let mut held = Vec::new();
+    for _ in 0..max_connections {
+        let mut stream =
+            TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\n")
+            .expect("write partial request head");
+        stream.flush().expect("flush partial request head");
+        held.push(stream);
+    }
+
+    // Give the dispatcher a moment to drain the `PeerAccepted` events
+    // into `connections` before the next connect.
+    thread::sleep(Duration::from_millis(200));
+
+    let response = round_trip(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(
+        response.starts_with("HTTP/1.1 503 "),
+        "expected 503, got: {response:?}",
+    );
+
+    drop(held);
 }
