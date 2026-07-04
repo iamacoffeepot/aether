@@ -1,6 +1,6 @@
 # ADR-0131: Typed Route Authoring Surface for the HTTP Server
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-03
 
 Realizes the guest-side typed-routing layer **ADR-0130** decided and scoped as its follow-on arc. Builds on **ADR-0033** / **ADR-0123** (the `#[actor]` dispatch macro and its impl-hosted / struct-hosted forms), **ADR-0121** (capabilities own their kinds), and the shared `Lifecycle<S>` hook of iamacoffeepot/aether#2048.

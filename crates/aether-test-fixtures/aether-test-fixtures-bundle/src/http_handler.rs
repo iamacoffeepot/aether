@@ -22,13 +22,13 @@
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::ComponentHostCapability;
+use aether_capabilities::http;
 use aether_capabilities::http::HttpServerCapability;
 use aether_capabilities::http::kinds::{
     HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen, HttpServerRequest,
-    HttpServerResponse, HttpStreamCredit, RegisterRouteSelf, WebSocketAccept, WebSocketClose,
-    WebSocketMessage,
+    HttpServerResponse, HttpStreamCredit, WebSocketAccept, WebSocketClose, WebSocketMessage,
 };
-use aether_data::{Kind as _, MailboxId};
+use aether_data::MailboxId;
 use aether_kinds::DropComponent;
 
 pub struct HttpHandler;
@@ -240,16 +240,19 @@ impl WasmActor for WebSocketHandler {
 }
 
 /// Routed sibling of [`HttpHandler`] for the ADR-0130 drop-purge e2e
-/// test: claims `/routed` from `wire` via `register_route_self` (the
-/// same declaration path a real component takes) and replies a fixed
-/// tag. `GET /routed/drop` doubles as the test's mail bridge into the
-/// chassis — the request body carries a decimal trampoline mailbox id,
-/// and the handler forwards a [`DropComponent`] for it to
-/// `aether.component` (detached: the drop teardown is not part of the
-/// request's causal chain), so the test can drop this component from
-/// outside without a chassis-level mail surface.
+/// test, authored through the typed route surface (`#[http::router]` /
+/// `#[http::route]`, ADR-0131): the macro mints the route's kind and
+/// injects the `register_route_self` registration, so this fixture is
+/// the wasm32 + `Lifecycle<S>` universality proof for the macro layer.
+/// It replies a fixed tag for `/routed`. `GET /routed/drop` doubles as
+/// the test's mail bridge into the chassis — the request body carries a
+/// decimal trampoline mailbox id, and the handler forwards a
+/// [`DropComponent`] for it to `aether.component` (detached: the drop
+/// teardown is not part of the request's causal chain), so the test can
+/// drop this component from outside without a chassis-level mail surface.
 pub struct RoutedHttpHandler;
 
+#[http::router]
 #[actor]
 impl WasmActor for RoutedHttpHandler {
     const NAMESPACE: &'static str = "routed_web";
@@ -258,24 +261,23 @@ impl WasmActor for RoutedHttpHandler {
         Ok(RoutedHttpHandler)
     }
 
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
-        ctx.actor::<HttpServerCapability>()
-            .send(&RegisterRouteSelf {
-                prefix: "/routed".to_string(),
-                method: None,
-                kind: HttpServerRequest::ID,
-            });
-    }
-
     /// Reply a fixed tag for anything under `/routed`; on
     /// `/routed/drop` also forward a [`DropComponent`] for the mailbox
-    /// id named in the request body.
+    /// id named in the request body. The request arrives via the
+    /// identity [`HttpServerRequest`] extractor; `ctx` derefs to
+    /// `WasmCtx`, so the detached `DropComponent` send reads exactly as
+    /// an ordinary handler's.
     ///
     /// # Agent
     /// Not sent manually — dispatched by `aether.http.server` for the
-    /// `/routed` prefix this actor claims in `wire`.
-    #[handler]
-    fn on_request(&mut self, ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpServerResponse {
+    /// `/routed` prefix this actor claims (the `#[http::route]` macro
+    /// injects the registration into `wire`).
+    #[http::route(any, "/routed")]
+    fn on_routed(
+        &mut self,
+        ctx: http::Ctx<'_, WasmCtx<'_>>,
+        req: HttpServerRequest,
+    ) -> HttpServerResponse {
         if req.path == "/routed/drop" {
             let target = String::from_utf8_lossy(&req.body).trim().parse::<u64>();
             let Ok(raw_id) = target else {

@@ -9,8 +9,17 @@
 pub mod client;
 pub mod kinds;
 pub mod server;
+pub mod typed;
 
 pub use kinds::*;
+
+// ADR-0131 typed route-authoring surface. The `#[router]` / `#[route]`
+// proc macros (host-compiled, so wasm-safe) re-exported from the
+// cap-owned derive crate, alongside the runtime types they compile down
+// to — consumers write `#[http::router]` / `#[http::route]` next to
+// `http::FromRequest` / `http::Ctx` / `http::Route`.
+pub use aether_capabilities_derive::{route, router};
+pub use typed::{Ctx, FromRequest, Route};
 
 // Egress client surface (`client.rs`). `HttpConfig` is the always-on
 // domain struct; the `Config`-derive `HttpConfigLayer` / `HttpOverlay`
