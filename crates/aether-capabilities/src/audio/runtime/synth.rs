@@ -13,6 +13,7 @@ use aether_data::MailboxId;
 use super::super::kinds::ScheduledNote;
 use super::event::AudioEvent;
 use super::instrument::{BUILTINS, instrument_by_id};
+use super::reverb::Reverb;
 use super::sample::{SampleBank, SampleVoice};
 use super::schedule::{ScheduledEntry, millis_to_frames};
 use super::track::{TRACK_FADE_SECS, TrackVoice};
@@ -33,6 +34,14 @@ pub struct Synth {
     banks: Vec<Arc<SampleBank>>,
     sample_rate: f32,
     master_gain: f32,
+    /// Master reverb send (ADR-0126): the mono Freeverb-style DSP the
+    /// summed mix is fed through at `reverb_send` proportion.
+    reverb: Reverb,
+    /// Linear send scalar into `reverb`, clamped `0.0..=1.0`. `0.0`
+    /// (the default) is fully dry — the reverb only ever receives
+    /// silence, so its wet output stays exactly zero and the mix is
+    /// bit-for-bit identical to the pre-reverb dry sum.
+    reverb_send: f32,
     /// Monotonically increasing counter stamped into each `Voice::seq`
     /// at allocation. Voice-steal uses the minimum value to locate the
     /// oldest voice regardless of pool order.
@@ -59,6 +68,8 @@ impl Synth {
             banks: Vec::new(),
             sample_rate,
             master_gain: 1.0,
+            reverb: Reverb::new(sample_rate),
+            reverb_send: 0.0,
             next_seq: 0,
             frame_clock: 0,
             scheduled: BinaryHeap::new(),
@@ -215,6 +226,9 @@ impl Synth {
                 AudioEvent::SetMasterGain { gain } => {
                     self.master_gain = gain.clamp(0.0, 1.0);
                 }
+                AudioEvent::SetReverbSend { send } => {
+                    self.reverb_send = send.clamp(0.0, 1.0);
+                }
                 AudioEvent::TrackStart {
                     sender_mailbox,
                     lane,
@@ -355,6 +369,8 @@ impl Synth {
             for track in &mut self.tracks {
                 sample += track.next_sample();
             }
+            let wet = self.reverb.process(sample * self.reverb_send);
+            sample += wet;
             sample *= self.master_gain;
             sample = sample.tanh();
             let start = frame * channels;
@@ -382,6 +398,11 @@ impl Synth {
     #[cfg(test)]
     pub fn master_gain(&self) -> f32 {
         self.master_gain
+    }
+
+    #[cfg(test)]
+    pub fn reverb_send(&self) -> f32 {
+        self.reverb_send
     }
 
     #[cfg(test)]

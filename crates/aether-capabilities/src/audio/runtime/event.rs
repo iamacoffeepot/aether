@@ -41,6 +41,13 @@ pub enum AudioEvent {
     SetMasterGain {
         gain: f32,
     },
+    /// Set the master reverb send (ADR-0126): the linear scalar applied
+    /// to the mixer's summed dry output before it is fed into the
+    /// reverb, clamped `0.0..=1.0` by the handler before this event is
+    /// pushed.
+    SetReverbSend {
+        send: f32,
+    },
     /// Start (or restart) a track in the dedicated mixer lane. `pcm`
     /// is already mono and resampled to the device rate, so the
     /// callback walks it by index. Keyed by `(sender_mailbox, lane,

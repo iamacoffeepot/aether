@@ -1,5 +1,5 @@
 //! The `aether.audio.*` mail vocabulary (ADR-0121: the capability owns
-//! its kinds). The 11 audio kinds — the cast-shaped real-time triggers
+//! its kinds). The 13 audio kinds — the cast-shaped real-time triggers
 //! (`NoteOn` / `NoteOff` / `SetMasterGain`) and the structured control
 //! plane (`SetMasterGain`'s reply, the ADR-0104 scheduled batch, the
 //! ADR-0103 track lane, and the ADR-0103 sampled-bank loader) — live
@@ -98,6 +98,36 @@ pub struct SetMasterGain {
 #[kind(name = "aether.audio.set_master_gain_result")]
 pub enum SetMasterGainResult {
     Ok { applied_gain: f32 },
+    Err { error: String },
+}
+
+/// Set the substrate's master reverb send (ADR-0126). `send` is a
+/// linear scalar applied to the mixer's summed dry output before it
+/// feeds a fixed-character Freeverb-style reverb; the wet signal is
+/// then added back into the mix. `0.0` is fully dry (the reverb inert
+/// by default), `1.0` sends the full mix through the reverb; values
+/// above `1.0` are clamped. Room size, damping, and wet gain are fixed
+/// substrate constants — no per-send tuning in v1 (ADR-0126).
+/// Desktop-only: headless and hub chassis reply with an
+/// `unsupported on <chassis>` error. Fire-and-forget in the happy path.
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
+)]
+#[kind(name = "aether.audio.set_reverb_send")]
+pub struct SetReverbSend {
+    pub send: f32,
+}
+
+/// Reply to `SetReverbSend` (ADR-0126). `Ok` echoes the send the
+/// substrate actually applied — values above `1.0` are clamped, so
+/// callers that sent `1.5` learn they got `1.0`. `Err` fires on
+/// chassis without an audio device (headless, hub) or when audio
+/// was disabled at boot via `AETHER_AUDIO_DISABLE`.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.audio.set_reverb_send_result")]
+pub enum SetReverbSendResult {
+    Ok { applied_send: f32 },
     Err { error: String },
 }
 

@@ -29,13 +29,15 @@ use aether_actor::runtime;
 // event queue), schedule (the ADR-0104 heap entry), instrument (the built-in
 // registry), voice (the synthesis kernels), sample (the ADR-0103 sampled
 // banks), track (the ADR-0103 mixer lane), synth (the mixer aggregate + cpal
-// pipeline build), decode (the ADR-0103 §1 decode/resample core), and sfz (the
-// ADR-0103 §5 SFZ-subset parser).
+// pipeline build), decode (the ADR-0103 §1 decode/resample core), sfz (the
+// ADR-0103 §5 SFZ-subset parser), and reverb (the ADR-0126 master reverb
+// send DSP).
 mod config;
 mod decode;
 mod event;
 mod instrument;
 mod pipeline;
+mod reverb;
 mod sample;
 mod schedule;
 mod sfz;
@@ -58,7 +60,8 @@ use self::sample::{
 use self::sfz::parse_sfz;
 use super::kinds::{
     LoadInstrument, LoadInstrumentResult, NoteOff, NoteOn, PlayTrack, PlayTrackResult, Schedule,
-    ScheduleResult, SetMasterGain, SetMasterGainResult, StopTrack,
+    ScheduleResult, SetMasterGain, SetMasterGainResult, SetReverbSend, SetReverbSendResult,
+    StopTrack,
 };
 
 // The substrate-typed + native-only surface the parent's `#[actor] impl`
@@ -620,6 +623,35 @@ impl NativeActor for AudioCapability {
         }
     }
 
+    /// Set the master reverb send (ADR-0126).
+    ///
+    /// # Agent
+    /// Reply: `SetReverbSendResult`. `Ok { applied_send }` clamps to
+    /// `0.0..=1.0`; `Err` on chassis without audio.
+    #[handler]
+    fn on_set_reverb_send(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: SetReverbSend,
+    ) -> SetReverbSendResult {
+        let applied = mail.send.clamp(0.0, 1.0);
+        let Some(s) = state.sender.as_ref() else {
+            return SetReverbSendResult::Err {
+                error: "audio pipeline not initialised on this desktop substrate".to_owned(),
+            };
+        };
+        let _ = s.push(AudioEvent::SetReverbSend { send: applied });
+        tracing::info!(
+            target: "aether_substrate::audio",
+            requested = mail.send,
+            applied,
+            "reverb send set",
+        );
+        SetReverbSendResult::Ok {
+            applied_send: applied,
+        }
+    }
+
     /// Schedule a batch of timed note events (ADR-0104).
     ///
     /// # Agent
@@ -1001,7 +1033,9 @@ mod tests {
     use super::sample::{SampleBank, SampleLoop, SampleRegion, SampleVoice, assemble_bank};
     use super::sfz::{SfzLoop, SfzRegion};
     use super::synth::Synth;
-    use super::voice::{MAX_VOICES, OscVoice, PartialBankVoice, voice_seed};
+    use super::voice::{
+        MAX_VOICES, OscVoice, PartialBankVoice, VoiceKernel, build_builtin_kernel, voice_seed,
+    };
     use super::*;
     use crate::fs::FsError;
     use aether_data::{MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
@@ -1325,6 +1359,106 @@ mod tests {
         let mut tail = vec![0.0f32; release_samples];
         synth.fill(&mut tail, 1);
         assert_eq!(synth.voice_count(), 0);
+    }
+
+    // ADR-0126 master reverb send. `reverb_send` defaults to fully dry
+    // and only a `SetReverbSend` event changes it; these tests pin the
+    // inert-by-default invariant and the reverb tail's existence.
+
+    // Tripwire: with `reverb_send` at its default 0.0, `fill`'s output
+    // for a fixed note must exactly match an independent, reverb-free
+    // computation of the same voice — a regression that feeds the mix
+    // into the reverb regardless of `reverb_send`, or defaults the send
+    // to nonzero, would otherwise silently color every mix.
+    #[test]
+    fn reverb_send_zero_matches_pre_reverb_dry_mix_bit_for_bit() {
+        let (sender, queue) = new_event_channel();
+        let mut synth = Synth::new(queue, TEST_RATE);
+        sender
+            .push(AudioEvent::NoteOn {
+                sender_mailbox: MailboxId(1),
+                pitch: 60,
+                velocity: 100,
+                instrument_id: 0,
+            })
+            .unwrap();
+        assert_eq!(
+            synth.reverb_send(),
+            0.0,
+            "reverb send must default to fully dry",
+        );
+
+        let mut buf = vec![0.0f32; 480];
+        synth.fill(&mut buf, 1);
+
+        // Independent parallel computation of the dry mix: the exact
+        // same built-in kernel `trigger_note_on` would have built,
+        // stepped and mixed the same way `fill` does (master_gain at
+        // its 1.0 default), never touching the reverb.
+        let def = BUILTINS
+            .iter()
+            .find(|d| d.name == "sine_lead")
+            .expect("sine_lead is builtin id 0");
+        let mut kernel = build_builtin_kernel(MailboxId(1), 0, 60, 100, def, TEST_RATE);
+        let dt = 1.0 / TEST_RATE;
+        let expected: Vec<f32> = (0..480)
+            .map(|_| {
+                let dry = match &mut kernel {
+                    VoiceKernel::Oscillator(v) => v.next_sample(dt),
+                    VoiceKernel::PartialBank(v) => v.next_sample(dt),
+                    VoiceKernel::Sample(v) => v.next_sample(dt),
+                };
+                dry.tanh()
+            })
+            .collect();
+        assert_eq!(
+            buf, expected,
+            "reverb_send == 0.0 must not alter the dry mix",
+        );
+    }
+
+    #[test]
+    fn reverb_tail_persists_after_the_note_ends() {
+        let (sender, queue) = new_event_channel();
+        let mut synth = Synth::new(queue, TEST_RATE);
+        sender
+            .push(AudioEvent::SetReverbSend { send: 1.0 })
+            .unwrap();
+        sender
+            .push(AudioEvent::NoteOn {
+                sender_mailbox: MailboxId(1),
+                pitch: 60,
+                velocity: 100,
+                instrument_id: 0,
+            })
+            .unwrap();
+        let mut buf = vec![0.0f32; 480];
+        synth.fill(&mut buf, 1);
+        assert_eq!(synth.reverb_send(), 1.0);
+
+        sender
+            .push(AudioEvent::NoteOff {
+                sender_mailbox: MailboxId(1),
+                pitch: 60,
+                instrument_id: 0,
+            })
+            .unwrap();
+        // Drive well past the release so the voice fully frees.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let release_samples = (0.5 * TEST_RATE) as usize;
+        let mut tail = vec![0.0f32; release_samples];
+        synth.fill(&mut tail, 1);
+        assert_eq!(synth.voice_count(), 0, "voice should have released by now");
+
+        // Render a further block with no voices or tracks live — any
+        // energy here can only be the reverb's tail from the note that
+        // already ended.
+        let mut after = vec![0.0f32; 4_000];
+        synth.fill(&mut after, 1);
+        assert!(
+            after.iter().any(|s| s.abs() > 1.0e-6),
+            "expected a reverb tail after the note's voice had already ended",
+        );
     }
 
     // ADR-0104 scheduled note events. These drive `fill` with known
@@ -2350,6 +2484,89 @@ mod tests {
             ScheduleResult::Err { .. } => {}
             ScheduleResult::Ok { .. } => panic!("nop chassis must reply Err"),
         }
+    }
+
+    // `on_set_master_gain` / `on_set_reverb_send` — both a synchronous
+    // clamp-and-reply handler over a scalar. No prior coverage existed
+    // for the master-gain handler's nop-chassis `Err` / clamp behavior;
+    // backfilled alongside the new reverb-send handler.
+
+    #[test]
+    fn set_master_gain_on_nop_chassis_replies_err() {
+        let mut cap = AudioCapabilityState::nop();
+        let (mailer, _rx) = test_mailer_and_rx();
+        let transport = Arc::new(NativeBinding::new_for_test(
+            Arc::clone(&mailer),
+            MailboxId(0),
+        ));
+        let mut ctx = load_ctx(&transport);
+        let result =
+            AudioCapability::on_set_master_gain(&mut cap, &mut ctx, SetMasterGain { gain: 0.5 });
+        match result {
+            SetMasterGainResult::Err { .. } => {}
+            SetMasterGainResult::Ok { .. } => panic!("nop chassis must reply Err"),
+        }
+    }
+
+    #[test]
+    fn set_master_gain_clamps_over_range_input() {
+        let (mut cap, queue) = live_cap();
+        let (mailer, _rx) = test_mailer_and_rx();
+        let transport = Arc::new(NativeBinding::new_for_test(
+            Arc::clone(&mailer),
+            MailboxId(0),
+        ));
+        let mut ctx = load_ctx(&transport);
+        let result =
+            AudioCapability::on_set_master_gain(&mut cap, &mut ctx, SetMasterGain { gain: 1.5 });
+        match result {
+            SetMasterGainResult::Ok { applied_gain } => assert_eq!(applied_gain, 1.0),
+            SetMasterGainResult::Err { error } => panic!("expected Ok, got Err({error})"),
+        }
+        let event = queue.pop().expect("a set_master_gain event was queued");
+        assert!(
+            matches!(event, AudioEvent::SetMasterGain { gain } if gain == 1.0),
+            "expected SetMasterGain clamped to 1.0, got {event:?}",
+        );
+    }
+
+    #[test]
+    fn set_reverb_send_on_nop_chassis_replies_err() {
+        let mut cap = AudioCapabilityState::nop();
+        let (mailer, _rx) = test_mailer_and_rx();
+        let transport = Arc::new(NativeBinding::new_for_test(
+            Arc::clone(&mailer),
+            MailboxId(0),
+        ));
+        let mut ctx = load_ctx(&transport);
+        let result =
+            AudioCapability::on_set_reverb_send(&mut cap, &mut ctx, SetReverbSend { send: 0.5 });
+        match result {
+            SetReverbSendResult::Err { .. } => {}
+            SetReverbSendResult::Ok { .. } => panic!("nop chassis must reply Err"),
+        }
+    }
+
+    #[test]
+    fn set_reverb_send_clamps_over_range_input() {
+        let (mut cap, queue) = live_cap();
+        let (mailer, _rx) = test_mailer_and_rx();
+        let transport = Arc::new(NativeBinding::new_for_test(
+            Arc::clone(&mailer),
+            MailboxId(0),
+        ));
+        let mut ctx = load_ctx(&transport);
+        let result =
+            AudioCapability::on_set_reverb_send(&mut cap, &mut ctx, SetReverbSend { send: 1.5 });
+        match result {
+            SetReverbSendResult::Ok { applied_send } => assert_eq!(applied_send, 1.0),
+            SetReverbSendResult::Err { error } => panic!("expected Ok, got Err({error})"),
+        }
+        let event = queue.pop().expect("a set_reverb_send event was queued");
+        assert!(
+            matches!(event, AudioEvent::SetReverbSend { send } if send == 1.0),
+            "expected SetReverbSend clamped to 1.0, got {event:?}",
+        );
     }
 
     /// Mono ramp samples for an in-memory WAV fixture.
