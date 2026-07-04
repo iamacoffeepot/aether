@@ -45,13 +45,15 @@ pub use aether_substrate::mail::registry::{MailboxEntry, Registry};
 // `HttpServerResponse`; the rest of the kind vocabulary is used only here.
 pub use crate::http::kinds::HttpServerResponse;
 use crate::http::kinds::{
-    HttpHeader, HttpMethod, HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen,
+    HttpHeader, HttpMethod, HttpRequestChunk, HttpRequestCredit, HttpRequestStreamEnd,
+    HttpRequestStreamOpen, HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen,
     HttpServerRequest, HttpStreamCredit, RegisterRoute, RegisterRouteResult, RegisterRouteSelf,
     UnregisterRoute, UnregisterRouteSelf, UnregisterRoutesAll,
 };
 
 use aether_substrate::Mail;
 use std::io::{self, Read, Write};
+use std::str::from_utf8;
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -63,6 +65,57 @@ pub type ConnId = u64;
 /// Header-array size for the inbound parse (doubles as the header-count
 /// cap: a request with more headers is answered `431`). ADR-0108 §6.
 const MAX_HEADER_COUNT: usize = 64;
+
+/// How the request frames its body, decided from the head (ADR-0108 §4 /
+/// ADR-0128). Drives both the reader's body read and the dispatcher's
+/// buffered-vs-streamed-vs-reject decision.
+#[derive(Copy, Clone)]
+pub enum BodyFraming {
+    /// A `Content-Length`-delimited body of this many bytes (0 = no body),
+    /// with no `Transfer-Encoding`.
+    Length(usize),
+    /// A lone `Transfer-Encoding: chunked` body of unknown length — streamable
+    /// (a streaming handler decodes it incrementally), un-bufferable (a
+    /// buffered handler is answered `411`).
+    Chunked,
+    /// A framing the cap refuses `411`: `Content-Length` and
+    /// `Transfer-Encoding` together (request smuggling), or a non-`chunked`
+    /// transfer coding.
+    Invalid,
+}
+
+/// The request head a reader hands the dispatcher for the streaming decision
+/// (ADR-0128), before it reads the body. The method stays a raw `String`; the
+/// dispatcher maps it to [`HttpMethod`] and answers `501` for a non-enumerated
+/// verb.
+pub struct ParsedHead {
+    pub method: String,
+    pub path: String,
+    pub query: String,
+    pub headers: Vec<HttpHeader>,
+    pub framing: BodyFraming,
+    pub keep_alive: bool,
+}
+
+/// The dispatcher's decision, sent back to a parked reader over the
+/// per-connection control channel (ADR-0128). A rejected request is handled by
+/// the dispatcher writing the canned status and closing the connection —
+/// dropping the control sender, which surfaces at the reader as a disconnect —
+/// so there is no reject variant here.
+pub enum ReaderControl {
+    /// Read the `Content-Length` body into one [`InboundEvent::RequestParsed`]
+    /// (today's buffered path).
+    Buffered,
+    /// Stream the body incrementally, seeded with `credit` initial send-window
+    /// units (one per [`InboundEvent::RequestBodyChunk`]).
+    Stream { credit: u32 },
+    /// Replenish the streaming reader's send window by `credit` — the handler
+    /// drained chunks and granted more.
+    Credit { credit: u32 },
+    /// Keep-alive resume: the response was written; read the next request on
+    /// the same socket.
+    Resume,
+}
 
 /// One parsed inbound HTTP/1.1 request the reader hands to the
 /// dispatcher. The method stays a raw `String` here; the dispatcher
@@ -89,11 +142,27 @@ pub struct ParsedRequest {
 pub enum InboundEvent {
     /// The accept thread took a new connection.
     PeerAccepted { stream: TcpStream, peer: SocketAddr },
-    /// A reader parsed a complete, size-bounded request.
+    /// A reader parsed a request head and needs the dispatcher's streaming
+    /// decision before it reads the body (ADR-0128): the dispatcher resolves
+    /// the handler, checks its accept-set, and replies down the connection's
+    /// control channel with either [`ReaderControl::Buffered`] (read the body
+    /// into one [`Self::RequestParsed`]) or [`ReaderControl::Stream`] (deliver
+    /// it incrementally), or rejects the request and closes.
+    RequestHeadParsed { conn_id: ConnId, head: ParsedHead },
+    /// A reader parsed a complete, size-bounded request (buffered path).
     RequestParsed {
         conn_id: ConnId,
         request: ParsedRequest,
     },
+    /// A streaming reader delivered one inbound body piece (ADR-0128); the
+    /// dispatcher forwards it to the handler as an [`HttpRequestChunk`] on the
+    /// connection's active stream.
+    RequestBodyChunk { conn_id: ConnId, body: Vec<u8> },
+    /// A streaming reader finished the request body (ADR-0128): the
+    /// `Content-Length` count reached zero, or the chunked terminator arrived.
+    /// The dispatcher sends the handler an [`HttpRequestStreamEnd`] and awaits
+    /// its buffered response on that mail's correlation.
+    RequestBodyEnd { conn_id: ConnId },
     /// A reader hit a trust cap or a parse error before any dispatch;
     /// the dispatcher writes the canned status response and closes.
     RequestRejected {
@@ -136,12 +205,19 @@ pub struct ConnState {
     /// Reader thread's shutdown flag. Cap flips it + shuts down the
     /// socket to wake the blocked `read()`.
     pub shutdown: Arc<AtomicBool>,
-    /// Per-connection resume signal (keep-alive). After a successful
-    /// keep-alive response the dispatcher sends `()` here to release the
-    /// reader for the next request; dropping this sender (on
-    /// [`Self::close_connection`]) makes the reader's `recv_timeout` return
+    /// Per-connection reader control channel (ADR-0128 + keep-alive). Carries
+    /// the dispatcher's streaming decision ([`ReaderControl::Buffered`] /
+    /// [`ReaderControl::Stream`]), mid-stream credit replenishment
+    /// ([`ReaderControl::Credit`]), and the keep-alive resume signal
+    /// ([`ReaderControl::Resume`]) to the parked reader. Dropping this sender
+    /// (on [`Self::close_connection`]) makes the reader's `recv_timeout` return
     /// `Disconnected`, its close-path exit.
-    pub resume_tx: mpsc::Sender<()>,
+    pub control_tx: mpsc::Sender<ReaderControl>,
+    /// The `stream_id` of this connection's in-progress inbound request stream
+    /// (ADR-0128), if any — the reverse index the dispatcher uses to route a
+    /// reader's [`InboundEvent::RequestBodyChunk`] / `RequestBodyEnd` to the
+    /// right [`RequestStreamState`]. `None` on a buffered or idle connection.
+    pub active_stream: Option<u64>,
     /// Reader thread handle. Joined in `unwire`, detached on close.
     pub reader_thread: Option<JoinHandle<()>>,
 }
@@ -188,6 +264,28 @@ pub struct StreamState {
     /// fit the bounded channel yet (chunks still queued). Flushed as slots
     /// free so the terminating chunk always follows the body in order.
     pending_end: bool,
+}
+
+/// Per-connection *inbound* request-stream state (ADR-0128), keyed in
+/// [`HttpServerCapabilityState::request_streams`] by a cap-minted `stream_id`.
+/// The dispatcher owns it single-threaded; the reader thread owns only the
+/// socket read and the credit wait. The mirror of [`StreamState`] with the
+/// data flowing the other way — the cap produces credit-paced chunks *to* the
+/// handler and the handler grants credit *back*.
+pub struct RequestStreamState {
+    /// The connection whose reader feeds this stream. Teardown locates a
+    /// stream by connection through this field.
+    conn_id: ConnId,
+    /// The resolved handler mailbox the cap delivers `HttpRequestChunk` /
+    /// `HttpRequestStreamEnd` to. Captured at stream open so mid-stream
+    /// delivery skips route re-resolution.
+    handler: MailboxId,
+    /// The request method, carried to the final response's [`PendingRequest`]
+    /// so a HEAD response suppresses its body.
+    method: HttpMethod,
+    /// Whether the final response keeps the connection alive, carried to the
+    /// final response's [`PendingRequest`].
+    keep_alive: bool,
 }
 
 /// One registered route (ADR-0130): requests whose path matches
@@ -324,6 +422,20 @@ pub struct HttpServerCapabilityState {
     /// `HttpResponseStreamOpen`; torn down on stream end, flood, timeout, or
     /// connection close.
     pub streams: HashMap<u64, StreamState>,
+    /// Inbound request-stream credit-window depth (ADR-0128): the initial
+    /// count of `HttpRequestChunk` mails the cap delivers to a streaming
+    /// handler before parking the reader on the handler's `HttpRequestCredit`.
+    pub request_stream_window: u32,
+    /// Active *inbound* request streams (ADR-0128), keyed by a cap-minted
+    /// `stream_id`. Created when a streaming handler accepts a request head;
+    /// torn down when the body ends (the final response then rides the
+    /// `HttpRequestStreamEnd` dispatch through `in_flight`) or on connection
+    /// close.
+    pub request_streams: HashMap<u64, RequestStreamState>,
+    /// Monotonic source of inbound request-stream ids. Distinct from response
+    /// stream ids (those reuse the request's dispatch correlation), so the two
+    /// tables never collide.
+    pub next_stream_id: u64,
 }
 
 impl HttpServerCapabilityState {
@@ -448,9 +560,10 @@ impl HttpServerCapabilityState {
         let write_half = stream;
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_for_thread = Arc::clone(&shutdown);
-        // Per-connection resume signal (keep-alive): the dispatcher's half is
-        // stored in `ConnState`, the reader's half moves into the thread.
-        let (resume_tx, resume_rx) = mpsc::channel::<()>();
+        // Per-connection reader control channel (ADR-0128 + keep-alive): the
+        // dispatcher's half is stored in `ConnState`, the reader's half moves
+        // into the thread.
+        let (control_tx, control_rx) = mpsc::channel::<ReaderControl>();
 
         let sink = WakeSink {
             inbound_tx: self.inbound_tx.clone(),
@@ -461,7 +574,6 @@ impl HttpServerCapabilityState {
         let tuning = ReaderTuning {
             request_timeout: self.request_timeout,
             idle_timeout: self.keep_alive_timeout,
-            max_request_bytes: self.max_request_bytes,
             max_header_bytes: self.max_header_bytes,
         };
 
@@ -477,7 +589,7 @@ impl HttpServerCapabilityState {
                     conn_id,
                     &shutdown_for_thread,
                     &sink,
-                    &resume_rx,
+                    &control_rx,
                     tuning,
                 );
             }) {
@@ -499,7 +611,8 @@ impl HttpServerCapabilityState {
                 peer,
                 write_half,
                 shutdown,
-                resume_tx,
+                control_tx,
+                active_stream: None,
                 reader_thread: Some(thread),
             },
         );
@@ -587,6 +700,194 @@ impl HttpServerCapabilityState {
         );
     }
 
+    /// Resolve the handler a request head dispatches to — a matching ADR-0130
+    /// route (its stable mailbox validated live, no fallback if it is dead) or
+    /// the late-bound `handler_mailbox` — read-only, so the streaming decision
+    /// can consult the resolved handler's accept-set before the body is read.
+    /// `None` collapses every "nothing live" case to the `503` the buffered
+    /// dispatch answers.
+    fn resolved_handler(&self, path: &str, method: HttpMethod) -> Option<(MailboxId, KindId)> {
+        if let Some(route) = self.resolve_route(path, method) {
+            if validate_route_mailbox(self.mailer.registry(), route.mailbox).is_err() {
+                return None;
+            }
+            return Some((route.mailbox, route.kind));
+        }
+        self.mailer
+            .registry()
+            .lookup(&self.handler_mailbox)
+            .map(|handler| (handler, <HttpServerRequest as Kind>::ID))
+    }
+
+    /// Decide a parsed request head's body path (ADR-0128): resolve the
+    /// handler, read its accept-set, and either signal the parked reader to
+    /// buffer or stream the body, or reject and close. A handler whose
+    /// accept-set carries `HttpRequestStreamOpen` takes the streamed path
+    /// structurally — the cap cannot stream chunk kinds to a handler that does
+    /// not handle them — so no per-request opt-in is needed.
+    pub fn decide_request_head(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        conn_id: ConnId,
+        head: ParsedHead,
+    ) {
+        let Some(method) = parse_http_method(&head.method) else {
+            self.write_status_response(conn_id, 501, "method not implemented");
+            self.close_connection(conn_id, "unsupported method");
+            return;
+        };
+        let Some((handler, _kind)) = self.resolved_handler(&head.path, method) else {
+            self.write_status_response(conn_id, 503, "no handler registered");
+            self.close_connection(conn_id, "handler unresolved");
+            return;
+        };
+        let streaming = self
+            .mailer
+            .capability_registry()
+            .accepts(handler, <HttpRequestStreamOpen as Kind>::ID);
+        match (head.framing, streaming) {
+            // Smuggling (`Content-Length` + `Transfer-Encoding`) and a
+            // non-`chunked` coding are always `411`; a lone `chunked` body to a
+            // buffered handler has no length to buffer under, also `411`
+            // (relaxing #2545's guard only for a streaming handler).
+            (BodyFraming::Invalid, _) | (BodyFraming::Chunked, false) => {
+                self.write_status_response(conn_id, 411, "length required");
+                self.close_connection(conn_id, "unbufferable request framing");
+            }
+            (BodyFraming::Length(n), false) if n > self.max_request_bytes => {
+                self.write_status_response(conn_id, 413, "request body exceeds limit");
+                self.close_connection(conn_id, "body exceeds limit");
+            }
+            (_, false) => {
+                // Buffered handler: the reader reads the `Content-Length` body
+                // into one `RequestParsed`, then `dispatch_request` runs.
+                self.signal_reader(conn_id, ReaderControl::Buffered);
+            }
+            (_, true) => {
+                self.start_request_stream(ctx, conn_id, handler, method, head);
+            }
+        }
+    }
+
+    /// Open an inbound request stream (ADR-0128): mint a `stream_id`, record
+    /// the stream, send the handler an `HttpRequestStreamOpen`, and seed the
+    /// reader's send window. The handler learns its `stream_id` here and paces
+    /// the cap by mailing `HttpRequestCredit`.
+    fn start_request_stream(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        conn_id: ConnId,
+        handler: MailboxId,
+        method: HttpMethod,
+        head: ParsedHead,
+    ) {
+        let stream_id = self.next_stream_id;
+        self.next_stream_id += 1;
+        let window = self.request_stream_window.max(1);
+        self.request_streams.insert(
+            stream_id,
+            RequestStreamState {
+                conn_id,
+                handler,
+                method,
+                keep_alive: head.keep_alive,
+            },
+        );
+        if let Some(conn) = self.connections.get_mut(&conn_id) {
+            conn.active_stream = Some(stream_id);
+        }
+        let payload = HttpRequestStreamOpen {
+            stream_id,
+            method,
+            path: head.path,
+            query: head.query,
+            headers: head.headers,
+        }
+        .encode_into_bytes();
+        let _ = ctx.send_envelope_as_root(handler, <HttpRequestStreamOpen as Kind>::ID, &payload);
+        self.signal_reader(conn_id, ReaderControl::Stream { credit: window });
+        tracing::debug!(
+            target: "aether_substrate::http_server",
+            conn = conn_id,
+            stream = stream_id,
+            window,
+            "http request stream opened",
+        );
+    }
+
+    /// Forward one inbound body piece to the handler as an `HttpRequestChunk`
+    /// on the connection's active stream (ADR-0128). A missing stream (the
+    /// connection closed, or the stream already ended) drops the chunk.
+    fn forward_request_chunk(&mut self, ctx: &mut NativeCtx<'_>, conn_id: ConnId, body: Vec<u8>) {
+        let Some(stream_id) = self.connections.get(&conn_id).and_then(|c| c.active_stream) else {
+            return;
+        };
+        let Some(handler) = self.request_streams.get(&stream_id).map(|s| s.handler) else {
+            return;
+        };
+        let payload = HttpRequestChunk { stream_id, body }.encode_into_bytes();
+        let _ = ctx.send_envelope_as_root(handler, <HttpRequestChunk as Kind>::ID, &payload);
+    }
+
+    /// Finish an inbound request stream (ADR-0128): send the handler an
+    /// `HttpRequestStreamEnd` and record it as the in-flight request whose
+    /// buffered `HttpServerResponse` reply, riding the terminator's envelope
+    /// correlation, the reply-interception path writes back — so a streamed
+    /// upload answers with one ordinary response and the settlement safety net
+    /// still `502`s a handler that drops without replying.
+    fn end_request_stream(&mut self, ctx: &mut NativeCtx<'_>, conn_id: ConnId) {
+        let Some(stream_id) = self
+            .connections
+            .get_mut(&conn_id)
+            .and_then(|c| c.active_stream.take())
+        else {
+            return;
+        };
+        let Some(stream) = self.request_streams.remove(&stream_id) else {
+            return;
+        };
+        let payload = HttpRequestStreamEnd { stream_id }.encode_into_bytes();
+        let mail_id =
+            ctx.send_envelope_as_root(stream.handler, <HttpRequestStreamEnd as Kind>::ID, &payload);
+        if let Some(registry) = self.mailer.settlement_registry() {
+            registry.subscribe_settlement_mail(
+                mail_id,
+                self.self_mailbox,
+                <Settled as Kind>::ID,
+                Arc::clone(&self.mailer),
+            );
+        }
+        self.in_flight.insert(
+            mail_id.correlation_id,
+            PendingRequest {
+                conn_id,
+                method: stream.method,
+                keep_alive: stream.keep_alive,
+            },
+        );
+    }
+
+    /// Replenish a streaming reader's send window by `credit` on the handler's
+    /// grant (ADR-0128). A grant for an ended / unknown stream is a no-op.
+    fn replenish_reader_credit(&mut self, stream_id: u64, credit: u32) {
+        let Some(conn_id) = self.request_streams.get(&stream_id).map(|s| s.conn_id) else {
+            return;
+        };
+        self.signal_reader(conn_id, ReaderControl::Credit { credit });
+    }
+
+    /// Send a control message to a connection's parked reader; a send failure
+    /// means the reader already exited, so the connection is closed.
+    fn signal_reader(&mut self, conn_id: ConnId, control: ReaderControl) {
+        let sent = self
+            .connections
+            .get(&conn_id)
+            .is_some_and(|conn| conn.control_tx.send(control).is_ok());
+        if !sent {
+            self.close_connection(conn_id, "reader gone");
+        }
+    }
+
     /// Format + write the handler's [`HttpServerResponse`]. `is_head`
     /// suppresses the response body per HEAD semantics (headers,
     /// including `Content-Length`, still describe what the body would
@@ -607,13 +908,7 @@ impl HttpServerCapabilityState {
     /// already exited (its own read error / EOF), so the connection is
     /// closed instead.
     pub fn resume_connection(&mut self, conn_id: ConnId) {
-        let resumed = self
-            .connections
-            .get(&conn_id)
-            .is_some_and(|conn| conn.resume_tx.send(()).is_ok());
-        if !resumed {
-            self.close_connection(conn_id, "reader gone");
-        }
+        self.signal_reader(conn_id, ReaderControl::Resume);
     }
 
     /// Format + write a canned status response (the cap's own
@@ -663,6 +958,12 @@ impl HttpServerCapabilityState {
         for stream_id in stream_ids {
             self.teardown_stream(stream_id);
         }
+        // Drop any inbound request stream bound to this connection (ADR-0128);
+        // the reader (parked on the control channel or blocked mid-read) is
+        // already unblocked by the dropped `ConnState` sender / socket
+        // shutdown above.
+        self.request_streams
+            .retain(|_, stream| stream.conn_id != conn_id);
         // Drop any in-flight entry pinned to this connection so we don't
         // write to a dead socket.
         self.in_flight
@@ -907,6 +1208,10 @@ struct RequestHead {
     query: String,
     headers: Vec<HttpHeader>,
     content_length: usize,
+    /// How the body is framed (ADR-0128). The dispatcher turns this into the
+    /// buffered / streamed / `411` decision; the reader turns it into the body
+    /// read (count down `content_length`, or decode chunked).
+    framing: BodyFraming,
     /// httparse minor version: `Some(0)` = HTTP/1.0, `Some(1)` = HTTP/1.1.
     /// Drives the keep-alive default ([`request_keeps_alive`]).
     version: Option<u8>,
@@ -966,11 +1271,14 @@ fn parse_head(buf: &[u8], max_header_bytes: usize) -> HeadParse {
             };
             let mut out_headers = Vec::with_capacity(request.headers.len());
             let mut content_length = 0usize;
+            let mut has_content_length = false;
             let mut bad_length = false;
             let mut has_transfer_encoding = false;
+            let mut transfer_encoding_chunked = false;
             for header in &*request.headers {
                 let value = String::from_utf8_lossy(header.value).into_owned();
                 if header.name.eq_ignore_ascii_case("content-length") {
+                    has_content_length = true;
                     match value.trim().parse::<usize>() {
                         Ok(n) => content_length = n,
                         Err(_) => bad_length = true,
@@ -978,6 +1286,11 @@ fn parse_head(buf: &[u8], max_header_bytes: usize) -> HeadParse {
                 }
                 if header.name.eq_ignore_ascii_case("transfer-encoding") {
                     has_transfer_encoding = true;
+                    // A lone `chunked` coding is streamable; any list (e.g.
+                    // `gzip, chunked`) or non-`chunked` coding is refused.
+                    if value.trim().eq_ignore_ascii_case("chunked") {
+                        transfer_encoding_chunked = true;
+                    }
                 }
                 out_headers.push(HttpHeader {
                     name: header.name.to_string(),
@@ -990,12 +1303,20 @@ fn parse_head(buf: &[u8], max_header_bytes: usize) -> HeadParse {
                     message: "invalid content-length",
                 };
             }
-            if has_transfer_encoding {
-                return HeadParse::Reject {
-                    status: 411,
-                    message: "length required",
-                };
-            }
+            // Body framing (ADR-0128): `Content-Length` + `Transfer-Encoding`
+            // together is request smuggling and a non-`chunked` coding is
+            // unsupported — both `Invalid` (the dispatcher answers `411`); a
+            // lone `chunked` streams; otherwise the `Content-Length` count (0
+            // when absent) delimits the body.
+            let framing = if has_transfer_encoding {
+                if has_content_length || !transfer_encoding_chunked {
+                    BodyFraming::Invalid
+                } else {
+                    BodyFraming::Chunked
+                }
+            } else {
+                BodyFraming::Length(content_length)
+            };
             HeadParse::Complete(RequestHead {
                 head_len,
                 method,
@@ -1003,6 +1324,7 @@ fn parse_head(buf: &[u8], max_header_bytes: usize) -> HeadParse {
                 query,
                 headers: out_headers,
                 content_length,
+                framing,
                 version,
             })
         }
@@ -1034,7 +1356,6 @@ fn parse_head(buf: &[u8], max_header_bytes: usize) -> HeadParse {
 struct ReaderTuning {
     request_timeout: Duration,
     idle_timeout: Duration,
-    max_request_bytes: usize,
     max_header_bytes: usize,
 }
 
@@ -1067,28 +1388,38 @@ fn request_keeps_alive(version: Option<u8>, headers: &[HttpHeader]) -> bool {
     matches!(version, Some(1))
 }
 
+/// Cap on a chunked-transfer size line (hex size + optional `;ext`) and on a
+/// trailer header line, in bytes — a peer cannot stream an unbounded framing
+/// line at the cap.
+const MAX_CHUNK_LINE_BYTES: usize = 256;
+/// Cap on trailer header lines after the terminating chunk — a peer cannot
+/// stream unbounded trailers.
+const MAX_CHUNK_TRAILERS: usize = MAX_HEADER_COUNT;
+
 /// Per-connection reader thread body. An outer per-request loop reads one
-/// HTTP/1.1 request (head + `Content-Length`-bounded body), posts it, then
-/// waits on the per-connection resume channel: on a keep-alive response the
-/// dispatcher signals `()` and the loop reads the next request off the same
-/// socket (carrying any over-read pipelined bytes forward); on a close
-/// response the dispatcher drops the sender and the reader exits. A fresh /
-/// idle connection between requests reads under `idle_timeout`; once a
+/// HTTP/1.1 request head, posts it for the dispatcher's streaming decision,
+/// then reads the body either buffered (`Content-Length` into one
+/// [`InboundEvent::RequestParsed`]) or streamed (credit-paced
+/// [`InboundEvent::RequestBodyChunk`] mails, ADR-0128), then waits on the
+/// per-connection control channel: on a keep-alive response the dispatcher
+/// signals [`ReaderControl::Resume`] and the loop reads the next request off
+/// the same socket (carrying any over-read pipelined bytes forward); on a
+/// close response the dispatcher drops the sender and the reader exits. A fresh
+/// / idle connection between requests reads under `idle_timeout`; once a
 /// request's bytes start arriving the in-flight `request_timeout` (slow-loris)
-/// governs, and the handler-response deadline is the resume wait.
+/// governs, and the handler-response deadline is the control wait.
 #[allow(clippy::too_many_lines)]
 fn run_reader_loop(
     read_half: TcpStream,
     conn_id: ConnId,
     shutdown: &AtomicBool,
     sink: &WakeSink,
-    resume_rx: &mpsc::Receiver<()>,
+    control_rx: &mpsc::Receiver<ReaderControl>,
     tuning: ReaderTuning,
 ) {
     let ReaderTuning {
         request_timeout,
         idle_timeout,
-        max_request_bytes,
         max_header_bytes,
     } = tuning;
     let mut stream = read_half;
@@ -1173,16 +1504,6 @@ fn run_reader_loop(
             }
         };
 
-        // Body cap (ADR-0108 §6): reject before reading any body bytes.
-        if head.content_length > max_request_bytes {
-            sink.post(InboundEvent::RequestRejected {
-                conn_id,
-                status: 413,
-                message: "request body exceeds limit",
-            });
-            return;
-        }
-
         // The body read and the `Expect: 100-continue` write run under the
         // in-flight timeout — a request has started arriving.
         if current_timeout != request_timeout {
@@ -1196,16 +1517,46 @@ fn run_reader_loop(
             current_timeout = request_timeout;
         }
 
-        // `Expect: 100-continue` (only once we've decided to accept the
-        // body): the reader owns a full-duplex clone of the socket, so it
-        // writes the interim response inline, strictly before the body
-        // read — the final response still goes out the dispatcher's
-        // `write_half`, so the two writes never interleave on the shared fd.
-        let expects_continue = head.content_length > 0
-            && head.headers.iter().any(|header| {
-                header.name.eq_ignore_ascii_case("expect")
-                    && header.value.to_ascii_lowercase().contains("100-continue")
-            });
+        let keep_alive = request_keeps_alive(head.version, &head.headers);
+
+        // Post the head and await the dispatcher's streaming decision (ADR-0128).
+        // The dispatcher owns registry access, so it resolves the handler,
+        // reads its accept-set, and replies `Buffered` / `Stream` — or rejects
+        // (`411` / `413` / `501` / `503`) and closes, surfacing here as a
+        // disconnect. Reject decisions (including the body-cap `413` that used
+        // to live in this reader) now belong to the dispatcher, which has the
+        // handler's streaming disposition.
+        let parsed_head = ParsedHead {
+            method: head.method.clone(),
+            path: head.path.clone(),
+            query: head.query.clone(),
+            headers: head.headers.clone(),
+            framing: head.framing,
+            keep_alive,
+        };
+        if !sink.post(InboundEvent::RequestHeadParsed {
+            conn_id,
+            head: parsed_head,
+        }) {
+            return;
+        }
+        // A timeout means the dispatcher never answered (a wedged / torn-down
+        // cap); a disconnect means it rejected the request and closed. Either
+        // way there is nothing more this reader can write.
+        let Ok(mode) = control_rx.recv_timeout(request_timeout) else {
+            return;
+        };
+
+        // `Expect: 100-continue`: written only once the dispatcher has accepted
+        // the body (a rejected request never prompts a body send). The reader
+        // owns a full-duplex clone of the socket, so it writes the interim
+        // response inline, strictly before the body read — the final response
+        // still goes out the dispatcher's `write_half`, so the two writes never
+        // interleave on the shared fd.
+        let expects_continue = head.headers.iter().any(|header| {
+            header.name.eq_ignore_ascii_case("expect")
+                && header.value.to_ascii_lowercase().contains("100-continue")
+        });
         if expects_continue && let Err(e) = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n") {
             tracing::debug!(
                 target: "aether_substrate::http_server",
@@ -1215,84 +1566,60 @@ fn run_reader_loop(
             );
         }
 
-        // Phase 2: read the `Content-Length`-bounded body. Leftover bytes
-        // already in `buf` past the head come first; any over-read past the
-        // body (a pipelined next request) is preserved into `next_buf` and
-        // carried to the next iteration so keep-alive framing stays intact.
-        let mut body: Vec<u8> = Vec::with_capacity(head.content_length);
-        let mut next_buf: Vec<u8> = Vec::new();
-        {
-            let after_head = &buf[head.head_len..];
-            if after_head.len() >= head.content_length {
-                body.extend_from_slice(&after_head[..head.content_length]);
-                next_buf.extend_from_slice(&after_head[head.content_length..]);
-            } else {
-                body.extend_from_slice(after_head);
-            }
-        }
-        let mut body_error = false;
-        while body.len() < head.content_length {
-            if shutdown.load(Ordering::Acquire) {
-                return;
-            }
-            match read_more(&mut stream, &mut chunk) {
-                ReadStep::Filled(n) => {
-                    let want = head.content_length - body.len();
-                    if n <= want {
-                        body.extend_from_slice(&chunk[..n]);
-                    } else {
-                        body.extend_from_slice(&chunk[..want]);
-                        next_buf.extend_from_slice(&chunk[want..n]);
+        // Phase 2: read the body per the decision, then Phase 3: wait for the
+        // response deadline. Both paths leave the reader ready to loop with the
+        // over-read (pipelined) bytes in `next_buf`, or return to close.
+        let next_buf = match mode {
+            ReaderControl::Buffered => {
+                match read_buffered_body(&mut stream, conn_id, shutdown, sink, &head, &buf) {
+                    Some((body, next_buf)) => {
+                        let request = ParsedRequest {
+                            method: head.method,
+                            path: head.path,
+                            query: head.query,
+                            headers: head.headers,
+                            body,
+                            keep_alive,
+                        };
+                        if !sink.post(InboundEvent::RequestParsed { conn_id, request }) {
+                            return;
+                        }
+                        next_buf
                     }
-                }
-                ReadStep::Eof => {
-                    sink.post(InboundEvent::ReaderClosed {
-                        conn_id,
-                        reason: "eof mid-body".to_string(),
-                    });
-                    body_error = true;
-                    break;
-                }
-                ReadStep::Timeout => {
-                    sink.post(InboundEvent::ReaderClosed {
-                        conn_id,
-                        reason: "read timeout (body)".to_string(),
-                    });
-                    body_error = true;
-                    break;
-                }
-                ReadStep::Error(reason) => {
-                    sink.post(InboundEvent::ReaderClosed { conn_id, reason });
-                    body_error = true;
-                    break;
+                    None => return,
                 }
             }
-        }
-        if body_error {
-            return;
-        }
-
-        let keep_alive = request_keeps_alive(head.version, &head.headers);
-        let request = ParsedRequest {
-            method: head.method,
-            path: head.path,
-            query: head.query,
-            headers: head.headers,
-            body,
-            keep_alive,
+            ReaderControl::Stream { credit } => {
+                let leftover = buf[head.head_len..].to_vec();
+                match stream_request_body(
+                    &mut stream,
+                    conn_id,
+                    shutdown,
+                    sink,
+                    control_rx,
+                    head.framing,
+                    leftover,
+                    credit,
+                    request_timeout,
+                ) {
+                    StreamOutcome::Complete { next_buf } => next_buf,
+                    StreamOutcome::Closed => return,
+                }
+            }
+            // The dispatcher never sends a bare credit / resume as the first
+            // control after a head — treat it as a torn-down connection.
+            ReaderControl::Credit { .. } | ReaderControl::Resume => return,
         };
-        if !sink.post(InboundEvent::RequestParsed { conn_id, request }) {
-            return;
-        }
 
         // Phase 3: response deadline. Wait for the dispatcher's resume signal
         // (a keep-alive response was written — loop to the next request), the
         // handler-response timeout (`504`), or the sender being dropped (the
         // dispatcher took the close path — the connection is torn down).
-        match resume_rx.recv_timeout(request_timeout) {
-            Ok(()) => {
+        match control_rx.recv_timeout(request_timeout) {
+            Ok(ReaderControl::Resume) => {
                 buf = next_buf;
             }
+            Ok(_) => return,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 sink.post(InboundEvent::RequestTimedOut { conn_id });
                 return;
@@ -1301,6 +1628,330 @@ fn run_reader_loop(
                 return;
             }
         }
+    }
+}
+
+/// Read a `Content-Length`-delimited body into one buffer (the buffered path).
+/// Leftover bytes already past the head come first; any over-read past the body
+/// (a pipelined next request) is returned as the second tuple element so
+/// keep-alive framing stays intact. `None` on EOF / timeout / error / shutdown
+/// (a `ReaderClosed` is posted where appropriate).
+fn read_buffered_body(
+    stream: &mut TcpStream,
+    conn_id: ConnId,
+    shutdown: &AtomicBool,
+    sink: &WakeSink,
+    head: &RequestHead,
+    buf: &[u8],
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    let mut body: Vec<u8> = Vec::with_capacity(head.content_length);
+    let mut next_buf: Vec<u8> = Vec::new();
+    let after_head = &buf[head.head_len..];
+    if after_head.len() >= head.content_length {
+        body.extend_from_slice(&after_head[..head.content_length]);
+        next_buf.extend_from_slice(&after_head[head.content_length..]);
+    } else {
+        body.extend_from_slice(after_head);
+    }
+    let mut chunk = [0u8; 8 * 1024];
+    while body.len() < head.content_length {
+        if shutdown.load(Ordering::Acquire) {
+            return None;
+        }
+        match read_more(stream, &mut chunk) {
+            ReadStep::Filled(n) => {
+                let want = head.content_length - body.len();
+                if n <= want {
+                    body.extend_from_slice(&chunk[..n]);
+                } else {
+                    body.extend_from_slice(&chunk[..want]);
+                    next_buf.extend_from_slice(&chunk[want..n]);
+                }
+            }
+            ReadStep::Eof => {
+                sink.post(InboundEvent::ReaderClosed {
+                    conn_id,
+                    reason: "eof mid-body".to_string(),
+                });
+                return None;
+            }
+            ReadStep::Timeout => {
+                sink.post(InboundEvent::ReaderClosed {
+                    conn_id,
+                    reason: "read timeout (body)".to_string(),
+                });
+                return None;
+            }
+            ReadStep::Error(reason) => {
+                sink.post(InboundEvent::ReaderClosed { conn_id, reason });
+                return None;
+            }
+        }
+    }
+    Some((body, next_buf))
+}
+
+/// Outcome of streaming one request body to the dispatcher (ADR-0128).
+enum StreamOutcome {
+    /// The body completed and [`InboundEvent::RequestBodyEnd`] was posted;
+    /// `next_buf` holds any over-read bytes past the body (a pipelined request).
+    Complete { next_buf: Vec<u8> },
+    /// The reader stopped (EOF / timeout / error / teardown); a `ReaderClosed`
+    /// was posted where the stop was the reader's, or the control / wake
+    /// channel disconnected.
+    Closed,
+}
+
+/// Stream a request body to the dispatcher as credit-paced
+/// [`InboundEvent::RequestBodyChunk`] mails, then post
+/// [`InboundEvent::RequestBodyEnd`] (ADR-0128). A `Content-Length` body counts
+/// down; a `chunked` body is decoded frame by frame. The reader parks on the
+/// control channel when its send window is exhausted, so a fast peer backs up
+/// into TCP rather than growing the handler's inbox.
+#[allow(clippy::too_many_arguments)]
+fn stream_request_body(
+    stream: &mut TcpStream,
+    conn_id: ConnId,
+    shutdown: &AtomicBool,
+    sink: &WakeSink,
+    control_rx: &mpsc::Receiver<ReaderControl>,
+    framing: BodyFraming,
+    leftover: Vec<u8>,
+    initial_credit: u32,
+    request_timeout: Duration,
+) -> StreamOutcome {
+    let mut streamer = BodyStreamer {
+        stream,
+        conn_id,
+        shutdown,
+        sink,
+        control_rx,
+        request_timeout,
+        credit: initial_credit,
+        work: leftover,
+        pos: 0,
+    };
+    let result = match framing {
+        BodyFraming::Length(n) => streamer.stream_length_body(n),
+        BodyFraming::Chunked => streamer.stream_chunked_body(),
+        // The dispatcher never signals `Stream` for `Invalid` framing.
+        BodyFraming::Invalid => Err(()),
+    };
+    match result {
+        Ok(()) => {
+            let next_buf = streamer.work[streamer.pos..].to_vec();
+            if sink.post(InboundEvent::RequestBodyEnd { conn_id }) {
+                StreamOutcome::Complete { next_buf }
+            } else {
+                StreamOutcome::Closed
+            }
+        }
+        Err(()) => StreamOutcome::Closed,
+    }
+}
+
+/// The reader-side state for streaming one request body (ADR-0128): the socket,
+/// a working buffer with a cursor over unconsumed bytes, and the send-window
+/// credit shared with the dispatcher through the control channel. All methods
+/// return `Err(())` to mean "stop, the outcome is [`StreamOutcome::Closed`]",
+/// posting a `ReaderClosed` first where the stop is a read failure.
+struct BodyStreamer<'a> {
+    stream: &'a mut TcpStream,
+    conn_id: ConnId,
+    shutdown: &'a AtomicBool,
+    sink: &'a WakeSink,
+    control_rx: &'a mpsc::Receiver<ReaderControl>,
+    request_timeout: Duration,
+    /// Un-spent send-window credit — the count of `RequestBodyChunk` mails the
+    /// reader may still post before it must park for the handler's grant.
+    credit: u32,
+    /// Unconsumed bytes (leftover past the head, plus socket refills).
+    work: Vec<u8>,
+    /// Cursor into `work`; bytes before it are consumed.
+    pos: usize,
+}
+
+impl BodyStreamer<'_> {
+    /// Unconsumed byte count.
+    fn avail(&self) -> usize {
+        self.work.len() - self.pos
+    }
+
+    fn post_closed(&self, reason: &str) {
+        self.sink.post(InboundEvent::ReaderClosed {
+            conn_id: self.conn_id,
+            reason: reason.to_string(),
+        });
+    }
+
+    /// Read one socket batch into `work`, compacting the consumed prefix first.
+    /// `Err` on EOF / timeout / error / shutdown.
+    fn read_socket_once(&mut self) -> Result<(), ()> {
+        if self.pos > 0 {
+            self.work.drain(..self.pos);
+            self.pos = 0;
+        }
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(());
+        }
+        let mut chunk = [0u8; 8 * 1024];
+        match read_more(self.stream, &mut chunk) {
+            ReadStep::Filled(n) => {
+                self.work.extend_from_slice(&chunk[..n]);
+                Ok(())
+            }
+            ReadStep::Eof => {
+                self.post_closed("eof mid-body");
+                Err(())
+            }
+            ReadStep::Timeout => {
+                self.post_closed("read timeout (body)");
+                Err(())
+            }
+            ReadStep::Error(reason) => {
+                self.sink.post(InboundEvent::ReaderClosed {
+                    conn_id: self.conn_id,
+                    reason,
+                });
+                Err(())
+            }
+        }
+    }
+
+    /// Ensure at least one unconsumed byte, reading from the socket if needed.
+    fn ensure_avail(&mut self) -> Result<(), ()> {
+        if self.avail() == 0 {
+            self.read_socket_once()?;
+        }
+        Ok(())
+    }
+
+    /// Wait for a send-window credit, then deliver `body` as one inbound chunk
+    /// and spend the credit (ADR-0128). An empty body is never framed. A zero
+    /// window parks on the control channel until the handler grants more; a
+    /// stall past `request_timeout` or a teardown returns `Err`.
+    fn emit(&mut self, body: Vec<u8>) -> Result<(), ()> {
+        if body.is_empty() {
+            return Ok(());
+        }
+        while self.credit == 0 {
+            if self.shutdown.load(Ordering::Acquire) {
+                return Err(());
+            }
+            match self.control_rx.recv_timeout(self.request_timeout) {
+                Ok(ReaderControl::Credit { credit } | ReaderControl::Stream { credit }) => {
+                    self.credit = self.credit.saturating_add(credit);
+                }
+                // A bare buffered / resume mid-stream, or the control channel
+                // dropped, means a torn-down connection — stop.
+                Ok(ReaderControl::Buffered | ReaderControl::Resume)
+                | Err(mpsc::RecvTimeoutError::Disconnected) => return Err(()),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.post_closed("stream credit timeout");
+                    return Err(());
+                }
+            }
+        }
+        if !self.sink.post(InboundEvent::RequestBodyChunk {
+            conn_id: self.conn_id,
+            body,
+        }) {
+            return Err(());
+        }
+        self.credit -= 1;
+        Ok(())
+    }
+
+    /// Deliver the next `remaining`-bounded run of unconsumed bytes as one
+    /// chunk, refilling from the socket when empty. Returns the new remaining.
+    fn deliver_slice(&mut self, remaining: usize) -> Result<usize, ()> {
+        self.ensure_avail()?;
+        let take = remaining.min(self.avail());
+        let slice = self.work[self.pos..self.pos + take].to_vec();
+        self.pos += take;
+        self.emit(slice)?;
+        Ok(remaining - take)
+    }
+
+    /// Stream a `Content-Length`-delimited body of `n` bytes.
+    fn stream_length_body(&mut self, n: usize) -> Result<(), ()> {
+        let mut remaining = n;
+        while remaining > 0 {
+            remaining = self.deliver_slice(remaining)?;
+        }
+        Ok(())
+    }
+
+    /// Stream a `chunked` transfer-encoded body, decoding it frame by frame:
+    /// a hex chunk-size line, that many body bytes (delivered credit-paced),
+    /// its trailing CRLF, repeated until the zero-length terminator, then any
+    /// trailer up to the final blank line.
+    fn stream_chunked_body(&mut self) -> Result<(), ()> {
+        loop {
+            let size = self.read_chunk_size()?;
+            if size == 0 {
+                return self.consume_trailer();
+            }
+            let mut remaining = size;
+            while remaining > 0 {
+                remaining = self.deliver_slice(remaining)?;
+            }
+            self.consume_crlf()?;
+        }
+    }
+
+    /// Read and parse a chunk-size line: hex digits up to an optional `;ext`,
+    /// terminated by CRLF. `Err` on a malformed or oversize line.
+    fn read_chunk_size(&mut self) -> Result<usize, ()> {
+        let line = self.read_line()?;
+        let hex_end = line.iter().position(|&b| b == b';').unwrap_or(line.len());
+        let text = from_utf8(&line[..hex_end]).unwrap_or("").trim();
+        usize::from_str_radix(text, 16).map_err(|_| self.post_closed("malformed chunk size"))
+    }
+
+    /// Read one CRLF-terminated line (the CRLF stripped), bounded to
+    /// [`MAX_CHUNK_LINE_BYTES`]. The line stays in `work` across refills so a
+    /// CRLF split across two socket reads still matches.
+    fn read_line(&mut self) -> Result<Vec<u8>, ()> {
+        loop {
+            if let Some(idx) = self.work[self.pos..].windows(2).position(|w| w == b"\r\n") {
+                let line = self.work[self.pos..self.pos + idx].to_vec();
+                self.pos += idx + 2;
+                return Ok(line);
+            }
+            if self.avail() > MAX_CHUNK_LINE_BYTES {
+                self.post_closed("chunk line too long");
+                return Err(());
+            }
+            self.read_socket_once()?;
+        }
+    }
+
+    /// Consume the CRLF that follows a chunk's data bytes.
+    fn consume_crlf(&mut self) -> Result<(), ()> {
+        while self.avail() < 2 {
+            self.read_socket_once()?;
+        }
+        if &self.work[self.pos..self.pos + 2] == b"\r\n" {
+            self.pos += 2;
+            Ok(())
+        } else {
+            self.post_closed("malformed chunk framing");
+            Err(())
+        }
+    }
+
+    /// Consume trailer header lines after the terminating chunk, up to the
+    /// final blank line. Trailers are ignored (our subset carries none); the
+    /// count is bounded so a peer cannot stream them unboundedly.
+    fn consume_trailer(&mut self) -> Result<(), ()> {
+        for _ in 0..MAX_CHUNK_TRAILERS {
+            if self.read_line()?.is_empty() {
+                return Ok(());
+            }
+        }
+        self.post_closed("too many chunk trailers");
+        Err(())
     }
 }
 
@@ -1619,6 +2270,9 @@ impl NativeActor for HttpServerCapability {
             in_flight: HashMap::new(),
             response_stream_window: config.response_stream_window,
             streams: HashMap::new(),
+            request_stream_window: config.request_stream_window,
+            request_streams: HashMap::new(),
+            next_stream_id: 0,
         })
     }
 
@@ -1672,8 +2326,17 @@ impl NativeActor for HttpServerCapability {
                 InboundEvent::PeerAccepted { stream, peer } => {
                     state.spawn_reader_for_peer(stream, peer);
                 }
+                InboundEvent::RequestHeadParsed { conn_id, head } => {
+                    state.decide_request_head(ctx, conn_id, head);
+                }
                 InboundEvent::RequestParsed { conn_id, request } => {
                     state.dispatch_request(ctx, conn_id, request);
+                }
+                InboundEvent::RequestBodyChunk { conn_id, body } => {
+                    state.forward_request_chunk(ctx, conn_id, body);
+                }
+                InboundEvent::RequestBodyEnd { conn_id } => {
+                    state.end_request_stream(ctx, conn_id);
                 }
                 InboundEvent::RequestRejected {
                     conn_id,
@@ -1740,6 +2403,26 @@ impl NativeActor for HttpServerCapability {
         end: HttpResponseStreamEnd,
     ) {
         state.end_stream(end.stream_id);
+    }
+
+    /// A streaming handler's inbound-body credit grant (ADR-0128), the inverse
+    /// of the cap → handler [`HttpStreamCredit`]. Matched by the payload's
+    /// `stream_id` against the `request_streams` table — a typed handler, not
+    /// the reply-interception fallback, so a credit grant is never mistaken for
+    /// the handler's final `HttpServerResponse`.
+    ///
+    /// # Agent
+    /// Not user-callable — a streaming handler sends this after receiving
+    /// [`HttpRequestStreamOpen`](crate::http::kinds::HttpRequestStreamOpen), as
+    /// it drains [`HttpRequestChunk`](crate::http::kinds::HttpRequestChunk)
+    /// mails, to let the cap deliver more of the request body.
+    #[handler]
+    fn on_request_credit(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        credit: HttpRequestCredit,
+    ) {
+        state.replenish_reader_credit(credit.stream_id, credit.credit);
     }
 
     /// Claim a route for an explicitly named mailbox (ADR-0130).
@@ -2033,8 +2716,9 @@ mod unit_tests {
     fn config_layer_defaults_match_the_named_consts() {
         use super::super::{
             DEFAULT_BIND_ADDR, DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS, DEFAULT_MAX_CONNECTIONS,
-            DEFAULT_MAX_HEADER_BYTES, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_TIMEOUT_MILLIS,
-            DEFAULT_RESPONSE_STREAM_WINDOW, HttpServerConfig, HttpServerConfigLayer,
+            DEFAULT_MAX_HEADER_BYTES, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_STREAM_WINDOW,
+            DEFAULT_REQUEST_TIMEOUT_MILLIS, DEFAULT_RESPONSE_STREAM_WINDOW, HttpServerConfig,
+            HttpServerConfigLayer,
         };
         use confique::Config as _;
         // No `.env()` source: loads the literal defaults only, so this is
@@ -2065,5 +2749,7 @@ mod unit_tests {
             default.response_stream_window,
             DEFAULT_RESPONSE_STREAM_WINDOW
         );
+        assert_eq!(layer.request_stream_window, DEFAULT_REQUEST_STREAM_WINDOW);
+        assert_eq!(default.request_stream_window, DEFAULT_REQUEST_STREAM_WINDOW);
     }
 }

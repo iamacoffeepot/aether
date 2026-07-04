@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use test_handlers::{
     ApiRouteHandler, ApiV2Handler, DupFirstHandler, DupSecondHandler, EchoHttpHandler,
     FixedBodyHttpHandler, FloodHttpHandler, MethodAnyHandler, MethodPostHandler,
-    STREAM_CHUNK_COUNT, SilentHttpHandler, StreamHttpHandler, TmpRouteHandler, stream_chunk_body,
+    STREAM_CHUNK_COUNT, SilentHttpHandler, StreamHttpHandler, StreamingUploadHandler,
+    TmpRouteHandler, stream_chunk_body,
 };
 
 mod test_handlers {
@@ -31,7 +32,8 @@ mod test_handlers {
     use aether_substrate::chassis::error::BootError;
 
     use crate::http::kinds::{
-        HttpHeader, HttpMethod, HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen,
+        HttpHeader, HttpMethod, HttpRequestChunk, HttpRequestCredit, HttpRequestStreamEnd,
+        HttpRequestStreamOpen, HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen,
         HttpServerRequest, HttpServerResponse, HttpStreamCredit, RegisterRouteSelf,
         UnregisterRouteSelf,
     };
@@ -472,6 +474,68 @@ mod test_handlers {
             }
         }
     }
+
+    /// A streaming *upload* handler (ADR-0128), the request-side mirror of
+    /// [`StreamHttpHandler`]: it declares the request-stream vocabulary
+    /// (`HttpRequestStreamOpen` in its accept-set is the structural opt-in the
+    /// cap reads), grants one credit per [`HttpRequestChunk`] it drains,
+    /// accumulates the received byte count, and replies `200` echoing that
+    /// count when the stream ends — the reply riding the
+    /// [`HttpRequestStreamEnd`] correlation.
+    pub struct StreamingUploadHandler;
+
+    /// Per-upload progress for [`StreamingUploadHandler`].
+    pub struct StreamingUploadHandlerState {
+        received: usize,
+    }
+
+    #[actor(singleton)]
+    impl NativeActor for StreamingUploadHandler {
+        type State = StreamingUploadHandlerState;
+        type Config = ();
+        const NAMESPACE: &'static str = "aether.http.test_upload_handler";
+
+        fn init(
+            (): (),
+            _ctx: &mut NativeInitCtx<'_>,
+        ) -> Result<StreamingUploadHandlerState, BootError> {
+            Ok(StreamingUploadHandlerState { received: 0 })
+        }
+
+        #[handler]
+        fn on_stream_open(
+            state: &mut Self::State,
+            _ctx: &mut NativeCtx<'_>,
+            _open: HttpRequestStreamOpen,
+        ) {
+            state.received = 0;
+        }
+
+        /// Count the piece and grant one credit back so the cap delivers the
+        /// next — the inbound mirror of [`StreamHttpHandler::on_credit`].
+        #[handler]
+        fn on_chunk(state: &mut Self::State, ctx: &mut NativeCtx<'_>, chunk: HttpRequestChunk) {
+            state.received += chunk.body.len();
+            ctx.actor::<HttpServerCapability>()
+                .send(&HttpRequestCredit {
+                    stream_id: chunk.stream_id,
+                    credit: 1,
+                });
+        }
+
+        #[handler]
+        fn on_stream_end(
+            state: &mut Self::State,
+            _ctx: &mut NativeCtx<'_>,
+            _end: HttpRequestStreamEnd,
+        ) -> HttpServerResponse {
+            HttpServerResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: format!("received:{}", state.received).into_bytes(),
+            }
+        }
+    }
 }
 
 fn config_for(handler: &str, max_request_bytes: usize) -> HttpServerConfig {
@@ -805,9 +869,10 @@ fn percent_encoded_path_is_decoded() {
     assert!(response.contains("x-aether-query: x=1\r\n"), "{response:?}");
 }
 
-/// A `Transfer-Encoding` request head (chunked bodies are the parked
-/// streaming surface, ADR-0108 §4) is rejected `411` rather than
-/// dispatched with a silently-dropped body.
+/// A `Transfer-Encoding: chunked` request to a *buffered* handler is rejected
+/// `411`: an unknown-length body has nothing to buffer under (ADR-0128 relaxes
+/// this only for a streaming handler, whose accept-set opts it into the
+/// incremental path — see `chunked_upload_streams_to_streaming_handler`).
 #[test]
 fn transfer_encoding_is_411() {
     let (registry, mailer) = fresh_substrate();
@@ -1017,6 +1082,142 @@ fn over_window_flood_tears_the_stream_down() {
         !response.contains("0\r\n\r\n"),
         "flood stream is torn down before the terminator: {response:?}",
     );
+}
+
+/// Server config for the request-streaming tests (ADR-0128): a small inbound
+/// credit window so a multi-chunk upload replenishes credit repeatedly. The
+/// `max_request_bytes` cap stays the 1 `MiB` default, which the large-upload
+/// test deliberately exceeds — streaming bypasses the buffered body cap.
+fn request_stream_config_for(handler: &str, window: u32) -> HttpServerConfig {
+    HttpServerConfig {
+        bind_addr: "127.0.0.1:0".to_string(),
+        handler_mailbox: handler.to_string(),
+        request_timeout_millis: 5_000,
+        request_stream_window: window,
+        ..HttpServerConfig::default()
+    }
+}
+
+/// A multi-megabyte `Content-Length` upload — past the 1 `MiB` buffered
+/// `max_request_bytes` cap — streams incrementally to a streaming handler and
+/// the echoed byte count matches, so the body never resides whole in the reader
+/// or the handler and the buffered cap does not `413` it (ADR-0128). The small
+/// window forces credit to replenish across hundreds of chunks.
+#[test]
+fn large_upload_streams_past_the_buffered_cap() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<StreamingUploadHandler>(())
+        .with_actor::<HttpServerCapability>(request_stream_config_for(
+            <StreamingUploadHandler as Addressable>::NAMESPACE,
+            4,
+        ))
+        .build_passive()
+        .expect("caps boot");
+    let port = port_of(&chassis);
+
+    // Well past DEFAULT_MAX_REQUEST_BYTES (1 MiB) — a buffered handler would
+    // `413` this; the streaming handler takes it incrementally.
+    let body_len = 2 * 1024 * 1024 + 7;
+    let mut request =
+        format!("POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: {body_len}\r\n\r\n")
+            .into_bytes();
+    request.resize(request.len() + body_len, b'a');
+
+    let response = round_trip(port, &request);
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
+    assert_eq!(
+        body_of(&response),
+        format!("received:{body_len}"),
+        "the streamed byte count round-trips",
+    );
+}
+
+/// A `Transfer-Encoding: chunked` upload to a streaming handler is accepted and
+/// decoded incrementally (not `411`), the hand-rolled chunked decoder
+/// reassembling the body across frames (ADR-0128).
+#[test]
+fn chunked_upload_streams_to_streaming_handler() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<StreamingUploadHandler>(())
+        .with_actor::<HttpServerCapability>(request_stream_config_for(
+            <StreamingUploadHandler as Addressable>::NAMESPACE,
+            4,
+        ))
+        .build_passive()
+        .expect("caps boot");
+    let port = port_of(&chassis);
+
+    // "hello" (5) + " world" (6) = 11 body bytes across two chunks.
+    let response = round_trip(
+        port,
+        b"POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n\
+          5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK\r\n"),
+        "chunked upload accepted, not 411: {response:?}",
+    );
+    assert_eq!(
+        body_of(&response),
+        "received:11",
+        "the two chunks decoded to 11 body bytes",
+    );
+}
+
+/// A request carrying both `Content-Length` and `Transfer-Encoding` (the
+/// request-smuggling shape) is refused `411` even for a streaming handler —
+/// ADR-0128 relaxes the guard only for a *lone* `chunked` coding, never the
+/// ambiguous pair.
+#[test]
+fn content_length_with_transfer_encoding_is_411() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<StreamingUploadHandler>(())
+        .with_actor::<HttpServerCapability>(request_stream_config_for(
+            <StreamingUploadHandler as Addressable>::NAMESPACE,
+            4,
+        ))
+        .build_passive()
+        .expect("caps boot");
+    let port = port_of(&chassis);
+
+    let response = round_trip(
+        port,
+        b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\nhello",
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 411 "),
+        "smuggling shape stays 411 even for a streaming handler: {response:?}",
+    );
+}
+
+/// A buffered handler (no `HttpRequestStreamOpen` in its accept-set) keeps the
+/// unchanged `HttpServerRequest` round trip — the streaming decision is a
+/// per-handler property, so an ordinary `Content-Length` POST to
+/// [`EchoHttpHandler`] still buffers and echoes verbatim (ADR-0128). The
+/// contrast case (`transfer_encoding_is_411`) shows the same handler cannot
+/// take a chunked body.
+#[test]
+fn buffered_handler_keeps_the_unstreamed_path() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<EchoHttpHandler>(())
+        .with_actor::<HttpServerCapability>(request_stream_config_for(
+            <EchoHttpHandler as Addressable>::NAMESPACE,
+            4,
+        ))
+        .build_passive()
+        .expect("caps boot");
+    let port = port_of(&chassis);
+
+    let response = round_trip(
+        port,
+        b"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello",
+    );
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
+    assert_eq!(body_of(&response), "hello", "buffered body echoed verbatim");
 }
 
 /// Boot the server (first, so the routed handlers' `wire` registrations

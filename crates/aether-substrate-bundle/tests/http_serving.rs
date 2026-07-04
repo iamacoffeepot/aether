@@ -163,6 +163,7 @@ mod tests {
             keep_alive_timeout_millis: 5_000,
             max_connections: 1024,
             response_stream_window: 16,
+            request_stream_window: 16,
         };
 
         let sandbox = init_save_sandbox("http-serving");
@@ -281,6 +282,7 @@ mod tests {
             max_connections: 1024,
             // Window below the chunk count so the round trip must replenish.
             response_stream_window: 8,
+            request_stream_window: 16,
         };
 
         let sandbox = init_save_sandbox("http-serving-stream");
@@ -387,6 +389,7 @@ mod tests {
     /// body names the trampoline mailbox id to drop — since the built
     /// chassis exposes no direct mail surface to the test.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn dropped_component_routes_are_purged() {
         const ROUTED_NAMESPACE: &str = "routed_web";
         let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
@@ -415,6 +418,7 @@ mod tests {
             keep_alive_timeout_millis: 5_000,
             max_connections: 1024,
             response_stream_window: 16,
+            request_stream_window: 16,
         };
 
         let sandbox = init_save_sandbox("http-route-drop");

@@ -207,6 +207,81 @@ pub struct HttpResponseStreamEnd {
     pub stream_id: u64,
 }
 
+// ADR-0128 HTTP server request streaming. The request-side mirror of the
+// response-streaming vocabulary above, with the credit direction inverted:
+// here the peer is the producer, so the cap streams the inbound body to a
+// streaming handler across many `HttpRequestChunk` mails and the *handler*
+// grants credit back to the cap with `HttpRequestCredit`. A handler opts in
+// structurally — by declaring it accepts `HttpRequestStreamOpen` — so the cap
+// reads the decision off the handler's accept-set at dispatch time rather than
+// from a per-request reply (a request handler cannot reply before it receives
+// the request).
+//
+// Each kind carries an explicit `stream_id` for the same reason the
+// response-side chunk / credit kinds do: the mid-stream mails are per-chunk
+// causal chains (no stream-long settlement hold), so envelope correlation
+// cannot tie a handler's `HttpRequestCredit` back to the connection it paces.
+// The cap mints a `stream_id` when it opens the stream and stamps it on the
+// `HttpRequestStreamOpen`; the handler echoes it on every `HttpRequestCredit`,
+// and the cap demultiplexes concurrent uploads by it. The handler's final
+// buffered `HttpServerResponse` rides the `HttpRequestStreamEnd` dispatch's
+// envelope correlation, so it needs no `stream_id`.
+
+/// `aether.http.server.request_stream_open` — the cap's first mail to a
+/// streaming handler when a streamed request begins (ADR-0128). It is
+/// [`HttpServerRequest`] minus the body: the request head, with the body to
+/// follow as [`HttpRequestChunk`] mails on the stream named by `stream_id`.
+/// The handler learns its `stream_id` here and stamps it on every
+/// [`HttpRequestCredit`] it sends back.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.http.server.request_stream_open")]
+pub struct HttpRequestStreamOpen {
+    pub stream_id: u64,
+    pub method: HttpMethod,
+    pub path: String,
+    pub query: String,
+    pub headers: Vec<HttpHeader>,
+}
+
+/// `aether.http.server.request_chunk` — cap → handler, one inbound body piece
+/// on the stream named by `stream_id` (ADR-0128). Each consumes one unit of
+/// the cap's send window; the handler replenishes by mailing
+/// [`HttpRequestCredit`] as it drains chunks. `body` is raw bytes so binary
+/// uploads stream without loss.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.http.server.request_chunk")]
+pub struct HttpRequestChunk {
+    pub stream_id: u64,
+    pub body: Vec<u8>,
+}
+
+/// `aether.http.server.request_stream_end` — cap → handler terminator on the
+/// stream named by `stream_id` (ADR-0128): the peer finished the body (socket
+/// EOF for a `Content-Length` body once fully read, or the zero-length
+/// terminating chunk for a chunked body). The handler replies its buffered
+/// [`HttpServerResponse`] to *this* mail — the cap keys the response on the
+/// terminator's envelope correlation — so a streamed upload still answers with
+/// one ordinary response.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.http.server.request_stream_end")]
+pub struct HttpRequestStreamEnd {
+    pub stream_id: u64,
+}
+
+/// `aether.http.server.request_credit` — the handler → cap backpressure grant
+/// (ADR-0128), the inverse of [`HttpStreamCredit`]. Tells the cap it may
+/// deliver up to `credit` more [`HttpRequestChunk`] mails on the stream named
+/// by `stream_id`. A full window parks the cap's per-connection socket reader,
+/// at which point the unread bytes back up into the kernel receive buffer and
+/// TCP backpressure blocks the peer's send — so a fast peer cannot outrun a
+/// slow handler unboundedly.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.http.server.request_credit")]
+pub struct HttpRequestCredit {
+    pub stream_id: u64,
+    pub credit: u32,
+}
+
 // ADR-0130 route-registration kinds. Mirrors the `aether.input`
 // subscribe family: `_self` variants resolve the registrant from the
 // inbound envelope's host-stamped `Source` (forgery-proof, in-process
