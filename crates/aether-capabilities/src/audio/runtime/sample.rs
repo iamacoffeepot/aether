@@ -8,7 +8,7 @@ use aether_data::Source;
 
 use super::decode::{decode_wav_to_mono, wav_source_rate};
 use super::sfz::{SfzLoop, SfzRegion};
-use super::voice::BankStage;
+use super::voice::{BankStage, STEAL_RELEASE_SECS};
 
 /// Attack ramp (seconds) wrapping a sample voice — a short swell so a
 /// re-pitched recording doesn't click on at full level (ADR-0103 §6,
@@ -140,6 +140,24 @@ impl SampleVoice {
 
     pub fn note_off(&mut self) {
         self.stage.begin_release(self.attack_secs);
+    }
+
+    /// Force a fast release ramp for a voice-steal: override the release
+    /// time to `STEAL_RELEASE_SECS` and begin releasing from the ramp's
+    /// current level. Unconditional — a voice already releasing is
+    /// re-ramped onto the fast fade. The loop (if any) keeps cycling
+    /// beneath the fade, so the sound decays rather than cutting.
+    pub fn steal_release(&mut self) {
+        let from_level = self.stage.level(self.attack_secs, self.release_secs);
+        self.release_secs = STEAL_RELEASE_SECS;
+        self.stage = BankStage::Release { t: 0.0, from_level };
+    }
+
+    /// Instantaneous loudness proxy for the quietest-steal scan:
+    /// amplitude scaled by the current ramp level, read without
+    /// advancing state.
+    pub fn current_level(&self) -> f32 {
+        self.amplitude * self.stage.level(self.attack_secs, self.release_secs)
     }
 
     pub fn done(&self) -> bool {

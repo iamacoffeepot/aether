@@ -1034,7 +1034,8 @@ mod tests {
     use super::sfz::{SfzLoop, SfzRegion};
     use super::synth::Synth;
     use super::voice::{
-        MAX_VOICES, OscVoice, PartialBankVoice, VoiceKernel, build_builtin_kernel, voice_seed,
+        MAX_VOICES, OscVoice, PartialBankVoice, STEAL_RELEASE_SECS, VoiceKernel,
+        build_builtin_kernel, voice_seed,
     };
     use super::*;
     use crate::fs::FsError;
@@ -1779,36 +1780,35 @@ mod tests {
         assert_eq!(synth.voice_count(), MAX_VOICES);
     }
 
-    /// Voice-steal must evict the oldest note (lowest seq) even after
-    /// the pool has been reordered by `swap_remove` inside the steal
-    /// path itself — scrambled via distinct-key note-ons (same-key
-    /// note-ons no longer replace, so they can't be used to shuffle the
-    /// pool; issue 2524).
+    /// Voice-steal must evict the *quietest* sounding voice, not the
+    /// oldest — an old voice under sustain treatment is frequently still
+    /// loud, so an age-based steal would cut an audible note.
     ///
-    /// Setup: fill to exactly `MAX_VOICES` with distinct pitches
-    /// `0..MAX_VOICES` (pitch 0 -> seq 0, ..., pitch `MAX_VOICES - 1` ->
-    /// seq `MAX_VOICES - 1`; no steal fires yet, pool order == seq
-    /// order). Push one more distinct-pitch note: steal fires, evicting
-    /// pitch 0 (seq 0) at index 0 via `swap_remove`, which moves the
-    /// last-pushed voice (pitch `MAX_VOICES - 1`) into index 0 — so the
-    /// new oldest surviving voice (pitch 1, seq 1) now sits at index 1,
-    /// not index 0. Push one more distinct-pitch note: a naive "evict
-    /// index 0" bug would evict pitch `MAX_VOICES - 1`; seq-based steal
-    /// must evict pitch 1 instead.
+    /// Setup: saturate the pool with loud (velocity 127) voices except
+    /// one deliberately quiet voice (velocity 1) that is *newer* than the
+    /// oldest, and make the oldest voice (pitch 0, allocated first) loud.
+    /// Trigger one more note: an oldest-seq steal would evict the loud
+    /// pitch 0; the quietest steal must evict the quiet voice and leave
+    /// pitch 0 sounding.
     #[test]
-    fn voice_steal_evicts_oldest_note() {
+    fn voice_steal_evicts_quietest_note() {
+        // Pitch 0 is the oldest voice and loud; `QUIET_PITCH` is newer but
+        // very quiet. All share instrument 0 (an oscillator patch), so
+        // after a common fill their envelope levels match and velocity
+        // alone sets `current_level`.
+        const QUIET_PITCH: u8 = 5;
+
         let (sender, queue) = new_event_channel();
         let mut synth = Synth::new(queue, 48_000.0);
 
-        // Fill to exactly MAX_VOICES with distinct pitches. Pitch 0 ->
-        // seq 0; pitch 1 -> seq 1. No steal fires (len < MAX_VOICES on
-        // every push), so pool order matches seq order.
         for pitch in 0..MAX_VOICES {
+            let pitch = u8::try_from(pitch).unwrap();
+            let velocity = if pitch == QUIET_PITCH { 1 } else { 127 };
             sender
                 .push(AudioEvent::NoteOn {
                     sender_mailbox: MailboxId(1),
-                    pitch: u8::try_from(pitch).unwrap(),
-                    velocity: 100,
+                    pitch,
+                    velocity,
                     instrument_id: 0,
                 })
                 .unwrap();
@@ -1816,51 +1816,69 @@ mod tests {
         let mut buf = vec![0.0f32; 64];
         synth.fill(&mut buf, 1);
         assert_eq!(synth.voice_count(), MAX_VOICES);
+        assert!(synth.has_voice_with_pitch(QUIET_PITCH));
 
-        // One more distinct-pitch note-on at capacity: steal fires,
-        // evicting pitch=0 (seq=0) at index 0. swap_remove moves the
-        // last voice (pitch=MAX_VOICES-1) into index 0, scrambling the
-        // pool so pitch=1 (seq=1, the new oldest survivor) sits at
-        // index 1, not index 0.
+        // One more note saturates the pool — steal fires.
         sender
             .push(AudioEvent::NoteOn {
                 sender_mailbox: MailboxId(1),
-                pitch: u8::try_from(MAX_VOICES).unwrap(),
+                pitch: 200,
                 velocity: 100,
                 instrument_id: 0,
             })
             .unwrap();
         synth.fill(&mut buf, 1);
-        assert_eq!(synth.voice_count(), MAX_VOICES);
-        assert!(!synth.has_voice_with_pitch(0), "pitch=0 must be evicted");
+
+        // The active pool stays exactly at the cap — the stolen voice
+        // moved to the (separate) dying pool, not into `voices`.
+        assert_eq!(
+            synth.voice_count(),
+            MAX_VOICES,
+            "active pool must stay at the cap"
+        );
         assert!(
-            synth.has_voice_with_pitch(1),
-            "pitch=1 (new oldest after the first steal's scramble) must still be present",
+            !synth.has_voice_with_pitch(QUIET_PITCH),
+            "voice steal must evict the quietest note (pitch=5, velocity 1)",
+        );
+        assert!(
+            synth.has_voice_with_pitch(0),
+            "the loud oldest voice (pitch=0) must survive a quietest steal",
+        );
+    }
+
+    /// A stolen voice must fade out over `STEAL_RELEASE_SECS`, not drop to
+    /// zero in a single sample — the graceful-eviction contract at the
+    /// kernel level.
+    #[test]
+    fn steal_release_fades_rather_than_cutting() {
+        let adsr = Adsr {
+            attack_secs: 0.0,
+            decay_secs: 0.0,
+            sustain: 1.0,
+            release_secs: 1.0,
+        };
+        let mut voice = OscVoice::new(69, 127, Wave::Sine, adsr, 0.5, 48_000.0, 1);
+        let dt = 1.0 / 48_000.0;
+        // Advance into sustain (attack/decay are zero-length).
+        for _ in 0..10 {
+            voice.next_sample(dt);
+        }
+        assert!(voice.current_level() > 0.0, "voice should be sounding");
+
+        voice.steal_release();
+        // Still audible on the very next sample — not an instant cut.
+        assert!(
+            voice.current_level() > 0.0,
+            "stolen voice must not drop to zero in one sample",
         );
 
-        // One more distinct-pitch note — steal fires again. The oldest
-        // voice is pitch=1 (seq=1), sitting at index 1 after the
-        // scramble above. A naive "evict index 0" bug would instead
-        // evict pitch=MAX_VOICES-1 (the voice the first steal moved to
-        // index 0); seq-based steal must evict pitch=1.
-        sender
-            .push(AudioEvent::NoteOn {
-                sender_mailbox: MailboxId(1),
-                pitch: u8::try_from(MAX_VOICES + 1).unwrap(),
-                velocity: 100,
-                instrument_id: 0,
-            })
-            .unwrap();
-        synth.fill(&mut buf, 1);
-        assert_eq!(synth.voice_count(), MAX_VOICES);
-        assert!(
-            !synth.has_voice_with_pitch(1),
-            "voice steal must evict the oldest note (pitch=1, seq=1), not an arbitrary one",
-        );
-        assert!(
-            synth.has_voice_with_pitch(u8::try_from(MAX_VOICES - 1).unwrap()),
-            "the voice the first steal scrambled to index 0 must survive the second steal",
-        );
+        // Within STEAL_RELEASE_SECS the fast release completes.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let steps = (STEAL_RELEASE_SECS * 48_000.0).ceil() as usize + 2;
+        for _ in 0..steps {
+            voice.next_sample(dt);
+        }
+        assert!(voice.done(), "stolen voice never finished its fast release");
     }
 
     // ADR-0103 track lane. The synth-side tests drive `Synth` directly
