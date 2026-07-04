@@ -35,8 +35,11 @@ use aether_kinds::{
 // Crate-local wiring the `#[runtime] impl` handler bodies name (sibling caps it
 // mails, the unsubscribe kind, the `Kind` / `MailboxCategory` vocabulary), the
 // state struct, and `forward_to_trampoline` — all used within this module.
+use crate::http::HttpServerCapability;
+use crate::http::kinds::UnregisterRoutesAll;
 use crate::input::{InputCapability, UnsubscribeAll};
 use crate::lifecycle::LifecycleCapability;
+use aether_actor::Addressable;
 use aether_data::{Kind, MailboxCategory};
 use aether_kinds::LifecycleUnsubscribeAll;
 
@@ -165,20 +168,17 @@ impl NativeActor for ComponentHostCapability {
     /// replies `DropResult::Ok` and shuts itself down.
     ///
     /// Before forwarding, purges the dying trampoline's mailbox from
-    /// every fan-out subscriber table so no cap keeps firing at a
+    /// every fan-out / routing table so no cap keeps firing at a
     /// dropped mailbox: `aether.input`'s input-stream tables (via
-    /// [`UnsubscribeAll`]) and `aether.lifecycle`'s per-stage tables
-    /// (via [`LifecycleUnsubscribeAll`]).
+    /// [`UnsubscribeAll`]), `aether.lifecycle`'s per-stage tables
+    /// (via [`LifecycleUnsubscribeAll`]), and `aether.http.server`'s
+    /// route table (via [`UnregisterRoutesAll`], ADR-0130).
     ///
     /// # Agent
     /// `DropComponent { mailbox_id }`. The `mailbox_id` is the
     /// trampoline's id from the `LoadResult.mailbox_id` field.
     #[handler]
-    fn on_drop_component(
-        _state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        payload: DropComponent,
-    ) {
+    fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: DropComponent) {
         // Cap-side cleanup: ask each owning cap to drop the dying
         // trampoline from its fan-out sets. Mail rather than direct
         // mutation post-issue-640 — each cap is the sole owner of its
@@ -190,6 +190,20 @@ impl NativeActor for ComponentHostCapability {
             .send(&LifecycleUnsubscribeAll {
                 mailbox: payload.mailbox_id.0,
             });
+        // The http server registers only when a bind is configured
+        // (ADR-0108), so gate its route purge on the cap being live —
+        // an unguarded typed send would warn-drop on every component
+        // drop in a chassis that serves no HTTP.
+        if state
+            .registry
+            .lookup(<HttpServerCapability as Addressable>::NAMESPACE)
+            .is_some()
+        {
+            ctx.actor::<HttpServerCapability>()
+                .send(&UnregisterRoutesAll {
+                    mailbox: payload.mailbox_id,
+                });
+        }
         forward_to_trampoline(ctx, payload.mailbox_id, DropComponent::ID, &payload);
     }
 

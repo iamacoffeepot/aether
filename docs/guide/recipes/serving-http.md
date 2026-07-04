@@ -100,6 +100,47 @@ the formatted response to the client. The server adds `Connection: close` and
 an appropriate `Content-Length` header; your handler sets the status code,
 optional extra headers, and the body.
 
+## Claiming routes
+
+Several components can each own a path family on the same server (ADR-0130).
+A component claims a prefix from its `wire` hook by mailing
+`aether.http.server.register_route_self` to the server capability; the server
+then dispatches matching requests to that component directly, and everything
+unmatched still goes to the configured `handler_mailbox` default.
+
+```rust
+use aether_capabilities::http::HttpServerCapability;
+use aether_capabilities::http::kinds::{HttpServerRequest, RegisterRouteSelf};
+use aether_data::Kind as _;
+
+fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+        prefix: "/api".to_string(),
+        method: None,                        // or Some(HttpMethod::Get)
+        kind: HttpServerRequest::ID,
+    });
+}
+```
+
+Matching is by path segment: `/api` claims `/api` and everything under
+`/api/…`, and leaves `/apiary` alone; `/` claims everything as a catch-all.
+When prefixes overlap, the longest match wins, and a route filtered to one
+method beats a method-agnostic route at the same prefix. A prefix already
+claimed by another component is answered
+`aether.http.server.register_route_result::Err` — first claimant keeps it.
+Routes follow the component: they survive `replace_component` (the mailbox id
+is stable) and are released automatically when the component drops, or
+explicitly via `aether.http.server.unregister_route_self`. External callers
+(an MCP session, a test) use the `register_route` / `unregister_route` forms,
+which name the handler mailbox explicitly.
+
+The `kind` field names the kind the route's requests dispatch as.
+`HttpServerRequest::ID` keeps the generic shape. Registering a route-specific
+kind — a struct with `aether.http.server.request`'s fields under its own
+`#[kind(name = …)]` — routes each prefix to its own `#[handler]`, with its own
+`describe_component` entry and `actor_cost` row; the payload bytes are always
+request-shaped, so the route kind decodes them directly.
+
 ## What happens when the handler doesn't reply
 
 If the handler receives the request but returns without calling `ctx.reply`, the
