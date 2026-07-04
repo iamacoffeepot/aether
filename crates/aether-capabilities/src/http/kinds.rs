@@ -7,6 +7,7 @@
 //! `default-features = false` wasm consumers keep compiling.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 // ADR-0043 substrate HTTP egress. One request kind + one reply
 // kind on the `"aether.http"` sink, plus supporting `HttpMethod`,
@@ -36,6 +37,31 @@ pub enum HttpMethod {
     Patch,
     Head,
     Options,
+}
+
+impl HttpMethod {
+    /// The canonical uppercase verb for this method — the render
+    /// counterpart of `parse_http_method` (the server runtime's
+    /// str-to-variant table). The two are independent match tables owning
+    /// the same seven spellings.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Delete => "DELETE",
+            Self::Patch => "PATCH",
+            Self::Head => "HEAD",
+            Self::Options => "OPTIONS",
+        }
+    }
+}
+
+impl fmt::Display for HttpMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// One HTTP header on a `Fetch` request or `FetchResult`
