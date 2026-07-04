@@ -138,8 +138,8 @@ use aether_actor::actor;
 
 // The runtime half — the whole `aether_substrate`-typed surface (the state,
 // the sidecar threads, the parse/render machinery, the `#[runtime] impl
-// NativeActor` with the handler bodies) — lives in `runtime.rs`, gated once
-// here.
+// NativeActor` with the handler bodies) — lives in the `runtime/` submodule,
+// gated once here.
 #[cfg(feature = "runtime")]
 mod runtime;
 
