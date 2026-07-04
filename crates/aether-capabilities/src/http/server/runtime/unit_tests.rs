@@ -94,6 +94,24 @@ fn render_stream_head_honors_keep_alive() {
     assert!(!close_head.contains("Connection: keep-alive"));
 }
 
+/// Tripwire: `as_str` (render) and `parse_http_method` (parse) are two
+/// independent match tables owning the same seven canonical spellings; this
+/// pins that they never drift apart across every variant.
+#[test]
+fn http_method_as_str_round_trips_through_parse_http_method() {
+    for method in [
+        HttpMethod::Get,
+        HttpMethod::Post,
+        HttpMethod::Put,
+        HttpMethod::Delete,
+        HttpMethod::Patch,
+        HttpMethod::Head,
+        HttpMethod::Options,
+    ] {
+        assert_eq!(parse_http_method(method.as_str()), Some(method));
+    }
+}
+
 #[test]
 fn reason_phrases_cover_emitted_statuses() {
     assert_eq!(reason_phrase(200), "OK");
