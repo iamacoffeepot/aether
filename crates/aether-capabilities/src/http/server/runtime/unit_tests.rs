@@ -1,7 +1,8 @@
 use super::{
-    OPCODE_BINARY, OPCODE_CONTINUATION, OPCODE_TEXT, WsFrameParse, http_date, normalize_prefix,
-    parse_http_method, parse_ws_frame, percent_decode_path, reason_phrase, request_keeps_alive,
-    route_matches, sec_websocket_accept, serialize_ws_frame, sha1, validate_ws_handshake,
+    HttpResponseStreamOpen, OPCODE_BINARY, OPCODE_CONTINUATION, OPCODE_TEXT, WsFrameParse,
+    http_date, normalize_prefix, parse_http_method, parse_ws_frame, percent_decode_path,
+    reason_phrase, render_stream_head, request_keeps_alive, route_matches, sec_websocket_accept,
+    serialize_ws_frame, sha1, validate_ws_handshake,
 };
 use crate::http::kinds::{HttpHeader, HttpMethod};
 use std::time::{Duration, UNIX_EPOCH};
@@ -73,6 +74,24 @@ fn known_methods_map_unknown_is_none() {
     assert_eq!(parse_http_method("OPTIONS"), Some(HttpMethod::Options));
     assert_eq!(parse_http_method("FROB"), None);
     assert_eq!(parse_http_method("get"), None);
+}
+
+/// Tripwire: `render_stream_head`'s `Connection` disposition is branch logic
+/// over its `keep_alive` argument, not a hardcoded `close` — pins the ADR-0128
+/// keep-alive-after-stream fix (issue #2582) at the unit level.
+#[test]
+fn render_stream_head_honors_keep_alive() {
+    let open = HttpResponseStreamOpen {
+        status: 200,
+        headers: vec![],
+    };
+    let keep_alive_head = String::from_utf8(render_stream_head(&open, true)).expect("head is utf8");
+    assert!(keep_alive_head.contains("Connection: keep-alive\r\n"));
+    assert!(!keep_alive_head.contains("Connection: close"));
+
+    let close_head = String::from_utf8(render_stream_head(&open, false)).expect("head is utf8");
+    assert!(close_head.contains("Connection: close\r\n"));
+    assert!(!close_head.contains("Connection: keep-alive"));
 }
 
 #[test]

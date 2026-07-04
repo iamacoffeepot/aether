@@ -68,7 +68,10 @@ pub fn render_status_response(status: u16, message: &str) -> Vec<u8> {
 /// Render the response head for a streamed response (ADR-0128): the status
 /// line, the handler's headers (cap-owned ones stripped), `Transfer-Encoding:
 /// chunked` in place of `Content-Length`, and `Date` / `Connection`.
-pub fn render_stream_head(open: &HttpResponseStreamOpen) -> Vec<u8> {
+/// `keep_alive` renders `Connection: keep-alive` (the connection is held for
+/// the next request once the stream ends) vs `Connection: close`, exactly
+/// like [`render_handler_response`]'s buffered decision.
+pub fn render_stream_head(open: &HttpResponseStreamOpen, keep_alive: bool) -> Vec<u8> {
     use std::fmt::Write as _;
     let mut head = format!(
         "HTTP/1.1 {} {}\r\n",
@@ -83,7 +86,11 @@ pub fn render_stream_head(open: &HttpResponseStreamOpen) -> Vec<u8> {
     }
     head.push_str("Transfer-Encoding: chunked\r\n");
     let _ = write!(head, "Date: {}\r\n", http_date(SystemTime::now()));
-    head.push_str("Connection: close\r\n\r\n");
+    if keep_alive {
+        head.push_str("Connection: keep-alive\r\n\r\n");
+    } else {
+        head.push_str("Connection: close\r\n\r\n");
+    }
     head.into_bytes()
 }
 
