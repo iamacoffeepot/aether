@@ -25,6 +25,12 @@
 //! [`NativeActor`]: aether_substrate::actor::native::NativeActor
 //! [`Addressable`]: aether_actor::Addressable
 
+// ADR-0131: self-alias so the `#[http::router]` macro's emitted
+// `::aether_capabilities::…` paths resolve inside this crate's own
+// route fixtures (the pattern `aether-actor` / `aether-substrate`
+// already use for their derive-emitted paths).
+extern crate self as aether_capabilities;
+
 // `aether.anthropic` content-gen cap (ADR-0050, issue 1014). Native-
 // only — embeds the native-only contentgen dispatch helper and makes
 // blocking ureq / subprocess calls.

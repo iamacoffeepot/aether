@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 
 use test_handlers::{
     ApiRouteHandler, ApiV2Handler, DupFirstHandler, DupSecondHandler, EchoHttpHandler,
-    FixedBodyHttpHandler, FloodHttpHandler, MethodAnyHandler, MethodPostHandler,
-    STREAM_CHUNK_COUNT, SilentHttpHandler, StreamHttpHandler, StreamingUploadHandler,
-    TmpRouteHandler, stream_chunk_body,
+    ExtractRouteHandler, FixedBodyHttpHandler, FloodHttpHandler, MethodAnyHandler,
+    MethodPostHandler, STREAM_CHUNK_COUNT, SilentHttpHandler, StreamHttpHandler,
+    StreamingUploadHandler, TmpRouteHandler, WiredRouteHandler, stream_chunk_body,
 };
 
 mod test_handlers {
@@ -22,46 +22,37 @@ mod test_handlers {
     //! the request without replying (the `502` safety-net path), two
     //! response-streaming handlers (ADR-0128) — a well-behaved one that
     //! paces chunks against credit, and a flooder that ignores credit —
-    //! plus the ADR-0130 routed handlers that claim prefixes from `wire`
-    //! via `register_route_self` — the same registration path a component
-    //! takes — and reply fixed tags so a test can assert which handler a
-    //! request reached.
+    //! plus the routed handlers. Most route handlers author their routes
+    //! through the typed `#[http::router]` / `#[http::route]` surface
+    //! (ADR-0131) — the macro mints each route's kind and injects its
+    //! `register_route_self` registration — so the tests exercise what a
+    //! component author writes. The conflict-`Err` and idempotent
+    //! double-claim handlers stay on the raw registration surface, so a
+    //! macro regression cannot mask a registration-semantics one.
     use aether_actor::actor;
     use aether_data::Kind;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
 
+    use crate::http;
     use crate::http::kinds::{
-        HttpHeader, HttpMethod, HttpRequestChunk, HttpRequestCredit, HttpRequestStreamEnd,
+        HttpHeader, HttpRequestChunk, HttpRequestCredit, HttpRequestStreamEnd,
         HttpRequestStreamOpen, HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen,
         HttpServerRequest, HttpServerResponse, HttpStreamCredit, RegisterRouteSelf,
         UnregisterRouteSelf,
     };
     use crate::http::server::HttpServerCapability;
 
-    /// A minted route kind (ADR-0130): the same shape as
-    /// [`HttpServerRequest`] under a distinct kind name, so the cap's
-    /// route-as-kind dispatch stamps this id and the handler's typed
-    /// `#[handler]` decodes the request-shaped payload as it.
-    #[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize)]
-    #[kind(name = "aether.http.test.api_route_request")]
-    pub struct ApiRouteRequest {
-        pub method: HttpMethod,
-        pub path: String,
-        pub query: String,
-        pub headers: Vec<HttpHeader>,
-        pub body: Vec<u8>,
-        pub peer_addr: String,
-    }
-
-    /// Claims `/api` from `wire` with the minted [`ApiRouteRequest`]
-    /// kind (registering the same key twice to pin the idempotent
-    /// same-mailbox re-claim), and echoes the decoded path back in the
-    /// body — proving the routed payload decoded as the registered
-    /// kind, not just that dispatch picked the right mailbox.
+    /// Claims `/api` through the typed authoring surface (`#[http::router]`
+    /// / `#[http::route]`, ADR-0131): the macro mints the route's
+    /// request-shaped kind, injects its `wire` registration, and decodes
+    /// the dispatched payload under the minted kind. The handler echoes
+    /// the decoded path, proving the payload round-tripped as the minted
+    /// kind (not merely that dispatch picked the right mailbox).
     pub struct ApiRouteHandler;
     pub struct ApiRouteHandlerState;
 
+    #[http::router]
     #[actor(singleton)]
     impl NativeActor for ApiRouteHandler {
         type State = ApiRouteHandlerState;
@@ -72,37 +63,87 @@ mod test_handlers {
             Ok(ApiRouteHandlerState)
         }
 
-        fn wire(_state: &mut ApiRouteHandlerState, ctx: &mut NativeCtx<'_>) {
-            let claim = RegisterRouteSelf {
-                prefix: "/api".to_string(),
-                method: None,
-                kind: <ApiRouteRequest as Kind>::ID,
-            };
-            ctx.actor::<HttpServerCapability>().send(&claim);
-            // Same mailbox re-claiming its own key: idempotent Ok.
-            ctx.actor::<HttpServerCapability>().send(&claim);
-        }
-
-        #[handler]
-        fn on_request(
-            _state: &mut Self::State,
-            _ctx: &mut NativeCtx<'_>,
-            request: ApiRouteRequest,
+        /// Echo the decoded request path back under `/api`.
+        #[http::route(any, "/api")]
+        fn on_api(
+            _state: &mut ApiRouteHandlerState,
+            ctx: http::Ctx<'_, NativeCtx<'_>>,
         ) -> HttpServerResponse {
             HttpServerResponse {
                 status: 200,
                 headers: Vec::new(),
-                body: format!("api:{}", request.path).into_bytes(),
+                body: format!("api:{}", ctx.request().path).into_bytes(),
             }
         }
     }
 
-    /// Claims `/tmp` from `wire`; on any request it releases its own
-    /// route via `unregister_route_self` before replying, so the next
-    /// request to `/tmp` falls back to the default handler.
+    /// A required-`name`-query extractor: parses `?name=…` off the
+    /// request, or returns the `400` the routed glue replies with in
+    /// place of dispatching the handler (ADR-0131's typed boundary).
+    pub struct QueryName(pub String);
+
+    impl http::FromRequest for QueryName {
+        fn from_request(request: &HttpServerRequest) -> Result<Self, HttpServerResponse> {
+            for pair in request.query.split('&') {
+                if let Some(value) = pair.strip_prefix("name=") {
+                    return Ok(Self(value.to_string()));
+                }
+            }
+            Err(HttpServerResponse {
+                status: 400,
+                headers: Vec::new(),
+                body: b"missing name query parameter".to_vec(),
+            })
+        }
+    }
+
+    /// Claims `/extract` and threads a real [`QueryName`] extractor into
+    /// the routed method, so a request under the prefix either dispatches
+    /// with the extracted value (echoed at `200`) or short-circuits to
+    /// the extractor's `400` before the handler runs.
+    pub struct ExtractRouteHandler;
+    pub struct ExtractRouteHandlerState;
+
+    #[http::router]
+    #[actor(singleton)]
+    impl NativeActor for ExtractRouteHandler {
+        type State = ExtractRouteHandlerState;
+        type Config = ();
+        const NAMESPACE: &'static str = "aether.http.test_route_extract";
+
+        fn init(
+            (): (),
+            _ctx: &mut NativeInitCtx<'_>,
+        ) -> Result<ExtractRouteHandlerState, BootError> {
+            Ok(ExtractRouteHandlerState)
+        }
+
+        /// Echo the extracted `name` query value; the glue never reaches
+        /// here when the extractor returns its `400`.
+        #[http::route(any, "/extract")]
+        fn on_extract(
+            _state: &mut ExtractRouteHandlerState,
+            _ctx: http::Ctx<'_, NativeCtx<'_>>,
+            name: QueryName,
+        ) -> HttpServerResponse {
+            HttpServerResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: format!("hello:{}", name.0).into_bytes(),
+            }
+        }
+    }
+
+    /// Claims `/tmp` through the macro surface; on any request the routed
+    /// method releases its own route via the raw `unregister_route_self`
+    /// (a protocol op the typed surface leaves to the body), so the next
+    /// request to `/tmp` falls back to the default handler. `ctx` derefs
+    /// to `NativeCtx`, so the raw send reads exactly as an ordinary
+    /// handler's.
     pub struct TmpRouteHandler;
     pub struct TmpRouteHandlerState;
 
+    #[http::router]
     #[actor(singleton)]
     impl NativeActor for TmpRouteHandler {
         type State = TmpRouteHandlerState;
@@ -113,20 +154,11 @@ mod test_handlers {
             Ok(TmpRouteHandlerState)
         }
 
-        fn wire(_state: &mut TmpRouteHandlerState, ctx: &mut NativeCtx<'_>) {
-            ctx.actor::<HttpServerCapability>()
-                .send(&RegisterRouteSelf {
-                    prefix: "/tmp".to_string(),
-                    method: None,
-                    kind: <HttpServerRequest as Kind>::ID,
-                });
-        }
-
-        #[handler]
-        fn on_request(
-            _state: &mut Self::State,
-            ctx: &mut NativeCtx<'_>,
-            _request: HttpServerRequest,
+        /// Release `/tmp`, then reply the `tmp` tag.
+        #[http::route(any, "/tmp")]
+        fn on_tmp(
+            _state: &mut TmpRouteHandlerState,
+            ctx: http::Ctx<'_, NativeCtx<'_>>,
         ) -> HttpServerResponse {
             ctx.actor::<HttpServerCapability>()
                 .send(&UnregisterRouteSelf {
@@ -141,9 +173,130 @@ mod test_handlers {
         }
     }
 
-    /// A routed handler that claims its prefixes from `wire` with the
-    /// generic request kind and replies `200` with a fixed tag body.
+    /// A macro route alongside a hand-written `wire`: the macro appends
+    /// its `/wired` registration to the author's `wire` (which
+    /// independently claims `/wired-extra` on the raw surface for a
+    /// generic-kind `#[handler]`), so both routes dispatch and the
+    /// hand-written registration survives the append.
+    pub struct WiredRouteHandler;
+    pub struct WiredRouteHandlerState;
+
+    #[http::router]
+    #[actor(singleton)]
+    impl NativeActor for WiredRouteHandler {
+        type State = WiredRouteHandlerState;
+        type Config = ();
+        const NAMESPACE: &'static str = "aether.http.test_route_wired";
+
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<WiredRouteHandlerState, BootError> {
+            Ok(WiredRouteHandlerState)
+        }
+
+        fn wire(_state: &mut WiredRouteHandlerState, ctx: &mut NativeCtx<'_>) {
+            ctx.actor::<HttpServerCapability>()
+                .send(&RegisterRouteSelf {
+                    prefix: "/wired-extra".to_string(),
+                    method: None,
+                    kind: <HttpServerRequest as Kind>::ID,
+                });
+        }
+
+        /// Generic-kind dispatch for the hand-registered `/wired-extra`.
+        #[handler]
+        fn on_extra(
+            _state: &mut Self::State,
+            _ctx: &mut NativeCtx<'_>,
+            _request: HttpServerRequest,
+        ) -> HttpServerResponse {
+            HttpServerResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: b"wired-raw".to_vec(),
+            }
+        }
+
+        /// The macro route whose registration is appended to `wire`.
+        #[http::route(any, "/wired")]
+        fn on_wired(
+            _state: &mut WiredRouteHandlerState,
+            _ctx: http::Ctx<'_, NativeCtx<'_>>,
+        ) -> HttpServerResponse {
+            HttpServerResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: b"wired-macro".to_vec(),
+            }
+        }
+    }
+
+    /// A macro-authored routed handler that claims its prefixes through
+    /// `#[http::route]` and replies `200` with a fixed tag body. Drives
+    /// the longest-prefix and method-filter precedence tests through the
+    /// typed authoring surface (the macro emits the registration).
     macro_rules! routed_handler {
+        ($ty:ident, $state:ident, $namespace:literal, $tag:literal,
+         $method:ident, $prefix:literal) => {
+            pub struct $ty;
+            pub struct $state;
+
+            #[http::router]
+            #[actor(singleton)]
+            impl NativeActor for $ty {
+                type State = $state;
+                type Config = ();
+                const NAMESPACE: &'static str = $namespace;
+
+                fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<$state, BootError> {
+                    Ok($state)
+                }
+
+                #[http::route($method, $prefix)]
+                fn on_route(
+                    _state: &mut $state,
+                    _ctx: http::Ctx<'_, NativeCtx<'_>>,
+                ) -> HttpServerResponse {
+                    HttpServerResponse {
+                        status: 200,
+                        headers: Vec::new(),
+                        body: $tag.to_vec(),
+                    }
+                }
+            }
+        };
+    }
+
+    routed_handler!(
+        ApiV2Handler,
+        ApiV2HandlerState,
+        "aether.http.test_route_api_v2",
+        b"api-v2",
+        any,
+        "/api/v2"
+    );
+    routed_handler!(
+        MethodPostHandler,
+        MethodPostHandlerState,
+        "aether.http.test_route_post_m",
+        b"post-m",
+        Post,
+        "/m"
+    );
+    routed_handler!(
+        MethodAnyHandler,
+        MethodAnyHandlerState,
+        "aether.http.test_route_any_m",
+        b"any-m",
+        any,
+        "/m"
+    );
+
+    /// A raw-surface routed handler that hand-writes its `wire`
+    /// registration with the generic request kind and replies `200` with
+    /// a fixed tag body. The conflict-`Err` and idempotent double-claim
+    /// tests key on the protocol directly, so they stay on this raw
+    /// surface rather than the macro's — a macro regression cannot then
+    /// mask a registration-semantics regression.
+    macro_rules! raw_routed_handler {
         ($ty:ident, $state:ident, $namespace:literal, $tag:literal,
          [$(($method:expr, $prefix:literal)),+ $(,)?]) => {
             pub struct $ty;
@@ -183,35 +336,17 @@ mod test_handlers {
         };
     }
 
-    routed_handler!(
-        ApiV2Handler,
-        ApiV2HandlerState,
-        "aether.http.test_route_api_v2",
-        b"api-v2",
-        [(None, "/api/v2")]
-    );
-    routed_handler!(
-        MethodPostHandler,
-        MethodPostHandlerState,
-        "aether.http.test_route_post_m",
-        b"post-m",
-        [(Some(HttpMethod::Post), "/m")]
-    );
-    routed_handler!(
-        MethodAnyHandler,
-        MethodAnyHandlerState,
-        "aether.http.test_route_any_m",
-        b"any-m",
-        [(None, "/m")]
-    );
-    routed_handler!(
+    // The first claimant sends its `/dup` claim twice, pinning the
+    // idempotent same-mailbox re-claim (both `Ok`) alongside the
+    // cross-mailbox conflict the second claimant loses.
+    raw_routed_handler!(
         DupFirstHandler,
         DupFirstHandlerState,
         "aether.http.test_route_dup_first",
         b"first",
-        [(None, "/dup")]
+        [(None, "/dup"), (None, "/dup")]
     );
-    routed_handler!(
+    raw_routed_handler!(
         DupSecondHandler,
         DupSecondHandlerState,
         "aether.http.test_route_dup_second",
@@ -1282,6 +1417,36 @@ fn routed_prefix_dispatches_as_registered_kind() {
     );
 }
 
+/// A macro-authored route with a real `FromRequest` extractor dispatches
+/// the routed method with the extracted value on success, and — when the
+/// extractor returns `Err` — replies that response without ever calling
+/// the handler (ADR-0131's typed `400` boundary), both over the wire.
+#[test]
+fn routed_extractor_success_and_failure() {
+    let chassis = routed_chassis!(ExtractRouteHandler);
+    let port = port_of(&chassis);
+
+    // Success: the extracted `name` reaches the handler and is echoed.
+    poll_body(
+        port,
+        b"GET /extract?name=ada HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "hello:ada",
+    );
+
+    // Failure: with the route proven live, a request missing `name`
+    // short-circuits to the extractor's 400 response body.
+    let missing = round_trip(port, b"GET /extract HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(
+        missing.starts_with("HTTP/1.1 400 "),
+        "extractor Err becomes the reply status: {missing:?}",
+    );
+    assert_eq!(
+        body_of(&missing),
+        "missing name query parameter",
+        "extractor Err body is replied verbatim",
+    );
+}
+
 /// Longest prefix wins among overlapping routes, matching stops at
 /// segment boundaries (`/apiary` is not under `/api`), and an exact
 /// prefix hit routes (ADR-0130).
@@ -1361,6 +1526,29 @@ fn conflicting_claim_is_rejected_first_claimant_keeps_route() {
 
     let dup = round_trip(port, b"GET /dup HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(body_of(&dup), "first", "first claimant keeps the route");
+}
+
+/// A macro route composes with a hand-written `wire`: the macro appends
+/// its `/wired` registration to the author's `wire` without displacing
+/// the raw `/wired-extra` claim already there, so both dispatch (ADR-0131
+/// append path).
+#[test]
+fn hand_written_wire_and_macro_route_compose() {
+    let chassis = routed_chassis!(WiredRouteHandler);
+    let port = port_of(&chassis);
+
+    // The macro-appended registration reaches the cap.
+    poll_body(
+        port,
+        b"GET /wired HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "wired-macro",
+    );
+    // The author's own `wire` registration survived the append.
+    poll_body(
+        port,
+        b"GET /wired-extra HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "wired-raw",
+    );
 }
 
 /// `unregister_route_self` releases the sender's route: the first

@@ -67,6 +67,7 @@ name = "aether-capabilities"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-capabilities-derive",
  "aether-codec",
  "aether-data",
  "aether-kinds",
@@ -92,6 +93,15 @@ dependencies = [
  "uuid",
  "wasmtime",
  "wgpu",
+]
+
+[[package]]
+name = "aether-capabilities-derive"
+version = "0.3.0-alpha"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

@@ -108,6 +108,10 @@ ui-runtime = ["ui", "runtime", "render", "text"]
 aether-actor = { path = "../aether-actor" }
 aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data" }
+# ADR-0131: the `#[http::router]` / `#[http::route]` proc macros, re-exported
+# through the wasm-safe `http` module. Proc-macro crates are host-compiled, so
+# an unconditional dep leaves the wasm-header-only build unaffected.
+aether-capabilities-derive = { path = "../aether-capabilities-derive" }
 aether-kinds = { path = "../aether-kinds" }
 # `alloc` rides along for the `rpc::wire` + `trace_walk` modules (folded
 # in per ADR-0124), whose owned-`String`/`Vec` wire types need serde's

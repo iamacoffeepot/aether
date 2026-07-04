@@ -145,6 +145,81 @@ kind — a struct with `aether.http.server.request`'s fields under its own
 `describe_component` entry and `actor_cost` row; the payload bytes are always
 request-shaped, so the route kind decodes them directly.
 
+## Typed route authoring
+
+The typed surface writes that whole registration for you (ADR-0131). Put
+`#[http::router]` on the actor's impl block, above `#[actor]`, and
+`#[http::route(<Method|any>, "<prefix>")]` on a method; the macros mint the
+route's request-shaped kind, inject the `register_route_self` send into `wire`,
+and turn the method into the route's `#[handler]`. A routed method takes an
+`http::Ctx<'_, C>` — the transport ctx (`WasmCtx` here) plus the request and
+matched route, dereffing to the ctx so mail sends read as usual — and returns
+`HttpServerResponse`:
+
+```rust
+use aether_capabilities::http;
+use aether_capabilities::http::kinds::{HttpServerRequest, HttpServerResponse};
+
+#[http::router]
+#[actor]
+impl WasmActor for ApiHandler {
+    const NAMESPACE: &'static str = "api";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(ApiHandler)
+    }
+
+    #[http::route(Get, "/api/users")]
+    fn list_users(&mut self, ctx: http::Ctx<'_, WasmCtx<'_>>) -> HttpServerResponse {
+        HttpServerResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: format!("path: {}", ctx.request().path).into_bytes(),
+        }
+    }
+}
+```
+
+To parse a request into domain values, add parameters that implement
+`http::FromRequest`. Each runs in declaration order before the method body; the
+first one that returns `Err` becomes the reply — the boundary where a malformed
+request turns into a `400` instead of ad-hoc parsing inside the handler:
+
+```rust
+struct UserId(u64);
+
+impl http::FromRequest for UserId {
+    fn from_request(request: &HttpServerRequest) -> Result<Self, HttpServerResponse> {
+        request
+            .path
+            .rsplit('/')
+            .next()
+            .and_then(|seg| seg.parse().ok())
+            .map(UserId)
+            .ok_or(HttpServerResponse {
+                status: 400,
+                headers: Vec::new(),
+                body: b"expected a numeric user id".to_vec(),
+            })
+    }
+}
+
+#[http::route(Get, "/api/users")]
+fn get_user(&mut self, _ctx: http::Ctx<'_, WasmCtx<'_>>, id: UserId) -> HttpServerResponse {
+    // `id` is already parsed; a bad id never reaches here.
+    HttpServerResponse { status: 200, headers: Vec::new(), body: format!("user {}", id.0).into_bytes() }
+}
+```
+
+An `HttpServerRequest` parameter hands the method the whole request (the
+identity extractor). The same surface serves native actors — a routed method on
+an `impl NativeActor` takes `http::Ctx<'_, NativeCtx<'_>>` with a
+`state: &mut YourState` first parameter, and the macros write the native `wire`.
+
+Drop to the raw `register_route_self` surface above for a streaming route
+(`HttpResponseStreamOpen`) — the typed surface returns `HttpServerResponse`, so
+a streamed response keeps its own hand-written `#[handler]`.
+
 ## What happens when the handler doesn't reply
 
 If the handler receives the request but returns without calling `ctx.reply`, the
@@ -249,5 +324,6 @@ purely opt-in per reply.
 
 This recipe names the env keys and kind names live in the source. Before
 following it, confirm `AETHER_HTTP_SERVER_ENABLED`, `HttpServerRequest`,
-`HttpServerResponse`, and `HttpServerConfig` still exist where named — grep the
-crates, and if a name has drifted, fix the recipe as part of your work.
+`HttpServerResponse`, `HttpServerConfig`, and the `http::{router, route,
+FromRequest, Ctx}` authoring surface still exist where named — grep the crates,
+and if a name has drifted, fix the recipe as part of your work.
