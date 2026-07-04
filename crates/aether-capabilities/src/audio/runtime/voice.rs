@@ -13,10 +13,19 @@ use super::instrument::{
 use super::sample::SampleVoice;
 
 /// Maximum concurrent voices before voice-stealing kicks in. Chosen
-/// as "more than a string section fits in one component" — on
-/// saturation, voice-steal always evicts the oldest sounding note,
-/// never causing audio glitches.
-pub const MAX_VOICES: usize = 64;
+/// so pedaled piano writing stacks well past a string section without
+/// starving the pool. On saturation, voice-steal evicts the
+/// least-audible (quietest / most-decayed) sounding voice — not the
+/// oldest, which under sustain treatment may still be loud — and forces
+/// it into a fast release ramp (`STEAL_RELEASE_SECS`) so it fades out
+/// over a few milliseconds instead of vanishing between two samples.
+pub const MAX_VOICES: usize = 128;
+
+/// Release-ramp length (seconds) a voice-steal forces onto its victim —
+/// a few milliseconds, long enough to fade the evicted voice to zero
+/// without an audible click, short enough that the freed slot is
+/// effectively immediate.
+pub const STEAL_RELEASE_SECS: f32 = 0.004;
 
 /// Envelope state machine. `Release` captures the level it was at
 /// when the note was released, since a note can be released mid-attack
@@ -29,6 +38,42 @@ enum EnvelopeStage {
     Sustain,
     Release { t: f32, from_level: f32 },
     Done,
+}
+
+impl EnvelopeStage {
+    /// The envelope's current level for this stage *without* advancing
+    /// `t` — mirrors the `advance_envelope` formulas as a read-only
+    /// probe. Used to capture the level a voice-steal begins its fast
+    /// release from, and as the loudness proxy the quietest-steal scan
+    /// reads.
+    fn level(self, adsr: &Adsr) -> f32 {
+        match self {
+            Self::Attack { t } => {
+                if adsr.attack_secs > 0.0 {
+                    (t / adsr.attack_secs).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                }
+            }
+            Self::Decay { t } => {
+                if adsr.decay_secs > 0.0 {
+                    let fall = (1.0 - adsr.sustain).mul_add(-(t / adsr.decay_secs), 1.0);
+                    fall.clamp(adsr.sustain.min(1.0), 1.0)
+                } else {
+                    adsr.sustain
+                }
+            }
+            Self::Sustain => adsr.sustain,
+            Self::Release { t, from_level } => {
+                if adsr.release_secs > 0.0 {
+                    (from_level * (1.0 - (t / adsr.release_secs))).max(0.0)
+                } else {
+                    0.0
+                }
+            }
+            Self::Done => 0.0,
+        }
+    }
 }
 
 /// The oscillator voice kernel — a periodic waveform through a linear
@@ -159,6 +204,24 @@ impl OscVoice {
             EnvelopeStage::Release { .. } | EnvelopeStage::Done => return,
         };
         self.envelope = EnvelopeStage::Release { t: 0.0, from_level };
+    }
+
+    /// Force a fast release ramp for a voice-steal: override the release
+    /// time to `STEAL_RELEASE_SECS` and begin releasing from the current
+    /// envelope level (so a voice mid-attack or mid-decay fades from
+    /// where it actually was, no level jump). Unconditional — a voice
+    /// already releasing is re-ramped onto the fast fade.
+    pub fn steal_release(&mut self) {
+        let from_level = self.envelope.level(&self.adsr);
+        self.adsr.release_secs = STEAL_RELEASE_SECS;
+        self.envelope = EnvelopeStage::Release { t: 0.0, from_level };
+    }
+
+    /// Instantaneous loudness proxy for the quietest-steal scan:
+    /// amplitude scaled by the current envelope level, read without
+    /// advancing state.
+    pub fn current_level(&self) -> f32 {
+        self.amplitude * self.envelope.level(&self.adsr)
     }
 
     pub fn done(&self) -> bool {
@@ -301,6 +364,32 @@ impl BankStage {
         *self = Self::Release { t: 0.0, from_level };
     }
 
+    /// The ramp's current level for this stage *without* advancing `t` —
+    /// the read-only mirror of [`advance`](Self::advance) the wrapping
+    /// voice's `current_level` reads and a voice-steal captures the fast
+    /// release's start level from. Needs both `attack_s` and `release_s`
+    /// (the `Release` stage fades over the wrapping voice's release time).
+    pub fn level(self, attack_s: f32, release_s: f32) -> f32 {
+        match self {
+            Self::Attack { t } => {
+                if attack_s > 0.0 {
+                    (t / attack_s).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                }
+            }
+            Self::Sustain => 1.0,
+            Self::Release { t, from_level } => {
+                if release_s > 0.0 {
+                    (from_level * (1.0 - (t / release_s))).max(0.0)
+                } else {
+                    0.0
+                }
+            }
+            Self::Done => 0.0,
+        }
+    }
+
     /// Advance the attack/release ramp one sample, returning its current
     /// level — the shared bank ramp logic over the wrapping voice's own
     /// attack/release times. Attack swells linearly to `1.0` then holds
@@ -401,6 +490,30 @@ impl PartialBankVoice {
         self.stage.begin_release(self.attack_s);
     }
 
+    /// Force a fast release ramp for a voice-steal: override the release
+    /// time to `STEAL_RELEASE_SECS` and begin releasing from the ramp's
+    /// current level. Unconditional — a voice already releasing is
+    /// re-ramped onto the fast fade.
+    pub fn steal_release(&mut self) {
+        let from_level = self.stage.level(self.attack_s, self.release_secs);
+        self.release_secs = STEAL_RELEASE_SECS;
+        self.stage = BankStage::Release { t: 0.0, from_level };
+    }
+
+    /// Sum of the (absolute) partial amplitudes — the spectral energy the
+    /// bank is currently carrying, shared by the loudness proxy and the
+    /// test-only accessor.
+    fn partial_amp_sum(&self) -> f32 {
+        self.partials.iter().map(|p| p.amp.abs()).sum()
+    }
+
+    /// Instantaneous loudness proxy for the quietest-steal scan: the
+    /// partial-amp sum scaled by the overall amplitude and the ramp
+    /// level, read without advancing state.
+    pub fn current_level(&self) -> f32 {
+        self.amplitude * self.partial_amp_sum() * self.stage.level(self.attack_s, self.release_secs)
+    }
+
     pub fn done(&self) -> bool {
         matches!(self.stage, BankStage::Done)
     }
@@ -435,7 +548,7 @@ impl PartialBankVoice {
 
     #[cfg(test)]
     pub fn envelope_level(&self) -> f32 {
-        self.partials.iter().map(|p| p.amp.abs()).sum()
+        self.partial_amp_sum()
     }
 
     #[cfg(test)]
@@ -498,15 +611,17 @@ pub fn build_builtin_kernel(
 /// `Copy`; it stays a flat `Vec<Voice>` mutated by `swap_remove` /
 /// `push`.
 ///
-/// `seq` is a monotonically increasing counter stamped at allocation,
-/// used by voice-steal to locate the oldest voice regardless of the
-/// pool's current order (which `swap_remove` scrambles).
+/// `seq` is a monotonically increasing counter stamped at allocation.
+/// Voice-steal no longer reads it (it evicts by instantaneous loudness,
+/// `current_level`), but note-off does: several voices can share one
+/// `(sender_mailbox, instrument_id, pitch)` key now that same-key
+/// note-ons stack, so `seq` lets note-off pick the *oldest* matching
+/// voice regardless of the pool's current order (which `swap_remove`
+/// scrambles).
 ///
-/// `released` marks a voice whose `note_off` has already fired. Several
-/// voices can share the same `(sender_mailbox, instrument_id, pitch)`
-/// key now that same-key note-ons stack instead of stealing each
-/// other's slot; `released` lets note-off pick the oldest *unreleased*
-/// voice on that key rather than re-releasing one already fading out.
+/// `released` marks a voice whose `note_off` has already fired. Together
+/// with `seq` it lets note-off pick the oldest *unreleased* voice on a
+/// shared key rather than re-releasing one already fading out.
 #[derive(Clone, Debug)]
 pub struct Voice {
     pub sender_mailbox: MailboxId,
@@ -540,6 +655,26 @@ impl Voice {
             VoiceKernel::Oscillator(v) => v.next_sample(dt),
             VoiceKernel::PartialBank(v) => v.next_sample(dt),
             VoiceKernel::Sample(v) => v.next_sample(dt),
+        }
+    }
+
+    /// Force the kernel into its fast steal-release ramp (see the
+    /// per-kernel `steal_release`). Dispatched like `note_off`.
+    pub fn steal_release(&mut self) {
+        match &mut self.kernel {
+            VoiceKernel::Oscillator(v) => v.steal_release(),
+            VoiceKernel::PartialBank(v) => v.steal_release(),
+            VoiceKernel::Sample(v) => v.steal_release(),
+        }
+    }
+
+    /// The kernel's instantaneous loudness proxy — the quietest-steal
+    /// scan's key. Dispatched like `next_sample`.
+    pub fn current_level(&self) -> f32 {
+        match &self.kernel {
+            VoiceKernel::Oscillator(v) => v.current_level(),
+            VoiceKernel::PartialBank(v) => v.current_level(),
+            VoiceKernel::Sample(v) => v.current_level(),
         }
     }
 }

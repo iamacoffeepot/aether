@@ -2,7 +2,7 @@
 //! track lanes, the loaded banks, and the scheduled heap, and renders the
 //! summed output the cpal callback drains.
 
-use std::cmp::Reverse;
+use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
 use std::sync::Arc;
 
@@ -24,6 +24,14 @@ use super::voice::{MAX_VOICES, Voice, VoiceKernel, build_builtin_kernel};
 pub struct Synth {
     events: Arc<ArrayQueue<AudioEvent>>,
     voices: Vec<Voice>,
+    /// Voices evicted by a saturation steal, fading out over their fast
+    /// steal-release ramp (`STEAL_RELEASE_SECS`) before they retire. Kept
+    /// out of `voices` so the active pool never floats above `MAX_VOICES`
+    /// and the quietest-steal scan can never re-select an already-fading
+    /// voice (which would starve eviction of actually-loud notes).
+    /// Pre-reserved to `MAX_VOICES` so a normal steal never reallocates on
+    /// the callback thread.
+    dying: Vec<Voice>,
     /// Track playback lane (ADR-0103 §3) — separate from `voices` so a
     /// track is never counted against `MAX_VOICES` nor voice-stolen.
     tracks: Vec<TrackVoice>,
@@ -43,8 +51,9 @@ pub struct Synth {
     /// bit-for-bit identical to the pre-reverb dry sum.
     reverb_send: f32,
     /// Monotonically increasing counter stamped into each `Voice::seq`
-    /// at allocation. Voice-steal uses the minimum value to locate the
-    /// oldest voice regardless of pool order.
+    /// at allocation. Note-off reads the minimum value to locate the
+    /// oldest voice on a shared key regardless of pool order (voice-steal
+    /// no longer uses it — it evicts by instantaneous loudness).
     next_seq: u64,
     /// Running output-frame counter (ADR-0104). Advanced by the frame
     /// count of every `fill`; the timebase scheduled events are placed
@@ -64,6 +73,7 @@ impl Synth {
         Self {
             events,
             voices: Vec::with_capacity(MAX_VOICES),
+            dying: Vec::with_capacity(MAX_VOICES),
             tracks: Vec::new(),
             banks: Vec::new(),
             sample_rate,
@@ -98,7 +108,7 @@ impl Synth {
 
     /// Admit a `note_on`: resolve its kernel (a built-in patch, or — when
     /// the id walks past the built-ins — a loaded sample bank's region
-    /// selected by `(pitch, velocity)`), then steal the oldest voice if
+    /// selected by `(pitch, velocity)`), then steal the quietest voice if
     /// at capacity, and push. A second note-on on the same
     /// `(sender_mailbox, instrument_id, pitch)` key stacks a new voice
     /// rather than replacing the existing one, so concurrent same-pitch
@@ -141,16 +151,29 @@ impl Synth {
             return;
         };
         if self.voices.len() >= MAX_VOICES {
-            // Evict the oldest (minimum-seq) voice. swap_remove is O(1)
-            // and safe here because the pool is non-empty at capacity.
-            if let Some(oldest_idx) = self
+            // Saturated: steal the least-audible sounding voice by
+            // instantaneous loudness (quietest / most-decayed) rather
+            // than age — an old voice under sustain treatment may still
+            // be loud. Force the victim into a fast release ramp and move
+            // it to `dying`, so it fades out over STEAL_RELEASE_SECS
+            // instead of vanishing between two samples. swap_remove is
+            // O(1) and safe here because the pool is non-empty at
+            // capacity; the scan is O(N) over N <= MAX_VOICES, only on a
+            // saturation steal.
+            if let Some(quietest_idx) = self
                 .voices
                 .iter()
                 .enumerate()
-                .min_by_key(|(_, v)| v.seq)
+                .min_by(|(_, a), (_, b)| {
+                    a.current_level()
+                        .partial_cmp(&b.current_level())
+                        .unwrap_or(Ordering::Equal)
+                })
                 .map(|(i, _)| i)
             {
-                self.voices.swap_remove(oldest_idx);
+                let mut victim = self.voices.swap_remove(quietest_idx);
+                victim.steal_release();
+                self.dying.push(victim);
             }
         }
         let seq = self.next_seq;
@@ -364,6 +387,11 @@ impl Synth {
             for voice in &mut self.voices {
                 sample += voice.next_sample(dt);
             }
+            // Stolen voices fade out in the dying pool, summed alongside
+            // the active pool so the eviction is a ramp, not a cut.
+            for voice in &mut self.dying {
+                sample += voice.next_sample(dt);
+            }
             // Tracks mix in their own lane, summed after the voices
             // and before master gain + the soft clip (ADR-0103 §3).
             for track in &mut self.tracks {
@@ -382,6 +410,7 @@ impl Synth {
         // scheduled offsets against the right receipt frame (ADR-0104).
         self.frame_clock += frames as u64;
         self.voices.retain(|v| !v.done());
+        self.dying.retain(|v| !v.done());
         self.tracks.retain(|t| !t.done());
     }
 
