@@ -51,7 +51,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 mod route;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub use route::ComponentHostNativeExt;
 pub use route::{ComponentHostWasmExt, resolve_embedded};
 

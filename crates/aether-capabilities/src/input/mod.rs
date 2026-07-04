@@ -38,7 +38,7 @@ pub use config::InputConfig;
 
 use aether_actor::WasmActorMailbox;
 use aether_data::{Kind, MailboxId};
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
 use aether_actor::actor;
@@ -176,7 +176,7 @@ impl InputMailboxExt for WasmActorMailbox<'_, InputCapability> {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 impl InputMailboxExt for NativeActorMailbox<'_, InputCapability> {
     fn subscribe<K: Kind>(&self) {
         self.send(&SubscribeInputSelf { kind: K::ID });

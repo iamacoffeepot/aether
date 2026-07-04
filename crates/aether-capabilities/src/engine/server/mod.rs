@@ -46,6 +46,19 @@ use aether_kinds::{
     ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SpawnEngine,
     TerminateEngine, UploadBinary, UploadComponent,
 };
+// The per-handler reply kinds the `#[actor]`-emitted native markers name.
+// Those markers ride `not(wasm)`, so they exist on every host build — `runtime`
+// on or off — but a marker-only host build (`--no-default-features`) has no
+// `use runtime::*` to bring the reply kinds into scope. This fills exactly that
+// gap: it imports them only when the runtime glob is absent (`not(runtime)`),
+// so the two paths are complementary rather than overlapping. A `runtime` host
+// build still reaches these kinds through `use runtime::*`.
+#[cfg(all(not(target_family = "wasm"), not(feature = "runtime")))]
+use aether_kinds::{
+    ListComponentBinariesResult, ListEngineBinariesResult, ListEnginesResult,
+    ResolveComponentResult, SpawnEngineResult, TerminateEngineResult, UploadBinaryResult,
+    UploadComponentResult,
+};
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
 
@@ -56,11 +69,11 @@ use std::sync::{Arc, Mutex};
 // spawn-dir resolution). All three are native-only — the cap forks
 // processes and owns sockets — so they elide on wasm alongside the
 // runtime half.
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 mod artifacts;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 mod config;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 mod fleet;
 
 // `EngineConfig` (+ its derive-emitted `EngineOverlay`) ride through
@@ -68,7 +81,7 @@ mod fleet;
 // `HubCli`, resolves argv-then-env, and passes the config to
 // `with_actor::<EngineServer>(cfg)` (ADR-0090). Native-only re-export —
 // the engines cap is native-only, so the config has no wasm consumer.
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub use config::{EngineConfig, EngineConfigLayer, EngineOverlay};
 
 /// `aether.engine` engines-cap **identity** (ADR-0122 identity/runtime

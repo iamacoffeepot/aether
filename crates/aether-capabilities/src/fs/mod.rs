@@ -38,7 +38,7 @@ pub use registry::{AdapterRegistry, build_registry};
 // for X {}` markers always-on against the identity, outside the
 // `feature = "runtime"` gate, so they reference these kinds from here.
 use aether_actor::WasmActorMailbox;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
 /// Sender-side facade for actors addressed via
@@ -135,7 +135,7 @@ impl FsMailboxExt for WasmActorMailbox<'_, FsCapability> {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 impl FsMailboxExt for NativeActorMailbox<'_, FsCapability> {
     fn read(&self, namespace: &str, path: &str) {
         self.send(&Read {

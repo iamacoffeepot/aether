@@ -27,7 +27,7 @@ pub use config::{HttpConfigLayer, HttpOverlay};
 // reference `Fetch` from here. `HttpMethod` is named by `HttpMailboxExt`.
 use crate::http::kinds::{Fetch, HttpMethod};
 use aether_actor::WasmActorMailbox;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
 // The wire reply kind. Named by the always-on (non-wasm) handler-inventory
@@ -105,7 +105,7 @@ impl HttpMailboxExt for WasmActorMailbox<'_, HttpCapability> {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 impl HttpMailboxExt for NativeActorMailbox<'_, HttpCapability> {
     //noinspection DuplicatedCode
     fn get(&self, url: &str) {

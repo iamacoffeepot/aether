@@ -3,7 +3,7 @@
 
 use aether_actor::{Addressable, WasmActorMailbox};
 use aether_data::{ActorId, Tag, fold_lineage, with_tag};
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
 use super::{
@@ -180,7 +180,7 @@ impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
 /// FFI, and a single trait can't carry both signatures. The precedent
 /// is [`crate::component::ComponentHostWasmExt`] /
 /// [`crate::component::ComponentHostNativeExt`] (issue 654).
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub trait TcpNativeExt {
     /// Mail `aether.tcp.bind_listener { addr, name }` to the cap.
     fn bind_listener(&self, addr: &str, name: Option<&str>);
@@ -217,7 +217,7 @@ pub trait TcpNativeExt {
     ) -> NativeActorMailbox<'_, R>;
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
     //noinspection DuplicatedCode
     fn bind_listener(&self, addr: &str, name: Option<&str>) {

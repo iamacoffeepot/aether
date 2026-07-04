@@ -57,24 +57,30 @@ use crate::rpc::RpcInboundReady;
 // alongside the runtime half.
 #[cfg(not(target_family = "wasm"))]
 mod config;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 mod connect;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 mod heartbeat;
 #[cfg(test)]
 mod sinks;
 
 // `EngineProxyConfig` / `HeartbeatParams` carry only wasm-safe types,
 // but the proxy that consumes them is native-only, so the re-export is
-// gated like `TcpListenerConfig`.
+// gated like `TcpListenerConfig`. `EngineProxyConfig` rides `not(wasm)`
+// because it re-exports on up to the crate root for chassis builders;
+// `HeartbeatParams` has no consumer outside the `runtime` half (the
+// `connect` / `heartbeat` modules and `server::runtime`), so it rides the
+// `runtime` gate to stay off a marker-only host build.
 #[cfg(not(target_family = "wasm"))]
-pub use config::{EngineProxyConfig, HeartbeatParams};
+pub use config::EngineProxyConfig;
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+pub use config::HeartbeatParams;
 
 // The engines cap (`aether.engine`) classifies a failed `spawn_child`
 // with this to decide whether to re-fork on a fresh port (a stolen-port
 // child-exited death) or report a dead spawn. Native-only — it names
 // `SpawnError` / `BootError`.
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub use connect::is_reforkable_spawn_failure;
 
 /// `aether.engine.proxy:<id>` cap **identity** (ADR-0122 identity/runtime

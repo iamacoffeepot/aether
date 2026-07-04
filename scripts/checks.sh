@@ -12,7 +12,7 @@
 # there surfaces as a red canary.
 
 # Ordered canonical step names.
-CANONICAL_STEPS="fmt clippy doc dist test qodana"
+CANONICAL_STEPS="fmt clippy doc dist marker test qodana"
 
 # The identifying command for a step. The producer runs exactly this, adding
 # per-run wrappers (RUSTDOCFLAGS for doc, AETHER_REQUIRE_RUNTIME for test,
@@ -25,6 +25,13 @@ canonical_cmd() {
         clippy) echo "cargo clippy --workspace --all-targets -- -D warnings" ;;
         doc)    echo "cargo doc --workspace --no-deps" ;;
         dist)   echo "cargo xtask dist --no-bins" ;;
+        # Marker-only host build (iamacoffeepot/aether#2583): the transport-only
+        # tier (`aether-capabilities` with `default-features = false`, so the
+        # `runtime` feature is off) must compile on the host triple. Isolated
+        # `-p` on purpose — a `--workspace` build's resolver-3 feature
+        # unification turns `runtime` back on for the crate and masks the
+        # failure (ADR-0122 §33), so this guard must never fold into one.
+        marker) echo "cargo build -p aether-capabilities --no-default-features" ;;
         test)   echo "cargo nextest run --workspace --all-features --profile ci" ;;
         qodana) echo "qodana scan" ;;
         *)      return 1 ;;
