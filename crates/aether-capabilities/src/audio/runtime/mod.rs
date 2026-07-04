@@ -61,7 +61,7 @@ use self::sfz::parse_sfz;
 use super::kinds::{
     LoadInstrument, LoadInstrumentResult, NoteOff, NoteOn, PlayTrack, PlayTrackResult, Schedule,
     ScheduleResult, SetMasterGain, SetMasterGainResult, SetReverbSend, SetReverbSendResult,
-    StopTrack,
+    SetSenderGain, SetSenderGainResult, StopTrack,
 };
 
 // The substrate-typed + native-only surface the parent's `#[actor] impl`
@@ -563,6 +563,7 @@ impl NativeActor for AudioCapability {
             pitch: mail.pitch,
             velocity: mail.velocity,
             instrument_id: mail.instrument_id,
+            pan: mail.pan,
         };
         if s.push(ev).is_err() {
             tracing::warn!(
@@ -649,6 +650,41 @@ impl NativeActor for AudioCapability {
         );
         SetReverbSendResult::Ok {
             applied_send: applied,
+        }
+    }
+
+    /// Set a per-sender level trim (ADR-0127).
+    ///
+    /// # Agent
+    /// Reply: `SetSenderGainResult`. `Ok { applied_gain }` clamps to
+    /// `0.0..=4.0` (boost allowed); the trim is keyed by this mail's
+    /// sender and ducks that sender's already-sounding voices on the next
+    /// render block. `Err` on chassis without audio.
+    #[handler]
+    fn on_set_sender_gain(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: SetSenderGain,
+    ) -> SetSenderGainResult {
+        let applied = mail.gain.clamp(0.0, 4.0);
+        let Some(s) = state.sender.as_ref() else {
+            return SetSenderGainResult::Err {
+                error: "audio pipeline not initialised on this desktop substrate".to_owned(),
+            };
+        };
+        let sender_mailbox = sender_mailbox_id(ctx.reply_target());
+        let _ = s.push(AudioEvent::SetSenderGain {
+            sender_mailbox,
+            gain: applied,
+        });
+        tracing::info!(
+            target: "aether_substrate::audio",
+            requested = mail.gain,
+            applied,
+            "sender gain set",
+        );
+        SetSenderGainResult::Ok {
+            applied_gain: applied,
         }
     }
 
@@ -1185,6 +1221,7 @@ mod tests {
                 pitch: 96,
                 velocity: 100,
                 instrument_id: 5,
+                pan: 0,
             })
             .unwrap();
         let mut buf = vec![0.0f32; 4_800];
@@ -1340,6 +1377,7 @@ mod tests {
                 pitch: 60,
                 velocity: 100,
                 instrument_id: 0,
+                pan: 0,
             })
             .unwrap();
         let mut buf = vec![0.0f32; 480];
@@ -1381,6 +1419,7 @@ mod tests {
                 pitch: 60,
                 velocity: 100,
                 instrument_id: 0,
+                pan: 0,
             })
             .unwrap();
         assert_eq!(
@@ -1431,6 +1470,7 @@ mod tests {
                 pitch: 60,
                 velocity: 100,
                 instrument_id: 0,
+                pan: 0,
             })
             .unwrap();
         let mut buf = vec![0.0f32; 480];
@@ -1480,6 +1520,7 @@ mod tests {
                         pitch: 60,
                         velocity: 100,
                         instrument_id: 0,
+                        pan: 0,
                     },
                 }],
             })
@@ -1523,6 +1564,7 @@ mod tests {
                             pitch: 60,
                             velocity: 100,
                             instrument_id: 0,
+                            pan: 0,
                         },
                     },
                     ScheduledEvent {
@@ -1531,6 +1573,7 @@ mod tests {
                             pitch: 64,
                             velocity: 100,
                             instrument_id: 0,
+                            pan: 0,
                         },
                     },
                 ],
@@ -1564,6 +1607,7 @@ mod tests {
                             pitch: 60,
                             velocity: 100,
                             instrument_id: 0,
+                            pan: 0,
                         },
                     },
                     ScheduledEvent {
@@ -1610,6 +1654,7 @@ mod tests {
                         pitch: 72,
                         velocity: 100,
                         instrument_id: 0,
+                        pan: 0,
                     },
                 }],
             })
@@ -1635,6 +1680,7 @@ mod tests {
                     pitch: 60,
                     velocity: 100,
                     instrument_id: 0,
+                    pan: 0,
                 })
                 .unwrap();
         }
@@ -1662,6 +1708,7 @@ mod tests {
                     pitch: 60,
                     velocity: 100,
                     instrument_id: 0,
+                    pan: 0,
                 })
                 .unwrap();
         }
@@ -1718,6 +1765,7 @@ mod tests {
                     pitch: 60,
                     velocity: 100,
                     instrument_id: 0,
+                    pan: 0,
                 })
                 .unwrap();
         }
@@ -1744,6 +1792,126 @@ mod tests {
         assert!(synth.master_gain().abs() < f32::EPSILON);
     }
 
+    // ADR-0127 per-note pan + per-sender gain. These drive `Synth::fill`
+    // with a known stereo channel count and read the two channels' energy
+    // apart, exercising this crate's own mix logic (the pan law wiring,
+    // the sender-gain table, and its block-granular live resolution).
+
+    /// Sum the absolute energy in each channel of an interleaved buffer.
+    fn channel_energy(buffer: &[f32], channels: usize) -> Vec<f32> {
+        let mut energy = vec![0.0f32; channels];
+        for frame in buffer.chunks_exact(channels) {
+            for (ch, s) in frame.iter().enumerate() {
+                energy[ch] += s.abs();
+            }
+        }
+        energy
+    }
+
+    // Tripwire: a hard-left note must land its energy in the left channel
+    // and near-none in the right — the pan law wiring from the i8 field
+    // through the L/R accumulator split.
+    #[test]
+    fn hard_left_note_puts_energy_in_the_left_channel() {
+        let (sender, queue) = new_event_channel();
+        let mut synth = Synth::new(queue, TEST_RATE);
+        sender
+            .push(AudioEvent::NoteOn {
+                sender_mailbox: MailboxId(1),
+                pitch: 60,
+                velocity: 127,
+                instrument_id: 0,
+                pan: -128,
+            })
+            .unwrap();
+        let mut buf = vec![0.0f32; 480 * 2];
+        synth.fill(&mut buf, 2);
+        let energy = channel_energy(&buf, 2);
+        assert!(energy[0] > 0.0, "hard-left note produced no left energy");
+        assert!(
+            energy[1] < energy[0] * 1.0e-3,
+            "hard-left note leaked into the right channel: L={}, R={}",
+            energy[0],
+            energy[1],
+        );
+    }
+
+    // Tripwire: a set_sender_gain of 0.5 must halve that sender's voice
+    // contribution versus unity — the sender-gain table applied at the mix.
+    #[test]
+    fn set_sender_gain_scales_voice_contribution() {
+        let render_energy = |gain: Option<f32>| -> f32 {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, TEST_RATE);
+            if let Some(g) = gain {
+                sender
+                    .push(AudioEvent::SetSenderGain {
+                        sender_mailbox: MailboxId(1),
+                        gain: g,
+                    })
+                    .unwrap();
+            }
+            sender
+                .push(AudioEvent::NoteOn {
+                    sender_mailbox: MailboxId(1),
+                    pitch: 60,
+                    // A modest velocity keeps the summed level well inside
+                    // the near-linear region of the tanh soft clip, so the
+                    // energy ratio reflects the gain, not the clip.
+                    velocity: 80,
+                    instrument_id: 0,
+                    pan: 0,
+                })
+                .unwrap();
+            let mut buf = vec![0.0f32; 480 * 2];
+            synth.fill(&mut buf, 2);
+            buf.iter().map(|s| s.abs()).sum()
+        };
+        let unity = render_energy(None);
+        let halved = render_energy(Some(0.5));
+        let ratio = halved / unity;
+        assert!(
+            (ratio - 0.5).abs() < 0.05,
+            "gain 0.5 should halve a sender's energy, got ratio {ratio}",
+        );
+    }
+
+    // Tripwire: a set_sender_gain arriving after a note is already sounding
+    // must duck it on the next block — the trim is resolved per block, not
+    // captured at note_on.
+    #[test]
+    fn set_sender_gain_ducks_a_sounding_voice() {
+        let (sender, queue) = new_event_channel();
+        let mut synth = Synth::new(queue, TEST_RATE);
+        sender
+            .push(AudioEvent::NoteOn {
+                sender_mailbox: MailboxId(1),
+                pitch: 60,
+                velocity: 100,
+                instrument_id: 0,
+                pan: 0,
+            })
+            .unwrap();
+        let mut buf = vec![0.0f32; 256 * 2];
+        // Warm past the attack, then measure a steady block at unity.
+        synth.fill(&mut buf, 2);
+        synth.fill(&mut buf, 2);
+        let unity_energy: f32 = buf.iter().map(|s| s.abs()).sum();
+        // Duck the already-sounding voice; the next block must drop.
+        sender
+            .push(AudioEvent::SetSenderGain {
+                sender_mailbox: MailboxId(1),
+                gain: 0.25,
+            })
+            .unwrap();
+        synth.fill(&mut buf, 2);
+        let ducked_energy: f32 = buf.iter().map(|s| s.abs()).sum();
+        assert!(
+            ducked_energy < unity_energy * 0.5,
+            "set_sender_gain must duck a sounding voice: unity={unity_energy}, ducked={ducked_energy}",
+        );
+    }
+
     #[test]
     fn unknown_instrument_id_drops_note() {
         let (sender, queue) = new_event_channel();
@@ -1754,6 +1922,7 @@ mod tests {
                 pitch: 60,
                 velocity: 100,
                 instrument_id: 99,
+                pan: 0,
             })
             .unwrap();
         let mut buf = vec![0.0f32; 64];
@@ -1772,6 +1941,7 @@ mod tests {
                     pitch: 60,
                     velocity: 100,
                     instrument_id: 0,
+                    pan: 0,
                 })
                 .unwrap();
         }
@@ -1810,6 +1980,7 @@ mod tests {
                     pitch,
                     velocity,
                     instrument_id: 0,
+                    pan: 0,
                 })
                 .unwrap();
         }
@@ -1825,6 +1996,7 @@ mod tests {
                 pitch: 200,
                 velocity: 100,
                 instrument_id: 0,
+                pan: 0,
             })
             .unwrap();
         synth.fill(&mut buf, 1);
@@ -1975,6 +2147,7 @@ mod tests {
                     pitch: 60,
                     velocity: 100,
                     instrument_id: 0,
+                    pan: 0,
                 })
                 .unwrap();
         }
@@ -2353,6 +2526,7 @@ mod tests {
                             pitch: 60,
                             velocity: 100,
                             instrument_id: 0,
+                            pan: 0,
                         },
                     },
                     ScheduledEvent {
@@ -2414,6 +2588,7 @@ mod tests {
                     pitch: 60,
                     velocity: 100,
                     instrument_id: 0,
+                    pan: 0,
                 },
             })
             .collect();
@@ -2448,6 +2623,7 @@ mod tests {
                             pitch: 60,
                             velocity: 100,
                             instrument_id: 0,
+                            pan: 0,
                         },
                     },
                     ScheduledEvent {
@@ -2456,6 +2632,7 @@ mod tests {
                             pitch: 64,
                             velocity: 100,
                             instrument_id: 0,
+                            pan: 0,
                         },
                     },
                 ],
@@ -2494,6 +2671,7 @@ mod tests {
                         pitch: 60,
                         velocity: 100,
                         instrument_id: 0,
+                        pan: 0,
                     },
                 }],
             },
@@ -2666,6 +2844,7 @@ mod tests {
                 pitch: 60,
                 velocity: 100,
                 instrument_id: id,
+                pan: 0,
             })
             .unwrap();
         synth.fill(&mut buf, 1);
@@ -2718,6 +2897,7 @@ mod tests {
                 pitch: 60,
                 velocity: 100,
                 instrument_id: builtin_id_ceiling() + 5,
+                pan: 0,
             })
             .unwrap();
         let mut buf = vec![0.0f32; 64];
@@ -2744,6 +2924,7 @@ mod tests {
                 pitch: 30,
                 velocity: 100,
                 instrument_id: builtin_id_ceiling(),
+                pan: 0,
             })
             .unwrap();
         synth.fill(&mut buf, 1);
@@ -2978,6 +3159,7 @@ mod tests {
                     pitch: 60,
                     velocity: 100,
                     instrument_id: builtin_id_ceiling(),
+                    pan: 0,
                 })
                 .unwrap();
         }

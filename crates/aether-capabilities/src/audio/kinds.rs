@@ -1,5 +1,5 @@
 //! The `aether.audio.*` mail vocabulary (ADR-0121: the capability owns
-//! its kinds). The 13 audio kinds — the cast-shaped real-time triggers
+//! its kinds). The 15 audio kinds — the cast-shaped real-time triggers
 //! (`NoteOn` / `NoteOff` / `SetMasterGain`) and the structured control
 //! plane (`SetMasterGain`'s reply, the ADR-0104 scheduled batch, the
 //! ADR-0103 track lane, and the ADR-0103 sampled-bank loader) — live
@@ -22,8 +22,12 @@ use serde::{Deserialize, Serialize};
 /// substrate allocates a new voice per `NoteOn`, keyed by
 /// `(sender_mailbox, instrument_id, pitch)` — several voices can share
 /// a key, so two concurrent same-pitch notes from one sender each sound
-/// independently instead of one stealing the other's voice.
-/// Fire-and-forget; no reply.
+/// independently instead of one stealing the other's voice. `pan` places
+/// the voice in the stereo image (ADR-0127): bipolar `i8` with `0` center
+/// (the historic mono behavior), `-128` hard left, and `127` hard right,
+/// mapped to `[-1.0, 1.0]` through a constant-power law. Pan is a render
+/// property of the voice, not part of the voice key, so a `NoteOff`
+/// carries none. Fire-and-forget; no reply.
 #[repr(C)]
 #[derive(
     Copy,
@@ -42,6 +46,7 @@ pub struct NoteOn {
     pub pitch: u8,
     pub velocity: u8,
     pub instrument_id: u8,
+    pub pan: i8,
 }
 
 /// Release a note previously started with `NoteOn`. The substrate
@@ -131,6 +136,36 @@ pub enum SetReverbSendResult {
     Err { error: String },
 }
 
+/// Set a per-sender level trim on the substrate synth (ADR-0127). `gain`
+/// is a linear scalar applied to every sounding voice whose envelope
+/// sender matches this mail's sender — the trim is keyed by the mail
+/// envelope, not carried in the payload — clamped `0.0..=4.0` (boost is
+/// allowed so a melody line can lift above the accompaniment; the synth's
+/// `tanh` soft clip catches overshoot). Unlike a per-note gain, this sets
+/// a set-once relative level for a whole voice line and is live: it ducks
+/// already-sounding voices on the next render block, mirroring
+/// `set_master_gain`. Desktop-only: headless and hub chassis reply `Err`.
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
+)]
+#[kind(name = "aether.audio.set_sender_gain")]
+pub struct SetSenderGain {
+    pub gain: f32,
+}
+
+/// Reply to `SetSenderGain` (ADR-0127). `Ok` echoes the gain the synth
+/// actually applied — values outside `0.0..=4.0` are clamped, so a caller
+/// that sent `5.0` learns it got `4.0`. `Err` fires on chassis without an
+/// audio device (headless, hub) or when audio was disabled at boot via
+/// `AETHER_AUDIO_DISABLE`.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.audio.set_sender_gain_result")]
+pub enum SetSenderGainResult {
+    Ok { applied_gain: f32 },
+    Err { error: String },
+}
+
 // ADR-0104 scheduled note events. One `aether.audio.schedule` mail
 // carries a whole tune as a batch of timed note events; the audio cap
 // schedules them against its own sample clock so relative timing is
@@ -142,13 +177,16 @@ pub enum SetReverbSendResult {
 /// from the same voice pool, obeys the same steal policy, and matches
 /// `Off` to the oldest still-sounding voice on the scheduling sender's
 /// key, as if the equivalent mail had arrived at the event's due
-/// instant.
+/// instant. The `On` variant carries the same bipolar `pan` as `NoteOn`
+/// (`0` center, ADR-0127); `Off` carries none, since pan is not part of
+/// the voice key.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ScheduledNote {
     On {
         pitch: u8,
         velocity: u8,
         instrument_id: u8,
+        pan: i8,
     },
     Off {
         pitch: u8,

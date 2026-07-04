@@ -604,6 +604,19 @@ pub fn build_builtin_kernel(
     }
 }
 
+/// Constant-power stereo placement for a bipolar `i8` pan (ADR-0127):
+/// `0` center, `-128` hard left, `127` hard right. The `i8` maps to
+/// `[-1.0, 1.0]` (clamped, since `-128 / 127` lands just past `-1.0`),
+/// then a constant-power law splits the mono voice into `[gain_l,
+/// gain_r]`. Center yields `[cos(π/4), sin(π/4)]` (≈`0.707` each), so
+/// perceived loudness holds constant as a voice pans across the image.
+pub fn pan_law(pan: i8) -> [f32; 2] {
+    use std::f32::consts::FRAC_PI_4;
+    let pan_norm = (f32::from(pan) / 127.0).clamp(-1.0, 1.0);
+    let theta = (pan_norm + 1.0) * FRAC_PI_4;
+    [theta.cos(), theta.sin()]
+}
+
 /// A single sounding voice: the routing key (`sender_mailbox`,
 /// `instrument_id`, `pitch`) plus the kernel that renders it. No longer
 /// `Copy` — a sample voice holds a reference-counted PCM handle
@@ -622,6 +635,11 @@ pub fn build_builtin_kernel(
 /// `released` marks a voice whose `note_off` has already fired. Together
 /// with `seq` it lets note-off pick the oldest *unreleased* voice on a
 /// shared key rather than re-releasing one already fading out.
+///
+/// `pan_gains` is the constant-power `[gain_l, gain_r]` split derived
+/// once from the note's pan at allocation (ADR-0127); `sender_gain` is
+/// the live per-sender trim, refreshed from the synth's sender-gain table
+/// once per render block so a `set_sender_gain` ducks sounding voices.
 #[derive(Clone, Debug)]
 pub struct Voice {
     pub sender_mailbox: MailboxId,
@@ -630,6 +648,8 @@ pub struct Voice {
     pub seq: u64,
     pub kernel: VoiceKernel,
     pub released: bool,
+    pub pan_gains: [f32; 2],
+    pub sender_gain: f32,
 }
 
 impl Voice {
