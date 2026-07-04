@@ -119,6 +119,9 @@ pub struct ConnState {
 #[derive(Copy, Clone)]
 pub struct PendingRequest {
     pub conn_id: ConnId,
+    /// The request's method, carried so the reply path can suppress the
+    /// body on a HEAD response (message-body semantics forbid one).
+    pub method: HttpMethod,
 }
 
 /// Wake sink shared with the accept + reader sidecar threads: push an
@@ -309,12 +312,20 @@ impl HttpServerCapabilityState {
             );
         }
         self.in_flight
-            .insert(mail_id.correlation_id, PendingRequest { conn_id });
+            .insert(mail_id.correlation_id, PendingRequest { conn_id, method });
     }
 
-    /// Format + write the handler's [`HttpServerResponse`].
-    pub fn write_handler_response(&mut self, conn_id: ConnId, response: &HttpServerResponse) {
-        let bytes = render_handler_response(response);
+    /// Format + write the handler's [`HttpServerResponse`]. `is_head`
+    /// suppresses the response body per HEAD semantics (headers,
+    /// including `Content-Length`, still describe what the body would
+    /// have been).
+    pub fn write_handler_response(
+        &mut self,
+        conn_id: ConnId,
+        response: &HttpServerResponse,
+        is_head: bool,
+    ) {
+        let bytes = render_handler_response(response, is_head);
         self.write_raw_to(conn_id, &bytes);
     }
 
@@ -411,6 +422,34 @@ enum HeadParse {
     Reject { status: u16, message: &'static str },
 }
 
+/// Percent-decode an RFC 3986 path component (ADR-0108 §2: "the decoded
+/// path component"). A `%XX` escape with two following hex digits decodes
+/// to the byte; a short or invalid escape (a trailing `%`, `%2`, or
+/// non-hex digits like `%zz`) passes through literally rather than
+/// erroring. The query string is not run through this — `+`-as-space is
+/// form-encoding semantics that belongs to the query, not the path.
+fn percent_decode_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                // `hi` / `lo` are each a single hex digit (0..=15), so
+                // `hi * 16 + lo` is always in 0..=255.
+                out.push(u8::try_from(hi * 16 + lo).unwrap_or(0));
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Parse the accumulated bytes as an HTTP/1.1 request head (request line
 /// and headers). Enforces the header-count cap (`431` via
 /// `TooManyHeaders`) and surfaces the header-byte cap to the caller via
@@ -424,12 +463,13 @@ fn parse_head(buf: &[u8], max_header_bytes: usize) -> HeadParse {
             let method = request.method.unwrap_or_default().to_string();
             let raw_path = request.path.unwrap_or("/");
             let (path, query) = match raw_path.split_once('?') {
-                Some((before, after)) => (before.to_string(), after.to_string()),
-                None => (raw_path.to_string(), String::new()),
+                Some((before, after)) => (percent_decode_path(before), after.to_string()),
+                None => (percent_decode_path(raw_path), String::new()),
             };
             let mut out_headers = Vec::with_capacity(request.headers.len());
             let mut content_length = 0usize;
             let mut bad_length = false;
+            let mut has_transfer_encoding = false;
             for header in &*request.headers {
                 let value = String::from_utf8_lossy(header.value).into_owned();
                 if header.name.eq_ignore_ascii_case("content-length") {
@@ -437,6 +477,9 @@ fn parse_head(buf: &[u8], max_header_bytes: usize) -> HeadParse {
                         Ok(n) => content_length = n,
                         Err(_) => bad_length = true,
                     }
+                }
+                if header.name.eq_ignore_ascii_case("transfer-encoding") {
+                    has_transfer_encoding = true;
                 }
                 out_headers.push(HttpHeader {
                     name: header.name.to_string(),
@@ -447,6 +490,12 @@ fn parse_head(buf: &[u8], max_header_bytes: usize) -> HeadParse {
                 return HeadParse::Reject {
                     status: 400,
                     message: "invalid content-length",
+                };
+            }
+            if has_transfer_encoding {
+                return HeadParse::Reject {
+                    status: 411,
+                    message: "length required",
                 };
             }
             HeadParse::Complete(RequestHead {
@@ -546,6 +595,25 @@ fn run_reader_loop(
         return;
     }
 
+    // `Expect: 100-continue` (only once we've decided to accept the
+    // body): the reader owns a full-duplex clone of the socket, so it
+    // writes the interim response inline, strictly before the body
+    // read — the final response still goes out the dispatcher's
+    // `write_half`, so the two writes never interleave on the shared fd.
+    let expects_continue = head.content_length > 0
+        && head.headers.iter().any(|header| {
+            header.name.eq_ignore_ascii_case("expect")
+                && header.value.to_ascii_lowercase().contains("100-continue")
+        });
+    if expects_continue && let Err(e) = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n") {
+        tracing::debug!(
+            target: "aether_substrate::http_server",
+            conn = conn_id,
+            error = %e,
+            "http conn: 100-continue write failed",
+        );
+    }
+
     // Phase 2: read the `Content-Length`-bounded body. Leftover bytes
     // already in `buf` past the head come first.
     let mut body: Vec<u8> = Vec::with_capacity(head.content_length);
@@ -622,7 +690,10 @@ fn is_cap_owned_header(name: &str) -> bool {
 
 /// Render the handler's [`HttpServerResponse`] as an HTTP/1.1 response,
 /// supplying `Content-Length` / `Date` / `Connection` (ADR-0108 §2).
-fn render_handler_response(response: &HttpServerResponse) -> Vec<u8> {
+/// `is_head` emits the full head — including the `Content-Length` the
+/// body would have had — but appends no body bytes (HEAD semantics: a
+/// message with no message body).
+fn render_handler_response(response: &HttpServerResponse, is_head: bool) -> Vec<u8> {
     use std::fmt::Write as _;
     let mut head = format!(
         "HTTP/1.1 {} {}\r\n",
@@ -639,7 +710,9 @@ fn render_handler_response(response: &HttpServerResponse) -> Vec<u8> {
     let _ = write!(head, "Date: {}\r\n", http_date(SystemTime::now()));
     head.push_str("Connection: close\r\n\r\n");
     let mut out = head.into_bytes();
-    out.extend_from_slice(&response.body);
+    if !is_head {
+        out.extend_from_slice(&response.body);
+    }
     out
 }
 
@@ -680,6 +753,7 @@ fn reason_phrase(status: u16) -> &'static str {
         204 => "No Content",
         400 => "Bad Request",
         404 => "Not Found",
+        411 => "Length Required",
         413 => "Payload Too Large",
         414 => "URI Too Long",
         431 => "Request Header Fields Too Large",
@@ -923,7 +997,10 @@ impl NativeActor for HttpServerCapability {
             return;
         }
         match HttpServerResponse::decode_from_bytes(env.payload.bytes()) {
-            Some(response) => state.write_handler_response(pending.conn_id, &response),
+            Some(response) => {
+                let is_head = pending.method == HttpMethod::Head;
+                state.write_handler_response(pending.conn_id, &response, is_head);
+            }
             None => {
                 state.write_status_response(pending.conn_id, 502, "malformed handler response");
             }
@@ -935,7 +1012,7 @@ impl NativeActor for HttpServerCapability {
 
 #[cfg(test)]
 mod unit_tests {
-    use super::{http_date, parse_http_method, reason_phrase};
+    use super::{http_date, parse_http_method, percent_decode_path, reason_phrase};
     use crate::http::kinds::HttpMethod;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -958,11 +1035,24 @@ mod unit_tests {
     #[test]
     fn reason_phrases_cover_emitted_statuses() {
         assert_eq!(reason_phrase(200), "OK");
+        assert_eq!(reason_phrase(411), "Length Required");
         assert_eq!(reason_phrase(413), "Payload Too Large");
         assert_eq!(reason_phrase(501), "Not Implemented");
         assert_eq!(reason_phrase(502), "Bad Gateway");
         assert_eq!(reason_phrase(503), "Service Unavailable");
         assert_eq!(reason_phrase(504), "Gateway Timeout");
+    }
+
+    #[test]
+    fn percent_decode_path_decodes_valid_escapes_and_passes_through_invalid_ones() {
+        assert_eq!(percent_decode_path("/hello%20world"), "/hello world");
+        assert_eq!(percent_decode_path("/no-escapes"), "/no-escapes");
+        // Trailing `%` / `%2` (too short for a full escape) pass through
+        // literally rather than erroring.
+        assert_eq!(percent_decode_path("/trailing%"), "/trailing%");
+        assert_eq!(percent_decode_path("/trailing%2"), "/trailing%2");
+        // Non-hex digits pass through literally.
+        assert_eq!(percent_decode_path("/bad%zzescape"), "/bad%zzescape");
     }
 
     #[test]
