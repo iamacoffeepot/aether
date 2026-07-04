@@ -276,6 +276,7 @@ mod tests {
             max_request_bytes: 65_536,
             max_header_bytes: 8_192,
             request_timeout_millis: 10_000,
+            max_connections: 1024,
             // Window below the chunk count so the round trip must replenish.
             response_stream_window: 8,
         };
