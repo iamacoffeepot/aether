@@ -657,13 +657,12 @@ mod tests {
         // Parity with the structural sweep preflight / CI ran before this
         // xtask: a drop here surfaces as an AETHER_REQUIRE_RUNTIME panic. The
         // test fixtures are three single-output cdylib crates discovered the
-        // same way as `aether-kit` / `aether-mesh-viewer` — no example path.
+        // same way as `aether-kit` — no example path.
         for expected in [
             "aether_test_fixtures_bundle",
             "aether_test_fixtures_stateful_typed",
             "aether_test_fixtures_stateful_reshaped",
             "aether_kit",
-            "aether_mesh_viewer",
         ] {
             assert!(
                 stems.contains(expected),

@@ -161,7 +161,7 @@ fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) { /* advance one frame
 
 `aether-kit`'s `camera` export subscribes `Tick` and `Render` this way — it
 computes its camera matrix on `Tick` and publishes it to `aether.render` on
-`Render`; `aether-mesh-viewer` subscribes `Render` to replay its mesh each frame.
+`Render`; its `mesh_viewer` export subscribes `Render` to replay its mesh each frame.
 
 **A stage your chassis doesn't declare fails fast.** Subscribing to a stage the
 local graph doesn't carry replies `aether.lifecycle.subscribe_result` with an
