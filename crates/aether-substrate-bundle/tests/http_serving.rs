@@ -353,4 +353,151 @@ mod tests {
             String::from_utf8_lossy(&reassembled),
         );
     }
+
+    /// Poll `request` until the response body contains `expected`
+    /// (bounded deadline): route registration, and later the drop's
+    /// route purge, are asynchronous mail the test must not race.
+    fn poll_body_contains(port: u16, request: &[u8], expected: &str) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let response = round_trip(port, request);
+            let text = String::from_utf8_lossy(&response);
+            if text
+                .split_once("\r\n\r\n")
+                .is_some_and(|(_, body)| body.contains(expected))
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "expected body containing {expected:?} within 30s; last: {text:?}",
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// ADR-0130 drop-purge, end to end over real wasm: a guest claims
+    /// `/routed` via `register_route_self` in `wire`; dropping the
+    /// component (`aether.component.drop` → the component cap's
+    /// `unregister_routes_all` fan-out) purges the route, so the same
+    /// request falls back to the configured `handler_mailbox`. The
+    /// drop is injected through the routed guest itself — the request
+    /// body names the trampoline mailbox id to drop — since the built
+    /// chassis exposes no direct mail surface to the test.
+    #[test]
+    fn dropped_component_routes_are_purged() {
+        const ROUTED_NAMESPACE: &str = "routed_web";
+        let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
+        let Some(wasm_path) = locate_component_wasm("aether_test_fixtures_bundle") else {
+            assert!(
+                !strict,
+                "AETHER_REQUIRE_RUNTIME set but http_handler.wasm not pre-built; \
+                 CI's `Pre-build component wasm for scenario tests` step is missing it",
+            );
+            eprintln!(
+                "skipping: http_handler.wasm not built; \
+                 run `cargo build --target wasm32-unknown-unknown \
+                 -p aether-test-fixtures --examples`",
+            );
+            return;
+        };
+        let wasm = fs::read(&wasm_path).expect("read http_handler wasm");
+
+        let server_config = HttpServerConfig {
+            enabled: true,
+            bind_addr: "127.0.0.1:0".to_string(),
+            handler_mailbox: HANDLER_MAILBOX.to_string(),
+            max_request_bytes: 65_536,
+            max_header_bytes: 8_192,
+            request_timeout_millis: 10_000,
+            max_connections: 1024,
+            response_stream_window: 16,
+        };
+
+        let sandbox = init_save_sandbox("http-route-drop");
+        let env = HeadlessEnv {
+            namespace_roots: test_namespace_roots(sandbox),
+            http: HttpConfig::default(),
+            http_server: Some(server_config),
+            anthropic: AnthropicConfig::default(),
+            gemini: GeminiConfig::default(),
+            contentgen: ContentGenConfig::default(),
+            tick_period: Duration::from_millis(100),
+            rpc_addr: None,
+            workers: None,
+            ring_caps: aether_substrate_bundle::RingCapacities::default(),
+            scheduler_tuning: aether_substrate_bundle::SchedulerTuning::default(),
+            lifecycle_advance_timeout_millis: 1_000,
+            autoload: vec![
+                AutoloadComponent {
+                    wasm: wasm.clone(),
+                    config: Vec::new(),
+                    name: Some(HANDLER_NAMESPACE.to_owned()),
+                    export: Some(HANDLER_NAMESPACE.to_owned()),
+                },
+                AutoloadComponent {
+                    wasm,
+                    config: Vec::new(),
+                    name: Some(ROUTED_NAMESPACE.to_owned()),
+                    export: Some(ROUTED_NAMESPACE.to_owned()),
+                },
+            ],
+        };
+
+        let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
+
+        // Wait for both trampolines (fallback + routed guest).
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let routed_mailbox = loop {
+            if let Some(routed) = built.resolve_actor::<WasmTrampoline>(ROUTED_NAMESPACE)
+                && built
+                    .resolve_actor::<WasmTrampoline>(HANDLER_NAMESPACE)
+                    .is_some()
+            {
+                break routed;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "trampolines did not register within 30s; live: {:?}",
+                built.resolve_actors::<WasmTrampoline>(),
+            );
+            thread::sleep(Duration::from_millis(25));
+        };
+
+        let port = built
+            .handle::<HttpServerHandle>()
+            .expect("HttpServerHandle published by HttpServerCapability")
+            .local_port;
+
+        // Route live (registration is async mail — poll, don't race).
+        poll_body_contains(
+            port,
+            b"GET /routed HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            "routed handler",
+        );
+
+        // Drop the routed component through the guest bridge: the body
+        // carries the trampoline mailbox id to drop.
+        let drop_body = routed_mailbox.0.to_string();
+        let drop_request = format!(
+            "POST /routed/drop HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+             Content-Length: {}\r\n\r\n{}",
+            drop_body.len(),
+            drop_body,
+        );
+        let drop_response = round_trip(port, drop_request.as_bytes());
+        let drop_str = String::from_utf8_lossy(&drop_response);
+        assert!(
+            drop_str.starts_with("HTTP/1.1 200 ") && drop_str.contains("dropping"),
+            "drop bridge should acknowledge, got: {drop_str:?}",
+        );
+
+        // The purge rides the drop fan-out; once it lands, /routed
+        // falls back to the `web` fixture, which answers 404.
+        poll_body_contains(
+            port,
+            b"GET /routed HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            "not found",
+        );
+    }
 }

@@ -21,11 +21,14 @@
 #![allow(clippy::needless_pass_by_value, clippy::unused_self)]
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_capabilities::ComponentHostCapability;
 use aether_capabilities::http::HttpServerCapability;
 use aether_capabilities::http::kinds::{
     HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen, HttpServerRequest,
-    HttpServerResponse, HttpStreamCredit,
+    HttpServerResponse, HttpStreamCredit, RegisterRouteSelf,
 };
+use aether_data::{Kind as _, MailboxId};
+use aether_kinds::DropComponent;
 
 pub struct HttpHandler;
 
@@ -140,6 +143,70 @@ impl WasmActor for StreamingHttpHandler {
                     stream_id: self.stream_id,
                 });
             self.ended = true;
+        }
+    }
+}
+
+/// Routed sibling of [`HttpHandler`] for the ADR-0130 drop-purge e2e
+/// test: claims `/routed` from `wire` via `register_route_self` (the
+/// same declaration path a real component takes) and replies a fixed
+/// tag. `GET /routed/drop` doubles as the test's mail bridge into the
+/// chassis — the request body carries a decimal trampoline mailbox id,
+/// and the handler forwards a [`DropComponent`] for it to
+/// `aether.component` (detached: the drop teardown is not part of the
+/// request's causal chain), so the test can drop this component from
+/// outside without a chassis-level mail surface.
+pub struct RoutedHttpHandler;
+
+#[actor]
+impl WasmActor for RoutedHttpHandler {
+    const NAMESPACE: &'static str = "routed_web";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(RoutedHttpHandler)
+    }
+
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+        ctx.actor::<HttpServerCapability>()
+            .send(&RegisterRouteSelf {
+                prefix: "/routed".to_string(),
+                method: None,
+                kind: HttpServerRequest::ID,
+            });
+    }
+
+    /// Reply a fixed tag for anything under `/routed`; on
+    /// `/routed/drop` also forward a [`DropComponent`] for the mailbox
+    /// id named in the request body.
+    ///
+    /// # Agent
+    /// Not sent manually — dispatched by `aether.http.server` for the
+    /// `/routed` prefix this actor claims in `wire`.
+    #[handler]
+    fn on_request(&mut self, ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpServerResponse {
+        if req.path == "/routed/drop" {
+            let target = String::from_utf8_lossy(&req.body).trim().parse::<u64>();
+            let Ok(raw_id) = target else {
+                return HttpServerResponse {
+                    status: 400,
+                    headers: Vec::new(),
+                    body: b"body must be a decimal mailbox id".to_vec(),
+                };
+            };
+            ctx.actor::<ComponentHostCapability>()
+                .send_detached(&DropComponent {
+                    mailbox_id: MailboxId(raw_id),
+                });
+            return HttpServerResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: b"dropping".to_vec(),
+            };
+        }
+        HttpServerResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: b"routed handler".to_vec(),
         }
     }
 }

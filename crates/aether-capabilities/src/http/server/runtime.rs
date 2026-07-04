@@ -39,13 +39,15 @@ pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::mail::mailer::Mailer;
+pub use aether_substrate::mail::registry::{MailboxEntry, Registry};
 
 // The parent `#[actor] impl` writes the `502` reply path, so it names
 // `HttpServerResponse`; the rest of the kind vocabulary is used only here.
 pub use crate::http::kinds::HttpServerResponse;
 use crate::http::kinds::{
     HttpHeader, HttpMethod, HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen,
-    HttpServerRequest, HttpStreamCredit,
+    HttpServerRequest, HttpStreamCredit, RegisterRoute, RegisterRouteResult, RegisterRouteSelf,
+    UnregisterRoute, UnregisterRouteSelf, UnregisterRoutesAll,
 };
 
 use aether_substrate::Mail;
@@ -172,6 +174,61 @@ pub struct StreamState {
     pending_end: bool,
 }
 
+/// One registered route (ADR-0130): requests whose path matches
+/// `prefix` on a segment boundary (and whose method passes `method`)
+/// dispatch to `mailbox` as kind `kind`. The table keys the route by
+/// the registrant's `MailboxId`, so a route survives
+/// `replace_component` (the id is stable) and dispatch skips name
+/// resolution.
+pub struct Route {
+    pub prefix: String,
+    pub method: Option<HttpMethod>,
+    pub kind: KindId,
+    pub mailbox: MailboxId,
+}
+
+/// Segment-boundary prefix match (ADR-0130): `/api` matches `/api` and
+/// `/api/…`, never `/apiary`; `/` is the catch-all. Prefixes are
+/// normalized at registration ([`normalize_prefix`]), so no trailing
+/// slash reaches this check.
+fn route_matches(prefix: &str, path: &str) -> bool {
+    if prefix == "/" {
+        return true;
+    }
+    path.strip_prefix(prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Validate + normalize a registration prefix: must start with `/`;
+/// trailing slashes are stripped (`/api/` ⇒ `/api`) so the
+/// segment-boundary match has one canonical spelling, with `/` itself
+/// kept as the catch-all.
+fn normalize_prefix(raw: &str) -> Result<String, String> {
+    if !raw.starts_with('/') {
+        return Err(format!("route prefix {raw:?} must start with '/'"));
+    }
+    let trimmed = raw.trim_end_matches('/');
+    Ok(if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    })
+}
+
+/// Registrant-mailbox validation for the explicit-`mailbox`
+/// registration forms — the route twin of `aether.input`'s
+/// `validate_subscriber_mailbox` (that helper lives in the input cap's
+/// private runtime module, so the five-line check is mirrored rather
+/// than imported). The host-stamped `_self` forms skip it: the stamp
+/// already names a live in-process mailbox.
+fn validate_route_mailbox(registry: &Registry, id: MailboxId) -> Result<(), String> {
+    match registry.entry(id) {
+        Some(MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)) => Ok(()),
+        Some(MailboxEntry::Dropped) => Err(format!("mailbox {id:?} already dropped")),
+        None => Err(format!("unknown mailbox id {id:?}")),
+    }
+}
+
 /// Wake sink shared with the accept + reader sidecar threads: push an
 /// [`InboundEvent`] over the mpsc, then fire an [`HttpInboundReady`]
 /// wake mail at the cap so the dispatcher drains.
@@ -207,6 +264,14 @@ impl WakeSink {
 /// `NativeActor::State` interface without exposing it as crate-public API.
 pub struct HttpServerCapabilityState {
     pub handler_mailbox: String,
+    /// Registered routes (ADR-0130), unordered — [`Self::resolve_route`]
+    /// picks the winner per request by `(prefix length, method
+    /// specificity)`, which is deterministic without a sort: two
+    /// distinct equal-length prefixes cannot both match one path, and
+    /// duplicate `(prefix, method)` keys are rejected at registration.
+    /// Route counts are tens per substrate, so the linear scan is
+    /// dwarfed by the header parse that precedes it (ADR-0130).
+    pub routes: Vec<Route>,
     pub max_request_bytes: usize,
     pub max_header_bytes: usize,
     /// Live-connection-table ceiling (ADR-0108 §6); a peer accepted past
@@ -241,6 +306,78 @@ pub struct HttpServerCapabilityState {
 }
 
 impl HttpServerCapabilityState {
+    /// Claim `(prefix, method)` for `mailbox`, dispatching as `kind`
+    /// (ADR-0130). A key held by a different mailbox is answered
+    /// `Err`; the same mailbox re-claiming its own key is an
+    /// idempotent `Ok` that updates `kind` — so a component
+    /// re-running `wire` after `replace_component` re-registers
+    /// cleanly (its `MailboxId` is stable).
+    pub fn register_route(
+        &mut self,
+        prefix: &str,
+        method: Option<HttpMethod>,
+        kind: KindId,
+        mailbox: MailboxId,
+    ) -> RegisterRouteResult {
+        let prefix = match normalize_prefix(prefix) {
+            Ok(prefix) => prefix,
+            Err(error) => return RegisterRouteResult::Err { error },
+        };
+        if let Some(existing) = self
+            .routes
+            .iter_mut()
+            .find(|r| r.prefix == prefix && r.method == method)
+        {
+            if existing.mailbox == mailbox {
+                existing.kind = kind;
+                return RegisterRouteResult::Ok;
+            }
+            return RegisterRouteResult::Err {
+                error: format!(
+                    "route ({prefix:?}, {method:?}) already claimed by mailbox {:?}",
+                    existing.mailbox,
+                ),
+            };
+        }
+        self.routes.push(Route {
+            prefix,
+            method,
+            kind,
+            mailbox,
+        });
+        RegisterRouteResult::Ok
+    }
+
+    /// Release the `(prefix, method)` route held by `mailbox`.
+    /// Idempotent — releasing a route that isn't held (or is held by
+    /// someone else) is still `Ok`, mirroring the input cap's
+    /// unsubscribe semantics.
+    pub fn unregister_route(
+        &mut self,
+        prefix: &str,
+        method: Option<HttpMethod>,
+        mailbox: MailboxId,
+    ) -> RegisterRouteResult {
+        let prefix = match normalize_prefix(prefix) {
+            Ok(prefix) => prefix,
+            Err(error) => return RegisterRouteResult::Err { error },
+        };
+        self.routes
+            .retain(|r| !(r.prefix == prefix && r.method == method && r.mailbox == mailbox));
+        RegisterRouteResult::Ok
+    }
+
+    /// The longest segment-boundary prefix match among
+    /// method-compatible routes, with a method-specific route beating
+    /// a method-agnostic one at equal prefix (ADR-0130). `None` ⇒ the
+    /// configured `handler_mailbox` fallback.
+    fn resolve_route(&self, path: &str, method: HttpMethod) -> Option<&Route> {
+        self.routes
+            .iter()
+            .filter(|r| r.method.is_none_or(|m| m == method) && route_matches(&r.prefix, path))
+            .max_by_key(|r| (r.prefix.len(), r.method.is_some()))
+    }
+
     /// Allocate a fresh `ConnId`, store the connection's write half, and
     /// spin a reader thread for the read half. Refuses `503` and closes
     /// without spawning a reader when the live connection table is
@@ -358,12 +495,28 @@ impl HttpServerCapabilityState {
             self.close_connection(conn_id, "unsupported method");
             return;
         };
-        // Late-binding handler resolution (ADR-0108 §3): resolve the
-        // configured mailbox by name at dispatch time through the
-        // registry — the sanctioned runtime-name path, which folds a
-        // lineage-rendered name to its id and reports a miss as `None`.
-        // Nothing live under the name → `503`.
-        let Some(handler) = self.mailer.registry().lookup(&self.handler_mailbox) else {
+        // Route resolution (ADR-0130): a registered route names its
+        // handler by stable `MailboxId` and the kind its requests
+        // dispatch as; a dead routed mailbox is answered `503`, the
+        // same surface as an unresolved fallback (falling back instead
+        // would silently reroute a claimed path family). No route ⇒
+        // the ADR-0108 §3 late-binding fallback: resolve the configured
+        // `handler_mailbox` by name at dispatch time through the
+        // registry — the sanctioned runtime-name path — dispatching
+        // the generic request kind. Nothing live either way → `503`.
+        let routed = self
+            .resolve_route(&request.path, method)
+            .map(|route| (route.mailbox, route.kind));
+        let (handler, dispatch_kind) = if let Some((mailbox, kind)) = routed {
+            if validate_route_mailbox(self.mailer.registry(), mailbox).is_err() {
+                self.write_status_response(conn_id, 503, "routed handler gone");
+                self.close_connection(conn_id, "routed mailbox dead");
+                return;
+            }
+            (mailbox, kind)
+        } else if let Some(handler) = self.mailer.registry().lookup(&self.handler_mailbox) {
+            (handler, <HttpServerRequest as Kind>::ID)
+        } else {
             self.write_status_response(conn_id, 503, "no handler registered");
             self.close_connection(conn_id, "handler unresolved");
             return;
@@ -382,7 +535,7 @@ impl HttpServerCapabilityState {
             peer_addr,
         }
         .encode_into_bytes();
-        let mail_id = ctx.send_envelope_as_root(handler, <HttpServerRequest as Kind>::ID, &payload);
+        let mail_id = ctx.send_envelope_as_root(handler, dispatch_kind, &payload);
         // Safety net (ADR-0108 §5): if the chain settles with no
         // response, `on_settled` answers `502`. Best-effort — a chassis
         // without the settlement registry still serves the reply path.
@@ -1256,6 +1409,7 @@ impl NativeActor for HttpServerCapability {
 
         Ok(HttpServerCapabilityState {
             handler_mailbox: config.handler_mailbox,
+            routes: Vec::new(),
             max_request_bytes: config.max_request_bytes,
             max_header_bytes: config.max_header_bytes,
             max_connections: config.max_connections,
@@ -1395,6 +1549,113 @@ impl NativeActor for HttpServerCapability {
         state.end_stream(end.stream_id);
     }
 
+    /// Claim a route for an explicitly named mailbox (ADR-0130).
+    ///
+    /// # Agent
+    /// `RegisterRoute { prefix, method, kind, mailbox }`. The external
+    /// form — an MCP session or test names the handler mailbox
+    /// explicitly; it is validated against the registry. An in-process
+    /// actor registering itself sends `register_route_self` instead.
+    #[handler]
+    fn on_register_route(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        payload: RegisterRoute,
+    ) -> RegisterRouteResult {
+        if let Err(error) = validate_route_mailbox(state.mailer.registry(), payload.mailbox) {
+            return RegisterRouteResult::Err { error };
+        }
+        state.register_route(
+            &payload.prefix,
+            payload.method,
+            payload.kind,
+            payload.mailbox,
+        )
+    }
+
+    /// Claim a route for the *sending* actor (ADR-0130), resolved from
+    /// the inbound envelope's host-stamped `Source` — forgery-proof
+    /// and gated to in-process actors by construction, mirroring
+    /// `aether.input.subscribe_self`.
+    ///
+    /// # Agent
+    /// `RegisterRouteSelf { prefix, method, kind }`, typically sent
+    /// from a component's `wire` hook. An external session or remote
+    /// engine has no local mailbox and gets an `Err` reply — use
+    /// `register_route` with an explicit mailbox instead.
+    #[handler]
+    fn on_register_route_self(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        payload: RegisterRouteSelf,
+    ) -> RegisterRouteResult {
+        match ctx.source_mailbox() {
+            Some(mailbox) => {
+                state.register_route(&payload.prefix, payload.method, payload.kind, mailbox)
+            }
+            None => RegisterRouteResult::Err {
+                error: "aether.http.server.register_route_self requires a local sender; an \
+                        external session or remote engine must use \
+                        aether.http.server.register_route with an explicit mailbox"
+                    .to_string(),
+            },
+        }
+    }
+
+    /// Release an explicitly named mailbox's route (ADR-0130).
+    /// Idempotent.
+    ///
+    /// # Agent
+    /// `UnregisterRoute { prefix, method, mailbox }`.
+    #[handler]
+    fn on_unregister_route(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        payload: UnregisterRoute,
+    ) -> RegisterRouteResult {
+        state.unregister_route(&payload.prefix, payload.method, payload.mailbox)
+    }
+
+    /// Release the *sending* actor's route (ADR-0130), resolved from
+    /// the host-stamped `Source` like `register_route_self`.
+    /// Idempotent.
+    ///
+    /// # Agent
+    /// `UnregisterRouteSelf { prefix, method }`.
+    #[handler]
+    fn on_unregister_route_self(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        payload: UnregisterRouteSelf,
+    ) -> RegisterRouteResult {
+        match ctx.source_mailbox() {
+            Some(mailbox) => state.unregister_route(&payload.prefix, payload.method, mailbox),
+            None => RegisterRouteResult::Err {
+                error: "aether.http.server.unregister_route_self requires a local sender; an \
+                        external session or remote engine must use \
+                        aether.http.server.unregister_route with an explicit mailbox"
+                    .to_string(),
+            },
+        }
+    }
+
+    /// Release every route held by a mailbox (ADR-0130). Issued by
+    /// `ComponentHostCapability` on `DropComponent`, alongside its
+    /// input / lifecycle unsubscribe fan-out, so the route table
+    /// doesn't keep dispatching at a dropped trampoline. Idempotent;
+    /// fire-and-forget.
+    ///
+    /// # Agent
+    /// `UnregisterRoutesAll { mailbox }`.
+    #[handler]
+    fn on_unregister_routes_all(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        payload: UnregisterRoutesAll,
+    ) {
+        state.routes.retain(|r| r.mailbox != payload.mailbox);
+    }
+
     /// Settlement notice. The root corresponds to a dispatched request
     /// we subscribed to; if it settled with no [`HttpServerResponse`]
     /// written, answer `502` (ADR-0108 §5) and clear the entry.
@@ -1467,9 +1728,36 @@ impl NativeActor for HttpServerCapability {
 
 #[cfg(test)]
 mod unit_tests {
-    use super::{http_date, parse_http_method, percent_decode_path, reason_phrase};
+    use super::{
+        http_date, normalize_prefix, parse_http_method, percent_decode_path, reason_phrase,
+        route_matches,
+    };
     use crate::http::kinds::HttpMethod;
     use std::time::{Duration, UNIX_EPOCH};
+
+    /// Segment-boundary semantics (ADR-0130): a prefix matches at `/`
+    /// boundaries only, so `/api` never captures `/apiary`.
+    #[test]
+    fn route_match_is_segment_boundary() {
+        assert!(route_matches("/api", "/api"));
+        assert!(route_matches("/api", "/api/widgets"));
+        assert!(!route_matches("/api", "/apiary"));
+        assert!(!route_matches("/api", "/ap"));
+        assert!(route_matches("/", "/anything"));
+        assert!(route_matches("/", "/"));
+    }
+
+    /// Prefix normalization: leading `/` required, trailing slashes
+    /// stripped to one canonical spelling, `/` kept as the catch-all.
+    #[test]
+    fn prefix_normalization() {
+        assert_eq!(normalize_prefix("/api/"), Ok("/api".to_string()));
+        assert_eq!(normalize_prefix("/api"), Ok("/api".to_string()));
+        assert_eq!(normalize_prefix("/"), Ok("/".to_string()));
+        assert_eq!(normalize_prefix("///"), Ok("/".to_string()));
+        assert!(normalize_prefix("api").is_err());
+        assert!(normalize_prefix("").is_err());
+    }
 
     #[test]
     fn http_date_formats_the_rfc_example() {

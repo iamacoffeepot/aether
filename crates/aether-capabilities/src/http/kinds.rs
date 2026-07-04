@@ -207,6 +207,110 @@ pub struct HttpResponseStreamEnd {
     pub stream_id: u64,
 }
 
+// ADR-0130 route-registration kinds. Mirrors the `aether.input`
+// subscribe family: `_self` variants resolve the registrant from the
+// inbound envelope's host-stamped `Source` (forgery-proof, in-process
+// by construction); the explicit-`mailbox` variants serve external
+// callers and are validated against the registry. A route carries the
+// `KindId` its requests dispatch as — the cap stamps that kind onto
+// the request-shaped payload, so the registered kind's schema must
+// decode `aether.http.server.request`'s byte layout
+// (`aether.http.server.request` itself is the generic choice).
+
+/// `aether.http.server.register_route` — claim a path-prefix route for
+/// `mailbox`. `prefix` is segment-boundary matched (`/api` matches
+/// `/api` and `/api/…`, never `/apiary`; `/` is the catch-all; a
+/// trailing slash is normalized off at registration). `method` filters
+/// the route to one HTTP method; `None` accepts every method. Among
+/// matching routes the longest prefix wins, and a method-specific
+/// route beats a method-agnostic one at equal prefix. A `(prefix,
+/// method)` key already claimed by a *different* mailbox is answered
+/// `Err`; the same mailbox re-claiming its own key is an idempotent
+/// `Ok` (and updates `kind`). Reply: `RegisterRouteResult`.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.http.server.register_route")]
+pub struct RegisterRoute {
+    pub prefix: String,
+    pub method: Option<HttpMethod>,
+    pub kind: aether_data::KindId,
+    pub mailbox: aether_data::MailboxId,
+}
+
+/// `aether.http.server.register_route_self` — reflexive counterpart of
+/// [`RegisterRoute`]: claim the route for the *sending* actor, with no
+/// explicit `mailbox` field. The cap resolves the registrant from the
+/// inbound envelope's host-stamped `Source` (ADR-0083), so the
+/// registrant cannot be forged and the op is gated to in-process
+/// actors by construction — an external session or another engine gets
+/// an `Err` reply, pushing it onto the named [`RegisterRoute`] form.
+/// This is the common "route to me" case, sent from `wire`. Reply:
+/// `RegisterRouteResult`.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.http.server.register_route_self")]
+pub struct RegisterRouteSelf {
+    pub prefix: String,
+    pub method: Option<HttpMethod>,
+    pub kind: aether_data::KindId,
+}
+
+/// `aether.http.server.unregister_route` — release the `(prefix,
+/// method)` route held by `mailbox`. Idempotent: releasing a route
+/// that isn't held is still `Ok`. Reply: `RegisterRouteResult`.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.http.server.unregister_route")]
+pub struct UnregisterRoute {
+    pub prefix: String,
+    pub method: Option<HttpMethod>,
+    pub mailbox: aether_data::MailboxId,
+}
+
+/// `aether.http.server.unregister_route_self` — reflexive counterpart
+/// of [`UnregisterRoute`]: release the *sending* actor's `(prefix,
+/// method)` route, resolved from the host-stamped `Source` like
+/// [`RegisterRouteSelf`]. Idempotent. Reply: `RegisterRouteResult`.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.http.server.unregister_route_self")]
+pub struct UnregisterRouteSelf {
+    pub prefix: String,
+    pub method: Option<HttpMethod>,
+}
+
+/// Reply to the route registration / unregistration kinds (ADR-0130).
+/// Failure modes: an invalid prefix (must start with `/`), an unknown
+/// or dropped registrant mailbox, a `(prefix, method)` key already
+/// claimed by another mailbox, or a `_self` op from a sender with no
+/// local mailbox.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.http.server.register_route_result")]
+pub enum RegisterRouteResult {
+    Ok,
+    Err { error: String },
+}
+
+/// `aether.http.server.unregister_routes_all` — release every route
+/// held by `mailbox`. Issued by `ComponentHostCapability` on
+/// `DropComponent` (alongside its `aether.input.unsubscribe_all` /
+/// `aether.lifecycle.unsubscribe_all` sends) so the route table
+/// doesn't keep dispatching at a dropped trampoline. Idempotent: a
+/// mailbox holding no routes is a no-op. Fire-and-forget; no reply.
+/// Cast-shape (Pod) — one `MailboxId`, fixed size.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.http.server.unregister_routes_all")]
+pub struct UnregisterRoutesAll {
+    pub mailbox: aether_data::MailboxId,
+}
+
 /// `aether.http.server.inbound_ready` — accept / reader sidecar →
 /// `HttpServerCapability` dispatcher wake (ADR-0108, issue 1760).
 /// The HTTP-server analog of `RpcInboundReady`: the sidecar pushes

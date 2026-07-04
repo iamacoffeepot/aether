@@ -39,8 +39,13 @@
 // `#[actor]` emits the `HandlesKind<K>` markers always-on against the
 // identity, and the `init` / handler bodies name these kinds. The two
 // stream-inbound kinds (ADR-0128) are `#[handler]` kinds so a streaming
-// handler can address them at `HttpServerCapability` type-safely.
+// handler can address them at `HttpServerCapability` type-safely; the
+// route-registration kinds (ADR-0130) are `#[handler]` kinds likewise.
 use crate::http::kinds::{HttpInboundReady, HttpResponseChunk, HttpResponseStreamEnd};
+use crate::http::kinds::{
+    RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf,
+    UnregisterRoutesAll,
+};
 use aether_kinds::trace::Settled;
 
 // Default bind address. Loopback per ADR-0108 §6 — binding a public
