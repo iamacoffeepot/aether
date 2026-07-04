@@ -20,9 +20,9 @@ mod test_handlers {
 
     use crate::http::kinds::{HttpHeader, HttpServerRequest, HttpServerResponse};
 
-    /// Replies `200` and echoes the request's method / path / query (as
-    /// headers) and body (verbatim), so a test can assert the full request
-    /// round-tripped to the handler.
+    /// Replies `200` and echoes the request's method / path / query /
+    /// peer address (as headers) and body (verbatim), so a test can
+    /// assert the full request round-tripped to the handler.
     pub struct EchoHttpHandler;
 
     /// Empty runtime state for the stateless echo handler (ADR-0122: a
@@ -57,6 +57,10 @@ mod test_handlers {
                 HttpHeader {
                     name: "x-aether-query".to_string(),
                     value: request.query.clone(),
+                },
+                HttpHeader {
+                    name: "x-aether-peer-addr".to_string(),
+                    value: request.peer_addr.clone(),
                 },
                 HttpHeader {
                     name: "content-type".to_string(),
@@ -234,6 +238,15 @@ fn get_round_trips_to_handler() {
     assert!(
         response.contains("x-aether-query: name=ada\r\n"),
         "{response:?}",
+    );
+    let peer_addr_header = response
+        .lines()
+        .find_map(|line| line.strip_prefix("x-aether-peer-addr: "))
+        .map(|value| value.trim_end_matches('\r'))
+        .expect("x-aether-peer-addr header present");
+    assert!(
+        peer_addr_header.starts_with("127.0.0.1:"),
+        "expected the loopback client's address, got: {peer_addr_header:?}",
     );
     assert!(response.contains("Content-Length: 0\r\n"), "{response:?}");
     assert!(response.contains("Date: "), "{response:?}");

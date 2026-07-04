@@ -118,7 +118,10 @@ pub enum FetchResult {
 /// Inbound HTTP request delivered to a handler component by the server
 /// capability (ADR-0108). `query` is always present — empty string when
 /// the URL carries no query component. `body` is raw bytes so binary
-/// uploads round-trip without loss.
+/// uploads round-trip without loss. `peer_addr` is the connecting
+/// peer's address in `SocketAddr` display form (`ip:port`, IPv6
+/// bracketed), supplied by the cap for handler-side logging /
+/// rate-limit / allowlisting (ADR-0108 §6).
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.http.server.request")]
 pub struct HttpServerRequest {
@@ -127,6 +130,7 @@ pub struct HttpServerRequest {
     pub query: String,
     pub headers: Vec<HttpHeader>,
     pub body: Vec<u8>,
+    pub peer_addr: String,
 }
 
 /// Outbound HTTP response produced by a handler component and forwarded
