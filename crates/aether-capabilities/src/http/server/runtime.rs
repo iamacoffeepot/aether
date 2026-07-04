@@ -288,12 +288,18 @@ impl HttpServerCapabilityState {
             self.close_connection(conn_id, "handler unresolved");
             return;
         };
+        let peer_addr = self
+            .connections
+            .get(&conn_id)
+            .map(|c| c.peer.to_string())
+            .unwrap_or_default();
         let payload = HttpServerRequest {
             method,
             path: request.path,
             query: request.query,
             headers: request.headers,
             body: request.body,
+            peer_addr,
         }
         .encode_into_bytes();
         let mail_id = ctx.send_envelope_as_root(handler, <HttpServerRequest as Kind>::ID, &payload);

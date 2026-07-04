@@ -64,7 +64,9 @@ aether_actor::export!(Web);
 
 The component registers at `aether.component/aether.embedded:web` (its
 `NAMESPACE` const rendered through the ADR-0099 lineage), which is the same
-address you put in `AETHER_HTTP_SERVER_HANDLER_MAILBOX`.
+address you put in `AETHER_HTTP_SERVER_HANDLER_MAILBOX`. `req.peer_addr`
+carries the connecting client's address (`ip:port`, IPv6 bracketed) for
+logging, rate-limiting, or allowlisting.
 
 ## 3. Load the handler
 
