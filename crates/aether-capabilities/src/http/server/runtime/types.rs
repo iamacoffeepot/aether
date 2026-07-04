@@ -281,6 +281,12 @@ pub struct StreamState {
     /// fit the bounded channel yet (chunks still queued). Flushed as slots
     /// free so the terminating chunk always follows the body in order.
     pub pending_end: bool,
+    /// Whether the connection is kept alive once this stream finishes
+    /// (renders `Connection: keep-alive` in the stream head and resumes the
+    /// reader at [`HttpServerCapabilityState::finish_stream`]) rather than
+    /// closing it. Set from the promoted request's [`PendingRequest`] at
+    /// stream open, mirroring `PendingRequest::keep_alive`.
+    pub keep_alive: bool,
 }
 
 /// Per-connection *inbound* request-stream state (ADR-0128), keyed in

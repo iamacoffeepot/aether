@@ -135,13 +135,16 @@ impl HttpServerCapabilityState {
         // once here (it just replied, so it is live) and store it on the
         // stream for credit grants; a missing handler leaves the sentinel and
         // credit sends drop harmlessly, the pre-store no-op behavior.
-        self.in_flight.remove(&stream_id);
+        let keep_alive = self
+            .in_flight
+            .remove(&stream_id)
+            .is_some_and(|pending| pending.keep_alive);
         let handler = self
             .mailer
             .registry()
             .lookup(&self.handler_mailbox)
             .unwrap_or(MailboxId(0));
-        let head = render_stream_head(open);
+        let head = render_stream_head(open, keep_alive);
         self.write_raw_to(conn_id, &head);
 
         let Some(conn) = self.connections.get(&conn_id) else {
@@ -202,6 +205,7 @@ impl HttpServerCapabilityState {
                 writer_thread: Some(writer_thread),
                 credit_outstanding: window,
                 pending_end: false,
+                keep_alive,
             },
         );
         // Grant the initial credit window — the handler learns its
@@ -280,14 +284,26 @@ impl HttpServerCapabilityState {
         self.try_flush_end(stream_id);
     }
 
-    /// A writer thread finished (ADR-0128) — tear the stream down and close
-    /// its connection.
+    /// A writer thread finished (ADR-0128) — tear the stream down, then
+    /// either resume the connection for the next request (keep-alive,
+    /// mirroring the buffered path's decision) or close it. A keep-alive
+    /// stream that outran the reader's response deadline finds the reader
+    /// already gone; `resume_connection`'s send fails and it falls back to
+    /// `close_connection` on that same path.
     pub fn finish_stream(&mut self, stream_id: u64) {
-        let Some(conn_id) = self.streams.get(&stream_id).map(|stream| stream.conn_id) else {
+        let Some((conn_id, keep_alive)) = self
+            .streams
+            .get(&stream_id)
+            .map(|stream| (stream.conn_id, stream.keep_alive))
+        else {
             return;
         };
         self.teardown_stream(stream_id);
-        self.close_connection(conn_id, "stream finished");
+        if keep_alive {
+            self.resume_connection(conn_id);
+        } else {
+            self.close_connection(conn_id, "stream finished");
+        }
     }
 
     /// Try to hand a deferred terminator to the writer; on success clear the

@@ -1631,6 +1631,44 @@ fn content_length_of(head: &[u8]) -> usize {
     0
 }
 
+/// Read exactly one *chunked* transfer-encoding HTTP/1.1 response off
+/// `stream` (a streamed response, ADR-0128) — the head up to its blank line,
+/// then the chunked body up to and including its terminating zero-length
+/// chunk (`0\r\n\r\n`) — leaving any bytes read past it (a pipelined next
+/// response) in `carry` for the following call. The chunked mirror of
+/// [`read_one_response`], which only handles the buffered `Content-Length`
+/// case.
+fn read_one_chunked_response(stream: &mut TcpStream, carry: &mut Vec<u8>) -> String {
+    let mut chunk = [0u8; 4096];
+    let head_end = loop {
+        if let Some(pos) = carry.windows(4).position(|window| window == b"\r\n\r\n") {
+            break pos + 4;
+        }
+        let n = stream.read(&mut chunk).expect("read response head");
+        assert!(
+            n > 0,
+            "eof before response head; buffered: {:?}",
+            String::from_utf8_lossy(carry),
+        );
+        carry.extend_from_slice(&chunk[..n]);
+    };
+    let terminator = b"0\r\n\r\n";
+    let body_end = loop {
+        if let Some(pos) = carry[head_end..]
+            .windows(terminator.len())
+            .position(|window| window == terminator)
+        {
+            break head_end + pos + terminator.len();
+        }
+        let n = stream.read(&mut chunk).expect("read chunked response body");
+        assert!(n > 0, "eof mid chunked response body");
+        carry.extend_from_slice(&chunk[..n]);
+    };
+    let response = String::from_utf8_lossy(&carry[..body_end]).into_owned();
+    carry.drain(..body_end);
+    response
+}
+
 /// Assert that the next read on `stream` observes the server's close (EOF).
 /// The stream's read timeout bounds this so a server that failed to close
 /// surfaces as a timeout rather than a hang.
@@ -1715,6 +1753,109 @@ fn keep_alive_serves_sequential_requests_on_one_socket() {
     assert!(
         third.contains("Connection: close\r\n"),
         "third response closes: {third:?}",
+    );
+    assert_closed(&mut stream);
+}
+
+/// Tripwire (issue #2582): a streamed (chunked) response to a keep-alive
+/// request renders `Connection: keep-alive` and the socket is reused for a
+/// second request — the streamed mirror of
+/// [`keep_alive_serves_sequential_requests_on_one_socket`]. Before the fix,
+/// `render_stream_head` hardcoded `Connection: close` and `finish_stream`
+/// unconditionally closed the connection, so this second read would hang /
+/// fail against the pre-fix behavior.
+#[test]
+fn keep_alive_reuses_socket_after_streamed_response() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<StreamHttpHandler>(())
+        .with_actor::<HttpServerCapability>(stream_config_for(
+            <StreamHttpHandler as Addressable>::NAMESPACE,
+            8,
+        ))
+        .build_passive()
+        .expect("caps boot");
+    let port = port_of(&chassis);
+
+    let mut stream =
+        TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set_read_timeout");
+    let mut carry: Vec<u8> = Vec::new();
+
+    let expected: Vec<u8> = (0..STREAM_CHUNK_COUNT)
+        .flat_map(stream_chunk_body)
+        .collect();
+
+    // First streamed request, HTTP/1.1 default (no `Connection: close`).
+    stream
+        .write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .expect("write first request");
+    stream.flush().expect("flush");
+    let first = read_one_chunked_response(&mut stream, &mut carry);
+    assert!(first.starts_with("HTTP/1.1 200 OK\r\n"), "{first:?}");
+    assert!(
+        first.contains("Connection: keep-alive\r\n"),
+        "streamed response keeps alive: {first:?}",
+    );
+    assert_eq!(
+        dechunk(body_of(&first)).into_bytes(),
+        expected,
+        "first stream reassembles in order",
+    );
+
+    // The reuse invariant: a second request on the same socket after the
+    // stream ended gets served rather than the socket being closed.
+    stream
+        .write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .expect("write second request");
+    stream.flush().expect("flush");
+    let second = read_one_chunked_response(&mut stream, &mut carry);
+    assert!(second.starts_with("HTTP/1.1 200 OK\r\n"), "{second:?}");
+    assert!(
+        second.contains("Connection: keep-alive\r\n"),
+        "second streamed response keeps alive too: {second:?}",
+    );
+    assert_eq!(
+        dechunk(body_of(&second)).into_bytes(),
+        expected,
+        "second stream reassembles in order",
+    );
+}
+
+/// Pins the negative alongside the reuse tripwire above: a streamed request
+/// carrying `Connection: close` still tears the socket down once the stream
+/// ends, exactly like the buffered path.
+#[test]
+fn streamed_response_honors_explicit_connection_close() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<StreamHttpHandler>(())
+        .with_actor::<HttpServerCapability>(stream_config_for(
+            <StreamHttpHandler as Addressable>::NAMESPACE,
+            8,
+        ))
+        .build_passive()
+        .expect("caps boot");
+    let port = port_of(&chassis);
+
+    let mut stream =
+        TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set_read_timeout");
+    let mut carry: Vec<u8> = Vec::new();
+
+    stream
+        .write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .expect("write request");
+    stream.flush().expect("flush");
+    let response = read_one_chunked_response(&mut stream, &mut carry);
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
+    assert!(
+        response.contains("Connection: close\r\n"),
+        "streamed response honors explicit close: {response:?}",
     );
     assert_closed(&mut stream);
 }

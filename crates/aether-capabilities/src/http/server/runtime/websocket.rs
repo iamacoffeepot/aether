@@ -577,6 +577,11 @@ impl HttpServerCapabilityState {
                 writer_thread: Some(writer_thread),
                 credit_outstanding: window,
                 pending_end: false,
+                // A websocket's `StreamFinished` (the close handshake's final
+                // write, a protocol error, or an idle timeout) always tears
+                // the connection down — there is no keep-alive resume once a
+                // connection has upgraded.
+                keep_alive: false,
             },
         );
         if let Some(conn) = self.connections.get_mut(&conn_id) {
