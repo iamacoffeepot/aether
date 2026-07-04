@@ -71,6 +71,7 @@ dependencies = [
  "aether-data",
  "aether-kinds",
  "aether-substrate",
+ "base64",
  "bytemuck",
  "clap",
  "confique",

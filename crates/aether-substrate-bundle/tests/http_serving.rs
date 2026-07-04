@@ -62,6 +62,19 @@ const STREAM_HANDLER_MAILBOX: &str = "aether.component/aether.embedded:web_strea
 /// fixture's own `STREAM_CHUNK_COUNT`.
 const STREAM_CHUNK_COUNT: u32 = 20;
 
+/// The `WebSocketHandler` fixture's `NAMESPACE` const (ADR-0129).
+const WS_HANDLER_NAMESPACE: &str = "web_socket";
+
+/// The websocket handler's full lineage mailbox address.
+const WS_HANDLER_MAILBOX: &str = "aether.component/aether.embedded:web_socket";
+
+/// RFC 6455 §1.3 worked-vector handshake key, and the `Sec-WebSocket-Accept`
+/// the server must echo for it (base64(SHA-1(key + GUID))). Using the fixed
+/// vector keeps the crypto out of the test — the cap's own tripwire pins the
+/// computation.
+const WS_TEST_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+const WS_TEST_ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
+
 /// Slice of `response` after the HTTP head's blank line, or empty if absent.
 fn body_after_head(response: &[u8]) -> &[u8] {
     response
@@ -125,6 +138,86 @@ fn round_trip(port: u16, request: &[u8]) -> Vec<u8> {
     response
 }
 
+/// RFC 6455 opcodes the websocket e2e client uses.
+const WS_OPCODE_TEXT: u8 = 0x1;
+const WS_OPCODE_CONTINUATION: u8 = 0x0;
+const WS_OPCODE_CLOSE: u8 = 0x8;
+
+/// Serialize a masked client→server frame (RFC 6455 §5.1 requires client
+/// frames be masked). `fin` marks the final fragment.
+fn ws_client_frame(opcode: u8, payload: &[u8], fin: bool) -> Vec<u8> {
+    let mask = [0x12u8, 0x34, 0x56, 0x78];
+    let mut out = Vec::with_capacity(payload.len() + 6);
+    let fin_bit = if fin { 0x80 } else { 0x00 };
+    out.push(fin_bit | opcode);
+    let len = payload.len();
+    if len < 126 {
+        out.push(0x80 | u8::try_from(len).unwrap_or(0));
+    } else if let Ok(short) = u16::try_from(len) {
+        out.push(0x80 | 0x7E);
+        out.extend_from_slice(&short.to_be_bytes());
+    } else {
+        out.push(0x80 | 0x7F);
+        out.extend_from_slice(&(len as u64).to_be_bytes());
+    }
+    out.extend_from_slice(&mask);
+    for (i, byte) in payload.iter().enumerate() {
+        out.push(byte ^ mask[i % 4]);
+    }
+    out
+}
+
+/// Read exactly `n` bytes off the socket (the e2e client controls the timing,
+/// so a short read means a bug, not partial data).
+fn read_exact_n(stream: &mut TcpStream, n: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; n];
+    stream.read_exact(&mut buf).expect("read exact frame bytes");
+    buf
+}
+
+/// Read one server→client frame (unmasked, RFC 6455 §5.1) and return its
+/// opcode + payload.
+fn read_server_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
+    let header = read_exact_n(stream, 2);
+    let opcode = header[0] & 0x0F;
+    assert_eq!(
+        header[1] & 0x80,
+        0,
+        "a server→client frame must be unmasked"
+    );
+    let len = match header[1] & 0x7F {
+        126 => {
+            let ext = read_exact_n(stream, 2);
+            usize::from(u16::from_be_bytes([ext[0], ext[1]]))
+        }
+        127 => {
+            let ext = read_exact_n(stream, 8);
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&ext);
+            usize::try_from(u64::from_be_bytes(arr)).unwrap_or(0)
+        }
+        n => usize::from(n),
+    };
+    let payload = read_exact_n(stream, len);
+    (opcode, payload)
+}
+
+/// Read the HTTP response head (through the blank line) one byte at a time, so
+/// the read stops exactly at the head boundary and does not consume any
+/// following websocket frame bytes.
+fn read_http_head(stream: &mut TcpStream) -> String {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        stream.read_exact(&mut byte).expect("read head byte");
+        head.push(byte[0]);
+        if head.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&head).into_owned()
+}
+
 mod tests {
     use super::*;
 
@@ -164,6 +257,7 @@ mod tests {
             max_connections: 1024,
             response_stream_window: 16,
             request_stream_window: 16,
+            websocket_idle_timeout_millis: 300_000,
         };
 
         let sandbox = init_save_sandbox("http-serving");
@@ -283,6 +377,7 @@ mod tests {
             // Window below the chunk count so the round trip must replenish.
             response_stream_window: 8,
             request_stream_window: 16,
+            websocket_idle_timeout_millis: 300_000,
         };
 
         let sandbox = init_save_sandbox("http-serving-stream");
@@ -358,6 +453,158 @@ mod tests {
         );
     }
 
+    /// Boot a headless chassis with `HttpServerCapability` bound and the
+    /// `WebSocketHandler` wasm fixture loaded (ADR-0129). Over a real
+    /// `TcpStream`: perform the RFC 6455 upgrade handshake, exchange a message
+    /// each direction (a single frame, then a fragmented message to exercise
+    /// continuation reassembly), and close cleanly — the end-to-end proof that
+    /// a wasm handler serves a live bidirectional websocket.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn wasm_handler_serves_a_websocket_round_trip() {
+        let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
+        let Some(wasm_path) = locate_component_wasm("aether_test_fixtures_bundle") else {
+            assert!(
+                !strict,
+                "AETHER_REQUIRE_RUNTIME set but http_handler.wasm not pre-built; \
+                 CI's `Pre-build component wasm for scenario tests` step is missing it",
+            );
+            eprintln!(
+                "skipping: http_handler.wasm not built; \
+                 run `cargo build --target wasm32-unknown-unknown \
+                 -p aether-test-fixtures --examples`",
+            );
+            return;
+        };
+        let wasm = fs::read(&wasm_path).expect("read http_handler wasm");
+
+        let server_config = HttpServerConfig {
+            enabled: true,
+            bind_addr: "127.0.0.1:0".to_string(),
+            handler_mailbox: WS_HANDLER_MAILBOX.to_string(),
+            max_request_bytes: 65_536,
+            max_header_bytes: 8_192,
+            request_timeout_millis: 10_000,
+            keep_alive_timeout_millis: 5_000,
+            max_connections: 1024,
+            response_stream_window: 8,
+            request_stream_window: 16,
+            websocket_idle_timeout_millis: 10_000,
+        };
+
+        let sandbox = init_save_sandbox("http-serving-websocket");
+        let env = HeadlessEnv {
+            namespace_roots: test_namespace_roots(sandbox),
+            http: HttpConfig::default(),
+            http_server: Some(server_config),
+            anthropic: AnthropicConfig::default(),
+            gemini: GeminiConfig::default(),
+            contentgen: ContentGenConfig::default(),
+            tick_period: Duration::from_millis(100),
+            rpc_addr: None,
+            workers: None,
+            ring_caps: aether_substrate_bundle::RingCapacities::default(),
+            scheduler_tuning: aether_substrate_bundle::SchedulerTuning::default(),
+            lifecycle_advance_timeout_millis: 1_000,
+            autoload: vec![AutoloadComponent {
+                wasm,
+                config: Vec::new(),
+                name: Some(WS_HANDLER_NAMESPACE.to_owned()),
+                export: Some(WS_HANDLER_NAMESPACE.to_owned()),
+            }],
+        };
+
+        let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if built
+                .resolve_actor::<WasmTrampoline>(WS_HANDLER_NAMESPACE)
+                .is_some()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "websocket trampoline did not register within 30s; \
+                 live trampolines: {:?}",
+                built.resolve_actors::<WasmTrampoline>(),
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        let port = built
+            .handle::<HttpServerHandle>()
+            .expect("HttpServerHandle published by HttpServerCapability")
+            .local_port;
+        assert!(port > 0, "bound to an OS-assigned port");
+
+        let mut stream =
+            TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("set_read_timeout");
+
+        // Handshake.
+        let handshake = format!(
+            "GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: {WS_TEST_KEY}\r\n\r\n"
+        );
+        stream
+            .write_all(handshake.as_bytes())
+            .expect("write handshake");
+        stream.flush().expect("flush handshake");
+
+        let head = read_http_head(&mut stream);
+        assert!(
+            head.starts_with("HTTP/1.1 101 "),
+            "upgrade should reply 101, got: {head:?}",
+        );
+        assert!(
+            head.contains(&format!("Sec-WebSocket-Accept: {WS_TEST_ACCEPT}")),
+            "101 should echo the computed accept key, got: {head:?}",
+        );
+
+        // A single-frame message echoes back verbatim.
+        stream
+            .write_all(&ws_client_frame(WS_OPCODE_TEXT, b"hello websocket", true))
+            .expect("write text frame");
+        stream.flush().expect("flush text frame");
+        let (opcode, payload) = read_server_frame(&mut stream);
+        assert_eq!(opcode, WS_OPCODE_TEXT, "echo should be a text frame");
+        assert_eq!(
+            payload, b"hello websocket",
+            "echo should match what was sent"
+        );
+
+        // A fragmented message (two frames) reassembles into one echoed message
+        // — the cap reassembles inbound continuation frames before dispatch.
+        stream
+            .write_all(&ws_client_frame(WS_OPCODE_TEXT, b"frag-", false))
+            .expect("write fragment 1");
+        stream
+            .write_all(&ws_client_frame(WS_OPCODE_CONTINUATION, b"ment", true))
+            .expect("write fragment 2");
+        stream.flush().expect("flush fragments");
+        let (opcode, payload) = read_server_frame(&mut stream);
+        assert_eq!(opcode, WS_OPCODE_TEXT, "reassembled echo is a text frame");
+        assert_eq!(
+            payload, b"frag-ment",
+            "the cap should reassemble the fragmented message before dispatch",
+        );
+
+        // Clean close: send a close frame, read the cap's echoed close.
+        let mut close_payload = Vec::new();
+        close_payload.extend_from_slice(&1000u16.to_be_bytes());
+        stream
+            .write_all(&ws_client_frame(WS_OPCODE_CLOSE, &close_payload, true))
+            .expect("write close frame");
+        stream.flush().expect("flush close frame");
+        let (opcode, _payload) = read_server_frame(&mut stream);
+        assert_eq!(opcode, WS_OPCODE_CLOSE, "the cap should echo a close frame");
+    }
+
     /// Poll `request` until the response body contains `expected`
     /// (bounded deadline): route registration, and later the drop's
     /// route purge, are asynchronous mail the test must not race.
@@ -419,6 +666,7 @@ mod tests {
             max_connections: 1024,
             response_stream_window: 16,
             request_stream_window: 16,
+            websocket_idle_timeout_millis: 300_000,
         };
 
         let sandbox = init_save_sandbox("http-route-drop");

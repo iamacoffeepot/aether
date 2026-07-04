@@ -42,6 +42,7 @@ default = ["runtime"]
 # macro arm references. Always on for chassis.
 runtime = [
     "dep:aether-substrate",
+    "dep:base64",
     "dep:clap",
     "dep:confique",
     "dep:dirs",
@@ -116,6 +117,11 @@ serde = { workspace = true, default-features = false, features = ["derive", "all
 # Native-only: gated behind the `runtime` feature so wasm builds
 # don't drag in wasmtime / cpal / wgpu transitively.
 aether-substrate = { path = "../aether-substrate", optional = true }
+# ADR-0129: the `Sec-WebSocket-Accept` handshake key is base64(SHA-1(key +
+# GUID)). SHA-1 is hand-rolled in `http/server/runtime.rs` (one fixed hash
+# does not earn a `sha1` crate); base64 is already a workspace dependency, so
+# the cap inherits it — runtime-gated, the websocket handshake is native-only.
+base64 = { workspace = true, optional = true }
 bytemuck = { workspace = true, features = ["derive"] }
 # ADR-0090 unit g (iamacoffeepot/aether#1264): the `Config` derive
 # emits per-cap `*Overlay` structs (`#[derive(clap::Args)]`) next to

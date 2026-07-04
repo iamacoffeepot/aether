@@ -25,7 +25,8 @@ use aether_capabilities::ComponentHostCapability;
 use aether_capabilities::http::HttpServerCapability;
 use aether_capabilities::http::kinds::{
     HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen, HttpServerRequest,
-    HttpServerResponse, HttpStreamCredit, RegisterRouteSelf,
+    HttpServerResponse, HttpStreamCredit, RegisterRouteSelf, WebSocketAccept, WebSocketClose,
+    WebSocketMessage,
 };
 use aether_data::{Kind as _, MailboxId};
 use aether_kinds::DropComponent;
@@ -145,6 +146,69 @@ impl WasmActor for StreamingHttpHandler {
             self.ended = true;
         }
     }
+}
+
+/// Reference websocket handler fixture (ADR-0129) for the `serving-http`
+/// websocket e2e test. On an upgrade request it opts in with `WebSocketAccept`
+/// (any inbound request is treated as an upgrade — the cap only dispatches here
+/// after it has validated the RFC 6455 handshake); thereafter it echoes each
+/// inbound `WebSocketMessage` straight back, preserving the text/binary flag,
+/// so the client reads back exactly what it sent. The echo is sent on the
+/// inbound message's causal chain (a plain `.send`), so the cap routes it to
+/// the originating socket (ADR-0129 §3).
+///
+/// Registered at `aether.component/aether.embedded:web_socket` after load.
+pub struct WebSocketHandler;
+
+#[actor]
+impl WasmActor for WebSocketHandler {
+    const NAMESPACE: &'static str = "web_socket";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(WebSocketHandler)
+    }
+
+    /// Accept every upgrade the cap routes here (the cap has already validated
+    /// the handshake). A real handler would apply auth / path policy first.
+    ///
+    /// # Agent
+    /// Not sent manually — the `aether.http.server` cap dispatches an
+    /// `HttpServerRequest` for a websocket upgrade; replying `WebSocketAccept`
+    /// completes the handshake, `HttpServerResponse` declines it.
+    #[handler]
+    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> WebSocketAccept {
+        WebSocketAccept {
+            subprotocol: None,
+            headers: Vec::new(),
+        }
+    }
+
+    /// Echo one inbound message back to the peer on the same causal chain.
+    ///
+    /// # Agent
+    /// Not sent manually — the cap dispatches one per complete inbound
+    /// websocket message on the upgraded connection.
+    #[handler]
+    fn on_message(&mut self, ctx: &mut WasmCtx<'_>, msg: WebSocketMessage) {
+        ctx.actor::<HttpServerCapability>().send(&msg);
+    }
+
+    /// The cap's outbound send window (ADR-0128 / ADR-0129 §3). The echo never
+    /// outruns the window, so this handler tracks no credit — it accepts the
+    /// grant to keep the log quiet.
+    ///
+    /// # Agent
+    /// Not sent manually — the cap grants credit as writer slots free.
+    #[handler]
+    fn on_credit(&mut self, _ctx: &mut WasmCtx<'_>, _credit: HttpStreamCredit) {}
+
+    /// A peer-initiated close (ADR-0129 §5). Nothing to do — the cap has
+    /// already echoed the close frame and is tearing the connection down.
+    ///
+    /// # Agent
+    /// Not sent manually — the cap reports a peer close here.
+    #[handler]
+    fn on_close(&mut self, _ctx: &mut WasmCtx<'_>, _close: WebSocketClose) {}
 }
 
 /// Routed sibling of [`HttpHandler`] for the ADR-0130 drop-purge e2e
