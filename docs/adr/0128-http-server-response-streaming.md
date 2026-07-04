@@ -1,0 +1,71 @@
+# ADR-0128: HTTP server response streaming with windowed flow control
+
+- **Status:** Proposed
+- **Date:** 2026-07-03
+
+Extends **ADR-0108** (the `aether.http.server` capability), which parked streaming in its §4 and named a chunk-kind protocol with backpressure as the natural next surface. Builds on the settlement model of **ADR-0080** / **ADR-0106**, the synchronous-inline mail routing of **ADR-0038**, and the off-hot-path staging stance of **ADR-0103**. Reuses the accept → dispatch → reply spine ADR-0108 established.
+
+## Context
+
+The HTTP server capability buffers whole bodies both directions (ADR-0108 §4). A handler component receives one `HttpServerRequest` and replies one `HttpServerResponse` whose entire `body: Vec<u8>` the cap renders in a single pass with a cap-supplied `Content-Length`, then closes the connection (`Connection: close`). Three shapes are out of reach: a download too large to hold in wasm memory, an upload the peer streams past the request byte cap, and a long-lived event stream (server-sent events, a websocket) that emits output over minutes with no single terminal reply.
+
+ADR-0108 §4 parks all three because "a streaming body would require a chunk-kind protocol with backpressure that the mail layer does not model." That gap is concrete. Mail routing is synchronous and inline: `Mailer::push` resolves the recipient and runs its handler on the caller's thread, and each actor inbox is an unbounded `std::sync::mpsc` — every push is accepted, and no recipient can signal a producer to slow down (`crates/aether-substrate/src/mail/mailer.rs`, `crates/aether-substrate/src/mail/registry.rs`). The input pub/sub streams (ADR-0021/0068) are the same shape: a keyed broadcast that fans one push per subscriber with no flow control. The audio track lane (ADR-0103) is the one bounded continuous feed, but it is bounded-with-**drop** (a full `ArrayQueue` discards the event) and hands over a whole decoded buffer once — its authors deliberately declined a refill/streaming protocol. None of these is a backpressured chunk stream, and none can become one without reopening the layer it lives in.
+
+A second constraint shapes the answer: settlement. A causal chain is live while it has unbalanced `Sent`s or an outstanding hold (`in_flight > 0 || held_open > 0`), and the per-actor trace rings evict with settlement-awareness — a full ring grows to protect the oldest chain still in flight and only reclaims an entry once its chain settles (`crates/aether-substrate/src/runtime/trace.rs`). A stream that holds one settlement chain open across thousands of chunks over minutes therefore defeats trace-ring eviction and forces every actor's ring to grow toward its ceiling. Any streaming design that pins a single chain open for the whole stream pays this cost; one that settles per chunk does not.
+
+## Decision
+
+Add a **response-streaming surface** to `aether.http.server`: a handler emits a response body incrementally across many mails, and the cap streams each piece to the peer as it arrives, under a **windowed credit protocol** that lets the cap tell the handler to slow down. The first increment is server → client response streaming only. Streamed request bodies and websocket upgrade are named later increments, not this change.
+
+### 1. Streaming is opt-in, alongside the buffered path
+
+The existing `HttpServerRequest` → `HttpServerResponse` round trip is unchanged and remains the default. A handler that wants to stream replies with a new stream-open kind instead of `HttpServerResponse`; the cap sees the open kind and switches that connection into streaming mode. A handler that replies `HttpServerResponse` gets exactly today's buffered behavior. No existing endpoint changes.
+
+### 2. Response-stream kind vocabulary
+
+New wire kinds in `crates/aether-capabilities/src/http/kinds.rs` (owned by the server capability per ADR-0121), reusing `HttpHeader`:
+
+- `HttpResponseStreamOpen { status: u16, headers: Vec<HttpHeader> }` — the handler's first reply on a streamed response. It declares the status line and headers; the cap writes the response head with `Transfer-Encoding: chunked` (or holds the connection open for an SSE content-type) instead of `Content-Length`, and begins the stream.
+- `HttpResponseChunk { body: Vec<u8> }` — one body piece. The handler sends these on the correlated stream; the cap frames each as a chunk to the peer. Each chunk consumes one unit of credit.
+- `HttpResponseStreamEnd {}` — the handler's terminator. The cap writes the terminating chunk (and any close/keep-alive disposition) and finalizes the stream.
+- `HttpStreamCredit { credit: u32 }` — the flow-control mail the **cap sends to the handler**. It grants the handler permission to send up to `credit` more chunks. This is the backpressure signal the mail layer lacks, modeled one level up as an explicit typed mail between the two endpoints.
+
+Correlation reuses the ADR-0108 in-flight table: the stream is keyed by the original dispatch's correlation id, so every chunk mail and every credit mail rides the same correlation the request opened.
+
+### 3. Per-connection writer thread + bounded hand-off — where socket backpressure lives
+
+Today the cap writes the response inline on its own actor thread (`write_raw_to`). That is safe for one buffered write but fatal for a stream: a slow peer's blocked socket write would pin the substrate scheduler thread for the life of the stream. So a streamed connection gets a **per-connection writer thread** (mirroring the existing per-connection reader thread), fed by a **bounded** channel (`crossbeam_channel::bounded(N)` / `sync_channel`). The cap's stream handlers push each `HttpResponseChunk`'s bytes onto that channel; the writer thread drains it to the socket. TCP backpressure — a slow peer — blocks the **writer thread**, not the scheduler.
+
+The bounded channel is the true backpressure source. As the writer thread drains chunks to the socket, the cap replenishes the handler's credit: it issues `HttpStreamCredit` mail back to the handler as writer-thread slots free up, so the handler's in-flight chunk count is bounded by the window. When credit reaches zero the handler simply stops sending — it is an ordinary actor and pauses until the next `HttpStreamCredit` mail arrives, which it handles like any other mail. The window size is a config knob with a default; the credit accounting lives entirely in the cap's per-connection stream state.
+
+Backpressure is modeled at the capability/kind level, not in the mailer. The mail layer stays synchronous-inline and push-accept-always (ADR-0038); adding a bounded queue to the mailer would fight that design and touch every actor. The producer rate the design must govern is socket-drain rate, and that flows naturally: socket → writer-thread bounded channel → credit mail → handler.
+
+### 4. Per-chunk settlement, not a stream-long hold
+
+Each `HttpResponseChunk` and each `HttpStreamCredit` mail is its own short causal chain that settles as soon as it is handled. The stream's lifetime is tracked by the cap's per-connection stream state, **not** by holding a settlement chain open. This is load-bearing: a stream-long hold would defeat the trace ring's settlement-aware eviction and grow every actor's ring toward its ceiling over a long stream (ADR-0106 / `runtime/trace.rs`). The original request dispatch settles once the handler acknowledges with `HttpResponseStreamOpen`; the cap's existing settlement subscription still answers `502` if the handler never opens a stream nor replies, and the per-request timeout still answers `504`. A mid-stream handler stall is bounded by an idle-write timeout on the writer thread.
+
+### 5. First increment: response streaming only
+
+Response streaming (handler is the producer, peer is the consumer) is the highest-value and simplest shape: unidirectional, backpressure flows handler ← cap ← socket, and it covers both large downloads (chunked transfer-encoding) and server-sent events (a `text/event-stream` content-type over the same chunk framing). Two shapes are deferred to their own increments:
+
+- **Streamed request bodies** invert the credit direction — the peer is the producer, so the cap must grant credit to the socket reader and deliver inbound chunks to the handler as mail. It reuses this ADR's protocol shape mirrored, and lands as its own change.
+- **Websocket upgrade** adds the `Upgrade` handshake and a bidirectional framed message protocol on the upgraded socket. It composes with the writer thread and credit mechanism but is a distinct surface.
+
+## Consequences
+
+- **Positive** — a handler serves arbitrarily large or open-ended responses without holding the body in wasm memory: large downloads, log tails, and server-sent event streams become expressible. The substrate-as-general-application-host story gains a streaming inbound-response half. The buffered `HttpServerResponse` path is untouched, so the change is purely additive.
+- **Positive** — backpressure is explicit and legible: the `HttpStreamCredit` mail is visible in traces, and the window bound is a config knob. The mail layer keeps its synchronous-inline invariant; no scheduler surgery.
+- **Neutral / cost** — four new wire kinds, a per-connection writer thread (one more OS thread per streamed connection, on top of the reader thread), a bounded hand-off channel, and per-connection stream state with credit accounting. A window-size config knob joins `HttpServerConfig`.
+- **Negative / risk** — the credit protocol is a real state machine (open → chunk\* under credit → end, with credit replenishment and mid-stream teardown) that the cap must drive correctly, including the peer-disconnect-mid-stream and handler-stall-mid-stream paths. A handler that ignores the credit signal and floods chunks must be bounded by the cap dropping over-window chunks or tearing the stream down — a trust boundary the design must pin.
+- **Follow-on** — streamed request bodies and websocket upgrade land as their own increments on this protocol foundation. Keep-alive (persistent connections) composes with streaming via the chunked terminator but is independent — a streamed response can close at stream end without it. The per-connection writer thread is the v1 mechanism, not the long-term scale design: an event-driven I/O loop (non-blocking sockets + readiness polling) replaces both the writer threads and the existing per-connection reader threads if connection count ever demands it — the same refinement ADR-0108 parks for its accept path. Websocket at scale (thousands of mostly-idle long-lived sockets) is the increment that forces it; the wire kinds and credit protocol are unchanged by that swap, only where blocked writes park.
+
+## Alternatives considered
+
+- **Add bounded-queue backpressure to the mailer.** Rejected: mail routing is synchronous-inline and push-accept-always by design (ADR-0038 retired the queue); adding a bounded queue would fight that invariant and touch every actor inbox. The backpressure that matters is socket-drain rate, which the per-connection writer thread's bounded channel captures without changing the mail layer.
+- **Hold one settlement chain open for the whole stream.** Rejected: a long-lived open chain defeats the trace ring's settlement-aware eviction and grows every actor's ring toward its ceiling over a multi-minute stream (ADR-0106). Per-chunk settlement is cheap and keeps the trace surface bounded.
+- **Reuse the audio track lane's bounded ring (ADR-0103).** Rejected: that lane is bounded-with-**drop** — a full queue discards the event. Silently dropping response body bytes corrupts the download; a response stream needs bounded-with-backpressure, not bounded-with-drop.
+- **Websocket first.** Rejected: bidirectional framing plus the upgrade handshake is more surface than response streaming, which already delivers the download and SSE value through a unidirectional protocol. Websocket lands on this foundation later.
+- **Keep inline socket writes, just loop over N chunks on the cap thread.** Rejected: a slow peer would block the cap's actor thread — and thus a substrate scheduler thread — for the life of the stream. The write syscall itself is cheap while the kernel send buffer has room; the cost being avoided is the block when it doesn't. The writer thread is mandatory to keep socket backpressure off the scheduler.
+- **One shared writer thread for all streamed connections, blocking writes.** Rejected: the first slow peer blocks the shared thread and every other stream queues behind it — head-of-line blocking. Thread-per-connection cannot produce that failure; a slow peer harms only its own stream.
+- **One event-loop writer (non-blocking sockets + readiness polling).** Deferred, not rejected: it removes the per-connection thread cost without head-of-line blocking, and done honestly it subsumes the per-connection reader threads too — it is the ADR-0108 "async accept loop" refinement extended to the whole connection I/O path. It is also a hand-rolled event loop with per-connection partial-write bookkeeping, machinery the v1 regime (loopback-default bind, `max_connections`-bounded, SSE and download streams) does not need. Named in Follow-on as the scale path the websocket increment forces; the credit protocol is unchanged by the swap.
+- **Implicit backpressure with no credit mail (let the unbounded inbox absorb chunks).** Rejected: the handler would outrun a slow peer without bound, growing its inbox and holding chunk bytes in memory — the exact unbounded-buffering this change exists to remove. The explicit credit window is what bounds in-flight chunks.
