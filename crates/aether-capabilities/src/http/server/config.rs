@@ -2,6 +2,8 @@
 //! layer the chassis builds from argv/env and hands to
 //! `with_actor::<HttpServerCapability>(config)`.
 
+use std::collections::HashSet;
+
 use super::{
     DEFAULT_BIND_ADDR, DEFAULT_MAX_HEADER_BYTES, DEFAULT_MAX_REQUEST_BYTES,
     DEFAULT_REQUEST_TIMEOUT_MILLIS,
@@ -43,9 +45,23 @@ pub struct HttpServerConfig {
     pub bind_addr: String,
     /// The single handler mailbox every request is dispatched to (e.g.
     /// `"aether.component/aether.embedded:web"`). Empty = every request is
-    /// answered `503` (no handler resolves).
+    /// answered `503` (no handler resolves). Acts as the fallback handler
+    /// when `routes` is set but no route matches.
     #[cfg_attr(feature = "runtime", config(default = ""))]
     pub handler_mailbox: String,
+    /// Optional path-prefix → handler-mailbox route table. Each entry is
+    /// a `"<prefix>=<mailbox>"` string (e.g.
+    /// `"/api=aether.component/aether.embedded:api"`); a request routes
+    /// to the longest matching prefix's handler and falls back to
+    /// [`handler_mailbox`](Self::handler_mailbox) when no prefix matches.
+    /// Empty (the default) = every request hits `handler_mailbox`, so an
+    /// existing single-handler deployment is unchanged. Env
+    /// `AETHER_HTTP_SERVER_ROUTES` is comma-split (`csv_set`); mailbox
+    /// lineage names carry `/` and `:` but never commas, so the split is
+    /// safe. A malformed entry (no `=`, or an empty side) fails the cap's
+    /// `init` with a `BootError`.
+    #[cfg_attr(feature = "runtime", config(default = [], csv_set))]
+    pub routes: HashSet<String>,
     /// Cap on the request body in bytes ([`DEFAULT_MAX_REQUEST_BYTES`]);
     /// an announced `Content-Length` past this is answered `413`.
     #[cfg_attr(feature = "runtime", config(default = 1_048_576))]
@@ -67,6 +83,7 @@ impl Default for HttpServerConfig {
             enabled: false,
             bind_addr: DEFAULT_BIND_ADDR.to_string(),
             handler_mailbox: String::new(),
+            routes: HashSet::new(),
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
             max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
             request_timeout_millis: DEFAULT_REQUEST_TIMEOUT_MILLIS,

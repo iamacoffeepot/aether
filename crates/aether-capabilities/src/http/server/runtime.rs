@@ -46,6 +46,7 @@ pub use crate::http::kinds::HttpServerResponse;
 use crate::http::kinds::{HttpHeader, HttpMethod, HttpServerRequest};
 
 use aether_substrate::Mail;
+use std::cmp::Reverse;
 use std::io::{self, Read, Write};
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -156,6 +157,11 @@ impl WakeSink {
 /// `NativeActor::State` interface without exposing it as crate-public API.
 pub struct HttpServerCapabilityState {
     pub handler_mailbox: String,
+    /// Path-prefix → handler-mailbox routes, sorted by prefix length
+    /// descending so a longest-prefix match is the first
+    /// `path.starts_with(prefix)` hit. Parsed from `config.routes` at
+    /// `init`; empty ⇒ every request falls back to `handler_mailbox`.
+    pub routes: Vec<(String, String)>,
     pub max_request_bytes: usize,
     pub max_header_bytes: usize,
     pub request_timeout: Duration,
@@ -278,12 +284,23 @@ impl HttpServerCapabilityState {
             self.close_connection(conn_id, "unsupported method");
             return;
         };
+        // Longest-prefix route resolution (ADR-0108 follow-on step one):
+        // `routes` is sorted by prefix length descending, so the first
+        // `path.starts_with(prefix)` is the longest match. No route
+        // matches → the configured `handler_mailbox` default.
+        let handler_name = self
+            .routes
+            .iter()
+            .find(|(prefix, _)| request.path.starts_with(prefix.as_str()))
+            .map_or(self.handler_mailbox.as_str(), |(_, mailbox)| {
+                mailbox.as_str()
+            });
         // Late-binding handler resolution (ADR-0108 §3): resolve the
-        // configured mailbox by name at dispatch time through the
-        // registry — the sanctioned runtime-name path, which folds a
-        // lineage-rendered name to its id and reports a miss as `None`.
-        // Nothing live under the name → `503`.
-        let Some(handler) = self.mailer.registry().lookup(&self.handler_mailbox) else {
+        // chosen mailbox by name at dispatch time through the registry —
+        // the sanctioned runtime-name path, which folds a lineage-rendered
+        // name to its id and reports a miss as `None`. Nothing live under
+        // the name → `503`.
+        let Some(handler) = self.mailer.registry().lookup(handler_name) else {
             self.write_status_response(conn_id, 503, "no handler registered");
             self.close_connection(conn_id, "handler unresolved");
             return;
@@ -739,6 +756,27 @@ impl NativeActor for HttpServerCapability {
         config: HttpServerConfig,
         ctx: &mut NativeInitCtx<'_>,
     ) -> Result<HttpServerCapabilityState, BootError> {
+        // Parse the route table into (prefix, mailbox) pairs, sorted by
+        // prefix length descending for longest-prefix dispatch (ADR-0108
+        // follow-on step one). A malformed entry (no `=`, or an empty
+        // side) fails the bind fast, symmetric with the cap's synchronous
+        // bind-failure surface.
+        let mut routes: Vec<(String, String)> = Vec::with_capacity(config.routes.len());
+        for entry in &config.routes {
+            let Some((prefix, mailbox)) = entry.split_once('=') else {
+                return Err(BootError::Other(Box::new(io::Error::other(format!(
+                    "AETHER_HTTP_SERVER_ROUTES entry {entry:?} missing '=' (want \"<prefix>=<mailbox>\")"
+                )))));
+            };
+            if prefix.is_empty() || mailbox.is_empty() {
+                return Err(BootError::Other(Box::new(io::Error::other(format!(
+                    "AETHER_HTTP_SERVER_ROUTES entry {entry:?} has an empty prefix or mailbox"
+                )))));
+            }
+            routes.push((prefix.to_string(), mailbox.to_string()));
+        }
+        routes.sort_by_key(|(prefix, _)| Reverse(prefix.len()));
+
         let listener =
             TcpListener::bind(&config.bind_addr).map_err(|e| BootError::Other(Box::new(e)))?;
         let local_addr = listener
@@ -797,6 +835,7 @@ impl NativeActor for HttpServerCapability {
             addr = %config.bind_addr,
             port,
             handler = %config.handler_mailbox,
+            routes = routes.len(),
             "http server bound",
         );
 
@@ -804,6 +843,7 @@ impl NativeActor for HttpServerCapability {
 
         Ok(HttpServerCapabilityState {
             handler_mailbox: config.handler_mailbox,
+            routes,
             max_request_bytes: config.max_request_bytes,
             max_header_bytes: config.max_header_bytes,
             request_timeout: Duration::from_millis(config.request_timeout_millis),
@@ -982,6 +1022,7 @@ mod unit_tests {
         assert_eq!(layer.bind_addr, DEFAULT_BIND_ADDR);
         assert_eq!(layer.bind_addr, default.bind_addr);
         assert_eq!(layer.handler_mailbox, "");
+        assert!(layer.routes.is_empty());
         assert_eq!(layer.max_request_bytes, DEFAULT_MAX_REQUEST_BYTES);
         assert_eq!(layer.max_header_bytes, DEFAULT_MAX_HEADER_BYTES);
         assert_eq!(layer.request_timeout_millis, DEFAULT_REQUEST_TIMEOUT_MILLIS);

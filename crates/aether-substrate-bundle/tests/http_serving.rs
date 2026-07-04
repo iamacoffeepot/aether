@@ -116,6 +116,7 @@ mod tests {
             max_request_bytes: 65_536,
             max_header_bytes: 8_192,
             request_timeout_millis: 10_000,
+            ..HttpServerConfig::default()
         };
 
         let sandbox = init_save_sandbox("http-serving");

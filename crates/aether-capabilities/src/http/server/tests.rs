@@ -8,7 +8,9 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-use test_handlers::{EchoHttpHandler, SilentHttpHandler};
+use test_handlers::{
+    EchoHttpHandler, RouteApiHandler, RouteApiV2Handler, RouteDefaultHandler, SilentHttpHandler,
+};
 
 mod test_handlers {
     //! Minimal native handler actors behind the server in the integration
@@ -71,6 +73,60 @@ mod test_handlers {
         }
     }
 
+    /// Replies `200` with a fixed tag as the body, so a route test can
+    /// assert which handler a request actually reached (the response body
+    /// names the handler). Three distinct namespaces below give the route
+    /// table three addressable targets.
+    macro_rules! tagged_handler {
+        ($ty:ident, $state:ident, $namespace:literal, $tag:literal) => {
+            pub struct $ty;
+            pub struct $state;
+
+            #[actor(singleton)]
+            impl NativeActor for $ty {
+                type State = $state;
+                type Config = ();
+                const NAMESPACE: &'static str = $namespace;
+
+                fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<$state, BootError> {
+                    Ok($state)
+                }
+
+                #[handler]
+                fn on_request(
+                    _state: &mut Self::State,
+                    _ctx: &mut NativeCtx<'_>,
+                    _request: HttpServerRequest,
+                ) -> HttpServerResponse {
+                    HttpServerResponse {
+                        status: 200,
+                        headers: Vec::new(),
+                        body: Vec::from($tag),
+                    }
+                }
+            }
+        };
+    }
+
+    tagged_handler!(
+        RouteApiHandler,
+        RouteApiHandlerState,
+        "aether.http.test_route_api",
+        b"api"
+    );
+    tagged_handler!(
+        RouteApiV2Handler,
+        RouteApiV2HandlerState,
+        "aether.http.test_route_api_v2",
+        b"api-v2"
+    );
+    tagged_handler!(
+        RouteDefaultHandler,
+        RouteDefaultHandlerState,
+        "aether.http.test_route_default",
+        b"default"
+    );
+
     /// Receives the request and returns without replying — the response-less
     /// chain the `502` settlement safety net covers.
     pub struct SilentHttpHandler;
@@ -104,6 +160,16 @@ fn config_for(handler: &str, max_request_bytes: usize) -> HttpServerConfig {
         bind_addr: "127.0.0.1:0".to_string(),
         handler_mailbox: handler.to_string(),
         max_request_bytes,
+        request_timeout_millis: 5_000,
+        ..HttpServerConfig::default()
+    }
+}
+
+fn config_with_routes(handler: &str, routes: &[&str]) -> HttpServerConfig {
+    HttpServerConfig {
+        bind_addr: "127.0.0.1:0".to_string(),
+        handler_mailbox: handler.to_string(),
+        routes: routes.iter().map(|s| (*s).to_string()).collect(),
         request_timeout_millis: 5_000,
         ..HttpServerConfig::default()
     }
@@ -323,4 +389,84 @@ fn response_less_chain_is_502() {
         response.starts_with("HTTP/1.1 502 "),
         "expected 502, got: {response:?}",
     );
+}
+
+/// A configured prefix routes to that prefix's handler; a path matching
+/// no prefix falls back to the default `handler_mailbox`.
+#[test]
+fn route_prefix_dispatches_and_falls_back() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<RouteApiHandler>(())
+        .with_actor::<RouteDefaultHandler>(())
+        .with_actor::<HttpServerCapability>(config_with_routes(
+            <RouteDefaultHandler as Addressable>::NAMESPACE,
+            &["/api=aether.http.test_route_api"],
+        ))
+        .build_passive()
+        .expect("caps boot");
+    let port = port_of(&chassis);
+
+    let routed = round_trip(
+        port,
+        b"GET /api/widgets HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert!(routed.starts_with("HTTP/1.1 200 OK\r\n"), "{routed:?}");
+    assert_eq!(body_of(&routed), "api", "routed to the /api handler");
+
+    let unrouted = round_trip(port, b"GET /other HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(unrouted.starts_with("HTTP/1.1 200 OK\r\n"), "{unrouted:?}");
+    assert_eq!(
+        body_of(&unrouted),
+        "default",
+        "unrouted path falls back to handler_mailbox",
+    );
+}
+
+/// With two overlapping prefixes configured, the longest matching prefix
+/// wins regardless of `HashSet` iteration order.
+#[test]
+fn longest_prefix_wins() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<RouteApiHandler>(())
+        .with_actor::<RouteApiV2Handler>(())
+        .with_actor::<RouteDefaultHandler>(())
+        .with_actor::<HttpServerCapability>(config_with_routes(
+            <RouteDefaultHandler as Addressable>::NAMESPACE,
+            &[
+                "/api=aether.http.test_route_api",
+                "/api/v2=aether.http.test_route_api_v2",
+            ],
+        ))
+        .build_passive()
+        .expect("caps boot");
+    let port = port_of(&chassis);
+
+    let deep = round_trip(port, b"GET /api/v2/x HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert_eq!(
+        body_of(&deep),
+        "api-v2",
+        "/api/v2/x takes the longer /api/v2 prefix",
+    );
+
+    let shallow = round_trip(port, b"GET /api/other HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert_eq!(body_of(&shallow), "api", "/api/other takes the /api prefix");
+
+    let unrouted = round_trip(port, b"GET /zzz HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert_eq!(body_of(&unrouted), "default", "no prefix ⇒ default handler");
+}
+
+/// A malformed route entry (no `=`) fails the cap's `init` fast rather
+/// than binding with a silently-dropped route.
+#[test]
+fn malformed_route_entry_fails_boot() {
+    let (registry, mailer) = fresh_substrate();
+    let result = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<HttpServerCapability>(config_with_routes(
+            "aether.http.test_route_default",
+            &["no-equals-sign"],
+        ))
+        .build_passive();
+    assert!(result.is_err(), "malformed route must abort boot");
 }
