@@ -8,7 +8,7 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-use test_handlers::{EchoHttpHandler, SilentHttpHandler};
+use test_handlers::{EchoHttpHandler, FixedBodyHttpHandler, SilentHttpHandler};
 
 mod test_handlers {
     //! Minimal native handler actors behind the server in the integration
@@ -67,6 +67,45 @@ mod test_handlers {
                 status: 200,
                 headers,
                 body: request.body,
+            }
+        }
+    }
+
+    /// Always replies `200` with a fixed non-empty body, regardless of
+    /// method — unlike [`EchoHttpHandler`] (which echoes the request
+    /// body, empty for HEAD by definition and so unable to prove body
+    /// suppression), this handler always has a body to suppress.
+    pub struct FixedBodyHttpHandler;
+
+    /// Empty runtime state for the stateless fixed-body handler (ADR-0122).
+    pub struct FixedBodyHttpHandlerState;
+
+    #[actor(singleton)]
+    impl NativeActor for FixedBodyHttpHandler {
+        type State = FixedBodyHttpHandlerState;
+        type Config = ();
+        const NAMESPACE: &'static str = "aether.http.test_fixed_body_handler";
+
+        fn init(
+            (): (),
+            _ctx: &mut NativeInitCtx<'_>,
+        ) -> Result<FixedBodyHttpHandlerState, BootError> {
+            Ok(FixedBodyHttpHandlerState)
+        }
+
+        #[handler]
+        fn on_request(
+            _state: &mut Self::State,
+            _ctx: &mut NativeCtx<'_>,
+            _request: HttpServerRequest,
+        ) -> HttpServerResponse {
+            HttpServerResponse {
+                status: 200,
+                headers: vec![HttpHeader {
+                    name: "content-type".to_string(),
+                    value: "text/plain".to_string(),
+                }],
+                body: b"fixed body".to_vec(),
             }
         }
     }
@@ -323,4 +362,122 @@ fn response_less_chain_is_502() {
         response.starts_with("HTTP/1.1 502 "),
         "expected 502, got: {response:?}",
     );
+}
+
+/// A percent-encoded path is decoded before it reaches the handler
+/// (ADR-0108 §2's "the decoded path component"); the query string stays
+/// raw.
+#[test]
+fn percent_encoded_path_is_decoded() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<EchoHttpHandler>(())
+        .with_actor::<HttpServerCapability>(config_for(
+            <EchoHttpHandler as Addressable>::NAMESPACE,
+            1024,
+        ))
+        .build_passive()
+        .expect("caps boot");
+
+    let response = round_trip(
+        port_of(&chassis),
+        b"GET /hello%20world?x=1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK\r\n"),
+        "expected 200, got: {response:?}",
+    );
+    assert!(
+        response.contains("x-aether-path: /hello world\r\n"),
+        "{response:?}",
+    );
+    assert!(response.contains("x-aether-query: x=1\r\n"), "{response:?}");
+}
+
+/// A `Transfer-Encoding` request head (chunked bodies are the parked
+/// streaming surface, ADR-0108 §4) is rejected `411` rather than
+/// dispatched with a silently-dropped body.
+#[test]
+fn transfer_encoding_is_411() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<EchoHttpHandler>(())
+        .with_actor::<HttpServerCapability>(config_for(
+            <EchoHttpHandler as Addressable>::NAMESPACE,
+            1024,
+        ))
+        .build_passive()
+        .expect("caps boot");
+
+    let response = round_trip(
+        port_of(&chassis),
+        b"POST /chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 411 "),
+        "expected 411, got: {response:?}",
+    );
+}
+
+/// A request carrying `Expect: 100-continue` receives the interim `100
+/// Continue` before the final response.
+#[test]
+fn expect_continue_gets_100_continue() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<EchoHttpHandler>(())
+        .with_actor::<HttpServerCapability>(config_for(
+            <EchoHttpHandler as Addressable>::NAMESPACE,
+            1024,
+        ))
+        .build_passive()
+        .expect("caps boot");
+
+    let response = round_trip(
+        port_of(&chassis),
+        b"POST /submit HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nhello",
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 100 Continue\r\n\r\n"),
+        "expected interim 100 Continue, got: {response:?}",
+    );
+    assert!(
+        response.contains("HTTP/1.1 200 OK\r\n"),
+        "expected final 200 after the interim, got: {response:?}",
+    );
+}
+
+/// A HEAD response carries the handler's headers — including the
+/// `Content-Length` the body would have had — but no body bytes; a GET
+/// to the same handler still returns the body.
+#[test]
+fn head_response_suppresses_body() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<FixedBodyHttpHandler>(())
+        .with_actor::<HttpServerCapability>(config_for(
+            <FixedBodyHttpHandler as Addressable>::NAMESPACE,
+            1024,
+        ))
+        .build_passive()
+        .expect("caps boot");
+    let port = port_of(&chassis);
+
+    let head_response = round_trip(port, b"HEAD /x HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(
+        head_response.starts_with("HTTP/1.1 200 OK\r\n"),
+        "expected 200, got: {head_response:?}",
+    );
+    assert!(
+        head_response.contains("Content-Length: 10\r\n"),
+        "{head_response:?}",
+    );
+    assert_eq!(
+        body_of(&head_response),
+        "",
+        "HEAD must not carry a message body",
+    );
+
+    let get_response = round_trip(port, b"GET /x HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert_eq!(body_of(&get_response), "fixed body");
 }
