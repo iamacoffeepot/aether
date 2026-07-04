@@ -3,7 +3,7 @@
 //! summed output the cpal callback drains.
 
 use std::cmp::{Ordering, Reverse};
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 
 use crossbeam_queue::ArrayQueue;
@@ -17,7 +17,7 @@ use super::reverb::Reverb;
 use super::sample::{SampleBank, SampleVoice};
 use super::schedule::{ScheduledEntry, millis_to_frames};
 use super::track::{TRACK_FADE_SECS, TrackVoice};
-use super::voice::{MAX_VOICES, Voice, VoiceKernel, build_builtin_kernel};
+use super::voice::{MAX_VOICES, Voice, VoiceKernel, build_builtin_kernel, pan_law};
 
 /// Whole-process synth state. Lives on the cpal callback thread;
 /// the cap communicates via the event queue.
@@ -50,6 +50,11 @@ pub struct Synth {
     /// silence, so its wet output stays exactly zero and the mix is
     /// bit-for-bit identical to the pre-reverb dry sum.
     reverb_send: f32,
+    /// Live per-sender level trim (ADR-0127), keyed by the envelope
+    /// sender's `MailboxId`. An absent sender renders at unity (`1.0`). A
+    /// `set_sender_gain` inserts/overwrites here; `fill` resolves each
+    /// voice's entry once per block, so the trim ducks sounding voices.
+    sender_gains: HashMap<MailboxId, f32>,
     /// Monotonically increasing counter stamped into each `Voice::seq`
     /// at allocation. Note-off reads the minimum value to locate the
     /// oldest voice on a shared key regardless of pool order (voice-steal
@@ -80,6 +85,7 @@ impl Synth {
             master_gain: 1.0,
             reverb: Reverb::new(sample_rate),
             reverb_send: 0.0,
+            sender_gains: HashMap::new(),
             next_seq: 0,
             frame_clock: 0,
             scheduled: BinaryHeap::new(),
@@ -121,6 +127,7 @@ impl Synth {
         pitch: u8,
         velocity: u8,
         instrument_id: u8,
+        pan: i8,
     ) {
         let kernel = instrument_by_id(instrument_id)
             .map(|def| {
@@ -178,6 +185,15 @@ impl Synth {
         }
         let seq = self.next_seq;
         self.next_seq += 1;
+        // Resolve the live per-sender trim at allocation from the same
+        // block-stable table `fill` refreshes from, so a voice added
+        // mid-block by a scheduled event starts at the right level
+        // (ADR-0127).
+        let sender_gain = self
+            .sender_gains
+            .get(&sender_mailbox)
+            .copied()
+            .unwrap_or(1.0);
         self.voices.push(Voice {
             sender_mailbox,
             instrument_id,
@@ -185,6 +201,8 @@ impl Synth {
             seq,
             kernel,
             released: false,
+            pan_gains: pan_law(pan),
+            sender_gain,
         });
     }
 
@@ -224,7 +242,8 @@ impl Synth {
                 pitch,
                 velocity,
                 instrument_id,
-            } => self.trigger_note_on(sender_mailbox, pitch, velocity, instrument_id),
+                pan,
+            } => self.trigger_note_on(sender_mailbox, pitch, velocity, instrument_id, pan),
             ScheduledNote::Off {
                 pitch,
                 instrument_id,
@@ -240,7 +259,8 @@ impl Synth {
                     pitch,
                     velocity,
                     instrument_id,
-                } => self.trigger_note_on(sender_mailbox, pitch, velocity, instrument_id),
+                    pan,
+                } => self.trigger_note_on(sender_mailbox, pitch, velocity, instrument_id, pan),
                 AudioEvent::NoteOff {
                     sender_mailbox,
                     pitch,
@@ -251,6 +271,15 @@ impl Synth {
                 }
                 AudioEvent::SetReverbSend { send } => {
                     self.reverb_send = send.clamp(0.0, 1.0);
+                }
+                AudioEvent::SetSenderGain {
+                    sender_mailbox,
+                    gain,
+                } => {
+                    // The handler already clamped to 0.0..=4.0; store the
+                    // trim (absent = unity 1.0). `fill` resolves it onto
+                    // sounding voices on the next block (ADR-0127).
+                    self.sender_gains.insert(sender_mailbox, gain);
                 }
                 AudioEvent::TrackStart {
                     sender_mailbox,
@@ -364,6 +393,18 @@ impl Synth {
 
     pub fn fill(&mut self, buffer: &mut [f32], channels: usize) {
         self.drain_events();
+        // Resolve each voice's live per-sender trim once per block, so a
+        // `set_sender_gain` ducks already-sounding voices on the next
+        // block — block-granular, mirroring `set_master_gain` (ADR-0127).
+        // Voices allocated mid-block by a scheduled event resolve their
+        // own trim in `trigger_note_on` from the same block-stable table.
+        for voice in &mut self.voices {
+            voice.sender_gain = self
+                .sender_gains
+                .get(&voice.sender_mailbox)
+                .copied()
+                .unwrap_or(1.0);
+        }
         let dt = 1.0 / self.sample_rate;
         let frames = buffer.len() / channels.max(1);
         for frame in 0..frames {
@@ -383,27 +424,69 @@ impl Synth {
                     .expect("peeked entry is present this iteration");
                 self.fire_scheduled(entry.sender_mailbox, &entry.note);
             }
-            let mut sample = 0.0f32;
+            // Per-voice stereo placement (ADR-0127): the mono kernel
+            // output is trimmed by the sender gain, then split into L/R by
+            // the voice's constant-power pan gains. `mono` is the pre-pan
+            // downmix — the mono-device output and the (mono) reverb send
+            // feed — kept separate from `left + right` so a
+            // constant-power-centered voice isn't summed to +3 dB on a
+            // mono device and so a `reverb_send` of 0 stays bit-for-bit dry
+            // (ADR-0126 / ADR-0127).
+            let mut left = 0.0f32;
+            let mut right = 0.0f32;
+            let mut mono = 0.0f32;
             for voice in &mut self.voices {
-                sample += voice.next_sample(dt);
+                let s = voice.next_sample(dt) * voice.sender_gain;
+                left = s.mul_add(voice.pan_gains[0], left);
+                right = s.mul_add(voice.pan_gains[1], right);
+                mono += s;
             }
-            // Stolen voices fade out in the dying pool, summed alongside
-            // the active pool so the eviction is a ramp, not a cut.
+            // Stolen voices fade out in the dying pool (ADR-0126 steal
+            // ramp), panned by their captured placement and trimmed by
+            // their captured sender gain, so the eviction is a ramp, not a
+            // cut.
             for voice in &mut self.dying {
-                sample += voice.next_sample(dt);
+                let s = voice.next_sample(dt) * voice.sender_gain;
+                left = s.mul_add(voice.pan_gains[0], left);
+                right = s.mul_add(voice.pan_gains[1], right);
+                mono += s;
             }
-            // Tracks mix in their own lane, summed after the voices
-            // and before master gain + the soft clip (ADR-0103 §3).
+            // Tracks mix in their own lane (ADR-0103 §3) — mono
+            // point-sources centered in the image, summed equally into
+            // both channels and into the mono downmix, unscaled by the pan
+            // law so their level is unchanged (ADR-0127 leaves track stereo
+            // width to a follow-up).
             for track in &mut self.tracks {
-                sample += track.next_sample();
+                let s = track.next_sample();
+                left += s;
+                right += s;
+                mono += s;
             }
-            let wet = self.reverb.process(sample * self.reverb_send);
-            sample += wet;
-            sample *= self.master_gain;
-            sample = sample.tanh();
+            // Master reverb send (ADR-0126): a mono send off the dry
+            // downmix, its wet return added equally to both channels. A
+            // `reverb_send` of 0 feeds the reverb only silence, so the wet
+            // output stays exactly zero and the dry mix is unaltered.
+            let wet = self.reverb.process(mono * self.reverb_send);
             let start = frame * channels;
-            for ch in 0..channels {
-                buffer[start + ch] = sample;
+            if channels >= 2 {
+                // ch0 = L, ch1 = R; any extra channels get the mono
+                // average of the two so a >2-channel device stays
+                // coherent.
+                let l = ((left + wet) * self.master_gain).tanh();
+                let r = ((right + wet) * self.master_gain).tanh();
+                buffer[start] = l;
+                buffer[start + 1] = r;
+                let mono_avg = (l + r) * 0.5;
+                for ch in 2..channels {
+                    buffer[start + ch] = mono_avg;
+                }
+            } else {
+                // A mono device collapses to the pre-pan downmix (pan is
+                // inaudible without two channels) plus the reverb return.
+                let m = ((mono + wet) * self.master_gain).tanh();
+                for ch in 0..channels {
+                    buffer[start + ch] = m;
+                }
             }
         }
         // Advance the clock by this block so the next drain anchors

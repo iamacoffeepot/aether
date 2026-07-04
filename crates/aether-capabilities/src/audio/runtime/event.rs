@@ -32,6 +32,10 @@ pub enum AudioEvent {
         pitch: u8,
         velocity: u8,
         instrument_id: u8,
+        /// Bipolar stereo placement (ADR-0127): `0` center, `-128` left,
+        /// `127` right. Rendered through the constant-power pan law at
+        /// the voice mix level, never inside the kernels.
+        pan: i8,
     },
     NoteOff {
         sender_mailbox: MailboxId,
@@ -47,6 +51,14 @@ pub enum AudioEvent {
     /// pushed.
     SetReverbSend {
         send: f32,
+    },
+    /// Set the live per-sender level trim (ADR-0127). Keyed by the
+    /// envelope sender; the synth holds a `MailboxId -> gain` table
+    /// resolved once per render block, so the trim ducks already-sounding
+    /// voices of that sender. Clamped `0.0..=4.0` on the handler side.
+    SetSenderGain {
+        sender_mailbox: MailboxId,
+        gain: f32,
     },
     /// Start (or restart) a track in the dedicated mixer lane. `pcm`
     /// is already mono and resampled to the device rate, so the
