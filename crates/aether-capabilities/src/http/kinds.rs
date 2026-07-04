@@ -145,6 +145,68 @@ pub struct HttpServerResponse {
     pub body: Vec<u8>,
 }
 
+// ADR-0128 HTTP server response streaming. A handler opts into streaming by
+// replying `HttpResponseStreamOpen` instead of `HttpServerResponse`, emits its
+// body across many `HttpResponseChunk` mails paced by the cap's
+// `HttpStreamCredit` grants, and terminates with `HttpResponseStreamEnd`.
+//
+// Correlation carries an explicit `stream_id` on the chunk / end / credit
+// kinds rather than riding the transport-envelope correlation the buffered
+// reply uses: the guest reply handle is one-shot, so a handler cannot re-echo
+// the request correlation across many chunks (ADR-0128 reconciles §2's
+// "keyed by correlation id" wording with this payload field). The cap sets
+// `stream_id` to the request's dispatch correlation id `C` — the same key its
+// in-flight table already holds — and the handler learns `C` from the first
+// `HttpStreamCredit`. The `HttpResponseStreamOpen` reply still rides the
+// one-shot correlation-echoed reply path, so the open handshake keys on `C`
+// directly.
+
+/// `aether.http.server.response_stream_open` — a handler's first reply on a
+/// streamed response (ADR-0128). Declares the status line and headers; the
+/// cap writes the response head with `Transfer-Encoding: chunked` (no
+/// `Content-Length`) and begins the stream. Replied like [`HttpServerResponse`]
+/// (correlation-echoed), so the cap keys the new stream by the request's
+/// in-flight correlation id.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.http.server.response_stream_open")]
+pub struct HttpResponseStreamOpen {
+    pub status: u16,
+    pub headers: Vec<HttpHeader>,
+}
+
+/// `aether.http.server.stream_credit` — the cap → handler backpressure grant
+/// (ADR-0128). Grants permission to send up to `credit` more
+/// [`HttpResponseChunk`] mails on the stream named by `stream_id`. The handler
+/// learns its `stream_id` from the first credit mail (the cap sets it to the
+/// request's dispatch correlation id) and pauses when its accumulated credit
+/// reaches zero.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.http.server.stream_credit")]
+pub struct HttpStreamCredit {
+    pub stream_id: u64,
+    pub credit: u32,
+}
+
+/// `aether.http.server.response_chunk` — handler → cap, one body piece on the
+/// stream named by `stream_id` (ADR-0128). Consumes one unit of credit; the
+/// cap frames it as one chunked-transfer chunk to the peer. `body` is raw
+/// bytes so binary downloads stream without loss.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.http.server.response_chunk")]
+pub struct HttpResponseChunk {
+    pub stream_id: u64,
+    pub body: Vec<u8>,
+}
+
+/// `aether.http.server.response_stream_end` — handler → cap terminator on the
+/// stream named by `stream_id` (ADR-0128). The cap writes the terminating
+/// zero-length chunk and closes the connection.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.http.server.response_stream_end")]
+pub struct HttpResponseStreamEnd {
+    pub stream_id: u64,
+}
+
 /// `aether.http.server.inbound_ready` — accept / reader sidecar →
 /// `HttpServerCapability` dispatcher wake (ADR-0108, issue 1760).
 /// The HTTP-server analog of `RpcInboundReady`: the sidecar pushes

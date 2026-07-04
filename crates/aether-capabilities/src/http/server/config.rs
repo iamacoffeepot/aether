@@ -4,7 +4,7 @@
 
 use super::{
     DEFAULT_BIND_ADDR, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_HEADER_BYTES,
-    DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_TIMEOUT_MILLIS,
+    DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_TIMEOUT_MILLIS, DEFAULT_RESPONSE_STREAM_WINDOW,
 };
 
 /// Init config for [`HttpServerCapability`](super::HttpServerCapability) (ADR-0108).
@@ -65,6 +65,15 @@ pub struct HttpServerConfig {
     /// `503` and closed rather than getting a reader thread.
     #[cfg_attr(feature = "runtime", config(default = 1024))]
     pub max_connections: usize,
+    /// Response-stream credit-window depth ([`DEFAULT_RESPONSE_STREAM_WINDOW`],
+    /// ADR-0128): the count of in-flight [`HttpResponseChunk`] mails a
+    /// streaming handler may hold before the per-connection writer thread
+    /// drains one and the cap replenishes credit. A count, not a byte or time
+    /// quantity, so it carries no unit suffix.
+    ///
+    /// [`HttpResponseChunk`]: crate::http::kinds::HttpResponseChunk
+    #[cfg_attr(feature = "runtime", config(default = 16))]
+    pub response_stream_window: u32,
 }
 
 impl Default for HttpServerConfig {
@@ -77,6 +86,7 @@ impl Default for HttpServerConfig {
             max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
             request_timeout_millis: DEFAULT_REQUEST_TIMEOUT_MILLIS,
             max_connections: DEFAULT_MAX_CONNECTIONS,
+            response_stream_window: DEFAULT_RESPONSE_STREAM_WINDOW,
         }
     }
 }

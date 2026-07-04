@@ -128,6 +128,78 @@ ctx.reply(&HttpServerResponse {
 The server sends these after its own `Connection: close` and `Content-Length`
 headers.
 
+## Streaming a response
+
+A handler that serves a large download or a long-lived event stream replies
+`HttpResponseStreamOpen` in place of `HttpServerResponse`, then emits the body
+across many `HttpResponseChunk` mails and terminates with
+`HttpResponseStreamEnd` (ADR-0128). The server renders the response as chunked
+transfer-encoding, so the whole body never resides in memory at once.
+
+The pace is a windowed credit protocol. When the handler opens a stream, the
+server grants it an initial credit window (`AETHER_HTTP_SERVER_RESPONSE_STREAM_WINDOW`,
+default 16) as an `HttpStreamCredit` mail, and replenishes one credit each time
+its per-connection writer thread drains a chunk to the socket. A chunk consumes
+one credit; when credit reaches zero the handler pauses until the next
+`HttpStreamCredit` arrives. So a slow client blocks the writer thread, not the
+scheduler, and the handler cannot outrun the socket:
+
+```rust
+use aether_capabilities::http::HttpServerCapability;
+use aether_capabilities::http::kinds::{
+    HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen, HttpStreamCredit,
+};
+
+pub struct Feed {
+    stream_id: u64,
+    next: u32,
+    done: bool,
+}
+
+#[actor]
+impl WasmActor for Feed {
+    const NAMESPACE: &'static str = "feed";
+
+    fn init<C: Resolver>(_ctx: &mut C) -> Result<Self, ActorInitError> {
+        Ok(Feed { stream_id: 0, next: 0, done: false })
+    }
+
+    // Open the stream. The body arrives later, one chunk per unit of credit.
+    #[handler]
+    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpResponseStreamOpen {
+        self.next = 0;
+        self.done = false;
+        HttpResponseStreamOpen { status: 200, headers: Vec::new() }
+    }
+
+    // Spend the granted credit, then terminate once the body is exhausted.
+    // The handler learns its `stream_id` from the first credit mail.
+    #[handler]
+    fn on_credit(&mut self, ctx: &mut WasmCtx<'_>, credit: HttpStreamCredit) {
+        self.stream_id = credit.stream_id;
+        let mut budget = credit.credit;
+        while budget > 0 && self.next < 100 {
+            ctx.actor::<HttpServerCapability>().send(&HttpResponseChunk {
+                stream_id: self.stream_id,
+                body: format!("line {}\n", self.next).into_bytes(),
+            });
+            self.next += 1;
+            budget -= 1;
+        }
+        if self.next >= 100 && !self.done {
+            ctx.actor::<HttpServerCapability>().send(&HttpResponseStreamEnd {
+                stream_id: self.stream_id,
+            });
+            self.done = true;
+        }
+    }
+}
+```
+
+The buffered `HttpServerResponse` path is unchanged — a handler that replies it
+gets a single `Content-Length`-framed response exactly as before. Streaming is
+purely opt-in per reply.
+
 ## Verify against current code
 
 This recipe names the env keys and kind names live in the source. Before
