@@ -27,6 +27,9 @@ members = [
     "crates/aether-test-fixtures/aether-test-fixtures-stateful-reshaped",
     "crates/aether-test-fixtures/aether-test-fixtures-split-cap",
     "xtask",
+    # Spike (spike/http-stress branch only; never merges to main): the
+    # HTTP-server stress harness.
+    "spikes/http-stress",
 ]
 exclude = [
     # The cargo-fuzz harness (issue 1562) is its own nested crate on the

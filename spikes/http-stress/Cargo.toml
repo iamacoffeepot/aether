@@ -1,0 +1,29 @@
+# Spike (issue-less, `spike/http-stress` branch): an HTTP stress test for the
+# `aether.http.server` capability, mirroring the mail-latency perf harness
+# (`crates/aether-substrate-bundle/src/perf/`) but over real sockets. Two bins:
+# `http-stress-server` is the forked substrate process under test;
+# `http-stress` (the driver) forks it and drives a concurrent load generator.
+[package]
+name = "http-stress"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "http-stress-server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "http-stress"
+path = "src/bin/driver.rs"
+
+[dependencies]
+aether-substrate-bundle = { path = "../../crates/aether-substrate-bundle" }
+aether-substrate = { path = "../../crates/aether-substrate" }
+aether-capabilities = { path = "../../crates/aether-capabilities" }
+aether-actor = { path = "../../crates/aether-actor" }
+aether-data = { path = "../../crates/aether-data" }
