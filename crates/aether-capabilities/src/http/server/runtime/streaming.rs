@@ -174,6 +174,7 @@ impl HttpShardState {
             mailer: Arc::clone(&self.mailer),
             self_id: self.self_mailbox,
             wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
+            dirty: Arc::clone(&self.wake_dirty),
         };
         let idle_deadline = self.request_timeout;
 

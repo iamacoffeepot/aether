@@ -26,6 +26,9 @@ pub struct HttpShardSeed {
     /// The matching sender: the supervisor keeps a clone (its assignment
     /// sink), and the shard clones it into each reader's [`WakeSink`].
     pub inbound_tx: mpsc::Sender<InboundEvent>,
+    /// The shard's wake-coalescing flag (ADR-0135 §4), shared between
+    /// the supervisor's assignment sink and every sink the shard builds.
+    pub wake_dirty: Arc<AtomicBool>,
     pub routes: SharedRoutes,
     pub live_connections: Arc<AtomicUsize>,
     pub handler_mailbox: String,
@@ -346,26 +349,49 @@ pub struct RequestStreamState {
 /// Wake sink shared with the accept + reader sidecar threads: push an
 /// [`InboundEvent`] over the mpsc, then fire an [`HttpInboundReady`]
 /// wake mail at the cap so the dispatcher drains.
+///
+/// The wake mail coalesces behind `dirty` (ADR-0135 §4): every sink
+/// targeting one drain loop shares the same flag, a post only fires the
+/// wake when it flips the flag clear → set, and the drain handler clears
+/// the flag *before* draining ([`WakeSink::arm_for_drain`]). A burst of
+/// events costs one wake instead of one per event; an event posted
+/// mid-drain re-arms the flag, so the follow-up wake is at most one
+/// spurious drain, never a lost event. The clear-before-drain /
+/// send-before-swap order is the load-bearing part of that guarantee.
 pub struct WakeSink {
     pub inbound_tx: mpsc::Sender<InboundEvent>,
     pub mailer: Arc<Mailer>,
     pub self_id: MailboxId,
     pub wake_kind: KindId,
+    /// Shared per-drain-target coalescing flag: `true` while a fired
+    /// wake mail has not yet begun its drain.
+    pub dirty: Arc<AtomicBool>,
 }
 
 impl WakeSink {
-    /// Post one event + wake. Returns `false` when the receiver is gone
-    /// (the cap tore down) so the caller stops.
+    /// Post one event, waking the drain loop only if no wake is already
+    /// pending for it. Returns `false` when the receiver is gone (the
+    /// cap tore down) so the caller stops.
     pub fn post(&self, event: InboundEvent) -> bool {
         if self.inbound_tx.send(event).is_err() {
             return false;
         }
-        self.mailer.push(Mail::new(
-            self.self_id,
-            self.wake_kind,
-            HttpInboundReady::default().encode_into_bytes(),
-            1,
-        ));
+        if !self.dirty.swap(true, Ordering::AcqRel) {
+            self.mailer.push(Mail::new(
+                self.self_id,
+                self.wake_kind,
+                HttpInboundReady::default().encode_into_bytes(),
+                1,
+            ));
+        }
         true
+    }
+
+    /// Drain-side arm: clear the coalescing flag. Must run *before* the
+    /// first `try_recv` of the drain loop — an event posted after the
+    /// clear re-fires the wake, an event posted before it is already in
+    /// the channel this drain is about to empty.
+    pub fn arm_for_drain(dirty: &AtomicBool) {
+        dirty.store(false, Ordering::Release);
     }
 }
