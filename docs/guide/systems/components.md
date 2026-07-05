@@ -97,10 +97,12 @@ error. A single-actor module has only the entry type, so an omitted selector is 
 whole story there.
 
 In practice you drive this through the MCP harness — `load_component(engine_id,
-binary_path, name?, export?)`, `replace_component(...)`, `terminate_substrate(...)` — which
-takes a **path** and reads the bytes for you (tool JSON never carries the wasm
-buffer; the wire kind does). The component's kind vocabulary travels inside the
-wasm's `aether.kinds` custom section ([ADR-0028](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0028-component-embedded-kind-manifest.md)), so the loader declares nothing —
+selector, name?, export?)`, `replace_component(...)`, `terminate_substrate(...)` — where
+`selector` resolves against the hub's content-addressed component registry
+([ADR-0116](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0116-component-registry.md)). Stage the wasm first with `upload_component`, which
+takes the **path** and reads the bytes for you (tool JSON never carries the wasm
+buffer; the wire kind does) and returns `{hash, name}` to load by. The component's
+kind vocabulary travels inside the wasm's `aether.kinds` custom section ([ADR-0028](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0028-component-embedded-kind-manifest.md)), so the loader declares nothing —
 the substrate reads the types directly off the binary.
 
 ## Boot configuration across the boundary

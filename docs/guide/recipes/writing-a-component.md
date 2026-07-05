@@ -154,13 +154,17 @@ to iterate fast.
 
 ## 5. Load it over MCP
 
-`load_component(engine_id, binary_path)` forwards the wasm to the engine's
-`aether.component` mailbox and returns a `LoadResult`. The tool takes a filesystem
-**path** and reads the bytes for you — tool JSON never carries the wasm buffer.
+`load_component(engine_id, selector)` resolves against the hub's content-addressed
+component registry (ADR-0116) and forwards the wasm to the engine's `aether.component`
+mailbox, returning a `LoadResult`. The *upload* tool takes the filesystem **path** and
+reads the bytes for you — `upload_component` stages `my_component.wasm` into the store
+and returns `{hash, name}` — so `load_component` itself never carries a path, only the
+resolved `selector`.
 
 ```text
-spawn_substrate(binary_path = ".../aether-substrate")        → engine_id
-load_component(engine_id, ".../my_component.wasm")           → LoadResult
+upload_component(staged_path = ".../my_component.wasm")      → { hash, name }
+spawn_substrate(selector = "default")                         → engine_id
+load_component(engine_id, selector = "<hash-or-name>")        → LoadResult
 ```
 
 `LoadResult::Ok` carries the assigned `mailbox_id`, the **resolved name**, and the
