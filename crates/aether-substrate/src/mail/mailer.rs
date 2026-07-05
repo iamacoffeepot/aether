@@ -371,7 +371,7 @@ impl Mailer {
     ///
     /// A reply that should join the caller's ADR-0080 causal chain goes
     /// through the lineage-carrying path instead:
-    /// [`Self::send_reply_with_lineage`] (the
+    /// [`Self::send_reply`] (the
     /// `NativeBinding::send_reply_for_handler` form),
     /// [`InboundMail::reply`](crate::chassis::inbox::InboundMail::reply)
     /// (the claimed-inbox drain guard), or the typed `ctx.reply()` on a
@@ -379,7 +379,7 @@ impl Mailer {
     /// unchained form silently detaches it from the caller's settlement
     /// window — the bug class #1701 fixed for handler replies.
     ///
-    /// Equivalent to [`Self::send_reply_with_lineage`] with a `NONE`
+    /// Equivalent to [`Self::send_reply`] with a `NONE`
     /// triple — the bare-vs-lineage split mirrors
     /// [`NativeBinding::send_mail`](crate::actor::native::NativeBinding)'s
     /// `send_mail` / `send_mail_with_lineage` pair.
@@ -387,7 +387,7 @@ impl Mailer {
     where
         K: Kind,
     {
-        self.send_reply_with_lineage(
+        self.send_reply(
             sender,
             result,
             aether_data::MailId::NONE,
@@ -420,7 +420,7 @@ impl Mailer {
     /// `reply_id` skips the hook and stamps the `NONE` triple,
     /// reproducing the pre-lineage reply shape for callers without a
     /// handler chain (the bare [`Self::send_reply_unchained`]).
-    pub fn send_reply_with_lineage<K>(
+    pub fn send_reply<K>(
         &self,
         sender: Source,
         result: &K,
@@ -1106,7 +1106,7 @@ mod tests {
     }
 
     /// #1695 / ADR-0080 §5/§6: a `Component`-addressed reply routed
-    /// through `send_reply_with_lineage` carries the caller's `root` +
+    /// through `send_reply` carries the caller's `root` +
     /// `parent` and a real (non-`NONE`) `mail_id`, and records the
     /// reply's `Sent` against the caller root so the chain stays open
     /// until the reply's `Finished` (the conformance fix — replies were
@@ -1114,7 +1114,7 @@ mod tests {
     /// (standing in for the recipient dispatcher) balances that `Sent`
     /// exactly, reclaiming the root cell.
     #[test]
-    fn send_reply_with_lineage_stamps_caller_chain() {
+    fn send_reply_stamps_caller_chain() {
         use aether_data::MailId;
 
         // Capture the delivered reply's lineage triple off the
@@ -1146,7 +1146,7 @@ mod tests {
         let counter = mailer.trace_handle().settlement_counter();
         assert_eq!(counter.live_roots(), 0, "no live root before the reply");
 
-        let sent = mailer.send_reply_with_lineage(
+        let sent = mailer.send_reply(
             Source::with_correlation(SourceAddr::Component(sink_id), 7),
             &CastReply {
                 code: 1,
@@ -1172,7 +1172,7 @@ mod tests {
         assert_eq!(
             counter.live_roots(),
             1,
-            "send_reply_with_lineage records the reply's Sent on the caller root"
+            "send_reply records the reply's Sent on the caller root"
         );
 
         // The recipient's dispatcher would record the matching `Finished`;

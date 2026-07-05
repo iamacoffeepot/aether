@@ -88,7 +88,7 @@ pub struct ComponentHostCapabilityState {
 ///
 /// The forward threads the child mail under the cap's current in-flight root
 /// and bumps that root's `in_flight` count before the calling handler returns
-/// (`send_envelope_traced_with_reply_to`), so the originating call stays open
+/// (`send_envelope_tracked_with_reply_to`), so the originating call stays open
 /// across the boundary: the trampoline's deferred `ctx.reply` streams back
 /// under a still-open root and settlement fires `ReplyEnd` only after it. A
 /// bare enqueue would let the cap handler's return settle the call before the
@@ -107,7 +107,7 @@ fn forward_to_trampoline<P>(
     P: Kind,
 {
     let bytes = payload.encode_into_bytes();
-    let _ = ctx.send_envelope_traced_with_reply_to(recipient, kind, &bytes, ctx.reply_target());
+    let _ = ctx.send_envelope_tracked_with_reply_to(recipient, kind, &bytes, ctx.reply_target());
 }
 
 #[runtime]

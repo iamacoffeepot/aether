@@ -71,7 +71,7 @@ pub struct RpcServerHandle {
 /// wire). Looked up by the dispatch's auto-minted
 /// `correlation_id` (== `MailId.correlation_id` of the dispatched
 /// envelope, which is also the root id since we always dispatch
-/// as chassis-root via `send_envelope_as_root`). Fields are
+/// as chassis-root via `send_envelope_detached`). Fields are
 /// `pub` so the parent's `on_settled` / `on_any` handlers can
 /// read them after `remove` / `get`.
 #[derive(Copy, Clone)]
@@ -287,7 +287,7 @@ impl RpcServerState {
             // sibling type to resolve through.
             #[allow(clippy::disallowed_methods)]
             let engine_cap = mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE);
-            let mail_id = ctx.send_envelope_as_root(
+            let mail_id = ctx.send_envelope_detached(
                 engine_cap,
                 <RouteEnvelope as Kind>::ID,
                 &route.encode_into_bytes(),
@@ -304,7 +304,7 @@ impl RpcServerState {
         let recipient = envelope.to.mailbox;
         let kind = envelope.kind;
         let payload = envelope.payload;
-        let mail_id: MailId = ctx.send_envelope_as_root(recipient, kind, &payload);
+        let mail_id: MailId = ctx.send_envelope_detached(recipient, kind, &payload);
 
         let Some(wire_cid) = cid else {
             // Fire-and-forget at the wire layer. No bookkeeping.

@@ -380,7 +380,7 @@ fn call_deferred_echo_settles_after_reply() {
 /// failure shape: each child is itself a deferred-reply path
 /// (spawn → loopback → re-reply), routed through the trace cap rather
 /// than directly. Pre-fix the trace cap dispatched each child via
-/// `ctx.send_envelope_traced` which stamps `reply_to` at the
+/// `ctx.send_envelope_tracked` which stamps `reply_to` at the
 /// dispatcher's own mailbox (the `push_envelope_buffered` default);
 /// child deferred replies landed at the trace cap, which has no
 /// handler for the reply kind and no `#[fallback]`, so they were

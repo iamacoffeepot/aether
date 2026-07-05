@@ -1975,7 +1975,7 @@ mod tests {
         let armed_reply_id = MailId::new(cap_mailbox, 1 << 63);
         let settle_rx = settlement.subscribe_settlement(root);
         let sender = Source::with_correlation(SourceAddr::Component(reply_mailbox), 7);
-        mailer.send_reply_with_lineage(
+        mailer.send_reply(
             sender,
             &LifecycleAdvanceComplete {
                 completed: 1,
@@ -2004,7 +2004,7 @@ mod tests {
         // all proves the guard was disarmed.
         let armed_reply_id_2 = MailId::new(cap_mailbox, (1 << 63) + 1);
         let sender_2 = Source::with_correlation(SourceAddr::Component(reply_mailbox), 8);
-        mailer.send_reply_with_lineage(
+        mailer.send_reply(
             sender_2,
             &LifecycleAdvanceComplete {
                 completed: 2,

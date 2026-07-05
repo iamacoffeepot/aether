@@ -827,7 +827,12 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// `send` / `send_many` on `NativeActorMailbox` cover the
     /// fire-and-forget case.
     #[must_use]
-    pub fn send_envelope_traced(&self, recipient: MailboxId, kind: KindId, bytes: &[u8]) -> MailId {
+    pub fn send_envelope_tracked(
+        &self,
+        recipient: MailboxId,
+        kind: KindId,
+        bytes: &[u8],
+    ) -> MailId {
         self.binding.push_envelope_buffered(
             recipient.0,
             kind.0,
@@ -838,7 +843,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         )
     }
 
-    /// Re-dispatch variant of [`Self::send_envelope_traced`] that pins the
+    /// Re-dispatch variant of [`Self::send_envelope_tracked`] that pins the
     /// child mail's `reply_to` to the supplied [`Source`] instead of
     /// stamping the default `(Component(self_mailbox), auto_correlation)`.
     /// The minted [`MailId`] and the chain's `in_flight` accounting are
@@ -856,11 +861,11 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     ///
     /// Pass `ctx.reply_target()` as `reply_to` to forward to whoever
     /// invoked this cap. Single-Call paths (the RPC server's
-    /// `send_envelope_as_root` dispatching directly at the receiver)
+    /// `send_envelope_detached` dispatching directly at the receiver)
     /// never reach this method — the default `reply_to` lands at the
     /// dispatcher which is also the call-correlation owner.
     #[must_use]
-    pub fn send_envelope_traced_with_reply_to(
+    pub fn send_envelope_tracked_with_reply_to(
         &self,
         recipient: MailboxId,
         kind: KindId,
@@ -878,7 +883,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         )
     }
 
-    /// Like [`Self::send_envelope_traced`] but always starts a fresh
+    /// Like [`Self::send_envelope_tracked`] but always starts a fresh
     /// causal chain — ignores the ctx's in-flight lineage and passes
     /// `parent_mail = None, inherited_root = None` to the dispatch
     /// path. The returned [`MailId`] is the root of the new chain, so
@@ -896,7 +901,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// (descendants don't settle individually; only the chain root
     /// does).
     #[must_use]
-    pub fn send_envelope_as_root(
+    pub fn send_envelope_detached(
         &self,
         recipient: MailboxId,
         kind: KindId,

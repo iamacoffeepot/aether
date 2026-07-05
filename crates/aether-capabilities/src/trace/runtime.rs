@@ -100,7 +100,7 @@ impl NativeActor for TraceDispatchCapability {
             }
         };
         for mail in resolved {
-            let _ = ctx.send_envelope_traced_with_reply_to(
+            let _ = ctx.send_envelope_tracked_with_reply_to(
                 mail.recipient,
                 mail.kind,
                 mail.payload.bytes(),
@@ -162,7 +162,7 @@ mod tests {
     /// Issue 749: `on_dispatch_traced` resolves each envelope's
     /// name addressing through the registry (matching
     /// `CaptureFrame`'s bundle pattern), dispatches each via
-    /// `send_envelope_traced` so children inherit the chain, and
+    /// `send_envelope_tracked` so children inherit the chain, and
     /// replies synchronously with `DispatchTracedAck::Ok { root }`
     /// carrying the inbound mail id.
     #[test]

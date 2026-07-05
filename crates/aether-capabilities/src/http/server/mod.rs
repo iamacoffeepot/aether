@@ -12,7 +12,7 @@
 //! On a parsed request the cap dispatches an
 //! [`HttpServerRequest`](crate::http::kinds::HttpServerRequest) to the configured
 //! handler mailbox as a fresh causal chain via
-//! `NativeCtx::send_envelope_as_root` (the wake mail is causally unrelated
+//! `NativeCtx::send_envelope_detached` (the wake mail is causally unrelated
 //! to the inbound request), records the open response socket in an
 //! in-flight table keyed by the dispatch's correlation id, and subscribes
 //! to settlement of the dispatched root. The handler replies

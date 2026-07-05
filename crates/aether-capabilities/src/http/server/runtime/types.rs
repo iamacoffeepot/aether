@@ -233,7 +233,7 @@ pub struct WsConn {
 /// Bookkeeping for one in-flight request. Looked up by the dispatch's
 /// auto-minted `correlation_id` (== the dispatched envelope's
 /// `MailId.correlation_id`, which is also the root id since the cap
-/// always dispatches via `send_envelope_as_root`).
+/// always dispatches via `send_envelope_detached`).
 #[derive(Copy, Clone)]
 pub struct PendingRequest {
     pub conn_id: ConnId,

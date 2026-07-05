@@ -28,7 +28,7 @@
 //! ADR-0080 §6 requires a reply's `Sent` to be recorded before the
 //! inbound's `Finished`, so a consume-time discharge would close the
 //! caller's chain before the reply joins it. [`InboundMail::reply`]
-//! routes through [`Mailer::send_reply_with_lineage`] with the inbound's
+//! routes through [`Mailer::send_reply`] with the inbound's
 //! chain and a drain-owned reply-id counter, so a claimed-mailbox
 //! consumer never reaches the bare, lineage-less `send_reply`.
 
@@ -319,7 +319,7 @@ impl InboundMail {
     /// (ADR-0080 §5/§6). Mints the reply id from the drain-owned
     /// reply-id counter in the disjoint reply-lineage space (`1 << 63`
     /// base) and stamps the inbound's `root` / parent, routing through
-    /// [`Mailer::send_reply_with_lineage`]. Returns whether the reply
+    /// [`Mailer::send_reply`]. Returns whether the reply
     /// was routed (`false` for a `SourceAddr::None` sender — nobody
     /// asked for a reply). The reply's `Sent` is recorded here, before
     /// this guard's `Drop` records the inbound's `Finished`, so the §6
@@ -334,13 +334,8 @@ impl InboundMail {
         } else {
             Some(self.env.mail_id)
         };
-        self.mailer.send_reply_with_lineage(
-            self.env.sender,
-            result,
-            reply_id,
-            self.env.root,
-            parent,
-        )
+        self.mailer
+            .send_reply(self.env.sender, result, reply_id, self.env.root, parent)
     }
 }
 

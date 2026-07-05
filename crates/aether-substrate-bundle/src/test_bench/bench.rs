@@ -1538,7 +1538,7 @@ mod tests {
         // (goes through the lifecycle cap's on_subscribe handler), then
         // advance one tick. The advance issues a `LifecycleAdvance` whose
         // chain root the lifecycle cap threads through
-        // `broadcast_to_subscribers` (`send_envelope_traced`) to every
+        // `broadcast_to_subscribers` (`send_envelope_tracked`) to every
         // stage subscriber (issue 723 lineage, ADR-0082 §6). Sequencing
         // both through `execute` settles the subscribe before the tick
         // fires.

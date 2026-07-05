@@ -210,7 +210,7 @@ impl Dispatch<Self> for Relay {
         // stamps its own `t_sent`, so later children in a fan-out reveal
         // any per-child enqueue skew.
         for &down in state.downstreams.iter() {
-            let _ = ctx.send_envelope_traced(down, Ping::ID, payload);
+            let _ = ctx.send_envelope_tracked(down, Ping::ID, payload);
             state.sent += 1;
         }
         Some(())
@@ -301,7 +301,7 @@ impl Dispatch<Self> for TickSource {
         for _ in 0..state.burst {
             let bytes = Ping { seq: state.seq }.encode_into_bytes();
             state.seq = state.seq.wrapping_add(1);
-            let _ = ctx.send_envelope_traced(state.entry, Ping::ID, &bytes);
+            let _ = ctx.send_envelope_tracked(state.entry, Ping::ID, &bytes);
             state.sent += 1;
         }
         Some(())

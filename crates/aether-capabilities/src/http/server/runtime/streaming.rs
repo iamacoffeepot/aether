@@ -40,7 +40,7 @@ impl HttpServerCapabilityState {
             headers: head.headers,
         }
         .encode_into_bytes();
-        let _ = ctx.send_envelope_as_root(handler, <HttpRequestStreamOpen as Kind>::ID, &payload);
+        let _ = ctx.send_envelope_detached(handler, <HttpRequestStreamOpen as Kind>::ID, &payload);
         self.signal_reader(conn_id, ReaderControl::Stream { credit: window });
         tracing::debug!(
             target: "aether_substrate::http_server",
@@ -67,7 +67,7 @@ impl HttpServerCapabilityState {
             return;
         };
         let payload = HttpRequestChunk { stream_id, body }.encode_into_bytes();
-        let _ = ctx.send_envelope_as_root(handler, <HttpRequestChunk as Kind>::ID, &payload);
+        let _ = ctx.send_envelope_detached(handler, <HttpRequestChunk as Kind>::ID, &payload);
     }
 
     /// Finish an inbound request stream (ADR-0128): send the handler an
@@ -88,8 +88,11 @@ impl HttpServerCapabilityState {
             return;
         };
         let payload = HttpRequestStreamEnd { stream_id }.encode_into_bytes();
-        let mail_id =
-            ctx.send_envelope_as_root(stream.handler, <HttpRequestStreamEnd as Kind>::ID, &payload);
+        let mail_id = ctx.send_envelope_detached(
+            stream.handler,
+            <HttpRequestStreamEnd as Kind>::ID,
+            &payload,
+        );
         if let Some(registry) = self.mailer.settlement_registry() {
             registry.subscribe_settlement_mail(
                 mail_id,
@@ -327,7 +330,7 @@ impl HttpServerCapabilityState {
             return;
         };
         let payload = HttpStreamCredit { stream_id, credit }.encode_into_bytes();
-        let _ = ctx.send_envelope_as_root(handler, <HttpStreamCredit as Kind>::ID, &payload);
+        let _ = ctx.send_envelope_detached(handler, <HttpStreamCredit as Kind>::ID, &payload);
     }
 
     /// Remove a stream and detach its writer thread without joining inline —
