@@ -62,6 +62,12 @@ const STREAM_HANDLER_MAILBOX: &str = "aether.component/aether.embedded:test.web_
 /// fixture's own `STREAM_CHUNK_COUNT`.
 const STREAM_CHUNK_COUNT: u32 = 20;
 
+/// The `RoutedStreamingHttpHandler` fixture's `NAMESPACE` const — a
+/// response-streaming handler reached through an externally-registered
+/// route (`register_route_self` in `wire`) rather than the configured
+/// default `handler_mailbox` (ADR-0128 × ADR-0131).
+const ROUTED_STREAM_HANDLER_NAMESPACE: &str = "test.web_stream_routed";
+
 /// The `WebSocketHandler` fixture's `NAMESPACE` const (ADR-0129).
 const WS_HANDLER_NAMESPACE: &str = "test.web_socket";
 
@@ -451,6 +457,128 @@ mod tests {
             "reassembled stream body: {:?}",
             String::from_utf8_lossy(&reassembled),
         );
+    }
+
+    /// Regression for issue 2600: a response-streaming handler reached
+    /// through an externally-registered route (ADR-0131) — not the configured
+    /// default `handler_mailbox` — must still be granted its initial
+    /// response-stream credit window (ADR-0128), so it emits its body chunks
+    /// rather than opening the stream and hanging (`curl` error 18).
+    ///
+    /// The `RoutedStreamingHttpHandler` fixture claims `/routed-stream` for
+    /// its own mailbox in `wire`; `HttpServerConfig.handler_mailbox` is bound
+    /// to a mailbox that does **not** resolve to it, so the default-handler
+    /// dispatch cannot mask the route path. On today's bug `open_stream`
+    /// re-resolves the (unresolvable) default handler and drops the initial
+    /// credit grant, so zero chunks arrive; after the fix the grant reaches
+    /// the route's handler and the client reassembles the same body the
+    /// default-handler streaming test asserts.
+    #[test]
+    fn wasm_handler_streams_chunked_response_via_registered_route() {
+        let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
+        let Some(wasm_path) = locate_component_wasm("aether_test_fixtures_bundle") else {
+            assert!(
+                !strict,
+                "AETHER_REQUIRE_RUNTIME set but http_handler.wasm not pre-built; \
+                 CI's `Pre-build component wasm for scenario tests` step is missing it",
+            );
+            eprintln!(
+                "skipping: http_handler.wasm not built; \
+                 run `cargo build --target wasm32-unknown-unknown \
+                 -p aether-test-fixtures --examples`",
+            );
+            return;
+        };
+        let wasm = fs::read(&wasm_path).expect("read http_handler wasm");
+
+        let server_config = HttpServerConfig {
+            enabled: true,
+            bind_addr: "127.0.0.1:0".to_string(),
+            // Deliberately unresolvable: the streaming handler is reachable
+            // only through the route it registers, so the default-handler
+            // dispatch cannot mask the bug (issue 2600 negative control).
+            handler_mailbox: "aether.component/aether.embedded:test.web_absent_default".to_string(),
+            max_request_bytes: 65_536,
+            max_header_bytes: 8_192,
+            request_timeout_millis: 10_000,
+            keep_alive_timeout_millis: 5_000,
+            max_connections: 1024,
+            // Window below the chunk count so the round trip must replenish.
+            response_stream_window: 8,
+            request_stream_window: 16,
+            websocket_idle_timeout_millis: 300_000,
+        };
+
+        let sandbox = init_save_sandbox("http-serving-stream-route");
+        let env = HeadlessEnv {
+            namespace_roots: test_namespace_roots(sandbox),
+            http: HttpConfig::default(),
+            http_server: Some(server_config),
+            anthropic: AnthropicConfig::default(),
+            gemini: GeminiConfig::default(),
+            contentgen: ContentGenConfig::default(),
+            tick_period: Duration::from_millis(100),
+            rpc_addr: None,
+            workers: None,
+            ring_caps: aether_substrate_bundle::RingCapacities::default(),
+            scheduler_tuning: aether_substrate_bundle::SchedulerTuning::default(),
+            lifecycle_advance_timeout_millis: 1_000,
+            autoload: vec![AutoloadComponent {
+                wasm,
+                config: Vec::new(),
+                name: Some(ROUTED_STREAM_HANDLER_NAMESPACE.to_owned()),
+                export: Some(ROUTED_STREAM_HANDLER_NAMESPACE.to_owned()),
+            }],
+        };
+
+        let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if built
+                .resolve_actor::<WasmTrampoline>(ROUTED_STREAM_HANDLER_NAMESPACE)
+                .is_some()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "routed streaming trampoline did not register within 30s; \
+                 live trampolines: {:?}",
+                built.resolve_actors::<WasmTrampoline>(),
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        let port = built
+            .handle::<HttpServerHandle>()
+            .expect("HttpServerHandle published by HttpServerCapability")
+            .local_port;
+        assert!(port > 0, "bound to an OS-assigned port");
+
+        // Route registration is async mail — poll until the streamed body
+        // reassembles rather than racing the `register_route_self`.
+        let expected: Vec<u8> = (0..STREAM_CHUNK_COUNT)
+            .flat_map(|i| format!("chunk-{i}\n").into_bytes())
+            .collect();
+        let request =
+            b"GET /routed-stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let response = round_trip(port, request);
+            let head = String::from_utf8_lossy(&response);
+            if head.starts_with("HTTP/1.1 200 ")
+                && head.contains("Transfer-Encoding: chunked")
+                && dechunk(body_after_head(&response)) == expected
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "routed streaming response did not reassemble within 30s; last: {head:?}",
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
     }
 
     /// Boot a headless chassis with `HttpServerCapability` bound and the

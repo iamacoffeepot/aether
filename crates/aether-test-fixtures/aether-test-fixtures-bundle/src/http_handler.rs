@@ -23,12 +23,13 @@
 use aether_actor::{ActorInitError, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::ComponentHostCapability;
 use aether_capabilities::http;
+use aether_capabilities::http::HttpServerCapability;
 use aether_capabilities::http::kinds::{
     HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse, HttpStreamCredit,
-    WebSocketAccept, WebSocketClose, WebSocketMessage,
+    RegisterRouteSelf, WebSocketAccept, WebSocketClose, WebSocketMessage,
 };
 use aether_capabilities::http::{ResponseStream, WebSocketStream};
-use aether_data::MailboxId;
+use aether_data::{Kind, MailboxId};
 use aether_kinds::DropComponent;
 
 pub struct HttpHandler;
@@ -324,6 +325,105 @@ impl WasmActor for RoutedHttpHandler {
             status: 200,
             headers: Vec::new(),
             body: b"routed handler".to_vec(),
+        }
+    }
+}
+
+/// Response-streaming handler reached through an **externally-registered
+/// route** rather than the configured default `handler_mailbox` (ADR-0128
+/// streaming × ADR-0131 route dispatch). It claims `/routed-stream` for its
+/// own mailbox with a raw `RegisterRouteSelf` from `wire`, then behaves
+/// exactly like [`StreamingHttpHandler`]: replies `HttpResponseStreamOpen`
+/// and emits `STREAM_CHUNK_COUNT` credit-paced `"chunk-{i}\n"` chunks. The
+/// e2e test points `HttpServerConfig.handler_mailbox` at a *different*
+/// mailbox, so the default-handler dispatch cannot mask the route path — the
+/// initial response-stream credit grant must reach this handler via the route
+/// it registered, not the configured default.
+///
+/// Registered at `aether.component/aether.embedded:test.web_stream_routed`
+/// after load.
+pub struct RoutedStreamingHttpHandler {
+    /// The stream this handler is feeding (ADR-0133), captured from the first
+    /// credit mail. `None` until that first grant arms it.
+    stream: Option<ResponseStream>,
+    /// Index of the next chunk to emit.
+    next_index: u32,
+    /// Whether the terminator has been sent.
+    ended: bool,
+}
+
+#[actor]
+impl WasmActor for RoutedStreamingHttpHandler {
+    const NAMESPACE: &'static str = "test.web_stream_routed";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(RoutedStreamingHttpHandler {
+            stream: None,
+            next_index: 0,
+            ended: false,
+        })
+    }
+
+    /// Claim `/routed-stream` for this actor's own mailbox through the raw
+    /// reflexive route form (ADR-0131). Registering from `wire` is the
+    /// common "route to me" case; `ctx` resolves the `aether.http.server`
+    /// cap by type, so the send reads exactly as the `#[http::route]` macro's
+    /// injected registration does.
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+        ctx.actor::<HttpServerCapability>()
+            .send(&RegisterRouteSelf {
+                prefix: "/routed-stream".to_string(),
+                method: None,
+                kind: <HttpServerRequest as Kind>::ID,
+            });
+    }
+
+    /// Open a streamed `200` response. Dispatched here through the registered
+    /// route, not the default `handler_mailbox`.
+    ///
+    /// # Agent
+    /// Not sent manually — the `aether.http.server` cap dispatches it on a
+    /// request matching the `/routed-stream` route this actor claimed in
+    /// `wire`.
+    #[handler]
+    fn on_request(
+        &mut self,
+        _ctx: &mut WasmCtx<'_>,
+        _req: HttpServerRequest,
+    ) -> HttpResponseStreamOpen {
+        self.next_index = 0;
+        self.ended = false;
+        HttpResponseStreamOpen {
+            status: 200,
+            headers: Vec::new(),
+        }
+    }
+
+    /// Spend the granted credit exactly as [`StreamingHttpHandler`] does. On
+    /// today's bug the initial grant never arrives for a route-dispatched
+    /// stream, so this never fires and no chunk is emitted.
+    ///
+    /// # Agent
+    /// Not sent manually — the cap sends one `HttpStreamCredit` per freed
+    /// window slot.
+    #[handler::manual]
+    fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: HttpStreamCredit) {
+        let stream = match self.stream {
+            Some(stream) => stream,
+            None => match ResponseStream::from_credit(ctx, &credit) {
+                Some(stream) => *self.stream.insert(stream),
+                None => return,
+            },
+        };
+        let mut budget = credit.credit;
+        while budget > 0 && self.next_index < STREAM_CHUNK_COUNT {
+            stream.chunk(ctx, format!("chunk-{}\n", self.next_index).into_bytes());
+            self.next_index += 1;
+            budget -= 1;
+        }
+        if self.next_index >= STREAM_CHUNK_COUNT && !self.ended {
+            stream.end(ctx);
+            self.ended = true;
         }
     }
 }

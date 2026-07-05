@@ -134,19 +134,19 @@ impl HttpServerCapabilityState {
         open: &HttpResponseStreamOpen,
     ) {
         // The stream chain settles here; the request is no longer in-flight
-        // (ADR-0128 §4), so `on_settled` won't `502` it. Resolve the handler
-        // once here (it just replied, so it is live) and store it on the
-        // stream for credit grants; a missing handler leaves the sentinel and
-        // credit sends drop harmlessly, the pre-store no-op behavior.
-        let keep_alive = self
+        // (ADR-0128 §4), so `on_settled` won't `502` it. The handler is carried
+        // out of the in-flight dispatch record — whichever mailbox actually
+        // replied, be it the configured default `handler_mailbox` or an
+        // externally-registered route (ADR-0131) — so credit grants reach the
+        // real replier regardless of dispatch path. A missing in-flight entry
+        // leaves the sentinel and credit sends drop harmlessly, the pre-store
+        // no-op behavior.
+        let (keep_alive, handler) = self
             .in_flight
             .remove(&stream_id)
-            .is_some_and(|pending| pending.keep_alive);
-        let handler = self
-            .mailer
-            .registry()
-            .lookup(&self.handler_mailbox)
-            .unwrap_or(MailboxId(0));
+            .map_or((false, MailboxId(0)), |pending| {
+                (pending.keep_alive, pending.handler)
+            });
         let head = render_stream_head(open, keep_alive);
         self.write_raw_to(conn_id, &head);
 
