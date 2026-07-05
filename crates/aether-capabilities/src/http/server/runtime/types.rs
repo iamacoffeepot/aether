@@ -4,10 +4,42 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-/// Per-connection identifier, monotonic within this cap. Distinct from
-/// the OS-level peer addr (one peer may reconnect; ids stay unique for
-/// the cap's lifetime).
+/// Per-connection identifier, monotonic within one dispatch shard.
+/// Distinct from the OS-level peer addr (one peer may reconnect; ids stay
+/// unique for the shard's lifetime).
 pub type ConnId = u64;
+
+/// The route table (ADR-0130) shared across the supervisor, its dispatch
+/// shards, and (in later ADR-0135 stages) the reader threads: the
+/// supervisor's registration handlers write, request dispatch reads.
+pub type SharedRoutes = Arc<RwLock<Vec<Route>>>;
+
+/// Boot config the supervisor builds for each dispatch shard it spawns
+/// (ADR-0135): the shard's sidecar channel (receiver consumed at `init`,
+/// sender cloned into every reader the shard spawns), the shared route
+/// table + live-connection count, and the per-connection tuning copied
+/// from [`HttpServerConfig`](crate::http::server::HttpServerConfig).
+pub struct HttpShardSeed {
+    /// The shard's inbound event channel; `Some` exactly until the shard's
+    /// `init` takes it (the `TcpSessionConfig::stream` consume pattern).
+    pub inbound_rx: Option<mpsc::Receiver<InboundEvent>>,
+    /// The matching sender: the supervisor keeps a clone (its assignment
+    /// sink), and the shard clones it into each reader's [`WakeSink`].
+    pub inbound_tx: mpsc::Sender<InboundEvent>,
+    pub routes: SharedRoutes,
+    pub live_connections: Arc<AtomicUsize>,
+    pub handler_mailbox: String,
+    pub max_request_bytes: usize,
+    pub max_header_bytes: usize,
+    pub request_timeout: Duration,
+    pub keep_alive_timeout: Duration,
+    pub ws_idle_timeout: Duration,
+    pub response_stream_window: u32,
+    pub request_stream_window: u32,
+    /// Cap-global stream-id source (ADR-0135) — see
+    /// [`HttpShardState::next_stream_id`](super::HttpShardState).
+    pub next_stream_id: Arc<AtomicU64>,
+}
 
 /// Header-array size for the inbound parse (doubles as the header-count
 /// cap: a request with more headers is answered `431`). ADR-0108 §6.
@@ -220,7 +252,7 @@ pub struct ConnState {
 
 /// Per-connection websocket state (ADR-0129), set on accept. Outbound frames
 /// ride the ADR-0128 writer thread through the [`StreamState`] keyed by
-/// `stream_id` in [`HttpServerCapabilityState::streams`]; `handler` is the
+/// `stream_id` in [`HttpShardState::streams`]; `handler` is the
 /// mailbox each inbound message is dispatched to.
 pub struct WsConn {
     /// The handler mailbox resolved at handshake — inbound messages dispatch
@@ -251,7 +283,7 @@ pub struct PendingRequest {
 }
 
 /// Per-connection response-stream state (ADR-0128), keyed in
-/// [`HttpServerCapabilityState::streams`] by `stream_id` (== the request's
+/// [`HttpShardState::streams`] by `stream_id` (== the request's
 /// dispatch correlation id `C`). The dispatcher owns all of this
 /// single-threaded, exactly like [`PendingRequest`]; the writer thread owns
 /// only the socket write.
@@ -283,14 +315,14 @@ pub struct StreamState {
     pub pending_end: bool,
     /// Whether the connection is kept alive once this stream finishes
     /// (renders `Connection: keep-alive` in the stream head and resumes the
-    /// reader at [`HttpServerCapabilityState::finish_stream`]) rather than
+    /// reader at [`HttpShardState::finish_stream`]) rather than
     /// closing it. Set from the promoted request's [`PendingRequest`] at
     /// stream open, mirroring `PendingRequest::keep_alive`.
     pub keep_alive: bool,
 }
 
 /// Per-connection *inbound* request-stream state (ADR-0128), keyed in
-/// [`HttpServerCapabilityState::request_streams`] by a cap-minted `stream_id`.
+/// [`HttpShardState::request_streams`] by a cap-minted `stream_id`.
 /// The dispatcher owns it single-threaded; the reader thread owns only the
 /// socket read and the credit wait. The mirror of [`StreamState`] with the
 /// data flowing the other way — the cap produces credit-paced chunks *to* the

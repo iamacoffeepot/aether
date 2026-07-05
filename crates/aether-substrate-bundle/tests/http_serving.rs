@@ -270,6 +270,7 @@ mod tests {
             max_connections: 1024,
             response_stream_window: 16,
             request_stream_window: 16,
+            dispatch_shards: 0,
             websocket_idle_timeout_millis: 300_000,
         };
 
@@ -391,6 +392,7 @@ mod tests {
             // Window below the chunk count so the round trip must replenish.
             response_stream_window: 8,
             request_stream_window: 16,
+            dispatch_shards: 0,
             websocket_idle_timeout_millis: 300_000,
         };
 
@@ -514,6 +516,7 @@ mod tests {
             // Window below the chunk count so the round trip must replenish.
             response_stream_window: 8,
             request_stream_window: 16,
+            dispatch_shards: 0,
             websocket_idle_timeout_millis: 300_000,
         };
 
@@ -633,6 +636,7 @@ mod tests {
             max_connections: 1024,
             response_stream_window: 8,
             request_stream_window: 16,
+            dispatch_shards: 0,
             websocket_idle_timeout_millis: 10_000,
         };
 
@@ -926,6 +930,7 @@ mod tests {
             max_connections: 1024,
             response_stream_window: 16,
             request_stream_window: 16,
+            dispatch_shards: 0,
             websocket_idle_timeout_millis: 300_000,
         };
 
