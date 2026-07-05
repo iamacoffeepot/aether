@@ -9,6 +9,7 @@
 pub mod client;
 pub mod kinds;
 pub mod server;
+pub mod stream;
 pub mod typed;
 
 pub use kinds::*;
@@ -20,6 +21,11 @@ pub use kinds::*;
 // `http::FromRequest` / `http::Ctx` / `http::Route`.
 pub use aether_capabilities_derive::{route, router};
 pub use typed::{Ctx, FromRequest, Route};
+
+// ADR-0133 reply-based data-phase stream handles. Wasm-safe like `typed`,
+// so a `default-features = false` guest that streams gets them without the
+// native runtime.
+pub use stream::{RequestStream, ResponseStream, WebSocketStream};
 
 // Egress client surface (`client.rs`). `HttpConfig` is the always-on
 // domain struct; the `Config`-derive `HttpConfigLayer` / `HttpOverlay`

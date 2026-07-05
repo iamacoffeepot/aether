@@ -708,6 +708,14 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
             self.mailbox,
         );
     }
+
+    //noinspection DuplicatedCode
+    // By-id detached send: the inherent `send_to` with `ChainMode::Detached`.
+    fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        self.inline
+            .route_or_enqueue(id.0, K::ID.0, &bytes, 1, ChainMode::Detached, self.mailbox);
+    }
 }
 
 // ADR-0112: the reply surface is per-mode. `Manual` carries it (a
@@ -927,6 +935,13 @@ impl MailSender for WasmDropCtx<'_> {
             true,
             self.mailbox,
         );
+    }
+
+    //noinspection DuplicatedCode
+    // By-id detached send — the by-name body with the caller's id.
+    fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        mail::send_mail(id.0, K::ID.0, &bytes, 1, true, self.mailbox);
     }
 }
 

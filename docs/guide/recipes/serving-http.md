@@ -289,18 +289,28 @@ default 16) as an `HttpStreamCredit` mail, and replenishes one credit each time
 its per-connection writer thread drains a chunk to the socket. A chunk consumes
 one credit; when credit reaches zero the handler pauses until the next
 `HttpStreamCredit` arrives. So a slow client blocks the writer thread, not the
-scheduler, and the handler cannot outrun the socket:
+scheduler, and the handler cannot outrun the socket.
+
+The data phase answers whoever dispatched to the handler — the same invariant the
+`HttpResponseStreamOpen` reply already honours (ADR-0133). The handler captures a
+`ResponseStream` handle from its first credit mail — the counterparty that paced
+the stream, plus the `stream_id` — and emits every chunk through it. The stream
+flows back to that counterparty, so a test mock or a middleware forwarding in
+front of the server receives it exactly as the real server does. Each send is a
+detached chain root, so a chunk settles on its own causal chain instead of the
+credit grant that triggered it. Reading the dispatch's sender needs the `Manual`
+ctx, so the credit handler is `#[handler::manual]`:
 
 ```rust
-use aether_actor::WasmInitCtx;
-use aether_capabilities::http::HttpServerCapability;
+use aether_actor::{Manual, WasmCtx, WasmInitCtx};
+use aether_capabilities::http::ResponseStream;
 use aether_capabilities::http::kinds::{
-    HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen, HttpServerRequest,
-    HttpStreamCredit,
+    HttpResponseStreamOpen, HttpServerRequest, HttpStreamCredit,
 };
 
 pub struct Feed {
-    stream_id: u64,
+    // The stream this handler is feeding, captured from the first credit mail.
+    stream: Option<ResponseStream>,
     next: u32,
     done: bool,
 }
@@ -310,7 +320,7 @@ impl WasmActor for Feed {
     const NAMESPACE: &'static str = "feed";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Feed { stream_id: 0, next: 0, done: false })
+        Ok(Feed { stream: None, next: 0, done: false })
     }
 
     // Open the stream. The body arrives later, one chunk per unit of credit.
@@ -322,23 +332,25 @@ impl WasmActor for Feed {
     }
 
     // Spend the granted credit, then terminate once the body is exhausted.
-    // The handler learns its `stream_id` from the first credit mail.
-    #[handler]
-    fn on_credit(&mut self, ctx: &mut WasmCtx<'_>, credit: HttpStreamCredit) {
-        self.stream_id = credit.stream_id;
+    // The first credit mail arms the stream handle — its counterparty is
+    // whoever paced the stream, and every chunk flows back through it.
+    #[handler::manual]
+    fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: HttpStreamCredit) {
+        let stream = match self.stream {
+            Some(stream) => stream,
+            None => match ResponseStream::from_credit(ctx, &credit) {
+                Some(stream) => *self.stream.insert(stream),
+                None => return,
+            },
+        };
         let mut budget = credit.credit;
         while budget > 0 && self.next < 100 {
-            ctx.actor::<HttpServerCapability>().send(&HttpResponseChunk {
-                stream_id: self.stream_id,
-                body: format!("line {}\n", self.next).into_bytes(),
-            });
+            stream.chunk(ctx, format!("line {}\n", self.next).into_bytes());
             self.next += 1;
             budget -= 1;
         }
         if self.next >= 100 && !self.done {
-            ctx.actor::<HttpServerCapability>().send(&HttpResponseStreamEnd {
-                stream_id: self.stream_id,
-            });
+            stream.end(ctx);
             self.done = true;
         }
     }
@@ -384,6 +396,7 @@ reply shapes; return from a bare `#[handler]` otherwise.
 
 This recipe names the env keys and kind names live in the source. Before
 following it, confirm `AETHER_HTTP_SERVER_ENABLED`, `HttpServerRequest`,
-`HttpServerResponse`, `HttpServerConfig`, and the `http::{router, route,
-FromRequest, Ctx}` authoring surface still exist where named — grep the crates,
-and if a name has drifted, fix the recipe as part of your work.
+`HttpServerResponse`, `HttpServerConfig`, the `http::{router, route,
+FromRequest, Ctx}` authoring surface, and `http::ResponseStream` still exist
+where named — grep the crates, and if a name has drifted, fix the recipe as part
+of your work.
