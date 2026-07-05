@@ -92,10 +92,6 @@ pub struct HttpShardState {
     /// each reader/writer sidecar); cleared at the top of the shard's
     /// `on_inbound_ready`.
     pub wake_dirty: Arc<AtomicBool>,
-    /// Round-robin cursor over shared route member sets (ADR-0136),
-    /// shard-local by design — a global cursor would be a cross-shard
-    /// contention point for marginal balance.
-    pub route_cursor: usize,
     pub connections: HashMap<ConnId, ConnState>,
     pub next_conn_id: ConnId,
     /// Dispatch-correlation → open response socket. Populated on
@@ -372,54 +368,6 @@ impl HttpSupervisorState {
 }
 
 impl HttpShardState {
-    /// The longest segment-boundary prefix match among
-    /// method-compatible routes, with a method-specific route beating
-    /// a method-agnostic one at equal prefix (ADR-0130), then one live
-    /// member picked round-robin from the winning route's set
-    /// (ADR-0136) — copied out from under the shared table's read
-    /// lock. [`RouteResolution::NoRoute`] ⇒ the configured
-    /// `handler_mailbox` fallback; [`RouteResolution::Dead`] ⇒ the
-    /// route exists but no member is live, the `503` surface (falling
-    /// back instead would silently reroute a claimed path family).
-    ///
-    /// # Panics
-    /// Panics if the route-table `RwLock` is poisoned — fail-fast per
-    /// ADR-0063.
-    /// `advance: false` is the peek form for the pre-dispatch head
-    /// decision (ADR-0128 §4): it reads the member the next dispatch
-    /// would pick without consuming a cursor tick, so the decision +
-    /// dispatch pair of resolutions per request advances the
-    /// round-robin exactly once.
-    // The read guard spans member validation by design: a route emptied
-    // concurrently must not be picked from a stale copy, and the
-    // registry probe under it takes no lock that ever holds this one.
-    #[allow(clippy::significant_drop_tightening)]
-    fn resolve_route(&mut self, path: &str, method: HttpMethod, advance: bool) -> RouteResolution {
-        let routes = self.routes.read().expect("route table lock poisoned");
-        let Some(route) = routes
-            .iter()
-            .filter(|r| r.method.is_none_or(|m| m == method) && route_matches(&r.prefix, path))
-            .max_by_key(|r| (r.prefix.len(), r.method.is_some()))
-        else {
-            return RouteResolution::NoRoute;
-        };
-        // Shard-local round-robin over the member set, skipping members
-        // the registry no longer reports live (the single-member case
-        // degenerates to today's validate-the-one-target check).
-        let start = self.route_cursor;
-        if advance {
-            self.route_cursor = self.route_cursor.wrapping_add(1);
-        }
-        let len = route.members.len();
-        for offset in 0..len {
-            let member = route.members[(start + offset) % len];
-            if validate_route_mailbox(self.mailer.registry(), member).is_ok() {
-                return RouteResolution::Live(member, route.kind);
-            }
-        }
-        RouteResolution::Dead
-    }
-
     /// Release this connection's slot in the global live count (ADR-0135).
     /// Paired with the supervisor's assignment-time increment; called
     /// exactly once per assigned connection — on close, or on an adoption
@@ -480,8 +428,14 @@ impl HttpShardState {
             request_timeout: self.request_timeout,
             idle_timeout: self.keep_alive_timeout,
             max_header_bytes: self.max_header_bytes,
+            max_request_bytes: self.max_request_bytes,
             ws_idle_timeout: self.ws_idle_timeout,
             ws_max_message_bytes: self.max_request_bytes,
+        };
+        let shared = ReaderShared {
+            routes: Arc::clone(&self.routes),
+            handler_mailbox: Arc::from(self.handler_mailbox.as_str()),
+            peer: peer.to_string(),
         };
 
         // Per-connection transport reader below the mail layer — carries
@@ -498,6 +452,7 @@ impl HttpShardState {
                     &sink,
                     &control_rx,
                     tuning,
+                    &shared,
                 );
             }) {
             Ok(thread) => thread,
@@ -534,61 +489,31 @@ impl HttpShardState {
         );
     }
 
-    /// Map the method, resolve the handler, dispatch the request, and
-    /// record the in-flight entry. Answers `501` / `503` inline.
-    pub fn dispatch_request(
+    /// Dispatch a reader-prepared buffered request (ADR-0135 §2): the
+    /// reader resolved the handler, validated it live, and encoded the
+    /// payload; this side stashes a websocket handshake key when one
+    /// rode along (ADR-0129), sends, subscribes settlement, and records
+    /// the in-flight entry. A handler that died since the reader's
+    /// check is caught by the settlement `502` net — the same net that
+    /// covers the dispatch-to-delivery gap.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_prepared(
         &mut self,
         ctx: &mut NativeCtx<'_>,
         conn_id: ConnId,
-        request: ParsedRequest,
+        payload: &[u8],
+        handler: MailboxId,
+        kind: KindId,
+        method: HttpMethod,
+        keep_alive: bool,
+        ws_key: Option<String>,
     ) {
-        let Some(method) = parse_http_method(&request.method) else {
-            self.write_status_response(conn_id, 501, "method not implemented");
-            self.close_connection(conn_id, "unsupported method");
-            return;
-        };
-        let keep_alive = request.keep_alive;
-        // Route resolution (ADR-0130): a registered route names its
-        // handler by stable `MailboxId` and the kind its requests
-        // dispatch as; a dead routed mailbox is answered `503`, the
-        // same surface as an unresolved fallback (falling back instead
-        // would silently reroute a claimed path family). No route ⇒
-        // the ADR-0108 §3 late-binding fallback: resolve the configured
-        // `handler_mailbox` by name at dispatch time through the
-        // registry — the sanctioned runtime-name path — dispatching
-        // the generic request kind. Nothing live either way → `503`.
-        let (handler, dispatch_kind) = match self.resolve_route(&request.path, method, true) {
-            RouteResolution::Live(mailbox, kind) => (mailbox, kind),
-            RouteResolution::Dead => {
-                self.write_status_response(conn_id, 503, "routed handler gone");
-                self.close_connection(conn_id, "routed mailbox dead");
-                return;
-            }
-            RouteResolution::NoRoute => {
-                if let Some(handler) = self.mailer.registry().lookup(&self.handler_mailbox) {
-                    (handler, <HttpServerRequest as Kind>::ID)
-                } else {
-                    self.write_status_response(conn_id, 503, "no handler registered");
-                    self.close_connection(conn_id, "handler unresolved");
-                    return;
-                }
-            }
-        };
-        let peer_addr = self
-            .connections
-            .get(&conn_id)
-            .map(|c| c.peer.to_string())
-            .unwrap_or_default();
-        let payload = HttpServerRequest {
-            method,
-            path: request.path,
-            query: request.query,
-            headers: request.headers,
-            body: request.body,
-            peer_addr,
+        if ws_key.is_some()
+            && let Some(conn) = self.connections.get_mut(&conn_id)
+        {
+            conn.ws_pending_key = ws_key;
         }
-        .encode_into_bytes();
-        let mail_id = ctx.send_envelope_detached(handler, dispatch_kind, &payload);
+        let mail_id = ctx.send_envelope_detached(handler, kind, payload);
         // Safety net (ADR-0108 §5): if the chain settles with no
         // response, `on_settled` answers `502`. Best-effort — a chassis
         // without the settlement registry still serves the reply path.
@@ -611,93 +536,27 @@ impl HttpShardState {
         );
     }
 
-    /// Resolve the handler a request head dispatches to — a matching ADR-0130
-    /// route (its stable mailbox validated live, no fallback if it is dead) or
-    /// the late-bound `handler_mailbox` — read-only, so the streaming decision
-    /// can consult the resolved handler's accept-set before the body is read.
-    /// `None` collapses every "nothing live" case to the `503` the buffered
-    /// dispatch answers.
-    fn resolved_handler(&mut self, path: &str, method: HttpMethod) -> Option<(MailboxId, KindId)> {
-        match self.resolve_route(path, method, false) {
-            RouteResolution::Live(mailbox, kind) => Some((mailbox, kind)),
-            RouteResolution::Dead => None,
-            RouteResolution::NoRoute => self
-                .mailer
-                .registry()
-                .lookup(&self.handler_mailbox)
-                .map(|handler| (handler, <HttpServerRequest as Kind>::ID)),
-        }
-    }
-
-    /// Decide a parsed request head's body path (ADR-0128): resolve the
-    /// handler, read its accept-set, and either signal the parked reader to
-    /// buffer or stream the body, or reject and close. A handler whose
-    /// accept-set carries `HttpRequestStreamOpen` takes the streamed path
-    /// structurally — the cap cannot stream chunk kinds to a handler that does
-    /// not handle them — so no per-request opt-in is needed.
-    pub fn decide_request_head(
+    /// Open the inbound request stream for a reader-posted head bound
+    /// for a streaming handler (ADR-0128 / ADR-0135 §2). The reader
+    /// resolved `handler` and made every reject decision; the shard
+    /// seats the session — minting the stream id and seeding credit —
+    /// because the stream tables live here. The method re-parses from
+    /// the head's raw string; the reader already rejected
+    /// non-enumerated verbs, so the defensive arm only fires on a
+    /// torn-down race.
+    pub fn open_requested_stream(
         &mut self,
         ctx: &mut NativeCtx<'_>,
         conn_id: ConnId,
         head: ParsedHead,
+        handler: MailboxId,
     ) {
         let Some(method) = parse_http_method(&head.method) else {
             self.write_status_response(conn_id, 501, "method not implemented");
             self.close_connection(conn_id, "unsupported method");
             return;
         };
-        let Some((handler, _kind)) = self.resolved_handler(&head.path, method) else {
-            self.write_status_response(conn_id, 503, "no handler registered");
-            self.close_connection(conn_id, "handler unresolved");
-            return;
-        };
-        // ADR-0129: a websocket upgrade handshake. The cap validates the
-        // protocol layer (`426`/`400`, cap-owned) before dispatch; on a valid
-        // handshake it stashes the `Sec-WebSocket-Key` and dispatches the
-        // request as an ordinary buffered `HttpServerRequest` the handler
-        // answers with `WebSocketAccept` (accept) or `HttpServerResponse`
-        // (decline). An upgrade request carries no body, so it always buffers.
-        if header_has_token(&head.headers, "upgrade", "websocket") {
-            match validate_ws_handshake(&head.headers) {
-                Ok(key) => {
-                    if let Some(conn) = self.connections.get_mut(&conn_id) {
-                        conn.ws_pending_key = Some(key);
-                    }
-                    self.signal_reader(conn_id, ReaderControl::Buffered);
-                }
-                Err((status, message)) => {
-                    self.write_status_response(conn_id, status, message);
-                    self.close_connection(conn_id, "invalid websocket handshake");
-                }
-            }
-            return;
-        }
-        let streaming = self
-            .mailer
-            .capability_registry()
-            .accepts(handler, <HttpRequestStreamOpen as Kind>::ID);
-        match (head.framing, streaming) {
-            // Smuggling (`Content-Length` + `Transfer-Encoding`) and a
-            // non-`chunked` coding are always `411`; a lone `chunked` body to a
-            // buffered handler has no length to buffer under, also `411`
-            // (relaxing #2545's guard only for a streaming handler).
-            (BodyFraming::Invalid, _) | (BodyFraming::Chunked, false) => {
-                self.write_status_response(conn_id, 411, "length required");
-                self.close_connection(conn_id, "unbufferable request framing");
-            }
-            (BodyFraming::Length(n), false) if n > self.max_request_bytes => {
-                self.write_status_response(conn_id, 413, "request body exceeds limit");
-                self.close_connection(conn_id, "body exceeds limit");
-            }
-            (_, false) => {
-                // Buffered handler: the reader reads the `Content-Length` body
-                // into one `RequestParsed`, then `dispatch_request` runs.
-                self.signal_reader(conn_id, ReaderControl::Buffered);
-            }
-            (_, true) => {
-                self.start_request_stream(ctx, conn_id, handler, method, head);
-            }
-        }
+        self.start_request_stream(ctx, conn_id, handler, method, head);
     }
 
     /// Send a control message to a connection's parked reader; a send failure

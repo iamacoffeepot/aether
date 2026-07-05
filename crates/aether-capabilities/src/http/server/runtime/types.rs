@@ -14,17 +14,15 @@ pub type ConnId = u64;
 /// supervisor's registration handlers write, request dispatch reads.
 pub type SharedRoutes = Arc<RwLock<Vec<Route>>>;
 
-/// Outcome of a shard's route resolution (ADR-0130 / ADR-0136).
-pub enum RouteResolution {
-    /// No registered route matches — dispatch falls back to the
-    /// configured `handler_mailbox`.
-    NoRoute,
-    /// A route matches but no member of its set is live — the `503`
-    /// surface (never the fallback: that would silently reroute a
-    /// claimed path family).
-    Dead,
-    /// The picked live member and the kind its requests dispatch as.
-    Live(MailboxId, KindId),
+/// Read-mostly state a reader thread consults to make the fast-path
+/// decision itself (ADR-0135 §2): the shared route table, the
+/// late-bound fallback handler name, and the connection's peer string
+/// (captured once at adoption; every request's `peer_addr` clones it
+/// on the reader thread rather than the shard).
+pub struct ReaderShared {
+    pub routes: SharedRoutes,
+    pub handler_mailbox: Arc<str>,
+    pub peer: String,
 }
 
 /// Boot config the supervisor builds for each dispatch shard it spawns
@@ -98,9 +96,6 @@ pub struct ParsedHead {
 /// dropping the control sender, which surfaces at the reader as a disconnect —
 /// so there is no reject variant here.
 pub enum ReaderControl {
-    /// Read the `Content-Length` body into one [`InboundEvent::RequestParsed`]
-    /// (today's buffered path).
-    Buffered,
     /// Stream the body incrementally, seeded with `credit` initial send-window
     /// units (one per [`InboundEvent::RequestBodyChunk`]).
     Stream { credit: u32 },
@@ -118,24 +113,6 @@ pub enum ReaderControl {
     Upgrade,
 }
 
-/// One parsed inbound HTTP/1.1 request the reader hands to the
-/// dispatcher. The method stays a raw `String` here; the dispatcher
-/// maps it to [`HttpMethod`] and answers `501` for a non-enumerated
-/// verb before any dispatch.
-pub struct ParsedRequest {
-    pub method: String,
-    pub path: String,
-    pub query: String,
-    pub headers: Vec<HttpHeader>,
-    pub body: Vec<u8>,
-    /// Whether this request wants the connection kept alive after its
-    /// response (HTTP/1.1 default, or HTTP/1.0 with `Connection:
-    /// keep-alive`), computed by [`request_keeps_alive`]. Carried to the
-    /// dispatcher so it renders `Connection: keep-alive` vs `close` and
-    /// either resumes the reader or closes the socket.
-    pub keep_alive: bool,
-}
-
 /// Internal event the accept / reader sidecar threads push to the cap
 /// dispatcher via an mpsc. The matching wake-mail kind is
 /// [`HttpInboundReady`] (empty payload) — `on_inbound_ready` drains the
@@ -143,17 +120,31 @@ pub struct ParsedRequest {
 pub enum InboundEvent {
     /// The accept thread took a new connection.
     PeerAccepted { stream: TcpStream, peer: SocketAddr },
-    /// A reader parsed a request head and needs the dispatcher's streaming
-    /// decision before it reads the body (ADR-0128): the dispatcher resolves
-    /// the handler, checks its accept-set, and replies down the connection's
-    /// control channel with either [`ReaderControl::Buffered`] (read the body
-    /// into one [`Self::RequestParsed`]) or [`ReaderControl::Stream`] (deliver
-    /// it incrementally), or rejects the request and closes.
-    RequestHeadParsed { conn_id: ConnId, head: ParsedHead },
-    /// A reader parsed a complete, size-bounded request (buffered path).
+    /// A reader parsed a request head bound for a *streaming* handler
+    /// (ADR-0128 / ADR-0135 §2): the reader already resolved `handler`
+    /// and read its accept-set; the shard opens the inbound request
+    /// stream and replies [`ReaderControl::Stream`] down the control
+    /// channel. Buffered requests never take this round trip.
+    RequestHeadParsed {
+        conn_id: ConnId,
+        head: ParsedHead,
+        handler: MailboxId,
+    },
+    /// A complete, size-bounded buffered request, resolved and encoded
+    /// at the reader (ADR-0135 §2): `payload` is the ready-to-send
+    /// `HttpServerRequest` (or routed-kind) wire image; the shard's
+    /// dispatch is send + settlement-subscribe + in-flight insert.
     RequestParsed {
         conn_id: ConnId,
-        request: ParsedRequest,
+        payload: Vec<u8>,
+        handler: MailboxId,
+        kind: KindId,
+        method: HttpMethod,
+        keep_alive: bool,
+        /// `Some` on a websocket upgrade handshake (ADR-0129) the
+        /// reader validated: the `Sec-WebSocket-Key` the shard stashes
+        /// before dispatching, consumed if the handler accepts.
+        ws_key: Option<String>,
     },
     /// A streaming reader delivered one inbound body piece (ADR-0128); the
     /// dispatcher forwards it to the handler as an [`HttpRequestChunk`] on the
@@ -164,13 +155,6 @@ pub enum InboundEvent {
     /// The dispatcher sends the handler an [`HttpRequestStreamEnd`] and awaits
     /// its buffered response on that mail's correlation.
     RequestBodyEnd { conn_id: ConnId },
-    /// A reader hit a trust cap or a parse error before any dispatch;
-    /// the dispatcher writes the canned status response and closes.
-    RequestRejected {
-        conn_id: ConnId,
-        status: u16,
-        message: &'static str,
-    },
     /// A reader saw EOF / a read error / a slow-loris timeout; the
     /// dispatcher tears the connection down.
     ReaderClosed { conn_id: ConnId, reason: String },
