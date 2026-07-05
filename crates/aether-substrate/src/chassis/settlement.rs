@@ -32,13 +32,17 @@
 //!   subscribers have drained are no-ops (the `HashSet` hit short-
 //!   circuits).
 //!
-//! The `settled` `HashSet` grows unboundedly within a chassis lifetime
-//! today. PR 5 (or a later cleanup) wires retention against the
-//! observer's eviction policy. For v1 — a chassis runs for a session,
-//! not forever — the cap-by-count plus per-process tear-down keeps
-//! memory bounded.
+//! The registry is striped into independent mutex cells keyed by the
+//! root's correlation id, and each cell's `settled` set is bounded
+//! (issue 2618): the oldest remembered roots evict in insertion order
+//! past the per-cell cap, so the registry holds a fixed-size
+//! recent-settlement window rather than growing for the chassis
+//! lifetime. A subscriber arriving after its root has been evicted from
+//! the window misses the pre-fire — see [`SETTLED_CAP_PER_CELL`] for
+//! why that gap sits far outside any legitimate subscribe timing.
 
-use std::collections::{HashMap, HashSet};
+use std::array;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -48,17 +52,48 @@ use aether_data::{Kind, KindId, MailId, MailboxId};
 use aether_kinds::trace::Settled;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 
+/// Cell count for the registry's striped lock (issue 2618). A power of
+/// two so the root hash masks; 64 cells is far past the worker count on
+/// any target machine, so two workers firing settlement for different
+/// roots virtually never contend.
+const CELL_COUNT: usize = 64;
+
+/// Per-cell cap on remembered settled roots (issue 2618). The settled
+/// set exists only to pre-fire a subscriber that arrives *after* its
+/// root settled; every production subscriber registers within
+/// microseconds of dispatching its root, so an eviction window
+/// `CELL_COUNT * SETTLED_CAP_PER_CELL` (131,072) roots deep — a second-plus
+/// of history even at stress-harness settle rates — is far beyond any
+/// legitimate subscribe-after-settle gap, and it converts what was
+/// unbounded growth over the chassis lifetime into a fixed ~6 MiB
+/// ceiling (the long-lived-substrate leak the stress arc surfaced).
+const SETTLED_CAP_PER_CELL: usize = 2048;
+
 /// Chassis-owned settlement notification registry. Owned by the
 /// chassis (one per substrate); cloned via `Arc` into the
 /// [`Mailer`]'s chassis-router closure so the
 /// dispatcher's `Settled` switch can fire.
-#[derive(Default)]
+///
+/// Striped into [`CELL_COUNT`] independent mutex cells keyed by the
+/// root's correlation id (issue 2618): every settled chain in the
+/// substrate fires through here from whichever worker discharged it,
+/// and every settlement-awaiting dispatch subscribes, so a single
+/// registry-wide mutex was the measured throughput ceiling once the
+/// HTTP dispatch path sharded (ADR-0135).
 pub struct SettlementRegistry {
-    inner: Mutex<Inner>,
+    cells: [Mutex<Cell>; CELL_COUNT],
+}
+
+impl Default for SettlementRegistry {
+    fn default() -> Self {
+        Self {
+            cells: array::from_fn(|_| Mutex::new(Cell::default())),
+        }
+    }
 }
 
 #[derive(Default)]
-struct Inner {
+struct Cell {
     /// Subscribers waiting on each root's settlement signal. Vec so
     /// multiple gate sites can wait on the same root concurrently
     /// (lifecycle gates + the per-frame drain barrier might both
@@ -67,10 +102,30 @@ struct Inner {
     /// variant — one map, one drain.
     pending: HashMap<MailId, Vec<SettlementSubscriber>>,
     /// Roots that have already settled at least once. Subscribing to
-    /// one pre-fires the receiver. Grows unboundedly within a
-    /// chassis lifetime; v1 accepts the bound (chassis tear-down
-    /// reclaims).
+    /// one pre-fires the receiver. Bounded to [`SETTLED_CAP_PER_CELL`]
+    /// recent roots, evicted in insertion order via `settled_order`
+    /// (issue 2618) — see the cap's doc for the window semantics.
     settled: HashSet<MailId>,
+    /// Insertion-order companion to `settled`, driving the bounded
+    /// eviction: the oldest remembered root leaves both structures
+    /// when the cap is exceeded.
+    settled_order: VecDeque<MailId>,
+}
+
+impl Cell {
+    /// Record `root` as settled, evicting the oldest remembered root
+    /// past the cap. A repeat settle of an already-remembered root is
+    /// a no-op (no duplicate order entry).
+    fn remember_settled(&mut self, root: MailId) {
+        if self.settled.insert(root) {
+            self.settled_order.push_back(root);
+            while self.settled_order.len() > SETTLED_CAP_PER_CELL {
+                if let Some(evicted) = self.settled_order.pop_front() {
+                    self.settled.remove(&evicted);
+                }
+            }
+        }
+    }
 }
 
 /// One subscriber parked on a root pending settlement. Channel
@@ -122,6 +177,17 @@ impl SettlementRegistry {
         Self::default()
     }
 
+    /// The mutex cell owning `root` (issue 2618): the correlation id is
+    /// a mailer-minted monotonic counter, so a Fibonacci-hash mix
+    /// spreads consecutive ids across the stripe before masking.
+    fn cell_for(&self, root: MailId) -> &Mutex<Cell> {
+        let mixed = root.correlation_id.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        // Take the mask from the mixed value's high bits — the ones the
+        // multiply actually scrambles.
+        let index = (mixed >> 32) as usize & (CELL_COUNT - 1);
+        &self.cells[index]
+    }
+
     /// Subscribe a gate site to `root`'s settlement signal. Returns
     /// a [`Receiver<()>`] that wakes when [`Self::fire_settled`] is
     /// called for the same root. Pre-fires immediately if `root` has
@@ -137,18 +203,17 @@ impl SettlementRegistry {
     /// a poisoned mutex means a prior holder panicked under the guard.
     pub fn subscribe_settlement(&self, root: MailId) -> Receiver<()> {
         let (tx, rx) = bounded::<()>(1);
-        let mut inner = self
-            .inner
+        let mut cell = self
+            .cell_for(root)
             .lock()
             .expect("settlement registry mutex poisoned; fail-fast per ADR-0063");
-        if inner.settled.contains(&root) {
+        if cell.settled.contains(&root) {
             // Pre-fire — root already settled. `try_send` rather
             // than `send` so a closed receiver (caller dropped it
             // before reading) doesn't panic.
             let _ = tx.try_send(());
         } else {
-            inner
-                .pending
+            cell.pending
                 .entry(root)
                 .or_default()
                 .push(SettlementSubscriber::Channel(tx));
@@ -175,18 +240,17 @@ impl SettlementRegistry {
         kind: KindId,
         mailer: Arc<Mailer>,
     ) {
-        let mut inner = self
-            .inner
+        let mut cell = self
+            .cell_for(root)
             .lock()
             .expect("settlement registry mutex poisoned; fail-fast per ADR-0063");
-        if inner.settled.contains(&root) {
+        if cell.settled.contains(&root) {
             // Drop the mutex before pushing — `push` may run hot
             // (resolves the recipient inline on this thread).
-            drop(inner);
+            drop(cell);
             push_settlement_notice(&mailer, target, kind, root);
         } else {
-            inner
-                .pending
+            cell.pending
                 .entry(root)
                 .or_default()
                 .push(SettlementSubscriber::Mail {
@@ -213,12 +277,12 @@ impl SettlementRegistry {
         // tight and removes a re-entrancy hazard if a future
         // subscriber type re-enters the registry.
         let subs = {
-            let mut inner = self
-                .inner
+            let mut cell = self
+                .cell_for(root)
                 .lock()
                 .expect("settlement registry mutex poisoned; fail-fast per ADR-0063");
-            inner.settled.insert(root);
-            inner.pending.remove(&root)
+            cell.remember_settled(root);
+            cell.pending.remove(&root)
         };
         if let Some(subs) = subs {
             for sub in subs {
@@ -232,39 +296,51 @@ impl SettlementRegistry {
     /// production code queries via mail (subscribe + recv).
     #[cfg(test)]
     fn pending_count(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("settlement registry mutex poisoned; fail-fast per ADR-0063")
-            .pending
-            .values()
-            .flat_map(|v| v.iter())
-            .filter(|s| matches!(s, SettlementSubscriber::Channel(_)))
-            .count()
+        self.cells
+            .iter()
+            .map(|cell| {
+                cell.lock()
+                    .expect("settlement registry mutex poisoned; fail-fast per ADR-0063")
+                    .pending
+                    .values()
+                    .flat_map(|v| v.iter())
+                    .filter(|s| matches!(s, SettlementSubscriber::Channel(_)))
+                    .count()
+            })
+            .sum()
     }
 
     /// Test introspection: count of roots recorded as already
     /// settled.
     #[cfg(test)]
     fn settled_count(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("settlement registry mutex poisoned; fail-fast per ADR-0063")
-            .settled
-            .len()
+        self.cells
+            .iter()
+            .map(|cell| {
+                cell.lock()
+                    .expect("settlement registry mutex poisoned; fail-fast per ADR-0063")
+                    .settled
+                    .len()
+            })
+            .sum()
     }
 
     /// Test introspection: count of pending mail subscribers across all
     /// roots.
     #[cfg(test)]
     fn pending_mail_count(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("settlement registry mutex poisoned; fail-fast per ADR-0063")
-            .pending
-            .values()
-            .flat_map(|v| v.iter())
-            .filter(|s| matches!(s, SettlementSubscriber::Mail { .. }))
-            .count()
+        self.cells
+            .iter()
+            .map(|cell| {
+                cell.lock()
+                    .expect("settlement registry mutex poisoned; fail-fast per ADR-0063")
+                    .pending
+                    .values()
+                    .flat_map(|v| v.iter())
+                    .filter(|s| matches!(s, SettlementSubscriber::Mail { .. }))
+                    .count()
+            })
+            .sum()
     }
 }
 
@@ -825,5 +901,36 @@ mod tests {
             .expect("decode Settled")
             .root;
         assert_eq!(decoded, r);
+    }
+
+    /// The settled window is bounded and evicts oldest-first (issue
+    /// 2618): overfilling the registry never grows the remembered set
+    /// past the cap, and the most recent root still pre-fires a late
+    /// subscriber.
+    ///
+    /// Tripwire: without the per-cell eviction, `settled_count` tracks
+    /// the total fired count (the pre-2618 unbounded growth); with
+    /// eviction ordered wrongly (evict-newest), the recent-root
+    /// pre-fire fails.
+    #[test]
+    fn settled_window_is_bounded_and_recent_roots_prefire() {
+        let reg = SettlementRegistry::new();
+        let cap = CELL_COUNT * SETTLED_CAP_PER_CELL;
+        let total = cap + cap / 4;
+        for cid in 0..total {
+            reg.fire_settled(root(7, cid as u64));
+        }
+        assert!(
+            reg.settled_count() <= cap,
+            "settled window exceeded its bound: {} > {cap}",
+            reg.settled_count(),
+        );
+        // The most recently settled root is inside every cell's window,
+        // so a late subscriber still pre-fires.
+        let rx = reg.subscribe_settlement(root(7, (total - 1) as u64));
+        assert!(
+            rx.try_recv().is_ok(),
+            "recent root should pre-fire a late subscriber",
+        );
     }
 }
