@@ -358,3 +358,81 @@ fn config_layer_defaults_match_the_named_consts() {
         DEFAULT_WS_IDLE_TIMEOUT_MILLIS
     );
 }
+
+mod wake_coalescing {
+    //! ADR-0135 §4 — the wake-mail coalescing protocol on [`WakeSink`].
+
+    use super::super::{InboundEvent, WakeSink};
+    use crate::http::kinds::HttpInboundReady;
+    use aether_data::{Kind, KindId};
+    use aether_substrate::mail::mailer::Mailer;
+    use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
+
+    struct CountingInbox(AtomicUsize);
+    impl InboxHandler for CountingInbox {
+        fn enqueue(&self, _dispatch: OwnedDispatch) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn sink_with_counter() -> (WakeSink, mpsc::Receiver<InboundEvent>, Arc<CountingInbox>) {
+        let registry = Arc::new(Registry::new());
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+        let counter = Arc::new(CountingInbox(AtomicUsize::new(0)));
+        let self_id = registry.register_inbox(
+            "test.wake_target",
+            Arc::clone(&counter) as Arc<dyn InboxHandler>,
+        );
+        let (inbound_tx, inbound_rx) = mpsc::channel();
+        let sink = WakeSink {
+            inbound_tx,
+            mailer,
+            self_id,
+            wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
+            dirty: Arc::new(AtomicBool::new(false)),
+        };
+        (sink, inbound_rx, counter)
+    }
+
+    fn probe_event() -> InboundEvent {
+        InboundEvent::RequestTimedOut { conn_id: 0 }
+    }
+
+    /// Tripwire: a burst of posts between drains fires exactly one wake
+    /// mail — without the dirty-flag swap, every post fires one (the
+    /// pre-ADR-0135 per-event wake volume this optimization exists to
+    /// remove).
+    #[test]
+    fn burst_fires_one_wake() {
+        let (sink, _rx, counter) = sink_with_counter();
+        for _ in 0..16 {
+            assert!(sink.post(probe_event()));
+        }
+        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+    }
+
+    /// Tripwire: the drain-side arm order (clear the flag *before*
+    /// draining) means a post landing mid-drain re-fires the wake —
+    /// clearing after the drain instead would swallow it and strand the
+    /// event until the next unrelated wake. `_dead_mailbox_id` never
+    /// aliases; the second wake is observable as a second count.
+    #[test]
+    fn post_after_arm_refires_wake() {
+        let (sink, rx, counter) = sink_with_counter();
+        assert!(sink.post(probe_event()));
+        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+
+        // Drain begins: arm first (the load-bearing order), then empty
+        // the channel.
+        WakeSink::arm_for_drain(&sink.dirty);
+        while rx.try_recv().is_ok() {}
+
+        // A post after the arm — even mid-drain — must fire a fresh
+        // wake, or the event would sit undelivered.
+        assert!(sink.post(probe_event()));
+        assert_eq!(counter.0.load(Ordering::SeqCst), 2);
+    }
+}

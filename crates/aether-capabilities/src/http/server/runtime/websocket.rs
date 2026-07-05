@@ -542,6 +542,7 @@ impl HttpShardState {
             mailer: Arc::clone(&self.mailer),
             self_id: self.self_mailbox,
             wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
+            dirty: Arc::clone(&self.wake_dirty),
         };
         // The writer's idle deadline is the websocket idle timeout: an upgraded
         // socket with nothing to write for minutes is normal, unlike a stalled

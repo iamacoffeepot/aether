@@ -117,11 +117,13 @@ impl NativeActor for HttpServerCapability {
         let self_id = ctx.self_id();
         let wake_kind = KindId(<HttpInboundReady as Kind>::ID.0);
 
+        let wake_dirty = Arc::new(AtomicBool::new(false));
         let accept_sink = WakeSink {
             inbound_tx,
             mailer: Arc::clone(&mailer),
             self_id,
             wake_kind,
+            dirty: Arc::clone(&wake_dirty),
         };
 
         // Transport thread below the mail layer — it accepts sockets
@@ -171,6 +173,7 @@ impl NativeActor for HttpServerCapability {
             accept_shutdown,
             accept_thread: Some(accept_thread),
             inbound_rx,
+            wake_dirty,
             shards: Vec::new(),
             next_shard: 0,
             next_stream_id: Arc::new(AtomicU64::new(0)),
@@ -205,6 +208,7 @@ impl NativeActor for HttpServerCapability {
     /// per item.
     #[handler]
     fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: HttpInboundReady) {
+        WakeSink::arm_for_drain(&state.wake_dirty);
         while let Ok(event) = state.inbound_rx.try_recv() {
             match event {
                 InboundEvent::PeerAccepted { stream, peer } => {

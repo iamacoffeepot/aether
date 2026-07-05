@@ -41,6 +41,10 @@ pub struct HttpSupervisorState {
     /// The supervisor's own sidecar channel: the accept thread posts
     /// [`InboundEvent::PeerAccepted`] here; nothing else feeds it.
     pub inbound_rx: mpsc::Receiver<InboundEvent>,
+    /// The supervisor drain loop's wake-coalescing flag (ADR-0135 §4),
+    /// shared with the accept sink; cleared at the top of
+    /// `on_inbound_ready`.
+    pub wake_dirty: Arc<AtomicBool>,
     /// One wake sink per spawned dispatch shard, in spawn order; empty until
     /// the first accepted connection forces the spawn (the dispatcher ctx is
     /// not available at `init`).
@@ -83,6 +87,11 @@ pub struct HttpShardState {
     pub mailer: Arc<Mailer>,
     pub inbound_rx: mpsc::Receiver<InboundEvent>,
     pub inbound_tx: mpsc::Sender<InboundEvent>,
+    /// This shard's wake-coalescing flag (ADR-0135 §4), shared by every
+    /// sink targeting this shard (the supervisor's assignment sink and
+    /// each reader/writer sidecar); cleared at the top of the shard's
+    /// `on_inbound_ready`.
+    pub wake_dirty: Arc<AtomicBool>,
     pub connections: HashMap<ConnId, ConnState>,
     pub next_conn_id: ConnId,
     /// Dispatch-correlation → open response socket. Populated on
@@ -146,9 +155,11 @@ impl HttpSupervisorState {
         };
         for index in 0..count {
             let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
+            let wake_dirty = Arc::new(AtomicBool::new(false));
             let seed = HttpShardSeed {
                 inbound_rx: Some(inbound_rx),
                 inbound_tx: inbound_tx.clone(),
+                wake_dirty: Arc::clone(&wake_dirty),
                 routes: Arc::clone(&self.routes),
                 live_connections: Arc::clone(&self.live_connections),
                 handler_mailbox: self.config.handler_mailbox.clone(),
@@ -171,6 +182,7 @@ impl HttpSupervisorState {
                     mailer: Arc::clone(&self.mailer),
                     self_id: mailbox,
                     wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
+                    dirty: wake_dirty,
                 }),
                 Err(e) => {
                     tracing::warn!(
@@ -385,6 +397,7 @@ impl HttpShardState {
             mailer: Arc::clone(&self.mailer),
             self_id: self.self_mailbox,
             wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
+            dirty: Arc::clone(&self.wake_dirty),
         };
         let tuning = ReaderTuning {
             request_timeout: self.request_timeout,

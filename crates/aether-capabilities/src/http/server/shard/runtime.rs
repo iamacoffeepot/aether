@@ -53,6 +53,7 @@ impl NativeActor for HttpDispatchShard {
             mailer: ctx.mailer(),
             inbound_rx,
             inbound_tx: seed.inbound_tx,
+            wake_dirty: seed.wake_dirty,
             connections: HashMap::new(),
             next_conn_id: 0,
             in_flight: HashMap::new(),
@@ -98,6 +99,7 @@ impl NativeActor for HttpDispatchShard {
     /// drains the mpsc and acts per item.
     #[handler]
     fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: HttpInboundReady) {
+        WakeSink::arm_for_drain(&state.wake_dirty);
         while let Ok(event) = state.inbound_rx.try_recv() {
             match event {
                 InboundEvent::PeerAccepted { stream, peer } => {
