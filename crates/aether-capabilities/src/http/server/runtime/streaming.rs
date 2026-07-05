@@ -144,8 +144,9 @@ impl HttpServerCapabilityState {
         let (keep_alive, handler) = self
             .in_flight
             .remove(&stream_id)
-            .map(|pending| (pending.keep_alive, pending.handler))
-            .unwrap_or((false, MailboxId(0)));
+            .map_or((false, MailboxId(0)), |pending| {
+                (pending.keep_alive, pending.handler)
+            });
         let head = render_stream_head(open, keep_alive);
         self.write_raw_to(conn_id, &head);
 

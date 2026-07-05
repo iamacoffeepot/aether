@@ -370,11 +370,12 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// cap by type, so the send reads exactly as the `#[http::route]` macro's
     /// injected registration does.
     fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
-        ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
-            prefix: "/routed-stream".to_string(),
-            method: None,
-            kind: <HttpServerRequest as Kind>::ID,
-        });
+        ctx.actor::<HttpServerCapability>()
+            .send(&RegisterRouteSelf {
+                prefix: "/routed-stream".to_string(),
+                method: None,
+                kind: <HttpServerRequest as Kind>::ID,
+            });
     }
 
     /// Open a streamed `200` response. Dispatched here through the registered
