@@ -128,7 +128,7 @@ impl Cube {
 
 #[actor]
 impl WasmActor for Cube {
-    const NAMESPACE: &'static str = "cube";
+    const NAMESPACE: &'static str = "test.cube";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Cube {

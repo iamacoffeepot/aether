@@ -532,7 +532,7 @@ impl TestBench {
     /// substrate-default cap (currently 100). The framework dispatch loop
     /// answers [`LogTail`] for every native actor and wasm trampoline, so
     /// `mailbox_name` is any live mailbox path (e.g.
-    /// `"aether.component/aether.embedded:test_fixture_probe"`).
+    /// `"aether.component/aether.embedded:test.probe"`).
     ///
     /// # Panics
     /// Panics on a decode failure — implies a kind shape mismatch,

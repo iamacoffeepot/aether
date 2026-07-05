@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 # ADR-0113 declarative-state replace SOURCE: a single-actor `Counter`
-# (`NAMESPACE = "stateful.typed"`) that declares `type State = CounterState`
+# (`NAMESPACE = "test.stateful.typed"`) that declares `type State = CounterState`
 # plus the dehydrate / rehydrate accessors, so `#[actor]` generates the
 # hot-swap hooks. Standalone (not in the bundle) because the decode-miss
 # test entry-loads it and replaces it with the reshaped satellite — a

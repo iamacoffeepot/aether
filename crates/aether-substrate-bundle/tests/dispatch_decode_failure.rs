@@ -8,7 +8,7 @@
 //! fallback / unknown-kind path) and hanging a request-shaped caller to its
 //! settlement timeout with no diagnostic.
 //!
-//! Drives the strict `Probe` fixture (namespace `test_fixture_probe`, no
+//! Drives the strict `Probe` fixture (namespace `test.probe`, no
 //! `#[fallback]`, an `on_set_render(SetRender)` handler) directly through the pub
 //! `Component::instantiate` / `deliver` API: deliver a `Mail` carrying
 //! `SetRender::ID` (a `#[repr(C)]` 4-byte cast-shape kind) with a 2-byte payload,

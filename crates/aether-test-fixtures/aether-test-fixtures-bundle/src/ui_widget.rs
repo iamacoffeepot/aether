@@ -37,7 +37,7 @@ pub struct UiWidget {
 #[actor]
 impl WasmActor for UiWidget {
     type Config = UiWidgetConfig;
-    const NAMESPACE: &'static str = "test_fixtures_ui_widget";
+    const NAMESPACE: &'static str = "test.ui_widget";
 
     fn init(config: UiWidgetConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(UiWidget { config })

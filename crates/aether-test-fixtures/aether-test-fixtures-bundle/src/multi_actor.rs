@@ -33,7 +33,7 @@ pub struct RootManager;
 
 #[actor]
 impl WasmActor for RootManager {
-    const NAMESPACE: &'static str = "ui.root";
+    const NAMESPACE: &'static str = "test.ui.root";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(RootManager)
@@ -54,7 +54,7 @@ impl WasmActor for RootManager {
     }
 }
 
-/// Sibling export — selectable at load via `export: "ui.panel"`
+/// Sibling export — selectable at load via `export: "test.ui.panel"`
 /// (ADR-0096) and spawnable at runtime by `RootManager` (ADR-0097).
 /// `Instanced` so it satisfies the `spawn_child` bound. Carries a
 /// `#[fallback]` so its capability group is observably distinct from the
@@ -63,7 +63,7 @@ pub struct Panel;
 
 #[actor(instanced)]
 impl WasmActor for Panel {
-    const NAMESPACE: &'static str = "ui.panel";
+    const NAMESPACE: &'static str = "test.ui.panel";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Panel)

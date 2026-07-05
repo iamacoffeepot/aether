@@ -25,7 +25,7 @@ pub struct MatSource;
 
 #[actor]
 impl WasmActor for MatSource {
-    const NAMESPACE: &'static str = "mat4_source";
+    const NAMESPACE: &'static str = "test.mat4_source";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(MatSource)

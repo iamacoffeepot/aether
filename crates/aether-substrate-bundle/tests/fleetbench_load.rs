@@ -17,7 +17,7 @@ mod tests {
     /// `/`-rendered lineage
     /// `aether.component/aether.embedded:<NAMESPACE>` (ADR-0099
     /// §3/§4). The probe example's `Addressable::NAMESPACE` is
-    /// `test_fixture_probe` — distinct from the wasm stem (`probe`),
+    /// `test.probe` — distinct from the wasm stem (`probe`),
     /// so this also pins that the registered name comes from the
     /// component's declared namespace, not the file name. Also
     /// asserts the recorded `CallRecord` trace captured the load
@@ -31,10 +31,7 @@ mod tests {
         let engine = bench.spawn_headless();
         let addr = bench.load(engine, "aether_test_fixtures_bundle");
 
-        let expected = format!(
-            "aether.component/{}:test_fixture_probe",
-            WasmTrampoline::NAMESPACE,
-        );
+        let expected = format!("aether.component/{}:test.probe", WasmTrampoline::NAMESPACE);
         assert_eq!(
             addr, expected,
             "LoadResult.name should be the ADR-0099 lineage address",

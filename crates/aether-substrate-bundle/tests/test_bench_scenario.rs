@@ -150,10 +150,10 @@ fn load_cube(bench: &mut TestBench, wasm_path: &Path) {
                 "aether.component",
                 &LoadComponent {
                     wasm,
-                    name: Some("cube".to_owned()),
+                    name: Some("test.cube".to_owned()),
                     config: Vec::new(),
                     // `Cube` is a non-entry actor in the bundle.
-                    export: Some("cube".to_owned()),
+                    export: Some("test.cube".to_owned()),
                 },
             ),
         )])
@@ -225,7 +225,7 @@ fn input_subscription_yields_one_tick_observed_per_advance() {
 /// instantiating its entry export — the first type in the `export!`
 /// list, `Probe` — via the boxed `ErasedWasmActor` path. Omitting `name`
 /// exercises the `aether.namespace` section, which carries the entry
-/// type's `NAMESPACE` (`test_fixture_probe`), and the `LoadResult`
+/// type's `NAMESPACE` (`test.probe`), and the `LoadResult`
 /// capabilities come from the entry type's `aether.kinds.inputs`
 /// manifest. Proves init-through-the-box and the multi-actor section
 /// emission end-to-end; selecting a non-entry export is the follow-on.
@@ -260,9 +260,9 @@ fn multi_actor_module_loads_entry_export() {
             name, capabilities, ..
         } => {
             assert!(
-                name.ends_with(":test_fixture_probe"),
+                name.ends_with(":test.probe"),
                 "entry export should resolve to the first type's NAMESPACE \
-                 (test_fixture_probe); got {name}",
+                 (test.probe); got {name}",
             );
             assert!(
                 !capabilities.handlers.is_empty(),
@@ -273,11 +273,11 @@ fn multi_actor_module_loads_entry_export() {
     }
 }
 
-/// ADR-0096: passing `export: "ui.panel"` instantiates the non-entry
+/// ADR-0096: passing `export: "test.ui.panel"` instantiates the non-entry
 /// type from the same multi-actor module. The host resolves the
 /// selector to the actor-type tag, `init_typed_p32` constructs `Panel`
 /// (not the entry `RootManager`), the trampoline name defaults to the
-/// selected type's namespace (`:ui.panel`), and the `LoadResult`
+/// selected type's namespace (`:test.ui.panel`), and the `LoadResult`
 /// capabilities come from `Panel`'s `aether.kinds.inputs` group — which
 /// carries a `#[fallback]` the entry type lacks, so the reply proves
 /// the right group was selected.
@@ -298,7 +298,7 @@ fn multi_actor_module_loads_selected_export() {
                     // No name: defaults to the selected export's namespace.
                     name: None,
                     config: Vec::new(),
-                    export: Some("ui.panel".to_owned()),
+                    export: Some("test.ui.panel".to_owned()),
                 },
             ),
         )])
@@ -311,8 +311,8 @@ fn multi_actor_module_loads_selected_export() {
             name, capabilities, ..
         } => {
             assert!(
-                name.ends_with(":ui.panel"),
-                "selected export should resolve to Panel's NAMESPACE (ui.panel); got {name}",
+                name.ends_with(":test.ui.panel"),
+                "selected export should resolve to Panel's NAMESPACE (test.ui.panel); got {name}",
             );
             assert!(
                 capabilities.fallback.is_some(),
@@ -389,9 +389,9 @@ fn multi_actor_sibling_spawn() {
                     wasm,
                     name: None,
                     // `RootManager` is a non-entry actor in the bundle; select
-                    // it by its `ui.root` export.
+                    // it by its `test.ui.root` export.
                     config: Vec::new(),
-                    export: Some("ui.root".to_owned()),
+                    export: Some("test.ui.root".to_owned()),
                 },
             ),
         )])
@@ -404,8 +404,8 @@ fn multi_actor_sibling_spawn() {
         LoadResult::Err { error } => panic!("multi-actor load failed: {error}"),
     };
     assert!(
-        root_name.ends_with(":ui.root"),
-        "selected export should resolve to ui.root; got {root_name}",
+        root_name.ends_with(":test.ui.root"),
+        "selected export should resolve to test.ui.root; got {root_name}",
     );
 
     // ADR-0099 §3/§4: a spawned sibling nests under its spawner, so the
@@ -463,7 +463,7 @@ fn multi_actor_sibling_spawn_twice_in_one_receive() {
                     wasm,
                     name: None,
                     config: Vec::new(),
-                    export: Some("ui.root".to_owned()),
+                    export: Some("test.ui.root".to_owned()),
                 },
             ),
         )])
@@ -1284,7 +1284,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
                     wasm,
                     name: Some(FIXTURE_NAME.to_owned()),
                     config: Vec::new(),
-                    export: Some("stateful.counter".to_owned()),
+                    export: Some("test.stateful.counter".to_owned()),
                 },
             ),
         )])
@@ -2653,7 +2653,7 @@ fn childless_component_hot_reloads_unchanged() {
                     name: Some(FIXTURE_NAME.to_owned()),
                     config: Vec::new(),
                     // `Counter` is a non-entry actor in the bundle.
-                    export: Some("stateful.counter".to_owned()),
+                    export: Some("test.stateful.counter".to_owned()),
                 },
             ),
         )])

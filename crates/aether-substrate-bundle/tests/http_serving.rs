@@ -45,28 +45,28 @@ use aether_substrate_bundle::test_bench::test_helpers::{
 
 /// The `http_handler` fixture's `NAMESPACE` const — the subname under
 /// which `WasmTrampoline` registers it, and the last segment of its
-/// full lineage address (`aether.component/aether.embedded:web`).
-const HANDLER_NAMESPACE: &str = "web";
+/// full lineage address (`aether.component/aether.embedded:test.web`).
+const HANDLER_NAMESPACE: &str = "test.web";
 
 /// The full handler mailbox address the http server cap resolves at
 /// dispatch time (ADR-0108 §3 late binding).
-const HANDLER_MAILBOX: &str = "aether.component/aether.embedded:web";
+const HANDLER_MAILBOX: &str = "aether.component/aether.embedded:test.web";
 
 /// The `StreamingHttpHandler` fixture's `NAMESPACE` const (ADR-0128).
-const STREAM_HANDLER_NAMESPACE: &str = "web_stream";
+const STREAM_HANDLER_NAMESPACE: &str = "test.web_stream";
 
 /// The streaming handler's full lineage mailbox address.
-const STREAM_HANDLER_MAILBOX: &str = "aether.component/aether.embedded:web_stream";
+const STREAM_HANDLER_MAILBOX: &str = "aether.component/aether.embedded:test.web_stream";
 
 /// The chunk count `StreamingHttpHandler` emits — kept in step with the
 /// fixture's own `STREAM_CHUNK_COUNT`.
 const STREAM_CHUNK_COUNT: u32 = 20;
 
 /// The `WebSocketHandler` fixture's `NAMESPACE` const (ADR-0129).
-const WS_HANDLER_NAMESPACE: &str = "web_socket";
+const WS_HANDLER_NAMESPACE: &str = "test.web_socket";
 
 /// The websocket handler's full lineage mailbox address.
-const WS_HANDLER_MAILBOX: &str = "aether.component/aether.embedded:web_socket";
+const WS_HANDLER_MAILBOX: &str = "aether.component/aether.embedded:test.web_socket";
 
 /// RFC 6455 §1.3 worked-vector handshake key, and the `Sec-WebSocket-Accept`
 /// the server must echo for it (base64(SHA-1(key + GUID))). Using the fixed
@@ -673,7 +673,7 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn dropped_component_routes_are_purged() {
-        const ROUTED_NAMESPACE: &str = "routed_web";
+        const ROUTED_NAMESPACE: &str = "test.routed_web";
         let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
         let Some(wasm_path) = locate_component_wasm("aether_test_fixtures_bundle") else {
             assert!(
