@@ -24,6 +24,19 @@ pub struct Route {
     pub members: Vec<MailboxId>,
 }
 
+/// The winning route for `(path, method)` (ADR-0130): the longest
+/// segment-boundary prefix among method-compatible routes, a
+/// method-specific route beating a method-agnostic one at equal
+/// prefix. Shared by the shard's streaming-path resolution and the
+/// reader's fast-path decision (ADR-0135 §2), so the two sides cannot
+/// drift.
+pub fn best_route<'a>(routes: &'a [Route], path: &str, method: HttpMethod) -> Option<&'a Route> {
+    routes
+        .iter()
+        .filter(|r| r.method.is_none_or(|m| m == method) && route_matches(&r.prefix, path))
+        .max_by_key(|r| (r.prefix.len(), r.method.is_some()))
+}
+
 /// Segment-boundary prefix match (ADR-0130): `/api` matches `/api` and
 /// `/api/…`, never `/apiary`; `/` is the catch-all. Prefixes are
 /// normalized at registration ([`normalize_prefix`]), so no trailing

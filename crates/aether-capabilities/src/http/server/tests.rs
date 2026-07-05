@@ -1,6 +1,10 @@
 use super::{HttpServerCapability, HttpServerConfig, HttpServerHandle};
+use crate::http::kinds::{HttpServerRequest as RequestKind, RegisterRoute};
 use crate::trace::TraceDispatchCapability;
 use aether_actor::Addressable;
+use aether_data::Kind as KindTrait;
+use aether_data::KindId;
+use aether_substrate::Mail;
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::testing::{TestChassis, fresh_substrate};
 use std::io::{self, Read, Write};
@@ -1698,6 +1702,88 @@ fn conflicting_claim_is_rejected_first_claimant_keeps_route() {
 
     let dup = round_trip(port, b"GET /dup HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(body_of(&dup), "first", "first claimant keeps the route");
+}
+
+/// A route registered mid-connection is visible to the very next
+/// request on an already-kept-alive socket (ADR-0135 §2): the reader
+/// re-reads the shared route table per request head, so registration
+/// granularity is next-request, not next-connection.
+///
+/// Tripwire: a reader-side route *snapshot* taken at connection
+/// adoption would serve the fallback forever on a long-lived
+/// connection; this test's second-phase request would never flip to
+/// the routed body.
+#[test]
+fn route_registered_mid_connection_serves_next_request() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<EchoHttpHandler>(())
+        .with_actor::<FixedBodyHttpHandler>(())
+        .with_actor::<HttpServerCapability>(keep_alive_config_for(
+            <EchoHttpHandler as Addressable>::NAMESPACE,
+            5_000,
+        ))
+        .build_passive()
+        .expect("caps boot");
+    let port = port_of(&chassis);
+
+    let mut stream =
+        TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set_read_timeout");
+    let mut carry = Vec::new();
+
+    // Pre-registration: /late falls back to the echo handler.
+    stream
+        .write_all(b"GET /late HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .expect("write request");
+    let first = read_one_response(&mut stream, &mut carry);
+    assert!(
+        first.contains("x-aether-path: /late"),
+        "pre-registration request falls back to echo: {first:?}",
+    );
+
+    // Register /late at the fixed-body handler while the connection is
+    // parked between keep-alive requests.
+    let supervisor = registry
+        .lookup(<HttpServerCapability as Addressable>::NAMESPACE)
+        .expect("http server registered");
+    let target = registry
+        .lookup(<FixedBodyHttpHandler as Addressable>::NAMESPACE)
+        .expect("fixed-body handler registered");
+    let payload = RegisterRoute {
+        prefix: "/late".to_string(),
+        method: None,
+        kind: <RequestKind as KindTrait>::ID,
+        mailbox: target,
+        shared: false,
+    }
+    .encode_into_bytes();
+    mailer.push(Mail::new(
+        supervisor,
+        KindId(<RegisterRoute as KindTrait>::ID.0),
+        payload,
+        1,
+    ));
+
+    // The registration lands asynchronously; poll on the SAME socket.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        stream
+            .write_all(b"GET /late HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("write request");
+        let response = read_one_response(&mut stream, &mut carry);
+        if body_of(&response) == "fixed body" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "mid-connection registration should reach the next request within 10s; \
+             last: {response:?}",
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 /// A shared member set (ADR-0136) spreads requests across its members

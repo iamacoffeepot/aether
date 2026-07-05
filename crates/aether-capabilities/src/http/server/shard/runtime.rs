@@ -54,7 +54,6 @@ impl NativeActor for HttpDispatchShard {
             inbound_rx,
             inbound_tx: seed.inbound_tx,
             wake_dirty: seed.wake_dirty,
-            route_cursor: 0,
             connections: HashMap::new(),
             next_conn_id: 0,
             in_flight: HashMap::new(),
@@ -106,25 +105,31 @@ impl NativeActor for HttpDispatchShard {
                 InboundEvent::PeerAccepted { stream, peer } => {
                     state.spawn_reader_for_peer(stream, peer);
                 }
-                InboundEvent::RequestHeadParsed { conn_id, head } => {
-                    state.decide_request_head(ctx, conn_id, head);
+                InboundEvent::RequestHeadParsed {
+                    conn_id,
+                    head,
+                    handler,
+                } => {
+                    state.open_requested_stream(ctx, conn_id, head, handler);
                 }
-                InboundEvent::RequestParsed { conn_id, request } => {
-                    state.dispatch_request(ctx, conn_id, request);
+                InboundEvent::RequestParsed {
+                    conn_id,
+                    payload,
+                    handler,
+                    kind,
+                    method,
+                    keep_alive,
+                    ws_key,
+                } => {
+                    state.dispatch_prepared(
+                        ctx, conn_id, &payload, handler, kind, method, keep_alive, ws_key,
+                    );
                 }
                 InboundEvent::RequestBodyChunk { conn_id, body } => {
                     state.forward_request_chunk(ctx, conn_id, body);
                 }
                 InboundEvent::RequestBodyEnd { conn_id } => {
                     state.end_request_stream(ctx, conn_id);
-                }
-                InboundEvent::RequestRejected {
-                    conn_id,
-                    status,
-                    message,
-                } => {
-                    state.write_status_response(conn_id, status, message);
-                    state.close_connection(conn_id, "request rejected");
                 }
                 InboundEvent::ReaderClosed { conn_id, reason } => {
                     state.close_connection(conn_id, &reason);

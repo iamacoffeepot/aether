@@ -188,6 +188,9 @@ pub struct ReaderTuning {
     pub request_timeout: Duration,
     pub idle_timeout: Duration,
     pub max_header_bytes: usize,
+    /// Cap on a buffered request body (ADR-0108 §6); the reader answers
+    /// `413` itself past it (ADR-0135 §2).
+    pub max_request_bytes: usize,
     /// Read deadline between frames once the connection upgrades to a websocket
     /// (ADR-0129). The frame loop reads under this rather than `request_timeout`.
     pub ws_idle_timeout: Duration,
@@ -277,19 +280,113 @@ const MAX_CHUNK_LINE_BYTES: usize = 256;
 /// stream unbounded trailers.
 const MAX_CHUNK_TRAILERS: usize = MAX_HEADER_COUNT;
 
+/// Reader-side handler resolution (ADR-0135 §2): the winning route's
+/// next live member by this reader's round-robin cursor (seeded from
+/// the connection id so concurrent connections start spread across a
+/// shared set, ADR-0136), or the late-bound `handler_mailbox`
+/// fallback. `streaming` is the resolved handler's accept-set verdict
+/// on [`HttpRequestStreamOpen`] — the same structural opt-in the
+/// dispatcher used to read.
+enum ReaderResolution {
+    /// A live handler: the dispatch target, its dispatch kind, and
+    /// whether it takes the streamed body path.
+    Live {
+        handler: MailboxId,
+        kind: KindId,
+        streaming: bool,
+    },
+    /// A route matched but no member of its set is live — `503`, never
+    /// the fallback (that would silently reroute a claimed family).
+    Dead,
+    /// No route and no resolvable fallback — `503`.
+    NoHandler,
+}
+
+fn resolve_at_reader(
+    shared: &ReaderShared,
+    sink: &WakeSink,
+    cursor: &mut usize,
+    path: &str,
+    method: HttpMethod,
+) -> ReaderResolution {
+    let registry = sink.mailer.registry();
+    let picked = {
+        let routes = shared.routes.read().expect("route table lock poisoned");
+        match best_route(&routes, path, method) {
+            Some(route) => {
+                let start = *cursor;
+                *cursor = cursor.wrapping_add(1);
+                let len = route.members.len();
+                let mut live = None;
+                for offset in 0..len {
+                    let member = route.members[(start + offset) % len];
+                    if validate_route_mailbox(registry, member).is_ok() {
+                        live = Some((member, route.kind));
+                        break;
+                    }
+                }
+                let Some(found) = live else {
+                    return ReaderResolution::Dead;
+                };
+                Some(found)
+            }
+            None => registry
+                .lookup(&shared.handler_mailbox)
+                .map(|handler| (handler, <HttpServerRequest as Kind>::ID)),
+        }
+    };
+    match picked {
+        Some((handler, kind)) => ReaderResolution::Live {
+            handler,
+            kind,
+            streaming: sink
+                .mailer
+                .capability_registry()
+                .accepts(handler, <HttpRequestStreamOpen as Kind>::ID),
+        },
+        None => ReaderResolution::NoHandler,
+    }
+}
+
+/// Reader-written reject (ADR-0135 §2): write the canned status on the
+/// reader's own full-duplex clone — no response can be in flight at a
+/// pre-dispatch reject — and post `ReaderClosed` so the shard reaps the
+/// connection state.
+fn reject_and_close(
+    stream: &mut TcpStream,
+    sink: &WakeSink,
+    conn_id: ConnId,
+    status: u16,
+    message: &'static str,
+) {
+    let bytes = render_status_response(status, message);
+    let _ = stream.write_all(&bytes).and_then(|()| stream.flush());
+    sink.post(InboundEvent::ReaderClosed {
+        conn_id,
+        reason: message.to_string(),
+    });
+}
+
 /// Per-connection reader thread body. An outer per-request loop reads one
-/// HTTP/1.1 request head, posts it for the dispatcher's streaming decision,
-/// then reads the body either buffered (`Content-Length` into one
-/// [`InboundEvent::RequestParsed`]) or streamed (credit-paced
-/// [`InboundEvent::RequestBodyChunk`] mails, ADR-0128), then waits on the
-/// per-connection control channel: on a keep-alive response the dispatcher
-/// signals [`ReaderControl::Resume`] and the loop reads the next request off
-/// the same socket (carrying any over-read pipelined bytes forward); on a
-/// close response the dispatcher drops the sender and the reader exits. A fresh
-/// / idle connection between requests reads under `idle_timeout`; once a
-/// request's bytes start arriving the in-flight `request_timeout` (slow-loris)
-/// governs, and the handler-response deadline is the control wait.
-#[allow(clippy::too_many_lines)]
+/// HTTP/1.1 request head and makes the request-path decision itself
+/// (ADR-0135 §2): it resolves the handler against the shared route
+/// table + registry, writes every pre-dispatch reject on its own
+/// socket clone, and — the common buffered case — reads the body,
+/// encodes the request payload, and posts one ready-to-dispatch
+/// [`InboundEvent::RequestParsed`]. Only a streaming-handler body
+/// takes the head round trip ([`InboundEvent::RequestHeadParsed`] →
+/// [`ReaderControl::Stream`], ADR-0128); a websocket handshake is
+/// validated here and rides the buffered path with its key attached.
+/// After dispatch the reader parks on the control channel: on a
+/// keep-alive response the dispatcher signals [`ReaderControl::Resume`]
+/// and the loop reads the next request off the same socket (carrying
+/// any over-read pipelined bytes forward); on a close response the
+/// dispatcher drops the sender and the reader exits. A fresh / idle
+/// connection between requests reads under `idle_timeout`; once a
+/// request's bytes start arriving the in-flight `request_timeout`
+/// (slow-loris) governs, and the handler-response deadline is the
+/// control wait.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn run_reader_loop(
     read_half: TcpStream,
     conn_id: ConnId,
@@ -297,16 +394,22 @@ pub fn run_reader_loop(
     sink: &WakeSink,
     control_rx: &mpsc::Receiver<ReaderControl>,
     tuning: ReaderTuning,
+    shared: &ReaderShared,
 ) {
     let ReaderTuning {
         request_timeout,
         idle_timeout,
         max_header_bytes,
+        max_request_bytes,
         ..
     } = tuning;
     let mut stream = read_half;
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
     let mut chunk = [0u8; 8 * 1024];
+    // Round-robin cursor over shared route member sets (ADR-0136),
+    // seeded from the connection id so concurrent connections start
+    // spread across a set rather than all on member 0.
+    let mut route_cursor = usize::try_from(conn_id).unwrap_or(0);
     // `spawn_reader_for_peer` set the socket read timeout to `request_timeout`
     // before spawning; track it so a read only re-issues `set_read_timeout`
     // when the desired timeout actually changes.
@@ -326,11 +429,7 @@ pub fn run_reader_loop(
             match parse_head(&buf, max_header_bytes) {
                 HeadParse::Complete(head) => break head,
                 HeadParse::Reject { status, message } => {
-                    sink.post(InboundEvent::RequestRejected {
-                        conn_id,
-                        status,
-                        message,
-                    });
+                    reject_and_close(&mut stream, sink, conn_id, status, message);
                     return;
                 }
                 HeadParse::NeedMore => {}
@@ -401,40 +500,76 @@ pub fn run_reader_loop(
 
         let keep_alive = request_keeps_alive(head.version, &head.headers);
 
-        // Post the head and await the dispatcher's streaming decision (ADR-0128).
-        // The dispatcher owns registry access, so it resolves the handler,
-        // reads its accept-set, and replies `Buffered` / `Stream` — or rejects
-        // (`411` / `413` / `501` / `503`) and closes, surfacing here as a
-        // disconnect. Reject decisions (including the body-cap `413` that used
-        // to live in this reader) now belong to the dispatcher, which has the
-        // handler's streaming disposition.
-        let parsed_head = ParsedHead {
-            method: head.method.clone(),
-            path: head.path.clone(),
-            query: head.query.clone(),
-            headers: head.headers.clone(),
-            framing: head.framing,
-            keep_alive,
-        };
-        if !sink.post(InboundEvent::RequestHeadParsed {
-            conn_id,
-            head: parsed_head,
-        }) {
+        // The request-path decision, made here (ADR-0135 §2): map the
+        // method, resolve the handler against the shared route table +
+        // registry, and reject — writing the canned status on this
+        // reader's own socket clone — without waking the shard.
+        let Some(method) = parse_http_method(&head.method) else {
+            reject_and_close(&mut stream, sink, conn_id, 501, "method not implemented");
             return;
+        };
+        let resolution = resolve_at_reader(shared, sink, &mut route_cursor, &head.path, method);
+        let (handler, dispatch_kind, streaming) = match resolution {
+            ReaderResolution::Live {
+                handler,
+                kind,
+                streaming,
+            } => (handler, kind, streaming),
+            ReaderResolution::Dead => {
+                reject_and_close(&mut stream, sink, conn_id, 503, "routed handler gone");
+                return;
+            }
+            ReaderResolution::NoHandler => {
+                reject_and_close(&mut stream, sink, conn_id, 503, "no handler registered");
+                return;
+            }
+        };
+        // ADR-0129: a websocket upgrade handshake, validated here; a
+        // valid one rides the buffered path with the key attached (the
+        // shard stashes it pre-dispatch). Checked before framing,
+        // matching the pre-fast-path decision order — an upgrade
+        // request always buffers.
+        let ws_key = if header_has_token(&head.headers, "upgrade", "websocket") {
+            match validate_ws_handshake(&head.headers) {
+                Ok(key) => Some(key),
+                Err((status, message)) => {
+                    reject_and_close(&mut stream, sink, conn_id, status, message);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        if ws_key.is_none() {
+            // Framing rejects for the buffered path (ADR-0128): smuggling
+            // / non-`chunked` codings always, a lone `chunked` body to a
+            // buffered handler (no length to buffer under), and the body
+            // cap.
+            match (head.framing, streaming) {
+                (BodyFraming::Invalid, _) | (BodyFraming::Chunked, false) => {
+                    reject_and_close(&mut stream, sink, conn_id, 411, "length required");
+                    return;
+                }
+                (BodyFraming::Length(n), false) if n > max_request_bytes => {
+                    reject_and_close(
+                        &mut stream,
+                        sink,
+                        conn_id,
+                        413,
+                        "request body exceeds limit",
+                    );
+                    return;
+                }
+                _ => {}
+            }
         }
-        // A timeout means the dispatcher never answered (a wedged / torn-down
-        // cap); a disconnect means it rejected the request and closed. Either
-        // way there is nothing more this reader can write.
-        let Ok(mode) = control_rx.recv_timeout(request_timeout) else {
-            return;
-        };
 
-        // `Expect: 100-continue`: written only once the dispatcher has accepted
-        // the body (a rejected request never prompts a body send). The reader
-        // owns a full-duplex clone of the socket, so it writes the interim
-        // response inline, strictly before the body read — the final response
-        // still goes out the dispatcher's `write_half`, so the two writes never
-        // interleave on the shared fd.
+        // `Expect: 100-continue`: written only once the request is
+        // accepted (every reject above returned already). The reader
+        // owns a full-duplex clone of the socket, so it writes the
+        // interim response inline, strictly before the body read — the
+        // final response still goes out the dispatcher's `write_half`,
+        // so the two writes never interleave on the shared fd.
         let expects_continue = head.headers.iter().any(|header| {
             header.name.eq_ignore_ascii_case("expect")
                 && header.value.to_ascii_lowercase().contains("100-continue")
@@ -448,51 +583,81 @@ pub fn run_reader_loop(
             );
         }
 
-        // Phase 2: read the body per the decision, then Phase 3: wait for the
-        // response deadline. Both paths leave the reader ready to loop with the
+        // Phase 2: read the body — buffered inline (the fast path: one
+        // event per request, encoded here), or streamed under the
+        // shard-seated session (the head round trip survives only for
+        // streaming handlers). Then Phase 3: wait for the response
+        // deadline. Both paths leave the reader ready to loop with the
         // over-read (pipelined) bytes in `next_buf`, or return to close.
-        let next_buf = match mode {
-            ReaderControl::Buffered => {
-                match read_buffered_body(&mut stream, conn_id, shutdown, sink, &head, &buf) {
-                    Some((body, next_buf)) => {
-                        let request = ParsedRequest {
-                            method: head.method,
-                            path: head.path,
-                            query: head.query,
-                            headers: head.headers,
-                            body,
-                            keep_alive,
-                        };
-                        if !sink.post(InboundEvent::RequestParsed { conn_id, request }) {
-                            return;
-                        }
-                        next_buf
+        let next_buf = if streaming && ws_key.is_none() {
+            let parsed_head = ParsedHead {
+                method: head.method.clone(),
+                path: head.path.clone(),
+                query: head.query.clone(),
+                headers: head.headers.clone(),
+                framing: head.framing,
+                keep_alive,
+            };
+            if !sink.post(InboundEvent::RequestHeadParsed {
+                conn_id,
+                head: parsed_head,
+                handler,
+            }) {
+                return;
+            }
+            // A timeout means the shard never answered (wedged / torn
+            // down); a disconnect means it closed. Either way there is
+            // nothing more this reader can write.
+            let Ok(mode) = control_rx.recv_timeout(request_timeout) else {
+                return;
+            };
+            let ReaderControl::Stream { credit } = mode else {
+                // A bare credit / resume / upgrade as the first control
+                // after a streaming head means a torn-down connection.
+                return;
+            };
+            let leftover = buf[head.head_len..].to_vec();
+            match stream_request_body(
+                &mut stream,
+                conn_id,
+                shutdown,
+                sink,
+                control_rx,
+                head.framing,
+                leftover,
+                credit,
+                request_timeout,
+            ) {
+                StreamOutcome::Complete { next_buf } => next_buf,
+                StreamOutcome::Closed => return,
+            }
+        } else {
+            match read_buffered_body(&mut stream, conn_id, shutdown, sink, &head, &buf) {
+                Some((body, next_buf)) => {
+                    let payload = HttpServerRequest {
+                        method,
+                        path: head.path,
+                        query: head.query,
+                        headers: head.headers,
+                        body,
+                        peer_addr: shared.peer.clone(),
                     }
-                    None => return,
+                    .encode_into_bytes();
+                    if !sink.post(InboundEvent::RequestParsed {
+                        conn_id,
+                        payload,
+                        handler,
+                        kind: dispatch_kind,
+                        method,
+                        keep_alive,
+                        ws_key,
+                    }) {
+                        return;
+                    }
+                    next_buf
                 }
+                None => return,
             }
-            ReaderControl::Stream { credit } => {
-                let leftover = buf[head.head_len..].to_vec();
-                match stream_request_body(
-                    &mut stream,
-                    conn_id,
-                    shutdown,
-                    sink,
-                    control_rx,
-                    head.framing,
-                    leftover,
-                    credit,
-                    request_timeout,
-                ) {
-                    StreamOutcome::Complete { next_buf } => next_buf,
-                    StreamOutcome::Closed => return,
-                }
-            }
-            // The dispatcher never sends a bare credit / resume / upgrade as
-            // the first control after a head (an upgrade rides the Buffered
-            // dispatch, then arrives at the response wait) — treat it as a
-            // torn-down connection.
-            ReaderControl::Credit { .. } | ReaderControl::Resume | ReaderControl::Upgrade => return,
         };
 
         // Phase 3: response deadline. Wait for the dispatcher's resume signal
@@ -733,9 +898,9 @@ impl BodyStreamer<'_> {
                 Ok(ReaderControl::Credit { credit } | ReaderControl::Stream { credit }) => {
                     self.credit = self.credit.saturating_add(credit);
                 }
-                // A bare buffered / resume / upgrade mid-stream, or the control
+                // A bare resume / upgrade mid-stream, or the control
                 // channel dropped, means a torn-down connection — stop.
-                Ok(ReaderControl::Buffered | ReaderControl::Resume | ReaderControl::Upgrade)
+                Ok(ReaderControl::Resume | ReaderControl::Upgrade)
                 | Err(mpsc::RecvTimeoutError::Disconnected) => return Err(()),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     self.post_closed("stream credit timeout");
