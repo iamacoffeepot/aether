@@ -24,6 +24,27 @@ let the OS pick a free port. `AETHER_HTTP_SERVER_HANDLER_MAILBOX` is the late-
 bound mailbox name (ADR-0108 §3): the server resolves it at dispatch time, so
 the handler component can load or reload without restarting the server.
 
+### Over MCP (`spawn_substrate`)
+
+`spawn_substrate` forwards its `args` array to the substrate's argv, with no
+env field — so the MCP-spawn path configures the server with flags instead of
+the env vars above. The `#[derive(Config)]` on `HttpServerConfig` is tagged
+`cli_prefix = "http-server"` (ADR-0090), which mints one flag per field —
+`enabled` becomes the bare presence flag `--http-server-enabled`, and every
+other field becomes `--http-server-<field>=<value>`:
+
+```jsonc
+// spawn_substrate
+{
+  "binary_path": "/path/to/aether-substrate-headless",
+  "args": [
+    "--http-server-enabled",
+    "--http-server-bind-addr=127.0.0.1:8080",
+    "--http-server-handler-mailbox=aether.component/aether.embedded:web"
+  ]
+}
+```
+
 ## 2. Set up the crate
 
 The http server cap needs **no marker feature** — unlike `render` / `audio` /
@@ -181,6 +202,51 @@ kind — a struct with `aether.http.server.request`'s fields under its own
 `#[kind(name = …)]` — routes each prefix to its own `#[handler]`, with its own
 `describe_component` entry and `actor_cost` row; the payload bytes are always
 request-shaped, so the route kind decodes them directly.
+
+### Registering a route for another mailbox
+
+`register_route_self` resolves the registrant from the sender's in-process
+`Source`; an MCP session or a test has no such source, so it uses the named
+form instead — `register_route` / `unregister_route`, which take the target
+`mailbox` explicitly. `RegisterRoute` carries `prefix`
+(`String`), `method` (`Option<HttpMethod>` — a bare variant string like
+`"Get"`, or `null` to match every method; the seven variants are `Get`,
+`Post`, `Put`, `Delete`, `Patch`, `Head`, `Options`), `kind` (the route's
+request `KindId`), and `mailbox` (the handler's `MailboxId`). Over the MCP
+wire both tagged ids render as ADR-0064 strings — `knd-…` and `mbx-…` — so
+the values below come from `describe_kinds` (the `kind` for
+`aether.http.server.request`, or a route-specific kind's own id) and from
+`load_component`'s `LoadResult.name` (the `mailbox`, once resolved through
+`describe_component` or the same tagged form it's already returned in):
+
+```jsonc
+// send_mail → aether.http.server  (kind: aether.http.server.register_route)
+{
+  "prefix": "/api",
+  "method": "Get",
+  "kind": "knd-…",     // aether.http.server.request's id, from describe_kinds
+  "mailbox": "mbx-…"   // the handler's mailbox, from load_component's LoadResult
+}
+```
+
+The reply is `aether.http.server.register_route_result` — `"Ok"` or
+`{ "Err": { "error": "…" } }` — the same shape `register_route_self` replies,
+which is *why* the named form exists: an external caller (an MCP session, a
+test) has no in-process `Source` to resolve, so `register_route_self` always
+answers it `Err`.
+
+Releasing the route mirrors the registration, dropping `kind` (a release
+doesn't need it) and keeping `method` so a method-specific route and a
+method-agnostic route at the same prefix release independently:
+
+```jsonc
+// send_mail → aether.http.server  (kind: aether.http.server.unregister_route)
+{
+  "prefix": "/api",
+  "method": "Get",
+  "mailbox": "mbx-…"
+}
+```
 
 ## Typed route authoring
 
@@ -406,7 +472,9 @@ reply shapes; return from a bare `#[handler]` otherwise.
 
 This recipe names the env keys and kind names live in the source. Before
 following it, confirm `AETHER_HTTP_SERVER_ENABLED`, `HttpServerRequest`,
-`HttpServerResponse`, `HttpServerConfig`, the `http::{router, route,
-FromRequest, Ctx}` authoring surface, and `http::ResponseStream` still exist
-where named — grep the crates, and if a name has drifted, fix the recipe as part
-of your work.
+`HttpServerResponse`, `HttpServerConfig`, the `--http-server-*` argv flags
+(`cli_prefix = "http-server"` on `HttpServerConfig`), `RegisterRoute` /
+`UnregisterRoute` / `HttpMethod`, the `http::{router, route, FromRequest,
+Ctx}` authoring surface, and `http::ResponseStream` still exist where named —
+grep the crates, and if a name has drifted, fix the recipe as part of your
+work.

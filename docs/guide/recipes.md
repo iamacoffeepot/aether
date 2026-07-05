@@ -63,6 +63,8 @@ example.
 - **Wiring an MCP tool** (recompile) — args → tool → wire-kind round-trip.
 - **Writing a component** (the middle) — `#[actor]`, handlers, `export!`,
   loading it, and talking to it.
+- **Serving HTTP from a component** (recompile) — the `aether.http.server`
+  capability, the request/response handler, and claiming a route.
 - **Debugging a hung settlement** (drive-only) — reading a stuck mail chain
   with the trace tools.
 
