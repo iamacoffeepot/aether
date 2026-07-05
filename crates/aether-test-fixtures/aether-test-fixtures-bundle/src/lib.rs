@@ -25,7 +25,10 @@ mod stateful_replace;
 mod ui_widget;
 
 pub use cube::Cube;
-pub use http_handler::{HttpHandler, RoutedHttpHandler, StreamingHttpHandler, WebSocketHandler};
+pub use http_handler::{
+    HttpHandler, RoutedHttpHandler, RoutedStreamingHttpHandler, StreamingHttpHandler,
+    WebSocketHandler,
+};
 pub use inline_child::{
     InlineDespawnParent, InlineParent, InlineStatefulChild, InlineStatefulParent,
 };
@@ -52,6 +55,7 @@ aether_actor::export!(
     HttpHandler,
     StreamingHttpHandler,
     RoutedHttpHandler,
+    RoutedStreamingHttpHandler,
     WebSocketHandler,
     SourceObserver,
     MatrixParent,
