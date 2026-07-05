@@ -1124,6 +1124,15 @@ impl<M: ReplyMode> MailSender for NativeCtx<'_, M> {
             None,
         );
     }
+
+    //noinspection DuplicatedCode
+    // By-id detached send — the by-name body with the caller's id, `None` /
+    // `None` lineage minting a fresh root (ADR-0080 §7).
+    fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        self.binding
+            .push_envelope_buffered(id.0, K::ID.0, &bytes, 1, None, None);
+    }
 }
 
 // ADR-0112: the reply surface is per-mode. `Manual` carries it (a

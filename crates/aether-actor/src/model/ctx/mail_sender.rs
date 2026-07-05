@@ -19,7 +19,7 @@
 //! sends uses the trait's [`MailSender::send`] / [`MailSender::send_many`]
 //! / [`MailSender::send_to_named`] methods.
 
-use aether_data::Kind;
+use aether_data::{Kind, MailboxId};
 
 use crate::model::{HandlesKind, Singleton};
 
@@ -101,4 +101,28 @@ pub trait MailSender {
     fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         self.send_to_named::<K>(name, payload);
     }
+
+    /// By-id counterpart to [`Self::send_detached`]: fire-and-forget send
+    /// of `payload` to the mailbox `id`, minting a fresh causal root
+    /// rather than inheriting the caller's in-flight chain (ADR-0080 §7).
+    ///
+    /// This fills the last cell of the send grid — typed / by-name / by-id
+    /// crossed with inherit / detached. [`Self::send`] and
+    /// [`Self::send_detached`] are the typed pair; [`Self::send_to_named`]
+    /// / [`Self::send_detached_to_named`] the by-name pair; the
+    /// inherit-by-id send is each ctx's inherent `send_to`, and this is its
+    /// detached partner. Its motivating consumer is a stored stream handle
+    /// that answers whoever dispatched to a handler (ADR-0133): the
+    /// counterparty address is captured at runtime, so a typed `R` can't
+    /// name it and a fresh root is wanted per send.
+    ///
+    /// **Fire-and-forget only.** Same contract as [`Self::send_detached`]:
+    /// the send mints no parent linkage, so any reply the recipient issues
+    /// inherits the *recipient's* tree rather than the sender's. Reply-
+    /// correlated requests do not use it.
+    ///
+    /// Required rather than defaulted: there is no by-id inherit method on
+    /// this trait to delegate to (the inherit-by-id send is the per-ctx
+    /// inherent `send_to`), so each concrete ctx supplies its own body.
+    fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K);
 }

@@ -20,14 +20,14 @@
 // ignores `self` is correct but triggers `unused_self`.
 #![allow(clippy::needless_pass_by_value, clippy::unused_self)]
 
-use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::ComponentHostCapability;
 use aether_capabilities::http;
-use aether_capabilities::http::HttpServerCapability;
 use aether_capabilities::http::kinds::{
-    HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen, HttpServerRequest,
-    HttpServerResponse, HttpStreamCredit, WebSocketAccept, WebSocketClose, WebSocketMessage,
+    HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse, HttpStreamCredit, WebSocketAccept,
+    WebSocketClose, WebSocketMessage,
 };
+use aether_capabilities::http::{ResponseStream, WebSocketStream};
 use aether_data::MailboxId;
 use aether_kinds::DropComponent;
 
@@ -76,8 +76,10 @@ const STREAM_CHUNK_COUNT: u32 = 20;
 ///
 /// Registered at `aether.component/aether.embedded:web_stream` after load.
 pub struct StreamingHttpHandler {
-    /// The stream this handler is feeding, learned from the first credit mail.
-    stream_id: u64,
+    /// The stream this handler is feeding (ADR-0133), captured from the
+    /// first credit mail — the counterparty that dispatched it plus the
+    /// stream id. `None` until that first grant arms it.
+    stream: Option<ResponseStream>,
     /// Index of the next chunk to emit.
     next_index: u32,
     /// Whether the terminator has been sent.
@@ -90,7 +92,7 @@ impl WasmActor for StreamingHttpHandler {
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(StreamingHttpHandler {
-            stream_id: 0,
+            stream: None,
             next_index: 0,
             ended: false,
         })
@@ -125,24 +127,26 @@ impl WasmActor for StreamingHttpHandler {
     /// Not sent manually — the cap sends one `HttpStreamCredit` per freed
     /// window slot; the handler emits at most that many `HttpResponseChunk`s
     /// in response.
-    #[handler]
-    fn on_credit(&mut self, ctx: &mut WasmCtx<'_>, credit: HttpStreamCredit) {
-        self.stream_id = credit.stream_id;
+    #[handler::manual]
+    fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: HttpStreamCredit) {
+        // ADR-0133: capture the stream handle from the first credit grant —
+        // the counterparty that dispatched it, so chunks flow back to
+        // whoever paced the stream rather than a hard-coded cap singleton.
+        let stream = match self.stream {
+            Some(stream) => stream,
+            None => match ResponseStream::from_credit(ctx, &credit) {
+                Some(stream) => *self.stream.insert(stream),
+                None => return,
+            },
+        };
         let mut budget = credit.credit;
         while budget > 0 && self.next_index < STREAM_CHUNK_COUNT {
-            ctx.actor::<HttpServerCapability>()
-                .send(&HttpResponseChunk {
-                    stream_id: self.stream_id,
-                    body: format!("chunk-{}\n", self.next_index).into_bytes(),
-                });
+            stream.chunk(ctx, format!("chunk-{}\n", self.next_index).into_bytes());
             self.next_index += 1;
             budget -= 1;
         }
         if self.next_index >= STREAM_CHUNK_COUNT && !self.ended {
-            ctx.actor::<HttpServerCapability>()
-                .send(&HttpResponseStreamEnd {
-                    stream_id: self.stream_id,
-                });
+            stream.end(ctx);
             self.ended = true;
         }
     }
@@ -163,6 +167,9 @@ impl WasmActor for StreamingHttpHandler {
 ///
 /// Registered at `aether.component/aether.embedded:web_socket` after load.
 pub struct WebSocketHandler {
+    /// The upgraded connection (ADR-0133), captured from the first credit
+    /// grant. `None` until that accept-time grant arms it.
+    stream: Option<WebSocketStream>,
     greeted: bool,
 }
 
@@ -171,7 +178,10 @@ impl WasmActor for WebSocketHandler {
     const NAMESPACE: &'static str = "web_socket";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(WebSocketHandler { greeted: false })
+        Ok(WebSocketHandler {
+            stream: None,
+            greeted: false,
+        })
     }
 
     /// Accept every upgrade the cap routes here (the cap has already validated
@@ -198,15 +208,23 @@ impl WasmActor for WebSocketHandler {
     /// websocket message on the upgraded connection.
     #[handler]
     fn on_message(&mut self, ctx: &mut WasmCtx<'_>, msg: WebSocketMessage) {
+        // The connection handle was captured on the accept-time credit
+        // grant (ADR-0132/ADR-0133), which always precedes peer traffic.
+        let Some(stream) = self.stream else {
+            return;
+        };
         if !msg.binary && msg.data == b"misroute" {
-            ctx.actor::<HttpServerCapability>().send(&WebSocketMessage {
+            // Echo to a deliberately wrong stream id on the same
+            // counterparty — the cap must drop an unknown-stream send
+            // without tearing the connection down.
+            let misrouted = WebSocketStream {
+                counterparty: stream.counterparty,
                 stream_id: msg.stream_id.wrapping_add(1000),
-                binary: msg.binary,
-                data: msg.data,
-            });
+            };
+            misrouted.message(ctx, msg.binary, msg.data);
             return;
         }
-        ctx.actor::<HttpServerCapability>().send(&msg);
+        stream.message(ctx, msg.binary, msg.data);
     }
 
     /// The cap's outbound send window (ADR-0128 / ADR-0129 §3). The first
@@ -218,15 +236,20 @@ impl WasmActor for WebSocketHandler {
     ///
     /// # Agent
     /// Not sent manually — the cap grants credit as writer slots free.
-    #[handler]
-    fn on_credit(&mut self, ctx: &mut WasmCtx<'_>, credit: HttpStreamCredit) {
+    #[handler::manual]
+    fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: HttpStreamCredit) {
+        // ADR-0133: capture the connection handle from the accept-time
+        // credit grant — its counterparty is whoever owns the socket.
+        let stream = match self.stream {
+            Some(stream) => stream,
+            None => match WebSocketStream::from_credit(ctx, &credit) {
+                Some(stream) => *self.stream.insert(stream),
+                None => return,
+            },
+        };
         if !self.greeted {
             self.greeted = true;
-            ctx.actor::<HttpServerCapability>().send(&WebSocketMessage {
-                stream_id: credit.stream_id,
-                binary: false,
-                data: b"server greeting".to_vec(),
-            });
+            stream.message(ctx, false, b"server greeting".to_vec());
         }
     }
 

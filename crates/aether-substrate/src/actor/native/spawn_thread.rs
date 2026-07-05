@@ -42,7 +42,7 @@ use std::thread::{self, JoinHandle};
 
 use aether_actor::{Addressable, HandlesKind};
 use aether_actor::{MailSender, Singleton};
-use aether_data::{Kind, MailId, mailbox_id_from_name};
+use aether_data::{Kind, MailId, MailboxId, mailbox_id_from_name};
 
 use super::binding::NativeBinding;
 use crate::runtime::trace::SettlementHold;
@@ -179,6 +179,15 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
     fn prev_correlation(&self) -> u64 {
         self.binding.prev_correlation()
     }
+
+    //noinspection DuplicatedCode
+    // By-id detached send: `None` / `None` lineage mints a fresh root
+    // rather than inheriting this ctx's captured chain (ADR-0080 §7).
+    fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        self.binding
+            .send_mail_with_lineage(id.0, K::ID.0, &bytes, 1, None, None);
+    }
 }
 
 /// ADR-0080 §12 spawn-context with no in-flight inheritance. Each
@@ -259,6 +268,15 @@ impl<A: Addressable> MailSender for RootCtx<A> {
 
     fn prev_correlation(&self) -> u64 {
         self.binding.prev_correlation()
+    }
+
+    //noinspection DuplicatedCode
+    // By-id detached send. A root ctx already mints a fresh chain per send,
+    // so this matches its other sends' `None` / `None` lineage.
+    fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        self.binding
+            .send_mail_with_lineage(id.0, K::ID.0, &bytes, 1, None, None);
     }
 }
 
