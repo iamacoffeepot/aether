@@ -7,8 +7,8 @@
 //!
 //! Behaviour:
 //!
-//! - `GET /` → 200 `hello from aether`
-//! - Anything else → 404 `not found`
+//! - Any request → 200, echoing the request path in the body
+//!   (`hello from aether: {path}`)
 //!
 //! Registered at `aether.component/aether.embedded:test.web` after load.
 //! The e2e test configures `HttpServerConfig.handler_mailbox` to that
@@ -19,6 +19,8 @@
 // bytes so callers can't see references. A stateless handler that
 // ignores `self` is correct but triggers `unused_self`.
 #![allow(clippy::needless_pass_by_value, clippy::unused_self)]
+
+use std::collections::BTreeMap;
 
 use aether_actor::{ActorInitError, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::ComponentHostCapability;
@@ -52,14 +54,10 @@ impl WasmActor for HttpHandler {
     /// to `"aether.component/aether.embedded:test.web"` to route here.
     #[handler]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpServerResponse {
-        let (status, body): (u16, &[u8]) = match req.path.as_str() {
-            "/" => (200, b"hello from aether"),
-            _ => (404, b"not found"),
-        };
         HttpServerResponse {
-            status,
+            status: 200,
             headers: Vec::new(),
-            body: body.to_vec(),
+            body: format!("hello from aether: {}", req.path).into_bytes(),
         }
     }
 }
@@ -168,10 +166,11 @@ impl WasmActor for StreamingHttpHandler {
 ///
 /// Registered at `aether.component/aether.embedded:test.web_socket` after load.
 pub struct WebSocketHandler {
-    /// The upgraded connection (ADR-0133), captured from the first credit
-    /// grant. `None` until that accept-time grant arms it.
-    stream: Option<WebSocketStream>,
-    greeted: bool,
+    /// Per-connection upgraded streams (ADR-0133), keyed by `stream_id` and
+    /// inserted on that connection's accept-time credit grant. Map
+    /// membership is the greeted flag: a `stream_id` present here has
+    /// already received its greeting.
+    connections: BTreeMap<u64, WebSocketStream>,
 }
 
 #[actor]
@@ -180,8 +179,7 @@ impl WasmActor for WebSocketHandler {
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(WebSocketHandler {
-            stream: None,
-            greeted: false,
+            connections: BTreeMap::new(),
         })
     }
 
@@ -209,9 +207,10 @@ impl WasmActor for WebSocketHandler {
     /// websocket message on the upgraded connection.
     #[handler]
     fn on_message(&mut self, ctx: &mut WasmCtx<'_>, msg: WebSocketMessage) {
-        // The connection handle was captured on the accept-time credit
-        // grant (ADR-0132/ADR-0133), which always precedes peer traffic.
-        let Some(stream) = self.stream else {
+        // The connection handle was captured on this connection's
+        // accept-time credit grant (ADR-0132/ADR-0133), which always
+        // precedes peer traffic on that connection.
+        let Some(stream) = self.connections.get(&msg.stream_id).copied() else {
             return;
         };
         if !msg.binary && msg.data == b"misroute" {
@@ -240,27 +239,30 @@ impl WasmActor for WebSocketHandler {
     #[handler::manual]
     fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: HttpStreamCredit) {
         // ADR-0133: capture the connection handle from the accept-time
-        // credit grant — its counterparty is whoever owns the socket.
-        let stream = match self.stream {
-            Some(stream) => stream,
-            None => match WebSocketStream::from_credit(ctx, &credit) {
-                Some(stream) => *self.stream.insert(stream),
-                None => return,
-            },
-        };
-        if !self.greeted {
-            self.greeted = true;
-            stream.message(ctx, false, b"server greeting".to_vec());
+        // credit grant — its counterparty is whoever owns the socket. A
+        // repeat grant for a known stream_id is a no-op: this connection
+        // has already been greeted.
+        if self.connections.contains_key(&credit.stream_id) {
+            return;
         }
+        let Some(stream) = WebSocketStream::from_credit(ctx, &credit) else {
+            return;
+        };
+        self.connections.insert(credit.stream_id, stream);
+        stream.message(ctx, false, b"server greeting".to_vec());
     }
 
-    /// A peer-initiated close (ADR-0129 §5). Nothing to do — the cap has
-    /// already echoed the close frame and is tearing the connection down.
+    /// A peer-initiated close (ADR-0129 §5). Evict the connection's state so
+    /// a long-lived reference handler does not leak per-connection state as
+    /// sockets churn — the cap has already echoed the close frame and is
+    /// tearing the connection down.
     ///
     /// # Agent
     /// Not sent manually — the cap reports a peer close here.
     #[handler]
-    fn on_close(&mut self, _ctx: &mut WasmCtx<'_>, _close: WebSocketClose) {}
+    fn on_close(&mut self, _ctx: &mut WasmCtx<'_>, close: WebSocketClose) {
+        self.connections.remove(&close.stream_id);
+    }
 }
 
 /// Routed sibling of [`HttpHandler`] for the ADR-0130 drop-purge e2e
