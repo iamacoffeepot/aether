@@ -246,8 +246,11 @@ impl NativeActor for HttpDispatchShard {
             // Already answered (the reply landed first) or never ours.
             return;
         };
-        state.write_status_response(pending.conn_id, 502, "no response from handler");
-        state.close_connection(pending.conn_id, "settled without response");
+        state.respond_and_finish(
+            pending.conn_id,
+            render_status_response(502, "no response from handler"),
+            false,
+        );
     }
 
     /// An outbound websocket message from the handler (ADR-0129 §3), routed by
@@ -334,8 +337,11 @@ impl NativeActor for HttpDispatchShard {
                 state.accept_websocket(ctx, correlation, pending.conn_id, pending.handler, &accept);
             } else {
                 state.in_flight.remove(&correlation);
-                state.write_status_response(pending.conn_id, 502, "malformed websocket accept");
-                state.close_connection(pending.conn_id, "malformed websocket accept");
+                state.respond_and_finish(
+                    pending.conn_id,
+                    render_status_response(502, "malformed websocket accept"),
+                    false,
+                );
             }
             return;
         }
@@ -344,8 +350,11 @@ impl NativeActor for HttpDispatchShard {
                 state.open_stream(ctx, correlation, pending.conn_id, &open);
             } else {
                 state.in_flight.remove(&correlation);
-                state.write_status_response(pending.conn_id, 502, "malformed stream open");
-                state.close_connection(pending.conn_id, "malformed stream open");
+                state.respond_and_finish(
+                    pending.conn_id,
+                    render_status_response(502, "malformed stream open"),
+                    false,
+                );
             }
             return;
         }
@@ -356,23 +365,23 @@ impl NativeActor for HttpDispatchShard {
         }
         if let Some(response) = HttpServerResponse::decode_from_bytes(env.payload.bytes()) {
             let is_head = pending.method == HttpMethod::Head;
-            state.write_handler_response(pending.conn_id, &response, is_head, pending.keep_alive);
+            let bytes = render_handler_response(&response, is_head, pending.keep_alive);
             state.in_flight.remove(&correlation);
-            // A successful keep-alive response holds the connection and
-            // releases the reader for the next request; otherwise the
-            // connection closes (HTTP/1.0, or `Connection: close`).
-            if pending.keep_alive {
-                state.resume_connection(pending.conn_id);
-            } else {
-                state.close_connection(pending.conn_id, "response written");
-            }
+            // The parked reader writes the bytes (ADR-0135 §3): on
+            // keep-alive it loops into the next request; otherwise it
+            // exits into the normal ReaderClosed teardown (HTTP/1.0, or
+            // `Connection: close`).
+            state.respond_and_finish(pending.conn_id, bytes, pending.keep_alive);
         } else {
             // A cap-level error ends the connection (canned responses stay
             // `Connection: close`), which keeps the keep-alive path scoped to
             // the normal success round-trip.
-            state.write_status_response(pending.conn_id, 502, "malformed handler response");
             state.in_flight.remove(&correlation);
-            state.close_connection(pending.conn_id, "malformed handler response");
+            state.respond_and_finish(
+                pending.conn_id,
+                render_status_response(502, "malformed handler response"),
+                false,
+            );
         }
     }
 }

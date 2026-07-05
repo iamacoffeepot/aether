@@ -1704,6 +1704,60 @@ fn conflicting_claim_is_rejected_first_claimant_keeps_route() {
     assert_eq!(body_of(&dup), "first", "first claimant keeps the route");
 }
 
+/// A peer that stalls its receive window blocks only its own reader
+/// thread, never the dispatch shard (ADR-0135 §3): with one shard
+/// pinned, connection A parks a 16 MiB echo response against a client
+/// that refuses to read while connection B's small request round-trips
+/// promptly through the same shard.
+///
+/// Tripwire: with the response write back on the shard's dispatch (the
+/// pre-ADR-0135 §3 shape), A's blocked `write_all` freezes the shard
+/// and B times out empty.
+#[test]
+fn stalled_peer_does_not_block_sibling_connections() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<EchoHttpHandler>(())
+        .with_actor::<HttpServerCapability>(HttpServerConfig {
+            bind_addr: "127.0.0.1:0".to_string(),
+            handler_mailbox: <EchoHttpHandler as Addressable>::NAMESPACE.to_string(),
+            // Short: the stalled write parks within milliseconds, and
+            // teardown waits out at most one response deadline.
+            request_timeout_millis: 2_000,
+            max_request_bytes: 32 * 1024 * 1024,
+            dispatch_shards: 1,
+            ..HttpServerConfig::default()
+        })
+        .build_passive()
+        .expect("caps boot");
+    let port = port_of(&chassis);
+
+    // Connection A: a 16 MiB echo whose response the client never
+    // reads — far past loopback socket buffering, so the reader's
+    // write_all parks against A's receive window.
+    let body_len = 16 * 1024 * 1024;
+    let mut stalled =
+        TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect stalled peer");
+    let mut request =
+        format!("POST /stall HTTP/1.1\r\nHost: localhost\r\nContent-Length: {body_len}\r\n\r\n")
+            .into_bytes();
+    request.resize(request.len() + body_len, b'a');
+    stalled.write_all(&request).expect("write stalled request");
+    stalled.flush().expect("flush stalled request");
+
+    // Give the echo time to dispatch and its response write to park.
+    thread::sleep(Duration::from_millis(300));
+
+    // Connection B on the same (sole) shard round-trips promptly.
+    let response = round_trip(port, b"GET /probe HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(
+        response.starts_with("HTTP/1.1 200 "),
+        "sibling connection must be served while a peer stalls; got: {response:?}",
+    );
+
+    drop(stalled);
+}
+
 /// A route registered mid-connection is visible to the very next
 /// request on an already-kept-alive socket (ADR-0135 §2): the reader
 /// re-reads the shared route table per request head, so registration

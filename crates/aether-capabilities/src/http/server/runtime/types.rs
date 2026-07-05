@@ -102,8 +102,16 @@ pub enum ReaderControl {
     /// Replenish the streaming reader's send window by `credit` — the handler
     /// drained chunks and granted more.
     Credit { credit: u32 },
-    /// Keep-alive resume: the response was written; read the next request on
-    /// the same socket.
+    /// The rendered response bytes for the request this reader has in
+    /// flight (ADR-0135 §3): the reader writes them on its own socket
+    /// clone — the write syscall never runs on the shard's dispatch —
+    /// then loops into the next request (`resume: true`, keep-alive) or
+    /// exits posting `ReaderClosed` (`resume: false`, close-mode and
+    /// every canned terminal status).
+    Respond { bytes: Vec<u8>, resume: bool },
+    /// Keep-alive resume with nothing to write: a streamed response
+    /// finished on the writer thread (ADR-0128); read the next request
+    /// on the same socket.
     Resume,
     /// Websocket upgrade accepted (ADR-0129): the `101` was written and the
     /// connection is now in websocket mode. The parked reader leaves the
