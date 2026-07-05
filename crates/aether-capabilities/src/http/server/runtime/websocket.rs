@@ -509,9 +509,13 @@ impl HttpShardState {
             .and_then(|conn| conn.ws_pending_key.take())
         else {
             // A `WebSocketAccept` with no stashed key — the handler replied it
-            // to a non-upgrade request. Cap-level error, close the connection.
-            self.write_status_response(conn_id, 500, "websocket accept without upgrade");
-            self.close_connection(conn_id, "websocket accept without upgrade");
+            // to a non-upgrade request. Cap-level error; the parked reader
+            // writes the canned status and exits (ADR-0135 §3).
+            self.respond_and_finish(
+                conn_id,
+                render_status_response(500, "websocket accept without upgrade"),
+                false,
+            );
             return;
         };
         let head = render_ws_accept(&key, accept);

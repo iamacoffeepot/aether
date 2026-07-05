@@ -4,6 +4,8 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+use std::time::Instant;
+
 /// Outcome of [`read_more`].
 pub enum ReadStep {
     Filled(usize),
@@ -660,28 +662,79 @@ pub fn run_reader_loop(
             }
         };
 
-        // Phase 3: response deadline. Wait for the dispatcher's resume signal
-        // (a keep-alive response was written — loop to the next request), the
-        // handler-response timeout (`504`), or the sender being dropped (the
-        // dispatcher took the close path — the connection is torn down).
-        match control_rx.recv_timeout(request_timeout) {
-            Ok(ReaderControl::Resume) => {
-                buf = next_buf;
-            }
-            Ok(ReaderControl::Upgrade) => {
-                // ADR-0129: the handshake was accepted (`101` written) — leave
-                // the HTTP request lifecycle for the RFC 6455 frame loop,
-                // carrying any bytes over-read past the handshake head.
-                run_ws_reader_loop(&mut stream, conn_id, shutdown, sink, next_buf, tuning);
-                return;
-            }
-            Ok(_) => return,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
+        // Phase 3: response deadline. Wait for the response bytes to
+        // write ourselves (ADR-0135 §3), the streamed-response resume,
+        // the handler-response timeout (`504`), or the sender being
+        // dropped (the dispatcher took the close path — the connection
+        // is torn down).
+        let response_deadline = Instant::now() + request_timeout;
+        // Wrapped so the loop can hand the pipelined carry-over to
+        // exactly one consuming arm (the borrow checker cannot see that
+        // every consumer exits the loop).
+        let mut next_buf = Some(next_buf);
+        loop {
+            let now = Instant::now();
+            let Some(remaining) = response_deadline.checked_duration_since(now) else {
                 sink.post(InboundEvent::RequestTimedOut { conn_id });
                 return;
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return;
+            };
+            match control_rx.recv_timeout(remaining) {
+                Ok(ReaderControl::Respond { bytes, resume }) => {
+                    if let Err(e) = stream.write_all(&bytes).and_then(|()| stream.flush()) {
+                        tracing::debug!(
+                            target: "aether_substrate::http_server",
+                            conn = conn_id,
+                            error = %e,
+                            "http response write failed",
+                        );
+                        sink.post(InboundEvent::ReaderClosed {
+                            conn_id,
+                            reason: "response write failed".to_string(),
+                        });
+                        return;
+                    }
+                    if resume {
+                        buf = next_buf.take().unwrap_or_default();
+                        break;
+                    }
+                    sink.post(InboundEvent::ReaderClosed {
+                        conn_id,
+                        reason: "response written".to_string(),
+                    });
+                    return;
+                }
+                Ok(ReaderControl::Resume) => {
+                    buf = next_buf.take().unwrap_or_default();
+                    break;
+                }
+                Ok(ReaderControl::Upgrade) => {
+                    // ADR-0129: the handshake was accepted (`101` written) — leave
+                    // the HTTP request lifecycle for the RFC 6455 frame loop,
+                    // carrying any bytes over-read past the handshake head.
+                    run_ws_reader_loop(
+                        &mut stream,
+                        conn_id,
+                        shutdown,
+                        sink,
+                        next_buf.take().unwrap_or_default(),
+                        tuning,
+                    );
+                    return;
+                }
+                // A late credit grant for the just-finished request stream
+                // (the handler's replenishment racing the RequestBodyEnd
+                // drain) is benign — keep waiting out the same deadline.
+                Ok(ReaderControl::Credit { .. }) => {}
+                // A fresh Stream decision with no head posted means a
+                // torn-down connection.
+                Ok(ReaderControl::Stream { .. }) => return,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    sink.post(InboundEvent::RequestTimedOut { conn_id });
+                    return;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return;
+                }
             }
         }
     }
@@ -898,9 +951,12 @@ impl BodyStreamer<'_> {
                 Ok(ReaderControl::Credit { credit } | ReaderControl::Stream { credit }) => {
                     self.credit = self.credit.saturating_add(credit);
                 }
-                // A bare resume / upgrade mid-stream, or the control
-                // channel dropped, means a torn-down connection — stop.
-                Ok(ReaderControl::Resume | ReaderControl::Upgrade)
+                // A bare resume / respond / upgrade mid-stream, or the
+                // control channel dropped, means a torn-down connection
+                // — stop.
+                Ok(
+                    ReaderControl::Resume | ReaderControl::Respond { .. } | ReaderControl::Upgrade,
+                )
                 | Err(mpsc::RecvTimeoutError::Disconnected) => return Err(()),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     self.post_closed("stream credit timeout");

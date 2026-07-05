@@ -571,19 +571,15 @@ impl HttpShardState {
         }
     }
 
-    /// Format + write the handler's [`HttpServerResponse`]. `is_head`
-    /// suppresses the response body per HEAD semantics (headers,
-    /// including `Content-Length`, still describe what the body would
-    /// have been).
-    pub fn write_handler_response(
-        &mut self,
-        conn_id: ConnId,
-        response: &HttpServerResponse,
-        is_head: bool,
-        keep_alive: bool,
-    ) {
-        let bytes = render_handler_response(response, is_head, keep_alive);
-        self.write_raw_to(conn_id, &bytes);
+    /// Hand a fully rendered response to the connection's parked reader
+    /// (ADR-0135 §3): the reader performs the socket write on its own
+    /// clone and either loops into the next request (`resume`) or exits
+    /// into the normal `ReaderClosed` teardown. The shard's dispatch
+    /// never blocks on a peer's receive window — a stalled peer stalls
+    /// only its own reader thread. A send failure means the reader
+    /// already exited, so the connection closes instead.
+    pub fn respond_and_finish(&mut self, conn_id: ConnId, bytes: Vec<u8>, resume: bool) {
+        self.signal_reader(conn_id, ReaderControl::Respond { bytes, resume });
     }
 
     /// Release the reader for the next request on a kept-alive connection by
