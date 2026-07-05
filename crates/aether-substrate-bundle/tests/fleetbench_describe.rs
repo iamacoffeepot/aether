@@ -54,7 +54,7 @@ mod tests {
             }
         };
 
-        // The probe entry actor (`test_fixture_probe`) typed-handles Tick,
+        // The probe entry actor (`test.probe`) typed-handles Tick,
         // Key, and SetRender. Asserting two substrate kinds round-trip proves
         // the wire carried the full retained handler set, not an empty stub.
         let handler_ids: Vec<_> = capabilities.handlers.iter().map(|h| h.id).collect();

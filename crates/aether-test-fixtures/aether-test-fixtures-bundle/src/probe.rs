@@ -51,7 +51,7 @@
 //! sibling `Probe` covers that.
 //!
 //! Consumers load it from the `probe` bundle stem with
-//! `export: Some("test_fixtures_probe_with_config")` (ADR-0096).
+//! `export: Some("test.probe_with_config")` (ADR-0096).
 
 // `on_key` only re-broadcasts the inbound payload, so it doesn't touch
 // `self`; it keeps `&mut self` to match the `#[handler]` dispatch ABI.
@@ -78,7 +78,7 @@ pub struct Probe {
 
 #[actor]
 impl WasmActor for Probe {
-    const NAMESPACE: &'static str = "test_fixture_probe";
+    const NAMESPACE: &'static str = "test.probe";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Probe {
@@ -175,7 +175,7 @@ impl WasmActor for Probe {
 /// `WasmActor::Config = ProbeConfig` path end-to-end.
 ///
 /// Consumers load this actor from the `probe` bundle with
-/// `export: Some("test_fixtures_probe_with_config")`.
+/// `export: Some("test.probe_with_config")`.
 pub struct ProbeWithConfig {
     seed: u32,
     label: String,
@@ -184,7 +184,7 @@ pub struct ProbeWithConfig {
 #[actor]
 impl WasmActor for ProbeWithConfig {
     type Config = ProbeConfig;
-    const NAMESPACE: &'static str = "test_fixtures_probe_with_config";
+    const NAMESPACE: &'static str = "test.probe_with_config";
 
     fn init(config: ProbeConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(ProbeWithConfig {

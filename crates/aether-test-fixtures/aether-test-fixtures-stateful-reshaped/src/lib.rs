@@ -37,7 +37,7 @@ pub struct Counter {
 
 #[actor]
 impl WasmActor for Counter {
-    const NAMESPACE: &'static str = "stateful.typed";
+    const NAMESPACE: &'static str = "test.stateful.typed";
 
     type State = CounterState;
 

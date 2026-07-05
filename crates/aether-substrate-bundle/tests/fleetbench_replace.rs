@@ -52,10 +52,7 @@ mod tests {
             "probe should not declare a CameraCreate handler: {:?}",
             loaded.capabilities.handlers,
         );
-        let expected = format!(
-            "aether.component/{}:test_fixture_probe",
-            WasmTrampoline::NAMESPACE,
-        );
+        let expected = format!("aether.component/{}:test.probe", WasmTrampoline::NAMESPACE);
         assert_eq!(
             loaded.addr, expected,
             "probe should load at its ADR-0099 lineage address",
@@ -96,7 +93,7 @@ mod tests {
     /// ADR-0096 wire regression for `ReplaceComponent.export`: load
     /// the `multi_actor` module's **entry** actor (`RootManager`, a
     /// strict receiver — no `#[fallback]`), then replace it with the
-    /// non-entry export `ui.panel` (`Panel`, which carries a
+    /// non-entry export `test.ui.panel` (`Panel`, which carries a
     /// `#[fallback]`) at the same trampoline `mailbox_id`. The
     /// post-replace capabilities must be `Panel`'s — `fallback`
     /// flips from `None` to `Some` — proving the new `export` field
@@ -114,9 +111,9 @@ mod tests {
         let engine = bench.spawn_headless();
 
         // Load the `RootManager` actor (a strict receiver) from the
-        // bundle by its `ui.root` export. It is a non-entry actor in the
+        // bundle by its `test.ui.root` export. It is a non-entry actor in the
         // bundle (the entry is `Probe`), so it is selected explicitly.
-        let loaded = bench.load_full_export(engine, "aether_test_fixtures_bundle", "ui.root");
+        let loaded = bench.load_full_export(engine, "aether_test_fixtures_bundle", "test.ui.root");
 
         // Pre-replace: the entry is a strict receiver — it declares a
         // Ping handler and no fallback.
@@ -135,13 +132,13 @@ mod tests {
             loaded.capabilities.fallback,
         );
 
-        // Replace into the non-entry export `ui.panel`, at the same
+        // Replace into the non-entry export `test.ui.panel`, at the same
         // mailbox id, carrying the export over the wire.
         let caps = bench.replace_export(
             engine,
             loaded.mailbox_id,
             "aether_test_fixtures_bundle",
-            "ui.panel",
+            "test.ui.panel",
         );
 
         // Post-replace: Panel's capability group is active — still a

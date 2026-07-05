@@ -40,7 +40,7 @@ pub struct Counter {
 
 #[actor]
 impl WasmActor for Counter {
-    const NAMESPACE: &'static str = "stateful.typed";
+    const NAMESPACE: &'static str = "test.stateful.typed";
 
     /// ADR-0113: the durable shape. Declaring it plus the accessors below
     /// is enough — `#[actor]` generates the `on_dehydrate` /

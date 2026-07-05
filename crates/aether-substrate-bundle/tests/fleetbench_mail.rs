@@ -47,7 +47,7 @@ mod tests {
             engine,
             "aether_test_fixtures_bundle",
             &config,
-            "test_fixtures_probe_with_config",
+            "test.probe_with_config",
         );
 
         let replies = bench.send(engine, &addr, &ConfigQuery);

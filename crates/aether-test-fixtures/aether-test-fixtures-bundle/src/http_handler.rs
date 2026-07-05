@@ -10,7 +10,7 @@
 //! - `GET /` → 200 `hello from aether`
 //! - Anything else → 404 `not found`
 //!
-//! Registered at `aether.component/aether.embedded:web` after load.
+//! Registered at `aether.component/aether.embedded:test.web` after load.
 //! The e2e test configures `HttpServerConfig.handler_mailbox` to that
 //! address and then fires real `TcpStream` requests at the bound port.
 
@@ -35,7 +35,7 @@ pub struct HttpHandler;
 
 #[actor]
 impl WasmActor for HttpHandler {
-    const NAMESPACE: &'static str = "web";
+    const NAMESPACE: &'static str = "test.web";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(HttpHandler)
@@ -48,7 +48,7 @@ impl WasmActor for HttpHandler {
     /// # Agent
     /// Not sent manually — the `aether.http.server` cap dispatches it
     /// on every inbound request. Configure `HttpServerConfig.handler_mailbox`
-    /// to `"aether.component/aether.embedded:web"` to route here.
+    /// to `"aether.component/aether.embedded:test.web"` to route here.
     #[handler]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpServerResponse {
         let (status, body): (u16, &[u8]) = match req.path.as_str() {
@@ -74,7 +74,7 @@ const STREAM_CHUNK_COUNT: u32 = 20;
 /// `HttpResponseStreamEnd`. Each chunk is `"chunk-{i}\n"`, so the client
 /// reassembles a deterministic body.
 ///
-/// Registered at `aether.component/aether.embedded:web_stream` after load.
+/// Registered at `aether.component/aether.embedded:test.web_stream` after load.
 pub struct StreamingHttpHandler {
     /// The stream this handler is feeding (ADR-0133), captured from the
     /// first credit mail — the counterparty that dispatched it plus the
@@ -88,7 +88,7 @@ pub struct StreamingHttpHandler {
 
 #[actor]
 impl WasmActor for StreamingHttpHandler {
-    const NAMESPACE: &'static str = "web_stream";
+    const NAMESPACE: &'static str = "test.web_stream";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(StreamingHttpHandler {
@@ -105,7 +105,7 @@ impl WasmActor for StreamingHttpHandler {
     /// Not sent manually — the `aether.http.server` cap dispatches it on
     /// every inbound request. Route here by pointing
     /// `HttpServerConfig.handler_mailbox` at
-    /// `"aether.component/aether.embedded:web_stream"`.
+    /// `"aether.component/aether.embedded:test.web_stream"`.
     #[handler]
     fn on_request(
         &mut self,
@@ -165,7 +165,7 @@ impl WasmActor for StreamingHttpHandler {
 /// can assert the cap drops an unknown-stream send without tearing the
 /// connection down.
 ///
-/// Registered at `aether.component/aether.embedded:web_socket` after load.
+/// Registered at `aether.component/aether.embedded:test.web_socket` after load.
 pub struct WebSocketHandler {
     /// The upgraded connection (ADR-0133), captured from the first credit
     /// grant. `None` until that accept-time grant arms it.
@@ -175,7 +175,7 @@ pub struct WebSocketHandler {
 
 #[actor]
 impl WasmActor for WebSocketHandler {
-    const NAMESPACE: &'static str = "web_socket";
+    const NAMESPACE: &'static str = "test.web_socket";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(WebSocketHandler {
@@ -278,7 +278,7 @@ pub struct RoutedHttpHandler;
 #[http::router]
 #[actor]
 impl WasmActor for RoutedHttpHandler {
-    const NAMESPACE: &'static str = "routed_web";
+    const NAMESPACE: &'static str = "test.routed_web";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(RoutedHttpHandler)

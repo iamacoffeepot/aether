@@ -25,7 +25,7 @@ mod tests {
 
     /// The probe fixture's declared `Addressable::NAMESPACE` (distinct from the
     /// `probe` wasm stem).
-    const PROBE_NAMESPACE: &str = "test_fixture_probe";
+    const PROBE_NAMESPACE: &str = "test.probe";
 
     /// The probe's registered ADR-0099 lineage address.
     fn probe_lineage_addr() -> String {

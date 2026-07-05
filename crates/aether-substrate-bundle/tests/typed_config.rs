@@ -1,6 +1,6 @@
 //! ADR-0090 c1 (issue 1256) integration coverage for the typed
 //! `WasmActor::Config` path. Loads the `ProbeWithConfig` actor from the
-//! `probe` bundle (issue 1994, ADR-0096) via `export: Some("test_fixtures_probe_with_config")`
+//! `probe` bundle (issue 1994, ADR-0096) via `export: Some("test.probe_with_config")`
 //! through a [`TestBench`] and asserts the wasm guest's
 //! `init_with_config_p32` decode-error surfaces in `LoadResult::Err` when the
 //! load mail carries no config bytes — c1 wires the host probe and
@@ -55,7 +55,7 @@ fn typed_config_guest_without_config_bytes_surfaces_decode_error() {
                     wasm,
                     name: Some("probe_with_config".to_owned()),
                     config: Vec::new(),
-                    export: Some("test_fixtures_probe_with_config".to_owned()),
+                    export: Some("test.probe_with_config".to_owned()),
                 },
             ),
         )])
@@ -111,7 +111,7 @@ fn typed_config_guest_with_config_bytes_round_trips() {
                         wasm,
                         name: Some("probe_with_config".to_owned()),
                         config: config_bytes,
-                        export: Some("test_fixtures_probe_with_config".to_owned()),
+                        export: Some("test.probe_with_config".to_owned()),
                     },
                 ),
             ),

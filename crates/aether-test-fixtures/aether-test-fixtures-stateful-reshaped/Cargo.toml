@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 # ADR-0113 decode-miss companion / replace TARGET: same
-# `NAMESPACE = "stateful.typed"` and `CounterState` kind name as the typed
+# `NAMESPACE = "test.stateful.typed"` and `CounterState` kind name as the typed
 # satellite, but a reshaped state shape (an added `generation` field
 # changes `Kind::ID`). Replacing the typed fixture with this one makes the
 # generated `on_rehydrate` decode-miss and boot fresh. Standalone for the

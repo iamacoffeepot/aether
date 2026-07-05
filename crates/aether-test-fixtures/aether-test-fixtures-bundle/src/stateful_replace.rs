@@ -34,7 +34,7 @@ pub struct Counter {
 
 #[actor]
 impl WasmActor for Counter {
-    const NAMESPACE: &'static str = "stateful.counter";
+    const NAMESPACE: &'static str = "test.stateful.counter";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Counter { count: 0 })
@@ -79,7 +79,7 @@ pub struct Sidecar;
 
 #[actor(instanced)]
 impl WasmActor for Sidecar {
-    const NAMESPACE: &'static str = "stateful.sidecar";
+    const NAMESPACE: &'static str = "test.stateful.sidecar";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Sidecar)
