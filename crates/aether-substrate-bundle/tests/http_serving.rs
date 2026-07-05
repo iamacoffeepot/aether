@@ -81,6 +81,11 @@ const WS_HANDLER_MAILBOX: &str = "aether.component/aether.embedded:test.web_sock
 const WS_TEST_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 const WS_TEST_ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
 
+/// A second, distinct handshake key for the concurrent-connection case.
+/// Its `Sec-WebSocket-Accept` isn't asserted — only that the connection
+/// upgrades and gets its own per-connection greeting/echoes.
+const WS_TEST_KEY_2: &str = "AQIDBAUGBwgJCgsMDQ4PEA==";
+
 /// Slice of `response` after the HTTP head's blank line, or empty if absent.
 fn body_after_head(response: &[u8]) -> &[u8] {
     response
@@ -232,8 +237,10 @@ mod tests {
     /// path. Once the guest trampoline is live, send two real HTTP/1.1
     /// requests over a `TcpStream` and assert:
     ///
-    /// - `GET /` → `200 OK` with body `hello from aether`
-    /// - `GET /missing` → `404 Not Found`
+    /// - `GET /` → `200 OK` echoing `/` in the body
+    /// - `GET /missing` → `200 OK` echoing `/missing` in the body — a
+    ///   non-root path serves a success body rather than a `404`
+    ///   (tripwire for issue 2603 finding 2).
     #[test]
     fn wasm_handler_serves_http_requests() {
         let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
@@ -331,19 +338,20 @@ mod tests {
             "GET / body should contain 'hello from aether', got: {root_str:?}",
         );
 
-        // GET /missing → 404
+        // GET /missing → 200, echoing the path (a non-root path serves
+        // success, not a 404 trap).
         let miss_response = round_trip(
             port,
             b"GET /missing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
         );
         let miss_str = String::from_utf8_lossy(&miss_response);
         assert!(
-            miss_str.starts_with("HTTP/1.1 404 "),
-            "GET /missing should reply 404, got: {miss_str:?}",
+            miss_str.starts_with("HTTP/1.1 200 "),
+            "GET /missing should reply 200, got: {miss_str:?}",
         );
         assert!(
-            miss_str.contains("not found"),
-            "GET /missing body should contain 'not found', got: {miss_str:?}",
+            miss_str.contains("/missing"),
+            "GET /missing body should echo the request path, got: {miss_str:?}",
         );
     }
 
@@ -590,7 +598,11 @@ mod tests {
     /// fragmented message to exercise continuation reassembly), prove an
     /// unknown-stream send is dropped without teardown, and close cleanly —
     /// the end-to-end proof that a wasm handler serves a live bidirectional
-    /// websocket.
+    /// websocket. Also opens a second, concurrent connection and asserts it
+    /// gets its own greeting and its own echoes with no cross-talk against
+    /// the first connection — the tripwire for issue 2603 finding 1 (the
+    /// fixture used to key its greeted flag and captured stream per actor,
+    /// not per connection).
     #[test]
     #[allow(clippy::too_many_lines)]
     fn wasm_handler_serves_a_websocket_round_trip() {
@@ -706,6 +718,91 @@ mod tests {
         assert_eq!(
             payload, b"server greeting",
             "the fixture's unsolicited push should arrive before any client frame",
+        );
+
+        // Concurrent second connection: the fixture keys its greeting +
+        // captured stream per connection (`stream_id`), not per actor, so a
+        // second concurrent client must get its own greeting and its own
+        // echoes with no cross-talk against the first connection (issue
+        // 2603 finding 1).
+        let mut stream2 =
+            TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect second ws client");
+        stream2
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("set_read_timeout for second connection");
+        let handshake2 = format!(
+            "GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: {WS_TEST_KEY_2}\r\n\r\n"
+        );
+        stream2
+            .write_all(handshake2.as_bytes())
+            .expect("write second handshake");
+        stream2.flush().expect("flush second handshake");
+
+        let head2 = read_http_head(&mut stream2);
+        assert!(
+            head2.starts_with("HTTP/1.1 101 "),
+            "second connection's upgrade should reply 101, got: {head2:?}",
+        );
+
+        // Its own accept-time greeting, distinct from the first
+        // connection's — proves the greet-once behavior is per connection.
+        let (opcode, payload) = read_server_frame(&mut stream2);
+        assert_eq!(
+            opcode, WS_OPCODE_TEXT,
+            "second connection's greeting should be a text frame"
+        );
+        assert_eq!(
+            payload, b"server greeting",
+            "the second connection should get its own greeting",
+        );
+
+        // Interleave a send on each connection, then read the echoes back
+        // in reverse order: if the fixture still tracked a single captured
+        // stream instead of a per-connection map, one of these echoes
+        // would either go missing or land on the wrong socket.
+        stream
+            .write_all(&ws_client_frame(WS_OPCODE_TEXT, b"hello from conn1", true))
+            .expect("write conn1 frame");
+        stream.flush().expect("flush conn1 frame");
+        stream2
+            .write_all(&ws_client_frame(WS_OPCODE_TEXT, b"hello from conn2", true))
+            .expect("write conn2 frame");
+        stream2.flush().expect("flush conn2 frame");
+
+        let (opcode2, payload2) = read_server_frame(&mut stream2);
+        assert_eq!(
+            opcode2, WS_OPCODE_TEXT,
+            "conn2's echo should be a text frame"
+        );
+        assert_eq!(
+            payload2, b"hello from conn2",
+            "conn2's echo must not cross-talk with conn1",
+        );
+
+        let (opcode1, payload1) = read_server_frame(&mut stream);
+        assert_eq!(
+            opcode1, WS_OPCODE_TEXT,
+            "conn1's echo should be a text frame"
+        );
+        assert_eq!(
+            payload1, b"hello from conn1",
+            "conn1's echo must not cross-talk with conn2",
+        );
+
+        // Close the second connection cleanly so it doesn't linger for the
+        // rest of the single-connection assertions below.
+        let mut close_payload2 = Vec::new();
+        close_payload2.extend_from_slice(&1000u16.to_be_bytes());
+        stream2
+            .write_all(&ws_client_frame(WS_OPCODE_CLOSE, &close_payload2, true))
+            .expect("write second close frame");
+        stream2.flush().expect("flush second close frame");
+        let (opcode, _payload) = read_server_frame(&mut stream2);
+        assert_eq!(
+            opcode, WS_OPCODE_CLOSE,
+            "the cap should echo a close frame for the second connection",
         );
 
         // A single-frame message echoes back verbatim.
@@ -910,12 +1007,14 @@ mod tests {
             "drop bridge should acknowledge, got: {drop_str:?}",
         );
 
-        // The purge rides the drop fan-out; once it lands, /routed
-        // falls back to the `web` fixture, which answers 404.
+        // The purge rides the drop fan-out; once it lands, /routed falls
+        // back to the `web` fixture, which echoes the path in its 200 body
+        // — distinct from the routed component's fixed "routed handler"
+        // body, so this still discriminates route-live from route-purged.
         poll_body_contains(
             port,
             b"GET /routed HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-            "not found",
+            "hello from aether: /routed",
         );
     }
 }
