@@ -399,6 +399,14 @@ pub struct WebSocketClose {
 /// method)` key already claimed by a *different* mailbox is answered
 /// `Err`; the same mailbox re-claiming its own key is an idempotent
 /// `Ok` (and updates `kind`). Reply: `RegisterRouteResult`.
+///
+/// `shared` (ADR-0136) opts the registration into the key's member
+/// *set*: N handler instances that all register `shared: true` with the
+/// same dispatch `kind` jointly serve the route, each request picked
+/// round-robin across live members. `false` is the exclusive claim
+/// described above. Mixing the two on one key, or joining with a
+/// different `kind`, is a conflict `Err` — spreading is something
+/// instances opt into together, never an accident.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.http.server.register_route")]
 pub struct RegisterRoute {
@@ -406,6 +414,7 @@ pub struct RegisterRoute {
     pub method: Option<HttpMethod>,
     pub kind: aether_data::KindId,
     pub mailbox: aether_data::MailboxId,
+    pub shared: bool,
 }
 
 /// `aether.http.server.register_route_self` — reflexive counterpart of
@@ -417,12 +426,18 @@ pub struct RegisterRoute {
 /// an `Err` reply, pushing it onto the named [`RegisterRoute`] form.
 /// This is the common "route to me" case, sent from `wire`. Reply:
 /// `RegisterRouteResult`.
+///
+/// `shared` (ADR-0136) opts into the key's member set exactly as on
+/// [`RegisterRoute`]: instanced handlers that all register `shared:
+/// true` jointly serve the route round-robin; `false` is the exclusive
+/// claim.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.http.server.register_route_self")]
 pub struct RegisterRouteSelf {
     pub prefix: String,
     pub method: Option<HttpMethod>,
     pub kind: aether_data::KindId,
+    pub shared: bool,
 }
 
 /// `aether.http.server.unregister_route` — release the `(prefix,
