@@ -248,7 +248,7 @@ mod tests {
         }
     }
 
-    const CAP: MailboxId = MailboxId(0xC0FFEE);
+    const CAP: MailboxId = MailboxId(0x00C0_FFEE);
 
     /// The one send this handler recorded, decoded to `K`. Panics if it did
     /// not send exactly once, to the wrong recipient, or the wrong kind.

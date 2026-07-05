@@ -24,8 +24,8 @@ use aether_actor::{ActorInitError, Manual, WasmActor, WasmCtx, WasmInitCtx, acto
 use aether_capabilities::ComponentHostCapability;
 use aether_capabilities::http;
 use aether_capabilities::http::kinds::{
-    HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse, HttpStreamCredit, WebSocketAccept,
-    WebSocketClose, WebSocketMessage,
+    HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse, HttpStreamCredit,
+    WebSocketAccept, WebSocketClose, WebSocketMessage,
 };
 use aether_capabilities::http::{ResponseStream, WebSocketStream};
 use aether_data::MailboxId;
