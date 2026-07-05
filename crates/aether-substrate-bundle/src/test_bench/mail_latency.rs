@@ -87,7 +87,7 @@ impl Dispatch<Self> for RingRelay {
         let ping = Ping::decode_from_bytes(payload)?;
         if ping.seq > 0 {
             let bytes = Ping { seq: ping.seq - 1 }.encode_into_bytes();
-            let _ = ctx.send_envelope_traced(state.next, Ping::ID, &bytes);
+            let _ = ctx.send_envelope_tracked(state.next, Ping::ID, &bytes);
         }
         Some(())
     }

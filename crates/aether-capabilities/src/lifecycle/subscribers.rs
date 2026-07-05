@@ -119,7 +119,7 @@ impl LifecycleMailboxExt for NativeActorMailbox<'_, LifecycleCapability> {
 }
 
 /// Push the current stage's empty signal to each subscriber as an
-/// untyped envelope. Uses the runtime-id `send_envelope_traced` path
+/// untyped envelope. Uses the runtime-id `send_envelope_tracked` path
 /// because the broadcast kind is chosen at runtime (the current
 /// state's), not a compile-site `K`; the path preserves the inbound
 /// `(parent, root)` lineage so settlement counts each child against
@@ -134,6 +134,6 @@ pub fn broadcast_to_subscribers<M: ReplyMode>(
         return;
     };
     for mailbox in set {
-        let _ = ctx.send_envelope_traced(SubstrateMailboxId(mailbox.0), stage, &[]);
+        let _ = ctx.send_envelope_tracked(SubstrateMailboxId(mailbox.0), stage, &[]);
     }
 }

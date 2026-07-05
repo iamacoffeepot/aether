@@ -8,7 +8,7 @@
 //! cap's dispatcher to drain.
 //!
 //! On `Call`, the cap dispatches the wire-borne envelope via
-//! `NativeCtx::send_envelope_as_root` (fresh causal chain — the wake
+//! `NativeCtx::send_envelope_detached` (fresh causal chain — the wake
 //! mail is causally unrelated to the wire-borne Call) and subscribes
 //! to settlement of the resulting root via
 //! `SettlementRegistry::subscribe_settlement_mail`. Any reply mail

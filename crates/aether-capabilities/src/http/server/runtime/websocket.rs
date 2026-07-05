@@ -627,7 +627,7 @@ impl HttpServerCapabilityState {
             data,
         }
         .encode_into_bytes();
-        let _ = ctx.send_envelope_as_root(handler, <WebSocketMessage as Kind>::ID, &payload);
+        let _ = ctx.send_envelope_detached(handler, <WebSocketMessage as Kind>::ID, &payload);
     }
 
     /// Report a peer-initiated websocket close to the handler (ADR-0129 §5) as
@@ -654,7 +654,7 @@ impl HttpServerCapabilityState {
             reason: reason.to_string(),
         }
         .encode_into_bytes();
-        let _ = ctx.send_envelope_as_root(handler, <WebSocketClose as Kind>::ID, &payload);
+        let _ = ctx.send_envelope_detached(handler, <WebSocketClose as Kind>::ID, &payload);
     }
 
     /// Frame an outbound application message and hand it to the connection's

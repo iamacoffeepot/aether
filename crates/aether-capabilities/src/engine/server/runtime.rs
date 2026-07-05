@@ -495,7 +495,7 @@ impl NativeActor for EngineServer {
         // reply, and the table entry is already gone, so the
         // returned MailId has nothing to subscribe against.
         let payload = mail.encode_into_bytes();
-        let _ = ctx.send_envelope_traced(proxy_mailbox, <TerminateEngine as Kind>::ID, &payload);
+        let _ = ctx.send_envelope_tracked(proxy_mailbox, <TerminateEngine as Kind>::ID, &payload);
         TerminateEngineResult::Ok
     }
 

@@ -461,7 +461,7 @@ impl NativeBinding {
     /// Reply path for native actors (ADR-0080 §5 / #1695). Mints the
     /// reply's lineage `MailId` from this actor's disjoint
     /// `reply_lineage` allocator and routes through
-    /// [`Mailer::send_reply_with_lineage`], so the reply joins the
+    /// [`Mailer::send_reply`], so the reply joins the
     /// caller's causal chain: it inherits the handler's `root` and
     /// `parent`, and its `Sent` is recorded against that root (keeping
     /// the §6 hold contract exact — a synchronous reply's `Sent`
@@ -487,7 +487,7 @@ impl NativeBinding {
         let correlation = self.reply_lineage.mint();
         let reply_id = MailId::new(self.self_mailbox, correlation);
         self.mailer
-            .send_reply_with_lineage(sender, payload, reply_id, root, parent);
+            .send_reply(sender, payload, reply_id, root, parent);
     }
 }
 

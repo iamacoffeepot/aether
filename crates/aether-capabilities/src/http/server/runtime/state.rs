@@ -320,7 +320,7 @@ impl HttpServerCapabilityState {
             peer_addr,
         }
         .encode_into_bytes();
-        let mail_id = ctx.send_envelope_as_root(handler, dispatch_kind, &payload);
+        let mail_id = ctx.send_envelope_detached(handler, dispatch_kind, &payload);
         // Safety net (ADR-0108 §5): if the chain settles with no
         // response, `on_settled` answers `502`. Best-effort — a chassis
         // without the settlement registry still serves the reply path.

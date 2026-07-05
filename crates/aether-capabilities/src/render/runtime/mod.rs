@@ -284,7 +284,7 @@ impl NativeActor for RenderCapability {
         };
 
         // iamacoffeepot/aether#860: dispatch each pre-mail as a
-        // fresh chassis-rooted chain via `send_envelope_as_root`
+        // fresh chassis-rooted chain via `send_envelope_detached`
         // and subscribe to its settlement, so the driver can wait
         // for the full causal chain (component handler → emitted
         // DrawTriangle → render cap accumulator) to land before
@@ -304,7 +304,7 @@ impl NativeActor for RenderCapability {
         let settlement_registry = state.mailer.settlement_registry().cloned();
         let mut pre_settlements = Vec::with_capacity(pre.len());
         for envelope in pre {
-            let mail_id = ctx.send_envelope_as_root(
+            let mail_id = ctx.send_envelope_detached(
                 envelope.recipient,
                 envelope.kind,
                 envelope.payload.bytes(),

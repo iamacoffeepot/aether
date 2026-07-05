@@ -122,7 +122,7 @@ impl EngineProxyState {
         let alive = EngineAlive {
             engine_id: self.engine_id.0.to_string(),
         };
-        let _ = ctx.send_envelope_as_root(
+        let _ = ctx.send_envelope_detached(
             engine_cap_mailbox(),
             <EngineAlive as Kind>::ID,
             &alive.encode_into_bytes(),
@@ -142,7 +142,7 @@ impl EngineProxyState {
             engine_id: self.engine_id.0.to_string(),
             reason,
         };
-        let _ = ctx.send_envelope_as_root(
+        let _ = ctx.send_envelope_detached(
             engine_cap_mailbox(),
             <EngineDied as Kind>::ID,
             &died.encode_into_bytes(),
