@@ -38,7 +38,7 @@
 //! past the per-cell cap, so the registry holds a fixed-size
 //! recent-settlement window rather than growing for the chassis
 //! lifetime. A subscriber arriving after its root has been evicted from
-//! the window misses the pre-fire — see [`SETTLED_CAP_PER_CELL`] for
+//! the window misses the pre-fire — see `SETTLED_CAP_PER_CELL` for
 //! why that gap sits far outside any legitimate subscribe timing.
 
 use std::array;
@@ -74,7 +74,7 @@ const SETTLED_CAP_PER_CELL: usize = 2048;
 /// [`Mailer`]'s chassis-router closure so the
 /// dispatcher's `Settled` switch can fire.
 ///
-/// Striped into [`CELL_COUNT`] independent mutex cells keyed by the
+/// Striped into `CELL_COUNT` independent mutex cells keyed by the
 /// root's correlation id (issue 2618): every settled chain in the
 /// substrate fires through here from whichever worker discharged it,
 /// and every settlement-awaiting dispatch subscribes, so a single
