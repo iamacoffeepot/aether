@@ -525,6 +525,7 @@ fn registration_send(routed: &Routed, ctx: &Ident) -> TokenStream2 {
                 prefix: #prefix.to_string(),
                 method: #method_expr,
                 kind: <#kind_struct as ::aether_data::Kind>::ID,
+                shared: false,
             });
     }
 }

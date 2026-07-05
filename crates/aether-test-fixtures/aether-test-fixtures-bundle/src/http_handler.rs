@@ -377,6 +377,7 @@ impl WasmActor for RoutedStreamingHttpHandler {
                 prefix: "/routed-stream".to_string(),
                 method: None,
                 kind: <HttpServerRequest as Kind>::ID,
+                shared: false,
             });
     }
 

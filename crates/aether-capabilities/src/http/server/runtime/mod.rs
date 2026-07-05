@@ -248,6 +248,7 @@ impl NativeActor for HttpServerCapability {
             payload.method,
             payload.kind,
             payload.mailbox,
+            payload.shared,
         )
     }
 
@@ -268,9 +269,13 @@ impl NativeActor for HttpServerCapability {
         payload: RegisterRouteSelf,
     ) -> RegisterRouteResult {
         match ctx.source_mailbox() {
-            Some(mailbox) => {
-                state.register_route(&payload.prefix, payload.method, payload.kind, mailbox)
-            }
+            Some(mailbox) => state.register_route(
+                &payload.prefix,
+                payload.method,
+                payload.kind,
+                mailbox,
+                payload.shared,
+            ),
             None => RegisterRouteResult::Err {
                 error: "aether.http.server.register_route_self requires a local sender; an \
                         external session or remote engine must use \

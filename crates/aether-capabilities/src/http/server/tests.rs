@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 use test_handlers::{
     ApiRouteHandler, ApiV2Handler, DupFirstHandler, DupSecondHandler, EchoHttpHandler,
-    ExtractRouteHandler, FixedBodyHttpHandler, FloodHttpHandler, MethodAnyHandler,
-    MethodPostHandler, STREAM_CHUNK_COUNT, SilentHttpHandler, StreamHttpHandler,
+    ExclusivePoolHandler, ExtractRouteHandler, FixedBodyHttpHandler, FloodHttpHandler,
+    MethodAnyHandler, MethodPostHandler, STREAM_CHUNK_COUNT, SharedAlphaHandler, SharedBetaHandler,
+    SharedDupJoinHandler, SharedWrongKindHandler, SilentHttpHandler, StreamHttpHandler,
     StreamingUploadHandler, TmpRouteHandler, WiredRouteHandler, stream_chunk_body,
 };
 
@@ -199,6 +200,7 @@ mod test_handlers {
                     prefix: "/wired-extra".to_string(),
                     method: None,
                     kind: <HttpServerRequest as Kind>::ID,
+                    shared: false,
                 });
         }
 
@@ -318,6 +320,7 @@ mod test_handlers {
                         prefix: $prefix.to_string(),
                         method: $method,
                         kind: <HttpServerRequest as Kind>::ID,
+                        shared: false,
                     });)+
                 }
 
@@ -353,6 +356,94 @@ mod test_handlers {
         "aether.http.test_route_dup_second",
         b"second",
         [(None, "/dup"), (None, "/second")]
+    );
+
+    /// Like [`raw_routed_handler!`] but every claim registers
+    /// `shared: true` with the given dispatch kind (ADR-0136) — the
+    /// member-set opt-in the shared-route tests exercise.
+    macro_rules! shared_routed_handler {
+        ($ty:ident, $state:ident, $namespace:literal, $tag:literal, $kind:ty,
+         [$(($method:expr, $prefix:literal)),+ $(,)?]) => {
+            pub struct $ty;
+            pub struct $state;
+
+            #[actor(singleton)]
+            impl NativeActor for $ty {
+                type State = $state;
+                type Config = ();
+                const NAMESPACE: &'static str = $namespace;
+
+                fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<$state, BootError> {
+                    Ok($state)
+                }
+
+                fn wire(_state: &mut $state, ctx: &mut NativeCtx<'_>) {
+                    $(ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+                        prefix: $prefix.to_string(),
+                        method: $method,
+                        kind: <$kind as Kind>::ID,
+                        shared: true,
+                    });)+
+                }
+
+                #[handler]
+                fn on_request(
+                    _state: &mut Self::State,
+                    _ctx: &mut NativeCtx<'_>,
+                    _request: HttpServerRequest,
+                ) -> HttpServerResponse {
+                    HttpServerResponse {
+                        status: 200,
+                        headers: Vec::new(),
+                        body: $tag.to_vec(),
+                    }
+                }
+            }
+        };
+    }
+
+    // The /pool member set (ADR-0136): two shared claimants that both
+    // serve, one kind-mismatched shared claimant and one exclusive
+    // claimant that are both rejected without touching their other
+    // routes.
+    shared_routed_handler!(
+        SharedAlphaHandler,
+        SharedAlphaHandlerState,
+        "aether.http.test_route_shared_alpha",
+        b"alpha",
+        HttpServerRequest,
+        [(None, "/pool")]
+    );
+    shared_routed_handler!(
+        SharedBetaHandler,
+        SharedBetaHandlerState,
+        "aether.http.test_route_shared_beta",
+        b"beta",
+        HttpServerRequest,
+        [(None, "/pool")]
+    );
+    shared_routed_handler!(
+        SharedWrongKindHandler,
+        SharedWrongKindHandlerState,
+        "aether.http.test_route_shared_wrong_kind",
+        b"wrong-kind",
+        HttpRequestChunk,
+        [(None, "/pool")]
+    );
+    shared_routed_handler!(
+        SharedDupJoinHandler,
+        SharedDupJoinHandlerState,
+        "aether.http.test_route_shared_dup_join",
+        b"shared-dup",
+        HttpServerRequest,
+        [(None, "/dup"), (None, "/shared-ok")]
+    );
+    raw_routed_handler!(
+        ExclusivePoolHandler,
+        ExclusivePoolHandlerState,
+        "aether.http.test_route_excl_pool",
+        b"excl-pool",
+        [(None, "/pool"), (None, "/excl-ok")]
     );
 
     /// Replies `200` and echoes the request's method / path / query /
@@ -1607,6 +1698,128 @@ fn conflicting_claim_is_rejected_first_claimant_keeps_route() {
 
     let dup = round_trip(port, b"GET /dup HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(body_of(&dup), "first", "first claimant keeps the route");
+}
+
+/// A shared member set (ADR-0136) spreads requests across its members
+/// round-robin: alpha and beta both register `/pool` shared, and with
+/// `dispatch_shards` pinned to 1 (one cursor) sequential requests
+/// alternate between them — both bodies observed, nothing else.
+///
+/// Tripwire: without member sets the second shared claim is rejected
+/// and every request serves "alpha"; with a broken cursor (never
+/// advancing) likewise.
+#[test]
+fn shared_route_spreads_across_members() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<HttpServerCapability>(HttpServerConfig {
+            bind_addr: "127.0.0.1:0".to_string(),
+            handler_mailbox: <FixedBodyHttpHandler as Addressable>::NAMESPACE.to_string(),
+            request_timeout_millis: 5_000,
+            dispatch_shards: 1,
+            ..HttpServerConfig::default()
+        })
+        .with_actor::<FixedBodyHttpHandler>(())
+        .with_actor::<SharedAlphaHandler>(())
+        .with_actor::<SharedBetaHandler>(())
+        .build_passive()
+        .expect("caps boot");
+    let port = port_of(&chassis);
+
+    // Wait until both registrations are live: with the set complete a
+    // pair of consecutive requests serves both bodies.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let first = round_trip(port, b"GET /pool HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let second = round_trip(port, b"GET /pool HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let pair = [body_of(&first).to_string(), body_of(&second).to_string()];
+        if pair.contains(&"alpha".to_string()) && pair.contains(&"beta".to_string()) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected alpha+beta across a request pair within 10s; got {pair:?}",
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    // Steady state: six more requests keep alternating — both members
+    // serve, and only members serve.
+    let mut alpha = 0;
+    let mut beta = 0;
+    for _ in 0..6 {
+        let response = round_trip(port, b"GET /pool HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        match body_of(&response) {
+            "alpha" => alpha += 1,
+            "beta" => beta += 1,
+            other => panic!("unexpected /pool body {other:?}"),
+        }
+    }
+    assert_eq!(
+        (alpha, beta),
+        (3, 3),
+        "round-robin alternation over 6 requests"
+    );
+}
+
+/// The ADR-0136 conflict matrix: a shared claim cannot join an
+/// exclusively-held key, an exclusive claim cannot take a shared set,
+/// and a kind-mismatched shared claim cannot join — each rejection
+/// leaves the loser's other routes serving and the contested route
+/// unchanged.
+#[test]
+fn mixed_and_mismatched_claims_are_rejected() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<HttpServerCapability>(HttpServerConfig {
+            bind_addr: "127.0.0.1:0".to_string(),
+            handler_mailbox: <FixedBodyHttpHandler as Addressable>::NAMESPACE.to_string(),
+            request_timeout_millis: 5_000,
+            dispatch_shards: 1,
+            ..HttpServerConfig::default()
+        })
+        .with_actor::<FixedBodyHttpHandler>(())
+        // Boot order fixes who holds what: /dup exclusive first; the
+        // /pool shared pair before the wrong-kind and exclusive
+        // challengers.
+        .with_actor::<DupFirstHandler>(())
+        .with_actor::<SharedAlphaHandler>(())
+        .with_actor::<SharedBetaHandler>(())
+        .with_actor::<SharedWrongKindHandler>(())
+        .with_actor::<SharedDupJoinHandler>(())
+        .with_actor::<ExclusivePoolHandler>(())
+        .build_passive()
+        .expect("caps boot");
+    let port = port_of(&chassis);
+
+    // The last-booted challenger's accepted route being live proves
+    // every earlier registration (including the rejected ones) has
+    // been processed.
+    poll_body(
+        port,
+        b"GET /excl-ok HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "excl-pool",
+    );
+    poll_body(
+        port,
+        b"GET /shared-ok HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "shared-dup",
+    );
+
+    // Shared join on the exclusive /dup: rejected, holder keeps it.
+    let dup = round_trip(port, b"GET /dup HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert_eq!(body_of(&dup), "first", "exclusive holder keeps /dup");
+
+    // Wrong-kind shared join and exclusive take of /pool: rejected —
+    // only alpha/beta ever serve it.
+    for _ in 0..6 {
+        let response = round_trip(port, b"GET /pool HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let body = body_of(&response);
+        assert!(
+            body == "alpha" || body == "beta",
+            "/pool must stay with the shared pair; got {body:?}",
+        );
+    }
 }
 
 /// A macro route composes with a hand-written `wire`: the macro appends

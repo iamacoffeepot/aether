@@ -54,6 +54,7 @@ impl NativeActor for HttpDispatchShard {
             inbound_rx,
             inbound_tx: seed.inbound_tx,
             wake_dirty: seed.wake_dirty,
+            route_cursor: 0,
             connections: HashMap::new(),
             next_conn_id: 0,
             in_flight: HashMap::new(),

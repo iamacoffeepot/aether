@@ -4,17 +4,24 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-/// One registered route (ADR-0130): requests whose path matches
-/// `prefix` on a segment boundary (and whose method passes `method`)
-/// dispatch to `mailbox` as kind `kind`. The table keys the route by
-/// the registrant's `MailboxId`, so a route survives
-/// `replace_component` (the id is stable) and dispatch skips name
-/// resolution.
+/// One registered route (ADR-0130 / ADR-0136): requests whose path
+/// matches `prefix` on a segment boundary (and whose method passes
+/// `method`) dispatch as kind `kind` to one of `members`. An exclusive
+/// registration is the one-member set; a shared set (ADR-0136) holds
+/// every instance that opted in, picked round-robin per request. The
+/// table keys targets by stable `MailboxId`, so a route survives
+/// `replace_component` and dispatch skips name resolution.
 pub struct Route {
     pub prefix: String,
     pub method: Option<HttpMethod>,
     pub kind: KindId,
-    pub mailbox: MailboxId,
+    /// Whether this key was registered `shared` (ADR-0136). An
+    /// exclusive route never grows a second member; a shared route
+    /// only admits further `shared` registrations of the same `kind`.
+    pub shared: bool,
+    /// The target set, in registration order. Never empty — the last
+    /// member's unregistration drops the whole route.
+    pub members: Vec<MailboxId>,
 }
 
 /// Segment-boundary prefix match (ADR-0130): `/api` matches `/api` and

@@ -14,6 +14,19 @@ pub type ConnId = u64;
 /// supervisor's registration handlers write, request dispatch reads.
 pub type SharedRoutes = Arc<RwLock<Vec<Route>>>;
 
+/// Outcome of a shard's route resolution (ADR-0130 / ADR-0136).
+pub enum RouteResolution {
+    /// No registered route matches — dispatch falls back to the
+    /// configured `handler_mailbox`.
+    NoRoute,
+    /// A route matches but no member of its set is live — the `503`
+    /// surface (never the fallback: that would silently reroute a
+    /// claimed path family).
+    Dead,
+    /// The picked live member and the kind its requests dispatch as.
+    Live(MailboxId, KindId),
+}
+
 /// Boot config the supervisor builds for each dispatch shard it spawns
 /// (ADR-0135): the shard's sidecar channel (receiver consumed at `init`,
 /// sender cloned into every reader the shard spawns), the shared route

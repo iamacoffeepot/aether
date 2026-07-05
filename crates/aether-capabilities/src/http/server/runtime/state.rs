@@ -92,6 +92,10 @@ pub struct HttpShardState {
     /// each reader/writer sidecar); cleared at the top of the shard's
     /// `on_inbound_ready`.
     pub wake_dirty: Arc<AtomicBool>,
+    /// Round-robin cursor over shared route member sets (ADR-0136),
+    /// shard-local by design — a global cursor would be a cross-shard
+    /// contention point for marginal balance.
+    pub route_cursor: usize,
     pub connections: HashMap<ConnId, ConnState>,
     pub next_conn_id: ConnId,
     /// Dispatch-correlation → open response socket. Populated on
@@ -238,11 +242,16 @@ impl HttpSupervisorState {
     }
 
     /// Claim `(prefix, method)` for `mailbox`, dispatching as `kind`
-    /// (ADR-0130). A key held by a different mailbox is answered
-    /// `Err`; the same mailbox re-claiming its own key is an
-    /// idempotent `Ok` that updates `kind` — so a component
-    /// re-running `wire` after `replace_component` re-registers
-    /// cleanly (its `MailboxId` is stable).
+    /// (ADR-0130), or join its shared member set (ADR-0136). Exclusive
+    /// (`shared: false`): a key held by anyone else is answered `Err`;
+    /// the same sole mailbox re-claiming its own key is an idempotent
+    /// `Ok` that updates `kind` — so a component re-running `wire`
+    /// after `replace_component` re-registers cleanly (its `MailboxId`
+    /// is stable). Shared (`shared: true`): joins the key's member set
+    /// when the set is shared and the `kind` matches; re-registering an
+    /// existing membership is an idempotent `Ok`. Mixing exclusive and
+    /// shared on one key, or joining with a different `kind`, is a
+    /// conflict `Err` either way.
     ///
     /// # Panics
     /// Panics if the route-table `RwLock` is poisoned — fail-fast per
@@ -254,6 +263,7 @@ impl HttpSupervisorState {
         method: Option<HttpMethod>,
         kind: KindId,
         mailbox: MailboxId,
+        shared: bool,
     ) -> RegisterRouteResult {
         let prefix = match normalize_prefix(prefix) {
             Ok(prefix) => prefix,
@@ -264,29 +274,62 @@ impl HttpSupervisorState {
             .iter_mut()
             .find(|r| r.prefix == prefix && r.method == method)
         {
-            if existing.mailbox == mailbox {
+            // Exclusive re-claim by the sole holder stays the idempotent
+            // kind-updating Ok it always was.
+            if !shared && !existing.shared && existing.members == [mailbox] {
                 existing.kind = kind;
                 return RegisterRouteResult::Ok;
             }
-            return RegisterRouteResult::Err {
-                error: format!(
-                    "route ({prefix:?}, {method:?}) already claimed by mailbox {:?}",
-                    existing.mailbox,
-                ),
-            };
+            if shared != existing.shared {
+                return RegisterRouteResult::Err {
+                    error: format!(
+                        "route ({prefix:?}, {method:?}) is {}; a {} registration cannot \
+                         join it (ADR-0136: spreading is a joint opt-in)",
+                        if existing.shared {
+                            "a shared member set"
+                        } else {
+                            "exclusively claimed"
+                        },
+                        if shared { "shared" } else { "exclusive" },
+                    ),
+                };
+            }
+            if !shared {
+                return RegisterRouteResult::Err {
+                    error: format!(
+                        "route ({prefix:?}, {method:?}) already claimed by mailbox {:?}",
+                        existing.members[0],
+                    ),
+                };
+            }
+            if existing.kind != kind {
+                return RegisterRouteResult::Err {
+                    error: format!(
+                        "route ({prefix:?}, {method:?}) member set dispatches kind {:?}; a \
+                         member registering kind {kind:?} cannot join (ADR-0136)",
+                        existing.kind,
+                    ),
+                };
+            }
+            if !existing.members.contains(&mailbox) {
+                existing.members.push(mailbox);
+            }
+            return RegisterRouteResult::Ok;
         }
         routes.push(Route {
             prefix,
             method,
             kind,
-            mailbox,
+            shared,
+            members: vec![mailbox],
         });
         RegisterRouteResult::Ok
     }
 
-    /// Release the `(prefix, method)` route held by `mailbox`.
-    /// Idempotent — releasing a route that isn't held (or is held by
-    /// someone else) is still `Ok`, mirroring the input cap's
+    /// Release `mailbox`'s membership in the `(prefix, method)` route
+    /// (ADR-0136); the last member's release drops the route.
+    /// Idempotent — releasing a route that isn't held (or a set the
+    /// mailbox never joined) is still `Ok`, mirroring the input cap's
     /// unsubscribe semantics.
     ///
     /// # Panics
@@ -302,45 +345,79 @@ impl HttpSupervisorState {
             Ok(prefix) => prefix,
             Err(error) => return RegisterRouteResult::Err { error },
         };
-        self.routes
-            .write()
-            .expect("route table lock poisoned")
-            .retain(|r| !(r.prefix == prefix && r.method == method && r.mailbox == mailbox));
+        let mut routes = self.routes.write().expect("route table lock poisoned");
+        for route in routes.iter_mut() {
+            if route.prefix == prefix && route.method == method {
+                route.members.retain(|m| *m != mailbox);
+            }
+        }
+        routes.retain(|r| !r.members.is_empty());
         RegisterRouteResult::Ok
     }
 
-    /// Release every route held by `mailbox` (ADR-0130's
-    /// `UnregisterRoutesAll`).
+    /// Release every route membership held by `mailbox` (ADR-0130's
+    /// `UnregisterRoutesAll`, ADR-0136 set semantics); sets it empties
+    /// drop entirely.
     ///
     /// # Panics
     /// Panics if the route-table `RwLock` is poisoned — fail-fast per
     /// ADR-0063.
     pub fn unregister_routes_all(&mut self, mailbox: MailboxId) {
-        self.routes
-            .write()
-            .expect("route table lock poisoned")
-            .retain(|r| r.mailbox != mailbox);
+        let mut routes = self.routes.write().expect("route table lock poisoned");
+        for route in routes.iter_mut() {
+            route.members.retain(|m| *m != mailbox);
+        }
+        routes.retain(|r| !r.members.is_empty());
     }
 }
 
 impl HttpShardState {
     /// The longest segment-boundary prefix match among
     /// method-compatible routes, with a method-specific route beating
-    /// a method-agnostic one at equal prefix (ADR-0130), copied out
-    /// from under the shared table's read lock. `None` ⇒ the
-    /// configured `handler_mailbox` fallback.
+    /// a method-agnostic one at equal prefix (ADR-0130), then one live
+    /// member picked round-robin from the winning route's set
+    /// (ADR-0136) — copied out from under the shared table's read
+    /// lock. [`RouteResolution::NoRoute`] ⇒ the configured
+    /// `handler_mailbox` fallback; [`RouteResolution::Dead`] ⇒ the
+    /// route exists but no member is live, the `503` surface (falling
+    /// back instead would silently reroute a claimed path family).
     ///
     /// # Panics
     /// Panics if the route-table `RwLock` is poisoned — fail-fast per
     /// ADR-0063.
-    fn resolve_route(&self, path: &str, method: HttpMethod) -> Option<(MailboxId, KindId)> {
-        self.routes
-            .read()
-            .expect("route table lock poisoned")
+    /// `advance: false` is the peek form for the pre-dispatch head
+    /// decision (ADR-0128 §4): it reads the member the next dispatch
+    /// would pick without consuming a cursor tick, so the decision +
+    /// dispatch pair of resolutions per request advances the
+    /// round-robin exactly once.
+    // The read guard spans member validation by design: a route emptied
+    // concurrently must not be picked from a stale copy, and the
+    // registry probe under it takes no lock that ever holds this one.
+    #[allow(clippy::significant_drop_tightening)]
+    fn resolve_route(&mut self, path: &str, method: HttpMethod, advance: bool) -> RouteResolution {
+        let routes = self.routes.read().expect("route table lock poisoned");
+        let Some(route) = routes
             .iter()
             .filter(|r| r.method.is_none_or(|m| m == method) && route_matches(&r.prefix, path))
             .max_by_key(|r| (r.prefix.len(), r.method.is_some()))
-            .map(|r| (r.mailbox, r.kind))
+        else {
+            return RouteResolution::NoRoute;
+        };
+        // Shard-local round-robin over the member set, skipping members
+        // the registry no longer reports live (the single-member case
+        // degenerates to today's validate-the-one-target check).
+        let start = self.route_cursor;
+        if advance {
+            self.route_cursor = self.route_cursor.wrapping_add(1);
+        }
+        let len = route.members.len();
+        for offset in 0..len {
+            let member = route.members[(start + offset) % len];
+            if validate_route_mailbox(self.mailer.registry(), member).is_ok() {
+                return RouteResolution::Live(member, route.kind);
+            }
+        }
+        RouteResolution::Dead
     }
 
     /// Release this connection's slot in the global live count (ADR-0135).
@@ -480,20 +557,22 @@ impl HttpShardState {
         // `handler_mailbox` by name at dispatch time through the
         // registry — the sanctioned runtime-name path — dispatching
         // the generic request kind. Nothing live either way → `503`.
-        let routed = self.resolve_route(&request.path, method);
-        let (handler, dispatch_kind) = if let Some((mailbox, kind)) = routed {
-            if validate_route_mailbox(self.mailer.registry(), mailbox).is_err() {
+        let (handler, dispatch_kind) = match self.resolve_route(&request.path, method, true) {
+            RouteResolution::Live(mailbox, kind) => (mailbox, kind),
+            RouteResolution::Dead => {
                 self.write_status_response(conn_id, 503, "routed handler gone");
                 self.close_connection(conn_id, "routed mailbox dead");
                 return;
             }
-            (mailbox, kind)
-        } else if let Some(handler) = self.mailer.registry().lookup(&self.handler_mailbox) {
-            (handler, <HttpServerRequest as Kind>::ID)
-        } else {
-            self.write_status_response(conn_id, 503, "no handler registered");
-            self.close_connection(conn_id, "handler unresolved");
-            return;
+            RouteResolution::NoRoute => {
+                if let Some(handler) = self.mailer.registry().lookup(&self.handler_mailbox) {
+                    (handler, <HttpServerRequest as Kind>::ID)
+                } else {
+                    self.write_status_response(conn_id, 503, "no handler registered");
+                    self.close_connection(conn_id, "handler unresolved");
+                    return;
+                }
+            }
         };
         let peer_addr = self
             .connections
@@ -538,17 +617,16 @@ impl HttpShardState {
     /// can consult the resolved handler's accept-set before the body is read.
     /// `None` collapses every "nothing live" case to the `503` the buffered
     /// dispatch answers.
-    fn resolved_handler(&self, path: &str, method: HttpMethod) -> Option<(MailboxId, KindId)> {
-        if let Some((mailbox, kind)) = self.resolve_route(path, method) {
-            if validate_route_mailbox(self.mailer.registry(), mailbox).is_err() {
-                return None;
-            }
-            return Some((mailbox, kind));
+    fn resolved_handler(&mut self, path: &str, method: HttpMethod) -> Option<(MailboxId, KindId)> {
+        match self.resolve_route(path, method, false) {
+            RouteResolution::Live(mailbox, kind) => Some((mailbox, kind)),
+            RouteResolution::Dead => None,
+            RouteResolution::NoRoute => self
+                .mailer
+                .registry()
+                .lookup(&self.handler_mailbox)
+                .map(|handler| (handler, <HttpServerRequest as Kind>::ID)),
         }
-        self.mailer
-            .registry()
-            .lookup(&self.handler_mailbox)
-            .map(|handler| (handler, <HttpServerRequest as Kind>::ID))
     }
 
     /// Decide a parsed request head's body path (ADR-0128): resolve the
