@@ -94,6 +94,13 @@ pub struct HttpServerConfig {
     /// [`HttpRequestCredit`]: crate::http::kinds::HttpRequestCredit
     #[cfg_attr(feature = "runtime", config(default = 16))]
     pub request_stream_window: u32,
+    /// Dispatch-shard count (ADR-0135): how many instanced dispatch actors
+    /// the supervisor spawns to run the per-connection request machinery in
+    /// parallel. `0` (the default) sizes automatically to the scheduler
+    /// pool's worker count. A count, not a byte or time quantity, so it
+    /// carries no unit suffix.
+    #[cfg_attr(feature = "runtime", config(default = 0))]
+    pub dispatch_shards: usize,
     /// Websocket idle timeout in milliseconds ([`DEFAULT_WS_IDLE_TIMEOUT_MILLIS`],
     /// ADR-0129): the read deadline between frames on an upgraded websocket
     /// connection. Distinct from `request_timeout_millis` (the slow-loris
@@ -117,6 +124,7 @@ impl Default for HttpServerConfig {
             max_connections: DEFAULT_MAX_CONNECTIONS,
             response_stream_window: DEFAULT_RESPONSE_STREAM_WINDOW,
             request_stream_window: DEFAULT_REQUEST_STREAM_WINDOW,
+            dispatch_shards: 0,
             websocket_idle_timeout_millis: DEFAULT_WS_IDLE_TIMEOUT_MILLIS,
         }
     }

@@ -485,7 +485,7 @@ pub fn run_ws_reader_loop(
     }
 }
 
-impl HttpServerCapabilityState {
+impl HttpShardState {
     /// Accept a websocket upgrade (ADR-0129 §1): the handler replied
     /// `WebSocketAccept` to a stashed-key upgrade request. Compute
     /// `Sec-WebSocket-Accept`, write the `101 Switching Protocols` head
@@ -534,8 +534,7 @@ impl HttpServerCapabilityState {
             }
         };
 
-        let stream_id = self.next_stream_id;
-        self.next_stream_id += 1;
+        let stream_id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
         let window = self.response_stream_window.max(1);
         let (tx, rx) = mpsc::sync_channel::<WriterMsg>(window as usize);
         let sink = WakeSink {

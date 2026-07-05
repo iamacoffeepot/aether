@@ -37,21 +37,15 @@
 
 // Handler-signature kinds resolve at file root through these imports —
 // `#[actor]` emits the `HandlesKind<K>` markers always-on against the
-// identity, and the `init` / handler bodies name these kinds. The
-// response-stream inbound kinds (`HttpResponseChunk` / `HttpResponseStreamEnd`)
-// and the request-stream credit grant (`HttpRequestCredit`) are `#[handler]`
-// kinds so a streaming handler can address them at `HttpServerCapability`
-// type-safely; the route-registration kinds (ADR-0130) are `#[handler]` kinds
-// likewise.
-use crate::http::kinds::{
-    HttpInboundReady, HttpRequestCredit, HttpResponseChunk, HttpResponseStreamEnd, WebSocketClose,
-    WebSocketMessage,
-};
+// identity, and the `init` / handler bodies name these kinds. Post-ADR-0135
+// the supervisor's surface is the sidecar wake plus route registration
+// (ADR-0130); the per-request kinds (streaming, websocket, settlement,
+// reply interception) live on the dispatch shard identity in `shard`.
+use crate::http::kinds::HttpInboundReady;
 use crate::http::kinds::{
     RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf,
     UnregisterRoutesAll,
 };
-use aether_kinds::trace::Settled;
 
 // Default bind address. Loopback per ADR-0108 §6 — binding a public
 // interface is an explicit operator choice.
@@ -94,6 +88,7 @@ pub const DEFAULT_REQUEST_STREAM_WINDOW: u32 = 16;
 pub const DEFAULT_WS_IDLE_TIMEOUT_MILLIS: u64 = 300_000;
 
 mod config;
+mod shard;
 
 pub use config::HttpServerConfig;
 // The `Config` derive on `HttpServerConfig` emits these native-only sibling
@@ -120,10 +115,10 @@ pub struct HttpServerHandle {
 /// ZST carrying only the addressing — `Addressable`, the per-handler
 /// `HandlesKind` markers, the `#[fallback]` reply-interception marker, and the
 /// name-inventory entry, all emitted always-on by `#[actor]`. The
-/// state-bearing runtime (`HttpServerCapabilityState`, which owns the
-/// listener + accept thread + connection table) lives behind the one
-/// `feature = "runtime"` gate, so a transport-only build never names the state
-/// type nor pulls `aether_substrate` through this cap.
+/// state-bearing runtime (`HttpSupervisorState`, which owns the listener +
+/// accept thread + shared route table + shard sinks, ADR-0135) lives behind
+/// the one `feature = "runtime"` gate, so a transport-only build never names
+/// the state type nor pulls `aether_substrate` through this cap.
 #[actor(singleton)]
 pub struct HttpServerCapability;
 

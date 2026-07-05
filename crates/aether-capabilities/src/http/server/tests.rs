@@ -29,17 +29,18 @@ mod test_handlers {
     //! component author writes. The conflict-`Err` and idempotent
     //! double-claim handlers stay on the raw registration surface, so a
     //! macro regression cannot mask a registration-semantics one.
-    use aether_actor::actor;
+    use aether_actor::{Manual, actor};
     use aether_data::Kind;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
 
+    use crate::http::{RequestStream, ResponseStream};
+
     use crate::http;
     use crate::http::kinds::{
-        HttpHeader, HttpRequestChunk, HttpRequestCredit, HttpRequestStreamEnd,
-        HttpRequestStreamOpen, HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen,
-        HttpServerRequest, HttpServerResponse, HttpStreamCredit, RegisterRouteSelf,
-        UnregisterRouteSelf,
+        HttpHeader, HttpRequestChunk, HttpRequestStreamEnd, HttpRequestStreamOpen,
+        HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse, HttpStreamCredit,
+        RegisterRouteSelf, UnregisterRouteSelf,
     };
     use crate::http::server::HttpServerCapability;
 
@@ -495,7 +496,6 @@ mod test_handlers {
 
     /// Per-stream progress for [`StreamHttpHandler`].
     pub struct StreamHttpHandlerState {
-        stream_id: u64,
         next_index: u32,
         ended: bool,
     }
@@ -508,7 +508,6 @@ mod test_handlers {
 
         fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<StreamHttpHandlerState, BootError> {
             Ok(StreamHttpHandlerState {
-                stream_id: 0,
                 next_index: 0,
                 ended: false,
             })
@@ -533,24 +532,26 @@ mod test_handlers {
 
         /// Spend the granted credit: send up to `credit.credit` more chunks,
         /// then terminate once all [`STREAM_CHUNK_COUNT`] have gone out.
-        #[handler]
-        fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, credit: HttpStreamCredit) {
-            state.stream_id = credit.stream_id;
+        /// Addressed through the ADR-0133 [`ResponseStream`] handle — the
+        /// data phase goes to whichever dispatch shard granted the credit,
+        /// never to the supervisor by type (ADR-0135).
+        #[handler::manual]
+        fn on_credit(
+            state: &mut Self::State,
+            ctx: &mut NativeCtx<'_, Manual>,
+            credit: HttpStreamCredit,
+        ) {
+            let Some(stream) = ResponseStream::from_credit(ctx, &credit) else {
+                return;
+            };
             let mut budget = credit.credit;
             while budget > 0 && state.next_index < STREAM_CHUNK_COUNT {
-                ctx.actor::<HttpServerCapability>()
-                    .send(&HttpResponseChunk {
-                        stream_id: state.stream_id,
-                        body: stream_chunk_body(state.next_index),
-                    });
+                stream.chunk(ctx, stream_chunk_body(state.next_index));
                 state.next_index += 1;
                 budget -= 1;
             }
             if state.next_index >= STREAM_CHUNK_COUNT && !state.ended {
-                ctx.actor::<HttpServerCapability>()
-                    .send(&HttpResponseStreamEnd {
-                        stream_id: state.stream_id,
-                    });
+                stream.end(ctx);
                 state.ended = true;
             }
         }
@@ -594,18 +595,21 @@ mod test_handlers {
             }
         }
 
-        #[handler]
-        fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, credit: HttpStreamCredit) {
+        #[handler::manual]
+        fn on_credit(
+            state: &mut Self::State,
+            ctx: &mut NativeCtx<'_, Manual>,
+            credit: HttpStreamCredit,
+        ) {
             if state.flooded {
                 return;
             }
             state.flooded = true;
+            let Some(stream) = ResponseStream::from_credit(ctx, &credit) else {
+                return;
+            };
             for _ in 0..FLOOD_CHUNK_COUNT {
-                ctx.actor::<HttpServerCapability>()
-                    .send(&HttpResponseChunk {
-                        stream_id: credit.stream_id,
-                        body: vec![b'x'; 8],
-                    });
+                stream.chunk(ctx, vec![b'x'; 8]);
             }
         }
     }
@@ -622,6 +626,11 @@ mod test_handlers {
     /// Per-upload progress for [`StreamingUploadHandler`].
     pub struct StreamingUploadHandlerState {
         received: usize,
+        /// The ADR-0133 inbound-stream handle captured at
+        /// `HttpRequestStreamOpen` — credit grants go to whichever dispatch
+        /// shard opened the stream (ADR-0135), never to the supervisor by
+        /// type.
+        stream: Option<RequestStream>,
     }
 
     #[actor(singleton)]
@@ -634,16 +643,20 @@ mod test_handlers {
             (): (),
             _ctx: &mut NativeInitCtx<'_>,
         ) -> Result<StreamingUploadHandlerState, BootError> {
-            Ok(StreamingUploadHandlerState { received: 0 })
+            Ok(StreamingUploadHandlerState {
+                received: 0,
+                stream: None,
+            })
         }
 
-        #[handler]
+        #[handler::manual]
         fn on_stream_open(
             state: &mut Self::State,
-            _ctx: &mut NativeCtx<'_>,
-            _open: HttpRequestStreamOpen,
+            ctx: &mut NativeCtx<'_, Manual>,
+            open: HttpRequestStreamOpen,
         ) {
             state.received = 0;
+            state.stream = RequestStream::from_open(ctx, &open);
         }
 
         /// Count the piece and grant one credit back so the cap delivers the
@@ -651,11 +664,9 @@ mod test_handlers {
         #[handler]
         fn on_chunk(state: &mut Self::State, ctx: &mut NativeCtx<'_>, chunk: HttpRequestChunk) {
             state.received += chunk.body.len();
-            ctx.actor::<HttpServerCapability>()
-                .send(&HttpRequestCredit {
-                    stream_id: chunk.stream_id,
-                    credit: 1,
-                });
+            if let Some(stream) = &state.stream {
+                stream.credit(ctx, 1);
+            }
         }
 
         #[handler]
@@ -1095,11 +1106,16 @@ fn head_response_suppresses_body() {
 
 /// A peer accepted past `max_connections` is refused a canned `503`
 /// and closed before a reader thread is spawned; it never reaches the
-/// handler.
+/// handler. `dispatch_shards` is pinned above one so the ceiling is
+/// provably global across shards (ADR-0135) — the two held connections
+/// land on different shards round-robin, and the supervisor still
+/// refuses the third against the shared live count.
 ///
-/// Tripwire: without the capacity guard in `spawn_reader_for_peer`,
-/// this connection is accepted and dispatched (or hangs waiting on
-/// the handler) instead of being refused.
+/// Tripwire: without the assignment-time capacity guard in
+/// `HttpSupervisorState::assign_peer`, this connection is accepted and
+/// dispatched (or hangs waiting on the handler) instead of being
+/// refused; with a per-shard rather than global count, it is accepted
+/// because no single shard is at the ceiling.
 #[test]
 fn over_capacity_connection_is_503() {
     let (registry, mailer) = fresh_substrate();
@@ -1111,6 +1127,7 @@ fn over_capacity_connection_is_503() {
             handler_mailbox: <EchoHttpHandler as Addressable>::NAMESPACE.to_string(),
             request_timeout_millis: 5_000,
             max_connections,
+            dispatch_shards: 2,
             ..HttpServerConfig::default()
         })
         .build_passive()
@@ -1143,6 +1160,70 @@ fn over_capacity_connection_is_503() {
     );
 
     drop(held);
+}
+
+/// Concurrent connections under a pinned multi-shard config (ADR-0135) are
+/// all served, including keep-alive reuse: four connections land on two
+/// shards round-robin, each serves two sequential requests, every reply
+/// routes back through the owning shard. Pinned to `dispatch_shards: 2`
+/// rather than the auto worker-count sizing so the multi-shard path is
+/// exercised even on a low-core CI runner where auto sizing collapses to
+/// one shard.
+///
+/// Tripwire: a shard-assignment bug (posting to a never-spawned shard, a
+/// round-robin index error, a reply intercepted by the wrong actor)
+/// surfaces here as a hung read or a `502`/`503` on some subset of the
+/// connections.
+#[test]
+fn connections_distribute_across_shards() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<EchoHttpHandler>(())
+        .with_actor::<HttpServerCapability>(HttpServerConfig {
+            bind_addr: "127.0.0.1:0".to_string(),
+            handler_mailbox: <EchoHttpHandler as Addressable>::NAMESPACE.to_string(),
+            request_timeout_millis: 5_000,
+            dispatch_shards: 2,
+            ..HttpServerConfig::default()
+        })
+        .build_passive()
+        .expect("caps boot");
+
+    let port = port_of(&chassis);
+
+    let mut streams: Vec<(TcpStream, Vec<u8>)> = (0..4)
+        .map(|_| {
+            let stream =
+                TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set_read_timeout");
+            (stream, Vec::new())
+        })
+        .collect();
+
+    for round in 0..2 {
+        // Write this round's request on every connection first, then read
+        // every response — so all four connections are in flight across
+        // both shards at once, not serialized one connection at a time.
+        for (index, (stream, _)) in streams.iter_mut().enumerate() {
+            let request =
+                format!("GET /conn{index}/round{round} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            stream.write_all(request.as_bytes()).expect("write request");
+            stream.flush().expect("flush request");
+        }
+        for (index, (stream, carry)) in streams.iter_mut().enumerate() {
+            let response = read_one_response(stream, carry);
+            assert!(
+                response.starts_with("HTTP/1.1 200 "),
+                "conn {index} round {round}: expected 200, got: {response:?}",
+            );
+            assert!(
+                response.contains(&format!("x-aether-path: /conn{index}/round{round}")),
+                "conn {index} round {round}: reply correlated to the wrong request: {response:?}",
+            );
+        }
+    }
 }
 
 /// A streaming handler (ADR-0128) emits its body across more chunks than the

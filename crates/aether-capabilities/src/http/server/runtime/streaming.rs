@@ -4,7 +4,7 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-impl HttpServerCapabilityState {
+impl HttpShardState {
     /// Open an inbound request stream (ADR-0128): mint a `stream_id`, record
     /// the stream, send the handler an `HttpRequestStreamOpen`, and seed the
     /// reader's send window. The handler learns its `stream_id` here and paces
@@ -17,8 +17,7 @@ impl HttpServerCapabilityState {
         method: HttpMethod,
         head: ParsedHead,
     ) {
-        let stream_id = self.next_stream_id;
-        self.next_stream_id += 1;
+        let stream_id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
         let window = self.request_stream_window.max(1);
         self.request_streams.insert(
             stream_id,
