@@ -69,6 +69,7 @@ mod tests {
                 config: Vec::new(),
                 name: Some("probe".to_owned()),
                 export: None,
+                replicas: None,
             }],
         };
         let decoded = decode_pack(&encode_pack(&pack)).expect("pack round trip");

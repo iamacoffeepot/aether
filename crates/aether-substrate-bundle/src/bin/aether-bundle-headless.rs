@@ -12,8 +12,9 @@ use std::time::Duration;
 use anyhow::Context as _;
 
 use aether_substrate::Chassis;
+use aether_substrate_bundle::autoload::expand_replicas;
 use aether_substrate_bundle::bundle_pack::decode_pack;
-use aether_substrate_bundle::headless::{AutoloadComponent, HeadlessChassis, HeadlessEnv};
+use aether_substrate_bundle::headless::{HeadlessChassis, HeadlessEnv};
 
 /// The component pack, embedded at build time. `build.rs` stages it
 /// into `OUT_DIR/bundle_pack.bin` from `AETHER_BUNDLE_MANIFEST` (the
@@ -41,11 +42,11 @@ fn main() -> anyhow::Result<()> {
             "empty bundle pack — booting componentless (build through `cargo xtask bundle`)",
         );
     }
-    env.autoload = pack
-        .components
-        .into_iter()
-        .map(AutoloadComponent::from)
-        .collect();
+    let mut autoload = Vec::with_capacity(pack.components.len());
+    for packed in pack.components {
+        autoload.extend(expand_replicas(packed).context("expand bundle pack replicas")?);
+    }
+    env.autoload = autoload;
     let chassis = HeadlessChassis::build(env)?;
     chassis.run()?;
     Ok(())
