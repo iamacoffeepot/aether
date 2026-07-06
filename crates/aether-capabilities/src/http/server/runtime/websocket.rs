@@ -614,6 +614,16 @@ impl HttpShardState {
         );
     }
 
+    /// The websocket-upgraded connection's dispatch handler + `stream_id`
+    /// (ADR-0132), or `None` if `conn_id` names no such connection — the
+    /// shared lookup behind every ws dispatch/close/send site.
+    fn ws_target(&self, conn_id: ConnId) -> Option<(MailboxId, u64)> {
+        self.connections
+            .get(&conn_id)
+            .and_then(|conn| conn.websocket.as_ref())
+            .map(|ws| (ws.handler, ws.stream_id))
+    }
+
     /// Deliver one reassembled inbound websocket message to the handler
     /// (ADR-0129 §4) as a `WebSocketMessage` on its own fresh causal root,
     /// stamped with the connection's `stream_id` (ADR-0132) so the handler
@@ -626,12 +636,7 @@ impl HttpShardState {
         binary: bool,
         data: Vec<u8>,
     ) {
-        let Some((handler, stream_id)) = self
-            .connections
-            .get(&conn_id)
-            .and_then(|conn| conn.websocket.as_ref())
-            .map(|ws| (ws.handler, ws.stream_id))
-        else {
+        let Some((handler, stream_id)) = self.ws_target(conn_id) else {
             return;
         };
         let payload = WebSocketMessage {
@@ -653,12 +658,7 @@ impl HttpShardState {
         code: u16,
         reason: &str,
     ) {
-        let Some((handler, stream_id)) = self
-            .connections
-            .get(&conn_id)
-            .and_then(|conn| conn.websocket.as_ref())
-            .map(|ws| (ws.handler, ws.stream_id))
-        else {
+        let Some((handler, stream_id)) = self.ws_target(conn_id) else {
             return;
         };
         let payload = WebSocketClose {
@@ -676,12 +676,7 @@ impl HttpShardState {
     /// the connection down; otherwise it spends one credit and queues the
     /// serialized frame.
     pub fn send_ws_message(&mut self, conn_id: ConnId, binary: bool, data: &[u8]) {
-        let Some(stream_id) = self
-            .connections
-            .get(&conn_id)
-            .and_then(|conn| conn.websocket.as_ref())
-            .map(|ws| ws.stream_id)
-        else {
+        let Some((_, stream_id)) = self.ws_target(conn_id) else {
             return;
         };
         let opcode = if binary { OPCODE_BINARY } else { OPCODE_TEXT };
@@ -716,12 +711,7 @@ impl HttpShardState {
     /// connection's writer thread. Uncredited and best-effort — a full writer
     /// channel drops the pong rather than blocking or tearing down.
     pub fn send_ws_pong(&mut self, conn_id: ConnId, payload: &[u8]) {
-        let Some(stream_id) = self
-            .connections
-            .get(&conn_id)
-            .and_then(|conn| conn.websocket.as_ref())
-            .map(|ws| ws.stream_id)
-        else {
+        let Some((_, stream_id)) = self.ws_target(conn_id) else {
             return;
         };
         let frame = serialize_ws_frame(OPCODE_PONG, payload, None);
@@ -735,12 +725,7 @@ impl HttpShardState {
     /// which tears the connection down). Serves both a handler-initiated close
     /// and the echo of a peer close frame.
     pub fn send_ws_close(&mut self, conn_id: ConnId, code: u16, reason: &str) {
-        let Some(stream_id) = self
-            .connections
-            .get(&conn_id)
-            .and_then(|conn| conn.websocket.as_ref())
-            .map(|ws| ws.stream_id)
-        else {
+        let Some((_, stream_id)) = self.ws_target(conn_id) else {
             return;
         };
         let frame = serialize_ws_close_frame(code, reason);

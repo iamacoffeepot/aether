@@ -135,7 +135,7 @@ impl NativeActor for HttpServerCapability {
         let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
         let mailer: Arc<Mailer> = ctx.mailer();
         let self_id = ctx.self_id();
-        let wake_kind = KindId(<HttpInboundReady as Kind>::ID.0);
+        let wake_kind = <HttpInboundReady as Kind>::ID;
 
         let wake_dirty = Arc::new(AtomicBool::new(false));
         let accept_sink = WakeSink {

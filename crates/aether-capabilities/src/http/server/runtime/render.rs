@@ -101,13 +101,12 @@ pub fn render_stream_head(open: &HttpResponseStreamOpen, keep_alive: bool) -> Ve
 /// `idle_deadline` is the idle-write / no-progress deadline: a handler that
 /// stalled mid-stream tears the stream down.
 pub fn run_writer_loop(
-    write_half: TcpStream,
+    mut write_half: TcpStream,
     stream_id: u64,
     rx: &mpsc::Receiver<WriterMsg>,
     sink: &WakeSink,
     idle_deadline: Duration,
 ) {
-    let mut write_half = write_half;
     loop {
         match rx.recv_timeout(idle_deadline) {
             Ok(WriterMsg::Chunk(body)) => {
