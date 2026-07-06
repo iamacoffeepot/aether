@@ -412,8 +412,17 @@ pub fn run_ws_reader_loop(
         ws_max_message_bytes,
         ..
     } = tuning;
-    // An idle websocket is normal — read under the (longer) idle deadline.
-    let _ = stream.set_read_timeout(Some(ws_idle_timeout));
+    // An idle websocket is normal — read under the (longer) idle deadline. If the
+    // setsockopt itself fails, the reader has no idle bound to enforce; close
+    // rather than enter the frame loop with an unbounded blocking read.
+    if stream.set_read_timeout(Some(ws_idle_timeout)).is_err() {
+        sink.post(InboundEvent::WebSocketClose {
+            conn_id,
+            code: 1011,
+            reason: "failed to arm websocket idle timeout".to_string(),
+        });
+        return;
+    }
     let mut buf = leftover;
     let mut msg: Vec<u8> = Vec::new();
     let mut msg_binary = false;
