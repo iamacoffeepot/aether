@@ -323,6 +323,17 @@ Drop to the raw `register_route_self` surface above for a streaming route
 (`HttpResponseStreamOpen`) — the typed surface returns `HttpServerResponse`, so
 a streamed response keeps its own hand-written `#[handler]`.
 
+### Scaling one handler to N instances
+
+`#[http::router(shared)]` — the bare ident `shared` in place of no argument —
+registers every route on the impl `shared: true` instead of the default
+exclusive claim. Load N instances of a component written this way and they
+join one round-robin member set on their shared prefixes, so "scale this
+handler to 4" is one attribute plus a `replicas: 4` on the load spec, with no
+hand-written `register_route_self` sends. Any argument other than the bare
+`shared` ident is a compile error naming the two accepted forms (no argument,
+or `shared`).
+
 ## What happens when the handler doesn't reply
 
 If the handler receives the request but returns without calling `ctx.reply`, the

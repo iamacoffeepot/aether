@@ -11,6 +11,10 @@
 //! route, rewrites each routed method into a `#[handler]` glue method
 //! driven by `FromRequest` extraction, injects the `RegisterRouteSelf`
 //! registration into `wire`, and hands `#[actor]` an ordinary impl block.
+//! Bare `#[http::router]` registers every route exclusively (today's
+//! default); `#[http::router(shared)]` registers them all `shared: true`
+//! instead (ADR-0136) — the impl-level opt-in for a component built to
+//! run as N interchangeable instances of one round-robin member set.
 //!
 //! The macros only emit token paths at the runtime vocabulary
 //! (`::aether_capabilities::http::…`, `::aether_data::…`, `::serde::…`);
@@ -46,13 +50,40 @@ pub fn route(_args: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// `#[http::router]` — the impl-block attribute that expands the typed
-/// route-authoring surface (ADR-0131). Written above `#[actor]`.
+/// route-authoring surface (ADR-0131). Written above `#[actor]`. Takes no
+/// arguments (today's exclusive registration) or the bare ident `shared`
+/// (ADR-0136 joint opt-in — every route on the impl registers
+/// `shared: true`, so N instances of the component join one round-robin
+/// member set).
 #[proc_macro_attribute]
-pub fn router(_args: TokenStream, item: TokenStream) -> TokenStream {
+pub fn router(args: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemImpl);
-    match expand_router(item) {
+    let shared = match parse_router_args(TokenStream2::from(args)) {
+        Ok(shared) => shared,
+        Err(err) => return err.into_compile_error().into(),
+    };
+    match expand_router(item, shared) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.into_compile_error().into(),
+    }
+}
+
+/// Parse `#[http::router(...)]`'s optional argument: absent (`shared =
+/// false`, today's exclusive semantics) or the bare ident `shared`
+/// (`shared = true`, ADR-0136 joint opt-in). Anything else — a different
+/// ident, a value, more than one token — is a spanned `compile_error!`
+/// naming the two accepted forms.
+fn parse_router_args(args: TokenStream2) -> syn::Result<bool> {
+    if args.is_empty() {
+        return Ok(false);
+    }
+    match syn::parse2::<Ident>(args.clone()) {
+        Ok(ident) if ident == "shared" => Ok(true),
+        _ => Err(syn::Error::new_spanned(
+            args,
+            "#[http::router] accepts no arguments, or the bare ident `shared` \
+             (ADR-0136 joint opt-in)",
+        )),
     }
 }
 
@@ -109,7 +140,7 @@ enum CallStyle {
     State(Box<Type>),
 }
 
-fn expand_router(mut item: ItemImpl) -> syn::Result<TokenStream2> {
+fn expand_router(mut item: ItemImpl, shared: bool) -> syn::Result<TokenStream2> {
     if !item.generics.params.is_empty() {
         return Err(syn::Error::new(
             item.generics.span(),
@@ -145,7 +176,7 @@ fn expand_router(mut item: ItemImpl) -> syn::Result<TokenStream2> {
         item.items.push(parse_quote!(#handler));
     }
 
-    inject_registration(&mut item, &routed)?;
+    inject_registration(&mut item, &routed, shared)?;
 
     Ok(quote! {
         #(#minted)*
@@ -511,8 +542,10 @@ fn emit_glue_handler(routed: &Routed) -> TokenStream2 {
 }
 
 /// Build the `RegisterRouteSelf` send for one route, addressed with the
-/// given `wire` ctx binding.
-fn registration_send(routed: &Routed, ctx: &Ident) -> TokenStream2 {
+/// given `wire` ctx binding. `shared` carries the impl-level
+/// `#[http::router(shared)]` opt-in (ADR-0136) straight into the wire
+/// field — every route on a `shared` impl registers `shared: true`.
+fn registration_send(routed: &Routed, ctx: &Ident, shared: bool) -> TokenStream2 {
     let Routed {
         method_expr,
         prefix,
@@ -525,7 +558,7 @@ fn registration_send(routed: &Routed, ctx: &Ident) -> TokenStream2 {
                 prefix: #prefix.to_string(),
                 method: #method_expr,
                 kind: <#kind_struct as ::aether_data::Kind>::ID,
-                shared: false,
+                shared: #shared,
             });
     }
 }
@@ -534,7 +567,9 @@ fn registration_send(routed: &Routed, ctx: &Ident) -> TokenStream2 {
 /// appended to an author-written `wire` body, or synthesized as a new
 /// `wire` when the impl has none. Receiver and ctx shapes are copied
 /// from the routed methods, so one rewrite serves both transports.
-fn inject_registration(item: &mut ItemImpl, routed: &[Routed]) -> syn::Result<()> {
+/// `shared` is the impl-level `#[http::router(shared)]` flag (ADR-0136),
+/// applied uniformly to every route registration this impl emits.
+fn inject_registration(item: &mut ItemImpl, routed: &[Routed], shared: bool) -> syn::Result<()> {
     let existing = item.items.iter_mut().find_map(|impl_item| match impl_item {
         ImplItem::Fn(method) if method.sig.ident == "wire" => Some(method),
         _ => None,
@@ -543,7 +578,7 @@ fn inject_registration(item: &mut ItemImpl, routed: &[Routed]) -> syn::Result<()
     if let Some(wire) = existing {
         let ctx = wire_ctx_ident(wire)?;
         for route in routed {
-            let send = registration_send(route, &ctx);
+            let send = registration_send(route, &ctx, shared);
             wire.block.stmts.push(parse_quote!(#send));
         }
         return Ok(());
@@ -557,7 +592,7 @@ fn inject_registration(item: &mut ItemImpl, routed: &[Routed]) -> syn::Result<()
     let ctx = format_ident!("__aether_ctx");
     let sends = routed
         .iter()
-        .map(|route| registration_send(route, &ctx))
+        .map(|route| registration_send(route, &ctx, shared))
         .collect::<Vec<_>>();
     let wire: ImplItemFn = parse_quote! {
         fn wire(#first_arg, #ctx: &mut #ctx_c) {
