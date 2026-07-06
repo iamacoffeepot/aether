@@ -5,6 +5,7 @@ use aether_actor::Addressable;
 use aether_data::Kind as KindTrait;
 use aether_data::KindId;
 use aether_substrate::Mail;
+use aether_substrate::Subname;
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::testing::{TestChassis, fresh_substrate};
 use std::io::{self, Read, Write};
@@ -15,10 +16,12 @@ use std::time::{Duration, Instant};
 
 use test_handlers::{
     ApiRouteHandler, ApiV2Handler, DupFirstHandler, DupSecondHandler, EchoHttpHandler,
-    ExclusivePoolHandler, ExtractRouteHandler, FixedBodyHttpHandler, FloodHttpHandler,
-    MethodAnyHandler, MethodPostHandler, STREAM_CHUNK_COUNT, SharedAlphaHandler, SharedBetaHandler,
-    SharedDupJoinHandler, SharedWrongKindHandler, SilentHttpHandler, StreamHttpHandler,
-    StreamingUploadHandler, TmpRouteHandler, WiredRouteHandler, stream_chunk_body,
+    ExclusiveMacroFirstHandler, ExclusiveMacroSecondHandler, ExclusivePoolHandler,
+    ExtractRouteHandler, FixedBodyHttpHandler, FloodHttpHandler, MethodAnyHandler,
+    MethodPostHandler, STREAM_CHUNK_COUNT, SharedAlphaHandler, SharedBetaHandler,
+    SharedDupJoinHandler, SharedMacroPoolHandler, SharedWrongKindHandler, SilentHttpHandler,
+    StreamHttpHandler, StreamingUploadHandler, TmpRouteHandler, WiredRouteHandler,
+    stream_chunk_body,
 };
 
 mod test_handlers {
@@ -449,6 +452,147 @@ mod test_handlers {
         b"excl-pool",
         [(None, "/pool"), (None, "/excl-ok")]
     );
+
+    /// A `#[http::router(shared)]` handler (issue 2625) — the typed
+    /// author-facing surface a scaled component actually writes, as opposed
+    /// to [`shared_routed_handler!`]'s hand-written
+    /// `RegisterRouteSelf { shared: true, .. }` send. `#[actor(instanced)]`
+    /// so a test can spawn two independently-named live instances of this
+    /// exact compiled type under `/macro-pool` — the accurate analog of
+    /// loading one wasm component `replicas: 2` times (#2626): both
+    /// instances' `wire` runs the identical macro-emitted registration send,
+    /// so they carry the same minted `Kind::ID` (derived from the compiled
+    /// `NAMESPACE` + method name, not the runtime instance name) and can
+    /// actually join one member set — two *different* actor types can't,
+    /// since each mints its own kind. `Config` is each instance's reply
+    /// tag, so the test can tell which instance served a request.
+    pub struct SharedMacroPoolHandler;
+    pub struct SharedMacroPoolHandlerState {
+        tag: &'static [u8],
+    }
+
+    #[http::router(shared)]
+    #[actor(instanced)]
+    impl NativeActor for SharedMacroPoolHandler {
+        type State = SharedMacroPoolHandlerState;
+        type Config = &'static [u8];
+        const NAMESPACE: &'static str = "aether.http.test_route_shared_macro_pool";
+
+        fn init(
+            tag: &'static [u8],
+            _ctx: &mut NativeInitCtx<'_>,
+        ) -> Result<SharedMacroPoolHandlerState, BootError> {
+            Ok(SharedMacroPoolHandlerState { tag })
+        }
+
+        // Hand-written (empty) so `#[http::router]` appends its
+        // registration send here rather than synthesizing its own `wire`
+        // by copying `on_route`'s first-arg pattern verbatim — a
+        // synthesized copy would never touch `state`, so whichever name
+        // `on_route` uses would either warn unused (a plain `state`) or
+        // trip `clippy::used_underscore_binding` (an `_`-prefixed one
+        // `on_route` still reads). An author-written `wire` sidesteps
+        // both: its own unused first arg is independently `_`-prefixed
+        // and never read, and `on_route`'s `state` is read and plain.
+        fn wire(_state: &mut SharedMacroPoolHandlerState, ctx: &mut NativeCtx<'_>) {
+            // Body is otherwise empty — `#[http::router]` appends this
+            // impl's `RegisterRouteSelf` send here, which is what actually
+            // uses `ctx` (a plain, non-underscore name since it must be
+            // usable by the injected statement).
+        }
+
+        #[http::route(any, "/macro-pool")]
+        fn on_route(
+            state: &mut SharedMacroPoolHandlerState,
+            _ctx: http::Ctx<'_, NativeCtx<'_>>,
+        ) -> HttpServerResponse {
+            HttpServerResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: state.tag.to_vec(),
+            }
+        }
+    }
+
+    /// A bare `#[http::router]` handler used by the regression guard
+    /// proving the default flag stays `shared: false` through the new
+    /// argument-parsing path (issue 2625): claims the contested
+    /// `/macro-excl` prefix.
+    pub struct ExclusiveMacroFirstHandler;
+    pub struct ExclusiveMacroFirstHandlerState;
+
+    #[http::router]
+    #[actor(singleton)]
+    impl NativeActor for ExclusiveMacroFirstHandler {
+        type State = ExclusiveMacroFirstHandlerState;
+        type Config = ();
+        const NAMESPACE: &'static str = "aether.http.test_route_excl_macro_first";
+
+        fn init(
+            (): (),
+            _ctx: &mut NativeInitCtx<'_>,
+        ) -> Result<ExclusiveMacroFirstHandlerState, BootError> {
+            Ok(ExclusiveMacroFirstHandlerState)
+        }
+
+        #[http::route(any, "/macro-excl")]
+        fn on_excl(
+            _state: &mut ExclusiveMacroFirstHandlerState,
+            _ctx: http::Ctx<'_, NativeCtx<'_>>,
+        ) -> HttpServerResponse {
+            HttpServerResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: b"excl-macro-first".to_vec(),
+            }
+        }
+    }
+
+    /// The second bare `#[http::router]` claimant of `/macro-excl`: its
+    /// own distinct `/macro-excl-second-ok` route proves this handler's
+    /// registrations were processed even though its `/macro-excl` claim
+    /// is rejected (the first claimant keeps it).
+    pub struct ExclusiveMacroSecondHandler;
+    pub struct ExclusiveMacroSecondHandlerState;
+
+    #[http::router]
+    #[actor(singleton)]
+    impl NativeActor for ExclusiveMacroSecondHandler {
+        type State = ExclusiveMacroSecondHandlerState;
+        type Config = ();
+        const NAMESPACE: &'static str = "aether.http.test_route_excl_macro_second";
+
+        fn init(
+            (): (),
+            _ctx: &mut NativeInitCtx<'_>,
+        ) -> Result<ExclusiveMacroSecondHandlerState, BootError> {
+            Ok(ExclusiveMacroSecondHandlerState)
+        }
+
+        #[http::route(any, "/macro-excl")]
+        fn on_excl(
+            _state: &mut ExclusiveMacroSecondHandlerState,
+            _ctx: http::Ctx<'_, NativeCtx<'_>>,
+        ) -> HttpServerResponse {
+            HttpServerResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: b"excl-macro-second".to_vec(),
+            }
+        }
+
+        #[http::route(any, "/macro-excl-second-ok")]
+        fn on_ok(
+            _state: &mut ExclusiveMacroSecondHandlerState,
+            _ctx: http::Ctx<'_, NativeCtx<'_>>,
+        ) -> HttpServerResponse {
+            HttpServerResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: b"excl-macro-second-ok".to_vec(),
+            }
+        }
+    }
 
     /// Replies `200` and echoes the request's method / path / query /
     /// peer address (as headers) and body (verbatim), so a test can
@@ -1702,6 +1846,109 @@ fn conflicting_claim_is_rejected_first_claimant_keeps_route() {
 
     let dup = round_trip(port, b"GET /dup HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(body_of(&dup), "first", "first claimant keeps the route");
+}
+
+/// A bare `#[http::router]` impl still registers exclusive (issue 2625
+/// regression guard on the default): `ExclusiveMacroFirstHandler` and
+/// `ExclusiveMacroSecondHandler` both claim `/macro-excl` through the
+/// typed macro surface with no `shared` argument, so the second
+/// claimant's registration must conflict and lose — proving the new
+/// argument-parsing path still defaults `shared` to `false` rather than
+/// letting every bare `#[http::router]` impl accidentally join a member
+/// set.
+#[test]
+fn bare_router_stays_exclusive_second_claim_rejected() {
+    let chassis = routed_chassis!(ExclusiveMacroFirstHandler, ExclusiveMacroSecondHandler);
+    let port = port_of(&chassis);
+
+    // The second handler's own distinct route being live proves its
+    // rejected `/macro-excl` claim was processed too.
+    poll_body(
+        port,
+        b"GET /macro-excl-second-ok HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "excl-macro-second-ok",
+    );
+
+    let contested = round_trip(port, b"GET /macro-excl HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert_eq!(
+        body_of(&contested),
+        "excl-macro-first",
+        "bare #[http::router] must stay exclusive: first claimant keeps the route",
+    );
+}
+
+/// `#[http::router(shared)]` (issue 2625) threads the flag from the
+/// attribute all the way into the wire `RegisterRouteSelf` send: two
+/// instances of a component built with the opt-in join one round-robin
+/// member set and both serve — the bug this catches is the flag failing
+/// to thread, which would make the second instance's registration a
+/// conflict `Err` instead of a join (only one tag would ever serve).
+#[test]
+fn macro_router_shared_opt_in_joins_a_member_set() {
+    // Pinned to one dispatch shard, like `shared_route_spreads_across_members`:
+    // round-robin state is per-shard, so alternation across a request
+    // sequence is only deterministic with a single shard.
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<HttpServerCapability>(HttpServerConfig {
+            bind_addr: "127.0.0.1:0".to_string(),
+            handler_mailbox: <FixedBodyHttpHandler as Addressable>::NAMESPACE.to_string(),
+            request_timeout_millis: 5_000,
+            dispatch_shards: 1,
+            ..HttpServerConfig::default()
+        })
+        .with_actor::<FixedBodyHttpHandler>(())
+        .build_passive()
+        .expect("caps boot");
+    // Two named instances of the exact same `SharedMacroPoolHandler` type
+    // (the accurate replica analog, per the type's own doc comment): each
+    // instance's `wire` runs the identical macro-emitted `shared: true`
+    // registration, so both carry the same minted `Kind::ID` and can join
+    // one member set.
+    chassis
+        .spawn_actor::<SharedMacroPoolHandler>(Subname::Named("alpha"), b"macro-alpha")
+        .finish()
+        .expect("spawn alpha");
+    chassis
+        .spawn_actor::<SharedMacroPoolHandler>(Subname::Named("beta"), b"macro-beta")
+        .finish()
+        .expect("spawn beta");
+    let port = port_of(&chassis);
+
+    // Wait until both registrations are live: with the set complete a
+    // pair of consecutive requests serves both bodies.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let first = round_trip(port, b"GET /macro-pool HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let second = round_trip(port, b"GET /macro-pool HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let pair = [body_of(&first).to_string(), body_of(&second).to_string()];
+        if pair.contains(&"macro-alpha".to_string()) && pair.contains(&"macro-beta".to_string()) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected macro-alpha+macro-beta across a request pair within 10s; got {pair:?}",
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    // Steady state: six more requests keep alternating — both members
+    // serve, and only members serve.
+    let mut alpha = 0;
+    let mut beta = 0;
+    for _ in 0..6 {
+        let response = round_trip(port, b"GET /macro-pool HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        match body_of(&response) {
+            "macro-alpha" => alpha += 1,
+            "macro-beta" => beta += 1,
+            other => panic!("unexpected /macro-pool body {other:?}"),
+        }
+    }
+    assert_eq!(
+        (alpha, beta),
+        (3, 3),
+        "round-robin alternation over 6 requests"
+    );
 }
 
 /// A peer that stalls its receive window blocks only its own reader
