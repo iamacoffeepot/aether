@@ -282,6 +282,19 @@ impl World {
             .map_or(Material::Void, |chunk| chunk.overlay[cell.chunk_index()])
     }
 
+    /// The raw overlay subcell coverage mask at `cell` — never
+    /// cascade-resolved. A missing chunk reads `0` (no coverage), which is
+    /// the apron read the mesher relies on: a chunk-border window can
+    /// sample one subcell into an absent neighbor and see empty space
+    /// rather than panicking. The bits are meaningless where
+    /// [`World::overlay`] is `Void`.
+    #[must_use]
+    pub fn overlay_mask(&self, cell: CellPos) -> u16 {
+        self.chunks
+            .get(&cell.chunk())
+            .map_or(0, |chunk| chunk.overlay_mask[cell.chunk_index()])
+    }
+
     /// Elevation at `cell` in octimeters. Unset cells read `0`.
     #[must_use]
     pub fn height(&self, cell: CellPos) -> i32 {
@@ -670,6 +683,7 @@ mod tests {
         let world = World::new();
         assert_eq!(world.underlay(cell(100, -50)), Material::Void);
         assert_eq!(world.overlay(cell(100, -50)), Material::Void);
+        assert_eq!(world.overlay_mask(cell(100, -50)), 0);
         assert_eq!(world.height(cell(100, -50)), 0);
         assert!(world.chunk(ChunkPos { x: 3, z: 3 }).is_none());
     }
