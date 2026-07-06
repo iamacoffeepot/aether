@@ -345,14 +345,28 @@ fn mesh_overlay_material(
         }
     }
 
-    merge_interior(&full, windows, color, tris);
-    emit_contours(&case_grid, windows, color, tris);
+    // The window/subcell octimeter coordinates above are chunk-local; the
+    // overlay geometry lives in world space like the underlay, so both
+    // passes shift by the chunk's base octimeter offset `[x, z]` before
+    // emit.
+    let base_oct = [
+        at.x * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
+        at.z * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
+    ];
+    merge_interior(&full, windows, base_oct, color, tris);
+    emit_contours(&case_grid, windows, base_oct, color, tris);
 }
 
 /// Greedy-merge the fully-covered (`case == 15`) windows into maximal
 /// rectangles — the interior is one uniform overlay color, so merging is
 /// safe — and emit one flat quad per rectangle.
-fn merge_interior(full: &[bool], windows: usize, color: [f32; 3], tris: &mut Vec<DrawTriangle>) {
+fn merge_interior(
+    full: &[bool],
+    windows: usize,
+    base_oct: [i32; 2],
+    color: [f32; 3],
+    tris: &mut Vec<DrawTriangle>,
+) {
     let mut consumed = vec![false; full.len()];
     for wj in 0..windows {
         for wi in 0..windows {
@@ -386,17 +400,23 @@ fn merge_interior(full: &[bool], windows: usize, color: [f32; 3], tris: &mut Vec
             // in octimeters (`six = wi - 1`, centers offset by half a
             // subcell); a `width`-wide run extends the far edge.
             let half = OCTIMETERS_PER_SUBCELL / 2;
-            let x0 = (wi as i32 - 1) * OCTIMETERS_PER_SUBCELL + half;
-            let x1 = (wi as i32 - 1 + width as i32) * OCTIMETERS_PER_SUBCELL + half;
-            let z0 = (wj as i32 - 1) * OCTIMETERS_PER_SUBCELL + half;
-            let z1 = (wj as i32 - 1 + height as i32) * OCTIMETERS_PER_SUBCELL + half;
+            let x0 = base_oct[0] + (wi as i32 - 1) * OCTIMETERS_PER_SUBCELL + half;
+            let x1 = base_oct[0] + (wi as i32 - 1 + width as i32) * OCTIMETERS_PER_SUBCELL + half;
+            let z0 = base_oct[1] + (wj as i32 - 1) * OCTIMETERS_PER_SUBCELL + half;
+            let z1 = base_oct[1] + (wj as i32 - 1 + height as i32) * OCTIMETERS_PER_SUBCELL + half;
             push_overlay_quad(tris, x0, z0, x1, z1, color);
         }
     }
 }
 
 /// Emit the contour geometry for every boundary window (case `1..=14`).
-fn emit_contours(case_grid: &[u8], windows: usize, color: [f32; 3], tris: &mut Vec<DrawTriangle>) {
+fn emit_contours(
+    case_grid: &[u8],
+    windows: usize,
+    base_oct: [i32; 2],
+    color: [f32; 3],
+    tris: &mut Vec<DrawTriangle>,
+) {
     for wj in 0..windows {
         for wi in 0..windows {
             let case = case_grid[wj * windows + wi];
@@ -405,7 +425,7 @@ fn emit_contours(case_grid: &[u8], windows: usize, color: [f32; 3], tris: &mut V
             }
             let six = wi as i32 - 1;
             let siz = wj as i32 - 1;
-            emit_window_contour(six, siz, case, color, tris);
+            emit_window_contour(six, siz, base_oct, case, color, tris);
         }
     }
 }
@@ -415,6 +435,7 @@ fn emit_contours(case_grid: &[u8], windows: usize, color: [f32; 3], tris: &mut V
 fn emit_window_contour(
     six: i32,
     siz: i32,
+    base_oct: [i32; 2],
     case: u8,
     color: [f32; 3],
     tris: &mut Vec<DrawTriangle>,
@@ -422,13 +443,14 @@ fn emit_window_contour(
     let half = OCTIMETERS_PER_SUBCELL / 2;
     // Sample centers sit half a subcell in from the window's octimeter
     // origin, so the window corners are at `..±half` and the edge
-    // midpoints land on the subcell boundary lattice.
-    let x_lo = six * OCTIMETERS_PER_SUBCELL + half;
-    let x_hi = (six + 1) * OCTIMETERS_PER_SUBCELL + half;
-    let z_lo = siz * OCTIMETERS_PER_SUBCELL + half;
-    let z_hi = (siz + 1) * OCTIMETERS_PER_SUBCELL + half;
-    let x_mid = (six + 1) * OCTIMETERS_PER_SUBCELL;
-    let z_mid = (siz + 1) * OCTIMETERS_PER_SUBCELL;
+    // midpoints land on the subcell boundary lattice. The `base_oct`
+    // shift lifts these chunk-local coordinates into world space.
+    let x_lo = base_oct[0] + six * OCTIMETERS_PER_SUBCELL + half;
+    let x_hi = base_oct[0] + (six + 1) * OCTIMETERS_PER_SUBCELL + half;
+    let z_lo = base_oct[1] + siz * OCTIMETERS_PER_SUBCELL + half;
+    let z_hi = base_oct[1] + (siz + 1) * OCTIMETERS_PER_SUBCELL + half;
+    let x_mid = base_oct[0] + (six + 1) * OCTIMETERS_PER_SUBCELL;
+    let z_mid = base_oct[1] + (siz + 1) * OCTIMETERS_PER_SUBCELL;
     let points = [
         [x_lo, z_lo],  // 0 BL corner
         [x_hi, z_lo],  // 1 BR corner
@@ -772,7 +794,7 @@ mod tests {
         // corners. A disconnected rule would emit two separate corner
         // triangles that never share the diagonal.
         let mut tris = Vec::new();
-        emit_window_contour(2, 2, 5, [0.0; 3], &mut tris);
+        emit_window_contour(2, 2, [0, 0], 5, [0.0; 3], &mut tris);
         assert_eq!(tris.len(), 4, "the connected hexagon fans to 4 triangles");
         // BL corner center = (160,160) oct = (0.625,0.625) m; TR = (224,224)
         // oct = (0.875,0.875) m.
@@ -788,6 +810,38 @@ mod tests {
             joins_diagonal,
             "the connected rule joins the inside diagonal"
         );
+    }
+
+    #[test]
+    fn overlay_geometry_sits_at_the_chunks_world_position() {
+        // The overlay pass emits in world space like the underlay: a chunk
+        // away from the origin must place its overlay geometry over its own
+        // world cells, not stacked back at the origin. A full-coverage
+        // chunk at (1, 1) spans world cells x,z in [16, 32], so every
+        // overlay vertex must land in that meter range — not [0, 16].
+        let mut chunk = Chunk::empty();
+        chunk.overlay = [Material::Water; CELLS_PER_CHUNK_AREA];
+        chunk.overlay_mask = [0xFFFF; CELLS_PER_CHUNK_AREA];
+        let mut world = World::new();
+        world.insert_chunk(ChunkPos { x: 1, z: 1 }, chunk);
+        let tris = mesh_chunk(&world, ChunkPos { x: 1, z: 1 });
+        let overlay: Vec<&Vertex> = tris
+            .iter()
+            .flat_map(|t| t.verts.iter())
+            .filter(|v| v.y == OVERLAY_Y_LIFT)
+            .collect();
+        assert!(
+            !overlay.is_empty(),
+            "a covered chunk emits overlay geometry"
+        );
+        for v in overlay {
+            assert!(
+                (16.0..=32.0).contains(&v.x) && (16.0..=32.0).contains(&v.z),
+                "overlay vertex ({}, {}) escaped chunk (1,1)'s world extent",
+                v.x,
+                v.z,
+            );
+        }
     }
 
     #[test]
