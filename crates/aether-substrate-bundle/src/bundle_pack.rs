@@ -49,6 +49,11 @@ pub struct PackedComponent {
     pub name: Option<String>,
     /// Optional export selector (ADR-0096).
     pub export: Option<String>,
+    /// Optional instance count (issue 2626): fan this entry out into N
+    /// autoload components, named `{base}-{index}`, at expansion time
+    /// (`autoload::expand_replicas`). `None` (or the historical absence of
+    /// this field) keeps today's one-instance behaviour.
+    pub replicas: Option<u32>,
 }
 
 /// Chassis settings the bundle bins apply before `run()`. All
@@ -135,6 +140,11 @@ pub struct ManifestComponent {
     pub name: Option<String>,
     #[serde(default)]
     pub export: Option<String>,
+    /// Optional instance count (issue 2626): expanded into N autoload
+    /// components at read time, one shared config, names `{base}-{index}`.
+    /// `replicas: 0` is a hard config error, not a silent no-op.
+    #[serde(default)]
+    pub replicas: Option<u32>,
 }
 
 /// A failure reading a [`BundleManifest`] (or a file it names) into a
@@ -239,6 +249,7 @@ pub fn pack_from_manifest(manifest_path: &Path) -> Result<Pack, ManifestError> {
             config,
             name: entry.name,
             export: entry.export,
+            replicas: entry.replicas,
         });
     }
     Ok(Pack {
@@ -294,6 +305,13 @@ pub fn encode_pack(pack: &Pack) -> Vec<u8> {
         put_bytes_long(&mut out, &component.config);
         put_opt_string(&mut out, component.name.as_deref());
         put_opt_string(&mut out, component.export.as_deref());
+        match component.replicas {
+            Some(n) => {
+                out.push(1);
+                out.extend_from_slice(&n.to_le_bytes());
+            }
+            None => out.push(0),
+        }
     }
     out
 }
@@ -376,11 +394,18 @@ pub fn decode_pack(bytes: &[u8]) -> Result<Pack, PackError> {
         let config = cursor.take_bytes_long()?;
         let name = cursor.take_opt_string()?;
         let export = cursor.take_opt_string()?;
+        let replicas = if cursor.take_byte()? == 0 {
+            None
+        } else {
+            let raw = cursor.take(4)?;
+            Some(u32::from_le_bytes(raw.try_into().expect("4-byte slice")))
+        };
         components.push(PackedComponent {
             wasm,
             config,
             name,
             export,
+            replicas,
         });
     }
     Ok(Pack {
@@ -410,12 +435,14 @@ mod tests {
                     config: vec![1, 2, 3],
                     name: Some("first".to_owned()),
                     export: None,
+                    replicas: Some(3),
                 },
                 PackedComponent {
                     wasm: vec![0xfe, 0xff],
                     config: Vec::new(),
                     name: None,
                     export: Some("alt".to_owned()),
+                    replicas: None,
                 },
             ],
         }
@@ -466,7 +493,7 @@ mod tests {
             "chassis": "headless",
             "tick_hz": 30,
             "components": [
-                {"wasm": "/abs/a.wasm", "config": "/abs/a.cfg", "name": "a"},
+                {"wasm": "/abs/a.wasm", "config": "/abs/a.cfg", "name": "a", "replicas": 3},
                 {"wasm": "/abs/b.wasm"}
             ]
         }"#;
@@ -476,7 +503,11 @@ mod tests {
         assert_eq!(manifest.tick_hz, Some(30));
         assert_eq!(manifest.components.len(), 2);
         assert_eq!(manifest.components[0].name.as_deref(), Some("a"));
+        assert_eq!(manifest.components[0].replicas, Some(3));
         assert_eq!(manifest.components[1].config, None);
+        // Absent `replicas` defaults to `None` — today's one-instance
+        // behaviour for every manifest written before this field existed.
+        assert_eq!(manifest.components[1].replicas, None);
     }
 
     /// A per-test scratch directory under the system temp dir, unique
@@ -509,7 +540,7 @@ mod tests {
         let manifest_json = serde_json::json!({
             "tick_hz": 30,
             "components": [
-                {"wasm": wasm_a, "config": cfg_a, "name": "first"},
+                {"wasm": wasm_a, "config": cfg_a, "name": "first", "replicas": 4},
                 {"wasm": wasm_b, "export": "alt"},
             ],
         });
@@ -529,12 +560,14 @@ mod tests {
                     config: vec![1, 2, 3],
                     name: Some("first".to_owned()),
                     export: None,
+                    replicas: Some(4),
                 },
                 PackedComponent {
                     wasm: vec![0xfe, 0xff],
                     config: Vec::new(),
                     name: None,
                     export: Some("alt".to_owned()),
+                    replicas: None,
                 },
             ],
         );

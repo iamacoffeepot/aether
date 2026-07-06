@@ -234,7 +234,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Fork+exec a substrate binary as a child of the hub, resolved from the hub's content-addressed binary store (ADR-0115) — not a host path. Pass `selector` to pick the binary: a content `hash`, a `name@version`, or a `name` (upload_binary first if it isn't stored). Omit `selector` for `default` — the headless chassis — so a bare spawn_substrate with no arguments returns a working engine. When `selector` is omitted you may instead attribute-query with `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (linked-cap superset), and `target` (build triple). The hub resolves the selector to the stored bytes, materializes them to an executable temp file, assigns a free localhost RPC port (injected as AETHER_RPC_PORT), forks it, and connects a proxy. Returns the engine_id and rpc_port on success; errors if the selector resolves to no stored binary or the substrate fails to come up. A spawn that fails after the hub allocated an engine_id carries that id in the error (and records a matching spawn_failed entry in list_engines.recently_died), so you can correlate and reap rather than guess. Pass `components` (each {selector, name?, config_path?, export?}) to bring the engine up with those components already loaded in one call — each selector is a content hash, name, or module@actor resolved against the hub's component registry (ADR-0116; upload_component first). aether-mcp pre-resolves each selector to its wasm bytes, stages a temp boot-manifest the hub injects as AETHER_BOOT_MANIFEST, and the spawned substrate reads the staged wasm itself (single-host), so no follow-up load_component is needed."
+        description = "Fork+exec a substrate binary as a child of the hub, resolved from the hub's content-addressed binary store (ADR-0115) — not a host path. Pass `selector` to pick the binary: a content `hash`, a `name@version`, or a `name` (upload_binary first if it isn't stored). Omit `selector` for `default` — the headless chassis — so a bare spawn_substrate with no arguments returns a working engine. When `selector` is omitted you may instead attribute-query with `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (linked-cap superset), and `target` (build triple). The hub resolves the selector to the stored bytes, materializes them to an executable temp file, assigns a free localhost RPC port (injected as AETHER_RPC_PORT), forks it, and connects a proxy. Returns the engine_id and rpc_port on success; errors if the selector resolves to no stored binary or the substrate fails to come up. A spawn that fails after the hub allocated an engine_id carries that id in the error (and records a matching spawn_failed entry in list_engines.recently_died), so you can correlate and reap rather than guess. Pass `components` (each {selector, name?, config_path?, export?, replicas?}) to bring the engine up with those components already loaded in one call — each selector is a content hash, name, or module@actor resolved against the hub's component registry (ADR-0116; upload_component first). aether-mcp pre-resolves each selector to its wasm bytes, stages a temp boot-manifest the hub injects as AETHER_BOOT_MANIFEST, and the spawned substrate reads the staged wasm itself (single-host), so no follow-up load_component is needed. Set replicas: N on an entry (issue 2626) to fan it out into N instances at boot from one spec, one shared config — each named {base}-{index} for index in 0..N (base = name > export > entry actor namespace) — and the readiness wait gates on every instance; pairs with #[router(shared)] (ADR-0136) to scale an HTTP handler to N instances with no hand-named entries. replicas: 0 is a tool error."
     )]
     pub async fn spawn_substrate(
         &self,
@@ -727,7 +727,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Load a WASM component into a substrate by registry selector (ADR-0116) — upload_component first if it isn't stored. Pass `selector`: a content hash, a name (latest upload under it), or a module@actor (the @actor half picks an exported actor type from a multi-actor module). The host wasm path is gone — the only path anywhere is the upload_component input. aether-mcp resolves the selector hub-local to the wasm bytes, forwards aether.component.load to the engine's aether.component mailbox, and awaits the LoadResult — returning {mailbox_id, name, capabilities} or an error. The component's kind vocabulary rides in the wasm's aether.kinds custom section. Pass config_path to deliver init-config bytes to a typed-config component (ADR-0090): the file must already hold the component's Config kind wire bytes — describe_component reports the expected config kind. Pass export to pick which exported actor type to instantiate from a multi-actor module (ADR-0096), named by its Actor::NAMESPACE; a module@actor selector populates it from its @actor half; omit both to load the module's entry type (the first in its export! list, and the only type a single-actor module has). The returned name + capabilities describe the selected type. Very large wasm payloads (debug builds at 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
+        description = "Load a WASM component into a substrate by registry selector (ADR-0116) — upload_component first if it isn't stored. Pass `selector`: a content hash, a name (latest upload under it), or a module@actor (the @actor half picks an exported actor type from a multi-actor module). The host wasm path is gone — the only path anywhere is the upload_component input. aether-mcp resolves the selector hub-local to the wasm bytes, forwards aether.component.load to the engine's aether.component mailbox, and awaits the LoadResult — returning {mailbox_id, name, capabilities} or an error. The component's kind vocabulary rides in the wasm's aether.kinds custom section. Pass config_path to deliver init-config bytes to a typed-config component (ADR-0090): the file must already hold the component's Config kind wire bytes — describe_component reports the expected config kind. Pass export to pick which exported actor type to instantiate from a multi-actor module (ADR-0096), named by its Actor::NAMESPACE; a module@actor selector populates it from its @actor half; omit both to load the module's entry type (the first in its export! list, and the only type a single-actor module has). The returned name + capabilities describe the selected type. Pass replicas: N (issue 2626) to load N instances of this selector in one call — each named {base}-{index} (base = name > export > entry actor namespace) — returning {\"components\": [{mailbox_id, name, capabilities}, ...]} instead of the single-load shape; pairs with #[router(shared)] (ADR-0136) to scale an HTTP handler to N instances with no hand-written registration. A mid-loop failure reports which replica failed and how many loaded before it — already-loaded replicas stay live, the same as N manual calls. replicas: 0 is a tool error. Very large wasm payloads (debug builds at 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
     )]
     pub async fn load_component(
         &self,
@@ -735,6 +735,7 @@ impl Mcp {
     ) -> Result<String, McpError> {
         let engine = parse_engine_id(&args.engine_id)?;
         let selector = args.selector.clone();
+        reject_zero_replicas(args.replicas, &selector)?;
         // ADR-0116: resolve the selector hub-local to the wasm bytes; a
         // `module@actor` selector's `@actor` half rides back as `export`.
         let resolved = self.resolve_component(&selector).await?;
@@ -750,39 +751,111 @@ impl Mcp {
         };
         // An explicit `export` arg wins over the selector's `@actor` half.
         let export = args.export.or(resolved.export);
-        let reply = self
-            .session
-            .call_one(engine_envelope(
-                engine,
-                COMPONENT_CAP,
-                &LoadComponent {
-                    wasm: resolved.wasm,
-                    name: args.name,
-                    config,
-                    export,
-                },
-            ))
-            .await
-            .map_err(|e| frame_size_aware_error(&format!("load_component {selector:?}"), e))?;
-        match LoadResult::decode_from_bytes(&reply.payload) {
-            Some(LoadResult::Ok {
-                mailbox_id,
-                name,
-                capabilities,
-            }) => {
-                self.components
-                    .lock()
-                    .expect("component cache mutex is never poisoned")
-                    .insert((engine, mailbox_id), capabilities.clone());
-                json(&serde_json::json!({
-                    "mailbox_id": mailbox_id,
-                    "name": name,
-                    "capabilities": capabilities,
-                }))
+
+        let Some(replicas) = args.replicas else {
+            // Today's exact single-load path, unmodified.
+            let reply = self
+                .session
+                .call_one(engine_envelope(
+                    engine,
+                    COMPONENT_CAP,
+                    &LoadComponent {
+                        wasm: resolved.wasm,
+                        name: args.name,
+                        config,
+                        export,
+                    },
+                ))
+                .await
+                .map_err(|e| frame_size_aware_error(&format!("load_component {selector:?}"), e))?;
+            return match LoadResult::decode_from_bytes(&reply.payload) {
+                Some(LoadResult::Ok {
+                    mailbox_id,
+                    name,
+                    capabilities,
+                }) => {
+                    self.components
+                        .lock()
+                        .expect("component cache mutex is never poisoned")
+                        .insert((engine, mailbox_id), capabilities.clone());
+                    json(&serde_json::json!({
+                        "mailbox_id": mailbox_id,
+                        "name": name,
+                        "capabilities": capabilities,
+                    }))
+                }
+                Some(LoadResult::Err { error }) => Err(internal_msg(&error)),
+                None => Err(internal_msg("undecodable LoadResult")),
+            };
+        };
+
+        // issue 2626: loop the single-load dispatch N times, one shared
+        // wasm/config, naming each instance in the same precedence order
+        // `stage_boot_manifest` derives `expected_names` in.
+        let base = replica_base_name(
+            args.name.as_deref(),
+            export.as_deref(),
+            resolved.entry_namespace.as_deref(),
+        )
+        .ok_or_else(|| {
+            McpError::invalid_params(
+                format!(
+                    "component {selector:?}: cannot determine a base name for `replicas` \
+                     (no `name`, `export`, or entry actor namespace in the wasm manifest); \
+                     set `name` or `export`"
+                ),
+                None,
+            )
+        })?;
+
+        let mut loaded = Vec::with_capacity(replicas as usize);
+        for (index, name) in replica_names(&base, replicas).into_iter().enumerate() {
+            let reply = self
+                .session
+                .call_one(engine_envelope(
+                    engine,
+                    COMPONENT_CAP,
+                    &LoadComponent {
+                        wasm: resolved.wasm.clone(),
+                        name: Some(name),
+                        config: config.clone(),
+                        export: export.clone(),
+                    },
+                ))
+                .await
+                .map_err(|e| {
+                    frame_size_aware_error(
+                        &format!("load_component {selector:?} replica {index}"),
+                        e,
+                    )
+                })?;
+            match LoadResult::decode_from_bytes(&reply.payload) {
+                Some(LoadResult::Ok {
+                    mailbox_id,
+                    name,
+                    capabilities,
+                }) => {
+                    self.components
+                        .lock()
+                        .expect("component cache mutex is never poisoned")
+                        .insert((engine, mailbox_id), capabilities.clone());
+                    loaded.push(serde_json::json!({
+                        "mailbox_id": mailbox_id,
+                        "name": name,
+                        "capabilities": capabilities,
+                    }));
+                }
+                Some(LoadResult::Err { error }) => {
+                    return Err(internal_msg(&format!(
+                        "load_component {selector:?} replica {index} of {replicas} failed: {error} \
+                         ({index} of {replicas} replicas loaded before this failure; already-loaded \
+                         replicas stay live, the same as N manual load_component calls)"
+                    )));
+                }
+                None => return Err(internal_msg("undecodable LoadResult")),
             }
-            Some(LoadResult::Err { error }) => Err(internal_msg(&error)),
-            None => Err(internal_msg("undecodable LoadResult")),
         }
+        json(&serde_json::json!({ "components": loaded }))
     }
 
     #[tool(
@@ -1365,6 +1438,7 @@ impl Mcp {
         let mut entries: Vec<serde_json::Value> = Vec::with_capacity(components.len());
         let mut expected_names: Vec<String> = Vec::with_capacity(components.len());
         for spec in components {
+            reject_zero_replicas(spec.replicas, &spec.selector)?;
             let resolved = self.resolve_component(&spec.selector).await?;
             let seq = SEQ.fetch_add(1, Ordering::Relaxed);
             let wasm_path =
@@ -1387,24 +1461,37 @@ impl Mcp {
             if let Some(ref e) = export {
                 entry["export"] = serde_json::json!(e);
             }
-            // Derive the expected registered name in the same precedence order the
-            // engine applies: caller-supplied name > export namespace > entry actor
-            // namespace. Fail loud if none is determinable: a spawn that can't name
-            // what it's waiting for is a bug to surface at stage time.
-            let ns = spec
-                .name
-                .clone()
-                .or_else(|| export.clone())
-                .or_else(|| resolved.entry_namespace.clone())
-                .ok_or_else(|| {
-                    internal_msg(&format!(
-                        "component {:?}: cannot determine expected registered name \
-                         (no `name`, `export`, or entry actor namespace in the wasm manifest); \
-                         set `name` or `export` on the ComponentSpec",
-                        spec.selector,
-                    ))
-                })?;
-            expected_names.push(format!("aether.component/aether.embedded:{ns}"));
+            // issue 2626: pass `replicas` into the staged manifest entry
+            // verbatim — `autoload::expand_replicas` fans it out at read time.
+            if let Some(replicas) = spec.replicas {
+                entry["replicas"] = serde_json::json!(replicas);
+            }
+            // Derive the expected registered name(s) in the same precedence
+            // order the engine applies: caller-supplied name > export
+            // namespace > entry actor namespace. Fail loud if none is
+            // determinable: a spawn that can't name what it's waiting for is
+            // a bug to surface at stage time.
+            let ns = replica_base_name(
+                spec.name.as_deref(),
+                export.as_deref(),
+                resolved.entry_namespace.as_deref(),
+            )
+            .ok_or_else(|| {
+                internal_msg(&format!(
+                    "component {:?}: cannot determine expected registered name \
+                     (no `name`, `export`, or entry actor namespace in the wasm manifest); \
+                     set `name` or `export` on the ComponentSpec",
+                    spec.selector,
+                ))
+            })?;
+            match spec.replicas {
+                Some(replicas) => expected_names.extend(
+                    replica_names(&ns, replicas)
+                        .into_iter()
+                        .map(|name| format!("aether.component/aether.embedded:{name}")),
+                ),
+                None => expected_names.push(format!("aether.component/aether.embedded:{ns}")),
+            }
             entries.push(entry);
             wasm_paths.push(wasm_path);
         }
@@ -1925,6 +2012,43 @@ impl StagedBootManifest {
 /// count while a requested component is still absent.
 fn components_all_loaded(want: &[String], actual: &[String]) -> bool {
     want.iter().all(|w| actual.iter().any(|a| a == w))
+}
+
+/// Resolve the base name a `replicas` fan-out derives its `{base}-{index}`
+/// names from (issue 2626), using the same precedence the component host
+/// itself applies at load: caller `name` > `export` > entry actor
+/// namespace. `None` when none of the three is available — the caller
+/// turns that into a clean tool error naming what to set. Shared by
+/// `stage_boot_manifest` (deriving `expected_names` to poll) and
+/// `load_component` (deriving each replica's load name), so both sides of
+/// a replicated load agree on what the components register as.
+fn replica_base_name(
+    name: Option<&str>,
+    export: Option<&str>,
+    entry_namespace: Option<&str>,
+) -> Option<String> {
+    name.or(export).or(entry_namespace).map(str::to_owned)
+}
+
+/// Derive the `{base}-{index}` name set a `replicas` fan-out registers
+/// under: every instance suffixed, no bare-name special case for index 0,
+/// so `replicas: 1` differs from an omitted field only by the `-0` suffix.
+fn replica_names(base: &str, replicas: u32) -> Vec<String> {
+    (0..replicas)
+        .map(|index| format!("{base}-{index}"))
+        .collect()
+}
+
+/// Reject `replicas: 0` (ADR-0090 §4 posture: a bad known value is a hard
+/// error, not a silent no-op) before it reaches any load dispatch.
+fn reject_zero_replicas(replicas: Option<u32>, selector: &str) -> Result<(), McpError> {
+    if replicas == Some(0) {
+        return Err(McpError::invalid_params(
+            format!("component {selector:?}: replicas must be at least 1 (got 0)"),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 /// Build a `MailEnvelope` addressed at a hub-local mailbox
@@ -3367,12 +3491,43 @@ mod tests {
                     name: None,
                     config_path: None,
                     export: None,
+                    replicas: None,
                 }],
             }))
             .await;
         assert!(
             result.is_err(),
             "an unresolvable component selector should abort the spawn as a tool error",
+        );
+    }
+
+    /// `spawn_substrate` rejects `replicas: 0` on a boot-list component
+    /// entry (issue 2626, ADR-0090 §4 posture) before any selector
+    /// resolution or fork — a bad known value is a hard tool error, never
+    /// a silent zero-instance no-op.
+    #[tokio::test]
+    async fn spawn_substrate_replicas_zero_is_tool_error() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let result = mcp
+            .spawn_substrate(Parameters(SpawnSubstrateArgs {
+                selector: None,
+                chassis: None,
+                caps: vec![],
+                target: None,
+                args: vec![],
+                components: vec![ComponentSpec {
+                    selector: "irrelevant".to_owned(),
+                    name: None,
+                    config_path: None,
+                    export: None,
+                    replicas: Some(0),
+                }],
+            }))
+            .await;
+        assert!(
+            result.is_err(),
+            "replicas: 0 must be a tool error, not a silent no-op",
         );
     }
 
@@ -3433,6 +3588,49 @@ mod tests {
             !components_all_loaded(&want, &actual),
             "only one of two wanted names present means the engine is not yet ready",
         );
+    }
+
+    /// `replica_base_name` follows the same precedence the component host
+    /// applies at load: caller `name` wins over `export`, which wins over
+    /// the entry actor namespace — the bug this catches is a fan-out base
+    /// name that disagrees with what an unreplicated load would resolve to.
+    #[test]
+    fn replica_base_name_follows_name_export_namespace_precedence() {
+        assert_eq!(
+            replica_base_name(Some("caller"), Some("export-ns"), Some("entry-ns")),
+            Some("caller".to_owned()),
+        );
+        assert_eq!(
+            replica_base_name(None, Some("export-ns"), Some("entry-ns")),
+            Some("export-ns".to_owned()),
+        );
+        assert_eq!(
+            replica_base_name(None, None, Some("entry-ns")),
+            Some("entry-ns".to_owned()),
+        );
+        assert_eq!(replica_base_name(None, None, None), None);
+    }
+
+    /// `replica_names` suffixes every instance — no bare-name special case
+    /// for index 0 — so `replicas: 1` differs from an omitted field only by
+    /// the `-0` suffix.
+    #[test]
+    fn replica_names_suffixes_every_instance() {
+        assert_eq!(
+            replica_names("handler", 3),
+            vec!["handler-0", "handler-1", "handler-2"],
+        );
+        assert_eq!(replica_names("handler", 1), vec!["handler-0"]);
+    }
+
+    /// `reject_zero_replicas` is a hard tool error on `replicas: 0` (ADR-0090
+    /// §4 posture — a bad known value aborts loudly, not a silent no-op) and
+    /// passes through any other value, including `None`.
+    #[test]
+    fn reject_zero_replicas_rejects_only_zero() {
+        assert!(reject_zero_replicas(Some(0), "sel").is_err());
+        assert!(reject_zero_replicas(Some(1), "sel").is_ok());
+        assert!(reject_zero_replicas(None, "sel").is_ok());
     }
 
     /// `terminate_substrate` with a malformed `engine_id` surfaces the
@@ -3700,11 +3898,35 @@ mod tests {
                 name: None,
                 config_path: None,
                 export: None,
+                replicas: None,
             }))
             .await;
         assert!(
             result.is_err(),
             "an unresolvable selector should be a tool error",
+        );
+    }
+
+    /// `load_component` rejects `replicas: 0` (issue 2626, ADR-0090 §4
+    /// posture) before it ever resolves the selector — a bad known value
+    /// is a hard tool error, never a silent zero-instance no-op.
+    #[tokio::test]
+    async fn load_component_replicas_zero_is_tool_error() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let result = mcp
+            .load_component(Parameters(LoadComponentArgs {
+                engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+                selector: "irrelevant".to_owned(),
+                name: None,
+                config_path: None,
+                export: None,
+                replicas: Some(0),
+            }))
+            .await;
+        assert!(
+            result.is_err(),
+            "replicas: 0 must be a tool error, not a silent no-op",
         );
     }
 
