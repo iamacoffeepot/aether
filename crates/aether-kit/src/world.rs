@@ -28,7 +28,7 @@
 //!
 //! # Ground fabric — underlay / overlay
 //!
-//! Two material planes, RuneScape-style:
+//! Two material planes:
 //!
 //! - [`Chunk::underlay`] — the ground fabric. This is what the region
 //!   cascade resolves ([`World::underlay`]): the cell's own underlay if

@@ -40,8 +40,8 @@
 //! glides there at `SPEED_OCTIMETERS_PER_TICK`, snaps, and re-commits.
 //! One dial spans the whole feel:
 //!
-//! - `cell = 256` (a full tile) — classic tile-to-tile, `RuneScape`-like
-//!   cadence; the mover rests on tile centers.
+//! - `cell = 256` (a full tile) — classic tile-to-tile cadence; the
+//!   mover rests on tile centers.
 //! - smaller cells — the mover lands on sub-tiles (halves, quarters, …).
 //! - `cell = 8` (one tick of travel) — it re-commits every tick, so
 //!   direction is free and it reads as continuous glide.
