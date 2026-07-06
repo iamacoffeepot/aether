@@ -544,26 +544,34 @@ pub fn run_reader_loop(
         };
         if ws_key.is_none() {
             // Framing rejects for the buffered path (ADR-0128): smuggling
-            // / non-`chunked` codings always, a lone `chunked` body to a
-            // buffered handler (no length to buffer under), and the body
-            // cap.
+            // / non-`chunked` codings always, and a lone `chunked` body to
+            // a buffered handler (no length to buffer under).
             match (head.framing, streaming) {
                 (BodyFraming::Invalid, _) | (BodyFraming::Chunked, false) => {
                     reject_and_close(&mut stream, sink, conn_id, 411, "length required");
                     return;
                 }
-                (BodyFraming::Length(n), false) if n > max_request_bytes => {
-                    reject_and_close(
-                        &mut stream,
-                        sink,
-                        conn_id,
-                        413,
-                        "request body exceeds limit",
-                    );
-                    return;
-                }
                 _ => {}
             }
+        }
+        // The body-size cap applies whenever the request will be buffered
+        // — a websocket upgrade always buffers (line ~594 forces the
+        // `else`-branch) regardless of the `streaming` flag, so the cap
+        // must not be gated on `ws_key.is_none()`. A non-upgrade request
+        // still keeps the ADR-0128 streaming exemption: only the
+        // `streaming && ws_key.is_none()` combination skips this check.
+        if (ws_key.is_some() || !streaming)
+            && let BodyFraming::Length(n) = head.framing
+            && n > max_request_bytes
+        {
+            reject_and_close(
+                &mut stream,
+                sink,
+                conn_id,
+                413,
+                "request body exceeds limit",
+            );
+            return;
         }
 
         // `Expect: 100-continue`: written only once the request is
@@ -634,7 +642,15 @@ pub fn run_reader_loop(
                 StreamOutcome::Closed => return,
             }
         } else {
-            match read_buffered_body(&mut stream, conn_id, shutdown, sink, &head, &buf) {
+            match read_buffered_body(
+                &mut stream,
+                conn_id,
+                shutdown,
+                sink,
+                &head,
+                &buf,
+                max_request_bytes,
+            ) {
                 Some((body, next_buf)) => {
                     let payload = HttpServerRequest {
                         method,
@@ -752,8 +768,13 @@ fn read_buffered_body(
     sink: &WakeSink,
     head: &RequestHead,
     buf: &[u8],
+    max_request_bytes: usize,
 ) -> Option<(Vec<u8>, Vec<u8>)> {
-    let mut body: Vec<u8> = Vec::with_capacity(head.content_length);
+    // Defense-in-depth (the primary guard is the 413 reject above, hoisted
+    // out of the `ws_key.is_none()` gate): even if some future path ever
+    // reaches this read without the cap having fired, the upfront
+    // allocation can never exceed it.
+    let mut body: Vec<u8> = Vec::with_capacity(head.content_length.min(max_request_bytes));
     let mut next_buf: Vec<u8> = Vec::new();
     let after_head = &buf[head.head_len..];
     if after_head.len() >= head.content_length {

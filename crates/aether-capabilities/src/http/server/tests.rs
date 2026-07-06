@@ -1152,6 +1152,39 @@ fn oversize_body_is_413() {
     );
 }
 
+/// A websocket-upgrade request that also declares an oversized
+/// `Content-Length` is answered `413` before any dispatch or buffered-body
+/// allocation. A valid upgrade handshake always buffers (never streams),
+/// so the body-size cap must apply to it the same as any other buffered
+/// request rather than being skipped because `ws_key.is_some()`.
+#[test]
+fn oversize_body_on_ws_upgrade_is_413() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<EchoHttpHandler>(())
+        .with_actor::<HttpServerCapability>(config_for(
+            <EchoHttpHandler as Addressable>::NAMESPACE,
+            8,
+        ))
+        .build_passive()
+        .expect("caps boot");
+
+    let response = round_trip(
+        port_of(&chassis),
+        b"GET /ws HTTP/1.1\r\n\
+          Host: localhost\r\n\
+          Upgrade: websocket\r\n\
+          Connection: Upgrade\r\n\
+          Sec-WebSocket-Version: 13\r\n\
+          Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+          Content-Length: 100\r\n\r\n",
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 413 "),
+        "expected 413, got: {response:?}",
+    );
+}
+
 /// A non-enumerated method is answered `501` before any dispatch.
 #[test]
 fn unknown_method_is_501() {
