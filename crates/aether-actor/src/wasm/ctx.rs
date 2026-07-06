@@ -18,10 +18,11 @@ use aether_data::{Kind, MailboxId, mailbox_id_from_name};
 
 use crate::mail::ReplyHandle;
 use crate::mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
+use crate::model::ctx::emit::Emit;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::outbound_reply::OutboundReply;
 use crate::model::ctx::persistence::Persistence;
-use crate::model::ctx::reply_mode::{Manual, ReplyMode, Single};
+use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode, Single};
 use crate::model::{
     Addressable, HandlesKind, Instanced, NamespaceError, Singleton, Subname,
     validate_namespace_segment,
@@ -258,6 +259,22 @@ impl<'a> WasmCtx<'a, Manual> {
         // marker without touching any real field and only removes
         // capability, never adds it.
         unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, Single>>() }
+    }
+
+    /// ADR-0134 downgrade-only coercion: view this [`Manual`] ctx as a
+    /// [`Multi<K>`] ctx, swapping the `OutboundReply` surface for the
+    /// [`Emit<K>`] surface. The `#[actor]` macro hands a `#[handler::multi]`
+    /// handler this view (with `K` read off its `Multi<K>` signature), so a
+    /// handler whose marker disagrees with its class fails to unify.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn as_multi<K: Kind>(&mut self) -> &mut WasmCtx<'a, Multi<K>> {
+        // SAFETY: `M` is `PhantomData`-only and `Multi<K>` is a ZST for every
+        // `K`, so `WasmCtx<'a, Manual>` and `WasmCtx<'a, Multi<K>>` are
+        // layout-identical (see `reply_mode_types_are_zsts` and
+        // `ffi_ctx_layout_identical_across_modes`). The reborrow swaps the
+        // marker without touching any real field.
+        unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, Multi<K>>>() }
     }
 }
 
@@ -753,6 +770,35 @@ impl OutboundReply for WasmCtx<'_, Manual> {
     }
 }
 
+// ADR-0134: the emit surface is the multi class's, implemented only for
+// the `Multi<K>` mode. Each `emit` is a detached chain root addressed at
+// the dispatch source (`self.source`, the `send_detached_to` body with the
+// source as recipient), so an emission starts a fresh chain rather than
+// holding the request chain open. A sourceless dispatch (session /
+// broadcast / substrate-origin mail, `MailboxId::NONE`) has no routable
+// target, so the emission warn-drops.
+impl<K: Kind> Emit<K> for WasmCtx<'_, Multi<K>> {
+    fn emit(&mut self, payload: &K) {
+        if self.source == MailboxId::NONE.0 {
+            tracing::warn!(
+                kind = <K as Kind>::NAME,
+                "multi handler emit dropped: the dispatch carries no routable \
+                 source (session / broadcast / substrate-origin mail)",
+            );
+            return;
+        }
+        let bytes = payload.encode_into_bytes();
+        self.inline.route_or_enqueue(
+            self.source,
+            K::ID.0,
+            &bytes,
+            1,
+            ChainMode::Detached,
+            self.mailbox,
+        );
+    }
+}
+
 /// A `save_state` deposit captured in memory instead of forwarded to the
 /// host `save_state` import (ADR-0114 §5). The dehydrate compose hands the
 /// parent and each inline child a [`WasmDropCtx`] bound to one of these so
@@ -958,7 +1004,8 @@ impl Persistence for WasmDropCtx<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Manual, NO_INBOUND_SOURCE, Registry, Single, SpawnError, WasmCtx, install_inline_child,
+        Emit, Manual, Multi, NO_INBOUND_SOURCE, Registry, Single, SpawnError, WasmCtx,
+        install_inline_child,
     };
     use crate::Addressable;
     use crate::mail::{Mail, PriorState};
@@ -1085,6 +1132,56 @@ mod tests {
             none_ctx.source_mailbox(),
             None,
             "MailboxId::NONE means no peer-component origin",
+        );
+    }
+
+    /// ADR-0134: `emit` on a `Multi<K>` ctx routes a detached mail at the
+    /// threaded dispatch source, and a sourceless dispatch drops the
+    /// emission. The source is set to a cluster member (the self id) so the
+    /// detached route resolves in place and enqueues locally — no host call
+    /// (the host stub panics on the host build, so reaching the assert
+    /// without a panic proves the local branch). A `()` payload encodes to
+    /// empty bytes.
+    #[test]
+    fn emit_routes_at_the_threaded_source_and_drops_when_sourceless() {
+        let registry = Registry::new();
+        let source = 0x7200_u64;
+        registry.set_self_id(source);
+
+        // A dispatch whose source is a cluster member: emit routes a
+        // detached mail there and enqueues locally.
+        let mut ctx: WasmCtx<'_, Manual> = WasmCtx::__new(source, &registry, source);
+        Emit::<()>::emit(ctx.as_multi::<()>(), &());
+        assert_eq!(
+            registry.queued_len(),
+            1,
+            "emit routes a detached mail at the threaded source",
+        );
+
+        // A sourceless dispatch (NONE) has no routable target — the emit
+        // drops rather than enqueuing.
+        let mut none_ctx: WasmCtx<'_, Manual> =
+            WasmCtx::__new(source, &registry, NO_INBOUND_SOURCE);
+        Emit::<()>::emit(none_ctx.as_multi::<()>(), &());
+        assert_eq!(
+            registry.queued_len(),
+            1,
+            "a sourceless emit drops — no additional mail enqueued",
+        );
+    }
+
+    /// ADR-0134: the multi mode marker is layout-neutral — a `Multi<K>`
+    /// view has the same size + alignment as the `Single` / `Manual` views.
+    /// This is the invariant the `as_multi` pointer reborrow rests on.
+    #[test]
+    fn ffi_ctx_layout_identical_for_multi_mode() {
+        assert_eq!(
+            size_of::<WasmCtx<'static, Single>>(),
+            size_of::<WasmCtx<'static, Multi<u32>>>(),
+        );
+        assert_eq!(
+            align_of::<WasmCtx<'static, Single>>(),
+            align_of::<WasmCtx<'static, Multi<u32>>>(),
         );
     }
 

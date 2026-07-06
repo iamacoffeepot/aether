@@ -780,17 +780,18 @@ pub struct KindLabels {
     pub root: LabelNode,
 }
 
-/// A handler's reply class as reported by the manifest (ADR-0112). The
-/// successor to ADR-0109's `Option<KindId>` reply field: a single-class
-/// handler reports `None` (`-> ()`) or `One(R)` (`-> R` / `-> Pending<R>`);
-/// a manual-class handler reports `Manual` (it issues its own replies, so
-/// no single static reply kind); a stream-class handler reports
-/// `Stream(R)` (reserved — the class isn't built yet). `describe_*`
-/// surfaces this so a caller reads the real reply shape, not a `None`
-/// that lies for a handler that replies by hand.
+/// A handler's reply class as reported by the manifest (ADR-0112,
+/// ADR-0134). The successor to ADR-0109's `Option<KindId>` reply field: a
+/// single-class handler reports `None` (`-> ()`) or `One(R)`
+/// (`-> R` / `-> Pending<R>`); a manual-class handler reports `Manual` (it
+/// issues its own replies, so no single static reply kind); a multi-class
+/// handler reports `Multi(R)` — it emits 0..n `R` mails, each a detached
+/// chain root at the dispatch source (ADR-0134). `describe_*` surfaces
+/// this so a caller reads the real reply shape, not a `None` that lies for
+/// a handler that replies by hand.
 ///
 /// **Variant order is the wire discriminant** — `None` = 0,
-/// `One` = 1, `Stream` = 2, `Manual` = 3. The const-fn encoders in
+/// `One` = 1, `Multi` = 2, `Manual` = 3. The const-fn encoders in
 /// [`crate::canonical`] and the macro emission depend on it; do not
 /// reorder.
 ///
@@ -806,9 +807,10 @@ pub enum ReplyContract {
     /// `-> R` / `-> Pending<R>` — a single-class handler whose reply kind
     /// is `R`.
     One(KindId),
-    /// Reserved (ADR-0112): a stream-class handler emitting `R` replies
-    /// over time. Not yet reachable — the macro rejects `#[handler::stream]`.
-    Stream(KindId),
+    /// A multi-class handler (ADR-0134) that emits 0..n `R` mails, each a
+    /// detached chain root addressed at the dispatch source. `R` is the
+    /// declared element kind read off the handler's `Multi<R>` ctx marker.
+    Multi(KindId),
     /// A manual-class handler that issues its own replies — no single
     /// static reply kind to report.
     Manual,
@@ -827,7 +829,7 @@ impl crate::Schema for ReplyContract {
                 fields: Cow::Borrowed(&[SchemaType::TypeId(KindId::TYPE_ID)]),
             },
             EnumVariant::Tuple {
-                name: Cow::Borrowed("Stream"),
+                name: Cow::Borrowed("Multi"),
                 discriminant: 2,
                 fields: Cow::Borrowed(&[SchemaType::TypeId(KindId::TYPE_ID)]),
             },
@@ -840,7 +842,7 @@ impl crate::Schema for ReplyContract {
 
     const LABEL: Option<&'static str> = Some("ReplyContract");
 
-    // Parallel-shape label tree mirroring `SCHEMA`. The `One` / `Stream`
+    // Parallel-shape label tree mirroring `SCHEMA`. The `One` / `Multi`
     // fields carry `LabelNode::Anonymous` — identical to
     // `<KindId as Schema>::LABEL_NODE`, since a typed-id field has no
     // nominal sub-shape.
@@ -855,7 +857,7 @@ impl crate::Schema for ReplyContract {
                 fields: Cow::Borrowed(&[LabelNode::Anonymous]),
             },
             VariantLabel::Tuple {
-                name: Cow::Borrowed("Stream"),
+                name: Cow::Borrowed("Multi"),
                 fields: Cow::Borrowed(&[LabelNode::Anonymous]),
             },
             VariantLabel::Unit {
@@ -880,12 +882,12 @@ pub enum InputsRecord {
         id: KindId,
         name: Cow<'static, str>,
         doc: Option<Cow<'static, str>>,
-        /// ADR-0112: the handler's reply class — `None` / `One(R)` for a
-        /// single-class handler (the ADR-0109 return-type contract),
+        /// ADR-0112 / ADR-0134: the handler's reply class — `None` / `One(R)`
+        /// for a single-class handler (the ADR-0109 return-type contract),
         /// `Manual` for a manual-class handler that replies by hand,
-        /// `Stream(R)` reserved. Lets a caller read the real `In -> Out`
-        /// before issuing the call. Successor to ADR-0109's
-        /// `Option<KindId>` reply field.
+        /// `Multi(R)` for a multi-class handler emitting 0..n `R` mails. Lets
+        /// a caller read the real `In -> Out` before issuing the call.
+        /// Successor to ADR-0109's `Option<KindId>` reply field.
         reply: ReplyContract,
     },
     /// A `#[fallback]` method's presence and optional description.
@@ -923,7 +925,7 @@ pub const INPUTS_SECTION: &str = "aether.kinds.inputs";
 /// v0x03 (ADR-0109 / issue 1803) added the `reply` kind id to the
 /// `Handler` variant; v0x04 (ADR-0112 / issue 1850) widened that field
 /// from `Option<KindId>` to [`ReplyContract`] so a handler's reply
-/// *class* (single / manual / stream) is reported, not just a single
+/// *class* (single / manual / multi) is reported, not just a single
 /// reply kind; v0x05 (ADR-0118 / issue 1984) moved every record
 /// onto the owned aether-wire format (fixed little-endian
 /// selectors / ids / counts). A component built before any of these and

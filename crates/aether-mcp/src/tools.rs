@@ -540,11 +540,14 @@ impl Mcp {
                         caps.handlers
                             .iter()
                             .find(|h| h.name == spec.kind_name)
-                            // ADR-0112: only a single-class handler names one
-                            // static reply kind to search the cache for; a
-                            // manual / silent handler yields no declared kind.
+                            // ADR-0112 / ADR-0134: a single-class handler names
+                            // one static reply kind and a multi-class handler
+                            // names its element kind — both are what a driver
+                            // decodes, so search the cache for either. A manual
+                            // / silent handler yields no declared kind.
                             .and_then(|h| match h.reply {
-                                aether_data::ReplyContract::One(id) => Some(id),
+                                aether_data::ReplyContract::One(id)
+                                | aether_data::ReplyContract::Multi(id) => Some(id),
                                 _ => None,
                             })
                     })

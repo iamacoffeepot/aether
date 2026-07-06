@@ -1,5 +1,5 @@
 error: #[handler(task)] always uses the single reply class; drop the `manual` / `multi` class marker — task replies go through `TaskDone`, not the handler class (ADR-0112 / ADR-0134)
-  --> tests/ui/rejects_manual_task_handler_native.rs:30:5
+  --> tests/ui/rejects_multi_task_handler_native.rs:30:5
    |
 30 | /     fn on_done(
 31 | |         &mut self,

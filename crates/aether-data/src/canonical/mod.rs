@@ -424,7 +424,7 @@ mod tests {
         // ADR-0112 / ADR-0118: the const-fn `(tag, id)` encoder matches
         // `wire::to_vec(ReplyContract)` byte-for-byte. The selector is
         // a `u32` LE, so its low byte (buf[0]) is the variant index —
-        // `None` = 0, `One` = 1, `Stream` = 2, `Manual` = 3.
+        // `None` = 0, `One` = 1, `Multi` = 2, `Manual` = 3.
         fn check(tag: u8, id: u64, expect: ReplyContract, expect_disc: u8) {
             // Reuse a fixed-cap scratch buffer; `reply_contract_len` <= 12.
             let len = reply_contract_len(tag, id);
@@ -442,7 +442,7 @@ mod tests {
         }
         check(0, 0, ReplyContract::None, 0);
         check(1, 0xabcd, ReplyContract::One(KindId(0xabcd)), 1);
-        check(2, 0x1234, ReplyContract::Stream(KindId(0x1234)), 2);
+        check(2, 0x1234, ReplyContract::Multi(KindId(0x1234)), 2);
         check(3, 0, ReplyContract::Manual, 3);
     }
 

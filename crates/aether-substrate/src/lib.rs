@@ -75,7 +75,7 @@ pub use actor::registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError}
 #[cfg(feature = "wasm")]
 pub use actor::wasm::component::{Component, ComponentCtx};
 pub use aether_actor::Addressable;
-pub use aether_actor::{Manual, ReplyMode, Single, Stream};
+pub use aether_actor::{Emit, Manual, Multi, ReplyMode, Single};
 pub use aether_derive::Config;
 #[cfg(feature = "wasm")]
 pub use boot::{SubstrateBoot, SubstrateBootBuilder};
