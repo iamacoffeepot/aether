@@ -217,12 +217,13 @@ impl HttpSupervisorState {
             );
             return;
         }
-        if self.live_connections.load(Ordering::Acquire) >= self.config.max_connections {
+        let live = self.live_connections.load(Ordering::Acquire);
+        if live >= self.config.max_connections {
             refuse_connection(stream, 503, "server at connection capacity");
             tracing::warn!(
                 target: "aether_substrate::http_server",
                 %peer,
-                live = self.live_connections.load(Ordering::Acquire),
+                live,
                 "http conn refused: at capacity",
             );
             return;

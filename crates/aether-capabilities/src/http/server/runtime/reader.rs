@@ -206,15 +206,7 @@ pub struct ReaderTuning {
 /// comma-separated values and repeated header lines (`Connection: keep-alive,
 /// Upgrade`).
 fn connection_has_token(headers: &[HttpHeader], token: &str) -> bool {
-    headers
-        .iter()
-        .filter(|header| header.name.eq_ignore_ascii_case("connection"))
-        .any(|header| {
-            header
-                .value
-                .split(',')
-                .any(|value| value.trim().eq_ignore_ascii_case(token))
-        })
+    header_has_token(headers, "connection", token)
 }
 
 /// First value of the header named `name` (case-insensitive), or `None` if the
@@ -350,6 +342,31 @@ fn resolve_at_reader(
     }
 }
 
+/// Re-arm the socket read timeout to `want` if it differs from `current`,
+/// posting `ReaderClosed` and returning `false` on a `set_read_timeout`
+/// failure (the caller must bail); returns `true` otherwise, with
+/// `current` updated to `want` when a change was made.
+fn ensure_read_timeout(
+    stream: &mut TcpStream,
+    sink: &WakeSink,
+    conn_id: ConnId,
+    current: &mut Duration,
+    want: Duration,
+) -> bool {
+    if want == *current {
+        return true;
+    }
+    if stream.set_read_timeout(Some(want)).is_err() {
+        sink.post(InboundEvent::ReaderClosed {
+            conn_id,
+            reason: "set read timeout failed".to_string(),
+        });
+        return false;
+    }
+    *current = want;
+    true
+}
+
 /// Reader-written reject (ADR-0135 §2): write the canned status on the
 /// reader's own full-duplex clone — no response can be in flight at a
 /// pre-dispatch reject — and post `ReaderClosed` so the shard reaps the
@@ -441,15 +458,14 @@ pub fn run_reader_loop(
             } else {
                 request_timeout
             };
-            if want_timeout != current_timeout {
-                if stream.set_read_timeout(Some(want_timeout)).is_err() {
-                    sink.post(InboundEvent::ReaderClosed {
-                        conn_id,
-                        reason: "set read timeout failed".to_string(),
-                    });
-                    return;
-                }
-                current_timeout = want_timeout;
+            if !ensure_read_timeout(
+                &mut stream,
+                sink,
+                conn_id,
+                &mut current_timeout,
+                want_timeout,
+            ) {
+                return;
             }
             match read_more(&mut stream, &mut chunk) {
                 ReadStep::Filled(n) => buf.extend_from_slice(&chunk[..n]),
@@ -489,15 +505,14 @@ pub fn run_reader_loop(
 
         // The body read and the `Expect: 100-continue` write run under the
         // in-flight timeout — a request has started arriving.
-        if current_timeout != request_timeout {
-            if stream.set_read_timeout(Some(request_timeout)).is_err() {
-                sink.post(InboundEvent::ReaderClosed {
-                    conn_id,
-                    reason: "set read timeout failed".to_string(),
-                });
-                return;
-            }
-            current_timeout = request_timeout;
+        if !ensure_read_timeout(
+            &mut stream,
+            sink,
+            conn_id,
+            &mut current_timeout,
+            request_timeout,
+        ) {
+            return;
         }
 
         let keep_alive = request_keeps_alive(head.version, &head.headers);
