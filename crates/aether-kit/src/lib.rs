@@ -9,14 +9,14 @@
 //! export, ADR-0096), and [`runtime::mesh_viewer::MeshViewer`] (loads a
 //! `.dsl` / `.obj` mesh file and replays it to the render sink,
 //! selected by the `aether_kit@aether.mesh_viewer` export), and
-//! [`runtime::world_view::WorldView`] (greedy-meshes the chunked world
-//! plane stack into flat ground quads, selected by the
+//! [`runtime::world_view::WorldView`] (meshes the chunked world plane
+//! stack into the keyed-quilt gouache grammar, selected by the
 //! `aether_kit@aether.world` export). The camera's `aether.camera.*`
 //! driver kinds live in [`camera`]; the mesh viewer's `aether.mesh.load`
 //! kind lives in [`mesh`]. The [`world`] module holds the chunked world
 //! plane stack — the `World` / `Chunk` / `Material` data layer and its
-//! `aether.kit.world.{set_chunk,set_region,load}` wire kinds — that
-//! `WorldView` meshes to the render sink.
+//! `aether.kit.world.{set_chunk,set_region,set_view_mode,load}` wire kinds
+//! — that `WorldView` meshes to the render sink.
 //!
 //! # Units
 //!
@@ -42,7 +42,7 @@ pub mod world;
 
 pub use world::{
     CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk, ChunkPos, Material, Region,
-    SetChunk, SetRegion, World, WorldDecodeError, WorldLoad,
+    SetChunk, SetRegion, SetViewMode, ViewMode, World, WorldDecodeError, WorldLoad,
 };
 
 #[cfg(feature = "runtime")]

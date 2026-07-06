@@ -429,6 +429,45 @@ impl SetRegion {
     }
 }
 
+/// How the mesher paints a chunk: the finished gouache grammar, or the
+/// raw grayscale noise field for calibrating the material table by eye.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ViewMode {
+    /// Flat keyed cells, pooled rims, wash, corner-minimized contours,
+    /// depth-graded water — the finished look.
+    #[default]
+    Painted,
+    /// Each cell's own hue-noise field as grayscale, so the table's
+    /// wavelength / octaves / amplitude read directly off the surface.
+    Raw,
+}
+
+impl ViewMode {
+    /// Decode the wire byte: `1` is the raw field, anything else painted.
+    #[must_use]
+    pub fn from_u8(byte: u8) -> Self {
+        if byte == 1 { Self::Raw } else { Self::Painted }
+    }
+}
+
+/// `aether.kit.world.set_view_mode` — switch the whole view between the
+/// painted gouache grammar and the raw grayscale field. `mode` is a raw
+/// [`ViewMode`] byte (`0` painted, `1` raw); an unknown byte reads as
+/// painted.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.world.set_view_mode")]
+pub struct SetViewMode {
+    pub mode: u8,
+}
+
+impl SetViewMode {
+    /// The [`ViewMode`] this selects.
+    #[must_use]
+    pub fn view_mode(&self) -> ViewMode {
+        ViewMode::from_u8(self.mode)
+    }
+}
+
 /// `aether.kit.world.load` — load a serialized world from the substrate's
 /// I/O surface (ADR-0041 namespace + path). The bytes are the
 /// [`World::to_bytes`] format; a decode failure keeps the prior world.
