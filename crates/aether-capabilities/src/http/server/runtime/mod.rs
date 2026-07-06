@@ -28,7 +28,7 @@ use super::{HttpInboundReady, HttpServerCapability, HttpServerConfig, HttpServer
 use aether_actor::runtime;
 
 pub use std::collections::HashMap;
-pub use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+pub use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 pub use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 pub use std::sync::{Arc, RwLock, mpsc};
 pub use std::thread;
@@ -82,6 +82,26 @@ pub use websocket::*;
 
 #[cfg(test)]
 mod unit_tests;
+
+/// Reconstructs the teardown self-connect target (see `unwire` below)
+/// from state the runtime already holds — no new state field. The
+/// listener's bound IP equals the configured `bind_addr`'s IP (`bind`
+/// only resolves the *port* when it is `0`), so this pairs that IP with
+/// the resolved `listener_port`. A wildcard bind (`0.0.0.0` / `::`) has
+/// no address a self-connect can land on, so it maps to the matching
+/// loopback instead; an unparseable `bind_addr` falls back to IPv4
+/// loopback.
+fn teardown_connect_addr(bind_addr: &str, listener_port: u16) -> SocketAddr {
+    let ip = bind_addr
+        .parse::<SocketAddr>()
+        .map_or(IpAddr::V4(Ipv4Addr::LOCALHOST), |addr| addr.ip());
+    let ip = match ip {
+        IpAddr::V4(v4) if v4.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(v6) if v6.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        other => other,
+    };
+    SocketAddr::new(ip, listener_port)
+}
 
 #[runtime]
 impl NativeActor for HttpServerCapability {
@@ -144,10 +164,17 @@ impl NativeActor for HttpServerCapability {
                                 break;
                             }
                         }
-                        Err(_) => {
+                        Err(error) => {
                             if accept_shutdown_for_thread.load(Ordering::Acquire) {
                                 break;
                             }
+                            tracing::warn!(
+                                target: "aether_substrate::http_server",
+                                port,
+                                %error,
+                                "http accept() failed; backing off before retry",
+                            );
+                            thread::sleep(Duration::from_millis(100));
                         }
                     }
                 }
@@ -186,8 +213,15 @@ impl NativeActor for HttpServerCapability {
         // their own `unwire` (the chassis tears instanced actors down
         // alongside the caps).
         state.accept_shutdown.store(true, Ordering::Release);
-        if let Ok(addr) = format!("127.0.0.1:{}", state.listener_port).parse::<SocketAddr>() {
-            let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(100));
+        let wake_addr = teardown_connect_addr(&state.config.bind_addr, state.listener_port);
+        if let Err(error) = TcpStream::connect_timeout(&wake_addr, Duration::from_millis(100)) {
+            tracing::warn!(
+                target: "aether_substrate::http_server",
+                port = state.listener_port,
+                addr = %wake_addr,
+                %error,
+                "http server teardown wake self-connect failed; accept-thread join may stall",
+            );
         }
         if let Some(thread) = state.accept_thread.take() {
             let _ = thread.join();

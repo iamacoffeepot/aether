@@ -2,9 +2,10 @@ use super::{
     HttpResponseStreamOpen, OPCODE_BINARY, OPCODE_CONTINUATION, OPCODE_TEXT, WsFrameParse,
     http_date, normalize_prefix, parse_http_method, parse_ws_frame, percent_decode_path,
     reason_phrase, render_stream_head, request_keeps_alive, route_matches, sec_websocket_accept,
-    serialize_ws_frame, sha1, validate_ws_handshake,
+    serialize_ws_frame, sha1, teardown_connect_addr, validate_ws_handshake,
 };
 use crate::http::kinds::{HttpHeader, HttpMethod};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, UNIX_EPOCH};
 
 fn conn_header(value: &str) -> Vec<HttpHeader> {
@@ -356,6 +357,51 @@ fn config_layer_defaults_match_the_named_consts() {
     assert_eq!(
         default.websocket_idle_timeout_millis,
         DEFAULT_WS_IDLE_TIMEOUT_MILLIS
+    );
+}
+
+/// Tripwire: a wildcard bind (`0.0.0.0` / `::`, no routable self-connect
+/// target) maps to the matching loopback family — this is the actual bug
+/// fix (issue #2631), not a mirror of the input.
+#[test]
+fn teardown_connect_addr_maps_wildcard_to_loopback() {
+    assert_eq!(
+        teardown_connect_addr("0.0.0.0:8080", 8080),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080)
+    );
+    assert_eq!(
+        teardown_connect_addr("[::]:8080", 8080),
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080)
+    );
+}
+
+/// A specific bind IP (not wildcard) is preserved as-is, paired with the
+/// resolved listener port rather than whatever port `bind_addr` named
+/// (e.g. `0` for an OS-assigned port).
+#[test]
+fn teardown_connect_addr_preserves_specific_ip() {
+    assert_eq!(
+        teardown_connect_addr("192.168.1.5:0", 41_234),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5)), 41_234)
+    );
+    assert_eq!(
+        teardown_connect_addr("127.0.0.1:8080", 8080),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080)
+    );
+}
+
+/// An unparseable `bind_addr` (e.g. a hostname `TcpListener::bind` would
+/// resolve via DNS, which this pure helper does not do) falls back to
+/// IPv4 loopback rather than panicking or propagating the parse error.
+#[test]
+fn teardown_connect_addr_unparseable_falls_back_to_loopback() {
+    assert_eq!(
+        teardown_connect_addr("not-an-address", 9090),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9090)
+    );
+    assert_eq!(
+        teardown_connect_addr("localhost:9090", 9090),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9090)
     );
 }
 
