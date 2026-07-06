@@ -21,8 +21,8 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aether_actor::{Addressable, HandlesKind, Manual, ReplyMode, Single, Singleton};
-use aether_actor::{MailSender, OutboundReply};
+use aether_actor::{Addressable, HandlesKind, Manual, Multi, ReplyMode, Single, Singleton};
+use aether_actor::{Emit, MailSender, OutboundReply};
 use core::marker::PhantomData;
 use core::ptr;
 
@@ -210,6 +210,21 @@ impl<'a> NativeCtx<'a, Manual> {
         // The reborrow swaps the marker without touching any real field and
         // only removes capability, never adds it.
         unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, Single>>() }
+    }
+
+    /// ADR-0134 downgrade-only coercion: view this [`Manual`] ctx as a
+    /// [`Multi<K>`] ctx, swapping the `OutboundReply` surface for the
+    /// [`Emit<K>`] surface. The `#[actor]` macro hands a `#[handler::multi]`
+    /// handler this view (with `K` read off its `Multi<K>` signature), so a
+    /// handler whose marker disagrees with its class fails to unify.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn as_multi<K: Kind>(&mut self) -> &mut NativeCtx<'a, Multi<K>> {
+        // SAFETY: `M` is `PhantomData`-only and `Multi<K>` is a ZST for every
+        // `K`, so `NativeCtx<'a, Manual>` and `NativeCtx<'a, Multi<K>>` are
+        // layout-identical (see `native_ctx_layout_identical_across_modes`).
+        // The reborrow swaps the marker without touching any real field.
+        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, Multi<K>>>() }
     }
 
     /// #1757: the per-dispatch constructor — moves the single dispatched
@@ -1187,6 +1202,29 @@ impl OutboundReply for NativeCtx<'_, Manual> {
     }
 }
 
+// ADR-0134: the emit surface is the multi class's, implemented only for
+// the `Multi<K>` mode. Each `emit` addresses the dispatch source
+// (`source_mailbox`) and starts a fresh detached chain (the
+// `send_detached_to` body — `None` / `None` lineage), so an emission does
+// not hold the request chain open. A sourceless dispatch (broadcast /
+// substrate-generated mail, no `SourceAddr::Component`) has no routable
+// target, so the emission warn-drops.
+impl<K: Kind> Emit<K> for NativeCtx<'_, Multi<K>> {
+    fn emit(&mut self, payload: &K) {
+        let Some(source) = self.source_mailbox() else {
+            tracing::warn!(
+                kind = <K as Kind>::NAME,
+                "multi handler emit dropped: the dispatch carries no routable \
+                 source (broadcast / substrate-origin mail)",
+            );
+            return;
+        };
+        let bytes = payload.encode_into_bytes();
+        self.binding
+            .push_envelope_buffered(source.0, K::ID.0, &bytes, 1, None, None);
+    }
+}
+
 /// Issue 629 / Phase A: type-keyed map of cap-exported sub-handles
 /// for cross-thread access from drivers / embedders. Caps publish
 /// during `init` via [`NativeInitCtx::publish_handle`]; consumers
@@ -1455,6 +1493,93 @@ mod tests {
             detached.root, detached.mail_id,
             "detached send is its own root"
         );
+    }
+
+    /// ADR-0134: a multi handler's `ctx.emit` addresses the dispatch source
+    /// and starts a fresh detached chain (no parent edge, its own root);
+    /// a dispatch with no routable source (`SourceAddr::None`) drops the
+    /// emission. The buffered send routes at handler end (`NativeCtx`'s
+    /// `Drop` flush), so the assertions read the routed dispatch off the
+    /// source-registered sink.
+    #[test]
+    fn emit_routes_detached_at_source_and_drops_when_sourceless() {
+        use crate::mail::registry::OwnedDispatch;
+        use crate::testing::bare_substrate;
+        use std::sync::mpsc;
+
+        let (registry, mailer) = bare_substrate();
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        // The sink is registered under the id the dispatch source names, so
+        // a receipt here proves the emit addressed the source.
+        let source_id = registry.register_inbox(
+            "test.multi_emit.sink",
+            Arc::new(move |dispatch: OwnedDispatch| {
+                // Terminal test sink (ADR-0094): discharge before observing.
+                dispatch.discharge();
+                let _ = tx.send(dispatch);
+            }),
+        );
+
+        let actor_mailbox = MailboxId(0x00BE_EF03);
+        let binding = Arc::new(NativeBinding::new_for_test(
+            Arc::clone(&mailer),
+            actor_mailbox,
+        ));
+
+        // A dispatch whose source is the sink component: emit addresses it.
+        let source = Source::with_correlation(SourceAddr::Component(source_id), 0);
+        {
+            let mut ctx = NativeCtx::new_dispatching(&binding, source, MailId::NONE, MailId::NONE);
+            Emit::<CastOnly>::emit(ctx.as_multi::<CastOnly>(), &CastOnly { code: 7 });
+            // ctx drops here → `flush_outbound` routes the buffered emit.
+        }
+        let emitted = rx.try_recv().expect("emit routed at flush");
+        assert!(
+            emitted.parent_mail.is_none(),
+            "emit carries no parent edge — it is a detached root"
+        );
+        assert_eq!(
+            emitted.root, emitted.mail_id,
+            "a detached emit is its own chain root"
+        );
+
+        // A sourceless dispatch (`SourceAddr::None`) drops the emission.
+        let none_source = Source::with_correlation(SourceAddr::None, 0);
+        {
+            let mut ctx =
+                NativeCtx::new_dispatching(&binding, none_source, MailId::NONE, MailId::NONE);
+            Emit::<CastOnly>::emit(ctx.as_multi::<CastOnly>(), &CastOnly { code: 8 });
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "a sourceless emit routes nothing — the emission drops"
+        );
+    }
+
+    /// ADR-0134: the multi mode marker is layout-neutral — a `Multi<K>`
+    /// view has the same size + alignment as the `Single` view. This is the
+    /// invariant the `as_multi` pointer reborrow rests on.
+    #[test]
+    fn native_ctx_layout_identical_for_multi_mode() {
+        use std::mem::{align_of, size_of};
+        assert_eq!(
+            size_of::<NativeCtx<'static, Single>>(),
+            size_of::<NativeCtx<'static, Multi<u32>>>(),
+        );
+        assert_eq!(
+            align_of::<NativeCtx<'static, Single>>(),
+            align_of::<NativeCtx<'static, Multi<u32>>>(),
+        );
+    }
+
+    /// ADR-0134: `Emit` is reachable from the `Multi<K>` ctx only. The
+    /// single- / manual-locked ctxs carry no emit surface, so a stray
+    /// `ctx.emit` outside a multi handler is a compile error, not a
+    /// manifest lie.
+    #[test]
+    fn emit_present_on_multi() {
+        fn assert_impls<C: Emit<CastOnly>>() {}
+        assert_impls::<NativeCtx<'static, Multi<CastOnly>>>();
     }
 
     /// Type-level proof (ADR-0100): a `Pod`-without-`Serialize` cast kind

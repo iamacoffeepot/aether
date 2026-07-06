@@ -1094,10 +1094,15 @@ struct HandlerFn {
     /// return type. Drives the auto-emitted `ctx.reply` and the reply
     /// kind id on the inputs manifest record.
     reply: HandlerReply,
-    /// ADR-0112: the declared reply class (single / manual). Selects the
-    /// ctx view the macro passes (`as_single()` for single, the full
-    /// `Manual` ctx for manual) and the manifest `ReplyContract` tag.
+    /// ADR-0112 / ADR-0134: the declared reply class (single / manual /
+    /// multi). Selects the ctx view the macro passes (`as_single()` for
+    /// single, the full `Manual` ctx for manual, `as_multi::<K>()` for
+    /// multi) and the manifest `ReplyContract` tag.
     class: HandlerClass,
+    /// ADR-0134: the multi-class emit kind `K`, read off the `Multi<K>` ctx
+    /// marker. `Some` iff `class == Multi`; drives the `ReplyContract::Multi(K::ID)`
+    /// manifest pair.
+    multi_kind: Option<Type>,
 }
 
 struct FallbackFn {
@@ -1146,9 +1151,9 @@ fn expand_handlers(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStream2
 
 /// Match a handler attribute — bare `#[handler]` (any path whose last
 /// segment is `handler`, so `#[crate::handler]` / `#[aether_data::handler]`
-/// resolve too) or a class-marked `#[handler::single|manual|stream]`
-/// (ADR-0112), whose last segment is the class and whose preceding
-/// segment is `handler`. The class path never reaches attribute
+/// resolve too) or a class-marked `#[handler::single|manual|multi]`
+/// (ADR-0112 / ADR-0134), whose last segment is the class and whose
+/// preceding segment is `handler`. The class path never reaches attribute
 /// resolution — `#[actor]` parses and strips it.
 fn attr_is_handler(attr: &Attribute) -> bool {
     let segments = &attr.path().segments;
@@ -1160,7 +1165,7 @@ fn attr_is_handler(attr: &Attribute) -> bool {
     }
     if matches!(
         last.ident.to_string().as_str(),
-        "single" | "manual" | "stream"
+        "single" | "manual" | "multi"
     ) {
         let len = segments.len();
         return len >= 2 && segments[len - 2].ident == "handler";
@@ -1226,23 +1231,22 @@ fn parse_handler_variant(attr: &Attribute) -> syn::Result<HandlerVariant> {
     }
 }
 
-/// The reply class of a handler (ADR-0112), read off the attribute path:
-/// `#[handler]` / `#[handler::single]` are [`Single`](HandlerClass::Single),
-/// `#[handler::manual]` is [`Manual`](HandlerClass::Manual), and
-/// `#[handler::stream]` is [`Stream`](HandlerClass::Stream) — reserved,
-/// rejected by [`parse_handler_class`]. Orthogonal to [`HandlerVariant`]
+/// The reply class of a handler (ADR-0112, ADR-0134), read off the
+/// attribute path: `#[handler]` / `#[handler::single]` are
+/// [`Single`](HandlerClass::Single), `#[handler::manual]` is
+/// [`Manual`](HandlerClass::Manual), and `#[handler::multi]` is
+/// [`Multi`](HandlerClass::Multi). Orthogonal to [`HandlerVariant`]
 /// (the `mail` / `task` trigger), which is read from the parens.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HandlerClass {
     Single,
     Manual,
-    Stream,
+    Multi,
 }
 
-/// Read a handler's [`HandlerClass`] off its attribute path (ADR-0112).
-/// The last path segment is the class (`single` / `manual` / `stream`),
-/// or `handler` itself for the bare `#[handler]` (= single). `stream` is
-/// a hard error — the class is reserved and its emit surface isn't built.
+/// Read a handler's [`HandlerClass`] off its attribute path (ADR-0112,
+/// ADR-0134). The last path segment is the class (`single` / `manual` /
+/// `multi`), or `handler` itself for the bare `#[handler]` (= single).
 /// `attr_is_handler` is the gate, so the path is known to end in one of
 /// these segments.
 fn parse_handler_class(attr: &Attribute) -> syn::Result<HandlerClass> {
@@ -1256,24 +1260,115 @@ fn parse_handler_class(attr: &Attribute) -> syn::Result<HandlerClass> {
         // `#[handler::single]` are both the single class.
         "handler" | "single" => HandlerClass::Single,
         "manual" => HandlerClass::Manual,
-        "stream" => HandlerClass::Stream,
+        "multi" => HandlerClass::Multi,
         other => {
             return Err(syn::Error::new_spanned(
                 attr,
                 format!(
-                    "unknown #[handler::<class>] — accepts `single`, `manual`, or `stream` \
-                     (ADR-0112); got `{other}`"
+                    "unknown #[handler::<class>] — accepts `single`, `manual`, or `multi` \
+                     (ADR-0112 / ADR-0134); got `{other}`"
                 ),
             ));
         }
     };
-    if class == HandlerClass::Stream {
+    Ok(class)
+}
+
+/// Extract the element kind `K` from a `#[handler::multi]` method's ctx
+/// parameter (ADR-0134). The ctx is the second parameter and must be
+/// `ctx: &mut WasmCtx<'_, Multi<K>>` (wasm) or
+/// `ctx: &mut NativeCtx<'_, Multi<K>>` (native): the macro reads `K` off
+/// the `Multi<K>` marker so the manifest's `ReplyContract::Multi(K::ID)`
+/// and the `emit` element kind cannot drift. A ctx that lacks the
+/// `Multi<K>` marker earns a pointed error naming the required shape
+/// rather than an opaque unification failure at the generated call site.
+fn extract_multi_emit_kind(sig: &Signature) -> syn::Result<Type> {
+    // Nested (non-capturing) so every `Multi<K>`-shape failure earns one
+    // message, spanned at whichever token the parse got stuck on.
+    fn shape_err<T: quote::ToTokens>(span: T) -> syn::Error {
+        syn::Error::new_spanned(
+            span,
+            "#[handler::multi] requires a `Multi<K>` ctx marker naming the emit kind — \
+             write `ctx: &mut WasmCtx<'_, Multi<K>>` (or `NativeCtx<'_, Multi<K>>`), \
+             where `K` is the kind the handler emits (ADR-0134)",
+        )
+    }
+    let ctx_param = sig.inputs.get(1).ok_or_else(|| shape_err(sig))?;
+    let FnArg::Typed(pt) = ctx_param else {
+        return Err(shape_err(ctx_param));
+    };
+    // Peel the leading `&mut` / `&` off the ctx reference.
+    let Type::Reference(ctx_ref) = &*pt.ty else {
+        return Err(shape_err(&*pt.ty));
+    };
+    let Type::Path(ctx_path) = &*ctx_ref.elem else {
+        return Err(shape_err(&*pt.ty));
+    };
+    // The last segment is the ctx type (`WasmCtx` / `NativeCtx`); its final
+    // angle-bracketed type argument is the `Multi<K>` marker.
+    let ctx_seg = ctx_path
+        .path
+        .segments
+        .last()
+        .ok_or_else(|| shape_err(&*pt.ty))?;
+    let PathArguments::AngleBracketed(ctx_args) = &ctx_seg.arguments else {
+        return Err(shape_err(&*pt.ty));
+    };
+    let marker_ty = ctx_args
+        .args
+        .iter()
+        .filter_map(|a| match a {
+            GenericArgument::Type(t) => Some(t),
+            _ => None,
+        })
+        .next_back()
+        .ok_or_else(|| shape_err(&*pt.ty))?;
+    let Type::Path(marker_path) = marker_ty else {
+        return Err(shape_err(marker_ty));
+    };
+    let marker_seg = marker_path
+        .path
+        .segments
+        .last()
+        .ok_or_else(|| shape_err(marker_ty))?;
+    if marker_seg.ident != "Multi" {
+        return Err(shape_err(marker_ty));
+    }
+    let PathArguments::AngleBracketed(marker_args) = &marker_seg.arguments else {
+        return Err(shape_err(marker_ty));
+    };
+    marker_args
+        .args
+        .iter()
+        .find_map(|a| match a {
+            GenericArgument::Type(t) => Some(t.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| shape_err(marker_ty))
+}
+
+/// Resolve a mail handler's [`HandlerClass::Multi`] emit kind, enforcing
+/// its `-> ()` return contract (ADR-0134). A non-multi class carries no
+/// emit kind (`Ok(None)`). A multi handler must return `()` — its 0..n
+/// `ctx.emit` calls *are* the reply, so a return value is a contradiction
+/// — and its `K` is read off the `Multi<K>` ctx marker. Shared by the wasm
+/// and native collection sites so the enforcement can't drift between them.
+fn multi_kind_or_return_error(
+    class: HandlerClass,
+    reply: &HandlerReply,
+    sig: &Signature,
+) -> syn::Result<Option<Type>> {
+    if class != HandlerClass::Multi {
+        return Ok(None);
+    }
+    if !matches!(reply, HandlerReply::None) {
         return Err(syn::Error::new_spanned(
-            attr,
-            "#[handler::stream] is reserved and not yet implemented (ADR-0112)",
+            &sig.output,
+            "#[handler::multi] must return `()` — a multi handler answers with 0..n \
+             `ctx.emit` calls, so a return value has no reply path (ADR-0134)",
         ));
     }
-    Ok(class)
+    Ok(Some(extract_multi_emit_kind(sig)?))
 }
 
 /// Extract `(O, C, is_borrow)` from a `#[handler(task)]` method's third
@@ -1526,9 +1621,13 @@ fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStrea
                     let kind_ty = extract_handler_kind_type(&f.sig)?;
                     let agent_doc = extract_agent_doc(&f.attrs);
                     let reply = classify_handler_reply(&f.sig.output);
-                    // ADR-0112: read the reply class off the marker path
-                    // (rejects `#[handler::stream]`).
+                    // ADR-0112 / ADR-0134: read the reply class off the marker
+                    // path.
                     let class = parse_handler_class(&f.attrs[idx])?;
+                    // ADR-0134: a multi handler emits through `ctx.emit` and
+                    // must return `()` (the emissions are the reply, not a
+                    // return value); `K` rides its `Multi<K>` ctx marker.
+                    let multi_kind = multi_kind_or_return_error(class, &reply, &f.sig)?;
                     f.attrs.remove(idx);
                     handlers.push(HandlerFn {
                         method: f,
@@ -1536,6 +1635,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStrea
                         agent_doc,
                         reply,
                         class,
+                        multi_kind,
                     });
                 } else if let Some(idx) = fallback_attr_idx {
                     if fallback.is_some() {
@@ -2135,10 +2235,9 @@ fn expand_native_actor_trait(
                 }
                 if let Some(idx) = handler_attr_idx {
                     let variant = parse_handler_variant(&f.attrs[idx])?;
-                    // ADR-0112: read the reply class off the marker path
-                    // (rejects `#[handler::stream]` on both the mail and task
-                    // variants). A task handler always receives the
-                    // downgraded `Single` ctx, so it carries no class field.
+                    // ADR-0112 / ADR-0134: read the reply class off the marker
+                    // path. A task handler always receives the downgraded
+                    // `Single` ctx, so it carries no class field.
                     let class = parse_handler_class(&f.attrs[idx])?;
                     f.attrs.remove(idx);
                     match variant {
@@ -2146,6 +2245,12 @@ fn expand_native_actor_trait(
                             let (kind_ty, is_slice) =
                                 extract_native_actor_handler_kind(&f.sig, is_split)?;
                             let reply = classify_handler_reply(&f.sig.output);
+                            // ADR-0134: enforce the multi-class `-> ()` return
+                            // and the required `Multi<K>` ctx marker (a pointed
+                            // error when absent). The native dispatch reads `K`
+                            // by inference off the signature, so the extracted
+                            // kind itself is not retained here.
+                            multi_kind_or_return_error(class, &reply, &f.sig)?;
                             handlers.push(NativeActorHandlerFn {
                                 method: f,
                                 kind_ty,
@@ -2165,8 +2270,9 @@ fn expand_native_actor_trait(
                                 return Err(syn::Error::new_spanned(
                                     &f,
                                     "#[handler(task)] always uses the single reply class; \
-                                     drop the class marker — task replies go through \
-                                     `TaskDone`, not the handler class",
+                                     drop the `manual` / `multi` class marker — task replies \
+                                     go through `TaskDone`, not the handler class \
+                                     (ADR-0112 / ADR-0134)",
                                 ));
                             }
                             let (output_ty, context_ty, is_borrow) =
@@ -2390,9 +2496,12 @@ fn expand_native_actor_trait(
             (HandlerClass::Manual, _) => quote! {
                 #self_ty::#method_ident(__aether_state, __aether_ctx, __aether_decoded);
             },
-            (HandlerClass::Stream, _) => {
-                unreachable!("parse_handler_class rejects #[handler::stream]")
-            }
+            // ADR-0134: a multi handler is called with the `Multi<K>` view
+            // (`K` inferred from its ctx signature); it emits 0..n mails and
+            // returns `()`, so there is no auto-reply.
+            (HandlerClass::Multi, _) => quote! {
+                #self_ty::#method_ident(__aether_state, __aether_ctx.as_multi(), __aether_decoded);
+            },
         };
         if h.is_slice {
             // Slice handler — payload is `count * size_of::<K>()`
@@ -3100,8 +3209,12 @@ struct NativeActorHandlerFn {
     /// return type. A `-> R` native handler auto-replies `R` through
     /// `OutboundReply::reply`, the same path a manual `ctx.reply` takes.
     reply: HandlerReply,
-    /// ADR-0112: the declared reply class (single / manual). Selects the
-    /// ctx view the dispatch arm passes and the manifest reply tag.
+    /// ADR-0112 / ADR-0134: the declared reply class (single / manual /
+    /// multi). Selects the ctx view the dispatch arm passes and the
+    /// manifest reply tag. The multi emit kind `K` is not stored — the
+    /// native dispatch arm reads it off the handler's `Multi<K>` ctx
+    /// signature by inference, and the native reply manifest is the
+    /// inventory `HandlerEntry`, not the wasm `ReplyContract` record.
     class: HandlerClass,
 }
 
@@ -3593,9 +3706,12 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
             (HandlerClass::Manual, _) => quote! {
                 self.#method(__aether_ctx, __aether_decoded);
             },
-            (HandlerClass::Stream, _) => {
-                unreachable!("parse_handler_class rejects #[handler::stream]")
-            }
+            // ADR-0134: a multi handler is called with the `Multi<K>` view
+            // (`K` inferred from its ctx signature); it emits 0..n mails and
+            // returns `()`, so there is no auto-reply.
+            (HandlerClass::Multi, _) => quote! {
+                self.#method(__aether_ctx.as_multi(), __aether_decoded);
+            },
         };
         // `Mail::kind()` and `Kind::ID` are both the typed `KindId`
         // newtype (`KindId: PartialEq`), so they compare directly.
@@ -3696,21 +3812,29 @@ fn build_inputs_manifest_consts(
     for h in handlers {
         let k = &h.kind_ty;
         let doc_expr = option_str_token(h.agent_doc.as_ref());
-        // ADR-0112: the reply class rides the handler record as a
+        // ADR-0112 / ADR-0134: the reply class rides the handler record as a
         // `ReplyContract` `(tag, id)` pair — `(0, 0)` for a single `-> ()`,
-        // `(1, R::ID)` for a single `-> R` / `-> Pending<R>`, `(3, 0)` for a
-        // manual handler (no single static reply kind). `Stream` is
-        // unreachable — `parse_handler_class` rejects `#[handler::stream]`.
+        // `(1, R::ID)` for a single `-> R` / `-> Pending<R>`, `(2, K::ID)` for
+        // a multi handler emitting `K` (the element kind off its `Multi<K>`
+        // ctx marker), `(3, 0)` for a manual handler (no single static reply
+        // kind).
         let (reply_tag_expr, reply_id_expr) = match (h.class, h.reply.manifest_kind()) {
             (HandlerClass::Manual, _) => (quote! { 3u8 }, quote! { 0u64 }),
+            (HandlerClass::Multi, _) => {
+                let k = h
+                    .multi_kind
+                    .as_ref()
+                    .expect("a multi handler carries its `Multi<K>` emit kind");
+                (
+                    quote! { 2u8 },
+                    quote! { <#k as ::aether_actor::__macro_internals::Kind>::ID.0 },
+                )
+            }
             (HandlerClass::Single, Some(r)) => (
                 quote! { 1u8 },
                 quote! { <#r as ::aether_actor::__macro_internals::Kind>::ID.0 },
             ),
             (HandlerClass::Single, None) => (quote! { 0u8 }, quote! { 0u64 }),
-            (HandlerClass::Stream, _) => {
-                unreachable!("parse_handler_class rejects #[handler::stream]")
-            }
         };
         // `inputs_handler_len` / `write_inputs_handler` take a raw `u64`
         // for the wire bytes; `Kind::ID` is `KindId` post-issue 466 so

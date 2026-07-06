@@ -164,6 +164,39 @@ mailbox id and kind id resolve at compile time. The handler takes the decoded ma
 **by value** and gets `&mut self` because nothing else can touch the state
 concurrently.
 
+## Reply classes
+
+A handler declares how it answers through its class marker
+([ADR-0112](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0112-handler-reply-classes.md),
+[ADR-0134](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0134-multi-reply-class-and-explicit-handler-classes.md)).
+The **single** class (`#[handler]` / `#[handler::single]`) answers 0-or-1 through
+its return value — `-> R` sends `R` back, `-> ()` is fire-and-forget. The
+**manual** class (`#[handler::manual]`) takes a `Manual` ctx and issues its own
+replies by hand (`ctx.reply` / `ctx.reply_to`), for a reply it can't compute this
+turn.
+
+The **multi** class (`#[handler::multi]`) answers one dispatch with *several*
+mails. Its ctx is `Multi<K>` and it emits 0..n mails of the declared kind `K`
+through `ctx.emit`, returning `()` — the emissions are the reply:
+
+```rust
+#[handler::multi]
+fn on_query(&mut self, ctx: &mut WasmCtx<'_, Multi<Row>>, q: Query) {
+    for row in self.rows_matching(&q) {
+        ctx.emit(&row);            // one Row mail per match
+    }
+}
+```
+
+Each `emit` is a **detached chain root addressed at the dispatch source** — the
+mail goes back to whoever sent the query, correlated by its payload, on a fresh
+causal chain rather than the request's. So the request chain settles promptly on
+the handler's return instead of staying open for the stream, and every emission
+has the same chain shape regardless of when the producer sends it. A dispatch with
+no routable source (session / broadcast mail) drops the emission with a warning.
+The `#[actor]` macro reads `K` off the `Multi<K>` marker, so
+`describe_component` reports the real `ReplyContract::Multi(K)` element kind.
+
 ## Configuring an actor
 
 An actor can take typed **boot configuration**. Declare a `Config` associated type

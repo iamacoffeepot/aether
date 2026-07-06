@@ -26,17 +26,26 @@ fn ui() {
     // can't link the substrate types — the existing native fixtures here
     // are all macro-level diagnostics that fire before path resolution).
     t.pass("tests/ui/accepts_manual_handler_wasm.rs");
+    // ADR-0134: the multi reply class compiles on both expansion paths. The
+    // wasm fixture type-checks the full `emit` body; the native fixture uses
+    // the split + runtime-feature gate (like `accepts_actor_split_task_handler`)
+    // so the substrate-typed runtime surface cfgs out, leaving the assertion
+    // that the macro accepts the `#[handler::multi]` + `Multi<K>` signature.
+    t.pass("tests/ui/accepts_multi_handler_wasm.rs");
+    t.pass("tests/ui/accepts_multi_handler_native.rs");
     t.compile_fail("tests/ui/rejects_duplicate_handler_kind_wasm.rs");
     t.compile_fail("tests/ui/rejects_duplicate_handler_kind_native.rs");
     t.compile_fail("tests/ui/rejects_missing_namespace_wasm.rs");
     t.compile_fail("tests/ui/rejects_missing_namespace_native.rs");
     t.compile_fail("tests/ui/rejects_stray_const_wasm.rs");
     t.compile_fail("tests/ui/rejects_stray_const_native.rs");
-    // ADR-0112: `#[handler::stream]` is reserved (a macro error, so the
-    // native fixture works too); a wasm marker / class disagreement fails
-    // to unify.
-    t.compile_fail("tests/ui/rejects_stream_reserved_wasm.rs");
-    t.compile_fail("tests/ui/rejects_stream_reserved_native.rs");
+    // ADR-0134: a `#[handler::multi]` without the required `Multi<K>` ctx
+    // marker earns a pointed macro error; a non-`()` return is rejected on
+    // the native path; and `#[handler::multi(task)]` is rejected like any
+    // class-marked task handler.
+    t.compile_fail("tests/ui/rejects_multi_marker_mismatch_wasm.rs");
+    t.compile_fail("tests/ui/rejects_multi_nonunit_return_native.rs");
+    t.compile_fail("tests/ui/rejects_multi_task_handler_native.rs");
     t.compile_fail("tests/ui/rejects_manual_marker_mismatch_wasm.rs");
     // ADR-0112 (single-locked): a single-class `#[handler]` body has no
     // reply surface (`OutboundReply` is not impl'd for the `Single` ctx),

@@ -58,7 +58,9 @@ pub mod trace;
 pub mod wasm;
 
 pub use local::Local;
-pub use model::ctx::{MailSender, Manual, OutboundReply, Persistence, ReplyMode, Single, Stream};
+pub use model::ctx::{
+    Emit, MailSender, Manual, Multi, OutboundReply, Persistence, ReplyMode, Single,
+};
 pub use model::slot::Slot;
 pub use model::{
     Actor, Addressable, EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced, Lifecycle,

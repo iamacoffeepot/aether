@@ -1,0 +1,5 @@
+error: #[handler::multi] must return `()` — a multi handler answers with 0..n `ctx.emit` calls, so a return value has no reply path (ADR-0134)
+  --> tests/ui/rejects_multi_nonunit_return_native.rs:56:7
+   |
+56 |     ) -> u32 {
+   |       ^^^^^^

@@ -1161,16 +1161,26 @@ mod tests {
                 doc: None,
                 reply: aether_data::ReplyContract::Manual,
             },
+            InputsRecord::Handler {
+                id: aether_data::KindId(4),
+                name: "multi".into(),
+                doc: None,
+                reply: aether_data::ReplyContract::Multi(aether_data::KindId(0x5678)),
+            },
         ]);
         let wasm = wasm_with_section(INPUTS_SECTION, &section);
         let caps = read_inputs_from_bytes(&wasm).unwrap();
-        assert_eq!(caps.handlers.len(), 3);
+        assert_eq!(caps.handlers.len(), 4);
         assert_eq!(caps.handlers[0].reply, aether_data::ReplyContract::None);
         assert_eq!(
             caps.handlers[1].reply,
             aether_data::ReplyContract::One(aether_data::KindId(0xabcd))
         );
         assert_eq!(caps.handlers[2].reply, aether_data::ReplyContract::Manual);
+        assert_eq!(
+            caps.handlers[3].reply,
+            aether_data::ReplyContract::Multi(aether_data::KindId(0x5678))
+        );
     }
 
     #[test]
