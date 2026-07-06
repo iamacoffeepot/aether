@@ -10,7 +10,11 @@
 //! `.dsl` / `.obj` mesh file and replays it to the render sink,
 //! selected by the `aether_kit@aether.mesh_viewer` export). The
 //! camera's `aether.camera.*` driver kinds live in [`camera`]; the
-//! mesh viewer's `aether.mesh.load` kind lives in [`mesh`].
+//! mesh viewer's `aether.mesh.load` kind lives in [`mesh`]. The
+//! [`world`] module holds the chunked world plane stack — the
+//! `World` / `Chunk` / `Material` data layer and its
+//! `aether.kit.world.{set_chunk,set_region,load}` wire kinds — that a
+//! world-view actor meshes to the render sink.
 //!
 //! # Units
 //!
@@ -32,6 +36,12 @@ use serde::{Deserialize, Serialize};
 
 pub mod camera;
 pub mod mesh;
+pub mod world;
+
+pub use world::{
+    CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk, ChunkPos, Material, Region,
+    SetChunk, SetRegion, World, WorldDecodeError, WorldLoad,
+};
 
 #[cfg(feature = "runtime")]
 pub mod runtime;
