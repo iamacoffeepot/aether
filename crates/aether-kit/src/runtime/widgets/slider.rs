@@ -134,7 +134,7 @@ impl WasmActor for SliderWidget {
     /// Reconfigure the range / step / theme in place, re-clamping the current
     /// value into the new range. `initial` is ignored on re-config (it seeds
     /// the value only at init) so a restyle does not jump the value.
-    #[handler]
+    #[handler::single]
     fn on_config(&mut self, _ctx: &mut WasmCtx<'_>, config: SliderConfig) {
         self.min = config.min;
         self.max = config.max;
@@ -144,31 +144,31 @@ impl WasmActor for SliderWidget {
     }
 
     /// Restyle: adopt the fanned theme.
-    #[handler]
+    #[handler::single]
     fn on_set_theme(&mut self, _ctx: &mut WasmCtx<'_>, set: SetTheme) {
         self.theme = set.theme;
     }
 
     /// Cache the layout rect the root assigned.
-    #[handler]
+    #[handler::single]
     fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
         self.frame = frame;
     }
 
     /// Take keyboard focus (draw the focus ring).
-    #[handler]
+    #[handler::single]
     fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
         self.focused = true;
     }
 
     /// Release keyboard focus.
-    #[handler]
+    #[handler::single]
     fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
         self.focused = false;
     }
 
     /// A left press begins a drag and sets the value from the cursor.
-    #[handler]
+    #[handler::single]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         if press.button != mouse_button::LEFT {
             return;
@@ -179,7 +179,7 @@ impl WasmActor for SliderWidget {
     }
 
     /// A move while dragging updates the value and streams it uncommitted.
-    #[handler]
+    #[handler::single]
     fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
         if !self.dragging {
             return;
@@ -189,7 +189,7 @@ impl WasmActor for SliderWidget {
     }
 
     /// A left release ends the drag and commits the value.
-    #[handler]
+    #[handler::single]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         if release.button != mouse_button::LEFT || !self.dragging {
             return;
@@ -201,7 +201,7 @@ impl WasmActor for SliderWidget {
 
     /// Arrow keys nudge by `step` and commit at once (focused only — the root
     /// forwards keyboard mail to the focused child).
-    #[handler]
+    #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         let delta = match key.code {
             KEY_LEFT | KEY_DOWN => -self.nudge_amount(),
@@ -217,7 +217,7 @@ impl WasmActor for SliderWidget {
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
-    #[handler]
+    #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         let width = self.frame.width;
         let height = self.frame.height;

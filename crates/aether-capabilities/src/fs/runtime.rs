@@ -145,7 +145,7 @@ impl NativeActor for FsCapability {
     ///
     /// # Agent
     /// Reply: `ReadResult`. Echoes namespace + path on both arms.
-    #[handler]
+    #[handler::single]
     fn on_read(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Read) -> ReadResult {
         let Some(adapter) = state.registry.get(&mail.namespace) else {
             return ReadResult::Err {
@@ -174,7 +174,7 @@ impl NativeActor for FsCapability {
     ///
     /// # Agent
     /// Reply: `WriteResult`. Echoes namespace + path (NOT bytes).
-    #[handler]
+    #[handler::single]
     fn on_write(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Write) -> WriteResult {
         let Some(adapter) = state.registry.get(&mail.namespace) else {
             return WriteResult::Err {
@@ -206,7 +206,7 @@ impl NativeActor for FsCapability {
     ///
     /// # Agent
     /// Reply: `CopyResult`. Echoes `from` + `to` (no bytes).
-    #[handler]
+    #[handler::single]
     fn on_copy(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Copy) -> CopyResult {
         let Some(adapter) = state.registry.get(&mail.to.namespace) else {
             return CopyResult::Err {
@@ -242,7 +242,7 @@ impl NativeActor for FsCapability {
     ///
     /// # Agent
     /// Reply: `DeleteResult`. Echoes namespace + path.
-    #[handler]
+    #[handler::single]
     fn on_delete(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Delete) -> DeleteResult {
         let Some(adapter) = state.registry.get(&mail.namespace) else {
             return DeleteResult::Err {
@@ -268,7 +268,7 @@ impl NativeActor for FsCapability {
     ///
     /// # Agent
     /// Reply: `ListResult`. Echoes namespace + prefix.
-    #[handler]
+    #[handler::single]
     fn on_list(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: List) -> ListResult {
         let Some(adapter) = state.registry.get(&mail.namespace) else {
             return ListResult::Err {
@@ -307,7 +307,7 @@ impl NativeActor for FsCapability {
     ///
     /// # Agent
     /// Reply: `FsFetchResult`. Echoes namespace + path on both arms.
-    #[handler]
+    #[handler::single]
     fn on_fetch(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: FsFetch) -> FsFetchResult {
         let Some(adapter) = state.registry.get(&mail.namespace) else {
             return FsFetchResult::Err {

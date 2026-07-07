@@ -49,20 +49,20 @@ impl WasmActor for LabelWidget {
     }
 
     /// Change the text / theme in place from a re-sent config.
-    #[handler]
+    #[handler::single]
     fn on_config(&mut self, _ctx: &mut WasmCtx<'_>, config: LabelConfig) {
         self.text = config.text;
         self.theme = config.theme;
     }
 
     /// Restyle: adopt the fanned theme.
-    #[handler]
+    #[handler::single]
     fn on_set_theme(&mut self, _ctx: &mut WasmCtx<'_>, set: SetTheme) {
         self.theme = set.theme;
     }
 
     /// Cache the layout rect the root assigned.
-    #[handler]
+    #[handler::single]
     fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
         self.frame = frame;
     }
@@ -71,7 +71,7 @@ impl WasmActor for LabelWidget {
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
-    #[handler]
+    #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         let size = self.theme.label_size_pixels;
         let mut items: Vec<WidgetDrawItem> = Vec::new();

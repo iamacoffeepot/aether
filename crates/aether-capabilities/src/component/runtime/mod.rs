@@ -150,7 +150,7 @@ impl NativeActor for ComponentHostCapability {
     /// Errors (bad wire bytes, kind conflict, name conflict,
     /// invalid wasm, instantiation trap) come back as
     /// `LoadResult::Err`.
-    #[handler]
+    #[handler::single]
     fn on_load_component(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -177,7 +177,7 @@ impl NativeActor for ComponentHostCapability {
     /// # Agent
     /// `DropComponent { mailbox_id }`. The `mailbox_id` is the
     /// trampoline's id from the `LoadResult.mailbox_id` field.
-    #[handler]
+    #[handler::single]
     fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: DropComponent) {
         // Cap-side cleanup: ask each owning cap to drop the dying
         // trampoline from its fan-out sets. Mail rather than direct
@@ -222,7 +222,7 @@ impl NativeActor for ComponentHostCapability {
     /// `export` (ADR-0096) names which exported actor type of the
     /// replacement module to instantiate; `None` reuses the type the
     /// trampoline currently hosts.
-    #[handler]
+    #[handler::single]
     fn on_replace_component(
         _state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -252,7 +252,7 @@ impl NativeActor for ComponentHostCapability {
     /// boot-manifest spawn (ADR-0116) to learn deterministically when a
     /// requested component is loaded, instead of inferring liveness by
     /// proxy.
-    #[handler]
+    #[handler::single]
     fn on_list_components(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -282,7 +282,7 @@ impl NativeActor for ComponentHostCapability {
     /// config kind; `Err { error }` means nothing is registered at that name.
     /// Name-addressed so a boot-manifest-loaded component (ADR-0116), whose
     /// spawner never receives a mailbox id, stays introspectable.
-    #[handler]
+    #[handler::single]
     fn on_describe_component(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,

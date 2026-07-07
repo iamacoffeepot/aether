@@ -51,7 +51,7 @@ impl aether_actor::WasmActor for Counter {
 
     fn on_dehydrate(&mut self, _ctx: &mut aether_actor::WasmDropCtx<'_>) {}
 
-    #[handler]
+    #[handler::single]
     fn on_bump(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, bump: Bump) {
         self.count += bump.delta;
     }

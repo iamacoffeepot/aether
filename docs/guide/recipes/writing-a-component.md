@@ -70,7 +70,7 @@ multi-actor examples.
 
 ## 2. Write the actor block
 
-The receive side is one `#[actor] impl WasmActor for C` block. Each `#[handler]`
+The receive side is one `#[actor] impl WasmActor for C` block. Each `#[handler::<class>]`
 method *is* a handler — the macro infers the kind it handles from the method's third
 parameter, so there's no typelist to maintain.
 
@@ -99,7 +99,7 @@ impl WasmActor for MyComponent {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
     }
 
-    #[handler]
+    #[handler::single]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         ctx.actor::<RenderCapability>().send(&TRIANGLE);
     }

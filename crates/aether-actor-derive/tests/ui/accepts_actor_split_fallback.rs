@@ -45,7 +45,7 @@ impl aether_substrate::actor::native::NativeActor for FallbackCap {
         Ok(FallbackCapState { seen: 0 })
     }
 
-    #[handler]
+    #[handler::single]
     fn on_ping(
         state: &mut Self::State,
         _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>,

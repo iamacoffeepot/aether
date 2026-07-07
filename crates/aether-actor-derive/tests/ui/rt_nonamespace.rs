@@ -4,6 +4,6 @@
 // so the harvest errors on the missing name.
 struct Whatever;
 impl NativeActor for Whatever {
-    #[handler]
+    #[handler::single]
     fn on_x(state: &mut Self::State, ctx: &mut Ctx, mail: Ping) {}
 }

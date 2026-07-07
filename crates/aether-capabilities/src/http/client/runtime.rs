@@ -124,7 +124,7 @@ impl NativeActor for HttpCapability {
     /// # Agent
     /// Reply: `FetchResult`. Synchronous on the dispatcher thread —
     /// long-running fetches block other HTTP mail until they finish.
-    #[handler]
+    #[handler::single]
     fn on_fetch(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Fetch) -> FetchResult {
         let timeout = mail.timeout_ms.map_or(state.default_timeout, |ms| {
             Duration::from_millis(u64::from(ms))

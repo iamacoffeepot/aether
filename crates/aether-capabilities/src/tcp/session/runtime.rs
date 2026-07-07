@@ -188,7 +188,7 @@ impl NativeActor for TcpSessionActor {
     /// fires per chunk, but the handler drains until the queue
     /// is empty so coalesced wakes process all outstanding chunks
     /// in one dispatcher tick.
-    #[handler]
+    #[handler::single]
     fn on_data_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: SessionDataReady) {
         while let Ok(item) = state.bytes_rx.try_recv() {
             match item {
@@ -208,7 +208,7 @@ impl NativeActor for TcpSessionActor {
     /// the dispatcher thread; for chunks larger than the kernel
     /// buffer this can block briefly, but typical request /
     /// response traffic clears in microseconds.
-    #[handler]
+    #[handler::single]
     fn on_session_write(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SessionWrite) {
         if let Err(e) = state.write_half.write_all(&mail.bytes) {
             tracing::warn!(
@@ -227,7 +227,7 @@ impl NativeActor for TcpSessionActor {
     /// mail, runs `unwire` (which joins the read thread).
     // Stateless close-request handler: shutdown is via ctx, so `_state`
     // is unused.
-    #[handler]
+    #[handler::single]
     fn on_close_request(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: SessionClose) {
         ctx.shutdown();
     }

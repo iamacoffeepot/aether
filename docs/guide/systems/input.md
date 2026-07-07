@@ -145,7 +145,7 @@ form: `input.subscribe_for::<Key>(other_mailbox)`.
 Then handle each stream as its kind, like any other mail:
 
 ```rust
-#[handler]
+#[handler::single]
 fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) { /* react to a keystroke */ }
 ```
 

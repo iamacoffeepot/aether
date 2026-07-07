@@ -68,7 +68,7 @@ aether-capabilities = { path = "../aether-capabilities", default-features = fals
 
 ## 3. Write the handler
 
-A handler is a wasm component with one `#[handler]` for
+A handler is a wasm component with one `#[handler::single]` for
 `aether.http.server.request`. It replies `aether.http.server.response` with a
 status code, optional headers, and a byte body. The server writes the formatted
 HTTP/1.1 response to the client socket. On HTTP/1.1 the connection is kept alive
@@ -90,7 +90,7 @@ impl WasmActor for Web {
         Ok(Web)
     }
 
-    #[handler]
+    #[handler::single]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpServerResponse {
         let (status, body): (u16, &[u8]) = match req.path.as_str() {
             "/" => (200, b"hello"),
@@ -107,8 +107,8 @@ impl WasmActor for Web {
 aether_actor::export!(Web);
 ```
 
-A bare `#[handler]` is the `Single` class: it replies by *returning* its kind, as
-above. `#[handler::manual]` opts into the `Manual` ctx (`WasmCtx<'_, Manual>`)
+`#[handler::single]` replies by *returning* its kind, as above.
+`#[handler::manual]` opts into the `Manual` ctx (`WasmCtx<'_, Manual>`)
 whose `ctx.reply(&…)` sends the reply explicitly — reach for it when one handler
 needs to reply one of *several* kinds (see "Mixing buffered and streamed routes"
 below), since a single return type can't express that choice.
@@ -199,7 +199,7 @@ which name the handler mailbox explicitly.
 The `kind` field names the kind the route's requests dispatch as.
 `HttpServerRequest::ID` keeps the generic shape. Registering a route-specific
 kind — a struct with `aether.http.server.request`'s fields under its own
-`#[kind(name = …)]` — routes each prefix to its own `#[handler]`, with its own
+`#[kind(name = …)]` — routes each prefix to its own `#[handler::single]`, with its own
 `describe_component` entry and `actor_cost` row; the payload bytes are always
 request-shaped, so the route kind decodes them directly.
 
@@ -254,7 +254,7 @@ The typed surface writes that whole registration for you (ADR-0131). Put
 `#[http::router]` on the actor's impl block, above `#[actor]`, and
 `#[http::route(<Method|any>, "<prefix>")]` on a method; the macros mint the
 route's request-shaped kind, inject the `register_route_self` send into `wire`,
-and turn the method into the route's `#[handler]`. A routed method takes an
+and turn the method into the route's `#[handler::single]`. A routed method takes an
 `http::Ctx<'_, C>` — the transport ctx (`WasmCtx` here) plus the request and
 matched route, dereffing to the ctx so mail sends read as usual — and returns
 `HttpServerResponse`:
@@ -321,7 +321,7 @@ an `impl NativeActor` takes `http::Ctx<'_, NativeCtx<'_>>` with a
 
 Drop to the raw `register_route_self` surface above for a streaming route
 (`HttpResponseStreamOpen`) — the typed surface returns `HttpServerResponse`, so
-a streamed response keeps its own hand-written `#[handler]`.
+a streamed response keeps its own hand-written `#[handler::single]`.
 
 ### Scaling one handler to N instances
 
@@ -411,7 +411,7 @@ impl WasmActor for Feed {
     }
 
     // Open the stream. The body arrives later, one chunk per unit of credit.
-    #[handler]
+    #[handler::single]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpResponseStreamOpen {
         self.next = 0;
         self.done = false;
@@ -451,7 +451,7 @@ purely opt-in per reply.
 ## Mixing buffered and streamed routes
 
 "Stream one route, buffer the rest" is a single handler choosing between two
-reply kinds per request — a bare `#[handler]`'s return type can only be one
+reply kinds per request — a `#[handler::single]`'s return type can only be one
 kind, so this is exactly the case that needs `#[handler::manual]` and its
 `Manual` ctx, whose `ctx.reply(&…)` sends the reply explicitly instead of
 returning it:
@@ -477,7 +477,7 @@ fn on_request(&mut self, ctx: &mut WasmCtx<'_, Manual>, req: HttpServerRequest) 
 ```
 
 Use `#[handler::manual]` + `ctx.reply` when a single route chooses between
-reply shapes; return from a bare `#[handler]` otherwise.
+reply shapes; return from a `#[handler::single]` otherwise.
 
 ## Verify against current code
 

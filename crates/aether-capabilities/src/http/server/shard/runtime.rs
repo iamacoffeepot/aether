@@ -97,7 +97,7 @@ impl NativeActor for HttpDispatchShard {
     /// Internal wake mail — not part of the cap's external surface. The
     /// supervisor and this shard's reader sidecars fire this; the handler
     /// drains the mpsc and acts per item.
-    #[handler]
+    #[handler::single]
     fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: HttpInboundReady) {
         WakeSink::arm_for_drain(&state.wake_dirty);
         while let Ok(event) = state.inbound_rx.try_recv() {
@@ -187,7 +187,7 @@ impl NativeActor for HttpDispatchShard {
     /// Not user-callable — a streaming handler sends this after replying
     /// [`HttpResponseStreamOpen`], paced by the cap's
     /// [`HttpStreamCredit`](crate::http::kinds::HttpStreamCredit) grants.
-    #[handler]
+    #[handler::single]
     fn on_response_chunk(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -202,7 +202,7 @@ impl NativeActor for HttpDispatchShard {
     /// # Agent
     /// Not user-callable — a streaming handler sends this once after its
     /// final [`HttpResponseChunk`] to close the stream.
-    #[handler]
+    #[handler::single]
     fn on_response_stream_end(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -224,7 +224,7 @@ impl NativeActor for HttpDispatchShard {
     /// mails, to let the cap deliver more of the request body.
     ///
     /// [`HttpStreamCredit`]: crate::http::kinds::HttpStreamCredit
-    #[handler]
+    #[handler::single]
     fn on_request_credit(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -239,7 +239,7 @@ impl NativeActor for HttpDispatchShard {
     ///
     /// # Agent
     /// Internal — fires from the settlement registry, not external mail.
-    #[handler]
+    #[handler::single]
     fn on_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Settled) {
         let correlation = mail.root.correlation_id;
         let Some(pending) = state.in_flight.remove(&correlation) else {
@@ -263,7 +263,7 @@ impl NativeActor for HttpDispatchShard {
     /// Not user-callable — an upgraded connection's handler sends this to
     /// speak to the peer; the cap frames it and drains it under the credit
     /// window.
-    #[handler]
+    #[handler::single]
     fn on_websocket_message(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -288,7 +288,7 @@ impl NativeActor for HttpDispatchShard {
     /// # Agent
     /// Not user-callable — an upgraded connection's handler sends this to close
     /// the socket.
-    #[handler]
+    #[handler::single]
     fn on_websocket_close(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,

@@ -239,7 +239,7 @@ impl NativeActor for LifecycleCapability {
     /// # Agent
     /// `LifecycleSubscribe { stage, mailbox }`. Stage must be a kind
     /// id registered as a state or terminal in the lifecycle graph.
-    #[handler]
+    #[handler::single]
     fn on_subscribe(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -279,7 +279,7 @@ impl NativeActor for LifecycleCapability {
     /// # Agent
     /// `LifecycleSubscribeSelf { stage }`. Stage must be a kind id
     /// registered as a state or terminal in the lifecycle graph.
-    #[handler]
+    #[handler::single]
     fn on_subscribe_self(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -322,7 +322,7 @@ impl NativeActor for LifecycleCapability {
     ///
     /// # Agent
     /// `LifecycleUnsubscribe { stage, mailbox }`.
-    #[handler]
+    #[handler::single]
     fn on_unsubscribe(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -355,7 +355,7 @@ impl NativeActor for LifecycleCapability {
     ///
     /// # Agent
     /// `LifecycleUnsubscribeSelf { stage }`.
-    #[handler]
+    #[handler::single]
     fn on_unsubscribe_self(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -403,7 +403,7 @@ impl NativeActor for LifecycleCapability {
     ///
     /// # Agent
     /// `LifecycleUnsubscribeAll { mailbox }`. Idempotent.
-    #[handler]
+    #[handler::single]
     fn on_unsubscribe_all(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -421,7 +421,7 @@ impl NativeActor for LifecycleCapability {
     /// # Agent
     /// `Quit {}`. Sent by chassis bridges from ctrlc / winit
     /// `WindowEvent::CloseRequested` / future hub-shutdown mail.
-    #[handler]
+    #[handler::single]
     fn on_quit(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _payload: Quit) {
         state.quit_pending = true;
     }

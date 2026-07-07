@@ -1,7 +1,7 @@
-//! An `#[actor] impl NativeActor` block that omits `const NAMESPACE` is
-//! rejected at the type — rather than falling through to a later
-//! "no associated const NAMESPACE" error against the surfaceless `Actor`
-//! trait.
+//! Issue #2607 (ADR-0134): the classless `#[handler(mail)]` paren form is
+//! rejected exactly like bare `#[handler]` — the `mail` variant trigger
+//! carries no reply class, so it hits the same "requires an explicit reply
+//! class" error naming all three accepted spellings.
 
 use aether_actor::actor;
 
@@ -20,11 +20,13 @@ struct Ping {
 }
 
 #[allow(dead_code)]
-struct NoNamespace;
+struct BareMailVariant;
 
 #[actor]
-impl aether_substrate::actor::native::NativeActor for NoNamespace {
+impl aether_substrate::actor::native::NativeActor for BareMailVariant {
     type Config = ();
+
+    const NAMESPACE: &'static str = "bare_mail_variant";
 
     fn init(
         _config: (),
@@ -33,7 +35,7 @@ impl aether_substrate::actor::native::NativeActor for NoNamespace {
         unimplemented!()
     }
 
-    #[handler::single]
+    #[handler(mail)]
     fn on_ping(
         &mut self,
         _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>,

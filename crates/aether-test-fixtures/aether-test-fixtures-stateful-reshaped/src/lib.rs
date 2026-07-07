@@ -60,7 +60,7 @@ impl WasmActor for Counter {
         self.generation = state.generation;
     }
 
-    #[handler]
+    #[handler::single]
     fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.count += 1;
     }

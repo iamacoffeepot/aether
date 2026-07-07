@@ -50,7 +50,7 @@ impl WasmActor for SourceObserver {
     /// (not a compile-time type), so we address it by raw id via the
     /// ctx-mediated `ctx.send_to`, which threads this actor's own id as the
     /// send's `from` (issue 1987).
-    #[handler]
+    #[handler::single]
     fn on_send_source_query(&mut self, ctx: &mut WasmCtx<'_>, msg: SendSourceQuery) {
         ctx.send_to(MailboxId(msg.to), &SourceQuery);
     }

@@ -165,7 +165,7 @@ impl NativeActor for RenderCapability {
     /// `DRAW_TRIANGLE_BYTES` per triangle, batched via `send_many`)
     /// per tick. Fire-and-forget; the cap accumulates into
     /// `frame_vertices` until the chassis driver records the frame.
-    #[handler]
+    #[handler::single]
     fn on_draw_triangle(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mails: &[DrawTriangle]) {
         if let Some(obs) = &state.config.observed_kinds {
             obs.lock()
@@ -209,7 +209,7 @@ impl NativeActor for RenderCapability {
     /// # Agent
     /// Camera components mail `aether.camera { view_proj: [f32; 16] }`
     /// to this mailbox. Fire-and-forget; latest value wins.
-    #[handler]
+    #[handler::single]
     fn on_camera(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Camera) {
         if let Some(obs) = &state.config.observed_kinds {
             obs.lock()
@@ -389,7 +389,7 @@ impl NativeActor for RenderCapability {
     /// Mail `aether.render.create_texture { width, height, pixels }`;
     /// the reply `aether.render.create_texture_result` carries the
     /// `texture_id` to thread into `draw_textured_quads`.
-    #[handler]
+    #[handler::single]
     fn on_create_texture(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -447,7 +447,7 @@ impl NativeActor for RenderCapability {
     /// # Agent
     /// Mail `aether.render.update_texture { texture_id, x, y, width,
     /// height, pixels }` to grow an atlas; no reply.
-    #[handler]
+    #[handler::single]
     fn on_update_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UpdateTexture) {
         if let Some(obs) = &state.config.observed_kinds {
             obs.lock()
@@ -487,7 +487,7 @@ impl NativeActor for RenderCapability {
     /// # Agent
     /// Mail `aether.render.draw_textured_quads { texture_id, space,
     /// quads }` every frame the quads should appear; no reply.
-    #[handler]
+    #[handler::single]
     fn on_draw_textured_quads(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -521,7 +521,7 @@ impl NativeActor for RenderCapability {
     /// # Agent
     /// Mail `aether.render.draw_solid_quads { space, quads }` every
     /// frame the rects should appear; no reply.
-    #[handler]
+    #[handler::single]
     fn on_draw_solid_quads(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,

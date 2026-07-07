@@ -8,7 +8,7 @@ mailbox on the air. By the end you have a mailbox reachable by mail on
 whichever chassis you wire it into.
 
 This is the native half of the actor model. The authoring shape — `init`
-/ `wire` / `unwire`, `#[handler]`, addressing by type — is the same one
+/ `wire` / `unwire`, `#[handler::<class>]`, addressing by type — is the same one
 [The actor model](../foundations/actor-model.md) walks for components;
 read that first if the `#[actor]` shape is new. The capability-specific
 parts are the host machinery: where the code lives, the builder
@@ -90,7 +90,7 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 /// The cap's mutable state — the font registry, glyph atlas, and parked
-/// `load_font` requests. `#[handler]`s receive it as `state: &mut
+/// `load_font` requests. `#[handler::<class>]`s receive it as `state: &mut
 /// Self::State`.
 pub struct TextCapabilityState { /* … */ }
 
@@ -106,7 +106,7 @@ impl NativeActor for TextCapability {
 
     // Fire-and-forget: the handler returns `()`. `draw` lays the string
     // out and emits textured quads to `aether.render` the same tick.
-    #[handler]
+    #[handler::single]
     fn on_draw_text(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawText) {
         // … rasterize glyphs, send the quad batch …
     }
@@ -139,7 +139,7 @@ The pieces:
   module is present. No inner `#[cfg]` is needed.
 - **`type State`** names the runtime struct holding the cap's mutable
   state. It lives in the feature-gated `runtime` module so it never
-  compiles into a wasm build, and `#[handler]`s receive it as
+  compiles into a wasm build, and `#[handler::<class>]`s receive it as
   `state: &mut Self::State`.
 - **`type Config`** is `()` for a config-free cap, or a real struct
   ([step 3](#3-give-it-a-config-if-it-needs-one)). The chassis builder
@@ -156,7 +156,7 @@ The pieces:
   streams or announce yourself from `wire`, not `init`.
   **`unwire(&mut self, ctx)`** (optional) is the symmetric pre-shutdown
   hook. Text needs neither.
-- **`#[handler] fn on_x(state: &mut Self::State, ctx, mail: K)`** infers
+- **`#[handler::<class>] fn on_x(state: &mut Self::State, ctx, mail: K)`** infers
   the kind from its third parameter. The first parameter is the runtime
   state, threaded explicitly because the identity carries none — take
   `&Self::State` for a read-only handler, `&mut Self::State` to mutate; the

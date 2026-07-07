@@ -56,7 +56,7 @@ impl WasmActor for UiWidget {
     /// the naive profile it rebuilds the `DrawSolidQuads` batch and sends
     /// it across the boundary every frame — the measured cost adds the
     /// batch build + mail encode + send that host-cached replay removes.
-    #[handler]
+    #[handler::single]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _: Tick) {
         if !self.config.redraw_each_tick {
             return;

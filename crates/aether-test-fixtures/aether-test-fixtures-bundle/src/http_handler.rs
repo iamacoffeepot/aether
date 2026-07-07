@@ -52,7 +52,7 @@ impl WasmActor for HttpHandler {
     /// Not sent manually — the `aether.http.server` cap dispatches it
     /// on every inbound request. Configure `HttpServerConfig.handler_mailbox`
     /// to `"aether.component/aether.embedded:test.web"` to route here.
-    #[handler]
+    #[handler::single]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpServerResponse {
         HttpServerResponse {
             status: 200,
@@ -105,7 +105,7 @@ impl WasmActor for StreamingHttpHandler {
     /// every inbound request. Route here by pointing
     /// `HttpServerConfig.handler_mailbox` at
     /// `"aether.component/aether.embedded:test.web_stream"`.
-    #[handler]
+    #[handler::single]
     fn on_request(
         &mut self,
         _ctx: &mut WasmCtx<'_>,
@@ -190,7 +190,7 @@ impl WasmActor for WebSocketHandler {
     /// Not sent manually — the `aether.http.server` cap dispatches an
     /// `HttpServerRequest` for a websocket upgrade; replying `WebSocketAccept`
     /// completes the handshake, `HttpServerResponse` declines it.
-    #[handler]
+    #[handler::single]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> WebSocketAccept {
         WebSocketAccept {
             subprotocol: None,
@@ -205,7 +205,7 @@ impl WasmActor for WebSocketHandler {
     /// # Agent
     /// Not sent manually — the cap dispatches one per complete inbound
     /// websocket message on the upgraded connection.
-    #[handler]
+    #[handler::single]
     fn on_message(&mut self, ctx: &mut WasmCtx<'_>, msg: WebSocketMessage) {
         // The connection handle was captured on this connection's
         // accept-time credit grant (ADR-0132/ADR-0133), which always
@@ -259,7 +259,7 @@ impl WasmActor for WebSocketHandler {
     ///
     /// # Agent
     /// Not sent manually — the cap reports a peer close here.
-    #[handler]
+    #[handler::single]
     fn on_close(&mut self, _ctx: &mut WasmCtx<'_>, close: WebSocketClose) {
         self.connections.remove(&close.stream_id);
     }
@@ -388,7 +388,7 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// Not sent manually — the `aether.http.server` cap dispatches it on a
     /// request matching the `/routed-stream` route this actor claimed in
     /// `wire`.
-    #[handler]
+    #[handler::single]
     fn on_request(
         &mut self,
         _ctx: &mut WasmCtx<'_>,

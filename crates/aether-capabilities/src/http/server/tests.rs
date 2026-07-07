@@ -212,7 +212,7 @@ mod test_handlers {
         }
 
         /// Generic-kind dispatch for the hand-registered `/wired-extra`.
-        #[handler]
+        #[handler::single]
         fn on_extra(
             _state: &mut Self::State,
             _ctx: &mut NativeCtx<'_>,
@@ -331,7 +331,7 @@ mod test_handlers {
                     });)+
                 }
 
-                #[handler]
+                #[handler::single]
                 fn on_request(
                     _state: &mut Self::State,
                     _ctx: &mut NativeCtx<'_>,
@@ -393,7 +393,7 @@ mod test_handlers {
                     });)+
                 }
 
-                #[handler]
+                #[handler::single]
                 fn on_request(
                     _state: &mut Self::State,
                     _ctx: &mut NativeCtx<'_>,
@@ -613,7 +613,7 @@ mod test_handlers {
             Ok(EchoHttpHandlerState)
         }
 
-        #[handler]
+        #[handler::single]
         fn on_request(
             _state: &mut Self::State,
             _ctx: &mut NativeCtx<'_>,
@@ -671,7 +671,7 @@ mod test_handlers {
             Ok(FixedBodyHttpHandlerState)
         }
 
-        #[handler]
+        #[handler::single]
         fn on_request(
             _state: &mut Self::State,
             _ctx: &mut NativeCtx<'_>,
@@ -705,7 +705,7 @@ mod test_handlers {
             Ok(SilentHttpHandlerState)
         }
 
-        #[handler]
+        #[handler::single]
         fn on_request(
             _state: &mut Self::State,
             _ctx: &mut NativeCtx<'_>,
@@ -752,7 +752,7 @@ mod test_handlers {
             })
         }
 
-        #[handler]
+        #[handler::single]
         fn on_request(
             state: &mut Self::State,
             _ctx: &mut NativeCtx<'_>,
@@ -822,7 +822,7 @@ mod test_handlers {
             Ok(FloodHttpHandlerState { flooded: false })
         }
 
-        #[handler]
+        #[handler::single]
         fn on_request(
             _state: &mut Self::State,
             _ctx: &mut NativeCtx<'_>,
@@ -900,7 +900,7 @@ mod test_handlers {
 
         /// Count the piece and grant one credit back so the cap delivers the
         /// next — the inbound mirror of [`StreamHttpHandler::on_credit`].
-        #[handler]
+        #[handler::single]
         fn on_chunk(state: &mut Self::State, ctx: &mut NativeCtx<'_>, chunk: HttpRequestChunk) {
             state.received += chunk.body.len();
             if let Some(stream) = &state.stream {
@@ -908,7 +908,7 @@ mod test_handlers {
             }
         }
 
-        #[handler]
+        #[handler::single]
         fn on_stream_end(
             state: &mut Self::State,
             _ctx: &mut NativeCtx<'_>,

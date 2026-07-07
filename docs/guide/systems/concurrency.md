@@ -74,7 +74,7 @@ provider request, a subprocess — it hands the work *off* the scheduler thread
 ([ADR-0093](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0093-hold-until-resolve-dispatch-primitive.md)):
 
 ```rust
-#[handler]
+#[handler::single]
 fn on_generate(&mut self, ctx, req: NanobananaGenerate) {
     let provider = self.provider.clone();
     ctx.dispatch_blocking(move || provider.call(&req));   // runs off the worker
@@ -88,7 +88,7 @@ fn on_generate_done(&mut self, ctx, done: TaskDone<NanobananaResult>) {
 
 `dispatch_blocking` spawns the closure on a worker thread and returns
 immediately; the result comes back later as `TaskDone<Output>` in a
-`#[handler(task)]` handler — a *variant* of `#[handler]`, matched by its
+`#[handler(task)]` handler — a *variant* of `#[handler::<class>]`, matched by its
 `TaskDone<K>` parameter the way a mail handler matches its kind. `resolve(ctx)`
 sends the reply and drops the settlement hold. This is the sanctioned home for
 "reply in a later turn"; it replaced the hand-rolled `InFlightDispatch` the

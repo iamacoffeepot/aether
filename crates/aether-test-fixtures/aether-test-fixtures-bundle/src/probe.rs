@@ -112,7 +112,7 @@ impl WasmActor for Probe {
     /// per advance for every input-subscribed mailbox. Watch
     /// `receive_mail` for `aether.test_fixture.tick_observed` to see
     /// the count climbing.
-    #[handler]
+    #[handler::single]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _: Tick) {
         self.tick_count += 1;
         ctx.send_to_named::<TickObserved>(
@@ -151,7 +151,7 @@ impl WasmActor for Probe {
     /// Not sent manually; the substrate's input fan-out fires it for
     /// every `aether.input`-subscribed mailbox when a key is pressed.
     /// Watch `receive_mail` for `aether.test_fixture.key_observed`.
-    #[handler]
+    #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         ctx.send_to_named::<KeyObserved>(
             TEST_BENCH_OBSERVER_MAILBOX_NAME,
@@ -167,7 +167,7 @@ impl WasmActor for Probe {
     /// Not sent manually; the substrate's input fan-out fires it for
     /// every `TextInput`-subscribed mailbox when text is committed.
     /// Watch `receive_mail` for `aether.test_fixture.text_input_observed`.
-    #[handler]
+    #[handler::single]
     fn on_text_input(&mut self, ctx: &mut WasmCtx<'_>, input: TextInput) {
         ctx.send_to_named::<TextInputObserved>(
             TEST_BENCH_OBSERVER_MAILBOX_NAME,
@@ -182,7 +182,7 @@ impl WasmActor for Probe {
     /// Send via `send_mail` with `kind_name = "aether.test_fixture.set_render"`
     /// and params `{ r, g, b, visible }`. Used by `capture_frame`
     /// scenarios to flip the fixture's render output between frames.
-    #[handler]
+    #[handler::single]
     fn on_set_render(&mut self, _ctx: &mut WasmCtx<'_>, mail: SetRender) {
         self.render = mail;
     }

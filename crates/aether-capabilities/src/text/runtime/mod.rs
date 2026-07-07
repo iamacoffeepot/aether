@@ -451,7 +451,7 @@ impl NativeActor for TextCapability {
     /// Store the atlas `texture_id` once `create_texture` replies. The
     /// cap creates exactly one texture, so the single reply is always
     /// its atlas — no correlation key needed.
-    #[handler]
+    #[handler::single]
     fn on_create_texture_result(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -485,7 +485,7 @@ impl NativeActor for TextCapability {
     /// frame; the next frame recovers fully. The first `draw` lazily
     /// creates the atlas texture and draws nothing until the reply lands —
     /// resend every frame (immediate-mode contract).
-    #[handler]
+    #[handler::single]
     fn on_draw_text(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawText) {
         let Some(font) = state.fonts.get(&mail.font_id).cloned() else {
             tracing::warn!(

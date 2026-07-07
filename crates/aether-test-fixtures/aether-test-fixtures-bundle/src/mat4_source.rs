@@ -36,7 +36,7 @@ impl WasmActor for MatSource {
     /// # Agent
     /// Dispatch `aether.test_fixtures.mat4_source_trigger`; the reply
     /// (`aether.math.mat4_apply`) is the operand.
-    #[handler]
+    #[handler::single]
     fn on_trigger(&mut self, _ctx: &mut WasmCtx<'_>, _trigger: Mat4SourceTrigger) -> Mat4Apply {
         Mat4Apply {
             matrix: Mat4::from_cols_array([

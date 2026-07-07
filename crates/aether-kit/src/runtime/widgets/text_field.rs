@@ -126,7 +126,7 @@ impl WasmActor for TextFieldWidget {
     }
 
     /// Reset the contents / cap / theme in place from a re-sent config.
-    #[handler]
+    #[handler::single]
     fn on_config(&mut self, _ctx: &mut WasmCtx<'_>, config: TextFieldConfig) {
         self.cursor = config.initial.len();
         self.text = config.initial;
@@ -136,39 +136,39 @@ impl WasmActor for TextFieldWidget {
     }
 
     /// Restyle: adopt the fanned theme.
-    #[handler]
+    #[handler::single]
     fn on_set_theme(&mut self, _ctx: &mut WasmCtx<'_>, set: SetTheme) {
         self.theme = set.theme;
     }
 
     /// Cache the layout rect the root assigned.
-    #[handler]
+    #[handler::single]
     fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
         self.frame = frame;
     }
 
     /// Take keyboard focus (draw the caret and focus ring).
-    #[handler]
+    #[handler::single]
     fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
         self.focused = true;
     }
 
     /// Release keyboard focus.
-    #[handler]
+    #[handler::single]
     fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
         self.focused = false;
     }
 
     /// Insert committed text at the caret. `TextInput` is already resolved
     /// through the layout and IME, so it inserts verbatim.
-    #[handler]
+    #[handler::single]
     fn on_text_input(&mut self, _ctx: &mut WasmCtx<'_>, input: TextInput) {
         self.insert(&input.text);
     }
 
     /// Editing keys: Backspace deletes, Left / Right move the caret, Enter
     /// commits the current contents up to the panel root.
-    #[handler]
+    #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         match key.code {
             KEY_BACKSPACE => self.backspace(),
@@ -187,13 +187,13 @@ impl WasmActor for TextFieldWidget {
 
     /// Cache the latest modifier state (Ctrl / Shift / …) so future
     /// chord-aware edits can consult it.
-    #[handler]
+    #[handler::single]
     fn on_modifiers(&mut self, _ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
         self.modifiers = modifiers;
     }
 
     /// Track the in-flight IME composition. Empty text clears it.
-    #[handler]
+    #[handler::single]
     fn on_ime_preedit(&mut self, _ctx: &mut WasmCtx<'_>, preedit: ImePreedit) {
         self.preedit = preedit.text;
     }
@@ -203,7 +203,7 @@ impl WasmActor for TextFieldWidget {
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
-    #[handler]
+    #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         let width = self.frame.width;
         let height = self.frame.height;

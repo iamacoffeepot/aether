@@ -226,7 +226,7 @@ impl NativeActor for EngineServer {
     /// Send `ListEngines` (fieldless). Reply: `ListEnginesResult
     /// { engines: [{ engine_id, rpc_port, last_heartbeat_age_millis }],
     /// recently_died: [{ engine_id, rpc_port, reason, died_age_millis }] }`.
-    #[handler]
+    #[handler::single]
     fn on_list(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -281,7 +281,7 @@ impl NativeActor for EngineServer {
     /// recently-died ring, so a caller can correlate and reap; a
     /// pre-allocation failure (selector miss, port allocation) carries
     /// `None`.
-    #[handler]
+    #[handler::single]
     fn on_spawn(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -457,7 +457,7 @@ impl NativeActor for EngineServer {
     /// entry. Reply: `TerminateEngineResult::Ok`, or `Err { error }`
     /// for an `engine_id` that doesn't parse or names no
     /// supervised engine.
-    #[handler]
+    #[handler::single]
     fn on_terminate(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -512,7 +512,7 @@ impl NativeActor for EngineServer {
     /// `RpcServerCapability`. An unknown / unparseable `engine_id`
     /// is answered with `CallSettled::Err` so the originating wire
     /// call closes instead of hanging.
-    #[handler]
+    #[handler::single]
     fn on_route(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: RouteEnvelope) {
         let reply_to = ctx.reply_target();
         let SourceAddr::Component(reply_target) = reply_to.addr else {
@@ -581,7 +581,7 @@ impl NativeActor for EngineServer {
     /// `died` for an already-removed engine (e.g. one a concurrent
     /// `terminate_substrate` already dropped) is a logged no-op, so
     /// it can't race the terminate path.
-    #[handler]
+    #[handler::single]
     fn on_engine_died(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: EngineDied) {
         let Ok(uuid) = Uuid::parse_str(&mail.engine_id) else {
             tracing::warn!(
@@ -614,7 +614,7 @@ impl NativeActor for EngineServer {
     /// table entry so `list_engines` reports a fresh
     /// `last_heartbeat_age_millis`. An `alive` for an unknown engine
     /// (already evicted) is a silent no-op.
-    #[handler]
+    #[handler::single]
     fn on_engine_alive(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: EngineAlive) {
         let Ok(uuid) = Uuid::parse_str(&mail.engine_id) else {
             return;
@@ -635,7 +635,7 @@ impl NativeActor for EngineServer {
     /// the hash. Reply: `UploadBinaryResult::Ok { hash, name }`, or
     /// `Err { error }` for an unreadable path or a `--describe` that
     /// failed or didn't yield a parseable manifest.
-    #[handler]
+    #[handler::single]
     fn on_upload_binary(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -657,7 +657,7 @@ impl NativeActor for EngineServer {
     /// field AND-combined; an absent / empty field is no constraint).
     /// Reply: `ListEngineBinariesResult { binaries: [{ hash, name,
     /// manifest: { chassis, caps, git_sha, profile, target } }] }`.
-    #[handler]
+    #[handler::single]
     fn on_list_engine_binaries(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -679,7 +679,7 @@ impl NativeActor for EngineServer {
     /// step), stores both, and points `name` (when set) at the hash.
     /// Reply: `UploadComponentResult::Ok { hash, name }`, or
     /// `Err { error }` for an unreadable path or an unparseable wasm.
-    #[handler]
+    #[handler::single]
     fn on_upload_component(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -705,7 +705,7 @@ impl NativeActor for EngineServer {
     /// matching more than one component is a clean ambiguity error).
     /// Reply: `ResolveComponentResult::Ok { hash, wasm, name, manifest,
     /// export }`, or `Err { error }` for no match / ambiguity.
-    #[handler]
+    #[handler::single]
     fn on_resolve_component(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -720,7 +720,7 @@ impl NativeActor for EngineServer {
     /// Send `ListComponentBinaries { namespace?, handled_kind? }` (each
     /// filter AND-combined; an absent field is no constraint). Reply:
     /// `ListComponentBinariesResult { components: [{ hash, name, manifest }] }`.
-    #[handler]
+    #[handler::single]
     fn on_list_component_binaries(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,

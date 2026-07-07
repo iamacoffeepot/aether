@@ -120,8 +120,8 @@ body works on either.
 ## Authoring an actor
 
 You declare the receive side with the **`#[actor]`** attribute on one `impl`
-block, and each **`#[handler]`** method *is* a handler — the macro infers the kind
-it handles from the method's **third parameter**:
+block, and each **`#[handler::<class>]`** method *is* a handler — the macro infers
+the kind it handles from the method's **third parameter**:
 
 ```rust
 #[actor]
@@ -136,7 +136,7 @@ impl WasmActor for Hello {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
     }
 
-    #[handler]
+    #[handler::single]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         ctx.actor::<RenderCapability>().send(&TRIANGLE);   // draw every tick
     }
@@ -169,7 +169,7 @@ concurrently.
 A handler declares how it answers through its class marker
 ([ADR-0112](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0112-handler-reply-classes.md),
 [ADR-0134](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0134-multi-reply-class-and-explicit-handler-classes.md)).
-The **single** class (`#[handler]` / `#[handler::single]`) answers 0-or-1 through
+The **single** class (`#[handler::single]`) answers 0-or-1 through
 its return value — `-> R` sends `R` back, `-> ()` is fire-and-forget. The
 **manual** class (`#[handler::manual]`) takes a `Manual` ctx and issues its own
 replies by hand (`ctx.reply` / `ctx.reply_to`), for a reply it can't compute this
@@ -339,7 +339,7 @@ how it reaches the outside world ([ADR-0074](https://github.com/iamacoffeepot/ae
 The two traits are deliberately mirror images. Both sit on the shared `Actor`
 super-trait (which owns only `NAMESPACE`). Both have a `type Config`, the same
 `init` / `wire` / `unwire` lifecycle with identical semantics, and the same
-`#[actor]` / `#[handler]` authoring shape. The *only* differences are the context
+`#[actor]` / `#[handler::<class>]` authoring shape. The *only* differences are the context
 type — `NativeCtx<'_>` instead of `WasmCtx<'_>` — and the host machinery underneath.
 A native capability's `wire` looks like a component's `wire`:
 
@@ -351,7 +351,7 @@ impl NativeActor for AudioCapability {
 
     fn init(config: AudioConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> { … }
 
-    #[handler]
+    #[handler::single]
     fn on_note_on(&mut self, ctx: &mut NativeCtx<'_>, note: NoteOn) { … }
 }
 ```

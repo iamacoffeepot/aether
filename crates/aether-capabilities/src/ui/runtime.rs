@@ -96,7 +96,7 @@ impl NativeActor for UiCapability {
     /// # Agent
     /// Fire-and-forget. Forwards one `DrawSolidQuads` (screen-space) to
     /// `aether.render` the same tick. Resend every frame.
-    #[handler]
+    #[handler::single]
     fn on_panel(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: UiPanel) {
         let [x, y, width, height] = mail.rect;
         let draw = DrawSolidQuads {
@@ -118,7 +118,7 @@ impl NativeActor for UiCapability {
     /// Fire-and-forget. Forwards a two-quad `DrawSolidQuads` (screen-
     /// space, track then frac-sized fill) to `aether.render` the same
     /// tick. `frac` is clamped to [0, 1]. Resend every frame.
-    #[handler]
+    #[handler::single]
     fn on_bar(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: UiBar) {
         let [x, y, width, height] = mail.rect;
         let frac = mail.frac.clamp(0.0, 1.0);
@@ -154,7 +154,7 @@ impl NativeActor for UiCapability {
     /// `(x, y)` along the baseline, where `(0, 0)` is the window's
     /// top-left corner. An unknown `font_id` warn-drops in the text cap.
     /// Resend every frame.
-    #[handler]
+    #[handler::single]
     fn on_label(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: UiLabel) {
         let draw = DrawText {
             font_id: mail.font_id,
@@ -177,7 +177,7 @@ impl NativeActor for UiCapability {
     /// component, read from the inbound's host-stamped source. A left-
     /// click inside `rect` replies `UiClicked { id }` to `owner`
     /// within one frame (see `on_mouse_button`). Resend every frame.
-    #[handler]
+    #[handler::single]
     fn on_button(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: UiButton) {
         let [x, y, width, height] = mail.rect;
         // Record for the next click's hit-test. A button mailed with
@@ -221,7 +221,7 @@ impl NativeActor for UiCapability {
     /// top, so it scans in reverse draw order), and on a hit sends
     /// `UiClicked { id }` to that button's recorded owner by id. A click
     /// outside every rect, or a non-left button, does nothing.
-    #[handler]
+    #[handler::single]
     fn on_mouse_button(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: MouseButton) {
         if mail.button != mouse_button::LEFT {
             return;
@@ -247,7 +247,7 @@ impl NativeActor for UiCapability {
     /// Fire-and-forget. The buttons drawn this frame become the hit-
     /// test set (`last`), and the new frame starts with an empty
     /// accumulator (`current`). No forwarded mail.
-    #[handler]
+    #[handler::single]
     fn on_tick(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _tick: Tick) {
         swap(&mut state.current, &mut state.last);
         state.current.clear();

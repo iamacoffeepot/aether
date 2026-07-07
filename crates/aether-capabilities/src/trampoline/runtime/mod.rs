@@ -157,7 +157,7 @@ impl NativeActor for WasmTrampoline {
     /// Mail arriving in the dropped state falls through to
     /// [`Self::forward_to_wasm`], which warn-drops because
     /// `state.component` is `None`.
-    #[handler]
+    #[handler::single]
     fn on_drop_component(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -192,7 +192,7 @@ impl NativeActor for WasmTrampoline {
     /// `take_saved_state` lifts any rehydration bundle, the new
     /// module instantiates against the same binding, and
     /// `on_rehydrate` runs on the fresh side.
-    #[handler]
+    #[handler::single]
     fn on_replace_component(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,

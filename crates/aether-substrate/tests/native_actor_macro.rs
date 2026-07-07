@@ -98,13 +98,13 @@ impl NativeActor for MacroProbeCap {
     }
 
     /// Handles structured-shape `Greet` mail.
-    #[aether_actor::handler]
+    #[aether_actor::handler::single]
     fn on_greet(&self, _ctx: &mut NativeCtx<'_>, mail: Greet) {
         self.greet_total.fetch_add(mail.tag, AtomicOrdering::SeqCst);
     }
 
     /// Handles cast-shape `Ping` mail.
-    #[aether_actor::handler]
+    #[aether_actor::handler::single]
     fn on_ping(&self, _ctx: &mut NativeCtx<'_>, mail: Ping) {
         self.ping_total.fetch_add(mail.seq, AtomicOrdering::SeqCst);
     }
@@ -628,7 +628,7 @@ impl NativeActor for TaskRouteCap {
 
     /// Dispatch a worker that produces a `ResultA`. The completion routes
     /// to `on_result_a` by output type.
-    #[aether_actor::handler]
+    #[aether_actor::handler::single]
     fn on_kick_a(&self, ctx: &mut NativeCtx<'_>, mail: KickA) {
         self.obs.dispatched.fetch_add(1, AtomicOrdering::SeqCst);
         let seed = mail.seed;
@@ -640,7 +640,7 @@ impl NativeActor for TaskRouteCap {
     }
 
     /// Dispatch a worker that produces a `ResultB`.
-    #[aether_actor::handler]
+    #[aether_actor::handler::single]
     fn on_kick_b(&self, ctx: &mut NativeCtx<'_>, mail: KickB) {
         self.obs.dispatched.fetch_add(1, AtomicOrdering::SeqCst);
         let seed = mail.seed;
@@ -712,7 +712,7 @@ impl NativeActor for ReplyMacroCap {
     /// `HandlerEntry` (not handler behaviour) is what this cap exists to
     /// exercise.
     #[allow(clippy::unused_self)]
-    #[aether_actor::handler]
+    #[aether_actor::handler::single]
     fn on_greet_reply(&self, _ctx: &mut NativeCtx<'_>, mail: Greet) -> Pong {
         Pong { echoed: mail.tag }
     }
@@ -904,7 +904,7 @@ impl NativeActor for DeferredReplyCap {
     /// kind on the request signature and arms an `EchoReply` worker; the
     /// macro sends nothing now.
     #[allow(clippy::unused_self)]
-    #[aether_actor::handler]
+    #[aether_actor::handler::single]
     fn on_kick_p(&self, ctx: &mut NativeCtx<'_>, mail: KickP) -> Pending<EchoReply> {
         let seed = mail.seed;
         ctx.dispatch_blocking(move || EchoReply { value: seed })
@@ -923,7 +923,7 @@ impl NativeActor for DeferredReplyCap {
     /// No-reply path: returns `()`, so it dispatches via
     /// `dispatch_blocking_with` (no `Pending<R>` contract to declare).
     #[allow(clippy::unused_self)]
-    #[aether_actor::handler]
+    #[aether_actor::handler::single]
     fn on_kick_s(&self, ctx: &mut NativeCtx<'_>, mail: KickS) {
         let seed = mail.seed;
         ctx.dispatch_blocking_with((), move || Silent { value: seed });

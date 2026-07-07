@@ -43,7 +43,7 @@ impl aether_substrate::actor::native::NativeActor for GatedCap {
         Ok(GatedCapState { seen: 0 })
     }
 
-    #[handler]
+    #[handler::single]
     fn on_ping(
         state: &mut Self::State,
         _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>,

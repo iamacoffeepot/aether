@@ -92,7 +92,7 @@ impl NativeActor for InputCapability {
     /// # Agent
     /// `SubscribeInput { kind, mailbox }`. Component mailboxes only —
     /// sinks and dropped mailboxes are rejected.
-    #[handler]
+    #[handler::single]
     fn on_subscribe(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -125,7 +125,7 @@ impl NativeActor for InputCapability {
     ///
     /// # Agent
     /// `SubscribeInputSelf { kind }`.
-    #[handler]
+    #[handler::single]
     fn on_subscribe_self(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -154,7 +154,7 @@ impl NativeActor for InputCapability {
     /// # Agent
     /// `UnsubscribeInput { kind, mailbox }`. Idempotent on
     /// "not currently subscribed"; rejects unknown / sink mailboxes.
-    #[handler]
+    #[handler::single]
     fn on_unsubscribe(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -179,7 +179,7 @@ impl NativeActor for InputCapability {
     ///
     /// # Agent
     /// `UnsubscribeInputSelf { kind }`.
-    #[handler]
+    #[handler::single]
     fn on_unsubscribe_self(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -210,7 +210,7 @@ impl NativeActor for InputCapability {
     ///
     /// # Agent
     /// `UnsubscribeAll { mailbox }`. Idempotent.
-    #[handler]
+    #[handler::single]
     fn on_unsubscribe_all(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -222,33 +222,33 @@ impl NativeActor for InputCapability {
     }
 
     /// Key-press fan-out.
-    #[handler]
+    #[handler::single]
     fn on_key(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Key) {
         state.fanout(ctx, &payload);
     }
 
     /// Key-release fan-out (paired with [`Key`] for hold-to-act
     /// semantics).
-    #[handler]
+    #[handler::single]
     fn on_key_release(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: KeyRelease) {
         state.fanout(ctx, &payload);
     }
 
     /// Cursor-move fan-out.
-    #[handler]
+    #[handler::single]
     fn on_mouse_move(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: MouseMove) {
         state.fanout(ctx, &payload);
     }
 
     /// Mouse-press fan-out.
-    #[handler]
+    #[handler::single]
     fn on_mouse_button(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: MouseButton) {
         state.fanout(ctx, &payload);
     }
 
     /// Mouse-release fan-out (paired with [`MouseButton`] for
     /// press-move-release drag).
-    #[handler]
+    #[handler::single]
     fn on_mouse_button_release(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -258,31 +258,31 @@ impl NativeActor for InputCapability {
     }
 
     /// Mouse-wheel fan-out.
-    #[handler]
+    #[handler::single]
     fn on_mouse_wheel(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: MouseWheel) {
         state.fanout(ctx, &payload);
     }
 
     /// Window-resize fan-out.
-    #[handler]
+    #[handler::single]
     fn on_window_size(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: WindowSize) {
         state.fanout(ctx, &payload);
     }
 
     /// Committed text-input fan-out (layout/IME-resolved characters).
-    #[handler]
+    #[handler::single]
     fn on_text_input(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: TextInput) {
         state.fanout(ctx, &payload);
     }
 
     /// In-flight IME-composition fan-out.
-    #[handler]
+    #[handler::single]
     fn on_ime_preedit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: ImePreedit) {
         state.fanout(ctx, &payload);
     }
 
     /// Modifier-state fan-out (latest-wins chord state).
-    #[handler]
+    #[handler::single]
     fn on_modifiers(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Modifiers) {
         state.fanout(ctx, &payload);
     }

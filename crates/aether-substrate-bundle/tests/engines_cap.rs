@@ -74,7 +74,7 @@ impl NativeActor for ReplySink {
         Ok(ReplySinkState { cells })
     }
 
-    #[handler]
+    #[handler::single]
     fn on_list_result(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, reply: ListEnginesResult) {
         *state
             .cells
@@ -83,7 +83,7 @@ impl NativeActor for ReplySink {
             .expect("test setup: list cell mutex is never poisoned") = Some(reply);
     }
 
-    #[handler]
+    #[handler::single]
     fn on_spawn_result(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -96,7 +96,7 @@ impl NativeActor for ReplySink {
             .expect("test setup: spawn cell mutex is never poisoned") = Some(reply);
     }
 
-    #[handler]
+    #[handler::single]
     fn on_terminate_result(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,

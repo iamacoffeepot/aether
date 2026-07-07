@@ -162,7 +162,7 @@ impl NativeActor for TcpListenerActor {
     /// `MonitorNotice` to the cap.
     // Stateless close request: shutdown is requested through `ctx`, not
     // through any state field, so `_state` is unused.
-    #[handler]
+    #[handler::single]
     fn on_close_request(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: Close) {
         ctx.shutdown();
     }
@@ -178,7 +178,7 @@ impl NativeActor for TcpListenerActor {
     /// — if multiple wakes coalesce into one dispatcher tick,
     /// we'll see the queue already drained on the second handler
     /// call and exit fast.
-    #[handler]
+    #[handler::single]
     fn on_connection_ready(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,

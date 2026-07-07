@@ -75,7 +75,7 @@ impl NativeActor for HeadlessRenderCapability {
     /// `DrawTriangle` lands here as a no-op so headless boots of
     /// desktop-designed components (which emit `DrawTriangle` every
     /// tick) don't trip the unknown-mailbox warn path.
-    #[handler]
+    #[handler::single]
     fn on_draw_triangle(
         _state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -86,7 +86,7 @@ impl NativeActor for HeadlessRenderCapability {
     /// `Camera` lands here as a no-op for the same reason as
     /// `on_draw_triangle` — desktop-designed components publish
     /// `aether.camera` every tick.
-    #[handler]
+    #[handler::single]
     fn on_camera(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: Camera) {}
 
     /// `CaptureFrame` replies `Err` inline so MCP `capture_frame`
@@ -128,13 +128,13 @@ impl NativeActor for HeadlessRenderCapability {
     /// `UpdateTexture` lands here as a no-op so desktop-designed
     /// components running on headless don't trip the unknown-mailbox
     /// warn path — mirrors `on_draw_triangle`.
-    #[handler]
+    #[handler::single]
     fn on_update_texture(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: UpdateTexture) {
     }
 
     /// `DrawTexturedQuads` lands here as a no-op for the same reason
     /// as `on_update_texture`.
-    #[handler]
+    #[handler::single]
     fn on_draw_textured_quads(
         _state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -144,7 +144,7 @@ impl NativeActor for HeadlessRenderCapability {
 
     /// `DrawSolidQuads` lands here as a no-op for the same reason
     /// as `on_draw_textured_quads`.
-    #[handler]
+    #[handler::single]
     fn on_draw_solid_quads(
         _state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,

@@ -85,7 +85,7 @@ impl WasmActor for RadioGroupWidget {
     }
 
     /// Replace the options / theme in place, re-clamping the selection.
-    #[handler]
+    #[handler::single]
     fn on_config(&mut self, _ctx: &mut WasmCtx<'_>, config: RadioConfig) {
         self.selected = clamp_index(config.initial_index, config.options.len());
         self.options = config.options;
@@ -93,31 +93,31 @@ impl WasmActor for RadioGroupWidget {
     }
 
     /// Restyle: adopt the fanned theme.
-    #[handler]
+    #[handler::single]
     fn on_set_theme(&mut self, _ctx: &mut WasmCtx<'_>, set: SetTheme) {
         self.theme = set.theme;
     }
 
     /// Cache the layout rect the root assigned.
-    #[handler]
+    #[handler::single]
     fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
         self.frame = frame;
     }
 
     /// Take keyboard focus.
-    #[handler]
+    #[handler::single]
     fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
         self.focused = true;
     }
 
     /// Release keyboard focus.
-    #[handler]
+    #[handler::single]
     fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
         self.focused = false;
     }
 
     /// A left click selects the row under the cursor.
-    #[handler]
+    #[handler::single]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         if press.button != mouse_button::LEFT {
             return;
@@ -131,7 +131,7 @@ impl WasmActor for RadioGroupWidget {
     }
 
     /// Up / Down move the selection while focused (clamped at the ends).
-    #[handler]
+    #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if self.options.is_empty() {
             return;
@@ -152,7 +152,7 @@ impl WasmActor for RadioGroupWidget {
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
-    #[handler]
+    #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         let row_height = self.theme.row_height.max(1.0);
         let marker = (row_height * 0.5).max(4.0);

@@ -465,7 +465,7 @@ impl WasmActor for WidgetPanel {
 
     /// A left press sets focus + drag capture on the hit child and forwards
     /// the press; any press forwards to the hit child.
-    #[handler]
+    #[handler::single]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         let target = if press.button == mouse_button::LEFT {
             let hit = self.focus.hit_test(press.x, press.y);
@@ -485,7 +485,7 @@ impl WasmActor for WidgetPanel {
     }
 
     /// A release forwards to the captured / hit child and clears capture.
-    #[handler]
+    #[handler::single]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         if let Some(child) = self.focus.pointer_target(release.x, release.y) {
             ctx.send_to(child, &release);
@@ -496,7 +496,7 @@ impl WasmActor for WidgetPanel {
     }
 
     /// A move forwards to the captured (dragged) or hit child.
-    #[handler]
+    #[handler::single]
     fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
         if let Some(child) = self.focus.pointer_target(moved.x, moved.y) {
             ctx.send_to(child, &moved);
@@ -509,11 +509,11 @@ impl WasmActor for WidgetPanel {
     // Subscribing the stream needs a handler to sink it; there is no per-panel
     // wheel state yet, so the handler is deliberately empty.
     #[allow(clippy::unused_self)]
-    #[handler]
+    #[handler::single]
     fn on_mouse_wheel(&mut self, _ctx: &mut WasmCtx<'_>, _wheel: MouseWheel) {}
 
     /// Tab cycles focus; every other key forwards to the focused child.
-    #[handler]
+    #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if key.code == KEY_TAB {
             if let Some(transition) = self.focus.advance_focus() {
@@ -532,11 +532,11 @@ impl WasmActor for WidgetPanel {
     // Subscribing the stream needs a handler to sink it; there is no per-panel
     // key-release state yet, so the handler is deliberately empty.
     #[allow(clippy::unused_self)]
-    #[handler]
+    #[handler::single]
     fn on_key_release(&mut self, _ctx: &mut WasmCtx<'_>, _release: KeyRelease) {}
 
     /// Committed text forwards to the focused child.
-    #[handler]
+    #[handler::single]
     fn on_text_input(&mut self, ctx: &mut WasmCtx<'_>, input: TextInput) {
         if let Some(child) = self.focus.keyboard_target() {
             ctx.send_to(child, &input);
@@ -544,7 +544,7 @@ impl WasmActor for WidgetPanel {
     }
 
     /// An IME composition forwards to the focused child.
-    #[handler]
+    #[handler::single]
     fn on_ime_preedit(&mut self, ctx: &mut WasmCtx<'_>, preedit: ImePreedit) {
         if let Some(child) = self.focus.keyboard_target() {
             ctx.send_to(child, &preedit);
@@ -553,7 +553,7 @@ impl WasmActor for WidgetPanel {
 
     /// Modifier state forwards to the focused child (the text field caches
     /// it).
-    #[handler]
+    #[handler::single]
     fn on_modifiers(&mut self, ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
         if let Some(child) = self.focus.keyboard_target() {
             ctx.send_to(child, &modifiers);
@@ -619,7 +619,7 @@ impl WasmActor for WidgetPanel {
 
     /// The font finished loading: stamp the real `font_id` into the theme and
     /// re-fan it so every child draws text with it.
-    #[handler]
+    #[handler::single]
     fn on_load_font_result(&mut self, ctx: &mut WasmCtx<'_>, result: LoadFontResult) {
         match result {
             LoadFontResult::Ok { font_id, .. } => {
@@ -633,7 +633,7 @@ impl WasmActor for WidgetPanel {
     }
 
     /// A live restyle: adopt the new theme and re-fan it to every child.
-    #[handler]
+    #[handler::single]
     fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
         self.theme = set.theme;
         self.fan_theme(ctx);

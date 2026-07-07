@@ -46,7 +46,7 @@ impl WasmActor for RootManager {
     /// dropped). `Subname::Counter` gives each spawn a bare counter
     /// discriminator (`0`, `1`, …); the returned `MailboxId`s are
     /// fire-and-forget here.
-    #[handler]
+    #[handler::single]
     fn on_ping(&mut self, ctx: &mut WasmCtx<'_>, ping: Ping) {
         for _ in 0..ping.seq.max(1) {
             let _ = ctx.spawn_child::<Panel>(Subname::Counter, &());
@@ -72,7 +72,7 @@ impl WasmActor for Panel {
     /// On `Ping`, broadcast a `TickObserved` to the test-bench observer
     /// so a scenario can confirm a spawned `Panel` is addressable and
     /// dispatches mail.
-    #[handler]
+    #[handler::single]
     fn on_ping(&mut self, ctx: &mut WasmCtx<'_>, _ping: Ping) {
         ctx.send_to_named::<TickObserved>(
             TEST_BENCH_OBSERVER_MAILBOX_NAME,

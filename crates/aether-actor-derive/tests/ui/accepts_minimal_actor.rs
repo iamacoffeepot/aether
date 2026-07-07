@@ -30,7 +30,7 @@ impl aether_actor::WasmActor for Minimal {
         Ok(Minimal)
     }
 
-    #[handler]
+    #[handler::single]
     fn on_ping(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, _ping: Ping) {}
 }
 

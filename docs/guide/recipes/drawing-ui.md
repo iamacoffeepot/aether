@@ -104,7 +104,7 @@ the widget. When buttons overlap, the topmost (last-drawn) one wins.
 In a component, you receive that reply with a handler on the clicked kind:
 
 ```rust
-#[handler]
+#[handler::single]
 fn on_clicked(&mut self, _ctx: &mut WasmCtx<'_>, click: UiClicked) {
     if click.id == RESTART_BUTTON {
         self.restart();

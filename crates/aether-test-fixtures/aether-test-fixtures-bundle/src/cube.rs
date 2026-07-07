@@ -152,7 +152,7 @@ impl WasmActor for Cube {
     /// advance for every `aether.lifecycle`-subscribed mailbox. A
     /// `capture_frame` taken after one tick shows the centered cube
     /// silhouette.
-    #[handler]
+    #[handler::single]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _: Tick) {
         ctx.actor::<RenderCapability>().send(&Camera {
             view_proj: self.view_proj,
