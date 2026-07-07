@@ -961,13 +961,15 @@ impl SetWaterPlane {
 
 /// `aether.kit.world.set_material_style` — write a material's complete
 /// live style row (base HSL, noise shape, smoothing defaults, rim / wash /
-/// water tunables), then remesh every cached chunk. A full-row write:
-/// every field of the resolved row is replaced, none carried over from the
-/// prior value. `smoothing_iterations` clamps to
+/// water tunables, encroachment margin), then remesh every cached chunk. A
+/// full-row write: every field of the resolved row is replaced, none
+/// carried over from the prior value. `smoothing_iterations` clamps to
 /// [`MAX_SMOOTHING_ITERATIONS`] and `smoothing_degrees` to `[45, 90]`, the
 /// same rule [`World::insert_smoothing_profile`] applies to the per-cell
-/// smoothing table. `material` is a raw [`Material`] byte; an undecodable
-/// byte or `Void` rejects the whole write (see
+/// smoothing table; `encroach_reach_octimeters` clamps to `[0, 256]` and
+/// `encroach_raggedness` to `[0, 1]` so a margin never outruns the mesher's
+/// apron. `material` is a raw [`Material`] byte; an undecodable byte or
+/// `Void` rejects the whole write (see
 /// `runtime::mesher::style::StyleTable::apply`).
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.world.set_material_style")]
@@ -1015,6 +1017,18 @@ pub struct SetMaterialStyle {
     /// Blob-merge hue-step threshold in degrees: same-material cells whose
     /// resolved hue differs by more than this pool a rim between them.
     pub blob_merge_degrees: f32,
+    /// Encroachment dominance in a total order: at a seam the higher-rank
+    /// material grows a noise-ragged margin over the lower one. `0` never
+    /// encroaches, and equal ranks never encroach on each other.
+    pub encroach_rank: u8,
+    /// How far in octimeters the margin reaches past the seam into the
+    /// lower material before the raggedness noise carves it back. `0`
+    /// disables the layer for this material. Clamped to `[0, 256]` on apply.
+    pub encroach_reach_octimeters: i32,
+    /// The fraction `[0, 1]` of the reach the world-anchored noise eats, so
+    /// the margin reads ragged rather than a clean offset band. Clamped to
+    /// `[0, 1]` on apply.
+    pub encroach_raggedness: f32,
 }
 
 /// How the mesher paints a chunk: the finished gouache grammar, or the
