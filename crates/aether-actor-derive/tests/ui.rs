@@ -102,4 +102,12 @@ fn ui() {
     t.compile_fail("tests/ui/rejects_slice_handler_wasm.rs");
     t.compile_fail("tests/ui/rejects_manual_task_handler_native.rs");
     t.compile_fail("tests/ui/rejects_nonself_handler_wasm.rs");
+    // Issue #2607 (ADR-0134): bare `#[handler]` and the classless
+    // `#[handler(mail)]` paren form are pointed compile errors naming all
+    // three accepted class spellings; `#[handler(task)]` stays classless
+    // and unaffected (proven by `accepts_actor_split_task_handler.rs`
+    // continuing to compile with its bare task handler).
+    t.compile_fail("tests/ui/rejects_bare_handler_wasm.rs");
+    t.compile_fail("tests/ui/rejects_bare_handler_native.rs");
+    t.compile_fail("tests/ui/rejects_bare_mail_variant_native.rs");
 }

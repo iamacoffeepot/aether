@@ -31,7 +31,7 @@ impl aether_actor::WasmActor for ReceiverProbe {
         Ok(ReceiverProbe)
     }
 
-    #[handler]
+    #[handler::single]
     fn on_ping(_state: u32, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}
 }
 

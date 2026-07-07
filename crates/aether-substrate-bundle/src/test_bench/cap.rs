@@ -84,7 +84,7 @@ impl NativeActor for TestBenchCapability {
     /// Push `ChassisEvent::Advance` onto the embedder loop. If the
     /// receiver is gone (chassis shutting down) reply `Err` inline
     /// so the caller doesn't hang.
-    #[handler]
+    #[handler::single]
     fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Advance) {
         let sender = ctx.reply_target();
         if state

@@ -47,7 +47,7 @@ impl NativeActor for HeadlessWindowCapability {
     /// local-RPC-server reply target an MCP-spawned engine tags
     /// (iamacoffeepot/aether#1321) that `HubOutbound::send_reply`
     /// silently drops.
-    #[handler]
+    #[handler::single]
     fn on_set_mode(
         _state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -59,7 +59,7 @@ impl NativeActor for HeadlessWindowCapability {
     }
 
     /// Reply `Err` for the same reason as `on_set_mode`.
-    #[handler]
+    #[handler::single]
     fn on_set_title(
         _state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -73,7 +73,7 @@ impl NativeActor for HeadlessWindowCapability {
     /// Reply `Err` for the same reason as `on_set_mode`
     /// (iamacoffeepot/aether#1318): a chassis without a window
     /// peripheral can't foreground one.
-    #[handler]
+    #[handler::single]
     fn on_focus(
         _state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,

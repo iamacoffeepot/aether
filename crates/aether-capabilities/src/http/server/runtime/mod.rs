@@ -240,7 +240,7 @@ impl NativeActor for HttpServerCapability {
     /// Internal wake mail — not part of the cap's external surface. The
     /// accept sidecar fires this; the handler drains the mpsc and assigns
     /// per item.
-    #[handler]
+    #[handler::single]
     fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: HttpInboundReady) {
         WakeSink::arm_for_drain(&state.wake_dirty);
         while let Ok(event) = state.inbound_rx.try_recv() {
@@ -268,7 +268,7 @@ impl NativeActor for HttpServerCapability {
     /// form — an MCP session or test names the handler mailbox
     /// explicitly; it is validated against the registry. An in-process
     /// actor registering itself sends `register_route_self` instead.
-    #[handler]
+    #[handler::single]
     fn on_register_route(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -296,7 +296,7 @@ impl NativeActor for HttpServerCapability {
     /// from a component's `wire` hook. An external session or remote
     /// engine has no local mailbox and gets an `Err` reply — use
     /// `register_route` with an explicit mailbox instead.
-    #[handler]
+    #[handler::single]
     fn on_register_route_self(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -324,7 +324,7 @@ impl NativeActor for HttpServerCapability {
     ///
     /// # Agent
     /// `UnregisterRoute { prefix, method, mailbox }`.
-    #[handler]
+    #[handler::single]
     fn on_unregister_route(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -339,7 +339,7 @@ impl NativeActor for HttpServerCapability {
     ///
     /// # Agent
     /// `UnregisterRouteSelf { prefix, method }`.
-    #[handler]
+    #[handler::single]
     fn on_unregister_route_self(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -364,7 +364,7 @@ impl NativeActor for HttpServerCapability {
     ///
     /// # Agent
     /// `UnregisterRoutesAll { mailbox }`.
-    #[handler]
+    #[handler::single]
     fn on_unregister_routes_all(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,

@@ -36,7 +36,7 @@ impl aether_substrate::actor::native::NativeActor for StrayConst {
         unimplemented!()
     }
 
-    #[handler]
+    #[handler::single]
     fn on_ping(
         &mut self,
         _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>,

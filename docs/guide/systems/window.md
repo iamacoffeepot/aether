@@ -115,7 +115,7 @@ addresses it by name rather than through a guest-side capability facade. Send th
 request kind to that mailbox and receive the reply kind like any other mail:
 
 ```rust
-#[handler]
+#[handler::single]
 fn on_set_mode_result(&mut self, ctx: &mut WasmCtx<'_>, result: SetWindowModeResult) {
     match result {
         SetWindowModeResult::Ok { mode, width, height } => { /* the resolved state */ }

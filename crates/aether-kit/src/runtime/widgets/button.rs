@@ -87,38 +87,38 @@ impl WasmActor for ButtonWidget {
     }
 
     /// Relabel / restyle in place from a re-sent config.
-    #[handler]
+    #[handler::single]
     fn on_config(&mut self, _ctx: &mut WasmCtx<'_>, config: ButtonConfig) {
         self.label = config.label;
         self.theme = config.theme;
     }
 
     /// Restyle: adopt the fanned theme.
-    #[handler]
+    #[handler::single]
     fn on_set_theme(&mut self, _ctx: &mut WasmCtx<'_>, set: SetTheme) {
         self.theme = set.theme;
     }
 
     /// Cache the layout rect the root assigned.
-    #[handler]
+    #[handler::single]
     fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
         self.frame = frame;
     }
 
     /// Take keyboard focus.
-    #[handler]
+    #[handler::single]
     fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
         self.focused = true;
     }
 
     /// Release keyboard focus.
-    #[handler]
+    #[handler::single]
     fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
         self.focused = false;
     }
 
     /// A left press inside arms the button.
-    #[handler]
+    #[handler::single]
     fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, press: MouseButton) {
         if press.button == mouse_button::LEFT {
             self.press_at(press.x, press.y);
@@ -126,7 +126,7 @@ impl WasmActor for ButtonWidget {
     }
 
     /// A left release fires the click if it lands back inside while armed.
-    #[handler]
+    #[handler::single]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         if release.button != mouse_button::LEFT {
             return;
@@ -143,7 +143,7 @@ impl WasmActor for ButtonWidget {
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
-    #[handler]
+    #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         let width = self.frame.width;
         let height = self.frame.height;

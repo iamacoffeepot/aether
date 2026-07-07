@@ -41,7 +41,7 @@ impl NativeActor for EngineCapSink {
         Ok(Self { cells })
     }
 
-    #[handler]
+    #[handler::single]
     fn on_alive(&mut self, _ctx: &mut NativeCtx<'_>, mail: EngineAlive) {
         self.cells
             .alive
@@ -50,7 +50,7 @@ impl NativeActor for EngineCapSink {
             .push(mail.engine_id);
     }
 
-    #[handler]
+    #[handler::single]
     fn on_died(&mut self, _ctx: &mut NativeCtx<'_>, mail: EngineDied) {
         self.cells
             .died
@@ -80,7 +80,7 @@ impl NativeActor for ProxyReplySink {
         Ok(Self { recorded })
     }
 
-    #[handler]
+    #[handler::single]
     fn on_reply(&mut self, _ctx: &mut NativeCtx<'_>, reply: TestEchoReply) {
         *self
             .recorded

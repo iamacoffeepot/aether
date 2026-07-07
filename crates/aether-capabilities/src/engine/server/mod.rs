@@ -159,7 +159,7 @@ impl NativeActor for ReplySink {
         Ok(Self { cells })
     }
 
-    #[handler]
+    #[handler::single]
     fn on_list_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: ListEnginesResult) {
         *self
             .cells
@@ -168,7 +168,7 @@ impl NativeActor for ReplySink {
             .expect("test setup: list cell mutex poisoned") = Some(reply);
     }
 
-    #[handler]
+    #[handler::single]
     fn on_spawn_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: SpawnEngineResult) {
         *self
             .cells
@@ -177,7 +177,7 @@ impl NativeActor for ReplySink {
             .expect("test setup: spawn cell mutex poisoned") = Some(reply);
     }
 
-    #[handler]
+    #[handler::single]
     fn on_terminate_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: TerminateEngineResult) {
         *self
             .cells

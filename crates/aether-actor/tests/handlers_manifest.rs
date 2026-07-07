@@ -71,13 +71,13 @@ impl WasmActor for ManifestProbe {
 
     /// # Agent
     /// Increments the tick counter.
-    #[handler]
+    #[handler::single]
     fn on_tick(&mut self, _ctx: &mut WasmCtx<'_>, _tick: Tick) {}
 
     // ADR-0109: a `-> R` handler — the return type is the reply
     // contract, so the macro auto-replies `Pong` and threads its kind id
     // onto this handler's inputs-manifest record.
-    #[handler]
+    #[handler::single]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, ping: Ping) -> Pong {
         Pong { seq: ping.seq }
     }

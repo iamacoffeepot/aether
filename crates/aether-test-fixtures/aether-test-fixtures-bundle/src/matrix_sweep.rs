@@ -157,7 +157,7 @@ impl WasmActor for MatrixParent {
     /// fan-out ping to child\[a\] in place. Child\[a\]'s handler drives the
     /// child-origin cells (child → parent / sibling / self) and the
     /// cross-cluster send. Everything settles in this one receive's drain.
-    #[handler]
+    #[handler::single]
     fn on_run_matrix(&mut self, ctx: &mut WasmCtx<'_>, msg: RunMatrix) {
         let parent_id = ctx.mailbox_id();
         let child_a = ctx.child("a").expect("inline child a is resident");

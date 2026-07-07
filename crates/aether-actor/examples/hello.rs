@@ -86,7 +86,7 @@ impl WasmActor for Hello {
     /// Not useful to send manually — the substrate drives this from
     /// its own tick loop. The effect is visible in `capture_frame`
     /// output.
-    #[handler]
+    #[handler::single]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         ctx.actor::<RenderCapability>().send(&TRIANGLE);
     }
@@ -99,7 +99,7 @@ impl WasmActor for Hello {
     /// Send `{ seq: N }` and expect a matching pong at your session.
     /// The seq echo lets you pair requests and replies when multiple
     /// are in flight.
-    #[handler]
+    #[handler::single]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, ping: Ping) -> Pong {
         Pong { seq: ping.seq }
     }

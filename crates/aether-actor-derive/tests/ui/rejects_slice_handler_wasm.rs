@@ -31,7 +31,7 @@ impl aether_actor::WasmActor for SliceProbe {
         Ok(SliceProbe)
     }
 
-    #[handler]
+    #[handler::single]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _mail: &[Ping]) {}
 }
 

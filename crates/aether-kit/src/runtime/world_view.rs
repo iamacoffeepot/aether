@@ -122,7 +122,7 @@ impl WasmActor for WorldView {
     /// Substrate-driven; do not send manually. If nothing renders after a
     /// `set_chunk`, the underlay resolved to `Void` (nothing to draw) or
     /// no camera is active.
-    #[handler]
+    #[handler::single]
     fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
         for mesh in self.meshes.values() {
             if !mesh.is_empty() {
@@ -138,7 +138,7 @@ impl WasmActor for WorldView {
     /// written chunk's own mesh. Neighbors with no cached mesh are not
     /// rendered, so they need no remesh; an empty neighbor's border
     /// geometry is already covered by this chunk's own apron windows.
-    #[handler]
+    #[handler::single]
     fn on_set_chunk(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetChunk) {
         let pos = msg.chunk_pos();
         self.world.insert_chunk(pos, msg.into_chunk());
@@ -166,7 +166,7 @@ impl WasmActor for WorldView {
     /// Send `aether.kit.world.set_view_mode` with `mode = 0` for the
     /// painted look or `mode = 1` for the raw hue-noise field, used to
     /// calibrate the material table by eye. `capture_frame` to compare.
-    #[handler]
+    #[handler::single]
     fn on_set_view_mode(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetViewMode) {
         self.mode = msg.view_mode();
         self.remesh_all();
@@ -176,7 +176,7 @@ impl WasmActor for WorldView {
     /// a default to resolve to, then remesh every cached chunk — a region
     /// default can change the resolved underlay of any cell pointing at
     /// that region.
-    #[handler]
+    #[handler::single]
     fn on_set_region(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetRegion) {
         let id = msg.region_id;
         self.world.insert_region(id, msg.into_region());
@@ -193,7 +193,7 @@ impl WasmActor for WorldView {
     /// `4`), and the corner angle in degrees (`45`–`90`). Cells opt in
     /// through the `smoothing` plane of `aether.kit.world.set_chunk`
     /// (byte = profile id, `0` = the material default).
-    #[handler]
+    #[handler::single]
     fn on_set_smoothing_profile(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetSmoothingProfile) {
         self.world
             .insert_smoothing_profile(msg.profile_id, msg.profile());
@@ -210,7 +210,7 @@ impl WasmActor for WorldView {
     /// `water_plane` plane of `aether.kit.world.set_chunk` (id = plane,
     /// `0` = the datum-0 level). One write retunes a whole lake live; use
     /// `capture_frame` to verify.
-    #[handler]
+    #[handler::single]
     fn on_set_water_plane(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetWaterPlane) {
         self.world.insert_water_plane(msg.plane_id, msg.plane());
         self.remesh_all();
@@ -230,7 +230,7 @@ impl WasmActor for WorldView {
     /// noise field directly. Tuned values are session-scoped; commit the
     /// judged row back into `mesher::style`'s const table as the new
     /// default once satisfied.
-    #[handler]
+    #[handler::single]
     fn on_set_material_style(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetMaterialStyle) {
         match Material::try_from(msg.material) {
             Ok(Material::Void) | Err(_) => {
@@ -258,7 +258,7 @@ impl WasmActor for WorldView {
     // The `&mut self` receiver is required by the `#[handler]` dispatch
     // ABI; this handler only issues a read and touches no state.
     #[allow(clippy::unused_self)]
-    #[handler]
+    #[handler::single]
     fn on_load(&mut self, ctx: &mut WasmCtx<'_>, msg: WorldLoad) {
         tracing::info!(
             target: "aether_kit",
@@ -276,7 +276,7 @@ impl WasmActor for WorldView {
     ///
     /// # Agent
     /// Substrate-driven; do not send manually.
-    #[handler]
+    #[handler::single]
     fn on_read_result(&mut self, _ctx: &mut WasmCtx<'_>, result: ReadResult) {
         match result {
             ReadResult::Ok {

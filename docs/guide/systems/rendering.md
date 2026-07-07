@@ -119,7 +119,7 @@ fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
     lifecycle.subscribe::<Render>();
 }
 
-#[handler]
+#[handler::single]
 fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
     ctx.actor::<RenderCapability>().send_many(&self.triangles);
 }

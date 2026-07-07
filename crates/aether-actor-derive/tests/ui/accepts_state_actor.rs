@@ -51,7 +51,7 @@ impl aether_actor::WasmActor for Counter {
         self.count = state.count;
     }
 
-    #[handler]
+    #[handler::single]
     fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, bump: Bump) {
         self.count += bump.delta;
     }

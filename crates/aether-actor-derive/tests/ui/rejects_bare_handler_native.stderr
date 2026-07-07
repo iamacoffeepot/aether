@@ -1,0 +1,5 @@
+error: #[handler] requires an explicit reply class (ADR-0134): write `#[handler::single]` (the return value is the reply), `#[handler::manual]` (the handler issues replies), or `#[handler::multi]` (detached emissions of a declared kind)
+  --> tests/ui/rejects_bare_handler_native.rs:42:5
+   |
+42 |     #[handler ]
+   |     ^^^^^^^^^^^

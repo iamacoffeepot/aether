@@ -223,7 +223,7 @@ impl WasmActor for InlineStatefulChild {
 
     /// Increment the child's in-memory counter (mail demuxed to the
     /// child's alias).
-    #[handler]
+    #[handler::single]
     fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.count += 1;
     }
@@ -393,7 +393,7 @@ impl WasmActor for InlineConfiguredChild {
 
     /// Increment the child's in-memory counter (mail demuxed to the
     /// child's alias).
-    #[handler]
+    #[handler::single]
     fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.count += 1;
     }

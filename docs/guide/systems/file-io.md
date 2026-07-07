@@ -118,7 +118,7 @@ These are fire-and-forget; the result arrives later as its own mail, which you
 receive like any other kind:
 
 ```rust
-#[handler]
+#[handler::single]
 fn on_read_result(&mut self, ctx: &mut WasmCtx<'_>, result: ReadResult) {
     match result {
         ReadResult::Ok { path, bytes, .. } => { /* path tells you which read */ }
@@ -176,5 +176,5 @@ namespace rather than path.
 - Why a single `send_mail` returns the read's bytes — the settlement contract on
   [Tracing & settlement](tracing-and-settlement.md), and the tool surface on
   [The MCP harness](../mcp-harness.md).
-- How a component receives a reply kind in a `#[handler]` —
+- How a component receives a reply kind in a `#[handler::<class>]` —
   [Components & lifecycle](components.md).

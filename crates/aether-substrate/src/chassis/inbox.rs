@@ -638,7 +638,7 @@ mod tests {
             Ok(Self)
         }
 
-        #[handler]
+        #[handler::single]
         #[allow(clippy::unused_self)]
         fn on_request(&mut self, _ctx: &mut NativeCtx<'_>, req: ReplyRequest) -> ReplyAck {
             ReplyAck { seq: req.seq }

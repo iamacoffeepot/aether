@@ -82,7 +82,7 @@ impl NativeActor for InventoryCapability {
     // The manifest is read from the process-global link-time
     // inventories — `state.registry` is only consulted by
     // `on_list_kinds`, so this arm takes `_state`.
-    #[handler]
+    #[handler::single]
     fn on_manifest(
         _state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -124,7 +124,7 @@ impl NativeActor for InventoryCapability {
     /// wire bytes (`schema_wire`) because `SchemaType` has
     /// no `Schema` impl of its own; decode it with
     /// `wire::from_bytes::<SchemaType>(&desc.schema_wire)`.
-    #[handler]
+    #[handler::single]
     fn on_list_kinds(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -165,7 +165,7 @@ impl NativeActor for InventoryCapability {
     /// locally-folded manifest couldn't resolve.
     // Stateless arm — `resolve` reads the process-global runtime
     // registry, not the cap state, so it takes `_state`.
-    #[handler]
+    #[handler::single]
     fn on_resolve(
         _state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -194,7 +194,7 @@ impl NativeActor for InventoryCapability {
     /// `In -> Out` handler list.
     // The manifest is read from the process-global link-time
     // inventory, so this arm takes `_state`.
-    #[handler]
+    #[handler::single]
     fn on_handlers(
         _state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -405,7 +405,7 @@ mod tests {
         /// the link-time inventory captures. Stateless: the link-time
         /// `HandlerEntry` is what the test reads, not handler state.
         #[allow(clippy::unused_self)]
-        #[handler]
+        #[handler::single]
         fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _mail: ProbeReq) -> ProbeReply {
             ProbeReply {}
         }

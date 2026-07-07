@@ -406,7 +406,7 @@ impl WasmActor for Locomotion {
         lifecycle.subscribe::<Render>();
     }
 
-    #[handler]
+    #[handler::single]
     fn on_tick(&mut self, _ctx: &mut WasmCtx<'_>, _tick: Tick) {
         // In preview mode the game is frozen: the static matrix in the field
         // must persist, so skip the simulation entirely.
@@ -429,7 +429,7 @@ impl WasmActor for Locomotion {
         self.advance();
     }
 
-    #[handler]
+    #[handler::single]
     fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
         let render = ctx.actor::<RenderCapability>();
         // This actor owns the overhead camera: publish the view each frame
@@ -443,17 +443,17 @@ impl WasmActor for Locomotion {
         self.send_hud(ctx);
     }
 
-    #[handler]
+    #[handler::single]
     fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, mail: MouseMove) {
         self.cursor = (mail.x, mail.y);
     }
 
-    #[handler]
+    #[handler::single]
     fn on_window_size(&mut self, _ctx: &mut WasmCtx<'_>, mail: WindowSize) {
         self.window = (mail.width, mail.height);
     }
 
-    #[handler]
+    #[handler::single]
     fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, mail: MouseButton) {
         // Left-click paths the avatar; other buttons are ignored so a
         // right-click no longer moves it.
@@ -462,7 +462,7 @@ impl WasmActor for Locomotion {
         }
     }
 
-    #[handler]
+    #[handler::single]
     fn on_key(&mut self, _ctx: &mut WasmCtx<'_>, key: Key) {
         match key.code {
             keycode::KEY_TAB => self.cycle_granularity(),
@@ -480,12 +480,12 @@ impl WasmActor for Locomotion {
         }
     }
 
-    #[handler]
+    #[handler::single]
     fn on_key_release(&mut self, _ctx: &mut WasmCtx<'_>, key: KeyRelease) {
         self.set_held(key.code, false);
     }
 
-    #[handler]
+    #[handler::single]
     fn on_teleport(&mut self, _ctx: &mut WasmCtx<'_>, mail: Teleport) {
         if self.map.walkable(mail.tile_x, mail.tile_z) {
             self.mover.x = tile_center_octimeters(mail.tile_x);
@@ -501,7 +501,7 @@ impl WasmActor for Locomotion {
         }
     }
 
-    #[handler]
+    #[handler::single]
     fn on_set_walkable(&mut self, _ctx: &mut WasmCtx<'_>, mail: SetWalkable) {
         if !self.map.set(mail.tile_x, mail.tile_z, mail.walkable) {
             tracing::warn!(
@@ -512,12 +512,12 @@ impl WasmActor for Locomotion {
         }
     }
 
-    #[handler]
+    #[handler::single]
     fn on_set_granularity(&mut self, _ctx: &mut WasmCtx<'_>, mail: SetGranularity) {
         self.set_cell(mail.cell_octimeters);
     }
 
-    #[handler]
+    #[handler::single]
     fn on_preview(&mut self, _ctx: &mut WasmCtx<'_>, mail: Preview) {
         self.preview = mail.shape;
         if mail.shape != 0 {

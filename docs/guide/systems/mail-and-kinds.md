@@ -165,7 +165,7 @@ kind's schema. For a batch that must settle as one traced unit, use
 `ctx.actor::<RenderCapability>().send(&kind)` — or hold a `Mailbox<K>` token.
 `Kind::ID` and `mailbox_id_from_name` are compile-time constants, so there's no
 host round-trip to resolve an address. You receive mail with a
-`#[handler] fn on_x(&mut self, ctx, mail: K)` — the kind is inferred from the
+`#[handler::<class>] fn on_x(&mut self, ctx, mail: K)` — the kind is inferred from the
 third parameter (see [Components & lifecycle](components.md) and the *Writing a component*
 recipe).
 

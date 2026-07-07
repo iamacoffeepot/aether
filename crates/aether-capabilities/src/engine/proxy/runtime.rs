@@ -306,7 +306,7 @@ impl NativeActor for EngineProxy {
     /// — the `mailbox` is the *substrate-local* recipient, `kind` +
     /// `payload` the mail to deliver there. Any reply routes back to
     /// the sender of this `ForwardEnvelope`.
-    #[handler]
+    #[handler::single]
     fn on_forward(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: ForwardEnvelope) {
         let envelope = MailEnvelope {
             to: MailboxAddress::local(mail.mailbox),
@@ -336,7 +336,7 @@ impl NativeActor for EngineProxy {
     /// Internal wake mail — not part of the proxy's external
     /// surface. The reader thread fires this after pushing a frame;
     /// the handler drains `conn.inbound` and routes each frame.
-    #[handler]
+    #[handler::single]
     fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: RpcInboundReady) {
         while let Ok(frame) = state.conn.inbound.try_recv() {
             match frame {
@@ -394,7 +394,7 @@ impl NativeActor for EngineProxy {
     /// outbound RPC connection closes as the actor drops. The
     /// `engine_id` field is ignored — a proxy only ever terminates
     /// its own engine.
-    #[handler]
+    #[handler::single]
     fn on_terminate(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: TerminateEngine) {
         tracing::info!(
             target: "aether_substrate::engine_proxy",
@@ -420,7 +420,7 @@ impl NativeActor for EngineProxy {
     /// unanswered it declares the engine dead: reports `EngineDied`
     /// to the engines cap and self-shuts-down (its `Drop` SIGKILLs
     /// the wedged child). Otherwise it sends a fresh `Ping`.
-    #[handler]
+    #[handler::single]
     fn on_heartbeat_tick(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,

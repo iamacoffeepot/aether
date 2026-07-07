@@ -1181,8 +1181,9 @@ fn attr_is_fallback(attr: &Attribute) -> bool {
         .is_some_and(|s| s.ident == "fallback")
 }
 
-/// The category of a `#[handler]` method (ADR-0093 §3). `#[handler]` and
-/// `#[handler(mail)]` both mean an inbound-mail handler (the default);
+/// The category of a `#[handler]` method (ADR-0093 §3). Bare `#[handler]`
+/// and `#[handler(mail)]` both select the inbound-mail variant, which also
+/// requires an explicit reply class (ADR-0134, [`HandlerClass`]);
 /// `#[handler(task)]` marks a hold-until-resolve dispatch completion,
 /// matched by its `TaskDone<O, C>` output type rather than a kind id.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1206,8 +1207,9 @@ fn parse_handler_variant(attr: &Attribute) -> syn::Result<HandlerVariant> {
                 syn::Error::new_spanned(
                     attr,
                     "#[handler(...)] accepts exactly `mail` or `task` — \
-                     `#[handler]` and `#[handler(mail)]` are inbound mail, \
-                     `#[handler(task)]` is a dispatch completion (ADR-0093 §3)",
+                     `mail` (bare `#[handler::<class>]` or `#[handler::<class>(mail)]`) \
+                     selects the inbound-mail variant, `task` (`#[handler(task)]`) is a \
+                     dispatch completion (ADR-0093 §3)",
                 )
             })?;
             if ident == "mail" {
@@ -1218,24 +1220,24 @@ fn parse_handler_variant(attr: &Attribute) -> syn::Result<HandlerVariant> {
                 Err(syn::Error::new_spanned(
                     &ident,
                     "unknown #[handler] variant — accepts exactly `mail` or `task` \
-                     (`#[handler]` / `#[handler(mail)]` = inbound mail, \
+                     (`#[handler::<class>]` / `#[handler::<class>(mail)]` = inbound mail, \
                      `#[handler(task)]` = a dispatch completion, ADR-0093 §3)",
                 ))
             }
         }
         Meta::NameValue(nv) => Err(syn::Error::new_spanned(
             nv,
-            "#[handler] takes no `= value` — write `#[handler]`, `#[handler(mail)]`, \
-             or `#[handler(task)]`",
+            "#[handler] takes no `= value` — write `#[handler::single]`, \
+             `#[handler::manual]`, `#[handler::multi]`, or `#[handler(task)]`",
         )),
     }
 }
 
 /// The reply class of a handler (ADR-0112, ADR-0134), read off the
-/// attribute path: `#[handler]` / `#[handler::single]` are
-/// [`Single`](HandlerClass::Single), `#[handler::manual]` is
-/// [`Manual`](HandlerClass::Manual), and `#[handler::multi]` is
-/// [`Multi`](HandlerClass::Multi). Orthogonal to [`HandlerVariant`]
+/// attribute path: `#[handler::single]` is [`Single`](HandlerClass::Single),
+/// `#[handler::manual]` is [`Manual`](HandlerClass::Manual), and
+/// `#[handler::multi]` is [`Multi`](HandlerClass::Multi) — every mail
+/// handler names its class explicitly. Orthogonal to [`HandlerVariant`]
 /// (the `mail` / `task` trigger), which is read from the parens.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HandlerClass {
@@ -1245,20 +1247,35 @@ enum HandlerClass {
 }
 
 /// Read a handler's [`HandlerClass`] off its attribute path (ADR-0112,
-/// ADR-0134). The last path segment is the class (`single` / `manual` /
-/// `multi`), or `handler` itself for the bare `#[handler]` (= single).
+/// ADR-0134), given the already-parsed [`HandlerVariant`]. The last path
+/// segment is the class (`single` / `manual` / `multi`); a bare `handler`
+/// segment is classless task exemption for [`HandlerVariant::Task`] (its
+/// reply rides `TaskDone`, not the handler class) and a pointed compile
+/// error for [`HandlerVariant::Mail`] — the class is no longer defaulted.
 /// `attr_is_handler` is the gate, so the path is known to end in one of
 /// these segments.
-fn parse_handler_class(attr: &Attribute) -> syn::Result<HandlerClass> {
+fn parse_handler_class(attr: &Attribute, variant: HandlerVariant) -> syn::Result<HandlerClass> {
     let last = attr
         .path()
         .segments
         .last()
         .expect("attr_is_handler guarantees a non-empty path");
     let class = match last.ident.to_string().as_str() {
-        // Bare `#[handler]` / `#[handler(mail|task)]` and the explicit
-        // `#[handler::single]` are both the single class.
-        "handler" | "single" => HandlerClass::Single,
+        "handler" => match variant {
+            // The task variant has no reply class — its reply rides
+            // `TaskDone`, not the handler class — so it stays classless.
+            HandlerVariant::Task => HandlerClass::Single,
+            HandlerVariant::Mail => {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "#[handler] requires an explicit reply class (ADR-0134): write \
+                     `#[handler::single]` (the return value is the reply), \
+                     `#[handler::manual]` (the handler issues replies), or \
+                     `#[handler::multi]` (detached emissions of a declared kind)",
+                ));
+            }
+        },
+        "single" => HandlerClass::Single,
         "manual" => HandlerClass::Manual,
         "multi" => HandlerClass::Multi,
         other => {
@@ -1611,7 +1628,8 @@ fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStrea
                     // dispatch yet. Reject `#[handler(task)]` here with a
                     // clear diagnostic rather than letting it expand into
                     // a guest dispatch table that can't satisfy it.
-                    if parse_handler_variant(&f.attrs[idx])? == HandlerVariant::Task {
+                    let variant = parse_handler_variant(&f.attrs[idx])?;
+                    if variant == HandlerVariant::Task {
                         return Err(syn::Error::new_spanned(
                             &f,
                             "dispatch completions are native-only (ADR-0093 §7); \
@@ -1623,7 +1641,7 @@ fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStrea
                     let reply = classify_handler_reply(&f.sig.output);
                     // ADR-0112 / ADR-0134: read the reply class off the marker
                     // path.
-                    let class = parse_handler_class(&f.attrs[idx])?;
+                    let class = parse_handler_class(&f.attrs[idx], variant)?;
                     // ADR-0134: a multi handler emits through `ctx.emit` and
                     // must return `()` (the emissions are the reply, not a
                     // return value); `K` rides its `Multi<K>` ctx marker.
@@ -2238,7 +2256,7 @@ fn expand_native_actor_trait(
                     // ADR-0112 / ADR-0134: read the reply class off the marker
                     // path. A task handler always receives the downgraded
                     // `Single` ctx, so it carries no class field.
-                    let class = parse_handler_class(&f.attrs[idx])?;
+                    let class = parse_handler_class(&f.attrs[idx], variant)?;
                     f.attrs.remove(idx);
                     match variant {
                         HandlerVariant::Mail => {

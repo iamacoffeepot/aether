@@ -96,7 +96,7 @@ impl NativeActor for TestEchoActor {
     }
 
     /// Stateless echo handler — the empty state is unused.
-    #[handler]
+    #[handler::single]
     fn on_echo(
         _state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -187,7 +187,7 @@ impl NativeActor for DeferredEchoActor {
     /// (queuing its `Finished`) before the reply lands — the window the
     /// bug used to settle in. The framework-held `SettlementHold` keeps
     /// the chain open until the deferred re-reply.
-    #[handler]
+    #[handler::single]
     fn on_deferred_echo(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,

@@ -33,7 +33,7 @@ impl aether_substrate::actor::native::NativeActor for Dup {
         unimplemented!()
     }
 
-    #[handler]
+    #[handler::single]
     fn on_first(
         &mut self,
         _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>,
@@ -41,7 +41,7 @@ impl aether_substrate::actor::native::NativeActor for Dup {
     ) {
     }
 
-    #[handler]
+    #[handler::single]
     fn on_second(
         &mut self,
         _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>,

@@ -511,7 +511,7 @@ impl NativeActor for RpcServerCapability {
     /// The accept / reader sidecars fire this to wake the
     /// dispatcher; the handler drains the mpsc and dispatches per
     /// item.
-    #[handler]
+    #[handler::single]
     fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: RpcInboundReady) {
         while let Ok(event) = state.inbound_rx.try_recv() {
             match event {
@@ -588,7 +588,7 @@ impl NativeActor for RpcServerCapability {
     /// Internal — fires from `SettlementRegistry::fire_settled`,
     /// not from external mail. Subscribers parked in the registry
     /// receive one of these per settled root.
-    #[handler]
+    #[handler::single]
     fn on_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Settled) {
         let correlation = mail.root.correlation_id;
         let Some(entry) = state.in_flight.remove(&correlation) else {

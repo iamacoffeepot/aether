@@ -53,7 +53,7 @@ impl aether_actor::WasmActor for MismatchProbe {
 
     // single class but a manual-mode ctx — the macro passes `as_single()`,
     // which doesn't unify with `WasmCtx<'_, Manual>`.
-    #[handler]
+    #[handler::single]
     fn on_pong(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _pong: Pong) {}
 }
 

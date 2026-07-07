@@ -138,7 +138,7 @@ These are fire-and-forget and use the chassis default timeout. The result
 arrives later as its own mail, which you receive like any other kind:
 
 ```rust
-#[handler]
+#[handler::single]
 fn on_fetch_result(&mut self, ctx: &mut WasmCtx<'_>, result: FetchResult) {
     match result {
         FetchResult::Ok { url, status, body, .. } => { /* url tells you which fetch */ }
@@ -188,5 +188,5 @@ too — they tie to the byte-handle design.
 - Why a single `send_mail` returns the fetch's reply — the settlement contract on
   [Tracing & settlement](tracing-and-settlement.md), and the tool surface on
   [The MCP harness](../mcp-harness.md).
-- How a component receives a reply kind in a `#[handler]` —
+- How a component receives a reply kind in a `#[handler::<class>]` —
   [Components & lifecycle](components.md).

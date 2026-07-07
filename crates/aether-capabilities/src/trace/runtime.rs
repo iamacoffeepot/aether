@@ -79,7 +79,7 @@ impl NativeActor for TraceDispatchCapability {
     /// bubble straight to the original caller with the same
     /// `correlation_id`, so the RPC server's `on_any` fallback wraps
     /// each into a `ReplyEvent` on the wire.
-    #[handler]
+    #[handler::single]
     fn on_dispatch_traced(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,

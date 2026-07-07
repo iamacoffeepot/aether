@@ -513,7 +513,7 @@ fn emit_glue_handler(routed: &Routed) -> TokenStream2 {
 
     quote! {
         #(#docs)*
-        #[handler]
+        #[handler::single]
         fn #glue_name(
             #glue_first,
             __aether_ctx: &mut #ctx_c,

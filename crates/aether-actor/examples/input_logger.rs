@@ -45,13 +45,13 @@ impl WasmActor for InputLogger {
         }
     }
 
-    #[handler]
+    #[handler::single]
     fn on_key(&mut self, _ctx: &mut WasmCtx<'_>, _key: Key) {}
 
-    #[handler]
+    #[handler::single]
     fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, _mb: MouseButton) {}
 
-    #[handler]
+    #[handler::single]
     fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, _m: MouseMove) {}
 }
 

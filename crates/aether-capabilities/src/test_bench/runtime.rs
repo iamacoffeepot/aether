@@ -50,7 +50,7 @@ impl NativeActor for UnsupportedTestBenchCapability {
 
     /// Reply `Err` so MCP `advance` fails fast on chassis that don't
     /// drive ticks via the embedder loop.
-    #[handler]
+    #[handler::single]
     fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: Advance) {
         state.outbound.send_reply(
             ctx.reply_target(),

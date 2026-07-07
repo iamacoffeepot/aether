@@ -101,7 +101,7 @@ impl NativeActor for TcpCapability {
     /// # Agent
     /// Reply: `BindListenerResult`. `Ok` on successful bind +
     /// spawn; `Err` on addr parse / bind / spawn / monitor failure.
-    #[handler]
+    #[handler::single]
     fn on_bind(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -230,7 +230,7 @@ impl NativeActor for TcpCapability {
     ///
     /// # Agent
     /// Reply: `ListListenersResult`.
-    #[handler]
+    #[handler::single]
     fn on_list(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,

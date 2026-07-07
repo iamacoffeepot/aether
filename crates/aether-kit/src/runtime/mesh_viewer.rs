@@ -123,7 +123,7 @@ impl WasmActor for MeshViewer {
     /// Substrate-driven; do not send manually. If no triangles render
     /// after a `load`, the file failed to read / parse / mesh — check
     /// `engine_logs`.
-    #[handler]
+    #[handler::single]
     fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
         if !self.triangles.is_empty() {
             ctx.actor::<RenderCapability>().send_many(&self.triangles);
@@ -145,7 +145,7 @@ impl WasmActor for MeshViewer {
     // `msg: LoadMesh` matches the dispatch ABI (ADR-0033 / ADR-0038);
     // the load body delegates straight to `FsCapability` via `ctx`.
     #[allow(clippy::needless_pass_by_value)]
-    #[handler]
+    #[handler::single]
     fn on_load(&mut self, ctx: &mut WasmCtx<'_>, msg: LoadMesh) {
         // Park the requester's reply target across the async read.
         // `on_read_result` answers it with the structured outcome.

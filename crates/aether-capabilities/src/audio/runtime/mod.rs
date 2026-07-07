@@ -553,7 +553,7 @@ impl NativeActor for AudioCapability {
     /// Fire-and-forget. The synth keys voices on
     /// `(sender, instrument_id, pitch)`; sending two `NoteOn`s with
     /// the same triple is a no-op.
-    #[handler]
+    #[handler::single]
     fn on_note_on(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: NoteOn) {
         let Some(s) = state.sender.as_ref() else {
             return;
@@ -577,7 +577,7 @@ impl NativeActor for AudioCapability {
     ///
     /// # Agent
     /// Fire-and-forget.
-    #[handler]
+    #[handler::single]
     fn on_note_off(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: NoteOff) {
         let Some(s) = state.sender.as_ref() else {
             return;
@@ -600,7 +600,7 @@ impl NativeActor for AudioCapability {
     /// # Agent
     /// Reply: `SetMasterGainResult`. `Ok { applied_gain }` clamps to
     /// `0.0..=1.0`; `Err` on chassis without audio.
-    #[handler]
+    #[handler::single]
     fn on_set_master_gain(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -629,7 +629,7 @@ impl NativeActor for AudioCapability {
     /// # Agent
     /// Reply: `SetReverbSendResult`. `Ok { applied_send }` clamps to
     /// `0.0..=1.0`; `Err` on chassis without audio.
-    #[handler]
+    #[handler::single]
     fn on_set_reverb_send(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -660,7 +660,7 @@ impl NativeActor for AudioCapability {
     /// `0.0..=4.0` (boost allowed); the trim is keyed by this mail's
     /// sender and ducks that sender's already-sounding voices on the next
     /// render block. `Err` on chassis without audio.
-    #[handler]
+    #[handler::single]
     fn on_set_sender_gain(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -699,7 +699,7 @@ impl NativeActor for AudioCapability {
     /// audio callback as one event and `Ok { accepted }` reports the
     /// count. Nop chassis (headless / hub / disabled / no device) reply
     /// `Err` fail-fast.
-    #[handler]
+    #[handler::single]
     fn on_schedule(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -916,7 +916,7 @@ impl NativeActor for AudioCapability {
     /// # Agent
     /// Fire-and-forget. Matched on `(sender, lane, namespace, path)`;
     /// stopping a track that isn't playing is a no-op.
-    #[handler]
+    #[handler::single]
     fn on_stop_track(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: StopTrack) {
         let Some(sender) = state.sender.as_ref() else {
             return;
