@@ -29,13 +29,13 @@ use std::fs;
 
 use aether_actor::Addressable;
 use aether_data::Kind;
-use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_TAB};
+use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_TAB, KEY_UP};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
     Key, LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, MouseMove,
     TextInput, Tick,
 };
-use aether_kit::{PanelConfig, Theme};
+use aether_kit::{PanelConfig, SliderConfig, Theme, WidgetChildSpec, WidgetKind};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
@@ -58,6 +58,7 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8]) {
         font_namespace: String::new(),
         font_path: String::new(),
         theme: Theme::DEFAULT,
+        children: Vec::new(),
     };
     let loaded = bench
         .execute(vec![(
@@ -216,5 +217,138 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
             .any(|m| m.contains("widget text committed") && m.contains("text=hi")),
         "the text entry then Enter should commit \"hi\" — proving pointer focus \
          and text routing; log was:\n{joined}",
+    );
+}
+
+/// A slider child spec for the declarative-children scenario: full `0..=255`
+/// range, unit step, seeded at `initial`, default theme.
+fn slider_spec(subname: &str, initial: f32) -> WidgetChildSpec {
+    WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::Slider,
+        origin: [0.0, 0.0],
+        config: SliderConfig {
+            min: 0.0,
+            max: 255.0,
+            step: 1.0,
+            initial,
+            theme: Theme::DEFAULT,
+        }
+        .encode_into_bytes(),
+    }
+}
+
+/// Load the reference `WidgetPanel` root with an explicit `children` list (so
+/// it stacks exactly those specs rather than its built-in reference stack) at
+/// `(10, 10)` 200px wide, no font, default theme.
+fn load_panel_with(bench: &mut TestBench, wasm: &[u8], children: Vec<WidgetChildSpec>) {
+    let config = PanelConfig {
+        x: 10.0,
+        y: 10.0,
+        width: 200.0,
+        font_namespace: String::new(),
+        font_path: String::new(),
+        theme: Theme::DEFAULT,
+        children,
+    };
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm: wasm.to_vec(),
+                    name: Some("panel".to_owned()),
+                    config: config.encode_into_bytes(),
+                    export: Some("aether.kit.widget.panel".to_owned()),
+                },
+            ),
+        )])
+        .expect("load sequence");
+    match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        LoadResult::Ok { name, .. } => assert!(
+            name.ends_with(":panel"),
+            "the panel root should register under :panel; got {name}",
+        ),
+        LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
+    }
+}
+
+/// The widget name a `widget slider changed` log line attributes its value to
+/// (the `widget=NAME` field the panel logs) — `None` for a non-slider line.
+fn slider_changed_widget(message: &str) -> Option<String> {
+    message.split("widget=").nth(1).map(|rest| {
+        rest.split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    })
+}
+
+/// A panel handed an explicit `children` list stacks exactly those widgets in
+/// the declared order, and that order drives the focus (Tab) cycle — the
+/// declarative-composition path the built-in reference stack can never
+/// exercise (it only ever sees one fixed order). Two sliders named `first`
+/// then `second`: from a fresh panel, Tab lands focus on `first` (focus
+/// registration index 0), an arrow nudge commits and logs it, and a second
+/// Tab-then-nudge logs `second`. The committed value-up events, read off the
+/// log ring in arrival order, must spell out the declared order — a
+/// spec→spawn dispatch fault or an order-derivation defect would reverse or
+/// drop one.
+#[test]
+fn panel_stacks_declared_children_in_order() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = TestBench::start_with_size(240, 220).expect("boot");
+    load_panel_with(
+        &mut bench,
+        &wasm,
+        vec![slider_spec("first", 40.0), slider_spec("second", 40.0)],
+    );
+
+    let panel = panel_address();
+    bench
+        .execute(vec![
+            // First tick spawns + lays out the declared stack.
+            ("spawn", BenchOp::send_mail(&panel, &Tick)),
+            // Tab from no focus lands on the first focusable child (index 0);
+            // an arrow nudge on the focused slider commits + logs it.
+            (
+                "tab_first",
+                BenchOp::send_mail(&panel, &Key { code: KEY_TAB }),
+            ),
+            (
+                "nudge_first",
+                BenchOp::send_mail(&panel, &Key { code: KEY_UP }),
+            ),
+            // Tab again advances to the second child; nudge + log it.
+            (
+                "tab_second",
+                BenchOp::send_mail(&panel, &Key { code: KEY_TAB }),
+            ),
+            (
+                "nudge_second",
+                BenchOp::send_mail(&panel, &Key { code: KEY_UP }),
+            ),
+        ])
+        .expect("declared-children session");
+
+    let log = panel_log_messages(&mut bench);
+    let joined = log.join("\n");
+    let order: Vec<String> = log
+        .iter()
+        .filter(|m| m.contains("widget slider changed") && m.contains("committed=true"))
+        .filter_map(|m| slider_changed_widget(m))
+        .collect();
+    assert_eq!(
+        order,
+        vec!["first".to_owned(), "second".to_owned()],
+        "the declared child order must drive both the vertical stack and the Tab \
+         focus cycle; committed slider events arrived as {order:?}; log was:\n{joined}",
     );
 }

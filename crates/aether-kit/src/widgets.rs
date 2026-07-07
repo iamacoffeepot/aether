@@ -132,17 +132,51 @@ pub struct WidgetDrawList {
     pub items: Vec<WidgetDrawItem>,
 }
 
+/// The kind of actor a [`WidgetChildSpec`] spawns, and the concrete config
+/// type its opaque [`WidgetChildSpec::config`] bytes decode as. It is the
+/// one tag that lets a single spec type serve both the homogeneous
+/// compositing [`WidgetConfig`] tree (every child a `Composite`) and the
+/// heterogeneous reference panel (a leaf per widget type). The spawnable set
+/// is closed and kit-owned — every variant maps to a compile-time
+/// `spawn_inline_child::<A>` call — so the dispatch match is exhaustive and
+/// an unknown widget is a compile error, not a runtime failure.
+#[derive(
+    aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default,
+)]
+pub enum WidgetKind {
+    /// A nested compositing subtree — the child's `config` decodes as a
+    /// [`WidgetConfig`] and spawns another compositing node. The default, so
+    /// a spec written for the compositing tree needs no tag.
+    #[default]
+    Composite,
+    /// A static label — `config` decodes as [`LabelConfig`]. Not focusable.
+    Label,
+    /// A value slider — `config` decodes as [`SliderConfig`].
+    Slider,
+    /// A radio group — `config` decodes as [`RadioConfig`]; its row count is
+    /// its option count.
+    Radio,
+    /// A single-line text field — `config` decodes as [`TextFieldConfig`].
+    TextField,
+    /// A push button — `config` decodes as [`ButtonConfig`].
+    Button,
+}
+
 /// One child's placement in a compositing node's layout table. `subname`
 /// is the inline-child address segment the parent spawns and collects it
-/// under; `origin` is the local-pixel offset the parent applies to the
-/// child's every draw. `config` is the child's own [`WidgetConfig`],
-/// pre-encoded to bytes — carrying it opaquely (rather than a nested
-/// [`WidgetConfig`] by value) is what lets a tree nest without forming a
+/// under; `kind` selects which actor the parent spawns and how `config`
+/// decodes; `origin` is the local-pixel offset the parent applies to the
+/// child's every draw. `config` is the child's own concrete config (a
+/// [`WidgetConfig`] for a `Composite`, a [`SliderConfig`] for a `Slider`,
+/// …), pre-encoded to bytes — carrying it opaquely (rather than a nested
+/// config by value) is what lets a tree nest without forming a
 /// self-referential schema, which a recursive `const SCHEMA` cannot
-/// express.
+/// express. A layout-owning parent (the reference panel) derives each
+/// child's `origin` from its stack order and ignores this field.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct WidgetChildSpec {
     pub subname: String,
+    pub kind: WidgetKind,
     pub origin: [f32; 2],
     pub config: Vec<u8>,
 }
@@ -299,10 +333,15 @@ pub struct FocusLost;
 
 /// `aether.kit.widget.panel.config` — the reference panel root's layout
 /// config: where the vertical widget stack sits (`x` / `y` top-left, `width`),
-/// its base [`Theme`], and the font it loads through `aether.text` to fill the
-/// theme's `font_id`. The panel spawns a fixed demonstration stack (a label, a
-/// slider, a radio group, a text field, an apply button) from this — the
-/// copy-paste starting point a real editor panel forks.
+/// its base [`Theme`], the font it loads through `aether.text` to fill the
+/// theme's `font_id`, and the ordered `children` it stacks. The panel derives
+/// each child's row height and focusability from its decoded config and lays
+/// them out in the declared order, so the child list — not Rust source — is
+/// what a panel contains. An empty `children` list falls back to the built-in
+/// reference stack (a label, a slider, a radio group, a text field, an apply
+/// button), the copy-paste starting point a real editor panel forks. A
+/// [`WidgetKind::Composite`] child (a nested container) is out of scope in v1
+/// and is rejected with a warn.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.widget.panel.config")]
 pub struct PanelConfig {
@@ -312,6 +351,7 @@ pub struct PanelConfig {
     pub font_namespace: String,
     pub font_path: String,
     pub theme: Theme,
+    pub children: Vec<WidgetChildSpec>,
 }
 
 #[cfg(test)]

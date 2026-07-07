@@ -74,13 +74,18 @@ drifts off it.
 
 `WidgetPanel` (export `aether.kit.widget.panel`) is the worked example — the
 test vehicle and the template a real editor forks. It embeds `Composite` and
-`Focus`, spawns a vertical stack of every widget on its first frame, loads a
-font through `aether.text` and stamps the session `font_id` into its theme when
-`load_font_result` arrives, drives the collect/emit loop each frame, and routes
-input through `Focus`. Its value-up handlers are the seam: each attributes the
-event by `ctx.source_mailbox()` and is where a map editor translates a widget
-change into world-knob driver mail. Fork it by replacing the stack and filling
-in those handlers.
+`Focus`, spawns the vertical stack its `PanelConfig` declares on its first
+frame (each `WidgetChildSpec` names a `WidgetKind` and carries that widget's
+pre-encoded config; an empty child list falls back to the built-in reference
+stack of every widget), loads a font through `aether.text` and stamps the
+session `font_id` into its theme when `load_font_result` arrives, drives the
+collect/emit loop each frame, and routes input through `Focus`. Row height and
+focusability derive from each child's decoded config and the vertical order
+follows the declared order, so what a panel contains is config data. Its
+value-up handlers are the seam: each attributes the event by
+`ctx.source_mailbox()` and is where a map editor translates a widget change
+into world-knob driver mail. Fork it by handing it your own `children` and
+filling in those handlers.
 
 To add a new widget — a dropdown, a checkbox, a color well — write one more
 `#[actor(instanced)]` type that speaks the same four lanes and answers `Collect`
