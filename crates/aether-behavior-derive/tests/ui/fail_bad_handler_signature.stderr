@@ -1,0 +1,5 @@
+error: #[on] handler's kind parameter must be a reference — `&K` observes, `&mut K` intercepts
+  --> tests/ui/fail_bad_handler_signature.rs:22:57
+   |
+22 |     fn clamp(&mut self, _ctx: &mut BehaviorCtx, slider: Slider) {
+   |                                                         ^^^^^^

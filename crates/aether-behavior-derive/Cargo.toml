@@ -1,0 +1,29 @@
+[package]
+name = "aether-behavior-derive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Proc-macro home for `#[behavior]` (ADR-0137). Kept separate from
+# `aether-behavior` because a proc-macro crate must opt into
+# `proc-macro = true` and can export nothing else — and, load-bearing
+# here, so the SDK trunk a future host consumes carries no proc-macro
+# machinery. A behavior script lists both crates: `aether-behavior` for
+# the runtime surface the generated code targets, this crate for the
+# `#[behavior]` attribute.
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+
+[dev-dependencies]
+aether-behavior = { path = "../aether-behavior" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+serde = { workspace = true, features = ["derive", "alloc"] }
+trybuild = "1"
+
+[lints]
+workspace = true
