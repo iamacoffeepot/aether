@@ -41,7 +41,7 @@ use aether_data::{EnumVariant, Primitive, SchemaType};
 use aether_kinds::{
     BinarySelector, CaptureFrame, CaptureFrameResult, ComponentCapabilities, ComponentSelector,
     CostTail, CostTailResult, DeathReason, DescribeComponent, DescribeComponentResult, FrameCheck,
-    FrameReduction, ListComponentBinaries, ListComponentBinariesResult, ListComponents,
+    FrameRect, FrameReduction, ListComponentBinaries, ListComponentBinariesResult, ListComponents,
     ListComponentsResult, ListEngineBinaries, ListEngineBinariesResult, ListEngines,
     ListEnginesResult, ListKinds, ListKindsResult, LoadComponent, LoadResult, NamedMail,
     ReplaceComponent, ReplaceResult, ResolveComponent, ResolveComponentResult, SimilarityCheck,
@@ -915,7 +915,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Capture an engine's current frame as a PNG, returned inline as image content. Optionally carries two mail bundles dispatched atomically around the capture: `mails` fires before readback (state changes that should appear in the image), `after_mails` fires after (cleanup). A bad bundle entry aborts the whole capture before any mail moves. Optionally carries `checks`: substrate-side reductions (not_all_black, differs_from_background, coverage, centroid, bounding_box) scored on the exact RGBA the PNG is built from and returned as a `verdict` text block alongside the image — a one-call spawn -> drive -> assert with no caller-side PNG decode. Optionally carries `similarity`: a reference-image check (`namespace` + `reference_path` + `threshold`) the render thread scores as a normalised mean-absolute-error against the captured RGBA, returned as `similarity_score` / `similarity_pass` text blocks alongside the image."
+        description = "Capture an engine's current frame as a PNG, returned inline as image content. Optionally carries two mail bundles dispatched atomically around the capture: `mails` fires before readback (state changes that should appear in the image), `after_mails` fires after (cleanup). A bad bundle entry aborts the whole capture before any mail moves. Optionally carries `checks`: substrate-side reductions (not_all_black, differs_from_background, coverage, centroid, bounding_box) scored on the exact RGBA the PNG is built from and returned as a `verdict` text block alongside the image — a one-call spawn -> drive -> assert with no caller-side PNG decode. Each check entry optionally carries `region` ({min_x, min_y, max_x, max_y}) to restrict the reduction to the frame-clamped intersection of that rect instead of the whole frame — e.g. asserting a widget's fill lands inside its own screen rect rather than folding the whole scene into one number; coverage then divides by the clamped region's pixel count, and centroid/bounding_box still report absolute frame coordinates. Omit `region` to score the whole frame (the prior behavior). Optionally carries `similarity`: a reference-image check (`namespace` + `reference_path` + `threshold`) the render thread scores as a normalised mean-absolute-error against the captured RGBA, returned as `similarity_score` / `similarity_pass` text blocks alongside the image."
     )]
     pub async fn capture_frame(
         &self,
@@ -2116,6 +2116,12 @@ fn capture_check(spec: &CaptureCheckSpec) -> Result<FrameCheck, McpError> {
         reduction,
         tolerance: spec.tolerance,
         background: spec.background,
+        region: spec.region.as_ref().map(|r| FrameRect {
+            min_x: r.min_x,
+            min_y: r.min_y,
+            max_x: r.max_x,
+            max_y: r.max_y,
+        }),
     })
 }
 

@@ -730,6 +730,19 @@ pub struct MailNodeJson {
     pub thread_name: Option<String>,
 }
 
+/// Inclusive axis-aligned pixel rect scoping a `CaptureCheckSpec` to one
+/// region of the frame (iamacoffeepot/aether#2673). A named struct
+/// rather than a flat `[u32; 4]` — the JSON surface is self-describing
+/// for the tool caller, matching how `CaptureCheckSpec` already mirrors
+/// the wire types it maps onto.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CaptureRect {
+    pub min_x: u32,
+    pub min_y: u32,
+    pub max_x: u32,
+    pub max_y: u32,
+}
+
 /// One frame check in a `capture_frame` `checks` list. Names a
 /// substrate-side reduction the render thread scores on the raw RGBA
 /// the PNG is built from, so a smoke demo asserts without decoding the
@@ -749,6 +762,18 @@ pub struct CaptureCheckSpec {
     /// `differs_from_background` convention).
     #[serde(default)]
     pub background: Option<[u8; 3]>,
+    /// Restrict the reduction to the frame-clamped intersection of this
+    /// rect (iamacoffeepot/aether#2673). Coverage divides by the
+    /// clamped region's pixel count, not the whole frame's; `centroid`
+    /// and `bounding_box` report absolute frame coordinates, not
+    /// region-relative ones; the background reference is unchanged —
+    /// still the frame's top-left pixel unless `background` pins one.
+    /// A region that clips to zero pixels (out of bounds, or a
+    /// degenerate `min_x > max_x` / `min_y > max_y`) scores the
+    /// established empty-mask result rather than erroring. Omit or
+    /// `null` to score the whole frame (the prior behavior).
+    #[serde(default)]
+    pub region: Option<CaptureRect>,
 }
 
 /// Optional reference-image similarity check for `capture_frame`. The
