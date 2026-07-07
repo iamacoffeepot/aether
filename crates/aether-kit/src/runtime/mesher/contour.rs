@@ -220,7 +220,53 @@ pub fn minimize_corners(
     for pass in 1..max_iterations {
         grid = cellular_pass(&grid, gw, gh, params, width, upsample, pass);
     }
+
+    grid = prune_one_wide_artifacts(grid, gw, gh, params, width, upsample);
     (grid, gw, gh)
+}
+
+/// Converge away one-sample-wide artifacts the final cellular pass had no
+/// successor to eat — a fill made while its neighbors were cut reads as a
+/// bump jutting off the boundary once marched. A covered sample attached
+/// by at most one orthogonal side cuts; an uncovered sample enclosed on
+/// three or more orthogonal sides fills; every staircase or corner sample
+/// carries exactly two sides, so legitimate contours are untouchable and
+/// the sweep is a no-op on them. Gated per sample like the passes — a
+/// zero-iteration zone keeps its raw mask verbatim.
+fn prune_one_wide_artifacts(
+    mut grid: Vec<bool>,
+    gw: usize,
+    gh: usize,
+    params: &[SmoothParams],
+    mask_width: usize,
+    upsample: usize,
+) -> Vec<bool> {
+    for _sweep in 0..8 {
+        let mut changed = false;
+        let mut next = grid.clone();
+        for gz in 0..gh as i32 {
+            for gx in 0..gw as i32 {
+                let own = params[(gz as usize / upsample) * mask_width + gx as usize / upsample];
+                if own.iterations < 1 {
+                    continue;
+                }
+                let m = grid[gz as usize * gw + gx as usize];
+                let orth_covered = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+                    .iter()
+                    .filter(|(dx, dz)| in_mask(&grid, gw, gh, gx + dx, gz + dz, m))
+                    .count();
+                if (m && orth_covered <= 1) || (!m && orth_covered >= 3) {
+                    next[gz as usize * gw + gx as usize] = !m;
+                    changed = true;
+                }
+            }
+        }
+        grid = next;
+        if !changed {
+            break;
+        }
+    }
+    grid
 }
 
 /// One cellular corner-flip pass over `grid`. A sample flips when a true
@@ -800,6 +846,53 @@ mod tests {
                     uniform_grid[gz * ugw + gx],
                     "away from the seam the field side matches a uniform run at ({gx}, {gz})",
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn smoothed_boundaries_carry_no_one_wide_artifacts() {
+        // An organic shoreline-shaped mask (a section of the demo lake)
+        // drives the cellular passes into their known failure mode: the
+        // final pass fills samples whose neighbors it simultaneously cut,
+        // leaving one-sample-wide bumps that march into triangles jutting
+        // off the boundary. The prune sweep must converge them away: every
+        // covered sample in the output has at least two covered orthogonal
+        // neighbors, and every uncovered sample at most two covered ones.
+        let rows = [
+            "..........................",
+            "..........................",
+            "..........##..............",
+            ".......#########..........",
+            "......############........",
+            ".....###############......",
+            ".....##################...",
+            ".....#####################",
+            ".....#####################",
+            ".....#####################",
+            ".....#####################",
+            ".....#####################",
+            ".....#####################",
+            ".....#####################",
+        ];
+        let (w, h) = (rows[0].len(), rows.len());
+        let mask: Vec<bool> = rows
+            .iter()
+            .flat_map(|r| r.bytes().map(|b| b == b'#'))
+            .collect();
+        let (grid, gw, gh) = minimize_corners(&mask, w, h, 2, &uniform(3, 90, w * h));
+        for gz in 0..gh as i32 {
+            for gx in 0..gw as i32 {
+                let m = grid[gz as usize * gw + gx as usize];
+                let orth_covered = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+                    .iter()
+                    .filter(|(dx, dz)| in_mask(&grid, gw, gh, gx + dx, gz + dz, m))
+                    .count();
+                if m {
+                    assert!(orth_covered >= 2, "one-wide bump survived at ({gx}, {gz})");
+                } else {
+                    assert!(orth_covered <= 2, "one-wide notch survived at ({gx}, {gz})");
+                }
             }
         }
     }

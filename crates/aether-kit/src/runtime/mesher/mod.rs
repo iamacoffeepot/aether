@@ -414,10 +414,11 @@ fn mesh_overlay_material(
 
 /// Emit water's body: a graded quad per subcell whose sample block sits
 /// fully inside the eroded smoothed grid, lightness falling with derived
-/// shore depth and hue varying per subcell. Partially-covered shoreline
-/// subcells are left to the marched rim layer beneath — that band carries
-/// the smoothed silhouette, so depth grading keeps its subcell resolution
-/// without quadrupling the water budget.
+/// shore depth and hue varying per subcell. A shoreline subcell only
+/// partially inside refines to per-sample quads over its covered samples,
+/// so the body hugs the smoothed contour at the smoothing grid's own
+/// resolution and the marched rim band beneath shows as an even pooled
+/// edge instead of subcell-scale teeth.
 fn emit_water(
     eroded: &[bool],
     gw: usize,
@@ -427,43 +428,77 @@ fn emit_water(
     tris: &mut Vec<DrawTriangle>,
 ) {
     let u = upsample as i32;
+    let sample = |gx: i32, gz: i32| {
+        // The grid is square (n × n upsampled), so gw bounds both.
+        gx >= 0
+            && gz >= 0
+            && (gx as usize) < gw
+            && (gz as usize) < gw
+            && eroded[gz as usize * gw + gx as usize]
+    };
     let inside = |six: i32, siz: i32| {
         let gx0 = (six + apron) * u;
         let gz0 = (siz + apron) * u;
-        (0..u).all(|dz| {
-            (0..u).all(|dx| {
-                let gx = gx0 + dx;
-                let gz = gz0 + dz;
-                // The grid is square (n × n upsampled), so gw bounds both.
-                gx >= 0
-                    && gz >= 0
-                    && (gx as usize) < gw
-                    && (gz as usize) < gw
-                    && eroded[gz as usize * gw + gx as usize]
-            })
-        })
+        (0..u).all(|dz| (0..u).all(|dx| sample(gx0 + dx, gz0 + dz)))
     };
+    let step_oct = OCTIMETERS_PER_SUBCELL / u;
     for sj in 0..SUBCELLS_PER_CHUNK_EDGE {
         for si in 0..SUBCELLS_PER_CHUNK_EDGE {
-            if !inside(si, sj) {
-                continue;
-            }
-            let depth = subcell_shore_depth(&inside, si, sj);
             let x_oct = base_oct[0] + si * OCTIMETERS_PER_SUBCELL;
             let z_oct = base_oct[1] + sj * OCTIMETERS_PER_SUBCELL;
+            if inside(si, sj) {
+                let depth = subcell_shore_depth(&inside, si, sj);
+                let center_x = (x_oct + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
+                let center_z = (z_oct + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
+                let resolved = resolve_cell(Material::Water, center_x, center_z, Some(depth));
+                let color = hsl_to_linear_rgb(resolved.hue, resolved.sat, resolved.light);
+                push_quad(
+                    tris,
+                    x_oct,
+                    z_oct,
+                    x_oct + OCTIMETERS_PER_SUBCELL,
+                    z_oct + OCTIMETERS_PER_SUBCELL,
+                    OVERLAY_BODY_LIFT,
+                    color,
+                );
+                continue;
+            }
+            // Shoreline refinement: per-sample quads over the covered
+            // samples of a partially-inside subcell, at the shore depth.
+            let gx0 = (si + apron) * u;
+            let gz0 = (sj + apron) * u;
+            let mut any = false;
+            for dz in 0..u {
+                for dx in 0..u {
+                    if sample(gx0 + dx, gz0 + dz) {
+                        any = true;
+                    }
+                }
+            }
+            if !any {
+                continue;
+            }
             let center_x = (x_oct + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
             let center_z = (z_oct + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
-            let resolved = resolve_cell(Material::Water, center_x, center_z, Some(depth));
+            let resolved = resolve_cell(Material::Water, center_x, center_z, Some(0.0));
             let color = hsl_to_linear_rgb(resolved.hue, resolved.sat, resolved.light);
-            push_quad(
-                tris,
-                x_oct,
-                z_oct,
-                x_oct + OCTIMETERS_PER_SUBCELL,
-                z_oct + OCTIMETERS_PER_SUBCELL,
-                OVERLAY_BODY_LIFT,
-                color,
-            );
+            for dz in 0..u {
+                for dx in 0..u {
+                    if sample(gx0 + dx, gz0 + dz) {
+                        let sx = x_oct + dx * step_oct;
+                        let sz = z_oct + dz * step_oct;
+                        push_quad(
+                            tris,
+                            sx,
+                            sz,
+                            sx + step_oct,
+                            sz + step_oct,
+                            OVERLAY_BODY_LIFT,
+                            color,
+                        );
+                    }
+                }
+            }
         }
     }
 }
