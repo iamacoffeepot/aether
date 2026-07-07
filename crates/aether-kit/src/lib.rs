@@ -15,7 +15,7 @@
 //! driver kinds live in [`camera`]; the mesh viewer's `aether.mesh.load`
 //! kind lives in [`mesh`]. The [`world`] module holds the chunked world
 //! plane stack — the `World` / `Chunk` / `Material` data layer and its
-//! `aether.kit.world.{set_chunk,set_region,set_view_mode,load}` wire kinds
+//! `aether.kit.world.{set_chunk,set_region,set_smoothing_profile,set_view_mode,load}` wire kinds
 //! — that `WorldView` meshes to the render sink.
 //!
 //! # Units
@@ -42,7 +42,8 @@ pub mod world;
 
 pub use world::{
     CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk, ChunkPos, Material, Region,
-    SetChunk, SetRegion, SetViewMode, ViewMode, World, WorldDecodeError, WorldLoad,
+    SetChunk, SetRegion, SetSmoothingProfile, SetViewMode, SmoothingProfile, ViewMode, World,
+    WorldDecodeError, WorldLoad,
 };
 
 #[cfg(feature = "runtime")]

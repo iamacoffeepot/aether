@@ -198,6 +198,28 @@ pub struct Region {
     pub default_material: Material,
 }
 
+/// Ceiling on a smoothing profile's iteration count. The contour pass
+/// reads `2 × iterations` subcells outward, so this cap keeps every
+/// field-driven read inside the mesher's fixed two-cell apron — the
+/// invariant the `R = 1` neighbor remesh relies on.
+pub const MAX_SMOOTHING_ITERATIONS: u32 = 4;
+
+/// A contour-smoothing profile — the number and the degrees a cell's
+/// smoothing plane points at. Referenced by 1-based id from the per-cell
+/// smoothing plane (`0` = no override, the material default applies); the
+/// table is positional like the region table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SmoothingProfile {
+    /// Corner-minimization iteration count (`0` = raw blocky contours).
+    /// Clamped to [`MAX_SMOOTHING_ITERATIONS`] at registration.
+    pub iterations: u32,
+    /// Corner angle in degrees the cellular passes flatten down to (`90`
+    /// rounds only true right angles; smaller rounds gentler junctions).
+    /// Clamped to `[45, 90]` at registration — the windowed rule's
+    /// threshold derivation assumes at least 45.
+    pub degrees: u32,
+}
+
 /// One `16 × 16` block of the world, as a struct-of-arrays: five
 /// property planes, each row-major (`z * 16 + x`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -215,6 +237,9 @@ pub struct Chunk {
     pub height: [i32; CELLS_PER_CHUNK_AREA],
     /// Region id per cell (`0` = no region).
     pub region: [u16; CELLS_PER_CHUNK_AREA],
+    /// Smoothing-profile id per cell (`0` = no override — the material's
+    /// own smoothing applies).
+    pub smoothing: [u8; CELLS_PER_CHUNK_AREA],
 }
 
 impl Chunk {
@@ -227,6 +252,7 @@ impl Chunk {
             overlay_mask: [0; CELLS_PER_CHUNK_AREA],
             height: [0; CELLS_PER_CHUNK_AREA],
             region: [0; CELLS_PER_CHUNK_AREA],
+            smoothing: [0; CELLS_PER_CHUNK_AREA],
         }
     }
 }
@@ -243,6 +269,7 @@ impl Default for Chunk {
 pub struct World {
     chunks: BTreeMap<ChunkPos, Chunk>,
     regions: Vec<Region>,
+    smoothing_profiles: Vec<SmoothingProfile>,
 }
 
 impl World {
@@ -335,6 +362,44 @@ impl World {
         self.regions[index] = region;
     }
 
+    /// Register a smoothing profile under a 1-based `id`, clamping
+    /// `iterations` to [`MAX_SMOOTHING_ITERATIONS`] and `degrees` to
+    /// `[45, 90]`. The table is positional like the region table; `id == 0`
+    /// is ignored (`0` is the "no override" sentinel).
+    pub fn insert_smoothing_profile(&mut self, id: u32, profile: SmoothingProfile) {
+        if id == 0 {
+            return;
+        }
+        let clamped = SmoothingProfile {
+            iterations: profile.iterations.min(MAX_SMOOTHING_ITERATIONS),
+            degrees: profile.degrees.clamp(45, 90),
+        };
+        let index = id as usize - 1;
+        if index >= self.smoothing_profiles.len() {
+            self.smoothing_profiles.resize(
+                index + 1,
+                SmoothingProfile {
+                    iterations: 0,
+                    degrees: 90,
+                },
+            );
+        }
+        self.smoothing_profiles[index] = clamped;
+    }
+
+    /// The smoothing override at `cell`, if the cell's smoothing plane
+    /// points at a registered profile. `None` — plane `0`, missing chunk,
+    /// or an unregistered id — means the material default applies.
+    #[must_use]
+    pub fn smoothing_override(&self, cell: CellPos) -> Option<SmoothingProfile> {
+        let chunk = self.chunks.get(&cell.chunk())?;
+        let id = chunk.smoothing[cell.chunk_index()];
+        if id == 0 {
+            return None;
+        }
+        self.smoothing_profiles.get(id as usize - 1).copied()
+    }
+
     /// Iterate the chunk set in `ChunkPos` order (deterministic — the
     /// `BTreeMap` key order).
     pub fn chunks(&self) -> impl Iterator<Item = (ChunkPos, &Chunk)> {
@@ -363,6 +428,8 @@ pub struct SetChunk {
     pub height: Vec<i32>,
     /// Region-id plane — 256 values. `0` = no region.
     pub region: Vec<u32>,
+    /// Smoothing-profile-id plane — 256 raw bytes. `0` = no override.
+    pub smoothing: Vec<u8>,
 }
 
 impl SetChunk {
@@ -402,6 +469,9 @@ impl SetChunk {
         for (dst, value) in chunk.region.iter_mut().zip(&self.region) {
             *dst = *value as u16;
         }
+        for (dst, byte) in chunk.smoothing.iter_mut().zip(&self.smoothing) {
+            *dst = *byte;
+        }
         chunk
     }
 }
@@ -425,6 +495,31 @@ impl SetRegion {
         Region {
             name: self.name,
             default_material: Material::from_u8_or_void(self.default_material),
+        }
+    }
+}
+
+/// `aether.kit.world.set_smoothing_profile` — register a contour-smoothing
+/// profile in the table under a 1-based `profile_id`, giving the per-cell
+/// smoothing plane a `(iterations, degrees)` pair to point at.
+/// `iterations` clamps to [`MAX_SMOOTHING_ITERATIONS`] and `degrees` to
+/// `[45, 90]` at registration.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.world.set_smoothing_profile")]
+pub struct SetSmoothingProfile {
+    pub profile_id: u32,
+    pub iterations: u32,
+    pub degrees: u32,
+}
+
+impl SetSmoothingProfile {
+    /// The [`SmoothingProfile`] this registers (clamping happens at
+    /// [`World::insert_smoothing_profile`]).
+    #[must_use]
+    pub fn profile(&self) -> SmoothingProfile {
+        SmoothingProfile {
+            iterations: self.iterations,
+            degrees: self.degrees,
         }
     }
 }
@@ -490,13 +585,20 @@ pub enum WorldDecodeError {
     BadName,
 }
 
-const WORLD_FORMAT_VERSION: u8 = 1;
+/// The current write version. Version 2 adds the smoothing-profile table
+/// (after the region table) and the per-chunk smoothing plane (after the
+/// region plane); version 1 buffers still decode, reading as an empty
+/// table and an all-zero plane.
+const WORLD_FORMAT_VERSION: u8 = 2;
+
+/// The oldest version [`World::from_bytes`] still decodes.
+const WORLD_FORMAT_VERSION_MIN: u8 = 1;
 
 impl World {
     /// Serialize to the compact `aether.kit.world.load` binary format: a
-    /// version byte, the region table, then per-chunk plane records — all
-    /// little-endian. Region ids are positional (index + 1), so the table
-    /// order is the id order.
+    /// version byte, the region table, the smoothing-profile table, then
+    /// per-chunk plane records — all little-endian. Region and profile ids
+    /// are positional (index + 1), so the table order is the id order.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -507,6 +609,11 @@ impl World {
             out.extend_from_slice(&(name.len() as u16).to_le_bytes());
             out.extend_from_slice(name);
             out.push(region.default_material.to_u8());
+        }
+        out.extend_from_slice(&(self.smoothing_profiles.len() as u32).to_le_bytes());
+        for profile in &self.smoothing_profiles {
+            out.push(profile.iterations as u8);
+            out.extend_from_slice(&(profile.degrees as u16).to_le_bytes());
         }
         out.extend_from_slice(&(self.chunks.len() as u32).to_le_bytes());
         for (pos, chunk) in &self.chunks {
@@ -527,17 +634,19 @@ impl World {
             for r in &chunk.region {
                 out.extend_from_slice(&r.to_le_bytes());
             }
+            out.extend_from_slice(&chunk.smoothing);
         }
         out
     }
 
-    /// Decode the [`World::to_bytes`] format. A truncated buffer or
-    /// unknown version returns `Err` rather than panicking; the caller
-    /// keeps its prior world on any error.
+    /// Decode the [`World::to_bytes`] format, current or version 1 (which
+    /// carries no smoothing table or plane — both read empty / zero). A
+    /// truncated buffer or unknown version returns `Err` rather than
+    /// panicking; the caller keeps its prior world on any error.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WorldDecodeError> {
         let mut reader = Reader::new(bytes);
         let version = reader.u8()?;
-        if version != WORLD_FORMAT_VERSION {
+        if !(WORLD_FORMAT_VERSION_MIN..=WORLD_FORMAT_VERSION).contains(&version) {
             return Err(WorldDecodeError::BadVersion(version));
         }
         let region_count = reader.u32()? as usize;
@@ -552,6 +661,19 @@ impl World {
                 name,
                 default_material,
             });
+        }
+        let mut smoothing_profiles = Vec::new();
+        if version >= 2 {
+            let profile_count = reader.u32()? as usize;
+            smoothing_profiles.reserve(profile_count);
+            for _ in 0..profile_count {
+                let iterations = u32::from(reader.u8()?);
+                let degrees = u32::from(reader.u16()?);
+                smoothing_profiles.push(SmoothingProfile {
+                    iterations,
+                    degrees,
+                });
+            }
         }
         let chunk_count = reader.u32()? as usize;
         let mut chunks = BTreeMap::new();
@@ -574,9 +696,18 @@ impl World {
             for slot in &mut chunk.region {
                 *slot = reader.u16()?;
             }
+            if version >= 2 {
+                for slot in &mut chunk.smoothing {
+                    *slot = reader.u8()?;
+                }
+            }
             chunks.insert(ChunkPos { x, z }, chunk);
         }
-        Ok(Self { chunks, regions })
+        Ok(Self {
+            chunks,
+            regions,
+            smoothing_profiles,
+        })
     }
 }
 
@@ -742,6 +873,7 @@ mod tests {
             overlay_mask: vec![0u8; OVERLAY_MASK_WIRE_BYTES],
             height: vec![0i32; CELLS_PER_CHUNK_AREA],
             region,
+            smoothing: vec![0u8; CELLS_PER_CHUNK_AREA],
         };
         assert_eq!(set.chunk_pos(), ChunkPos { x: 2, z: -1 });
         let chunk = set.into_chunk();
@@ -768,6 +900,7 @@ mod tests {
             overlay_mask,
             height: Vec::new(),
             region: Vec::new(),
+            smoothing: Vec::new(),
         };
         let chunk = set.into_chunk();
         assert_eq!(chunk.overlay_mask[0], 0);
@@ -785,6 +918,7 @@ mod tests {
             overlay_mask: Vec::new(),
             height: vec![5i32; 1],
             region: Vec::new(),
+            smoothing: vec![3u8; 1], // short → rest no-override
         };
         let chunk = set.into_chunk();
         assert_eq!(chunk.underlay[0], Material::Grass);
@@ -792,6 +926,8 @@ mod tests {
         assert_eq!(chunk.underlay[2], Material::Void);
         assert_eq!(chunk.height[0], 5);
         assert_eq!(chunk.height[1], 0);
+        assert_eq!(chunk.smoothing[0], 3);
+        assert_eq!(chunk.smoothing[1], 0);
     }
 
     #[test]
@@ -811,12 +947,20 @@ mod tests {
                 default_material: Material::Sand,
             },
         );
+        world.insert_smoothing_profile(
+            1,
+            SmoothingProfile {
+                iterations: 3,
+                degrees: 60,
+            },
+        );
         let mut a = Chunk::empty();
         a.underlay[0] = Material::Stone;
         a.overlay[5] = Material::Water;
         a.overlay_mask[5] = 0x0F0F;
         a.height[10] = -42;
         a.region[20] = 2;
+        a.smoothing[30] = 1;
         world.insert_chunk(ChunkPos { x: 1, z: -3 }, a);
         let mut b = Chunk::empty();
         b.underlay[255] = Material::Dirt;
@@ -827,6 +971,7 @@ mod tests {
 
         // Structural equality across the whole world.
         assert_eq!(decoded.regions, world.regions);
+        assert_eq!(decoded.smoothing_profiles, world.smoothing_profiles);
         assert_eq!(
             decoded.chunk(ChunkPos { x: 1, z: -3 }),
             world.chunk(ChunkPos { x: 1, z: -3 })
@@ -834,6 +979,76 @@ mod tests {
         assert_eq!(
             decoded.chunk(ChunkPos { x: -7, z: 4 }),
             world.chunk(ChunkPos { x: -7, z: 4 })
+        );
+    }
+
+    #[test]
+    fn version_one_buffer_decodes_with_no_smoothing() {
+        // Tripwire: the version-1 layout — no profile table, no per-chunk
+        // smoothing plane — is pinned here byte-for-byte and must keep
+        // decoding as long as WORLD_FORMAT_VERSION_MIN is 1. Build one v1
+        // buffer by hand: one region, one chunk with a Stone cell.
+        let mut buf = vec![1u8];
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one region
+        buf.extend_from_slice(&6u16.to_le_bytes());
+        buf.extend_from_slice(b"meadow");
+        buf.push(Material::Grass.to_u8());
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one chunk
+        buf.extend_from_slice(&2i32.to_le_bytes());
+        buf.extend_from_slice(&(-1i32).to_le_bytes());
+        let mut underlay = [0u8; CELLS_PER_CHUNK_AREA];
+        underlay[7] = Material::Stone.to_u8();
+        buf.extend_from_slice(&underlay);
+        buf.extend_from_slice(&[0u8; CELLS_PER_CHUNK_AREA]); // overlay
+        buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // masks
+        buf.extend_from_slice(&[0u8; 4 * CELLS_PER_CHUNK_AREA]); // heights
+        buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // regions
+
+        let world = World::from_bytes(&buf).expect("a v1 buffer still decodes");
+        assert_eq!(world.regions.len(), 1);
+        assert!(world.smoothing_profiles.is_empty());
+        let chunk = world.chunk(ChunkPos { x: 2, z: -1 }).expect("chunk");
+        assert_eq!(chunk.underlay[7], Material::Stone);
+        assert_eq!(chunk.smoothing, [0u8; CELLS_PER_CHUNK_AREA]);
+    }
+
+    #[test]
+    fn smoothing_override_resolves_plane_then_table_then_none() {
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        chunk.smoothing[0] = 1; // registered below
+        chunk.smoothing[1] = 9; // never registered
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
+        world.insert_smoothing_profile(
+            1,
+            SmoothingProfile {
+                iterations: 7, // past the cap — clamps to 4
+                degrees: 30,   // under the floor — clamps to 45
+            },
+        );
+
+        assert_eq!(
+            world.smoothing_override(cell(0, 0)),
+            Some(SmoothingProfile {
+                iterations: 4,
+                degrees: 45,
+            }),
+            "registration clamps to the apron-safe range",
+        );
+        assert_eq!(
+            world.smoothing_override(cell(1, 0)),
+            None,
+            "an unregistered id is no override",
+        );
+        assert_eq!(
+            world.smoothing_override(cell(2, 0)),
+            None,
+            "plane 0 is no override",
+        );
+        assert_eq!(
+            world.smoothing_override(cell(100, 100)),
+            None,
+            "a missing chunk is no override",
         );
     }
 

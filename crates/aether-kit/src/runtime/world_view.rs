@@ -25,6 +25,9 @@
 //! - `aether.kit.world.set_region` — register a region so the underlay
 //!   cascade has a default to resolve to; remeshes every cached chunk
 //!   (a region default can change any chunk's cascade-resolved underlay).
+//! - `aether.kit.world.set_smoothing_profile` — register a contour-
+//!   smoothing profile the per-cell smoothing plane points at; remeshes
+//!   every cached chunk.
 //! - `aether.kit.world.set_view_mode` — switch between the painted gouache
 //!   grammar and the raw grayscale calibration field; remeshes all.
 //! - `aether.kit.world.load` — fetch a serialized world through
@@ -41,7 +44,9 @@ use aether_capabilities::{FsCapability, LifecycleCapability, RenderCapability};
 use aether_kinds::Render;
 
 use super::mesher::mesh_chunk;
-use crate::world::{ChunkPos, SetChunk, SetRegion, SetViewMode, ViewMode, World, WorldLoad};
+use crate::world::{
+    ChunkPos, SetChunk, SetRegion, SetSmoothingProfile, SetViewMode, ViewMode, World, WorldLoad,
+};
 
 /// World-view component: holds the world plane stack and a per-chunk
 /// mesh cache, and replays the cache to the render sink each frame.
@@ -161,6 +166,23 @@ impl WasmActor for WorldView {
     fn on_set_region(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetRegion) {
         let id = msg.region_id;
         self.world.insert_region(id, msg.into_region());
+        self.remesh_all();
+    }
+
+    /// Register a contour-smoothing profile in the world's table, then
+    /// remesh every cached chunk — a profile change alters the smoothed
+    /// contour of every cell whose smoothing plane points at it.
+    ///
+    /// # Agent
+    /// Send `aether.kit.world.set_smoothing_profile` with a 1-based
+    /// `profile_id`, an iteration count (`0` = crisp raw contours, up to
+    /// `4`), and the corner angle in degrees (`45`–`90`). Cells opt in
+    /// through the `smoothing` plane of `aether.kit.world.set_chunk`
+    /// (byte = profile id, `0` = the material default).
+    #[handler]
+    fn on_set_smoothing_profile(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetSmoothingProfile) {
+        self.world
+            .insert_smoothing_profile(msg.profile_id, msg.profile());
         self.remesh_all();
     }
 
