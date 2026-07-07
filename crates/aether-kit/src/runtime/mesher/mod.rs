@@ -318,12 +318,15 @@ fn mesh_underlay(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
     emit_partition_windows(at, &display, gw, apron, step_oct, &interior, lo, tris);
 }
 
-/// Emit the marching-squares windows of the partition's boundary zone:
-/// every window not fully covered by interior cell quads, each label's
-/// case polygon colored by its material keyed at the window's owning cell
-/// (rim labels darkened). A two-label saddle resolves by label order —
-/// the higher label connects its diagonal, the lower splits — so the
-/// window always tiles exactly.
+/// Emit the marching-squares windows of the partition's boundary zone.
+/// Each window is owned by exactly one chunk — the one holding the cell
+/// under its center — so the boundary zone is emitted once fleet-wide,
+/// with no cross-chunk duplicates against the fixed per-frame vertex
+/// budget. Windows fully covered by interior cell quads are skipped;
+/// uniform single-label windows coalesce into row strips (per owning
+/// cell, so the keyed color stays flat per cell); mixed windows emit each
+/// label's case polygon, rim labels darkened, saddles resolved by label
+/// order so every window tiles exactly.
 #[allow(clippy::too_many_arguments)] // one call site; the partition state travels together
 fn emit_partition_windows(
     at: ChunkPos,
@@ -350,33 +353,66 @@ fn emit_partition_windows(
         step_oct,
         y_lift: UNDERLAY_Y,
     };
+    // A pending run of uniform windows: (label, owner cell, start wi).
+    let mut run: Option<(u8, CellPos, usize)> = None;
+    let flush = |run: &mut Option<(u8, CellPos, usize)>,
+                 end_wi: usize,
+                 wj: usize,
+                 tris: &mut Vec<DrawTriangle>| {
+        let Some((label, owner, start_wi)) = run.take() else {
+            return;
+        };
+        let material = Material::from_u8_or_void(label.div_ceil(2));
+        let resolved = resolve_cell(material, owner.x as f32 + 0.5, owner.z as f32 + 0.5, None);
+        let rim = if label % 2 == 1 {
+            style(material).rim_darken
+        } else {
+            0.0
+        };
+        let rect = [
+            origin_oct[0] + start_wi as i32 * step_oct,
+            origin_oct[1] + wj as i32 * step_oct,
+            origin_oct[0] + end_wi as i32 * step_oct,
+            origin_oct[1] + (wj + 1) as i32 * step_oct,
+        ];
+        emit_quad_shaded(material, &resolved, rect, rim, UNDERLAY_Y, tris);
+    };
     let windows = gw - 1;
     for wj in 0..windows {
         for wi in 0..windows {
             let x_lo = origin_oct[0] + wi as i32 * step_oct;
             let z_lo = origin_oct[1] + wj as i32 * step_oct;
+            // Ownership: the cell under the window's center. Emitting only
+            // chunk-local owners covers every window exactly once across
+            // the fleet, and a local owner keeps every overlapping cell
+            // within the classifiable range.
+            let x_center_cell = (x_lo + step_oct / 2).div_euclid(256);
+            let z_center_cell = (z_lo + step_oct / 2).div_euclid(256);
+            let x_owner_local = x_center_cell - at.x * EDGE;
+            let z_owner_local = z_center_cell - at.z * EDGE;
+            if !(0..EDGE).contains(&x_owner_local) || !(0..EDGE).contains(&z_owner_local) {
+                flush(&mut run, wi, wj, tris);
+                continue;
+            }
             // The world cells this window's square overlaps.
             let cx0 = x_lo.div_euclid(256);
             let cx1 = (x_lo + step_oct - 1).div_euclid(256);
             let cz0 = z_lo.div_euclid(256);
             let cz1 = (z_lo + step_oct - 1).div_euclid(256);
-            let mut in_range = true;
             let mut all_interior = true;
             for cz in cz0..=cz1 {
                 for cx in cx0..=cx1 {
                     let llx = cx - at.x * EDGE;
                     let llz = cz - at.z * EDGE;
-                    if llx < lo || llx >= hi || llz < lo || llz >= hi {
-                        in_range = false;
-                    } else if !interior[(llz - lo) as usize * cells_w + (llx - lo) as usize] {
+                    debug_assert!(llx >= lo && llx < hi && llz >= lo && llz < hi);
+                    if !interior[(llz - lo) as usize * cells_w + (llx - lo) as usize] {
                         all_interior = false;
                     }
                 }
             }
-            if !in_range || all_interior {
-                // Out of range: a neighbor chunk owns this window (its own
-                // classification there is complete). All interior: the
-                // cell quads already tile it.
+            if all_interior {
+                // The cell quads already tile it.
+                flush(&mut run, wi, wj, tris);
                 continue;
             }
             let corners = [
@@ -385,46 +421,76 @@ fn emit_partition_windows(
                 display[(wj + 1) * gw + wi],
                 display[(wj + 1) * gw + wi + 1],
             ];
-            // The window's owning cell keys every label's color.
-            let x_center_cell = (x_lo + step_oct / 2).div_euclid(256);
-            let z_center_cell = (z_lo + step_oct / 2).div_euclid(256);
-            let wash_x = (x_lo + step_oct / 2) as f32 / OCTIMETERS_PER_METER;
-            let wash_z = (z_lo + step_oct / 2) as f32 / OCTIMETERS_PER_METER;
-            for k in 0..4 {
-                let label = corners[k];
-                if label == 0 || corners[..k].contains(&label) {
-                    continue;
+            let owner = CellPos {
+                x: x_center_cell,
+                z: z_center_cell,
+            };
+            // A uniform window joins (or starts) a strip run.
+            if corners[0] != 0 && corners.iter().all(|&c| c == corners[0]) {
+                match run {
+                    Some((label, cell, _)) if label == corners[0] && cell == owner => {}
+                    _ => {
+                        flush(&mut run, wi, wj, tris);
+                        run = Some((corners[0], owner, wi));
+                    }
                 }
-                let case = label_case(display, gw, wi, wj, label);
-                let connected = if case == 5 || case == 10 {
-                    // The other diagonal pair: [BR, TL] for case 5,
-                    // [BL, TR] for case 10.
-                    let (o1, o2) = if case == 5 {
-                        (corners[1], corners[2])
-                    } else {
-                        (corners[0], corners[3])
-                    };
-                    o1 != o2 || label > o1
-                } else {
-                    true
-                };
-                let material = Material::from_u8_or_void(label.div_ceil(2));
-                let s = style(material);
-                let resolved = resolve_cell(
-                    material,
-                    x_center_cell as f32 + 0.5,
-                    z_center_cell as f32 + 0.5,
-                    None,
-                );
-                let mut light =
-                    wash_lightness(material, resolved.light, wash_x, wash_z, resolved.stroke);
-                if label % 2 == 1 {
-                    light *= 1.0 - s.rim_darken;
-                }
-                let color = hsl_to_linear_rgb(resolved.hue, resolved.sat, light.clamp(0.0, 100.0));
-                emit_label_window(wi as i32, wj as i32, &place, case, connected, color, tris);
+                continue;
             }
+            flush(&mut run, wi, wj, tris);
+            emit_mixed_window(display, gw, wi, wj, corners, owner, &place, tris);
         }
+        flush(&mut run, windows, wj, tris);
+    }
+}
+
+/// Emit every label's case polygon for one mixed boundary window, colored
+/// by its material keyed at the window's owning cell (rim labels
+/// darkened). A two-label saddle resolves by label order — the higher
+/// label connects its diagonal, the lower splits — so the window always
+/// tiles exactly.
+#[allow(clippy::too_many_arguments)] // one call site; the window state travels together
+fn emit_mixed_window(
+    display: &[u8],
+    gw: usize,
+    wi: usize,
+    wj: usize,
+    corners: [u8; 4],
+    owner: CellPos,
+    place: &GridPlacement,
+    tris: &mut Vec<DrawTriangle>,
+) {
+    let step_oct = place.step_oct;
+    let x_lo = place.origin_oct[0] + wi as i32 * step_oct;
+    let z_lo = place.origin_oct[1] + wj as i32 * step_oct;
+    let wash_x = (x_lo + step_oct / 2) as f32 / OCTIMETERS_PER_METER;
+    let wash_z = (z_lo + step_oct / 2) as f32 / OCTIMETERS_PER_METER;
+    for k in 0..4 {
+        let label = corners[k];
+        if label == 0 || corners[..k].contains(&label) {
+            continue;
+        }
+        let case = label_case(display, gw, wi, wj, label);
+        let connected = if case == 5 || case == 10 {
+            // The other diagonal pair: [BR, TL] for case 5, [BL, TR] for
+            // case 10.
+            let (o1, o2) = if case == 5 {
+                (corners[1], corners[2])
+            } else {
+                (corners[0], corners[3])
+            };
+            o1 != o2 || label > o1
+        } else {
+            true
+        };
+        let material = Material::from_u8_or_void(label.div_ceil(2));
+        let s = style(material);
+        let resolved = resolve_cell(material, owner.x as f32 + 0.5, owner.z as f32 + 0.5, None);
+        let mut light = wash_lightness(material, resolved.light, wash_x, wash_z, resolved.stroke);
+        if label % 2 == 1 {
+            light *= 1.0 - s.rim_darken;
+        }
+        let color = hsl_to_linear_rgb(resolved.hue, resolved.sat, light.clamp(0.0, 100.0));
+        emit_label_window(wi as i32, wj as i32, place, case, connected, color, tris);
     }
 }
 
@@ -1231,44 +1297,30 @@ mod tests {
     }
 
     #[test]
-    fn partition_chunks_agree_at_their_border() {
-        // Both chunks mesh the border zone from their own aprons; at any
-        // probe point near the seam each mesh must cover the point and
-        // paint it the same color — the partition is a pure function of
-        // world coordinates, so the overlapping geometry is identical.
+    fn partition_chunks_tile_the_seam_together() {
+        // Every boundary window is owned by exactly one chunk (the one
+        // holding its center cell), so neither mesh alone covers the whole
+        // seam strip — but their union must, with no gap. An ownership or
+        // classification disagreement between the two chunks shows up as a
+        // hole here.
         let world = sand_band_world(None);
         let mesh0 = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
         let mesh1 = mesh_chunk(&world, ChunkPos { x: 1, z: 0 }, ViewMode::Painted);
-        let color_at = |mesh: &[DrawTriangle], px: f32, pz: f32| -> Option<[f32; 3]> {
+        let ground_covers = |mesh: &[DrawTriangle], px: f32, pz: f32| {
             mesh.iter()
                 .filter(|t| t.verts.iter().all(|v| v.y == UNDERLAY_Y))
-                .find(|t| covers(t, px, pz))
-                .map(|t| [t.verts[0].r, t.verts[0].g, t.verts[0].b])
+                .any(|t| covers(t, px, pz))
         };
-        // Interior-cell areas are single-covered by their owning chunk, so
-        // the two meshes overlap only on boundary windows near the seam —
-        // scan a dense strip over world cell 15, compare wherever both
-        // cover, and require that the overlap actually occurred (the sand
-        // band's edge rows cross the seam, so boundary windows must exist).
-        let mut compared = 0;
         for j in 0..64 {
             let pz = (j as f32).mul_add(0.25, 0.13);
-            for i in 0..8 {
+            for i in 0..16 {
                 let px = (i as f32).mul_add(0.125, 15.06);
-                let (Some(c0), Some(c1)) = (color_at(&mesh0, px, pz), color_at(&mesh1, px, pz))
-                else {
-                    continue;
-                };
-                compared += 1;
-                for k in 0..3 {
-                    assert!(
-                        (c0[k] - c1[k]).abs() < 1e-4,
-                        "seam color diverges at ({px}, {pz}): {c0:?} vs {c1:?}",
-                    );
-                }
+                assert!(
+                    ground_covers(&mesh0, px, pz) || ground_covers(&mesh1, px, pz),
+                    "seam hole at ({px}, {pz})",
+                );
             }
         }
-        assert!(compared > 8, "the seam overlap was exercised: {compared}");
     }
 
     #[test]
