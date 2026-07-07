@@ -15,7 +15,7 @@
 //! driver kinds live in [`camera`]; the mesh viewer's `aether.mesh.load`
 //! kind lives in [`mesh`]. The [`world`] module holds the chunked world
 //! plane stack — the `World` / `Chunk` / `Material` data layer and its
-//! `aether.kit.world.{set_chunk,set_region,set_smoothing_profile,set_material_style,set_view_mode,load}` wire kinds
+//! `aether.kit.world.{set_chunk,set_region,set_smoothing_profile,set_water_plane,set_material_style,set_view_mode,load}` wire kinds
 //! — that `WorldView` meshes to the render sink. The [`widgets`] module
 //! holds the widget-compositing vocabulary (ADR-0117) — `Collect` /
 //! `WidgetDrawList` and the `WidgetConfig` tree — that
@@ -56,8 +56,8 @@ pub use widgets::{
 };
 pub use world::{
     CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk, ChunkPos, Material, Region,
-    SetChunk, SetMaterialStyle, SetRegion, SetSmoothingProfile, SetViewMode, SmoothingProfile,
-    ViewMode, World, WorldDecodeError, WorldLoad,
+    SetChunk, SetMaterialStyle, SetRegion, SetSmoothingProfile, SetViewMode, SetWaterPlane,
+    SmoothingProfile, ViewMode, WaterPlane, World, WorldDecodeError, WorldLoad,
 };
 
 #[cfg(feature = "runtime")]

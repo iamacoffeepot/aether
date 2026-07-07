@@ -11,7 +11,7 @@
 
 use aether_capabilities::render::DrawTriangle;
 use aether_kit::{
-    CELLS_PER_CHUNK_AREA, Chunk, ChunkPos, Material, Region, ViewMode, World,
+    CELLS_PER_CHUNK_AREA, Chunk, ChunkPos, Material, Region, ViewMode, WaterPlane, World,
     runtime::{StyleTable, mesher::mesh_chunk},
 };
 
@@ -23,6 +23,13 @@ fn lake_world() -> World {
             name: "meadow".into(),
             default_material: Material::Grass,
             cliff_material: Material::Stone,
+        },
+    );
+    // The lake surface plane every lake cell references.
+    world.insert_water_plane(
+        1,
+        WaterPlane {
+            level_octimeters: 0,
         },
     );
     let in_lake = |x: f32, z: f32| {
@@ -44,19 +51,12 @@ fn lake_world() -> World {
                     if near_lake(wx + 0.5, wz + 0.5, 2.2) {
                         chunk.underlay[i] = Material::Sand;
                     }
-                    let mut mask = 0u16;
-                    for sz in 0..4 {
-                        for sx in 0..4 {
-                            let scx = wx + (sx as f32 + 0.5) / 4.0;
-                            let scz = wz + (sz as f32 + 0.5) / 4.0;
-                            if in_lake(scx, scz) {
-                                mask |= 1 << (sz * 4 + sx);
-                            }
-                        }
-                    }
-                    if mask != 0 {
-                        chunk.overlay[i] = Material::Water;
-                        chunk.overlay_mask[i] = mask;
+                    // Water is underlay fabric now: paint the lake cells Water
+                    // and point them at the water plane; the partition smooths
+                    // the waterline at subcell expression from the cell paint.
+                    if in_lake(wx + 0.5, wz + 0.5) {
+                        chunk.underlay[i] = Material::Water;
+                        chunk.water_plane[i] = 1;
                     }
                 }
             }
