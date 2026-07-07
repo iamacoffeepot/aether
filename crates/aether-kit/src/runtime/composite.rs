@@ -1,0 +1,254 @@
+//! The compositing bookkeeping a widget node embeds (ADR-0117).
+//!
+//! A [`Composite`] is the plain state a compositing widget carries: an
+//! ordered set of child slots plus an own-chrome buffer. It does no mail
+//! and holds no capability handle — the actor drives it. Its job is the
+//! three pieces of protocol logic worth isolating: keyed attribution of a
+//! child's reply into the right slot, the filled-slot completion counter,
+//! and the depth-first flatten that offsets each child's draws by the rect
+//! its slot was assigned.
+//!
+//! Draw order emerges by construction. `flatten` lays down the node's own
+//! chrome first, then each slot in registration order (which the node set
+//! from its own layout, never from mail-arrival order), and an interior
+//! node's flattened list becomes its parent's slot payload — so a subtree
+//! carries its own internal order wherever it is placed.
+
+use alloc::vec::Vec;
+
+use aether_data::MailboxId;
+use aether_math::Vec2;
+
+use crate::widgets::{WidgetDrawItem, WidgetDrawList};
+
+/// One child's place in a compositing node's layout. `child` is the
+/// inline-child alias the reply is attributed to; `origin` is the offset
+/// applied to every draw the child reports; `list` is that child's draws
+/// for the current frame, `None` until it replies.
+struct Slot {
+    child: MailboxId,
+    origin: Vec2,
+    list: Option<WidgetDrawList>,
+}
+
+/// A compositing node's per-frame accumulator: registered child slots plus
+/// the node's own chrome. Reset each frame with [`Self::begin_frame`],
+/// filled as children reply, flattened once [`Self::is_complete`].
+#[derive(Default)]
+pub struct Composite {
+    slots: Vec<Slot>,
+    chrome: Vec<WidgetDrawItem>,
+}
+
+impl Composite {
+    /// An empty composite — no slots, no chrome.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a child slot at `origin`, once, when the child is spawned.
+    /// The slot persists across frames (the child's alias and its assigned
+    /// rect are stable); only its per-frame `list` resets. A duplicate
+    /// registration of the same `child` is ignored so a re-`wire` cannot
+    /// inflate the completion count.
+    pub fn register_slot(&mut self, child: MailboxId, origin: Vec2) {
+        if self.slots.iter().any(|slot| slot.child == child) {
+            return;
+        }
+        self.slots.push(Slot {
+            child,
+            origin,
+            list: None,
+        });
+    }
+
+    /// Drop the slot for `child` — the despawn counterpart of
+    /// [`Self::register_slot`], so a torn-down child stops being counted
+    /// toward completion. Returns whether a slot was removed.
+    pub fn forget_slot(&mut self, child: MailboxId) -> bool {
+        let before = self.slots.len();
+        self.slots.retain(|slot| slot.child != child);
+        self.slots.len() != before
+    }
+
+    /// Begin a frame: clear the chrome buffer and reset every slot to
+    /// unfilled, so the completion counter re-counts this frame's replies.
+    /// The slot set (children + origins) is untouched.
+    pub fn begin_frame(&mut self) {
+        self.chrome.clear();
+        for slot in &mut self.slots {
+            slot.list = None;
+        }
+    }
+
+    /// Append one of the node's own draws to its chrome (local
+    /// coordinates). Chrome flattens before any child, so it draws under
+    /// the children — the fills-under-labels layering.
+    pub fn extend_chrome(&mut self, items: impl IntoIterator<Item = WidgetDrawItem>) {
+        self.chrome.extend(items);
+    }
+
+    /// File a child's reply into its slot, attributed by the child's
+    /// alias. A reply from a `child` with no registered slot is dropped
+    /// (it cannot belong to this node's layout); a second reply from the
+    /// same child overwrites. Returns whether the reply landed in a slot.
+    pub fn fill(&mut self, child: MailboxId, list: WidgetDrawList) -> bool {
+        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.child == child) {
+            slot.list = Some(list);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether every registered slot has replied this frame. Vacuously
+    /// true for a leaf (no slots), which is the completion signal that
+    /// makes a childless node finish immediately after its own chrome.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.slots.iter().all(|slot| slot.list.is_some())
+    }
+
+    /// Flatten own chrome then every slot's draws — each offset by the
+    /// slot's origin — into one [`WidgetDrawList`] in depth-first order,
+    /// tagged with `intrinsic`. A slot still `None` (called before
+    /// completion) contributes nothing; call once [`Self::is_complete`].
+    #[must_use]
+    pub fn flatten(&self, intrinsic: Option<[f32; 2]>) -> WidgetDrawList {
+        let mut items = self.chrome.clone();
+        for slot in &self.slots {
+            if let Some(list) = &slot.list {
+                items.extend(list.items.iter().map(|item| item.offset(slot.origin)));
+            }
+        }
+        WidgetDrawList { intrinsic, items }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn quad(x: f32, tag: f32) -> WidgetDrawItem {
+        WidgetDrawItem::Quad {
+            x,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            color: [tag, 0.0, 0.0, 1.0],
+        }
+    }
+
+    fn list(items: Vec<WidgetDrawItem>) -> WidgetDrawList {
+        WidgetDrawList {
+            intrinsic: None,
+            items,
+        }
+    }
+
+    #[test]
+    fn a_leaf_with_no_slots_is_immediately_complete() {
+        let composite = Composite::new();
+        assert!(
+            composite.is_complete(),
+            "a node with no registered slots completes vacuously — the childless case",
+        );
+    }
+
+    #[test]
+    fn completion_gates_on_every_registered_slot() {
+        let mut composite = Composite::new();
+        let a = MailboxId(1);
+        let b = MailboxId(2);
+        composite.register_slot(a, Vec2::ZERO);
+        composite.register_slot(b, Vec2::ZERO);
+        composite.begin_frame();
+        assert!(!composite.is_complete(), "two slots, none filled");
+        assert!(composite.fill(a, list(vec![quad(0.0, 0.1)])));
+        assert!(!composite.is_complete(), "one of two slots filled");
+        assert!(composite.fill(b, list(vec![quad(0.0, 0.2)])));
+        assert!(
+            composite.is_complete(),
+            "both slots filled closes the counter",
+        );
+    }
+
+    #[test]
+    fn a_reply_from_an_unregistered_child_is_dropped() {
+        let mut composite = Composite::new();
+        composite.register_slot(MailboxId(1), Vec2::ZERO);
+        composite.begin_frame();
+        assert!(
+            !composite.fill(MailboxId(99), list(vec![quad(0.0, 0.5)])),
+            "a stray reply from a non-slot child does not land",
+        );
+        assert!(
+            !composite.is_complete(),
+            "and does not close the real slot's counter",
+        );
+    }
+
+    #[test]
+    fn begin_frame_resets_fills_but_keeps_slots() {
+        let mut composite = Composite::new();
+        let a = MailboxId(1);
+        composite.register_slot(a, Vec2::ZERO);
+        composite.begin_frame();
+        composite.fill(a, list(vec![quad(0.0, 0.1)]));
+        assert!(composite.is_complete());
+        composite.begin_frame();
+        assert!(
+            !composite.is_complete(),
+            "a new frame re-opens the slot so its reply must arrive again",
+        );
+    }
+
+    #[test]
+    fn forget_slot_removes_a_child_from_the_count() {
+        let mut composite = Composite::new();
+        let a = MailboxId(1);
+        let b = MailboxId(2);
+        composite.register_slot(a, Vec2::ZERO);
+        composite.register_slot(b, Vec2::ZERO);
+        composite.begin_frame();
+        composite.fill(a, list(vec![quad(0.0, 0.1)]));
+        assert!(!composite.is_complete(), "b still owed");
+        assert!(composite.forget_slot(b), "b removed");
+        assert!(
+            composite.is_complete(),
+            "with b despawned the counter closes on a alone",
+        );
+    }
+
+    #[test]
+    fn flatten_lays_chrome_first_then_slots_offset_in_order() {
+        let mut composite = Composite::new();
+        let a = MailboxId(1);
+        let b = MailboxId(2);
+        composite.register_slot(a, Vec2::new(100.0, 0.0));
+        composite.register_slot(b, Vec2::new(200.0, 0.0));
+        composite.begin_frame();
+        composite.extend_chrome([quad(0.0, 0.9)]); // chrome at local origin
+        composite.fill(a, list(vec![quad(1.0, 0.1)]));
+        composite.fill(b, list(vec![quad(2.0, 0.2)]));
+
+        let flat = composite.flatten(Some([300.0, 10.0]));
+        assert_eq!(flat.intrinsic, Some([300.0, 10.0]));
+        // Chrome first (x=0, untranslated), then slot a (x = 1 + 100),
+        // then slot b (x = 2 + 200) — depth-first, offset by slot origin.
+        let xs: Vec<f32> = flat
+            .items
+            .iter()
+            .map(|item| match item {
+                WidgetDrawItem::Quad { x, .. } | WidgetDrawItem::Text { x, .. } => *x,
+            })
+            .collect();
+        assert_eq!(
+            xs,
+            vec![0.0, 101.0, 202.0],
+            "chrome draws under the children, then slots in registration order, \
+             each offset by its assigned origin",
+        );
+    }
+}
