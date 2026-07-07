@@ -82,7 +82,25 @@
 //! ([`World::surface_height_in`]): cell heights blend into continuous
 //! slopes where neighbors sit within the step ceiling
 //! ([`crate::world::STEP_MAX_OCTIMETERS`]) and break where they exceed
-//! it — the corner plates split exactly on cliff edges, an interior
+//! it. Where a cell carries authored per-point relief
+//! (`World::cell_has_height_relief`) the pass resolves one stride down: the
+//! interior cap tessellates to `SUB × SUB` subcell quads over point patches
+//! (`SubPatch`) so a subcell break shows, the marched wall gate reads
+//! point (not cell) levels so a silhouette raised by deltas alone lofts its
+//! wall on the authored line, and same-material breaks — where no material
+//! boundary exists for the marched pass to follow — loft as subcell-lattice
+//! relief walls (`emit_relief_walls`) standing exactly on the authored
+//! break lines, cell interiors included. Contour smoothing freezes at a
+//! break (`partition_inputs` hands [`repartition`] a frozen mask over the
+//! flanking samples): paint may not smooth across a physical cliff, so a
+//! silhouette's contour follows the authored break line — the accepted
+//! sample-resolution staircase — while boundaries over continuous ground
+//! keep smoothing, and a boundary crossing lifts through the sample on its
+//! own side of the break (threaded as data through `window_point_anchor` /
+//! `anchored_lift`, never inferred from the vertex position). A relief-free
+//! cell keeps the whole-cell fast path, byte-identical to a world with no
+//! height points.
+//! On the cell lattice — the corner plates split exactly on cliff edges, an interior
 //! cell's owner-pinned patch lands the break on the cell line, and the
 //! wall pass closes that gap with a vertical face wearing the high cell's
 //! region cliff material, darkened toward its base. The walls stitch from
@@ -121,8 +139,8 @@ use crate::world::{
     ViewMode, World,
 };
 use contour::{
-    GridPlacement, SmoothParams, emit_label_window, erode, label_case, march_grid,
-    minimize_corners, push_quad, repartition,
+    GridPlacement, SmoothParams, emit_label_window, erode, label_case, label_window_polys,
+    march_grid, minimize_corners, push_quad, repartition,
 };
 use style::{
     ResolvedCell, StyleTable, fbm, hsl_to_linear_rgb, raw_field, resolve_cell, rim_strength,
@@ -305,17 +323,77 @@ impl CellLift {
     }
 }
 
+/// One subcell's bilinear surface patch — the point-lattice analogue of
+/// [`CellLift`], spanning `1 / SUB` m. Built only where a cell carries
+/// authored height relief; its four corners are the point-plate heights
+/// ([`World::subcell_corner_heights`]) the mesher lifts per-point caps and
+/// wall tops through. [`World::surface_height_in`]'s relief branch resolves
+/// the identical patch, so drawn and stood-on agree over authored relief.
+struct SubPatch {
+    x0: f32,
+    z0: f32,
+    corners: [f32; 4],
+}
+
+impl SubPatch {
+    fn of(world: &World, cell: CellPos, sub_x: i32, sub_z: i32) -> Self {
+        Self {
+            x0: cell.x as f32 + sub_x as f32 / SUB as f32,
+            z0: cell.z as f32 + sub_z as f32 / SUB as f32,
+            corners: world.subcell_corner_heights(cell, sub_x, sub_z),
+        }
+    }
+
+    /// The subcell of `cell` containing `(wx, wz)`, coordinates clamped to
+    /// the cell span so an off-cell caller reads the nearest edge subcell —
+    /// the same selection [`World::surface_height_in`] makes.
+    fn containing(world: &World, cell: CellPos, wx: f32, wz: f32) -> Self {
+        let sub = SUB as f32;
+        let local_x = ((wx - cell.x as f32) * sub).clamp(0.0, sub);
+        let local_z = ((wz - cell.z as f32) * sub).clamp(0.0, sub);
+        let sub_x = floor_to_i32(local_x).clamp(0, SUB - 1);
+        let sub_z = floor_to_i32(local_z).clamp(0, SUB - 1);
+        Self::of(world, cell, sub_x, sub_z)
+    }
+
+    fn y(&self, wx: f32, wz: f32) -> f32 {
+        let sub = SUB as f32;
+        let fx = ((wx - self.x0) * sub).clamp(0.0, 1.0);
+        let fz = ((wz - self.z0) * sub).clamp(0.0, 1.0);
+        let bottom = self.corners[0] + (self.corners[1] - self.corners[0]) * fx;
+        let top = self.corners[2] + (self.corners[3] - self.corners[2]) * fx;
+        bottom + (top - bottom) * fz
+    }
+
+    fn shade(&self, wx: f32, wz: f32) -> f32 {
+        let sub = SUB as f32;
+        let fx = ((wx - self.x0) * sub).clamp(0.0, 1.0);
+        let fz = ((wz - self.z0) * sub).clamp(0.0, 1.0);
+        let c = &self.corners;
+        // The corner deltas span 1/SUB m, so scale the gradient by SUB to
+        // read the slope per meter the whole-cell patch reports.
+        let grad_x = ((c[1] - c[0]) * (1.0 - fz) + (c[3] - c[2]) * fz) * sub;
+        let grad_z = ((c[2] - c[0]) * (1.0 - fx) + (c[3] - c[1]) * fx) * sub;
+        let normal = Vec3::new(-grad_x, 1.0, -grad_z).normalize();
+        (normal.dot(SLOPE_LIGHT) / SLOPE_LIGHT.y).clamp(SLOPE_SHADE_MIN, SLOPE_SHADE_MAX)
+    }
+}
+
 /// The surface height and slope shade at a world point, resolved through
 /// the point's own (floor) cell — the position-pure form overlay vertices
-/// lift through, continuous wherever no cliff intervenes.
+/// lift through, continuous wherever no cliff intervenes. Where the cell
+/// carries authored relief the point patch resolves the subcell height;
+/// otherwise the whole-cell patch is the fast path.
 fn point_lift(world: &World, wx: f32, wz: f32) -> (f32, f32) {
-    let lift = CellLift::of(
-        world,
-        CellPos {
-            x: floor_to_i32(wx),
-            z: floor_to_i32(wz),
-        },
-    );
+    let cell = CellPos {
+        x: floor_to_i32(wx),
+        z: floor_to_i32(wz),
+    };
+    if world.cell_has_height_relief(cell) {
+        let patch = SubPatch::containing(world, cell, wx, wz);
+        return (patch.y(wx, wz), patch.shade(wx, wz));
+    }
+    let lift = CellLift::of(world, cell);
     (lift.y(wx, wz), lift.shade(wx, wz))
 }
 
@@ -324,17 +402,391 @@ fn point_lift(world: &World, wx: f32, wz: f32) -> (f32, f32) {
 /// apart from the owner — then the owner's clamped patch wins, so a
 /// boundary polygon at a cliff stays on its own side of the break instead
 /// of stretching down the face (the skirt draws the face). On continuous
-/// ground the two forms agree and the rule is invisible.
+/// ground the two forms agree and the rule is invisible. A material-break
+/// crossing does not come here — it carries its side as data and lifts
+/// through [`anchored_lift`].
 fn label_lift(world: &World, owner: CellPos, wx: f32, wz: f32) -> (f32, f32) {
     let cell = CellPos {
         x: floor_to_i32(wx),
         z: floor_to_i32(wz),
     };
     if cell != owner && world.edge_is_cliff(cell, owner) {
+        if world.cell_has_height_relief(owner) {
+            let patch = SubPatch::containing(world, owner, wx, wz);
+            return (patch.y(wx, wz), patch.shade(wx, wz));
+        }
         let lift = CellLift::of(world, owner);
         return (lift.y(wx, wz), lift.shade(wx, wz));
     }
-    point_lift(world, wx, wz)
+    if world.cell_has_height_relief(cell) {
+        let patch = SubPatch::containing(world, cell, wx, wz);
+        return (patch.y(wx, wz), patch.shade(wx, wz));
+    }
+    let lift = CellLift::of(world, cell);
+    (lift.y(wx, wz), lift.shade(wx, wz))
+}
+
+/// The lift for a material-break crossing whose side is known as **data**:
+/// `anchor_oct` is the display-grid sample (a window corner) on the
+/// vertex's own side of the crossed edge, and over authored relief the
+/// vertex lifts through that sample's subcell patch — so the high flap
+/// holds its plate, the low flap holds the ground, and the marched wall
+/// closes the gap on the same anchors. The side is never inferred from the
+/// vertex position: a smoothing-displaced crossing sits off the subcell
+/// lattice, where positional inference reads whichever subcell the vertex
+/// floors into and collapses both flaps onto one plate. A crossing lies
+/// within half a sample of its anchor, so the anchored patch never
+/// extrapolates. Off relief the anchor is unused — the owner-clamp and
+/// whole-cell paths are exactly [`label_lift`]'s, so relief-free worlds are
+/// byte-identical.
+fn anchored_lift(
+    world: &World,
+    owner: CellPos,
+    anchor_oct: [i32; 2],
+    wx: f32,
+    wz: f32,
+) -> (f32, f32) {
+    let cell = CellPos {
+        x: floor_to_i32(wx),
+        z: floor_to_i32(wz),
+    };
+    if cell != owner && world.edge_is_cliff(cell, owner) {
+        if world.cell_has_height_relief(owner) {
+            let patch = SubPatch::containing(world, owner, wx, wz);
+            return (patch.y(wx, wz), patch.shade(wx, wz));
+        }
+        let lift = CellLift::of(world, owner);
+        return (lift.y(wx, wz), lift.shade(wx, wz));
+    }
+    if world.cell_has_height_relief(cell) {
+        let anchor_cell = CellPos {
+            x: anchor_oct[0].div_euclid(256),
+            z: anchor_oct[1].div_euclid(256),
+        };
+        let sub_x = anchor_oct[0].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
+        let sub_z = anchor_oct[1].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
+        let patch = SubPatch::of(world, anchor_cell, sub_x, sub_z);
+        return (patch.y(wx, wz), patch.shade(wx, wz));
+    }
+    let lift = CellLift::of(world, cell);
+    (lift.y(wx, wz), lift.shade(wx, wz))
+}
+
+/// The break lines crossing a window's interior, per axis, in octimeters:
+/// `Some(midline)` when the window's corner-sample point levels split past
+/// the step ceiling across that axis. Levels differ across an axis only
+/// when the two sample columns (rows) sit in different subcells, so a
+/// returned midline is always a subcell lattice line — the line the break
+/// stands on and the relief walls loft from. A flap polygon spanning a
+/// returned line must be clipped there ([`emit_clipped_flap`]): a cap fan
+/// must never connect vertices whose plates split.
+fn window_break_lines(
+    world: &World,
+    owner: CellPos,
+    x_lo: i32,
+    z_lo: i32,
+    step_oct: i32,
+) -> (Option<i32>, Option<i32>) {
+    if !world.cell_has_height_relief(owner) {
+        return (None, None);
+    }
+    let x_hi = x_lo + step_oct;
+    let z_hi = z_lo + step_oct;
+    // Corner-sample point levels in [BL, BR, TR, TL] order.
+    let level = [[x_lo, z_lo], [x_hi, z_lo], [x_hi, z_hi], [x_lo, z_hi]]
+        .map(|[px, pz]| point_surface_level_at(world, px, pz));
+    let x_break = (level[0] - level[1]).abs() > STEP_MAX_OCTIMETERS
+        || (level[3] - level[2]).abs() > STEP_MAX_OCTIMETERS;
+    let z_break = (level[0] - level[3]).abs() > STEP_MAX_OCTIMETERS
+        || (level[1] - level[2]).abs() > STEP_MAX_OCTIMETERS;
+    let half = step_oct / 2;
+    (
+        x_break.then_some(x_lo + half),
+        z_break.then_some(z_lo + half),
+    )
+}
+
+/// Split a convex polygon (octimeter coordinates) by the axis-aligned line
+/// `coord[axis] = line`, returning the `(below, above)` sides in boundary
+/// order. A vertex exactly on the line joins both sides, and a crossed
+/// edge gains its intersection on both — so the two fragments share their
+/// cut edge vertex-for-vertex.
+fn split_poly_at(poly: &[[f32; 2]], axis: usize, line: f32) -> (Vec<[f32; 2]>, Vec<[f32; 2]>) {
+    let mut below = Vec::new();
+    let mut above = Vec::new();
+    for (i, &a) in poly.iter().enumerate() {
+        let b = poly[(i + 1) % poly.len()];
+        let da = a[axis] - line;
+        let db = b[axis] - line;
+        if da <= 0.0 {
+            below.push(a);
+        }
+        if da >= 0.0 {
+            above.push(a);
+        }
+        if (da < 0.0 && db > 0.0) || (da > 0.0 && db < 0.0) {
+            let t = da / (da - db);
+            let mut p = [0.0f32; 2];
+            p[axis] = line;
+            p[1 - axis] = a[1 - axis] + (b[1 - axis] - a[1 - axis]) * t;
+            below.push(p);
+            above.push(p);
+        }
+    }
+    (below, above)
+}
+
+/// Twice the area of a polygon (shoelace, absolute) — the degenerate-
+/// fragment filter for [`emit_clipped_flap`].
+fn poly_area_doubled(poly: &[[f32; 2]]) -> f32 {
+    let mut sum = 0.0f32;
+    for (i, &a) in poly.iter().enumerate() {
+        let b = poly[(i + 1) % poly.len()];
+        sum += a[0] * b[1] - b[0] * a[1];
+    }
+    sum.abs()
+}
+
+/// One clipped flap fragment: its polygon (octimeter coordinates) and its
+/// side of each clipped break line per axis (`false` = below) — the datum
+/// [`fragment_lift`] resolves an on-line vertex's subcell through.
+type FlapFragment = (Vec<[f32; 2]>, [Option<(i32, bool)>; 2]);
+
+/// Clip one label flap polygon (octimeter coordinates) along the window's
+/// break midlines, so no fan triangle can connect vertices whose plates
+/// split — the slanted bridge a whole-window fan draws across an internal
+/// break. With no break lines the polygon passes through whole; degenerate
+/// slivers of a clip are dropped.
+fn clip_window_poly(
+    poly: &[[f32; 2]],
+    clip_x: Option<i32>,
+    clip_z: Option<i32>,
+) -> Vec<FlapFragment> {
+    let mut fragments: Vec<FlapFragment> = vec![(poly.to_vec(), [None, None])];
+    for (axis, clip) in [clip_x, clip_z].into_iter().enumerate() {
+        let Some(line) = clip else {
+            continue;
+        };
+        fragments = fragments
+            .into_iter()
+            .flat_map(|(frag, sides)| {
+                let (below, above) = split_poly_at(&frag, axis, line as f32);
+                let mut lo_sides = sides;
+                lo_sides[axis] = Some((line, false));
+                let mut hi_sides = sides;
+                hi_sides[axis] = Some((line, true));
+                [(below, lo_sides), (above, hi_sides)]
+            })
+            .collect();
+    }
+    fragments.retain(|(frag, _)| frag.len() >= 3 && poly_area_doubled(frag) >= 1.0);
+    fragments
+}
+
+/// Close the vertical gaps a clipped flap opens **inside itself**: where
+/// two fragments of one flap meet across a clipped break line at split
+/// plates, no other wall class stands — the display is uniform there (one
+/// flap, so no marched boundary), and where the flanking authored
+/// materials differ the relief walk skips the edge as marched territory.
+/// The regime is the marching chamfer at a silhouette corner: the cut
+/// leaves a sliver of this label's display over the far side's raised (or
+/// dropped) fabric, honestly lifted to that fabric's plate, and its
+/// lattice-line edges would otherwise be open cracks. The shared chord of
+/// each adjacent fragment pair is walled from the higher side's lift down
+/// to a tuck under the lower — gated to authored-material-differing lines
+/// so a same-material break stays the relief walk's (and only its) face.
+#[allow(clippy::too_many_lines)] // one pass: pair fragments, gate, loft
+fn emit_clip_gap_walls(
+    world: &World,
+    owner: CellPos,
+    fragments: &[FlapFragment],
+    styles: &StyleTable,
+    tris: &mut Vec<DrawTriangle>,
+) {
+    let tuck = WALL_TUCK_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
+    let mut colors: Option<([f32; 3], [f32; 3])> = None;
+    for axis in 0..2 {
+        for (fa, sa) in fragments {
+            let Some((line, false)) = sa[axis] else {
+                continue;
+            };
+            for (fb, sb) in fragments {
+                if sb[axis] != Some((line, true)) || sb[1 - axis] != sa[1 - axis] {
+                    continue;
+                }
+                // The shared chord: each side's on-line vertex extent along
+                // the other axis, overlapped.
+                let extent = |frag: &[[f32; 2]]| -> Option<(f32, f32)> {
+                    let mut lo = f32::MAX;
+                    let mut hi = f32::MIN;
+                    for v in frag {
+                        if (v[axis] - line as f32).abs() < 0.5 {
+                            lo = lo.min(v[1 - axis]);
+                            hi = hi.max(v[1 - axis]);
+                        }
+                    }
+                    (hi > lo).then_some((lo, hi))
+                };
+                let (Some((a_lo, a_hi)), Some((b_lo, b_hi))) = (extent(fa), extent(fb)) else {
+                    continue;
+                };
+                let lo = a_lo.max(b_lo);
+                let hi = a_hi.min(b_hi);
+                if hi - lo < 0.5 {
+                    continue;
+                }
+                // Authored materials across the line at the chord: a
+                // same-material break is the relief walk's face, not ours.
+                let lattice = line / OCTIMETERS_PER_SUBCELL;
+                let sub_other = floor_to_i32((lo + hi) * 0.5 / OCTIMETERS_PER_SUBCELL as f32);
+                let material_of = |sub_axis: i32| {
+                    let (sx, sz) = if axis == 0 {
+                        (sub_axis, sub_other)
+                    } else {
+                        (sub_other, sub_axis)
+                    };
+                    world.underlay_point(
+                        CellPos {
+                            x: sx.div_euclid(SUB),
+                            z: sz.div_euclid(SUB),
+                        },
+                        sx.rem_euclid(SUB),
+                        sz.rem_euclid(SUB),
+                    )
+                };
+                if material_of(lattice - 1) == material_of(lattice) {
+                    continue;
+                }
+                // Lift the chord endpoints through both fragments' sides.
+                let endpoint = |other: f32| -> [f32; 2] {
+                    let mut p = [0.0f32; 2];
+                    p[axis] = line as f32;
+                    p[1 - axis] = other;
+                    p
+                };
+                let lift = |p: [f32; 2], sides: [Option<(i32, bool)>; 2]| {
+                    fragment_lift(
+                        world,
+                        owner,
+                        sides,
+                        p[0] / OCTIMETERS_PER_METER,
+                        p[1] / OCTIMETERS_PER_METER,
+                    )
+                    .0
+                };
+                let (c0, c1) = (endpoint(lo), endpoint(hi));
+                let below = [lift(c0, *sa), lift(c1, *sa)];
+                let above = [lift(c0, *sb), lift(c1, *sb)];
+                if (below[0] - above[0]).abs() < f32::EPSILON
+                    && (below[1] - above[1]).abs() < f32::EPSILON
+                {
+                    continue; // the plates agree — no gap to close
+                }
+                let (top, base) = if below[0] + below[1] > above[0] + above[1] {
+                    (below, above)
+                } else {
+                    (above, below)
+                };
+                let (top_rgb, base_rgb) = *colors.get_or_insert_with(|| {
+                    let cliff = world.cliff_material(owner);
+                    let resolved = resolve_cell(
+                        styles.get(cliff),
+                        owner.x as f32 + 0.5,
+                        owner.z as f32 + 0.5,
+                        None,
+                    );
+                    (
+                        hsl_to_linear_rgb(
+                            resolved.hue,
+                            resolved.sat,
+                            (resolved.light * SKIRT_TOP_SHADE).clamp(0.0, 100.0),
+                        ),
+                        hsl_to_linear_rgb(
+                            resolved.hue,
+                            resolved.sat,
+                            (resolved.light * SKIRT_BASE_SHADE).clamp(0.0, 100.0),
+                        ),
+                    )
+                });
+                push_wall_quad(
+                    tris,
+                    [
+                        c0[0] / OCTIMETERS_PER_METER,
+                        c0[1] / OCTIMETERS_PER_METER,
+                        top[0],
+                    ],
+                    [
+                        c1[0] / OCTIMETERS_PER_METER,
+                        c1[1] / OCTIMETERS_PER_METER,
+                        top[1],
+                    ],
+                    base[0] - tuck,
+                    base[1] - tuck,
+                    top_rgb,
+                    base_rgb,
+                );
+            }
+        }
+    }
+}
+
+/// The lift for a vertex of a clipped flap fragment: position-pure through
+/// the vertex's own (floor) subcell, except that a vertex lying exactly on
+/// a clipped break line reads the subcell on the **fragment's** side of it
+/// (`sides` per axis, from [`emit_clipped_flap`]) — the high fragment holds
+/// its plate, the low fragment holds the ground, and the wall classes close
+/// the vertical gap on the same subcells. Off the break lines the two forms
+/// agree wherever the plates connect, so continuous relief stays seamless.
+/// The owner-clamp and relief-free paths are exactly [`label_lift`]'s, so
+/// cell-cliff and relief-free worlds are untouched.
+fn fragment_lift(
+    world: &World,
+    owner: CellPos,
+    sides: [Option<(i32, bool)>; 2],
+    wx: f32,
+    wz: f32,
+) -> (f32, f32) {
+    let cell = CellPos {
+        x: floor_to_i32(wx),
+        z: floor_to_i32(wz),
+    };
+    if cell != owner && world.edge_is_cliff(cell, owner) {
+        if world.cell_has_height_relief(owner) {
+            let patch = SubPatch::containing(world, owner, wx, wz);
+            return (patch.y(wx, wz), patch.shade(wx, wz));
+        }
+        let lift = CellLift::of(world, owner);
+        return (lift.y(wx, wz), lift.shade(wx, wz));
+    }
+    if world.cell_has_height_relief(cell) {
+        // Subcell per axis: the fragment's side when the coordinate sits
+        // exactly on that axis's clipped break line (always a subcell
+        // lattice line), else the floor subcell.
+        let sub_of = |w: f32, side: Option<(i32, bool)>| -> i32 {
+            if let Some((line, above)) = side {
+                let oct = w * OCTIMETERS_PER_METER;
+                if (oct - line as f32).abs() < 0.5 {
+                    let lattice = line / OCTIMETERS_PER_SUBCELL;
+                    return if above { lattice } else { lattice - 1 };
+                }
+            }
+            floor_to_i32(w * SUB as f32)
+        };
+        let sx = sub_of(wx, sides[0]);
+        let sz = sub_of(wz, sides[1]);
+        let patch = SubPatch::of(
+            world,
+            CellPos {
+                x: sx.div_euclid(SUB),
+                z: sz.div_euclid(SUB),
+            },
+            sx.rem_euclid(SUB),
+            sz.rem_euclid(SUB),
+        );
+        return (patch.y(wx, wz), patch.shade(wx, wz));
+    }
+    let lift = CellLift::of(world, cell);
+    (lift.y(wx, wz), lift.shade(wx, wz))
 }
 
 /// Floor to `i32` — `as i32` truncates toward zero, which is wrong for
@@ -342,6 +794,20 @@ fn label_lift(world: &World, owner: CellPos, wx: f32, wz: f32) -> (f32, f32) {
 fn floor_to_i32(v: f32) -> i32 {
     let t = v as i32;
     if (t as f32) > v { t - 1 } else { t }
+}
+
+/// The effective point surface level in octimeters at octimeter position
+/// `(px, pz)` — the cell and subcell it floors into, resolved through
+/// [`World::point_surface_level`]. The marched wall gate samples this so its
+/// break reads the same authored relief the cap drew.
+fn point_surface_level_at(world: &World, px: i32, pz: i32) -> i32 {
+    let cell = CellPos {
+        x: px.div_euclid(256),
+        z: pz.div_euclid(256),
+    };
+    let sub_x = px.rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
+    let sub_z = pz.rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
+    world.point_surface_level(cell, sub_x, sub_z)
 }
 
 /// The per-side pooled-rim strengths `[left, right, top, bottom]` for an
@@ -386,14 +852,18 @@ fn cell_rims(world: &World, cell: CellPos, material: Material, styles: &StyleTab
 /// The partition's inputs at subcell expression: the cascade-resolved
 /// material id and the smoothing params (the cell's field override, else
 /// the sample's own material's style row) for every sample of the chunk
-/// plus its apron. `None` when the whole area is Void — nothing to mesh.
+/// plus its apron, plus the frozen mask — a sample flanking a point-height
+/// break freezes so the smoothing passes can never move the paint boundary
+/// across a physical cliff ([`repartition`]'s barrier; the contour along a
+/// break stays the accepted sample-resolution staircase). `None` when the
+/// whole area is Void — nothing to mesh.
 fn partition_inputs(
     world: &World,
     at: ChunkPos,
     apron: i32,
     n: usize,
     styles: &StyleTable,
-) -> Option<(Vec<u8>, Vec<SmoothParams>)> {
+) -> Option<(Vec<u8>, Vec<SmoothParams>, Vec<bool>)> {
     let mut ids = vec![0u8; n * n];
     let mut params = vec![
         SmoothParams {
@@ -402,6 +872,7 @@ fn partition_inputs(
         };
         n * n
     ];
+    let mut frozen = vec![false; n * n];
     let mut any = false;
     for sj in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
         for si in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
@@ -430,9 +901,35 @@ fn partition_inputs(
                     smoothing_degrees: profile.degrees,
                 },
             );
+            // Freeze the sample when its subcell flanks a point-height
+            // break: paint smoothing must never cross a physical cliff, or
+            // the silhouette's flank would alternate between painted steep
+            // caps and wall wedges. Pure world reads (position-based), so
+            // neighboring chunks agree over the shared apron. The relief
+            // shortcut keeps flat neighborhoods off this path entirely.
+            if world.cell_has_height_relief(cell) {
+                let gx = at.x * EDGE * SUB + si;
+                let gz = at.z * EDGE * SUB + sj;
+                let own_level = point_surface_level_at(
+                    world,
+                    gx * OCTIMETERS_PER_SUBCELL,
+                    gz * OCTIMETERS_PER_SUBCELL,
+                );
+                frozen[idx] =
+                    [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                        .into_iter()
+                        .any(|(dx, dz): (i32, i32)| {
+                            let level = point_surface_level_at(
+                                world,
+                                (gx + dx) * OCTIMETERS_PER_SUBCELL,
+                                (gz + dz) * OCTIMETERS_PER_SUBCELL,
+                            );
+                            (own_level - level).abs() > STEP_MAX_OCTIMETERS
+                        });
+            }
         }
     }
-    any.then_some((ids, params))
+    any.then_some((ids, params, frozen))
 }
 
 /// The display label a repartitioned material sample renders as: the
@@ -460,6 +957,7 @@ fn display_label(material: u8, body: bool) -> u8 {
 /// geometry over their shared apron and the overlap is invisible. Returns
 /// the split display grid so the wall pass lofts from the same samples;
 /// `None` when the whole chunk plus apron is Void (nothing to mesh).
+#[allow(clippy::too_many_lines)] // one underlay pass: partition, split, tile interiors, march windows, flap margins
 fn mesh_underlay(
     world: &World,
     at: ChunkPos,
@@ -468,10 +966,10 @@ fn mesh_underlay(
 ) -> Option<DisplayPartition> {
     let apron = MAX_APRON_SUBCELLS;
     let n = (SUBCELLS_PER_CHUNK_EDGE + 2 * apron) as usize;
-    let (ids, params) = partition_inputs(world, at, apron, n, styles)?;
+    let (ids, params, frozen) = partition_inputs(world, at, apron, n, styles)?;
 
     let upsample = CONTOUR_UPSAMPLE;
-    let (grid, gw, gh) = repartition(&ids, n, n, upsample, &params);
+    let (grid, gw, gh) = repartition(&ids, n, n, upsample, &params, &frozen);
     let u = upsample as i32;
     let step_oct = OCTIMETERS_PER_SUBCELL / u;
 
@@ -556,6 +1054,13 @@ fn mesh_underlay(
                 cell.z as f32 + 0.5,
                 None,
             );
+            // Authored relief tessellates the cap to subcell resolution so
+            // its per-point heights and breaks show; a flat cell keeps the
+            // nine-slice fast path (byte-identical to a world with no relief).
+            if world.cell_has_height_relief(cell) {
+                emit_underlay_cell_subdivided(world, material, &resolved, cell, styles, tris);
+                continue;
+            }
             let rims = cell_rims(world, cell, material, styles);
             let lift = CellLift::of(world, cell);
             emit_underlay_cell(
@@ -695,16 +1200,22 @@ fn emit_partition_windows(
             // so the merge stays crack-free on sloped ground too (the quad
             // interior deviates from the surface by at most the tiny
             // cross-term over one window row, and nothing else draws
-            // there).
+            // there). A uniform window straddling a point-height break is
+            // the exception: its quad would bridge the split plates, so it
+            // routes through the mixed emitter, whose break clipping splits
+            // it (the label's case is 15 — the full window polygon).
             if corners[0] != 0 && corners.iter().all(|&c| c == corners[0]) {
-                match run {
-                    Some((label, cell, _)) if label == corners[0] && cell == owner => {}
-                    _ => {
-                        flush(&mut run, wi, wj, tris);
-                        run = Some((corners[0], owner, wi));
+                let (bx, bz) = window_break_lines(world, owner, x_lo, z_lo, step_oct);
+                if bx.is_none() && bz.is_none() {
+                    match run {
+                        Some((label, cell, _)) if label == corners[0] && cell == owner => {}
+                        _ => {
+                            flush(&mut run, wi, wj, tris);
+                            run = Some((corners[0], owner, wi));
+                        }
                     }
+                    continue;
                 }
-                continue;
             }
             flush(&mut run, wi, wj, tris);
             emit_mixed_window(
@@ -763,10 +1274,30 @@ fn emit_mixed_window(
     tris: &mut Vec<DrawTriangle>,
 ) {
     let step_oct = place.step_oct;
+    let half = step_oct / 2;
     let x_lo = place.origin_oct[0] + wi as i32 * step_oct;
     let z_lo = place.origin_oct[1] + wj as i32 * step_oct;
-    let wash_x = (x_lo + step_oct / 2) as f32 / OCTIMETERS_PER_METER;
-    let wash_z = (z_lo + step_oct / 2) as f32 / OCTIMETERS_PER_METER;
+    let x_hi = x_lo + step_oct;
+    let z_hi = z_lo + step_oct;
+    let wash_x = (x_lo + half) as f32 / OCTIMETERS_PER_METER;
+    let wash_z = (z_lo + half) as f32 / OCTIMETERS_PER_METER;
+    // The break midlines a flap must be clipped along — a fan across a
+    // split would draw a slanted bridge over the break instead of letting
+    // the walls close it.
+    let (clip_x, clip_z) = window_break_lines(world, owner, x_lo, z_lo, step_oct);
+    // Window point positions in octimeters, contour point numbering
+    // (corners 0..4, edge midpoints 4..8).
+    let points = [
+        [x_lo, z_lo],
+        [x_hi, z_lo],
+        [x_hi, z_hi],
+        [x_lo, z_hi],
+        [x_lo + half, z_lo],
+        [x_hi, z_lo + half],
+        [x_lo + half, z_hi],
+        [x_lo, z_lo + half],
+    ]
+    .map(|[px, pz]| [px as f32, pz as f32]);
     for k in 0..4 {
         let label = corners[k];
         if label == 0 || corners[..k].contains(&label) {
@@ -793,8 +1324,10 @@ fn emit_mixed_window(
         if label % 2 == 1 {
             light *= 1.0 - s.rim_darken;
         }
-        let vertex = |wx: f32, wz: f32| {
-            let (y, shade) = label_lift(world, owner, wx, wz);
+        let vertex = |pos: [f32; 2], sides: [Option<(i32, bool)>; 2]| {
+            let wx = pos[0] / OCTIMETERS_PER_METER;
+            let wz = pos[1] / OCTIMETERS_PER_METER;
+            let (y, shade) = fragment_lift(world, owner, sides, wx, wz);
             let rgb = hsl_to_linear_rgb(
                 resolved.hue,
                 resolved.sat,
@@ -809,18 +1342,47 @@ fn emit_mixed_window(
                 b: rgb[2],
             }
         };
-        emit_label_window(wi as i32, wj as i32, place, case, connected, &vertex, tris);
+        for poly in label_window_polys(case, connected) {
+            if poly.is_empty() {
+                continue;
+            }
+            let pts: Vec<[f32; 2]> = poly.iter().map(|&idx| points[idx as usize]).collect();
+            let fragments = clip_window_poly(&pts, clip_x, clip_z);
+            for (frag, sides) in &fragments {
+                for k in 1..frag.len() - 1 {
+                    tris.push(DrawTriangle {
+                        verts: [
+                            vertex(frag[0], *sides),
+                            vertex(frag[k], *sides),
+                            vertex(frag[k + 1], *sides),
+                        ],
+                    });
+                }
+            }
+            if clip_x.is_some() || clip_z.is_some() {
+                emit_clip_gap_walls(world, owner, &fragments, styles, tris);
+            }
+        }
     }
 }
 
-/// The world cell under grid sample `(gx, gz)` of a partition grid placed
-/// by `place`: the sample sits at `origin_oct + idx * step_oct` octimeters
-/// and the cell is that position floored by the 256-octimeter cell size.
-fn sample_cell(place: &GridPlacement, gx: i32, gz: i32) -> CellPos {
-    CellPos {
-        x: (place.origin_oct[0] + gx * place.step_oct).div_euclid(256),
-        z: (place.origin_oct[1] + gz * place.step_oct).div_euclid(256),
-    }
+/// The effective surface level in octimeters at grid sample `(gx, gz)`,
+/// resolved at subcell — not cell — granularity, so an authored point-height
+/// break inside a cell reads as a step just as a cell-scale cliff does. The
+/// encroachment flood tests this between adjacent samples so a margin wraps
+/// around a subcell break rather than climbing or draping it. Water resolves
+/// at its flat plane here.
+fn sample_surface_level(world: &World, place: &GridPlacement, gx: i32, gz: i32) -> i32 {
+    let sx = (place.origin_oct[0] + gx * place.step_oct).div_euclid(OCTIMETERS_PER_SUBCELL);
+    let sz = (place.origin_oct[1] + gz * place.step_oct).div_euclid(OCTIMETERS_PER_SUBCELL);
+    world.point_surface_level(
+        CellPos {
+            x: sx.div_euclid(SUB),
+            z: sz.div_euclid(SUB),
+        },
+        sx.rem_euclid(SUB),
+        sz.rem_euclid(SUB),
+    )
 }
 
 /// Barrier-respecting step distance from `encroacher`'s samples to every
@@ -859,7 +1421,7 @@ fn encroach_distance(
         for &idx in &frontier {
             let gx = (idx % gw) as i32;
             let gz = (idx / gw) as i32;
-            let here = sample_cell(place, gx, gz);
+            let here = sample_surface_level(world, place, gx, gz);
             for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
                 let nx = gx + dx;
                 let nz = gz + dz;
@@ -870,8 +1432,11 @@ fn encroach_distance(
                 if dist[nidx] <= step {
                     continue;
                 }
-                let there = sample_cell(place, nx, nz);
-                if here != there && world.edge_is_cliff(here, there) {
+                // A cliff blocks the flood — cell-scale or an authored
+                // subcell break — so a margin wraps around a step rather than
+                // climbing or draping it.
+                let there = sample_surface_level(world, place, nx, nz);
+                if (here - there).abs() > STEP_MAX_OCTIMETERS {
                     continue;
                 }
                 dist[nidx] = step;
@@ -1017,6 +1582,38 @@ fn emit_encroach_windows(
             }
             let x_lo = place.origin_oct[0] + wi as i32 * step_oct;
             let z_lo = place.origin_oct[1] + wj as i32 * step_oct;
+            // A flap must not drape a height break. Where the window's
+            // footprint straddles a subcell cliff — the effective surface
+            // level a step apart across it — the margin stops at the break
+            // edge rather than lofting a tall face down the wall the relief
+            // pass already seals. Water resolves at its flat plane here, so a
+            // shoreline flap still rides it; only an authored point-height
+            // step trips the gate.
+            let corner_level = |ox: i32, oz: i32| {
+                let sx = ox.div_euclid(OCTIMETERS_PER_SUBCELL);
+                let sz = oz.div_euclid(OCTIMETERS_PER_SUBCELL);
+                world.point_surface_level(
+                    CellPos {
+                        x: sx.div_euclid(SUB),
+                        z: sz.div_euclid(SUB),
+                    },
+                    sx.rem_euclid(SUB),
+                    sz.rem_euclid(SUB),
+                )
+            };
+            let x_hi = x_lo + step_oct;
+            let z_hi = z_lo + step_oct;
+            let (lo_level, hi_level) = [
+                corner_level(x_lo, z_lo),
+                corner_level(x_hi, z_lo),
+                corner_level(x_lo, z_hi),
+                corner_level(x_hi, z_hi),
+            ]
+            .into_iter()
+            .fold((i32::MAX, i32::MIN), |(lo, hi), l| (lo.min(l), hi.max(l)));
+            if hi_level - lo_level > STEP_MAX_OCTIMETERS {
+                continue;
+            }
             let x_center_cell = (x_lo + step_oct / 2).div_euclid(256);
             let z_center_cell = (z_lo + step_oct / 2).div_euclid(256);
             let x_owner_local = x_center_cell - at.x * EDGE;
@@ -1029,7 +1626,7 @@ fn emit_encroach_windows(
                 z: z_center_cell,
             };
             let resolved = resolve_cell(s, owner.x as f32 + 0.5, owner.z as f32 + 0.5, None);
-            let vertex = |wx: f32, wz: f32| {
+            let vertex = |wx: f32, wz: f32, _point: u8| {
                 let (y, shade) = label_lift(world, owner, wx, wz);
                 let light = wash_lightness(s, resolved.light, wx, wz, resolved.stroke);
                 let rgb = hsl_to_linear_rgb(
@@ -1177,6 +1774,44 @@ fn emit_underlay_cell(
         styles,
         tris,
     );
+}
+
+/// Emit a height-relief cell's cap as `SUB × SUB` subcell quads, each lifted
+/// through its own point patch ([`SubPatch`]) so authored subcell relief —
+/// and the breaks where adjacent points cliff — shows in the cap and the
+/// drawn height matches [`World::surface_height`] at every sample. Pooled
+/// rims are dropped here (relief shaping owns the cell); a flat cell keeps
+/// the nine-slice fast path in [`emit_underlay_cell`].
+fn emit_underlay_cell_subdivided(
+    world: &World,
+    material: Material,
+    resolved: &ResolvedCell,
+    cell: CellPos,
+    styles: &StyleTable,
+    tris: &mut Vec<DrawTriangle>,
+) {
+    for sj in 0..SUB {
+        for si in 0..SUB {
+            let patch = SubPatch::of(world, cell, si, sj);
+            let surface = |wx: f32, wz: f32| (patch.y(wx, wz), patch.shade(wx, wz));
+            let x0 = cell.x * 256 + si * OCTIMETERS_PER_SUBCELL;
+            let z0 = cell.z * 256 + sj * OCTIMETERS_PER_SUBCELL;
+            emit_quad_shaded(
+                material,
+                resolved,
+                [
+                    x0,
+                    z0,
+                    x0 + OCTIMETERS_PER_SUBCELL,
+                    z0 + OCTIMETERS_PER_SUBCELL,
+                ],
+                0.0,
+                &surface,
+                styles,
+                tris,
+            );
+        }
+    }
 }
 
 /// Push the two triangles of one underlay quad spanning `rect`
@@ -1511,13 +2146,16 @@ const WALL_SEGMENTS: [&[(u8, u8)]; 16] = [
     &[],               // 15
 ];
 
-/// Emit the chunk's vertical cliff faces as the union of two segment
+/// Emit the chunk's vertical cliff faces as the union of three segment
 /// classes lofted from one shared partition: marched walls where a material
-/// or Void boundary stands past the step ceiling
-/// ([`emit_marched_walls`]), and cell-edge lattice walls where a
-/// same-material cliff leaves no marched boundary ([`emit_lattice_walls`]).
-/// The raw calibration view has no partition, so it closes every cliff at
-/// cell resolution in flat gray.
+/// or Void boundary stands past the step ceiling ([`emit_marched_walls`]),
+/// cell-edge lattice walls where a same-material cliff leaves no marched
+/// boundary ([`emit_lattice_walls`]), and subcell-stride relief walls where
+/// authored point deltas break a same-material surface inside or across
+/// cells ([`emit_relief_walls`] — it owns every relief cell's same-material
+/// faces, and the cell-edge walk skips those cells). The raw calibration
+/// view has no partition, so it closes every cliff at cell resolution in
+/// flat gray.
 fn emit_walls(
     world: &World,
     at: ChunkPos,
@@ -1529,6 +2167,7 @@ fn emit_walls(
     if let Some(part) = partition {
         emit_marched_walls(world, at, part, styles, tris);
         emit_lattice_walls(world, at, mode, styles, true, tris);
+        emit_relief_walls(world, at, styles, tris);
     } else {
         emit_lattice_walls(world, at, mode, styles, false, tris);
     }
@@ -1536,18 +2175,23 @@ fn emit_walls(
 
 /// Loft the marched cliff walls: over the boundary windows of the display
 /// partition, wherever a segment separates two materials — or a material
-/// from a Void hole — whose surface levels stand past the step ceiling,
-/// drop the segment's marched contour from the high side down to the low
-/// ground. Each window is owned by the cell under its center, the same
-/// ownership the cap walk uses, so a wall's top vertices lift through the
-/// identical owner-clamped patch ([`label_lift`]) the cap drew — landing
-/// the top edge exactly on the cap's contour, watertight by construction.
-/// Emission gates on the owner standing a cliff above the segment's low
-/// side, so exactly the high-owned window lofts a given face and a
-/// low-owned window (whose top would clamp low) stays silent. A grounded
-/// low side tucks under its surface so the low cap covers the base; a Void
-/// low side drops [`WALL_VOID_DROP_OCTIMETERS`] so the hole reads as thick
-/// ground.
+/// from a Void hole — whose point surface levels stand past the step
+/// ceiling, drop the segment's marched contour from the high side down to
+/// the low ground. Each window is owned by the cell under its center, the
+/// same ownership the cap walk uses; the owner is the fleet-wide dedup key
+/// (a window emits only from the chunk holding its owner) and the color
+/// source, never the gate — the gate is per-segment and side-aware, reading
+/// the `a`-side corner's point level against the crossed side's, because
+/// along a contour the window center alternates sides subcell to subcell
+/// and an owner-level gate would picket-fence the wall. A wall's top
+/// vertices lift through the identical anchored patch ([`anchored_lift`]
+/// on the `a`-side corner sample) the high cap's crossing vertices took —
+/// landing the top edge exactly on the cap's contour, watertight by
+/// construction under any smoothing displacement.
+/// A grounded low side takes per-endpoint bases on the low side's own lift
+/// over relief (a flat min base where no relief engages), tucked under the
+/// low cap; a Void low side drops [`WALL_VOID_DROP_OCTIMETERS`] so the hole
+/// reads as thick ground.
 #[allow(clippy::too_many_lines)] // one boundary walk: classify sides, extract segments, loft
 #[allow(clippy::similar_names)] // the segment's two endpoints read clearest as `_p` / `_q` pairs
 fn emit_marched_walls(
@@ -1601,10 +2245,9 @@ fn emit_marched_walls(
             if mats.iter().all(|&m| m == mats[0]) {
                 continue; // uniform window — no material boundary to loft
             }
-            let owner_level = world.surface_level(owner);
             // The lowest edge neighbor of the owner: a Void hole floors to
-            // the owner's own (high) cell, so its drop is gated on the owner
-            // standing a real cliff above its surroundings rather than on the
+            // the high cell, so its drop is gated on the high side standing a
+            // real cliff above its cell surroundings rather than on the
             // hole's meaningless level.
             let min_neighbor = [(1, 0), (-1, 0), (0, 1), (0, -1)]
                 .into_iter()
@@ -1615,14 +2258,19 @@ fn emit_marched_walls(
                     })
                 })
                 .min()
-                .unwrap_or(owner_level);
-            // Corner sample floor-cell surface levels, same order as `mats`.
-            let level = [[x_lo, z_lo], [x_hi, z_lo], [x_hi, z_hi], [x_lo, z_hi]].map(|[cx, cz]| {
-                world.surface_level(CellPos {
-                    x: cx.div_euclid(256),
-                    z: cz.div_euclid(256),
-                })
-            });
+                .unwrap_or_else(|| world.surface_level(owner));
+            // Does authored relief engage anywhere this window can read? The
+            // per-endpoint wall bases below switch on this, so relief-free
+            // worlds keep their flat base byte-identically.
+            let relief = world.cell_has_height_relief(owner);
+            // Corner sample positions and point surface levels, same order
+            // as `mats`. Point levels (not the cell level) so an authored
+            // break inside a cell — a silhouette raised by deltas alone,
+            // the cell height flat — lofts its wall, and the gate reads the
+            // sample the cap actually drew. The positions double as the
+            // wall's side anchors ([`anchored_lift`]).
+            let corner_oct = [[x_lo, z_lo], [x_hi, z_lo], [x_hi, z_hi], [x_lo, z_hi]];
+            let point_level = corner_oct.map(|[cx, cz]| point_surface_level_at(world, cx, cz));
             let mid = |m: u8| -> [i32; 2] {
                 match m {
                     4 => [x_lo + half, z_lo],
@@ -1639,8 +2287,9 @@ fn emit_marched_walls(
                     _ => (3, 0),
                 }
             };
-            // Wall color: the owning (high) cell's cliff material, top-to-base
-            // shaded. The owner is the high side wherever a wall lofts.
+            // Wall color: the owning cell's cliff material, top-to-base
+            // shaded — the owner is the color source even when the segment's
+            // high side lies in a neighboring cell.
             let cliff = world.cliff_material(owner);
             let resolved = resolve_cell(
                 styles.get(cliff),
@@ -1667,25 +2316,38 @@ fn emit_marched_walls(
                     | u8::from(mats[2] == a) << 2
                     | u8::from(mats[3] == a) << 3;
                 for &(p, q) in WALL_SEGMENTS[case as usize] {
-                    // The low side along the segment: each crossed edge's
-                    // non-`a` corner. Void wins (a hole drops the fixed
-                    // depth); otherwise the lower ground governs the base.
-                    let low_of = |m: u8| {
+                    // The two sides of each crossed edge: the `a` (high
+                    // candidate) corner and the non-`a` (low) corner, each
+                    // read at point level, each carrying its corner sample
+                    // as the side anchor. The gate is side-aware and
+                    // per-segment — never the window center, whose side
+                    // alternates along a contour and would picket-fence the
+                    // wall with skipped windows.
+                    let sides_of = |m: u8| {
                         let (i, j) = edge_corners(m);
-                        let k = if mats[i] == a { j } else { i };
-                        (mats[k], level[k])
+                        let (hi, lo) = if mats[i] == a { (i, j) } else { (j, i) };
+                        (
+                            mats[lo],
+                            point_level[lo],
+                            point_level[hi],
+                            corner_oct[lo],
+                            corner_oct[hi],
+                        )
                     };
-                    let (mat_p, lvl_p) = low_of(p);
-                    let (mat_q, lvl_q) = low_of(q);
+                    let (mat_p, lvl_p, hi_p, lo_anchor_p, hi_anchor_p) = sides_of(p);
+                    let (mat_q, lvl_q, hi_q, lo_anchor_q, hi_anchor_q) = sides_of(q);
                     let is_void = mat_p == 0 || mat_q == 0;
                     let low_level = lvl_p.min(lvl_q);
-                    // Only a genuine cliff under the high owner lofts. A
-                    // material boundary reads the drop to the low neighbor
-                    // cell; a Void hole reads the owner's drop to its
-                    // surroundings. Either way a low-owned window (its top
-                    // would clamp low) and a flat boundary fall through here.
+                    let high_level = hi_p.max(hi_q);
+                    // Only a genuine cliff lofts. A material boundary reads
+                    // the point drop across the segment; a Void hole reads
+                    // the high side's drop to its cell surroundings (the
+                    // hole's own points carry no ground level). A flat
+                    // boundary falls through here; the owner is only the
+                    // fleet-wide dedup key and the color source, never the
+                    // gate — a low-owned window still lofts its segment.
                     let base_level = if is_void { min_neighbor } else { low_level };
-                    if owner_level - base_level <= STEP_MAX_OCTIMETERS {
+                    if high_level - base_level <= STEP_MAX_OCTIMETERS {
                         continue;
                     }
                     let mp = mid(p);
@@ -1694,11 +2356,26 @@ fn emit_marched_walls(
                     let wz_p = mp[1] as f32 / OCTIMETERS_PER_METER;
                     let wx_q = mq[0] as f32 / OCTIMETERS_PER_METER;
                     let wz_q = mq[1] as f32 / OCTIMETERS_PER_METER;
-                    let yt_p = label_lift(world, owner, wx_p, wz_p).0;
-                    let yt_q = label_lift(world, owner, wx_q, wz_q).0;
+                    // Tops anchored to each endpoint's `a`-side corner — the
+                    // identical anchor the high flap's crossing vertex took
+                    // ([`window_point_anchor`]), so the seam is shared
+                    // vertices under any smoothing displacement.
+                    let yt_p = anchored_lift(world, owner, hi_anchor_p, wx_p, wz_p).0;
+                    let yt_q = anchored_lift(world, owner, hi_anchor_q, wx_q, wz_q).0;
                     let (yb_p, yb_q) = if is_void {
                         let drop = WALL_VOID_DROP_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
                         (yt_p - drop, yt_q - drop)
+                    } else if relief {
+                        // Per-endpoint bases anchored to the low corners —
+                        // over relief the low cap splits to its own plates,
+                        // so a flat min base would gap where the low ground
+                        // varies along the segment. Tucked under the low cap
+                        // exactly as the flat base is.
+                        let tuck = WALL_TUCK_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
+                        (
+                            anchored_lift(world, owner, lo_anchor_p, wx_p, wz_p).0 - tuck,
+                            anchored_lift(world, owner, lo_anchor_q, wx_q, wz_q).0 - tuck,
+                        )
                     } else {
                         let base = (low_level - WALL_TUCK_OCTIMETERS) as f32 / OCTIMETERS_PER_METER;
                         (base, base)
@@ -1736,36 +2413,6 @@ fn emit_lattice_walls(
     same_material_only: bool,
     tris: &mut Vec<DrawTriangle>,
 ) {
-    // Per direction: neighbor offset, the shared edge's two lattice corners
-    // as indices into the high cell's corner order, and the same lattice
-    // points in the neighbor's order (the low side's plates).
-    struct WallEdge {
-        offset: (i32, i32),
-        top: [usize; 2],
-        bottom: [usize; 2],
-    }
-    const DIRECTIONS: [WallEdge; 4] = [
-        WallEdge {
-            offset: (1, 0),
-            top: [1, 3],
-            bottom: [0, 2],
-        },
-        WallEdge {
-            offset: (-1, 0),
-            top: [0, 2],
-            bottom: [1, 3],
-        },
-        WallEdge {
-            offset: (0, 1),
-            top: [2, 3],
-            bottom: [0, 1],
-        },
-        WallEdge {
-            offset: (0, -1),
-            top: [0, 1],
-            bottom: [2, 3],
-        },
-    ];
     let tuck = WALL_TUCK_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
     for lz in 0..EDGE {
         for lx in 0..EDGE {
@@ -1777,9 +2424,16 @@ fn emit_lattice_walls(
             if material == Material::Void {
                 continue;
             }
+            // In the painted view a relief cell's same-material faces belong
+            // to the subcell-stride walk ([`emit_relief_walls`]) — skipping
+            // here is what keeps every face owned by exactly one walk. The
+            // raw view keeps its cell-resolution closure over relief cells.
+            if same_material_only && world.cell_has_height_relief(cell) {
+                continue;
+            }
             let cell_level = world.surface_level(cell);
             let mut cached: Option<[f32; 4]> = None;
-            for edge in &DIRECTIONS {
+            for edge in &WALL_DIRECTIONS {
                 let neighbor = CellPos {
                     x: cell.x + edge.offset.0,
                     z: cell.z + edge.offset.1,
@@ -1849,6 +2503,173 @@ fn emit_lattice_walls(
     }
 }
 
+/// Per wall direction: neighbor offset, the shared edge's two lattice
+/// corners as indices into the high side's corner order, and the same
+/// lattice points in the neighbor's order (the low side's plates). Shared by
+/// the cell-edge walk ([`emit_lattice_walls`]) and its subcell-stride analog
+/// ([`emit_relief_walls`]) — the corner index order is the same at both
+/// strides.
+struct WallEdge {
+    offset: (i32, i32),
+    top: [usize; 2],
+    bottom: [usize; 2],
+}
+
+const WALL_DIRECTIONS: [WallEdge; 4] = [
+    WallEdge {
+        offset: (1, 0),
+        top: [1, 3],
+        bottom: [0, 2],
+    },
+    WallEdge {
+        offset: (-1, 0),
+        top: [0, 2],
+        bottom: [1, 3],
+    },
+    WallEdge {
+        offset: (0, 1),
+        top: [2, 3],
+        bottom: [0, 1],
+    },
+    WallEdge {
+        offset: (0, -1),
+        top: [0, 1],
+        bottom: [2, 3],
+    },
+];
+
+/// Loft the same-material height-break walls of relief cells at subcell
+/// stride: for every subcell of a chunk-local cell where the point path
+/// engages (`World::cell_has_height_relief`), a vertical face on any
+/// subcell-lattice edge whose same-material neighbor point stands more than
+/// the step ceiling below — the authored break lines per-point deltas draw,
+/// including lines crossing a cell interior, where the cell-edge walk cannot
+/// stand. The subcell-stride analog of [`emit_lattice_walls`], which skips
+/// relief cells in the painted view so every same-material face is owned by
+/// exactly one walk; a material or Void boundary is skipped here the same
+/// way the cell walk skips it (the marched pass lofts those). The high
+/// subcell owns the face and cells iterate chunk-local, so a chunk-border
+/// break lofts exactly once fleet-wide; tops come from the high subcell's
+/// point plates ([`World::subcell_corner_heights`] — the same patch its cap
+/// quads drew), bottoms from the neighbor's, tucked
+/// [`WALL_TUCK_OCTIMETERS`] under the low cap, and merged plates skip.
+///
+/// Handoff to the marched pass: where a break line meets a material
+/// boundary the relief wall ends at a subcell corner and the marched wall's
+/// curtain continues along the contour. Both classes lift their tops
+/// through the same point patches, so the tops meet on the shared cap
+/// surface; the vertical planes differ (marching contour vs subcell
+/// lattice), which is the same sample-resolution quantization the break
+/// lines themselves carry.
+fn emit_relief_walls(
+    world: &World,
+    at: ChunkPos,
+    styles: &StyleTable,
+    tris: &mut Vec<DrawTriangle>,
+) {
+    let tuck = WALL_TUCK_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
+    let sub_span = 1.0 / SUB as f32;
+    for lz in 0..EDGE {
+        for lx in 0..EDGE {
+            let cell = CellPos {
+                x: at.x * EDGE + lx,
+                z: at.z * EDGE + lz,
+            };
+            if !world.cell_has_height_relief(cell) {
+                continue; // no relief nearby — the cell-edge walk owns it
+            }
+            // The wall color is per owning cell, resolved lazily on the
+            // first face the cell lofts.
+            let mut colors: Option<([f32; 3], [f32; 3])> = None;
+            for sj in 0..SUB {
+                for si in 0..SUB {
+                    let material = world.underlay_point(cell, si, sj);
+                    if material == Material::Void {
+                        continue; // a hole's rim lofts as a marched wall
+                    }
+                    let level = world.point_surface_level(cell, si, sj);
+                    let mut cached: Option<[f32; 4]> = None;
+                    for edge in &WALL_DIRECTIONS {
+                        // The neighbor subcell on the global subcell lattice —
+                        // it may sit in an adjacent cell (or chunk).
+                        let gx = cell.x * SUB + si + edge.offset.0;
+                        let gz = cell.z * SUB + sj + edge.offset.1;
+                        let neighbor = CellPos {
+                            x: gx.div_euclid(SUB),
+                            z: gz.div_euclid(SUB),
+                        };
+                        let nsx = gx.rem_euclid(SUB);
+                        let nsz = gz.rem_euclid(SUB);
+                        if world.underlay_point(neighbor, nsx, nsz) != material {
+                            continue; // material / Void boundaries loft as marched walls
+                        }
+                        // Only the high side of a genuine point cliff lofts —
+                        // a low side, an equal pair, and a legal step all fall
+                        // through, so each face is emitted exactly once.
+                        if level - world.point_surface_level(neighbor, nsx, nsz)
+                            <= STEP_MAX_OCTIMETERS
+                        {
+                            continue;
+                        }
+                        let top = *cached
+                            .get_or_insert_with(|| world.subcell_corner_heights(cell, si, sj));
+                        let bottom = world.subcell_corner_heights(neighbor, nsx, nsz);
+                        let y_top = [top[edge.top[0]], top[edge.top[1]]];
+                        let y_low = [bottom[edge.bottom[0]], bottom[edge.bottom[1]]];
+                        if (y_top[0] - y_low[0]).abs() < f32::EPSILON
+                            && (y_top[1] - y_low[1]).abs() < f32::EPSILON
+                        {
+                            continue; // the point plates merged — no gap to close
+                        }
+                        // Subcell-corner positions in meters, same index order
+                        // as the cell walk at 1/SUB scale.
+                        let base_x = cell.x as f32 + si as f32 * sub_span;
+                        let base_z = cell.z as f32 + sj as f32 * sub_span;
+                        let corner_pos = |k: usize| {
+                            (
+                                base_x + if k % 2 == 1 { sub_span } else { 0.0 },
+                                base_z + if k >= 2 { sub_span } else { 0.0 },
+                            )
+                        };
+                        let (x0, z0) = corner_pos(edge.top[0]);
+                        let (x1, z1) = corner_pos(edge.top[1]);
+                        let (top_rgb, base_rgb) = *colors.get_or_insert_with(|| {
+                            let cliff = world.cliff_material(cell);
+                            let resolved = resolve_cell(
+                                styles.get(cliff),
+                                cell.x as f32 + 0.5,
+                                cell.z as f32 + 0.5,
+                                None,
+                            );
+                            (
+                                hsl_to_linear_rgb(
+                                    resolved.hue,
+                                    resolved.sat,
+                                    (resolved.light * SKIRT_TOP_SHADE).clamp(0.0, 100.0),
+                                ),
+                                hsl_to_linear_rgb(
+                                    resolved.hue,
+                                    resolved.sat,
+                                    (resolved.light * SKIRT_BASE_SHADE).clamp(0.0, 100.0),
+                                ),
+                            )
+                        });
+                        push_wall_quad(
+                            tris,
+                            [x0, z0, y_top[0]],
+                            [x1, z1, y_top[1]],
+                            y_low[0] - tuck,
+                            y_low[1] - tuck,
+                            top_rgb,
+                            base_rgb,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Push the two triangles of one vertical wall quad: a top edge from
 /// `top_a` to `top_b` (`[wx, wz, y]` meters) dropped to `y_bottom_a` /
 /// `y_bottom_b` at the same footprint, top vertices in `top_rgb` and base
@@ -1880,6 +2701,8 @@ fn push_wall_quad(
 
 #[cfg(test)]
 mod tests {
+    use alloc::collections::BTreeMap;
+
     use super::*;
     use crate::world::{
         CELLS_PER_CHUNK_AREA, Chunk, Region, STEP_MAX_OCTIMETERS, SUBCELLS_PER_CELL,
@@ -3241,6 +4064,954 @@ mod tests {
         assert!(
             inside,
             "the walls follow the marched silhouette inside the cell",
+        );
+    }
+
+    #[test]
+    fn drawn_relief_equals_stood_on() {
+        // drawn≡stood-on over authored subcell relief: a continuous per-point
+        // hill (deltas within the step ceiling, returning to zero at the chunk
+        // edges) lofts no walls, and every cap vertex sits exactly on
+        // `World::surface_height` — the same subcell patch a mover stands on.
+        let at = ChunkPos { x: 0, z: 0 };
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        chunk.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+        world.insert_chunk(at, chunk);
+        let sub = SUB as usize;
+        // A pyramid: 12 octimeters per subcell up to the middle and back down
+        // on both axes, flat (zero) by every chunk edge so the grass never
+        // stands above the Void surround and nothing cliffs anywhere.
+        let ramp = |g: i32| (12 * (g.min(60 - g)).max(0)) as i16;
+        for lz in 0..EDGE {
+            for lx in 0..EDGE {
+                let mut deltas = [0i16; SUBCELLS_PER_CELL];
+                for sz in 0..sub {
+                    for sx in 0..sub {
+                        let dx = ramp(lx * SUB + sx as i32);
+                        let dz = ramp(lz * SUB + sz as i32);
+                        deltas[sz * sub + sx] = dx.min(dz);
+                    }
+                }
+                world.set_cell_heights(CellPos { x: lx, z: lz }, &deltas);
+            }
+        }
+        let mesh = mesh_chunk(&world, at, ViewMode::Painted, &StyleTable::default());
+        assert!(!mesh.is_empty(), "the relief cell meshes caps");
+        assert!(
+            mesh.iter().all(|t| y_span(t) < 0.5),
+            "a continuous hill lofts no walls",
+        );
+        let mut raised = false;
+        for v in mesh.iter().flat_map(|t| t.verts.iter()) {
+            let surface = world.surface_height(v.x, v.z);
+            assert!(
+                (v.y - surface).abs() < 2e-3,
+                "cap vertex ({}, {}) drawn at {} but stood on {surface}",
+                v.x,
+                v.z,
+                v.y,
+            );
+            raised |= v.y > 1.0; // the ridge peaks near 360/256 ≈ 1.4 m
+        }
+        assert!(raised, "the authored relief actually lifts the cap");
+    }
+
+    /// Author a stone diamond (rotated square) at point resolution centered on
+    /// subcell `(34, 34)` with subcell radius `r`, raised `lift` octimeters on
+    /// a Void surround; the diamond's edges cross cell interiors diagonally.
+    fn diamond_world(r: i32, lift: i16) -> World {
+        let at = ChunkPos { x: 0, z: 0 };
+        let mut world = World::new();
+        world.insert_chunk(at, Chunk::empty()); // all-Void underlay
+        let sub = SUB as usize;
+        for lz in 0..EDGE {
+            for lx in 0..EDGE {
+                let mut points = [Material::Void.to_u8(); SUBCELLS_PER_CELL];
+                let mut deltas = [0i16; SUBCELLS_PER_CELL];
+                for sz in 0..sub {
+                    for sx in 0..sub {
+                        let gx = lx * SUB + sx as i32;
+                        let gz = lz * SUB + sz as i32;
+                        if (gx - 34).abs() + (gz - 34).abs() <= r {
+                            points[sz * sub + sx] = Material::Stone.to_u8();
+                            deltas[sz * sub + sx] = lift;
+                        }
+                    }
+                }
+                let cell = CellPos { x: lx, z: lz };
+                world.set_cell_points(cell, &points);
+                world.set_cell_heights(cell, &deltas);
+            }
+        }
+        world
+    }
+
+    #[test]
+    fn an_authored_diamond_wears_walls_on_its_silhouette() {
+        // A point-authored stone diamond raised 300 octimeters wears walls on
+        // its marched silhouette (which crosses cell interiors diagonally),
+        // with no wall on an interior cell edge between two fully-raised cells.
+        let at = ChunkPos { x: 0, z: 0 };
+        let world = diamond_world(12, 300);
+        let mesh = mesh_chunk(&world, at, ViewMode::Painted, &StyleTable::default());
+        let walls: Vec<&DrawTriangle> = mesh.iter().filter(|t| y_span(t) > 0.5).collect();
+        assert!(!walls.is_empty(), "the raised diamond wears walls");
+
+        // The silhouette departs the cell grid: some wall vertex sits strictly
+        // inside a cell, off every integer lattice line.
+        let departs = walls.iter().flat_map(|t| t.verts.iter()).any(|v| {
+            let fx = v.x - v.x.floor();
+            let fz = v.z - v.z.floor();
+            (0.1..0.9).contains(&fx) && (0.1..0.9).contains(&fz)
+        });
+        assert!(
+            departs,
+            "walls follow the diagonal silhouette, not cell edges"
+        );
+
+        // No wall on the interior cell edge x = 8 between cells (7,8) and
+        // (8,8) — both fully inside the diamond (the boundary crosses x = 8
+        // only at z = 6 and z = 11), so a fused interior stands no wall.
+        let interior_edge = walls
+            .iter()
+            .flat_map(|t| t.verts.iter())
+            .any(|v| (v.x - 8.0).abs() < 1e-4 && (8.05..8.95).contains(&v.z));
+        assert!(
+            !interior_edge,
+            "no wall vertex sits on an interior cell edge inside the diamond",
+        );
+
+        // And the cap actually rides the raised plane.
+        let peak = mesh
+            .iter()
+            .filter(|t| y_span(t) < 0.5)
+            .flat_map(|t| t.verts.iter())
+            .map(|v| v.y)
+            .fold(f32::MIN, f32::max);
+        assert!(
+            (peak - 300.0 / 256.0).abs() < 1e-3,
+            "the diamond cap stands at the raised level, peak {peak}",
+        );
+    }
+
+    #[test]
+    fn fused_equal_height_points_stand_no_internal_wall() {
+        // Two stone cells raised to the same per-point level fuse: the wall
+        // pass closes their outer perimeter against the Void surround but
+        // stands no wall on their shared edge, where the heights match.
+        let at = ChunkPos { x: 0, z: 0 };
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        chunk.underlay[8 * EDGE as usize + 8] = Material::Stone; // cell (8,8)
+        chunk.underlay[8 * EDGE as usize + 9] = Material::Stone; // cell (9,8)
+        world.insert_chunk(at, chunk);
+        world.set_cell_heights(CellPos { x: 8, z: 8 }, &[300; SUBCELLS_PER_CELL]);
+        world.set_cell_heights(CellPos { x: 9, z: 8 }, &[300; SUBCELLS_PER_CELL]);
+
+        let mesh = mesh_chunk(&world, at, ViewMode::Painted, &StyleTable::default());
+        let walls: Vec<&DrawTriangle> = mesh.iter().filter(|t| y_span(t) > 0.5).collect();
+        assert!(
+            !walls.is_empty(),
+            "the fused pair wears an outer perimeter wall"
+        );
+        let shared_edge = walls
+            .iter()
+            .flat_map(|t| t.verts.iter())
+            .any(|v| (v.x - 9.0).abs() < 1e-4 && (8.05..8.95).contains(&v.z));
+        assert!(
+            !shared_edge,
+            "no wall stands on the fused pair's equal-height shared edge",
+        );
+    }
+
+    #[test]
+    fn adjacent_chunks_agree_on_an_authored_break() {
+        // A stone shelf (raised 300, rows z < 8) meets grass ground (rows
+        // z >= 8) along a break running in x across the vertical chunk seam at
+        // x = 16. The marched wall pass reads point levels — pure functions of
+        // world position — so each chunk lofts its half and the two meet on
+        // identical vertices at the shared seam column.
+        let mut world = World::new();
+        for cx in 0..2 {
+            let mut chunk = Chunk::empty();
+            for lz in 0..EDGE {
+                for lx in 0..EDGE {
+                    let i = (lz * EDGE + lx) as usize;
+                    chunk.underlay[i] = if lz < 8 {
+                        Material::Stone
+                    } else {
+                        Material::Grass
+                    };
+                }
+            }
+            world.insert_chunk(ChunkPos { x: cx, z: 0 }, chunk);
+        }
+        for cx in 0..2 {
+            for lz in 0..8 {
+                for lx in 0..EDGE {
+                    world.set_cell_heights(
+                        CellPos {
+                            x: cx * EDGE + lx,
+                            z: lz,
+                        },
+                        &[300; SUBCELLS_PER_CELL],
+                    );
+                }
+            }
+        }
+        // Marched wall vertices land on subcell sample lines, not the exact
+        // chunk edge, so agreement is that the two chunks emit an identical
+        // vertex where their seam-straddling windows share an edge — a
+        // non-empty intersection of their wall-vertex sets, near the seam.
+        // The z band pins the collection to the authored z = 8 break line
+        // (the shelf's outer Void-drop walls are a different feature).
+        let wall_verts = |at| {
+            let mesh = mesh_chunk(&world, at, ViewMode::Painted, &StyleTable::default());
+            let mut verts: Vec<(i64, i64, i64)> = mesh
+                .iter()
+                .filter(|t| y_span(t) > 0.5)
+                .flat_map(|t| t.verts.iter())
+                .filter(|v| (7.5..8.5).contains(&v.z))
+                .map(|v| {
+                    (
+                        (v.x * 256.0).round() as i64,
+                        (v.y * 256.0).round() as i64,
+                        (v.z * 256.0).round() as i64,
+                    )
+                })
+                .collect();
+            verts.sort_unstable();
+            verts.dedup();
+            verts
+        };
+        let west = wall_verts(ChunkPos { x: 0, z: 0 });
+        let east = wall_verts(ChunkPos { x: 1, z: 0 });
+        assert!(
+            !west.is_empty() && !east.is_empty(),
+            "each chunk lofts the break"
+        );
+        let shared: Vec<_> = west.iter().filter(|v| east.contains(v)).collect();
+        assert!(
+            !shared.is_empty(),
+            "the two chunks meet on identical seam vertices",
+        );
+        // The shared vertices sit at the seam column and the raised top level.
+        assert!(
+            shared
+                .iter()
+                .any(|v| (v.0 - 16 * 256).abs() <= 32 && v.1 == 300),
+            "the shared seam wall stands at the authored break level",
+        );
+    }
+
+    #[test]
+    fn a_pure_delta_plateau_stands_walls_on_its_break_lines() {
+        // The same-material height-break class: a stone field at uniform cell
+        // height wears a plateau authored purely with point deltas — no
+        // material boundary anywhere (nothing for the marched pass) and no
+        // cell-height cliff (nothing for the cell-edge walk) — so every wall
+        // must come from the subcell relief walk, standing exactly on the
+        // plateau's break lines. Those lines run through cell interiors
+        // (x and z = 7.5 / 9.5 m), where a cell-edge wall cannot stand.
+        let at = ChunkPos { x: 0, z: 0 };
+        let mut world = World::new();
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let mut c = Chunk::empty();
+                c.underlay = [Material::Stone; CELLS_PER_CHUNK_AREA];
+                world.insert_chunk(ChunkPos { x: dx, z: dz }, c);
+            }
+        }
+        // Raise global subcells [30, 38) x [30, 38) by 300 octimeters.
+        let sub = SUB as usize;
+        for lz in 6..10 {
+            for lx in 6..10 {
+                let mut deltas = [0i16; SUBCELLS_PER_CELL];
+                for sz in 0..sub {
+                    for sx in 0..sub {
+                        let gx = lx * SUB + sx as i32;
+                        let gz = lz * SUB + sz as i32;
+                        if (30..38).contains(&gx) && (30..38).contains(&gz) {
+                            deltas[sz * sub + sx] = 300;
+                        }
+                    }
+                }
+                world.set_cell_heights(CellPos { x: lx, z: lz }, &deltas);
+            }
+        }
+        let mesh = mesh_chunk(&world, at, ViewMode::Painted, &StyleTable::default());
+        let walls: Vec<&DrawTriangle> = mesh.iter().filter(|t| y_span(t) > 0.5).collect();
+        assert!(!walls.is_empty(), "the delta plateau wears walls");
+        // Every wall vertex lies on the block's perimeter lines — the
+        // authored break, nowhere else (no fused-interior or cell-edge wall).
+        let lo = 7.5f32;
+        let hi = 9.5f32;
+        for v in walls.iter().flat_map(|t| t.verts.iter()) {
+            let on_x = ((v.x - lo).abs() < 1e-4 || (v.x - hi).abs() < 1e-4)
+                && (lo - 1e-4..=hi + 1e-4).contains(&v.z);
+            let on_z = ((v.z - lo).abs() < 1e-4 || (v.z - hi).abs() < 1e-4)
+                && (lo - 1e-4..=hi + 1e-4).contains(&v.x);
+            assert!(
+                on_x || on_z,
+                "wall vertex ({}, {}) stands off the authored break lines",
+                v.x,
+                v.z,
+            );
+        }
+        // And all four perimeter sides are closed.
+        for (side, pick) in [
+            (
+                "west",
+                &(|v: &Vertex| (v.x - lo).abs() < 1e-4) as &dyn Fn(&Vertex) -> bool,
+            ),
+            ("east", &|v: &Vertex| (v.x - hi).abs() < 1e-4),
+            ("north", &|v: &Vertex| (v.z - lo).abs() < 1e-4),
+            ("south", &|v: &Vertex| (v.z - hi).abs() < 1e-4),
+        ] {
+            assert!(
+                walls.iter().flat_map(|t| t.verts.iter()).any(pick),
+                "the plateau's {side} side is open",
+            );
+        }
+    }
+
+    #[test]
+    fn a_relief_cell_on_a_cell_cliff_lofts_its_wall_exactly_once() {
+        // A relief cell standing a plain cell-height cliff above a
+        // same-material neighbor: the cell-edge walk skips relief cells and
+        // the subcell relief walk owns the face, so the shared edge must be
+        // covered exactly once — the wall segments' top edges sum to the one
+        // cell-edge meter. Double emission (both walks firing) would sum to
+        // two; a routing hole would sum to zero.
+        let at = ChunkPos { x: 0, z: 0 };
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        chunk.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+        chunk.height[(8 * EDGE + 8) as usize] = 256; // cell (8,8) one meter up
+        world.insert_chunk(at, chunk);
+        // A small legal-step delta inside the raised cell flips it (and its
+        // neighbors) onto the point path without adding any further break.
+        let mut deltas = [0i16; SUBCELLS_PER_CELL];
+        deltas[SUBCELLS_PER_CELL - 1] = 16;
+        world.set_cell_heights(CellPos { x: 8, z: 8 }, &deltas);
+
+        let mesh = mesh_chunk(&world, at, ViewMode::Painted, &StyleTable::default());
+        // Wall triangles on the west edge plane x = 8 over cell (8,8)'s span.
+        let west: Vec<&DrawTriangle> = mesh
+            .iter()
+            .filter(|t| {
+                y_span(t) > 0.5
+                    && t.verts.iter().all(|v| {
+                        (v.x - 8.0).abs() < 1e-4 && (8.0 - 1e-4..=9.0 + 1e-4).contains(&v.z)
+                    })
+            })
+            .collect();
+        assert!(!west.is_empty(), "the cliff edge carries a wall");
+        // Each wall quad's top edge appears on exactly one of its two
+        // triangles (the one holding both top vertices); summing those top
+        // spans measures the edge coverage.
+        let top_length: f32 = west
+            .iter()
+            .map(|t| {
+                let tops: Vec<&Vertex> = t.verts.iter().filter(|v| v.y > 0.5).collect();
+                if tops.len() == 2 {
+                    (tops[0].z - tops[1].z).abs()
+                } else {
+                    0.0
+                }
+            })
+            .sum();
+        assert!(
+            (top_length - 1.0).abs() < 1e-3,
+            "the shared edge is covered exactly once, got {top_length} m of top edge",
+        );
+    }
+
+    /// The authored-silhouette fixture from the causeway demo failure: a
+    /// stone square raised purely by point deltas over flat grass ground —
+    /// materials and heights break on the same subcell lines (global
+    /// subcells `[30, 38)²`, i.e. `[7.5, 9.5)` m), every cell height zero.
+    /// Smoothing is pinned off through the per-cell override plane so the
+    /// marched contour is exactly the authored break line.
+    fn delta_column_world() -> World {
+        let mut world = World::new();
+        world.insert_smoothing_profile(
+            1,
+            SmoothingProfile {
+                iterations: 0,
+                degrees: 90,
+            },
+        );
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let mut c = Chunk::empty();
+                c.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+                c.smoothing = [1; CELLS_PER_CHUNK_AREA];
+                world.insert_chunk(ChunkPos { x: dx, z: dz }, c);
+            }
+        }
+        let sub = SUB as usize;
+        for lz in 6..10 {
+            for lx in 6..10 {
+                let mut points = [UNDERLAY_POINT_INHERIT; SUBCELLS_PER_CELL];
+                let mut deltas = [0i16; SUBCELLS_PER_CELL];
+                for sz in 0..sub {
+                    for sx in 0..sub {
+                        let gx = lx * SUB + sx as i32;
+                        let gz = lz * SUB + sz as i32;
+                        if (30..38).contains(&gx) && (30..38).contains(&gz) {
+                            points[sz * sub + sx] = Material::Stone.to_u8();
+                            deltas[sz * sub + sx] = 300;
+                        }
+                    }
+                }
+                let cell = CellPos { x: lx, z: lz };
+                world.set_cell_points(cell, &points);
+                world.set_cell_heights(cell, &deltas);
+            }
+        }
+        world
+    }
+
+    /// Twice the xz-projected area of a triangle — a wall face is exactly
+    /// vertical, so it projects to a line (zero area) while every cap
+    /// triangle keeps a footprint; the split separates the two without
+    /// guessing from heights.
+    fn xz_area_doubled(t: &DrawTriangle) -> f32 {
+        let [a, b, c] = &t.verts;
+        ((b.x - a.x) * (c.z - a.z) - (c.x - a.x) * (b.z - a.z)).abs()
+    }
+
+    #[test]
+    fn a_delta_silhouette_wall_coverage_is_complete() {
+        // The picket-fence regression from the causeway demo: gating marched
+        // segments on the window center's point level skips every window
+        // whose center lands on the low-material side — along a contour the
+        // center alternates sides subcell to subcell, halving the wall into
+        // isolated wedges. The side-aware per-segment gate must close the
+        // full perimeter: the emitted wall top-edge length covers the
+        // square's 8 m perimeter — the marched chamfers trade the corner
+        // right angles for diagonals and the clip-gap walls close the
+        // chamfer slivers' lattice edges, so the total sits just above 8 —
+        // far above the alternating half.
+        let world = delta_column_world();
+        let mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
+        let total: f32 = mesh
+            .iter()
+            .filter(|t| y_span(t) > 0.5)
+            .filter_map(|t| {
+                // Each wall quad's top edge rides exactly one of its two
+                // triangles — the one holding both top vertices.
+                let tops: Vec<&Vertex> = t.verts.iter().filter(|v| v.y > 1.0).collect();
+                (tops.len() == 2).then(|| (tops[1].x - tops[0].x).hypot(tops[1].z - tops[0].z))
+            })
+            .sum();
+        assert!(
+            (7.5..8.6).contains(&total),
+            "wall top-edge coverage {total} m over an 8 m perimeter — alternating gaps halve it",
+        );
+    }
+
+    #[test]
+    fn caps_split_at_a_delta_break_without_draping() {
+        // The zigzag regression from the causeway demo: a contour vertex on
+        // the break line lifted through whichever subcell it floors into
+        // drapes the grass cap up the column flank and sags the stone cap
+        // down it with subcell parity. Split caps read their own side: every
+        // cap triangle (nonzero footprint — walls project to a line) lies
+        // wholly on its side's plate, the grass ground at zero, the stone
+        // column at its raised level, nothing in between.
+        let world = delta_column_world();
+        let mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
+        let high = 300.0 / 256.0;
+        let (mut on_ground, mut on_column) = (false, false);
+        for t in &mesh {
+            if xz_area_doubled(t) < 1e-6 {
+                continue; // vertical wall faces own the gap
+            }
+            // Every cap triangle lies wholly on one plate: a draped triangle
+            // would mix the two levels (or hit an interpolated height between
+            // them) within one footprint.
+            let ground = t.verts.iter().all(|v| v.y.abs() < 1e-3);
+            let column = t.verts.iter().all(|v| (v.y - high).abs() < 1e-3);
+            assert!(
+                ground || column,
+                "cap triangle at ({}, {}) spans heights {:?} — a drape across the break",
+                t.verts[0].x,
+                t.verts[0].z,
+                t.verts.map(|v| v.y),
+            );
+            on_ground |= ground;
+            on_column |= column;
+        }
+        assert!(
+            on_ground && on_column,
+            "both caps are present (ground {on_ground}, column {on_column})",
+        );
+    }
+
+    #[test]
+    fn delta_break_walls_seal_both_caps() {
+        // Watertightness across the delta break: every wall top vertex
+        // coincides with a high-cap vertex, and every wall bottom vertex
+        // sits exactly one tuck below a low-cap vertex at the same position
+        // — the wall spans precisely the vertical gap the split caps open,
+        // no pinholes, no overlap.
+        let world = delta_column_world();
+        let mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
+        let tuck = WALL_TUCK_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
+        let cap_verts: Vec<&Vertex> = mesh
+            .iter()
+            .filter(|t| xz_area_doubled(t) > 1e-6)
+            .flat_map(|t| t.verts.iter())
+            .collect();
+        let seals = |x: f32, z: f32, y: f32| {
+            cap_verts
+                .iter()
+                .any(|c| (c.x - x).abs() < 1e-5 && (c.z - z).abs() < 1e-5 && (c.y - y).abs() < 1e-4)
+        };
+        let walls: Vec<&DrawTriangle> = mesh.iter().filter(|t| y_span(t) > 0.5).collect();
+        assert!(!walls.is_empty(), "the break carries walls");
+        for v in walls.iter().flat_map(|t| t.verts.iter()) {
+            if v.y > 1.0 {
+                assert!(
+                    seals(v.x, v.z, v.y),
+                    "wall top ({}, {}, {}) misses the high cap",
+                    v.x,
+                    v.z,
+                    v.y,
+                );
+            } else {
+                assert!(
+                    seals(v.x, v.z, v.y + tuck),
+                    "wall base ({}, {}, {}) + tuck misses the low cap",
+                    v.x,
+                    v.z,
+                    v.y,
+                );
+            }
+        }
+    }
+
+    /// The smoothed-relief fixture from the second causeway demo failure: a
+    /// stone diamond (`|gx - 34| + |gz - 34| <= 10` on the global subcell
+    /// lattice) raised purely by 300-octimeter point deltas over flat grass
+    /// cell heights, with contour smoothing enabled at the demo's settings
+    /// (iterations 2, degrees 45) through the per-cell override plane. The
+    /// staircase silhouette plus smoothing displaces the marched crossings
+    /// off the subcell lattice — the regime where a positional side
+    /// inference collapses to the floor subcell and reads the wrong plate.
+    fn smoothed_diamond_world() -> World {
+        let mut world = World::new();
+        world.insert_smoothing_profile(
+            1,
+            SmoothingProfile {
+                iterations: 2,
+                degrees: 45,
+            },
+        );
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let mut c = Chunk::empty();
+                c.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+                c.smoothing = [1; CELLS_PER_CHUNK_AREA];
+                world.insert_chunk(ChunkPos { x: dx, z: dz }, c);
+            }
+        }
+        let sub = SUB as usize;
+        for lz in 0..EDGE {
+            for lx in 0..EDGE {
+                let mut points = [UNDERLAY_POINT_INHERIT; SUBCELLS_PER_CELL];
+                let mut deltas = [0i16; SUBCELLS_PER_CELL];
+                let mut any = false;
+                for sz in 0..sub {
+                    for sx in 0..sub {
+                        let gx = lx * SUB + sx as i32;
+                        let gz = lz * SUB + sz as i32;
+                        if (gx - 34).abs() + (gz - 34).abs() <= 10 {
+                            points[sz * sub + sx] = Material::Stone.to_u8();
+                            deltas[sz * sub + sx] = 300;
+                            any = true;
+                        }
+                    }
+                }
+                if any {
+                    let cell = CellPos { x: lx, z: lz };
+                    world.set_cell_points(cell, &points);
+                    world.set_cell_heights(cell, &deltas);
+                }
+            }
+        }
+        world
+    }
+
+    /// The cap-split locations of a mesh: quantized xz positions where cap
+    /// vertices (nonzero-footprint triangles) sit on two plates more than
+    /// half a meter apart — the places the caps genuinely split over a
+    /// break and a wall must span.
+    fn cap_splits(mesh: &[DrawTriangle]) -> Vec<(f32, f32, f32, f32)> {
+        let mut heights: BTreeMap<(i64, i64), (f32, f32)> = BTreeMap::new();
+        for v in mesh
+            .iter()
+            .filter(|t| xz_area_doubled(t) > 1e-6)
+            .flat_map(|t| t.verts.iter())
+        {
+            let key = ((v.x * 256.0).round() as i64, (v.z * 256.0).round() as i64);
+            let entry = heights.entry(key).or_insert((v.y, v.y));
+            entry.0 = entry.0.min(v.y);
+            entry.1 = entry.1.max(v.y);
+        }
+        heights
+            .into_iter()
+            .filter(|&(_, (lo, hi))| hi - lo > 0.5)
+            .map(|((qx, qz), (lo, hi))| (qx as f32 / 256.0, qz as f32 / 256.0, lo, hi))
+            .collect()
+    }
+
+    /// Shared assertion for authored-plateau fixtures — the live causeway
+    /// probe's invariant, in-repo: every cap triangle (nonzero footprint)
+    /// lies level on one plateau (a triangle bridging two plateaus is the
+    /// slanted "plane not sitting flat" the demo showed — a flap fan
+    /// chording across a break), the authored breaks genuinely split the
+    /// caps, and every split is spanned by a wall at exactly its two
+    /// plates.
+    fn assert_plateaus_flat_and_sealed(world: &World, at: ChunkPos) {
+        let mesh = mesh_chunk(world, at, ViewMode::Painted, &StyleTable::default());
+        for t in &mesh {
+            if xz_area_doubled(t) < 1e-6 {
+                continue; // vertical wall faces
+            }
+            let ys = t.verts.map(|v| v.y);
+            assert!(
+                (ys[0] - ys[1]).abs() < 1e-3 && (ys[0] - ys[2]).abs() < 1e-3,
+                "cap triangle at ({}, {}) bridges plateaus: {ys:?}",
+                t.verts[0].x,
+                t.verts[0].z,
+            );
+        }
+        let splits = cap_splits(&mesh);
+        assert!(!splits.is_empty(), "the authored breaks split the caps");
+        let tuck = WALL_TUCK_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
+        let walls: Vec<&DrawTriangle> = mesh
+            .iter()
+            .filter(|t| xz_area_doubled(t) < 1e-6 && y_span(t) > 0.25)
+            .collect();
+        // A wall covers `(x, z)` at height `y` when the point lies on some
+        // wall triangle's edge — walls span whole subcell edges and marched
+        // segments, so a split can sit mid-edge (a T-junction on the same
+        // straight line), not only on a wall vertex.
+        let covered = |x: f32, z: f32, y: f32| {
+            walls.iter().any(|t| {
+                (0..3).any(|k| {
+                    let a = &t.verts[k];
+                    let b = &t.verts[(k + 1) % 3];
+                    let (ex, ez) = (b.x - a.x, b.z - a.z);
+                    let len_sq = ex * ex + ez * ez;
+                    if len_sq < 1e-8 {
+                        return false;
+                    }
+                    let (px, pz) = (x - a.x, z - a.z);
+                    if (ex * pz - ez * px).abs() > 1e-3 {
+                        return false; // off the edge's xz line
+                    }
+                    let t_on = (px * ex + pz * ez) / len_sq;
+                    if !(-1e-4..=1.0 + 1e-4).contains(&t_on) {
+                        return false;
+                    }
+                    (a.y + (b.y - a.y) * t_on - y).abs() < 1e-3
+                })
+            })
+        };
+        for (x, z, lo, hi) in splits {
+            assert!(
+                covered(x, z, hi),
+                "split at ({x}, {z}) has no wall top at {hi}",
+            );
+            assert!(
+                covered(x, z, lo - tuck),
+                "split at ({x}, {z}) has no wall base at {}",
+                lo - tuck,
+            );
+        }
+    }
+
+    #[test]
+    fn a_three_plateau_junction_stays_flat_and_sealed() {
+        // Three same-material plateaus (deltas 0 / 128 / 256) meeting at a
+        // point inside a stone square on grass, smoothing on — the junction
+        // regime the causeway probe caught: mixed windows near the zone
+        // lines hold same-label corner samples on different plateaus, and a
+        // whole-window flap fan chords across the break (pairs like
+        // 0.5 ↔ 1.0 in one footprint triangle). The clipped flaps must keep
+        // every cap triangle on one plateau and wall every split.
+        let mut world = World::new();
+        world.insert_smoothing_profile(
+            1,
+            SmoothingProfile {
+                iterations: 2,
+                degrees: 45,
+            },
+        );
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let mut c = Chunk::empty();
+                c.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+                c.smoothing = [1; CELLS_PER_CHUNK_AREA];
+                world.insert_chunk(ChunkPos { x: dx, z: dz }, c);
+            }
+        }
+        let sub = SUB as usize;
+        for lz in 0..EDGE {
+            for lx in 0..EDGE {
+                let mut points = [UNDERLAY_POINT_INHERIT; SUBCELLS_PER_CELL];
+                let mut deltas = [0i16; SUBCELLS_PER_CELL];
+                let mut any = false;
+                for sz in 0..sub {
+                    for sx in 0..sub {
+                        let gx = lx * SUB + sx as i32;
+                        let gz = lz * SUB + sz as i32;
+                        if (28..44).contains(&gx) && (28..44).contains(&gz) {
+                            points[sz * sub + sx] = Material::Stone.to_u8();
+                            // Zone lines x = 9 m and z = 9 m meet at the
+                            // junction and run out through the perimeter.
+                            deltas[sz * sub + sx] = if gx < 36 {
+                                0
+                            } else if gz < 36 {
+                                128
+                            } else {
+                                256
+                            };
+                            any = true;
+                        }
+                    }
+                }
+                if any {
+                    let cell = CellPos { x: lx, z: lz };
+                    world.set_cell_points(cell, &points);
+                    world.set_cell_heights(cell, &deltas);
+                }
+            }
+        }
+        assert_plateaus_flat_and_sealed(&world, ChunkPos { x: 0, z: 0 });
+    }
+
+    #[test]
+    fn a_two_height_silhouette_against_grass_stays_flat_and_sealed() {
+        // An L-shaped stone region on grass whose two arms stand at
+        // different heights (deltas 128 / 256), smoothing on — the internal
+        // same-material break line runs out through the stone/grass
+        // perimeter, the second junction regime from the causeway probe.
+        // Clipped flaps keep every cap triangle level; the walls close both
+        // the perimeter and the internal break.
+        let mut world = World::new();
+        world.insert_smoothing_profile(
+            1,
+            SmoothingProfile {
+                iterations: 2,
+                degrees: 45,
+            },
+        );
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let mut c = Chunk::empty();
+                c.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+                c.smoothing = [1; CELLS_PER_CHUNK_AREA];
+                world.insert_chunk(ChunkPos { x: dx, z: dz }, c);
+            }
+        }
+        let sub = SUB as usize;
+        for lz in 0..EDGE {
+            for lx in 0..EDGE {
+                let mut points = [UNDERLAY_POINT_INHERIT; SUBCELLS_PER_CELL];
+                let mut deltas = [0i16; SUBCELLS_PER_CELL];
+                let mut any = false;
+                for sz in 0..sub {
+                    for sx in 0..sub {
+                        let gx = lx * SUB + sx as i32;
+                        let gz = lz * SUB + sz as i32;
+                        // Vertical arm at +128; the foot at +256.
+                        let arm = (30..36).contains(&gx) && (26..42).contains(&gz);
+                        let foot = (36..42).contains(&gx) && (34..42).contains(&gz);
+                        if arm || foot {
+                            points[sz * sub + sx] = Material::Stone.to_u8();
+                            deltas[sz * sub + sx] = if arm { 128 } else { 256 };
+                            any = true;
+                        }
+                    }
+                }
+                if any {
+                    let cell = CellPos { x: lx, z: lz };
+                    world.set_cell_points(cell, &points);
+                    world.set_cell_heights(cell, &deltas);
+                }
+            }
+        }
+        assert_plateaus_flat_and_sealed(&world, ChunkPos { x: 0, z: 0 });
+    }
+
+    #[test]
+    fn smoothed_break_splits_are_walled() {
+        // Regression from the live causeway scene: smoothing displaced the
+        // paint boundary off the physical break, where the retired
+        // positional side inference collapsed both flaps onto the floor
+        // subcell's plate — the caps fused (the grass drape) and the walls
+        // thinned to picket striping. The break barrier freezes the samples
+        // flanking the break, so the contour stays on the authored line;
+        // the anchor threading then splits the caps there. The caps must
+        // split at many crossings (the count floor is the anti-collapse
+        // tripwire: observed 168, the collapse drives it toward zero), no
+        // cap triangle may bridge the two plates (the drape), and every
+        // split must be spanned by a wall at exactly its two plates.
+        let world = smoothed_diamond_world();
+        let mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
+        let high = 300.0 / 256.0;
+        for t in &mesh {
+            if xz_area_doubled(t) < 1e-6 {
+                continue; // vertical wall faces own the gap
+            }
+            let ground = t.verts.iter().all(|v| v.y.abs() < 1e-3);
+            let column = t.verts.iter().all(|v| (v.y - high).abs() < 1e-3);
+            assert!(
+                ground || column,
+                "cap triangle at ({}, {}) spans heights {:?} — a drape across the break",
+                t.verts[0].x,
+                t.verts[0].z,
+                t.verts.map(|v| v.y),
+            );
+        }
+        let splits = cap_splits(&mesh);
+        assert!(
+            splits.len() >= 80,
+            "only {} cap splits — the flaps collapsed onto one plate",
+            splits.len(),
+        );
+        let tuck = WALL_TUCK_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
+        let walls: Vec<&Vertex> = mesh
+            .iter()
+            .filter(|t| xz_area_doubled(t) < 1e-6 && y_span(t) > 0.5)
+            .flat_map(|t| t.verts.iter())
+            .collect();
+        for (x, z, lo, hi) in splits {
+            let at = |y: f32| {
+                walls.iter().any(|v| {
+                    (v.x - x).abs() < 1e-4 && (v.z - z).abs() < 1e-4 && (v.y - y).abs() < 1e-3
+                })
+            };
+            assert!(
+                at(hi),
+                "split at ({x}, {z}) has no wall top at {hi} — a picket gap",
+            );
+            assert!(
+                at(lo - tuck),
+                "split at ({x}, {z}) has no wall base at {} — an unsealed foot",
+                lo - tuck,
+            );
+        }
+    }
+
+    #[test]
+    fn smoothed_break_walls_seal_both_caps() {
+        // Watertightness in the smoothing-displaced regime: every wall top
+        // vertex coincides with a cap vertex and every wall base sits
+        // exactly one tuck below one — the anchored lifts hand the wall the
+        // same values the flaps drew, for crossings anywhere off the
+        // lattice.
+        let world = smoothed_diamond_world();
+        let mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
+        let tuck = WALL_TUCK_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
+        let cap_verts: Vec<&Vertex> = mesh
+            .iter()
+            .filter(|t| xz_area_doubled(t) > 1e-6)
+            .flat_map(|t| t.verts.iter())
+            .collect();
+        let seals = |x: f32, z: f32, y: f32| {
+            cap_verts
+                .iter()
+                .any(|c| (c.x - x).abs() < 1e-5 && (c.z - z).abs() < 1e-5 && (c.y - y).abs() < 1e-4)
+        };
+        let walls: Vec<&DrawTriangle> = mesh
+            .iter()
+            .filter(|t| xz_area_doubled(t) < 1e-6 && y_span(t) > 0.5)
+            .collect();
+        assert!(!walls.is_empty(), "the smoothed break carries walls");
+        for v in walls.iter().flat_map(|t| t.verts.iter()) {
+            if v.y > 1.0 {
+                assert!(
+                    seals(v.x, v.z, v.y),
+                    "wall top ({}, {}, {}) misses the high cap",
+                    v.x,
+                    v.z,
+                    v.y,
+                );
+            } else {
+                assert!(
+                    seals(v.x, v.z, v.y + tuck),
+                    "wall base ({}, {}, {}) + tuck misses the low cap",
+                    v.x,
+                    v.z,
+                    v.y,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zeroed_deltas_mesh_identically() {
+        // Tripwire: a world whose height deltas are all zero meshes byte-for-
+        // byte as one that never carried the plane. Author then clear a cell's
+        // deltas over a varied world; the net-zero relief must collapse back
+        // to the cell-stride caps and walls, adding and moving nothing.
+        let at = ChunkPos { x: 0, z: 0 };
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        for lz in 0..EDGE {
+            for lx in 0..EDGE {
+                let i = (lz * EDGE + lx) as usize;
+                chunk.underlay[i] = if lx < 8 {
+                    Material::Grass
+                } else {
+                    Material::Sand
+                };
+                chunk.height[i] = 8 * lx; // gentle ramp, no cliffs
+            }
+        }
+        world.insert_chunk(at, chunk);
+        let baseline = mesh_chunk(&world, at, ViewMode::Painted, &StyleTable::default());
+
+        let mut authored = world.clone();
+        authored.set_cell_heights(CellPos { x: 4, z: 4 }, &[50; SUBCELLS_PER_CELL]);
+        authored.set_cell_heights(CellPos { x: 4, z: 4 }, &[]); // clears to zero
+        let after = mesh_chunk(&authored, at, ViewMode::Painted, &StyleTable::default());
+
+        assert_eq!(
+            baseline, after,
+            "a net-zero delta plane meshes identically to no plane",
         );
     }
 }

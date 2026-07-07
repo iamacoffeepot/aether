@@ -78,6 +78,23 @@
 //! rather than its own lakebed [`Chunk::height`], so the surface lies flat
 //! regardless of the ground beneath — disconnected areas sharing a plane
 //! share a level (one sea row every coastal cell references).
+//!
+//! # Height — cell stride and per-point relief
+//!
+//! Elevation lives in two layers. [`Chunk::height`] is one octimeter value
+//! per cell (the cascade carrier and semantic anchor movement, water, and the
+//! corner cascade hang off), and [`Chunk::height_points`] adds an optional
+//! `i16` delta per subcell over it: [`World::point_height`] resolves
+//! `height(cell) + delta`, so an all-zero plane resolves at cell stride and a
+//! flat or legacy world is byte-identical to the per-cell height. The height
+//! pipeline — the corner-plate walk, the cliff test, and the bilinear patches
+//! [`World::cell_corner_heights`] / [`World::surface_height_in`] — generalizes
+//! one stride down to the point lattice **only where deltas exist**
+//! (`World::cell_has_height_relief` gates it); an authored delta is real,
+//! standable relief the mesher caps and walls draw and a mover stands on
+//! (drawn≡stood-on holds at subcell scale). Water pins per cell: a water
+//! cell's surface is its plane level regardless of its points, so a delta
+//! under water is lakebed relief the flat surface ignores.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -126,6 +143,21 @@ pub const UNDERLAY_POINTS_PER_CHUNK: usize = CELLS_PER_CHUNK_AREA * SUBCELLS_PER
 /// point to a [`Material`] — including `0` = authored [`Material::Void`],
 /// which is what cuts a shape or a hole below cell scale.
 pub const UNDERLAY_POINT_INHERIT: u8 = 255;
+
+/// Points in one chunk's height-delta plane: `CELLS_PER_CHUNK_AREA * SUB²`
+/// (= 4096 at `SUB = 4`), one `i16` octimeter delta per subcell in the same
+/// row-major cell order and `z*SUB + x` within-cell order as
+/// [`UNDERLAY_POINTS_PER_CHUNK`]. Stride-agnostic by construction: raising
+/// [`SUBCELLS_PER_CELL_EDGE`] regrows the plane with no other change.
+pub const HEIGHT_POINTS_PER_CHUNK: usize = CELLS_PER_CHUNK_AREA * SUBCELLS_PER_CELL;
+
+/// The height-point default: a point holding this **inherits** its cell's
+/// [`Chunk::height`] with no relief. An untouched world stores every point
+/// as this, so its surface resolves exactly at cell stride; an explicit
+/// non-zero delta lifts (or drops) the point off the cell height by that
+/// many octimeters ([`World::point_height`]), the subcell-resolution relief
+/// the height pipeline resolves one stride down.
+pub const HEIGHT_POINT_INHERIT: i16 = 0;
 
 /// Octimeters per cell: `1 cell = 1 m = 256 octimeters`.
 const OCTIMETERS_PER_CELL: i32 = 256;
@@ -304,6 +336,15 @@ pub struct Chunk {
     /// the per-cell [`Chunk::underlay`]; an explicit point shapes the ground
     /// below cell scale ([`World::underlay_point`]).
     pub underlay_points: [u8; UNDERLAY_POINTS_PER_CHUNK],
+    /// Per-subcell height deltas in octimeters — `SUB × SUB` points per cell
+    /// (same layout as [`Chunk::underlay_points`]). Each `i16` offsets its
+    /// subcell off the cell's [`Chunk::height`] ([`World::point_height`]);
+    /// [`HEIGHT_POINT_INHERIT`] (`0`) is no relief. An all-zero plane — the
+    /// empty default — resolves exactly at cell stride, so a flat or legacy
+    /// world's surface and mesh are byte-identical to the per-cell height;
+    /// an authored delta shapes standable relief below cell scale (a fused
+    /// column, a terrace, a ledge).
+    pub height_points: [i16; HEIGHT_POINTS_PER_CHUNK],
     /// Placed surface — raw, never cascade-resolved. `Void` = none.
     pub overlay: [Material; CELLS_PER_CHUNK_AREA],
     /// Overlay subcell coverage bitmask per cell — a `SUB × SUB` bit grid
@@ -332,6 +373,7 @@ impl Chunk {
         Self {
             underlay: [Material::Void; CELLS_PER_CHUNK_AREA],
             underlay_points: [UNDERLAY_POINT_INHERIT; UNDERLAY_POINTS_PER_CHUNK],
+            height_points: [HEIGHT_POINT_INHERIT; HEIGHT_POINTS_PER_CHUNK],
             overlay: [Material::Void; CELLS_PER_CHUNK_AREA],
             overlay_mask: [0; CELLS_PER_CHUNK_AREA],
             height: [0; CELLS_PER_CHUNK_AREA],
@@ -426,6 +468,20 @@ impl World {
         }
     }
 
+    /// Write `cell`'s `SUB × SUB` height deltas (octimeters off the cell's
+    /// [`Chunk::height`]), creating the cell's chunk if absent. Mirrors
+    /// [`World::set_cell_points`]: a short slice leaves the cell's remaining
+    /// points inheriting ([`HEIGHT_POINT_INHERIT`]), so an empty slice clears
+    /// the cell back to no relief; deltas past the cell's point count are
+    /// ignored.
+    pub fn set_cell_heights(&mut self, cell: CellPos, deltas: &[i16]) {
+        let chunk = self.chunks.entry(cell.chunk()).or_insert_with(Chunk::empty);
+        let base = cell.chunk_index() * SUBCELLS_PER_CELL;
+        for i in 0..SUBCELLS_PER_CELL {
+            chunk.height_points[base + i] = deltas.get(i).copied().unwrap_or(HEIGHT_POINT_INHERIT);
+        }
+    }
+
     /// The cell's cascade default alone — its region's `default_material`
     /// (`Void` for no region, an unregistered region, or a missing chunk),
     /// ignoring any explicit underlay. The mesher's base/patch split reads
@@ -474,6 +530,79 @@ impl World {
         self.chunks
             .get(&cell.chunk())
             .map_or(0, |chunk| chunk.height[cell.chunk_index()])
+    }
+
+    /// The lakebed elevation in octimeters at subcell point `(sub_x, sub_z)`
+    /// of `cell` (each folded into `0..SUB`): the cell's [`World::height`]
+    /// plus the point's authored delta, saturating rather than wrapping at
+    /// the `i32` extremes. An inherit ([`HEIGHT_POINT_INHERIT`]) point — or a
+    /// missing chunk — reads the cell height unchanged, so an all-zero plane
+    /// resolves at cell stride. Like [`World::height`] this is the raw ground
+    /// read: under a water cell it is the lakebed beneath the surface, not the
+    /// water level (`World::point_surface_level` resolves the effective
+    /// surface).
+    #[must_use]
+    pub fn point_height(&self, cell: CellPos, sub_x: i32, sub_z: i32) -> i32 {
+        let base = self.height(cell);
+        let Some(chunk) = self.chunks.get(&cell.chunk()) else {
+            return base;
+        };
+        let sub = SUBCELLS_PER_CELL_EDGE.cast_signed();
+        let within = (sub_z.rem_euclid(sub) * sub + sub_x.rem_euclid(sub)) as usize;
+        let delta = chunk.height_points[cell.chunk_index() * SUBCELLS_PER_CELL + within];
+        base.saturating_add(i32::from(delta))
+    }
+
+    /// The effective surface level in octimeters at subcell point
+    /// `(sub_x, sub_z)` of `cell` — the point-lattice analogue of
+    /// [`World::surface_level`]. A water cell's points resolve at the flat
+    /// water level (a delta under water is lakebed relief the flat surface
+    /// ignores); a land cell's points resolve at [`World::point_height`]. The
+    /// corner-plate walk reads this so an authored break inside a cell splits
+    /// its plates just as a cell-scale cliff splits the cell lattice.
+    pub(crate) fn point_surface_level(&self, cell: CellPos, sub_x: i32, sub_z: i32) -> i32 {
+        self.water_level(cell)
+            .unwrap_or_else(|| self.point_height(cell, sub_x, sub_z))
+    }
+
+    /// The effective surface level of the subcell whose global subcell-lattice
+    /// base corner is `(sx, sz)` (`sx = cell.x * SUB + sub_x`). The point
+    /// corner plate reads its four incident subcells through this.
+    fn subcell_surface_level(&self, sx: i32, sz: i32) -> i32 {
+        let sub = SUBCELLS_PER_CELL_EDGE.cast_signed();
+        let cell = CellPos {
+            x: sx.div_euclid(sub),
+            z: sz.div_euclid(sub),
+        };
+        self.point_surface_level(cell, sx.rem_euclid(sub), sz.rem_euclid(sub))
+    }
+
+    /// Does `cell` or any of its eight neighbors carry an authored height
+    /// delta? A `false` here is the shortcut that collapses a flat or legacy
+    /// neighborhood to the cell-stride corner-plate math — the corner plate
+    /// at any of `cell`'s corners reads at most this 3×3 cell window, so with
+    /// no relief anywhere in it the point lattice would resolve identically
+    /// and the finer walk is skipped. A `true` engages the per-point patches.
+    pub(crate) fn cell_has_height_relief(&self, cell: CellPos) -> bool {
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let n = CellPos {
+                    x: cell.x + dx,
+                    z: cell.z + dz,
+                };
+                let Some(chunk) = self.chunks.get(&n.chunk()) else {
+                    continue;
+                };
+                let base = n.chunk_index() * SUBCELLS_PER_CELL;
+                if chunk.height_points[base..base + SUBCELLS_PER_CELL]
+                    .iter()
+                    .any(|&d| d != HEIGHT_POINT_INHERIT)
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// The authored water surface level in octimeters at `cell`, or `None`
@@ -555,36 +684,51 @@ impl World {
         let start = cells.iter().position(|&c| c == cell);
         debug_assert!(start.is_some(), "cell must be incident to the corner");
         let start = start.unwrap_or(2);
-        let mut member = [false; 4];
-        member[start] = true;
-        // Closure over the four cyclic edges to a fixpoint (at most three
-        // rounds absorb everything reachable).
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for k in 0..4 {
-                let a = k;
-                let b = (k + 1) % 4;
-                let connected = (levels[a] - levels[b]).abs() <= STEP_MAX_OCTIMETERS;
-                if connected && member[a] != member[b] {
-                    member[a] = true;
-                    member[b] = true;
-                    changed = true;
-                }
-            }
-        }
-        // A water member pins the plate to the water level: average only the
-        // water members when any is present, else the whole connected plate.
-        let any_water = (0..4).any(|k| member[k] && is_water[k]);
-        let mut sum = 0i32;
-        let mut count = 0i32;
-        for k in 0..4 {
-            if member[k] && (!any_water || is_water[k]) {
-                sum += levels[k];
-                count += 1;
-            }
-        }
-        sum as f32 / count as f32 / OCTIMETERS_PER_CELL as f32
+        plate_mean_octimeters(levels, is_water, start) / OCTIMETERS_PER_CELL as f32
+    }
+
+    /// The plate-resolved elevation in meters of the point-lattice corner at
+    /// global subcell-lattice coordinate `(px, pz)` (world meters
+    /// `(px / SUB, pz / SUB)`), seen from the incident subcell whose position
+    /// in the corner's cyclic incidence is `anchor`. The subcell analogue of
+    /// [`World::corner_plate`]: the four incident subcells partition into
+    /// plates by the same non-cliff walk over their [`point_surface_level`]s
+    /// (with `STEP_MAX_OCTIMETERS` tested between adjacent points), and the
+    /// plate containing `anchor` averages its members. Water members pin the
+    /// plate to the water level exactly as at cell scale.
+    fn point_corner_plate(&self, px: i32, pz: i32, anchor: usize) -> f32 {
+        // Incident subcells in the same cyclic order as `corner_plate`, so
+        // consecutive entries (mod 4) share a subcell edge.
+        let subs = [(px - 1, pz - 1), (px, pz - 1), (px, pz), (px - 1, pz)];
+        let levels = subs.map(|(sx, sz)| self.subcell_surface_level(sx, sz));
+        let is_water = subs.map(|(sx, sz)| {
+            let sub = SUBCELLS_PER_CELL_EDGE.cast_signed();
+            self.water_level(CellPos {
+                x: sx.div_euclid(sub),
+                z: sz.div_euclid(sub),
+            })
+            .is_some()
+        });
+        plate_mean_octimeters(levels, is_water, anchor) / OCTIMETERS_PER_CELL as f32
+    }
+
+    /// The four point-plate corner heights (meters) of the subcell
+    /// `(sub_x, sub_z)` of `cell`, ordered like [`World::cell_corner_heights`]
+    /// — `[(low), (x+), (z+), (x+ z+)]`. The subcell spans `1 / SUB` m; the
+    /// mesher's per-point cap patches and [`World::surface_height_in`]'s relief
+    /// branch bilerp these. Each corner's anchor index selects the plate this
+    /// subcell belongs to, so an authored break between adjacent points reads
+    /// on the higher-coordinate side exactly as a cell cliff does.
+    pub(crate) fn subcell_corner_heights(&self, cell: CellPos, sub_x: i32, sub_z: i32) -> [f32; 4] {
+        let sub = SUBCELLS_PER_CELL_EDGE.cast_signed();
+        let sx = cell.x * sub + sub_x;
+        let sz = cell.z * sub + sub_z;
+        [
+            self.point_corner_plate(sx, sz, 2),
+            self.point_corner_plate(sx + 1, sz, 3),
+            self.point_corner_plate(sx, sz + 1, 1),
+            self.point_corner_plate(sx + 1, sz + 1, 0),
+        ]
     }
 
     /// The plate-resolved elevations of `cell`'s four corners, in meters,
@@ -593,11 +737,23 @@ impl World {
     /// emits.
     #[must_use]
     pub fn cell_corner_heights(&self, cell: CellPos) -> [f32; 4] {
+        if !self.cell_has_height_relief(cell) {
+            return [
+                self.corner_plate(cell.x, cell.z, cell),
+                self.corner_plate(cell.x + 1, cell.z, cell),
+                self.corner_plate(cell.x, cell.z + 1, cell),
+                self.corner_plate(cell.x + 1, cell.z + 1, cell),
+            ];
+        }
+        // Relief nearby: the cell's four outer corners resolve through the
+        // point lattice, each anchored to the cell's own corner subcell so
+        // the corner reads this cell's plate.
+        let sub = SUBCELLS_PER_CELL_EDGE.cast_signed();
         [
-            self.corner_plate(cell.x, cell.z, cell),
-            self.corner_plate(cell.x + 1, cell.z, cell),
-            self.corner_plate(cell.x, cell.z + 1, cell),
-            self.corner_plate(cell.x + 1, cell.z + 1, cell),
+            self.subcell_corner_heights(cell, 0, 0)[0],
+            self.subcell_corner_heights(cell, sub - 1, 0)[1],
+            self.subcell_corner_heights(cell, 0, sub - 1)[2],
+            self.subcell_corner_heights(cell, sub - 1, sub - 1)[3],
         ]
     }
 
@@ -610,9 +766,28 @@ impl World {
     /// along the whole shared edge.
     #[must_use]
     pub fn surface_height_in(&self, cell: CellPos, wx: f32, wz: f32) -> f32 {
-        let corners = self.cell_corner_heights(cell);
-        let fx = (wx - cell.x as f32).clamp(0.0, 1.0);
-        let fz = (wz - cell.z as f32).clamp(0.0, 1.0);
+        if !self.cell_has_height_relief(cell) {
+            let corners = self.cell_corner_heights(cell);
+            let fx = (wx - cell.x as f32).clamp(0.0, 1.0);
+            let fz = (wz - cell.z as f32).clamp(0.0, 1.0);
+            let bottom = corners[0] + (corners[1] - corners[0]) * fx;
+            let top = corners[2] + (corners[3] - corners[2]) * fx;
+            return bottom + (top - bottom) * fz;
+        }
+        // Relief nearby: resolve through the subcell patch containing the
+        // point. The coordinates clamp into the cell, then into its subcell,
+        // so a caller off the cell span reads the nearest edge subcell.
+        let sub = SUBCELLS_PER_CELL_EDGE.cast_signed();
+        let sub_f = sub as f32;
+        let local_x = ((wx - cell.x as f32) * sub_f).clamp(0.0, sub_f);
+        let local_z = ((wz - cell.z as f32) * sub_f).clamp(0.0, sub_f);
+        let sub_x = floor_to_i32(local_x).clamp(0, sub - 1);
+        let sub_z = floor_to_i32(local_z).clamp(0, sub - 1);
+        let corners = self.subcell_corner_heights(cell, sub_x, sub_z);
+        let x0 = cell.x as f32 + sub_x as f32 / sub_f;
+        let z0 = cell.z as f32 + sub_z as f32 / sub_f;
+        let fx = ((wx - x0) * sub_f).clamp(0.0, 1.0);
+        let fz = ((wz - z0) * sub_f).clamp(0.0, 1.0);
         let bottom = corners[0] + (corners[1] - corners[0]) * fx;
         let top = corners[2] + (corners[3] - corners[2]) * fx;
         bottom + (top - bottom) * fz
@@ -753,10 +928,11 @@ impl World {
 
 /// `aether.kit.world.set_chunk` — write one chunk's planes. The ground
 /// planes ride as raw `Bytes` (256 material/shape bytes each);
-/// `underlay_points` rides as up to [`UNDERLAY_POINTS_PER_CHUNK`] bytes;
+/// `underlay_points` rides as up to [`UNDERLAY_POINTS_PER_CHUNK`] bytes and
+/// `height_points` as up to [`HEIGHT_POINTS_PER_CHUNK`] `i16` deltas;
 /// `height` / `region` / `water_plane` ride as length-256 vectors. Shorter
-/// vectors pad with `Void` / `0` (and a short `underlay_points` leaves the
-/// tail inheriting); longer ones truncate.
+/// vectors pad with `Void` / `0` (and a short `underlay_points` /
+/// `height_points` leaves the tail inheriting); longer ones truncate.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.world.set_chunk")]
 pub struct SetChunk {
@@ -771,6 +947,12 @@ pub struct SetChunk {
     /// vector leaves the remaining points inheriting, so an empty vector is
     /// the all-inherit default.
     pub underlay_points: Vec<u8>,
+    /// Height-delta plane — up to [`HEIGHT_POINTS_PER_CHUNK`] `i16` octimeter
+    /// deltas, one per subcell in the same layout as `underlay_points`. Each
+    /// offsets its subcell off the cell's `height` ([`World::point_height`]);
+    /// a short vector leaves the remaining points at [`HEIGHT_POINT_INHERIT`]
+    /// (`0`, no relief), so an empty vector is the flat default.
+    pub height_points: Vec<i16>,
     /// Overlay plane — 256 raw material bytes. `0` = no overlay.
     pub overlay: Vec<u8>,
     /// Overlay subcell-mask plane — [`OVERLAY_MASK_WIRE_BYTES`] bytes
@@ -811,6 +993,11 @@ impl SetChunk {
         // (Chunk::empty seeds every point to the inherit sentinel).
         for (dst, byte) in chunk.underlay_points.iter_mut().zip(&self.underlay_points) {
             *dst = *byte;
+        }
+        // Height-delta plane: a short vector leaves the tail at zero relief
+        // (Chunk::empty seeds every delta to the inherit sentinel).
+        for (dst, delta) in chunk.height_points.iter_mut().zip(&self.height_points) {
+            *dst = *delta;
         }
         for (dst, byte) in chunk.overlay.iter_mut().zip(&self.overlay) {
             *dst = Material::from_u8_or_void(*byte);
@@ -867,6 +1054,34 @@ impl SetCellPoints {
     }
 }
 
+/// `aether.kit.world.set_cell_heights` — stamp one cell's `SUB × SUB` height
+/// deltas, the single-cell live-paint counterpart to `set_chunk`'s
+/// whole-plane `height_points` write and the height sibling of
+/// `set_cell_points`. `deltas` carries up to [`SUBCELLS_PER_CELL`] `i16`
+/// octimeter offsets in `z*SUB + x` subcell order; a short vector leaves the
+/// cell's remaining points at [`HEIGHT_POINT_INHERIT`] (an empty vector
+/// clears the cell back to no relief). Each delta lifts (or drops) its
+/// subcell off the cell's `height` — real, standable relief the height
+/// pipeline resolves one stride down.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.world.set_cell_heights")]
+pub struct SetCellHeights {
+    pub x: i32,
+    pub z: i32,
+    pub deltas: Vec<i16>,
+}
+
+impl SetCellHeights {
+    /// The cell this stamp targets.
+    #[must_use]
+    pub fn cell(&self) -> CellPos {
+        CellPos {
+            x: self.x,
+            z: self.z,
+        }
+    }
+}
+
 /// `aether.kit.world.set_region` — register a region in the table under a
 /// 1-based `region_id`, giving the underlay cascade a default material to
 /// fall through to. `default_material` and `cliff_material` are raw
@@ -910,6 +1125,45 @@ fn floor_to_i32(v: f32) -> i32 {
     #[allow(clippy::cast_possible_truncation)] // world coordinates are far inside i32
     let t = v as i32;
     if (t as f32) > v { t - 1 } else { t }
+}
+
+/// Partition four cyclically-ordered incident members into non-cliff plates
+/// and return the mean effective level (octimeters) of the plate containing
+/// `start`. Consecutive entries (mod 4) share an edge; a pair within
+/// [`STEP_MAX_OCTIMETERS`] joins the same plate, one past it splits. A plate
+/// with any water member averages only its water members (the flat-plane
+/// pin), else the whole connected plate. Shared by the cell corner plate
+/// ([`World::corner_plate`]) and the subcell point corner plate
+/// ([`World::point_corner_plate`]) so the two lattices resolve identically.
+fn plate_mean_octimeters(levels: [i32; 4], is_water: [bool; 4], start: usize) -> f32 {
+    let mut member = [false; 4];
+    member[start] = true;
+    // Closure over the four cyclic edges to a fixpoint (at most three rounds
+    // absorb everything reachable).
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for k in 0..4 {
+            let a = k;
+            let b = (k + 1) % 4;
+            let connected = (levels[a] - levels[b]).abs() <= STEP_MAX_OCTIMETERS;
+            if connected && member[a] != member[b] {
+                member[a] = true;
+                member[b] = true;
+                changed = true;
+            }
+        }
+    }
+    let any_water = (0..4).any(|k| member[k] && is_water[k]);
+    let mut sum = 0i32;
+    let mut count = 0i32;
+    for k in 0..4 {
+        if member[k] && (!any_water || is_water[k]) {
+            sum += levels[k];
+            count += 1;
+        }
+    }
+    sum as f32 / count as f32
 }
 
 /// `aether.kit.world.set_smoothing_profile` — register a contour-smoothing
@@ -1092,19 +1346,21 @@ pub enum WorldDecodeError {
     BadName,
 }
 
-/// The current write version. Version 5 appends the per-chunk
-/// underlay-point plane ([`UNDERLAY_POINTS_PER_CHUNK`] bytes) to the end of
-/// each chunk record. Version 4 adds the water-plane table (after the
-/// smoothing-profile table) and the per-chunk water-plane plane (after the
-/// height plane); version 3 adds a cliff-material byte to each region
+/// The current write version. Version 6 appends the per-chunk height-delta
+/// plane ([`HEIGHT_POINTS_PER_CHUNK`] `i16` octimeter deltas) to the end of
+/// each chunk record, after the underlay-point plane. Version 5 appends the
+/// per-chunk underlay-point plane ([`UNDERLAY_POINTS_PER_CHUNK`] bytes) to
+/// the end of each chunk record. Version 4 adds the water-plane table (after
+/// the smoothing-profile table) and the per-chunk water-plane plane (after
+/// the height plane); version 3 adds a cliff-material byte to each region
 /// record; version 2 adds the smoothing-profile table (after the region
 /// table) and the per-chunk smoothing plane (after the region plane).
-/// Older buffers still decode: a pre-5 buffer reads an all-inherit
-/// underlay-point plane, a pre-4 buffer reads an empty water-plane table
-/// and an all-zero water plane, a pre-3 region reads Stone cliffs, a
-/// version-1 buffer reads an empty profile table and an all-zero smoothing
-/// plane.
-const WORLD_FORMAT_VERSION: u8 = 5;
+/// Older buffers still decode: a pre-6 buffer reads an all-zero height-delta
+/// plane, a pre-5 buffer reads an all-inherit underlay-point plane, a pre-4
+/// buffer reads an empty water-plane table and an all-zero water plane, a
+/// pre-3 region reads Stone cliffs, a version-1 buffer reads an empty profile
+/// table and an all-zero smoothing plane.
+const WORLD_FORMAT_VERSION: u8 = 6;
 
 /// The oldest version [`World::from_bytes`] still decodes.
 const WORLD_FORMAT_VERSION_MIN: u8 = 1;
@@ -1160,12 +1416,16 @@ impl World {
             }
             out.extend_from_slice(&chunk.smoothing);
             out.extend_from_slice(&chunk.underlay_points);
+            for delta in &chunk.height_points {
+                out.extend_from_slice(&delta.to_le_bytes());
+            }
         }
         out
     }
 
-    /// Decode the [`World::to_bytes`] format, current or older (a pre-5
-    /// buffer carries no underlay-point plane — it reads all-inherit; a
+    /// Decode the [`World::to_bytes`] format, current or older (a pre-6
+    /// buffer carries no height-delta plane — it reads all-zero relief; a
+    /// pre-5 buffer carries no underlay-point plane — it reads all-inherit; a
     /// pre-4 buffer carries no water-plane table or plane — both read empty
     /// / zero; a pre-3 region reads Stone cliffs; a version-1 buffer carries
     /// no smoothing table or plane). A truncated buffer or unknown version
@@ -1255,6 +1515,11 @@ impl World {
                     *slot = reader.u8()?;
                 }
             }
+            if version >= 6 {
+                for slot in &mut chunk.height_points {
+                    *slot = reader.i16()?;
+                }
+            }
             chunks.insert(ChunkPos { x, z }, chunk);
         }
         Ok(Self {
@@ -1294,6 +1559,11 @@ impl<'a> Reader<'a> {
     fn u16(&mut self) -> Result<u16, WorldDecodeError> {
         let b = self.take(2)?;
         Ok(u16::from_le_bytes([b[0], b[1]]))
+    }
+
+    fn i16(&mut self) -> Result<i16, WorldDecodeError> {
+        let b = self.take(2)?;
+        Ok(i16::from_le_bytes([b[0], b[1]]))
     }
 
     fn u32(&mut self) -> Result<u32, WorldDecodeError> {
@@ -1512,6 +1782,7 @@ mod tests {
             chunk_z: -1,
             underlay,
             underlay_points: Vec::new(),
+            height_points: Vec::new(),
             overlay: vec![0u8; CELLS_PER_CHUNK_AREA],
             overlay_mask: vec![0u8; OVERLAY_MASK_WIRE_BYTES],
             height: vec![0i32; CELLS_PER_CHUNK_AREA],
@@ -1541,6 +1812,7 @@ mod tests {
             chunk_z: 0,
             underlay: Vec::new(),
             underlay_points: Vec::new(),
+            height_points: Vec::new(),
             overlay: Vec::new(),
             overlay_mask,
             height: Vec::new(),
@@ -1561,6 +1833,7 @@ mod tests {
             chunk_z: 0,
             underlay: vec![Material::Grass.to_u8(); 2], // short → rest Void
             underlay_points: vec![Material::Stone.to_u8(); 2], // short → rest inherit
+            height_points: vec![10i16; 2],              // short → rest zero relief
             overlay: vec![0u8; CELLS_PER_CHUNK_AREA + 10], // long → truncated
             overlay_mask: Vec::new(),
             height: vec![5i32; 1],
@@ -1580,6 +1853,10 @@ mod tests {
         assert_eq!(chunk.underlay_points[0], Material::Stone.to_u8());
         assert_eq!(chunk.underlay_points[1], Material::Stone.to_u8());
         assert_eq!(chunk.underlay_points[2], UNDERLAY_POINT_INHERIT);
+        // The two written height deltas hold; the tail keeps zero relief.
+        assert_eq!(chunk.height_points[0], 10);
+        assert_eq!(chunk.height_points[1], 10);
+        assert_eq!(chunk.height_points[2], HEIGHT_POINT_INHERIT);
     }
 
     #[test]
@@ -2061,5 +2338,200 @@ mod tests {
             },
         );
         assert_eq!(world.water_level(cell(3, 3)), Some(240));
+    }
+
+    #[test]
+    fn point_height_inherits_applies_and_saturates() {
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        chunk.height[3 * 16 + 3] = 100; // cell (3,3)
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
+
+        // An inherit (zero) point reads the cell height unchanged.
+        assert_eq!(
+            world.point_height(cell(3, 3), 0, 0),
+            100,
+            "inherit reads cell"
+        );
+        // A stamped delta offsets the point off the cell height.
+        world.set_cell_heights(cell(3, 3), &[40, -25]);
+        assert_eq!(world.point_height(cell(3, 3), 0, 0), 140, "+delta lifts");
+        assert_eq!(world.point_height(cell(3, 3), 1, 0), 75, "-delta drops");
+        assert_eq!(
+            world.point_height(cell(3, 3), 2, 0),
+            100,
+            "the untouched tail inherits the cell height",
+        );
+        // A short stamp leaves the tail inheriting; an empty stamp clears all.
+        world.set_cell_heights(cell(3, 3), &[]);
+        assert_eq!(
+            world.point_height(cell(3, 3), 0, 0),
+            100,
+            "an empty stamp clears the cell to inherit",
+        );
+
+        // Extremes saturate rather than wrap: a max-magnitude delta on a
+        // near-i32-max cell height clamps at the bound, not overflow-wraps.
+        let mut extreme = Chunk::empty();
+        extreme.height[0] = i32::MAX - 10;
+        let mut ex_world = World::new();
+        ex_world.insert_chunk(ChunkPos { x: 0, z: 0 }, extreme);
+        ex_world.set_cell_heights(cell(0, 0), &[i16::MAX]);
+        assert_eq!(
+            ex_world.point_height(cell(0, 0), 0, 0),
+            i32::MAX,
+            "a lift past the range saturates at i32::MAX",
+        );
+    }
+
+    #[test]
+    fn a_missing_chunk_point_height_reads_zero() {
+        let world = World::new();
+        assert_eq!(world.point_height(cell(50, -20), 2, 1), 0);
+    }
+
+    #[test]
+    fn pre_v6_buffer_decodes_all_zero_height_points() {
+        // Tripwire: a version-5 buffer carries no per-chunk height-delta
+        // plane; it must read all-zero relief, so every point resolves the
+        // cell's own height exactly as a per-cell height did. Hand-built with
+        // the exact v5 chunk-record layout (underlay-point plane at the tail,
+        // no height plane after it): no tables, one chunk with a raised cell.
+        let mut buf = vec![5u8];
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no regions
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no profiles
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no water planes
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one chunk
+        buf.extend_from_slice(&0i32.to_le_bytes()); // chunk x
+        buf.extend_from_slice(&0i32.to_le_bytes()); // chunk z
+        let mut underlay = [0u8; CELLS_PER_CHUNK_AREA];
+        underlay[0] = Material::Stone.to_u8();
+        buf.extend_from_slice(&underlay);
+        buf.extend_from_slice(&[0u8; CELLS_PER_CHUNK_AREA]); // overlay
+        buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // masks
+        let mut heights = [0u8; 4 * CELLS_PER_CHUNK_AREA];
+        heights[0..4].copy_from_slice(&128i32.to_le_bytes()); // cell 0 height
+        buf.extend_from_slice(&heights);
+        buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // water planes
+        buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // regions
+        buf.extend_from_slice(&[0u8; CELLS_PER_CHUNK_AREA]); // smoothing
+        buf.extend_from_slice(&[UNDERLAY_POINT_INHERIT; UNDERLAY_POINTS_PER_CHUNK]); // points
+
+        let world = World::from_bytes(&buf).expect("a v5 buffer still decodes");
+        let chunk = world.chunk(ChunkPos { x: 0, z: 0 }).expect("chunk");
+        assert_eq!(
+            chunk.height_points, [HEIGHT_POINT_INHERIT; HEIGHT_POINTS_PER_CHUNK],
+            "a pre-6 buffer reads an all-zero height-delta plane",
+        );
+        assert_eq!(
+            world.point_height(cell(0, 0), 2, 1),
+            128,
+            "a zero-relief point resolves the cell's own height",
+        );
+    }
+
+    #[test]
+    fn world_bytes_roundtrip_preserves_height_deltas() {
+        // An authored height-delta pattern rides the v6 chunk record and must
+        // survive the trip byte-for-byte alongside the other planes.
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        chunk.height[10] = 64;
+        world.insert_chunk(ChunkPos { x: 2, z: -1 }, chunk);
+        world.set_cell_heights(
+            CellPos { x: 32, z: -16 }, // cell (0,0) of chunk (2,-1)
+            &[300, -300, 0, 127, -128],
+        );
+
+        let bytes = world.to_bytes();
+        let decoded = World::from_bytes(&bytes).expect("roundtrip decodes");
+        assert_eq!(
+            decoded.chunk(ChunkPos { x: 2, z: -1 }),
+            world.chunk(ChunkPos { x: 2, z: -1 }),
+            "the height-delta plane survives the round trip",
+        );
+    }
+
+    #[test]
+    fn zeroed_deltas_restore_the_cell_stride_surface() {
+        // Tripwire: with every height delta zero the surface resolves at cell
+        // stride, byte-identical to a world that never carried the plane — the
+        // per-cell shortcut must collapse an all-zero neighborhood to the cell
+        // math, so authoring then clearing a cell's deltas moves nothing.
+        let base = height_world(|x, z| 8 * x - 5 * z); // gentle, no cliffs
+        let mut authored = base.clone();
+        authored.set_cell_heights(cell(3, 3), &[40; SUBCELLS_PER_CELL]);
+        authored.set_cell_heights(cell(3, 3), &[]); // clears back to zero relief
+        assert!(
+            !authored.cell_has_height_relief(cell(3, 3)),
+            "a cleared cell reports no relief, so the shortcut engages",
+        );
+        for &(wx, wz) in &[(3.5, 3.5), (3.1, 3.9), (4.0, 3.0), (2.5, 4.5), (3.75, 3.25)] {
+            assert_eq!(
+                base.surface_height(wx, wz),
+                authored.surface_height(wx, wz),
+                "a net-zero delta plane must not move the surface at ({wx}, {wz})",
+            );
+        }
+    }
+
+    #[test]
+    fn a_delta_ramp_reads_continuously() {
+        // A per-point height ramp within the step ceiling stays continuous:
+        // adjacent points share their plate, so surface_height varies smoothly
+        // across subcell boundaries with no break.
+        let sub = SUBCELLS_PER_CELL_EDGE.cast_signed();
+        let mut world = height_world(|_, _| 0);
+        // Cell (5,5) ramps 16 octimeters per subcell in x (0,16,32,48 ≤ step).
+        let mut deltas = [0i16; SUBCELLS_PER_CELL];
+        for sz in 0..sub {
+            for sx in 0..sub {
+                deltas[(sz * sub + sx) as usize] = (16 * sx) as i16;
+            }
+        }
+        world.set_cell_heights(cell(5, 5), &deltas);
+        // March densely across the ramp; no successive step exceeds the
+        // per-subcell slope (a break would show a jump far past it).
+        let mut prev = world.surface_height(5.02, 5.5);
+        for i in 1..48 {
+            let wx = 5.02 + i as f32 * 0.02;
+            let h = world.surface_height(wx, 5.5);
+            assert!(
+                (h - prev).abs() < 0.05,
+                "a continuous ramp jumped {} at x {wx}",
+                (h - prev).abs(),
+            );
+            prev = h;
+        }
+    }
+
+    #[test]
+    fn a_delta_plateau_splits_plates_on_its_perimeter() {
+        // A 2×2 block of points raised past the step ceiling is a plateau: its
+        // interior points stand at the raised level, a point just outside the
+        // block stays at the base, and the surface between them breaks (the
+        // plate splits on the block's perimeter) rather than blending.
+        let sub = SUBCELLS_PER_CELL_EDGE.cast_signed();
+        let mut world = height_world(|_, _| 0);
+        let mut deltas = [0i16; SUBCELLS_PER_CELL];
+        for sz in 1..3 {
+            for sx in 1..3 {
+                deltas[(sz * sub + sx) as usize] = 200; // > STEP_MAX_OCTIMETERS
+            }
+        }
+        world.set_cell_heights(cell(5, 5), &deltas);
+        // Center of the raised block (subcell (1,1)..(2,2)) stands at 200/256.
+        let inside = world.surface_height(5.0 + 1.5 / 4.0, 5.0 + 1.5 / 4.0);
+        assert!(
+            (inside - 200.0 / 256.0).abs() < 1e-4,
+            "the plateau interior stands at the raised level, got {inside}",
+        );
+        // A flat corner subcell stays at the base — the plate did not blend
+        // the raise outward across the break.
+        let outside = world.surface_height(5.0 + 0.5 / 4.0, 5.0 + 0.5 / 4.0);
+        assert!(
+            outside.abs() < 1e-4,
+            "a flat subcell outside the plateau stays at the base, got {outside}",
+        );
     }
 }
