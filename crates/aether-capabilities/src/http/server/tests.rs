@@ -1185,6 +1185,43 @@ fn oversize_body_on_ws_upgrade_is_413() {
     );
 }
 
+/// A websocket-upgrade request that also carries the request-smuggling
+/// framing shape (both `Content-Length` and `Transfer-Encoding`) is
+/// answered `411` before any dispatch — the same framing reject the
+/// non-upgrade path applies, not skipped because `ws_key.is_some()`.
+///
+/// Tripwire: on `origin/main` this returns non-411 because the framing
+/// reject sits inside `if ws_key.is_none()` and never runs for a valid
+/// upgrade handshake.
+#[test]
+fn smuggling_on_ws_upgrade_is_411() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<EchoHttpHandler>(())
+        .with_actor::<HttpServerCapability>(config_for(
+            <EchoHttpHandler as Addressable>::NAMESPACE,
+            1024,
+        ))
+        .build_passive()
+        .expect("caps boot");
+
+    let response = round_trip(
+        port_of(&chassis),
+        b"GET /ws HTTP/1.1\r\n\
+          Host: localhost\r\n\
+          Upgrade: websocket\r\n\
+          Connection: Upgrade\r\n\
+          Sec-WebSocket-Version: 13\r\n\
+          Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+          Content-Length: 5\r\n\
+          Transfer-Encoding: chunked\r\n\r\nhello",
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 411 "),
+        "expected 411, got: {response:?}",
+    );
+}
+
 /// A non-enumerated method is answered `501` before any dispatch.
 #[test]
 fn unknown_method_is_501() {
@@ -1678,6 +1715,45 @@ fn content_length_with_transfer_encoding_is_411() {
     assert!(
         response.starts_with("HTTP/1.1 411 "),
         "smuggling shape stays 411 even for a streaming handler: {response:?}",
+    );
+}
+
+/// A websocket-upgrade request carrying a lone `Transfer-Encoding: chunked`
+/// body is answered `411`, even against a *streaming* handler that would
+/// otherwise take a lone chunked body on the non-upgrade path
+/// (`chunked_upload_streams_to_streaming_handler`) — the upgrade forces
+/// buffering (RFC 6455: a handshake carries no body), so there is nothing
+/// to buffer under, the sharpest form of the regression.
+///
+/// Tripwire: on `origin/main` this returns non-411 because the framing
+/// reject sits inside `if ws_key.is_none()` and never runs for a valid
+/// upgrade handshake.
+#[test]
+fn chunked_on_ws_upgrade_is_411() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<StreamingUploadHandler>(())
+        .with_actor::<HttpServerCapability>(request_stream_config_for(
+            <StreamingUploadHandler as Addressable>::NAMESPACE,
+            4,
+        ))
+        .build_passive()
+        .expect("caps boot");
+    let port = port_of(&chassis);
+
+    let response = round_trip(
+        port,
+        b"GET /ws HTTP/1.1\r\n\
+          Host: localhost\r\n\
+          Upgrade: websocket\r\n\
+          Connection: Upgrade\r\n\
+          Sec-WebSocket-Version: 13\r\n\
+          Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+          Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 411 "),
+        "expected 411, got: {response:?}",
     );
 }
 
