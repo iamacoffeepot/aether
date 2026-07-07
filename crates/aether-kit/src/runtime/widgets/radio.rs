@@ -17,7 +17,7 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton};
 
-use crate::runtime::widgets::{push_border, quad};
+use crate::runtime::widgets::{push_border, quad, text_origin_y};
 use crate::theme::{SetTheme, Theme, WidgetState};
 use crate::widgets::{
     Collect, FocusGained, FocusLost, RadioConfig, RadioSelected, WidgetDrawItem, WidgetDrawList,
@@ -178,7 +178,7 @@ impl WasmActor for RadioGroupWidget {
             ));
             items.push(WidgetDrawItem::Text {
                 x: pad.mul_add(2.0, marker),
-                y: size.mul_add(0.35, row_height.mul_add(0.5, row_y)),
+                y: text_origin_y(row_y, row_height, size),
                 font_id: self.theme.font_id,
                 text: option.clone(),
                 size_pixels: size,

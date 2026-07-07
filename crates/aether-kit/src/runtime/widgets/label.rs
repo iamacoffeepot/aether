@@ -13,6 +13,7 @@ use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 
+use crate::runtime::widgets::text_origin_y;
 use crate::theme::{SetTheme, Theme};
 use crate::widgets::{Collect, LabelConfig, WidgetDrawItem, WidgetDrawList, WidgetFrame};
 
@@ -77,7 +78,7 @@ impl WasmActor for LabelWidget {
         if !self.text.is_empty() {
             items.push(WidgetDrawItem::Text {
                 x: 0.0,
-                y: size.mul_add(0.35, self.frame.height * 0.5),
+                y: text_origin_y(0.0, self.frame.height, size),
                 font_id: self.theme.font_id,
                 text: self.text.clone(),
                 size_pixels: size,
