@@ -58,6 +58,22 @@
 //!
 //! Consumers load this actor from the `inline_child` bundle with
 //! `export: Some("test.inline.configured_parent")`.
+//!
+//! # `InlineTagParent`
+//!
+//! Issue 2692 by-tag inline-spawn fixture. The entry `InlineTagParent`
+//! spawns the (already-exported) `InlineStatefulChild` in `wire` by
+//! *runtime tag* — `ctx.spawn_inline_child_by_tag(ActorTypeTag::of::<
+//! InlineStatefulChild>(), …)` — rather than the compile-time-typed verb,
+//! exercising the real `export!`-generated resolver. It also attempts a
+//! deliberately-unknown-tag spawn and records whether the resolver returned
+//! `UnknownActorTag`, surfaced on a `TagSpawnQuery`. Because the tagged
+//! child is `InlineStatefulChild`, its state reconstructs across a
+//! `replace_component` swap through the same reconstruct arm the tag came
+//! from.
+//!
+//! Consumers load this actor from the `inline_child` bundle with
+//! `export: Some("test.inline.tag_parent")`.
 
 // `#[handler::manual]` methods take `&mut self` to match the dispatch ABI
 // even though stateless replies never read it. `rehydrate` takes its
@@ -66,12 +82,14 @@
 #![allow(clippy::unused_self, clippy::needless_pass_by_value)]
 
 use aether_actor::{
-    ActorInitError, Mail, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, ActorTypeTag, Mail, Manual, OutboundReply, SpawnError, Subname, WasmActor,
+    WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::MailboxId;
 use aether_test_fixtures_kinds::{
     Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD,
-    INLINE_WHO_PARENT, InlineConfiguredChildConfig, InlineEcho, InlineProbe,
+    INLINE_WHO_PARENT, InlineConfiguredChildConfig, InlineEcho, InlineProbe, TagSpawnQuery,
+    TagSpawnReport,
 };
 
 /// Durable state the `InlineStatefulChild` carries across `replace_component`.
@@ -388,4 +406,69 @@ impl WasmActor for InlineConfiguredChild {
             ctx.reply(&CountReport { count: self.count });
         }
     }
+}
+
+/// Entry export for the issue 2692 by-tag inline-spawn fixture. Spawns the
+/// exported `InlineStatefulChild` by runtime [`ActorTypeTag`] (not the typed
+/// verb) in `wire`, storing the alias, and records whether a bogus tag was
+/// correctly rejected.
+///
+/// Load from the `inline_child` bundle with
+/// `export: Some("test.inline.tag_parent")`.
+pub struct InlineTagParent {
+    /// The by-tag-spawned child's alias `MailboxId` (set in `wire`).
+    child: Option<MailboxId>,
+    /// Whether the deliberately-unknown-tag spawn attempted in `wire`
+    /// returned [`SpawnError::UnknownActorTag`] — the only correct outcome.
+    unknown_tag_rejected: bool,
+}
+
+#[actor]
+impl WasmActor for InlineTagParent {
+    const NAMESPACE: &'static str = "test.inline.tag_parent";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(InlineTagParent {
+            child: None,
+            unknown_tag_rejected: false,
+        })
+    }
+
+    /// Issue 2692: spawn `InlineStatefulChild` **by tag** — the tag resolves
+    /// against the module's `export!` set (which includes that child), so no
+    /// generic parameter names the child type here. Then attempt a
+    /// deliberately-bogus tag and record that the generated resolver rejects
+    /// it with `UnknownActorTag` rather than spawning or panicking.
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+        if let Ok(alias) = ctx.spawn_inline_child_by_tag(
+            ActorTypeTag::of::<InlineStatefulChild>(),
+            Subname::Named("tagged"),
+            &[],
+        ) {
+            self.child = Some(alias);
+        }
+        let bogus = ActorTypeTag(0xFFFF_FFFF_FFFF_FFFF);
+        self.unknown_tag_rejected = matches!(
+            ctx.spawn_inline_child_by_tag(bogus, Subname::Named("nope"), &[]),
+            Err(SpawnError::UnknownActorTag(_)),
+        );
+    }
+
+    /// Report whether the bogus-tag spawn was correctly rejected — the
+    /// over-the-wire observable for the generated resolver's `UnknownActorTag`
+    /// fall-through.
+    #[handler::manual]
+    fn on_tag_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: TagSpawnQuery) {
+        if ctx.reply_target().is_some() {
+            ctx.reply(&TagSpawnReport {
+                unknown_tag_rejected: self.unknown_tag_rejected,
+            });
+        }
+    }
+
+    /// A `#[fallback]` keeps the parent a valid receiver — mail addressed to
+    /// its own id that it doesn't handle (the tagged child answers on its own
+    /// alias) is absorbed.
+    #[fallback]
+    fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
 }

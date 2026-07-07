@@ -56,7 +56,9 @@ pub mod raw;
 // Re-exports of `Wasm*` types — the `Wasm` prefix is deliberate (native/wasm split);
 // allows mirror the def-site allows on each type.
 #[allow(clippy::module_name_repetitions)]
-pub use ctx::{NO_INBOUND_SOURCE, RelativeMailbox, SpawnError, WasmCtx, WasmDropCtx, WasmInitCtx};
+pub use ctx::{
+    ActorTypeTag, NO_INBOUND_SOURCE, RelativeMailbox, SpawnError, WasmCtx, WasmDropCtx, WasmInitCtx,
+};
 #[allow(clippy::module_name_repetitions)]
 pub use mailbox::WasmActorMailbox;
 
@@ -307,6 +309,22 @@ pub fn install_guest_logging() {
     crate::log::install_forwarding_subscriber();
 }
 
+/// Allocate an inline child's first-class alias via the substrate's
+/// `spawn_inline_child` host fn (issue 2692). The `export!`-generated
+/// by-tag resolver calls this from its matched branch — before the shared
+/// [`inline::compose::spawn_one_child`] decode + init core — so a
+/// tag-selected child's alias is minted exactly as the typed
+/// [`WasmCtx::spawn_inline_child`] verb mints it, and an unmatched tag
+/// (which never reaches this call) orphans no alias. wasm32-only: the host
+/// build carries no FFI surface, and the resolver that calls this is itself
+/// emitted only in the wasm-cfg init shims.
+#[cfg(target_family = "wasm")]
+#[doc(hidden)]
+#[must_use]
+pub fn __alloc_inline_child_alias(is_counter: bool, subname: &str) -> aether_data::MailboxId {
+    aether_data::MailboxId(bridge::mail::spawn_inline_child(is_counter, subname))
+}
+
 pub mod guest_alloc;
 
 /// Bind a `WasmActor` implementor to the guest's `#[no_mangle]`
@@ -468,6 +486,13 @@ macro_rules! __export_internal {
             // and `WasmCtx` self read this rather than recomputing
             // `hash(NAMESPACE)`, the ADR-0099 depth-1 fixed point.
             __AETHER_INLINE.set_self_id(mailbox_id);
+            // Issue 2692: install this module's by-tag inline-spawn resolver
+            // (the tag-match over its exported set) so guest handler / `wire`
+            // code can `ctx.spawn_inline_child_by_tag(...)`. Set once here at
+            // init, before any `wire` or `receive` runs.
+            __AETHER_INLINE.set_spawn_resolver(
+                $crate::__export_internal!(@spawn_inline_child_by_tag $component),
+            );
             let mut ctx: $crate::WasmInitCtx<'_> = $crate::WasmInitCtx::__new(mailbox_id);
             match <$component as $crate::Lifecycle<$component>>::init(config, &mut ctx) {
                 Ok(instance) => {
@@ -786,6 +811,44 @@ macro_rules! __export_internal {
         )+
         __aether_reconstructed
     }};
+
+    // Resolve one inline child to *spawn* by matching a runtime actor-type
+    // tag against the module's exported type set (issue 2692) — the spawn
+    // sibling of `@reconstruct_child`, a second consumer of the same
+    // `$($candidate)` list, not a second copy of the table. Emits a
+    // non-capturing closure that coerces to `wasm::inline::SpawnByTagFn`; the
+    // module's init shims install it on `__AETHER_INLINE`. The matched branch
+    // allocates the child's alias via the host `spawn_inline_child` host fn
+    // THEN runs the shared decode + init core; an unmatched tag returns
+    // `UnknownActorTag` *before* any allocation, so no host alias is orphaned.
+    (@spawn_inline_child_by_tag $($candidate:ty),+) => {
+        |__aether_registry: &$crate::wasm::inline::Registry,
+         __aether_tag: $crate::ActorTypeTag,
+         __aether_is_counter: bool,
+         __aether_subname: &str,
+         __aether_config: &[u8]|
+         -> ::core::result::Result<$crate::MailboxId, $crate::SpawnError> {
+            $(
+                if __aether_tag == $crate::ActorTypeTag::of::<$candidate>() {
+                    let __aether_alias = $crate::wasm::__alloc_inline_child_alias(
+                        __aether_is_counter,
+                        __aether_subname,
+                    );
+                    return $crate::wasm::inline::compose::spawn_one_child::<$candidate>(
+                        __aether_registry,
+                        __aether_alias,
+                        __aether_tag.0,
+                        $crate::__macro_internals::String::from(__aether_subname),
+                        __aether_is_counter,
+                        __aether_config,
+                    );
+                }
+            )+
+            ::core::result::Result::Err(
+                $crate::SpawnError::UnknownActorTag(__aether_tag),
+            )
+        }
+    };
 }
 
 /// ADR-0096: FFI shims for a multi-actor module — `export!(A, B, …)`.
@@ -925,6 +988,12 @@ macro_rules! __export_multi_internal {
             // ADR-0114 addressing amendment: capture the real folded id as the
             // cluster self-identity (correct at any lineage depth).
             __AETHER_INLINE.set_self_id(mailbox_id);
+            // Issue 2692: install the by-tag inline-spawn resolver over the
+            // module's full exported set (entry + rest), so any exported actor
+            // can `ctx.spawn_inline_child_by_tag(...)`.
+            __AETHER_INLINE.set_spawn_resolver(
+                $crate::__export_internal!(@spawn_inline_child_by_tag $($component),+),
+            );
             $crate::__export_multi_internal!(@construct $entry, mailbox_id, config_bytes)
         }
 
@@ -959,6 +1028,13 @@ macro_rules! __export_multi_internal {
             // ADR-0114 addressing amendment: capture the real folded id as the
             // cluster self-identity (correct at any lineage depth).
             __AETHER_INLINE.set_self_id(mailbox_id);
+            // Issue 2692: install the by-tag inline-spawn resolver over the
+            // module's full exported set — the same set this shim selects the
+            // constructed type from — so the constructed actor can
+            // `ctx.spawn_inline_child_by_tag(...)`.
+            __AETHER_INLINE.set_spawn_resolver(
+                $crate::__export_internal!(@spawn_inline_child_by_tag $($component),+),
+            );
             $(
                 if type_tag
                     == $crate::__macro_internals::mailbox_id_from_name(

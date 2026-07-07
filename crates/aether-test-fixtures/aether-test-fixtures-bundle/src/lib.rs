@@ -31,7 +31,7 @@ pub use http_handler::{
 };
 pub use inline_child::{
     InlineConfiguredChild, InlineConfiguredParent, InlineDespawnParent, InlineParent,
-    InlineStatefulChild, InlineStatefulParent,
+    InlineStatefulChild, InlineStatefulParent, InlineTagParent,
 };
 pub use mat4_source::MatSource;
 pub use matrix_sweep::{MatrixChild, MatrixParent};
@@ -67,6 +67,7 @@ aether_actor::export!(
     InlineDespawnParent,
     InlineConfiguredParent,
     InlineConfiguredChild,
+    InlineTagParent,
     Counter,
     Sidecar,
 );

@@ -152,6 +152,37 @@ impl RelativeMailbox<'_> {
     }
 }
 
+/// A runtime selector for one of a module's `export!`ed actor types — the
+/// `hash(NAMESPACE)` folded id [`WasmCtx::spawn_inline_child_by_tag`]
+/// resolves against the module's exported set (issue 2692), and the same
+/// tag the ADR-0114 §5 reconstruct arm matches a persisted inline child on.
+///
+/// A newtype rather than a bare `u64` on purpose: it centralizes the single
+/// allowed [`mailbox_id_from_name`] call (every other call site is
+/// clippy-disallowed) in [`Self::of`], so a consumer selects a type with
+/// `ActorTypeTag::of::<SomeActor>()` and never hand-hashes a namespace. It
+/// also reads as an actor-type selector, distinct from a [`MailboxId`] even
+/// though the underlying hash coincides with the type's depth-1 folded id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ActorTypeTag(pub u64);
+
+impl ActorTypeTag {
+    /// The actor-type tag for `A` — `hash(A::NAMESPACE)`, folded at compile
+    /// time (`Addressable::NAMESPACE` is a `const`). The one sanctioned
+    /// [`mailbox_id_from_name`] call outside the id/routing core: it is the
+    /// id definition for an actor *type*, so the disallowed-method allow
+    /// mirrors [`WasmCtx::spawn_child`] / [`WasmCtx::spawn_inline_child`].
+    #[must_use]
+    // This is the id definition for an actor type — the single centralized
+    // `mailbox_id_from_name` call the by-tag spawn API is built to funnel, so
+    // consumers never hand-hash a namespace (all other call sites are
+    // clippy-disallowed).
+    #[allow(clippy::disallowed_methods)]
+    pub const fn of<A: Addressable>() -> Self {
+        Self(mailbox_id_from_name(A::NAMESPACE).0)
+    }
+}
+
 /// Why a synchronous spawn verb failed.
 ///
 /// For the detached [`WasmCtx::spawn_child`] (ADR-0097), only subname
@@ -173,6 +204,14 @@ pub enum SpawnError {
     /// in-guest during [`WasmCtx::spawn_inline_child`], so the boot failure
     /// comes back through this `Result`.
     InitFailed(ActorInitError),
+    /// Issue 2692: [`WasmCtx::spawn_inline_child_by_tag`] was handed an
+    /// [`ActorTypeTag`] that matched none of the module's `export!`ed actor
+    /// types (a stale spec, a script, a tag for a type dropped from the
+    /// module). The tag is runtime data, so an unresolvable one is a runtime
+    /// error the spawner recovers from rather than a panic — and no host
+    /// alias is allocated for it (the export-set fall-through precedes
+    /// allocation).
+    UnknownActorTag(ActorTypeTag),
 }
 
 /// Per-receive (and post-init `wire` / pre-shutdown `unwire`)
@@ -454,6 +493,50 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         )
     }
 
+    /// ADR-0114 / issue 2692: spawn an **inline child** whose type is
+    /// selected at runtime by an [`ActorTypeTag`] resolved against the
+    /// module's `export!`ed actor set, rather than named at compile time
+    /// like [`Self::spawn_inline_child`]. The tag-dispatched sibling of the
+    /// typed verb: same subname resolution, same first-class alias, same
+    /// in-guest `init` and registry insert — the one difference is that the
+    /// type is looked up by tag (through the same export-set table the
+    /// reconstruct arm walks, ADR-0114 §5) instead of monomorphized. So a
+    /// spawner can hold specs carrying tags and stay non-generic over its
+    /// children, which is what lets the behavior host and the panel drop
+    /// their per-child-type generic / hand-written dispatch.
+    ///
+    /// `config_bytes` are the selected type's `Config` encoded to its wire
+    /// shape (empty for a `Config = ()` type); the resolver decodes them for
+    /// the child's `init`, the runtime-data mirror of the typed verb's
+    /// in-guest `encode` / `decode` round-trip.
+    ///
+    /// A [`Subname::Named`] that fails validation returns
+    /// [`SpawnError::SubnameInvalid`] before any type lookup; a tag matching
+    /// no exported type returns [`SpawnError::UnknownActorTag`] with **no**
+    /// host alias allocated (the export-set fall-through precedes
+    /// allocation); a synchronous `init` `Err` or a `Config` decode miss
+    /// returns [`SpawnError::InitFailed`].
+    pub fn spawn_inline_child_by_tag(
+        &self,
+        tag: ActorTypeTag,
+        subname: Subname<'_>,
+        config_bytes: &[u8],
+    ) -> Result<MailboxId, SpawnError> {
+        let (is_counter, full_subname) = resolve_subname(subname)?;
+        // The resolver is installed on the module's registry by every
+        // `export!` init shim — it enumerates the exported type set the
+        // lookup needs, which is knowable only inside the macro expansion,
+        // so it cannot be a stored SDK-side generic. A registry with no
+        // resolver is a raw host-unit registry never wired by `export!`
+        // (the seam the host unit tests drive with a synthetic resolver); a
+        // real module always installs one at init, before any handler or
+        // `wire` runs.
+        let Some(resolver) = self.inline.spawn_resolver() else {
+            return Err(SpawnError::UnknownActorTag(tag));
+        };
+        resolver(self.inline, tag, is_counter, &full_subname, config_bytes)
+    }
+
     /// ADR-0114: tear down an **inline child** spawned by
     /// [`Self::spawn_inline_child`]. Drops the child from this ctx's
     /// per-component [`Registry`] (running the child's `Drop`), so it
@@ -608,11 +691,16 @@ fn resolve_subname(subname: Subname<'_>) -> Result<(bool, String), SpawnError> {
 /// child's encoded `Config` — the same bytes `config` was decoded from —
 /// retained in the slot so a subsequent dehydrate/reconstruct cycle can
 /// re-init the child from its real config instead of empty bytes.
+///
+/// `pub(crate)` so the by-tag spawn core
+/// ([`crate::wasm::inline::compose::spawn_one_child`], issue 2692) shares
+/// this exact `init` + insert step with the typed verb rather than
+/// copying it.
 // The parameters are the slot's reconstruct record (ADR-0114 §5) plus the
 // decoded config — a fixed set with no meaningful grouping short of a
 // one-use struct.
 #[allow(clippy::too_many_arguments)]
-fn install_inline_child<A>(
+pub(crate) fn install_inline_child<A>(
     registry: &Registry,
     alias: MailboxId,
     type_tag: u64,
@@ -1014,18 +1102,20 @@ impl Persistence for WasmDropCtx<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Emit, Manual, Multi, NO_INBOUND_SOURCE, Registry, Single, SpawnError, WasmCtx,
-        install_inline_child,
+        ActorTypeTag, Emit, Manual, Multi, NO_INBOUND_SOURCE, Registry, Single, SpawnError,
+        WasmCtx, install_inline_child,
     };
     use crate::Addressable;
     use crate::mail::{Mail, PriorState};
     use crate::model::Subname;
     use crate::model::ctx::OutboundReply;
     use crate::wasm::inline::RouteDecision;
+    use crate::wasm::inline::compose::spawn_one_child;
     use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmDropCtx, WasmInitCtx};
-    use aether_data::MailboxId;
+    use aether_data::{Kind, MailboxId};
     use alloc::string::String;
     use alloc::vec::Vec;
+    use core::cell::Cell;
     use core::mem::{align_of, size_of};
 
     /// Test inline child whose `init` always fails — drives the
@@ -1314,6 +1404,190 @@ mod tests {
             registry.queued_len(),
             1,
             "a send to a resolved relative enqueues locally — no scheduler hop",
+        );
+    }
+
+    // Issue 2692: the by-tag spawn host-unit fixtures. `thread_local` (not
+    // a `static`) keeps parallel-threaded test runs from racing on the
+    // observed-config cell.
+    extern crate std;
+
+    std::thread_local! {
+        /// The `value` field [`StubChild::init`] last decoded from its
+        /// config bytes, so the by-tag spawn test can assert the passed
+        /// bytes were threaded through decode → init.
+        static STUB_INIT_CONFIG: Cell<Option<u32>> = const { Cell::new(None) };
+    }
+
+    /// Config for [`StubChild`] carrying an observable `value`, so a by-tag
+    /// spawn test proves `config_bytes` were decoded and handed to `init`
+    /// (rather than dropped or replaced with an empty default).
+    #[derive(
+        ::aether_data::Kind, ::aether_data::Schema, serde::Serialize, serde::Deserialize, Debug,
+    )]
+    #[kind(name = "test.inline.stub_config")]
+    struct StubConfig {
+        value: u32,
+    }
+
+    /// Inline child whose `init` records its decoded config `value` into the
+    /// thread-local, so the by-tag host-unit test reads back what was
+    /// threaded. Its dispatch / lifecycle hooks are unreachable — the tests
+    /// only spawn it, never mail it.
+    struct StubChild;
+
+    impl Addressable for StubChild {
+        const NAMESPACE: &'static str = "test.inline.stub_child";
+        type Resolver = crate::Many;
+    }
+
+    impl crate::Lifecycle<Self> for StubChild {
+        type Config = StubConfig;
+        type InitError = ActorInitError;
+        type InitCtx<'a> = WasmInitCtx<'a>;
+        type Ctx<'a> = WasmCtx<'a>;
+
+        fn init(config: StubConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+            STUB_INIT_CONFIG.with(|c| c.set(Some(config.value)));
+            Ok(Self)
+        }
+    }
+
+    impl WasmActor for StubChild {
+        type State = Self;
+        type Persist = ();
+    }
+
+    impl crate::WasmDispatch<Self> for StubChild {
+        fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+            unreachable!("the by-tag spawn tests never dispatch the stub child")
+        }
+    }
+
+    impl ErasedWasmActor for StubChild {
+        fn erased_namespace(&self) -> &'static str {
+            Self::NAMESPACE
+        }
+        fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+            unreachable!("the by-tag spawn tests never dispatch the stub child")
+        }
+        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+        fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
+        fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
+    }
+
+    /// Synthetic stand-in for the `export!`-generated resolver: matches the
+    /// [`StubChild`] tag against the (one-type) exported set and, on a
+    /// match, fabricates the alias the real macro resolver would have
+    /// allocated via the host `spawn_inline_child` host fn (which panics on
+    /// the host build) before running the shared `spawn_one_child` core. Any
+    /// other tag falls through to [`SpawnError::UnknownActorTag`], exactly
+    /// as the generated resolver's tag-match fall-through does.
+    fn stub_resolver(
+        registry: &Registry,
+        tag: ActorTypeTag,
+        is_counter: bool,
+        full_subname: &str,
+        config_bytes: &[u8],
+    ) -> Result<MailboxId, SpawnError> {
+        if tag == ActorTypeTag::of::<StubChild>() {
+            let alias = MailboxId(0xABCD_0001);
+            spawn_one_child::<StubChild>(
+                registry,
+                alias,
+                tag.0,
+                String::from(full_subname),
+                is_counter,
+                config_bytes,
+            )
+        } else {
+            Err(SpawnError::UnknownActorTag(tag))
+        }
+    }
+
+    /// A resolver that panics if reached — the subname-validation-first
+    /// tests install it to prove the guard runs before any resolver call.
+    fn panicking_resolver(
+        _registry: &Registry,
+        _tag: ActorTypeTag,
+        _is_counter: bool,
+        _full_subname: &str,
+        _config_bytes: &[u8],
+    ) -> Result<MailboxId, SpawnError> {
+        panic!("the resolver must not run when subname validation fails")
+    }
+
+    /// Step 5(a): a known tag resolves to its exported type, and the passed
+    /// `config_bytes` are decoded and threaded into that type's `init`. Owned
+    /// logic: the tag → type selection and the config-decode-into-init path,
+    /// neither a derive nor another crate's machinery.
+    #[test]
+    fn spawn_inline_child_by_tag_spawns_matched_type_and_threads_config() {
+        let registry = Registry::new();
+        registry.set_spawn_resolver(stub_resolver);
+        STUB_INIT_CONFIG.with(|c| c.set(None));
+
+        let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+        let config_bytes = StubConfig { value: 0x1234_5678 }.encode_into_bytes();
+        let alias = ctx
+            .spawn_inline_child_by_tag(
+                ActorTypeTag::of::<StubChild>(),
+                Subname::Named("tagged"),
+                &config_bytes,
+            )
+            .expect("a known tag spawns its exported type");
+
+        assert!(
+            registry.take(alias).is_some(),
+            "the tagged child is resident under the resolver's alias",
+        );
+        assert_eq!(
+            STUB_INIT_CONFIG.with(Cell::get),
+            Some(0x1234_5678),
+            "the config bytes were decoded and threaded into the child's init",
+        );
+    }
+
+    /// Step 5(b): a tag matching no exported type returns
+    /// [`SpawnError::UnknownActorTag`] and inserts no child — the untrusted
+    /// runtime-tag path the spawner recovers from.
+    #[test]
+    fn spawn_inline_child_by_tag_unknown_tag_errors_and_inserts_nothing() {
+        let registry = Registry::new();
+        registry.set_spawn_resolver(stub_resolver);
+
+        let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+        let unknown = ActorTypeTag(0xFFFF_FFFF_FFFF_FFFF);
+        let result = ctx.spawn_inline_child_by_tag(unknown, Subname::Named("tagged"), &[]);
+        assert!(
+            matches!(result, Err(SpawnError::UnknownActorTag(t)) if t == unknown),
+            "an unresolvable tag returns UnknownActorTag(tag), got {result:?}",
+        );
+        assert!(
+            registry.child_metas().is_empty(),
+            "an unknown tag inserts no child",
+        );
+    }
+
+    /// Step 5(c): subname validation runs before the resolver — a
+    /// separator-bearing `Named` is rejected with
+    /// [`SpawnError::SubnameInvalid`] and the (panicking) resolver never
+    /// runs.
+    #[test]
+    fn spawn_inline_child_by_tag_rejects_bad_subname_before_resolver() {
+        let registry = Registry::new();
+        registry.set_spawn_resolver(panicking_resolver);
+
+        let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+        let result = ctx.spawn_inline_child_by_tag(
+            ActorTypeTag::of::<StubChild>(),
+            Subname::Named("bad:name"),
+            &[],
+        );
+        assert!(
+            matches!(result, Err(SpawnError::SubnameInvalid(_))),
+            "a separator-bearing subname is rejected before the resolver runs, got {result:?}",
         );
     }
 }
