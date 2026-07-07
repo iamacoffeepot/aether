@@ -199,6 +199,35 @@ pub enum WidgetKind {
     BehaviorHost,
 }
 
+impl WidgetKind {
+    /// This stock widget's actor type tag — `hash(NAMESPACE)` of the widget
+    /// actor `self` spawns, the same value `ActorTypeTag::of::<W>().0` would
+    /// produce for the concrete actor type. `None` for the two unwrappable
+    /// variants (`Composite`, `BehaviorHost`), which have no single wrapped
+    /// actor. The trunk-reachable producer for
+    /// `aether_behavior::host::ChildSpec::type_tag` when composing a
+    /// `HostConfig` directly, outside the kit's `WidgetKind::BehaviorHost`
+    /// spawn arm — the concrete widget actor types are `runtime`-gated and
+    /// not re-exported, so this hashes the actor namespace literals
+    /// directly rather than naming the types.
+    #[must_use]
+    // Id-constant definition for stock widget types whose actors are
+    // `runtime`-gated; the runtime tripwire binds it to
+    // `ActorTypeTag::of::<W>()`.
+    #[allow(clippy::disallowed_methods)]
+    pub const fn type_tag(self) -> Option<u64> {
+        let tag = match self {
+            Self::Label => aether_data::mailbox_id_from_name("aether.kit.widget.label").0,
+            Self::Slider => aether_data::mailbox_id_from_name("aether.kit.widget.slider").0,
+            Self::Radio => aether_data::mailbox_id_from_name("aether.kit.widget.radio").0,
+            Self::TextField => aether_data::mailbox_id_from_name("aether.kit.widget.text_field").0,
+            Self::Button => aether_data::mailbox_id_from_name("aether.kit.widget.button").0,
+            Self::Composite | Self::BehaviorHost => return None,
+        };
+        Some(tag)
+    }
+}
+
 /// Where a wrapped host's script comes from — the kit-local mirror of
 /// `aether_behavior`'s `ScriptSource`, carried in a [`BehaviorHostSpec`] so the
 /// trunk (always compiled) names no `aether-behavior` type. The `behavior`

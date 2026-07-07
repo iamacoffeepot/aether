@@ -25,7 +25,9 @@ use serde::{Deserialize, Serialize};
 /// `ActorTypeTag(type_tag)` at the spawn call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Schema)]
 pub struct ChildSpec {
-    /// `hash(NAMESPACE)` of the wrapped actor type.
+    /// `hash(NAMESPACE)` of the wrapped actor type. For a stock `aether-kit`
+    /// widget, `aether_kit::widgets::WidgetKind::type_tag()` produces this
+    /// value without linking the kit's `runtime` feature.
     pub type_tag: u64,
     /// The wrapped child's subname within the cluster.
     pub subname: String,

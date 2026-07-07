@@ -390,7 +390,7 @@ fn spawn_behavior_host(
     use aether_behavior::host::{ChildSpec, ScriptSource};
 
     let host_spec = decode_child::<BehaviorHostSpec>(spec)?;
-    let Some(type_tag) = wrapped_widget_tag(host_spec.wrapped) else {
+    let Some(type_tag) = host_spec.wrapped.type_tag() else {
         tracing::warn!(
             target: "aether_kit",
             subname = %spec.subname,
@@ -452,23 +452,6 @@ fn spawn_behavior_host(
             None
         }
     }
-}
-
-/// The wrapped widget's actor type tag for the `behavior` spawn arm — the same
-/// `ActorTypeTag::of::<Concrete>()` mapping the direct-widget arms encode, one
-/// per stock widget. A container or a host is not wrappable ⇒ `None`.
-#[cfg(feature = "behavior")]
-fn wrapped_widget_tag(kind: WidgetKind) -> Option<u64> {
-    use aether_actor::ActorTypeTag;
-    let tag = match kind {
-        WidgetKind::Label => ActorTypeTag::of::<LabelWidget>().0,
-        WidgetKind::Slider => ActorTypeTag::of::<SliderWidget>().0,
-        WidgetKind::Radio => ActorTypeTag::of::<RadioGroupWidget>().0,
-        WidgetKind::TextField => ActorTypeTag::of::<TextFieldWidget>().0,
-        WidgetKind::Button => ActorTypeTag::of::<ButtonWidget>().0,
-        WidgetKind::Composite | WidgetKind::BehaviorHost => return None,
-    };
-    Some(tag)
 }
 
 /// The `behavior`-feature-off stub: a `WidgetKind::BehaviorHost` slot needs the
@@ -764,34 +747,35 @@ mod behavior_tests {
     use aether_actor::ActorTypeTag;
     use aether_data::Kind;
 
-    // Tripwire: the wrapped-widget tag mapping points each stock kind at its
-    // own concrete widget type (not a transposed neighbour) and refuses to
-    // wrap a container or a host. A mis-wired arm would spawn the wrong widget
+    // Tripwire: `WidgetKind::type_tag` (the trunk accessor the `behavior`
+    // spawn arm now calls directly) points each stock kind at its own
+    // concrete widget type (not a transposed neighbour) and refuses to wrap
+    // a container or a host. A mis-wired arm would spawn the wrong widget
     // under a host — silent until the pixels are wrong.
     #[test]
     fn wrapped_tag_maps_each_stock_widget_and_rejects_unwrappable() {
         assert_eq!(
-            wrapped_widget_tag(WidgetKind::Slider),
+            WidgetKind::Slider.type_tag(),
             Some(ActorTypeTag::of::<SliderWidget>().0)
         );
         assert_eq!(
-            wrapped_widget_tag(WidgetKind::Button),
+            WidgetKind::Button.type_tag(),
             Some(ActorTypeTag::of::<ButtonWidget>().0)
         );
         assert_eq!(
-            wrapped_widget_tag(WidgetKind::Label),
+            WidgetKind::Label.type_tag(),
             Some(ActorTypeTag::of::<LabelWidget>().0)
         );
         assert_eq!(
-            wrapped_widget_tag(WidgetKind::Radio),
+            WidgetKind::Radio.type_tag(),
             Some(ActorTypeTag::of::<RadioGroupWidget>().0)
         );
         assert_eq!(
-            wrapped_widget_tag(WidgetKind::TextField),
+            WidgetKind::TextField.type_tag(),
             Some(ActorTypeTag::of::<TextFieldWidget>().0)
         );
-        assert_eq!(wrapped_widget_tag(WidgetKind::Composite), None);
-        assert_eq!(wrapped_widget_tag(WidgetKind::BehaviorHost), None);
+        assert_eq!(WidgetKind::Composite.type_tag(), None);
+        assert_eq!(WidgetKind::BehaviorHost.type_tag(), None);
     }
 
     // Tripwire: a `BehaviorHostSpec` carrying a stock wrapped widget encodes as
