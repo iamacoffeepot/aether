@@ -348,7 +348,11 @@ fn partition_inputs(
                 x: at.x * EDGE + si.div_euclid(SUB),
                 z: at.z * EDGE + sj.div_euclid(SUB),
             };
-            let material = world.underlay(cell);
+            // Sample the cell's authored point, not the whole-cell material:
+            // an all-inherit point folds back to `World::underlay(cell)`, so
+            // an unshaped world is unchanged, while an authored point moves
+            // the silhouette below cell scale.
+            let material = world.underlay_point(cell, si.rem_euclid(SUB), sj.rem_euclid(SUB));
             let idx = (sj + apron) as usize * n + (si + apron) as usize;
             ids[idx] = material.to_u8();
             any |= material != Material::Void;
@@ -1288,8 +1292,8 @@ fn emit_skirts(
 mod tests {
     use super::*;
     use crate::world::{
-        CELLS_PER_CHUNK_AREA, Chunk, Region, STEP_MAX_OCTIMETERS, SetMaterialStyle,
-        SmoothingProfile,
+        CELLS_PER_CHUNK_AREA, Chunk, Region, STEP_MAX_OCTIMETERS, SUBCELLS_PER_CELL,
+        SetMaterialStyle, SmoothingProfile, UNDERLAY_POINT_INHERIT,
     };
     use style::ResolvedCell;
 
@@ -2106,6 +2110,111 @@ mod tests {
                 .zip(tuned_mesh.iter())
                 .any(|(a, b)| base_color(a) != base_color(b)),
             "a live style-table write must change the painted mesh's colors",
+        );
+    }
+
+    #[test]
+    fn all_inherit_meshes_identically_to_cell_expansion() {
+        // Tripwire: the underlay-point inherit sentinel must fold back to the
+        // per-cell material exactly, so an unshaped world meshes byte-for-byte
+        // as it did before points existed. A varied world meshed with
+        // all-inherit points must equal the same world with every point
+        // explicitly pinned to its cell's cascade material — the literal
+        // cell-expansion `partition_inputs` performed before. Any drift in
+        // `underlay_point`'s indexing or sentinel handling breaks this.
+        let at = ChunkPos { x: 0, z: 0 };
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        for lz in 0..EDGE {
+            for lx in 0..EDGE {
+                let i = (lz * EDGE + lx) as usize;
+                chunk.underlay[i] = match (lx + lz) % 4 {
+                    0 => Material::Void, // falls through to the region default
+                    1 => Material::Grass,
+                    2 => Material::Sand,
+                    _ => Material::Stone,
+                };
+                chunk.height[i] = 10 * lx;
+                chunk.region[i] = 1;
+            }
+        }
+        world.insert_chunk(at, chunk);
+        world.insert_region(
+            1,
+            Region {
+                name: "meadow".into(),
+                default_material: Material::Dirt,
+                cliff_material: Material::Stone,
+            },
+        );
+
+        let inherit_mesh = mesh_chunk(&world, at, ViewMode::Painted, &StyleTable::default());
+        assert!(!inherit_mesh.is_empty(), "the fixture must mesh something");
+
+        // Pin every cell's points to its own cascade material — the explicit
+        // cell-expansion. Apron cells stay off-chunk and read Void either way.
+        let mut expanded = world.clone();
+        for lz in 0..EDGE {
+            for lx in 0..EDGE {
+                let cell = CellPos {
+                    x: at.x * EDGE + lx,
+                    z: at.z * EDGE + lz,
+                };
+                let material = expanded.underlay(cell).to_u8();
+                expanded.set_cell_points(cell, &[material; SUBCELLS_PER_CELL]);
+            }
+        }
+        let expanded_mesh = mesh_chunk(&expanded, at, ViewMode::Painted, &StyleTable::default());
+
+        assert_eq!(
+            inherit_mesh, expanded_mesh,
+            "all-inherit points fold to the explicit cell-expansion",
+        );
+    }
+
+    #[test]
+    fn a_point_shaped_cell_marches_inside_its_cell_span() {
+        // A cell whose only authored material is a 2x2 block of interior
+        // subcells (the rest inherit Void) marches a silhouette that departs
+        // the cell-edge lines: the Grass/Void contour lands between subcell
+        // centers, strictly inside the cell span, where a whole-cell material
+        // would only bound at the integer cell edges.
+        let at = ChunkPos { x: 0, z: 0 };
+        let cell = CellPos { x: 8, z: 8 };
+        let sub = SUB as usize;
+        let mut points = [UNDERLAY_POINT_INHERIT; SUBCELLS_PER_CELL];
+        for sub_z in 1..3 {
+            for sub_x in 1..3 {
+                points[sub_z * sub + sub_x] = Material::Grass.to_u8();
+            }
+        }
+        let mut world = World::new();
+        world.insert_chunk(at, Chunk::empty()); // all Void underlay
+        world.set_cell_points(cell, &points);
+
+        let mesh = mesh_chunk(&world, at, ViewMode::Painted, &StyleTable::default());
+        assert!(!mesh.is_empty(), "the authored blob must mesh");
+
+        let verts = mesh.iter().flat_map(|t| t.verts.iter());
+        let inside_x = verts
+            .clone()
+            .any(|v| v.x > cell.x as f32 + 0.1 && v.x < cell.x as f32 + 0.9);
+        let inside_z = verts
+            .clone()
+            .any(|v| v.z > cell.z as f32 + 0.1 && v.z < cell.z as f32 + 0.9);
+        assert!(
+            inside_x && inside_z,
+            "the marched contour must depart the cell-edge lines",
+        );
+        // And it stays bounded inside the cell — no vertex escapes the span.
+        assert!(
+            verts.clone().all(|v| {
+                v.x >= cell.x as f32 - 1e-4
+                    && v.x <= cell.x as f32 + 1.0 + 1e-4
+                    && v.z >= cell.z as f32 - 1e-4
+                    && v.z <= cell.z as f32 + 1.0 + 1e-4
+            }),
+            "the shaped silhouette stays inside the cell",
         );
     }
 }

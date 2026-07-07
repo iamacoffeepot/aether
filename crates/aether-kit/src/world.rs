@@ -54,6 +54,17 @@
 //!   painter's order applies across layers. Reserved here — the wire
 //!   layout is final, but mask meshing is a follow-up; nothing in this
 //!   module interprets the bits.
+//! - [`Chunk::underlay_points`] — an optional per-subcell material plane
+//!   that shapes the ground fabric below cell scale. Each point is a
+//!   [`Material`] byte or the [`UNDERLAY_POINT_INHERIT`] sentinel; an
+//!   inherit point resolves to its cell's cascade
+//!   ([`World::underlay_point`]), so an all-inherit plane meshes exactly as
+//!   the per-cell [`Chunk::underlay`]. An explicit point — including a
+//!   `Void` one that cuts a hole — moves sub-cell shape (a hexagonal
+//!   column, a two-material seam inside a cell) into authored data; the
+//!   mesher samples it in place of expanding the cell material. The cell
+//!   byte stays the gameplay and cascade truth — points are presentation-
+//!   layer ground shaping bounded inside the cell.
 //!
 //! # Water planes
 //!
@@ -100,6 +111,21 @@ pub const SUBCELLS_PER_CELL: usize = (SUBCELLS_PER_CELL_EDGE * SUBCELLS_PER_CELL
 /// `CELLS_PER_CHUNK_AREA * SUB² / 8` (= 512 at `SUB = 4`). The plane
 /// travels as little-endian mask words per cell, row-major cell order.
 pub const OVERLAY_MASK_WIRE_BYTES: usize = CELLS_PER_CHUNK_AREA * SUBCELLS_PER_CELL / 8;
+
+/// Points in one chunk's underlay-point plane: `CELLS_PER_CHUNK_AREA *
+/// SUB²` (= 4096 at `SUB = 4`) — one material point per subcell, row-major
+/// cell order, and within a cell the same `z*SUB + x` subcell order as the
+/// overlay mask. Stride-agnostic by construction: raising
+/// [`SUBCELLS_PER_CELL_EDGE`] regrows the plane with no other change.
+pub const UNDERLAY_POINTS_PER_CHUNK: usize = CELLS_PER_CHUNK_AREA * SUBCELLS_PER_CELL;
+
+/// The underlay-point sentinel: a point holding this **inherits** its
+/// cell's cascade-resolved material ([`World::underlay`]) rather than
+/// pinning one. An untouched world stores every point as this, so it
+/// meshes exactly as a per-cell underlay. An explicit `0..=5` byte pins the
+/// point to a [`Material`] — including `0` = authored [`Material::Void`],
+/// which is what cuts a shape or a hole below cell scale.
+pub const UNDERLAY_POINT_INHERIT: u8 = 255;
 
 /// Octimeters per cell: `1 cell = 1 m = 256 octimeters`.
 const OCTIMETERS_PER_CELL: i32 = 256;
@@ -271,6 +297,13 @@ pub struct WaterPlane {
 pub struct Chunk {
     /// Ground fabric — cascade-resolved by [`World::underlay`].
     pub underlay: [Material; CELLS_PER_CHUNK_AREA],
+    /// Per-subcell underlay material points — `SUB × SUB` points per cell
+    /// (row-major cell order, `z*SUB + x` within a cell). Each byte is a
+    /// [`Material`] or the [`UNDERLAY_POINT_INHERIT`] sentinel (inherit the
+    /// cell's cascade). All-inherit — the empty default — meshes exactly as
+    /// the per-cell [`Chunk::underlay`]; an explicit point shapes the ground
+    /// below cell scale ([`World::underlay_point`]).
+    pub underlay_points: [u8; UNDERLAY_POINTS_PER_CHUNK],
     /// Placed surface — raw, never cascade-resolved. `Void` = none.
     pub overlay: [Material; CELLS_PER_CHUNK_AREA],
     /// Overlay subcell coverage bitmask per cell — a `SUB × SUB` bit grid
@@ -298,6 +331,7 @@ impl Chunk {
     pub fn empty() -> Self {
         Self {
             underlay: [Material::Void; CELLS_PER_CHUNK_AREA],
+            underlay_points: [UNDERLAY_POINT_INHERIT; UNDERLAY_POINTS_PER_CHUNK],
             overlay: [Material::Void; CELLS_PER_CHUNK_AREA],
             overlay_mask: [0; CELLS_PER_CHUNK_AREA],
             height: [0; CELLS_PER_CHUNK_AREA],
@@ -351,6 +385,45 @@ impl World {
             return region.default_material;
         }
         Material::Void
+    }
+
+    /// The material at subcell point `(sub_x, sub_z)` of `cell` (each in
+    /// `0..SUB`): the point's explicit [`Material`] if it pins one, else —
+    /// the [`UNDERLAY_POINT_INHERIT`] sentinel, or a missing chunk — the
+    /// cell's cascade-resolved [`World::underlay`]. This is the sample the
+    /// mesher expands the ground from, so an all-inherit cell reads its
+    /// single cascade material at every point (identical to a per-cell
+    /// underlay), while an authored point shapes the fabric below cell
+    /// scale. `sub_x` / `sub_z` fold into the cell's point block, so a
+    /// caller passing a subcell that has walked into a neighbor still reads
+    /// this cell's plane.
+    #[must_use]
+    pub fn underlay_point(&self, cell: CellPos, sub_x: i32, sub_z: i32) -> Material {
+        let Some(chunk) = self.chunks.get(&cell.chunk()) else {
+            return Material::Void;
+        };
+        let sub = SUBCELLS_PER_CELL_EDGE.cast_signed();
+        let within = (sub_z.rem_euclid(sub) * sub + sub_x.rem_euclid(sub)) as usize;
+        let byte = chunk.underlay_points[cell.chunk_index() * SUBCELLS_PER_CELL + within];
+        if byte == UNDERLAY_POINT_INHERIT {
+            return self.underlay(cell);
+        }
+        Material::from_u8_or_void(byte)
+    }
+
+    /// Write `cell`'s `SUB × SUB` underlay material points, creating the
+    /// cell's chunk if absent. Each provided byte pins a point (a
+    /// [`Material`] or the [`UNDERLAY_POINT_INHERIT`] sentinel); a short
+    /// slice leaves the cell's remaining points inheriting, so an empty
+    /// slice clears the cell back to all-inherit. Bytes past the cell's
+    /// point count are ignored.
+    pub fn set_cell_points(&mut self, cell: CellPos, points: &[u8]) {
+        let chunk = self.chunks.entry(cell.chunk()).or_insert_with(Chunk::empty);
+        let base = cell.chunk_index() * SUBCELLS_PER_CELL;
+        for i in 0..SUBCELLS_PER_CELL {
+            chunk.underlay_points[base + i] =
+                points.get(i).copied().unwrap_or(UNDERLAY_POINT_INHERIT);
+        }
     }
 
     /// The cell's cascade default alone — its region's `default_material`
@@ -678,10 +751,12 @@ impl World {
     }
 }
 
-/// `aether.kit.world.set_chunk` — write one chunk's planes. The three
-/// ground planes ride as raw `Bytes` (256 material/shape bytes each);
+/// `aether.kit.world.set_chunk` — write one chunk's planes. The ground
+/// planes ride as raw `Bytes` (256 material/shape bytes each);
+/// `underlay_points` rides as up to [`UNDERLAY_POINTS_PER_CHUNK`] bytes;
 /// `height` / `region` / `water_plane` ride as length-256 vectors. Shorter
-/// vectors pad with `Void` / `0`; longer ones truncate.
+/// vectors pad with `Void` / `0` (and a short `underlay_points` leaves the
+/// tail inheriting); longer ones truncate.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.world.set_chunk")]
 pub struct SetChunk {
@@ -689,6 +764,13 @@ pub struct SetChunk {
     pub chunk_z: i32,
     /// Underlay plane — 256 raw material bytes (`Material as u8`).
     pub underlay: Vec<u8>,
+    /// Underlay material-point plane — up to [`UNDERLAY_POINTS_PER_CHUNK`]
+    /// bytes (`256 * SUB²`; 4096 at `SUB = 4`), one point per subcell in
+    /// row-major cell order (`z*SUB + x` within a cell). Each byte is a
+    /// [`Material`] or the [`UNDERLAY_POINT_INHERIT`] sentinel; a short
+    /// vector leaves the remaining points inheriting, so an empty vector is
+    /// the all-inherit default.
+    pub underlay_points: Vec<u8>,
     /// Overlay plane — 256 raw material bytes. `0` = no overlay.
     pub overlay: Vec<u8>,
     /// Overlay subcell-mask plane — [`OVERLAY_MASK_WIRE_BYTES`] bytes
@@ -725,6 +807,11 @@ impl SetChunk {
         for (dst, byte) in chunk.underlay.iter_mut().zip(&self.underlay) {
             *dst = Material::from_u8_or_void(*byte);
         }
+        // Underlay-point plane: a short vector leaves the tail inheriting
+        // (Chunk::empty seeds every point to the inherit sentinel).
+        for (dst, byte) in chunk.underlay_points.iter_mut().zip(&self.underlay_points) {
+            *dst = *byte;
+        }
         for (dst, byte) in chunk.overlay.iter_mut().zip(&self.overlay) {
             *dst = Material::from_u8_or_void(*byte);
         }
@@ -750,6 +837,33 @@ impl SetChunk {
             *dst = *byte;
         }
         chunk
+    }
+}
+
+/// `aether.kit.world.set_cell_points` — stamp one cell's `SUB × SUB`
+/// underlay material points, the single-cell live-paint counterpart to
+/// `set_chunk`'s whole-plane write. `points` carries up to
+/// [`SUBCELLS_PER_CELL`] bytes in `z*SUB + x` subcell order; a short vector
+/// leaves the cell's remaining points inheriting (an empty vector clears
+/// the cell back to all-inherit). Each byte is a [`Material`] or the
+/// [`UNDERLAY_POINT_INHERIT`] sentinel — including `0` = authored `Void`,
+/// which cuts a hole.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.world.set_cell_points")]
+pub struct SetCellPoints {
+    pub x: i32,
+    pub z: i32,
+    pub points: Vec<u8>,
+}
+
+impl SetCellPoints {
+    /// The cell this stamp targets.
+    #[must_use]
+    pub fn cell(&self) -> CellPos {
+        CellPos {
+            x: self.x,
+            z: self.z,
+        }
     }
 }
 
@@ -964,16 +1078,19 @@ pub enum WorldDecodeError {
     BadName,
 }
 
-/// The current write version. Version 4 adds the water-plane table (after
-/// the smoothing-profile table) and the per-chunk water-plane plane (after
-/// the height plane); version 3 adds a cliff-material byte to each region
+/// The current write version. Version 5 appends the per-chunk
+/// underlay-point plane ([`UNDERLAY_POINTS_PER_CHUNK`] bytes) to the end of
+/// each chunk record. Version 4 adds the water-plane table (after the
+/// smoothing-profile table) and the per-chunk water-plane plane (after the
+/// height plane); version 3 adds a cliff-material byte to each region
 /// record; version 2 adds the smoothing-profile table (after the region
 /// table) and the per-chunk smoothing plane (after the region plane).
-/// Older buffers still decode: a pre-4 buffer reads an empty water-plane
-/// table and an all-zero water plane, a pre-3 region reads Stone cliffs, a
+/// Older buffers still decode: a pre-5 buffer reads an all-inherit
+/// underlay-point plane, a pre-4 buffer reads an empty water-plane table
+/// and an all-zero water plane, a pre-3 region reads Stone cliffs, a
 /// version-1 buffer reads an empty profile table and an all-zero smoothing
 /// plane.
-const WORLD_FORMAT_VERSION: u8 = 4;
+const WORLD_FORMAT_VERSION: u8 = 5;
 
 /// The oldest version [`World::from_bytes`] still decodes.
 const WORLD_FORMAT_VERSION_MIN: u8 = 1;
@@ -1028,13 +1145,15 @@ impl World {
                 out.extend_from_slice(&r.to_le_bytes());
             }
             out.extend_from_slice(&chunk.smoothing);
+            out.extend_from_slice(&chunk.underlay_points);
         }
         out
     }
 
-    /// Decode the [`World::to_bytes`] format, current or older (a pre-4
-    /// buffer carries no water-plane table or plane — both read empty /
-    /// zero; a pre-3 region reads Stone cliffs; a version-1 buffer carries
+    /// Decode the [`World::to_bytes`] format, current or older (a pre-5
+    /// buffer carries no underlay-point plane — it reads all-inherit; a
+    /// pre-4 buffer carries no water-plane table or plane — both read empty
+    /// / zero; a pre-3 region reads Stone cliffs; a version-1 buffer carries
     /// no smoothing table or plane). A truncated buffer or unknown version
     /// returns `Err` rather than panicking; the caller keeps its prior
     /// world on any error.
@@ -1114,6 +1233,11 @@ impl World {
             }
             if version >= 2 {
                 for slot in &mut chunk.smoothing {
+                    *slot = reader.u8()?;
+                }
+            }
+            if version >= 5 {
+                for slot in &mut chunk.underlay_points {
                     *slot = reader.u8()?;
                 }
             }
@@ -1248,6 +1372,91 @@ mod tests {
     }
 
     #[test]
+    fn underlay_point_inherits_cascade_or_pins_explicit() {
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        // Cell (2,3): explicit Stone underlay; every point inherits it.
+        chunk.underlay[3 * 16 + 2] = Material::Stone;
+        // Cell (4,5): Void underlay in region 1 (Grass default); point (0,0)
+        // pinned Sand, point (1,0) pinned explicit Void, the rest inherit.
+        chunk.region[5 * 16 + 4] = 1;
+        let base = (5 * 16 + 4) * SUBCELLS_PER_CELL;
+        chunk.underlay_points[base] = Material::Sand.to_u8();
+        chunk.underlay_points[base + 1] = Material::Void.to_u8();
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
+        world.insert_region(
+            1,
+            Region {
+                name: "meadow".into(),
+                default_material: Material::Grass,
+                cliff_material: Material::Stone,
+            },
+        );
+
+        // Cell (2,3): inherit points resolve the cell's own paint.
+        assert_eq!(
+            world.underlay_point(cell(2, 3), 0, 0),
+            Material::Stone,
+            "inherit resolves the cell paint",
+        );
+        assert_eq!(world.underlay_point(cell(2, 3), 3, 3), Material::Stone);
+        // Cell (4,5): inherit points resolve the region default; explicit
+        // points pin, and an explicit Void reads Void even in a painted cell.
+        assert_eq!(
+            world.underlay_point(cell(4, 5), 2, 2),
+            Material::Grass,
+            "inherit resolves the region default",
+        );
+        assert_eq!(
+            world.underlay_point(cell(4, 5), 0, 0),
+            Material::Sand,
+            "an explicit point overrides the cascade",
+        );
+        assert_eq!(
+            world.underlay_point(cell(4, 5), 1, 0),
+            Material::Void,
+            "an explicit Void point reads Void in a painted cell",
+        );
+        // Cell (6,7): no cascade source, so an inherit point reads Void.
+        assert_eq!(
+            world.underlay_point(cell(6, 7), 0, 0),
+            Material::Void,
+            "no cascade source",
+        );
+    }
+
+    #[test]
+    fn set_cell_points_writes_a_cell_and_a_short_slice_inherits_the_tail() {
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        chunk.underlay[3 * 16 + 3] = Material::Grass; // cell (3,3)
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
+
+        // Stamp two Stone points; the short slice leaves the tail inheriting.
+        world.set_cell_points(
+            cell(3, 3),
+            &[Material::Stone.to_u8(), Material::Stone.to_u8()],
+        );
+        assert_eq!(world.underlay_point(cell(3, 3), 0, 0), Material::Stone);
+        assert_eq!(world.underlay_point(cell(3, 3), 1, 0), Material::Stone);
+        assert_eq!(
+            world.underlay_point(cell(3, 3), 2, 0),
+            Material::Grass,
+            "the unwritten tail inherits the cell's Grass",
+        );
+        // An empty slice clears the cell back to all-inherit.
+        world.set_cell_points(cell(3, 3), &[]);
+        assert_eq!(
+            world.underlay_point(cell(3, 3), 0, 0),
+            Material::Grass,
+            "an empty stamp clears the cell to inherit",
+        );
+        // A stamp on an absent chunk creates it and pins the point.
+        world.set_cell_points(cell(100, 100), &[Material::Sand.to_u8()]);
+        assert_eq!(world.underlay_point(cell(100, 100), 0, 0), Material::Sand);
+    }
+
+    #[test]
     fn overlay_never_cascades() {
         let mut world = World::new();
         let mut chunk = Chunk::empty();
@@ -1288,6 +1497,7 @@ mod tests {
             chunk_x: 2,
             chunk_z: -1,
             underlay,
+            underlay_points: Vec::new(),
             overlay: vec![0u8; CELLS_PER_CHUNK_AREA],
             overlay_mask: vec![0u8; OVERLAY_MASK_WIRE_BYTES],
             height: vec![0i32; CELLS_PER_CHUNK_AREA],
@@ -1316,6 +1526,7 @@ mod tests {
             chunk_x: 0,
             chunk_z: 0,
             underlay: Vec::new(),
+            underlay_points: Vec::new(),
             overlay: Vec::new(),
             overlay_mask,
             height: Vec::new(),
@@ -1335,6 +1546,7 @@ mod tests {
             chunk_x: 0,
             chunk_z: 0,
             underlay: vec![Material::Grass.to_u8(); 2], // short → rest Void
+            underlay_points: vec![Material::Stone.to_u8(); 2], // short → rest inherit
             overlay: vec![0u8; CELLS_PER_CHUNK_AREA + 10], // long → truncated
             overlay_mask: Vec::new(),
             height: vec![5i32; 1],
@@ -1350,6 +1562,10 @@ mod tests {
         assert_eq!(chunk.height[1], 0);
         assert_eq!(chunk.smoothing[0], 3);
         assert_eq!(chunk.smoothing[1], 0);
+        // The two written points hold; the tail keeps the inherit sentinel.
+        assert_eq!(chunk.underlay_points[0], Material::Stone.to_u8());
+        assert_eq!(chunk.underlay_points[1], Material::Stone.to_u8());
+        assert_eq!(chunk.underlay_points[2], UNDERLAY_POINT_INHERIT);
     }
 
     #[test]
@@ -1398,6 +1614,10 @@ mod tests {
         a.region[20] = 2;
         a.water_plane[40] = 2;
         a.smoothing[30] = 1;
+        // An authored underlay-point pattern (a pinned point and an explicit
+        // Void hole) rides the v5 chunk record and must survive the trip.
+        a.underlay_points[100] = Material::Sand.to_u8();
+        a.underlay_points[101] = Material::Void.to_u8();
         world.insert_chunk(ChunkPos { x: 1, z: -3 }, a);
         let mut b = Chunk::empty();
         b.underlay[255] = Material::Dirt;
@@ -1662,6 +1882,44 @@ mod tests {
         let chunk = world.chunk(ChunkPos { x: 0, z: 0 }).expect("chunk");
         assert_eq!(chunk.water_plane, [0u16; CELLS_PER_CHUNK_AREA]);
         assert_eq!(world.water_level(cell(0, 0)), Some(0), "datum-0 level");
+    }
+
+    #[test]
+    fn pre_v5_buffer_decodes_all_inherit_underlay_points() {
+        // Tripwire: a version-4 buffer carries no per-chunk underlay-point
+        // plane; it must read all-inherit, so every point resolves the cell's
+        // cascade material exactly as a per-cell underlay did. Hand-built with
+        // the exact v4 chunk-record layout (no underlay-point plane at the
+        // tail): no regions / profiles / water planes, one chunk with a Stone
+        // cell.
+        let mut buf = vec![4u8];
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no regions
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no profiles
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no water planes
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one chunk
+        buf.extend_from_slice(&0i32.to_le_bytes()); // chunk x
+        buf.extend_from_slice(&0i32.to_le_bytes()); // chunk z
+        let mut underlay = [0u8; CELLS_PER_CHUNK_AREA];
+        underlay[0] = Material::Stone.to_u8();
+        buf.extend_from_slice(&underlay);
+        buf.extend_from_slice(&[0u8; CELLS_PER_CHUNK_AREA]); // overlay
+        buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // masks
+        buf.extend_from_slice(&[0u8; 4 * CELLS_PER_CHUNK_AREA]); // heights
+        buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // water planes
+        buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // regions
+        buf.extend_from_slice(&[0u8; CELLS_PER_CHUNK_AREA]); // smoothing
+
+        let world = World::from_bytes(&buf).expect("a v4 buffer still decodes");
+        let chunk = world.chunk(ChunkPos { x: 0, z: 0 }).expect("chunk");
+        assert_eq!(
+            chunk.underlay_points, [UNDERLAY_POINT_INHERIT; UNDERLAY_POINTS_PER_CHUNK],
+            "a pre-5 buffer reads an all-inherit underlay-point plane",
+        );
+        assert_eq!(
+            world.underlay_point(cell(0, 0), 2, 1),
+            Material::Stone,
+            "an inherit point resolves the cell's cascade material",
+        );
     }
 
     /// A one-chunk world whose underlay / water-plane / height planes come
