@@ -56,9 +56,10 @@ pub use widgets::{
     WidgetFrame, WidgetKind,
 };
 pub use world::{
-    CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk, ChunkPos, Material, Region,
-    SetCellPoints, SetChunk, SetMaterialStyle, SetRegion, SetSmoothingProfile, SetViewMode,
-    SetWaterPlane, SmoothingProfile, ViewMode, WaterPlane, World, WorldDecodeError, WorldLoad,
+    CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk, ChunkPos,
+    HEIGHT_POINT_INHERIT, HEIGHT_POINTS_PER_CHUNK, Material, Region, SetCellHeights, SetCellPoints,
+    SetChunk, SetMaterialStyle, SetRegion, SetSmoothingProfile, SetViewMode, SetWaterPlane,
+    SmoothingProfile, ViewMode, WaterPlane, World, WorldDecodeError, WorldLoad,
 };
 
 #[cfg(feature = "runtime")]

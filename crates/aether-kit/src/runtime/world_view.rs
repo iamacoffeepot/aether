@@ -25,6 +25,9 @@
 //! - `aether.kit.world.set_cell_points` — stamp one cell's underlay
 //!   material points and remesh that cell's chunk plus its eight cached
 //!   neighbors (the single-cell live-paint counterpart to `set_chunk`).
+//! - `aether.kit.world.set_cell_heights` — stamp one cell's height deltas
+//!   (subcell relief off the cell height) and remesh that cell's chunk plus
+//!   its eight cached neighbors (the height sibling of `set_cell_points`).
 //! - `aether.kit.world.set_region` — register a region so the underlay
 //!   cascade has a default to resolve to; remeshes every cached chunk
 //!   (a region default can change any chunk's cascade-resolved underlay).
@@ -57,8 +60,8 @@ use aether_kinds::Render;
 use super::mesher::mesh_chunk;
 use super::mesher::style::StyleTable;
 use crate::world::{
-    ChunkPos, Material, SetCellPoints, SetChunk, SetMaterialStyle, SetRegion, SetSmoothingProfile,
-    SetViewMode, SetWaterPlane, ViewMode, World, WorldLoad,
+    ChunkPos, Material, SetCellHeights, SetCellPoints, SetChunk, SetMaterialStyle, SetRegion,
+    SetSmoothingProfile, SetViewMode, SetWaterPlane, ViewMode, World, WorldLoad,
 };
 
 /// World-view component: holds the world plane stack and a per-chunk
@@ -187,6 +190,24 @@ impl WasmActor for WorldView {
     fn on_set_cell_points(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetCellPoints) {
         let cell = msg.cell();
         self.world.set_cell_points(cell, &msg.points);
+        self.remesh_around(cell.chunk());
+    }
+
+    /// Stamp one cell's height deltas into the world, then remesh that cell's
+    /// chunk and its eight cached neighbors — a border cell's relief feeds the
+    /// neighbor's corner plates and walls through the same apron as a chunk
+    /// write.
+    ///
+    /// # Agent
+    /// Send `aether.kit.world.set_cell_heights` with a cell address (`x`,
+    /// `z`) and up to SUB² `i16` octimeter deltas in `z*SUB + x` subcell
+    /// order — each lifts (or drops) its subcell off the cell's `height`
+    /// (`0` = no relief). A short vector leaves the cell's remaining points
+    /// flat. `capture_frame` to verify the authored relief.
+    #[handler::single]
+    fn on_set_cell_heights(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetCellHeights) {
+        let cell = msg.cell();
+        self.world.set_cell_heights(cell, &msg.deltas);
         self.remesh_around(cell.chunk());
     }
 

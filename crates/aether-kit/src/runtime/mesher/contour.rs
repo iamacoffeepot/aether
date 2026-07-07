@@ -374,7 +374,14 @@ fn dominant_other(neighbors: &[u8], own: u8) -> Option<u8> {
 /// partition by construction (samples change owner, never coverage).
 /// `params` is per mask sample, resolved by the caller from the sample's
 /// original material (or its cell's smoothing-field override) and held
-/// fixed across passes.
+/// fixed across passes. `frozen` (per mask sample, like `params`) pins a
+/// sample to its seed label through every pass: the mesher freezes the
+/// samples flanking a point-height break so the paint boundary can never
+/// smooth across a physical cliff — a contour along a break stays on the
+/// authored line (the accepted sample-resolution staircase), while
+/// boundaries over continuous ground keep smoothing as ever. Neighborhood
+/// counts still read frozen samples; only their own reassignment is
+/// blocked, the same one-way gate a zero-iteration zone has.
 #[must_use]
 pub fn repartition(
     ids: &[u8],
@@ -382,8 +389,10 @@ pub fn repartition(
     height: usize,
     upsample: usize,
     params: &[SmoothParams],
+    frozen: &[bool],
 ) -> (Vec<u8>, usize, usize) {
     debug_assert_eq!(params.len(), ids.len(), "one SmoothParams per sample");
+    debug_assert_eq!(frozen.len(), ids.len(), "one frozen flag per sample");
     let upsample = upsample.max(1);
     let gw = width * upsample;
     let gh = height * upsample;
@@ -415,7 +424,8 @@ pub fn repartition(
         for gx in 0..gw {
             let cx = (gx / upsample) as i32;
             let cz = (gz / upsample) as i32;
-            if params[cz as usize * width + cx as usize].iterations < 1 {
+            let sample = cz as usize * width + cx as usize;
+            if params[sample].iterations < 1 || frozen[sample] {
                 continue;
             }
             let fx = ((gx % upsample) as f32 + 0.5) * inv;
@@ -449,21 +459,23 @@ pub fn repartition(
     // same pointwise, parity-shoulder, and windowed rules, with the flip
     // target the dominant differing neighbor.
     for pass in 1..max_iterations {
-        grid = cellular_repartition_pass(&grid, gw, gh, params, width, upsample, pass);
+        grid = cellular_repartition_pass(&grid, gw, gh, params, frozen, width, upsample, pass);
     }
 
-    grid = prune_one_wide_labels(grid, gw, gh, params, width, upsample);
+    grid = prune_one_wide_labels(grid, gw, gh, params, frozen, width, upsample);
     (grid, gw, gh)
 }
 
 /// One cellular reassignment pass over the id grid — the multi-label
 /// [`cellular_pass`]. Counts read "differs from mine"; a firing sample
 /// reassigns to its dominant differing eight-neighbor.
+#[allow(clippy::too_many_arguments)] // one call site; the pass state travels together
 fn cellular_repartition_pass(
     grid: &[u8],
     gw: usize,
     gh: usize,
     params: &[SmoothParams],
+    frozen: &[bool],
     mask_width: usize,
     upsample: usize,
     pass: u32,
@@ -471,8 +483,9 @@ fn cellular_repartition_pass(
     let mut next = grid.to_vec();
     for gz in 0..gh as i32 {
         for gx in 0..gw as i32 {
-            let own = params[(gz as usize / upsample) * mask_width + gx as usize / upsample];
-            if own.iterations <= pass {
+            let sample = (gz as usize / upsample) * mask_width + gx as usize / upsample;
+            let own = params[sample];
+            if own.iterations <= pass || frozen[sample] {
                 continue;
             }
             let t24 = t24_of(own.smoothing_degrees);
@@ -534,6 +547,7 @@ fn prune_one_wide_labels(
     gw: usize,
     gh: usize,
     params: &[SmoothParams],
+    frozen: &[bool],
     mask_width: usize,
     upsample: usize,
 ) -> Vec<u8> {
@@ -542,8 +556,9 @@ fn prune_one_wide_labels(
         let mut next = grid.clone();
         for gz in 0..gh as i32 {
             for gx in 0..gw as i32 {
-                let own = params[(gz as usize / upsample) * mask_width + gx as usize / upsample];
-                if own.iterations < 1 {
+                let sample = (gz as usize / upsample) * mask_width + gx as usize / upsample;
+                let own = params[sample];
+                if own.iterations < 1 || frozen[sample] {
                     continue;
                 }
                 let m = grid[gz as usize * gw + gx as usize];
@@ -595,26 +610,44 @@ const SADDLE_SPLIT_POLYS: [(&[u8], &[u8]); 2] = [
 /// saddle resolution for cases 5 and 10: the id-priority winner connects
 /// its diagonal through the center, the loser splits into two corner
 /// triangles, and every other case has one fixed polygon. Case 0 emits
-/// nothing; case 15 emits the full window.
+/// nothing; case 15 emits the full window. The vertex closure receives the
+/// window point index alongside the position (corners `0 = BL, 1 = BR,
+/// 2 = TR, 3 = TL`, edge midpoints `4 = bottom, 5 = right, 6 = top,
+/// 7 = left`), so a caller lifting over height relief can resolve which
+/// side of a crossed edge a boundary vertex belongs to as data — a
+/// smoothing-displaced crossing sits off the subcell lattice, where the
+/// side cannot be inferred from the position.
 pub fn emit_label_window(
     wi: i32,
     wj: i32,
     place: &GridPlacement,
     case: u8,
     connected: bool,
-    vertex: &impl Fn(f32, f32) -> Vertex,
+    vertex: &impl Fn(f32, f32, u8) -> Vertex,
     tris: &mut Vec<DrawTriangle>,
 ) {
+    for poly in label_window_polys(case, connected) {
+        emit_window_poly_indexed(wi, wj, place, poly, vertex, tris);
+    }
+}
+
+/// The one or two boundary polygons `label`'s marching case covers in a
+/// window — the tables behind [`emit_label_window`], exposed so a caller
+/// that must clip a flap before fanning it (the mesher's height-break
+/// split) can walk the raw point-index polygons. `connected` resolves the
+/// two saddles exactly as [`emit_label_window`] does; case 0 covers
+/// nothing, every other case one polygon (a split saddle two). Point
+/// indices are the window-point numbering (corners `0..4`, edge midpoints
+/// `4..8`); every polygon is convex.
+#[must_use]
+pub fn label_window_polys(case: u8, connected: bool) -> [&'static [u8]; 2] {
     if case == 0 {
-        return;
+        return [&[], &[]];
     }
     if (case == 5 || case == 10) && !connected {
-        let (first, second) = SADDLE_SPLIT_POLYS[usize::from(case == 10)];
-        emit_window_poly(wi, wj, place, first, vertex, tris);
-        emit_window_poly(wi, wj, place, second, vertex, tris);
-        return;
+        return SADDLE_SPLIT_POLYS[usize::from(case == 10)].into();
     }
-    emit_window_poly(wi, wj, place, CASE_POLYS[case as usize], vertex, tris);
+    [CASE_POLYS[case as usize], &[]]
 }
 
 /// Peel a `radius`-cell band off `grid`: a cell survives only when every
@@ -768,6 +801,54 @@ fn emit_window_contour(
     tris: &mut Vec<DrawTriangle>,
 ) {
     emit_window_poly(wi, wj, place, CASE_POLYS[case as usize], vertex, tris);
+}
+
+/// Fan-triangulate one window polygon given by its boundary-point indices
+/// (corners `0..4`, edge midpoints `4..8`), handing each vertex its point
+/// index alongside the position — the label-marching form
+/// [`emit_label_window`] emits through.
+fn emit_window_poly_indexed(
+    wi: i32,
+    wj: i32,
+    place: &GridPlacement,
+    poly: &[u8],
+    vertex: &impl Fn(f32, f32, u8) -> Vertex,
+    tris: &mut Vec<DrawTriangle>,
+) {
+    if poly.len() < 3 {
+        return; // the empty slot of a single-polygon case
+    }
+    let step_oct = place.step_oct;
+    let half = step_oct / 2;
+    let x_lo = place.origin_oct[0] + wi * step_oct;
+    let x_hi = place.origin_oct[0] + (wi + 1) * step_oct;
+    let z_lo = place.origin_oct[1] + wj * step_oct;
+    let z_hi = place.origin_oct[1] + (wj + 1) * step_oct;
+    let x_mid = x_lo + half;
+    let z_mid = z_lo + half;
+    let points = [
+        [x_lo, z_lo],
+        [x_hi, z_lo],
+        [x_hi, z_hi],
+        [x_lo, z_hi],
+        [x_mid, z_lo],
+        [x_hi, z_mid],
+        [x_mid, z_hi],
+        [x_lo, z_mid],
+    ];
+    let vert = |idx: u8| {
+        let p = points[idx as usize];
+        vertex(
+            p[0] as f32 / OCTIMETERS_PER_METER,
+            p[1] as f32 / OCTIMETERS_PER_METER,
+            idx,
+        )
+    };
+    for k in 1..poly.len() - 1 {
+        tris.push(DrawTriangle {
+            verts: [vert(poly[0]), vert(poly[k]), vert(poly[k + 1])],
+        });
+    }
 }
 
 /// Fan-triangulate one window polygon given by its boundary-point indices
@@ -1228,7 +1309,7 @@ mod tests {
         let ids: Vec<u8> = mask.iter().map(|&b| u8::from(b)).collect();
         let params = uniform(3, 90, w * h);
         let (bool_grid, gw, gh) = minimize_corners(&mask, w, h, 2, &params);
-        let (id_grid, igw, igh) = repartition(&ids, w, h, 2, &params);
+        let (id_grid, igw, igh) = repartition(&ids, w, h, 2, &params, &vec![false; w * h]);
         assert_eq!((gw, gh), (igw, igh));
         for (i, (&b, &id)) in bool_grid.iter().zip(&id_grid).enumerate() {
             assert_eq!(u8::from(b), id, "two-label repartition diverges at {i}");
@@ -1255,7 +1336,7 @@ mod tests {
                 params[z * w + x].iterations = 0; // left zone is crisp
             }
         }
-        let (grid, gw, _) = repartition(&ids, w, h, 2, &params);
+        let (grid, gw, _) = repartition(&ids, w, h, 2, &params, &vec![false; w * h]);
         for gz in 0..h * 2 {
             for gx in 0..12 {
                 assert_eq!(
@@ -1294,9 +1375,10 @@ mod tests {
         let case1 = label_case(&ids, 2, 0, 0, 1);
         let case2 = label_case(&ids, 2, 0, 0, 2);
         assert_eq!((case1, case2), (5, 10));
-        emit_label_window(0, 0, &place, case1, false, &flat_vertex, &mut tris);
+        let indexed = |wx: f32, wz: f32, _point: u8| flat_vertex(wx, wz);
+        emit_label_window(0, 0, &place, case1, false, &indexed, &mut tris);
         let split_area = poly_area(&tris);
-        emit_label_window(0, 0, &place, case2, true, &flat_vertex, &mut tris);
+        emit_label_window(0, 0, &place, case2, true, &indexed, &mut tris);
         let window_area = (64.0f32 / 256.0) * (64.0 / 256.0);
         assert!(
             (poly_area(&tris) - window_area).abs() < 1e-6,
@@ -1321,11 +1403,12 @@ mod tests {
         // diagonal corners), labels 2 and 3 one corner each.
         let ids = [1u8, 2, 3, 1];
         let mut tris = Vec::new();
+        let indexed = |wx: f32, wz: f32, _point: u8| flat_vertex(wx, wz);
         for label in 1..=3u8 {
             let case = label_case(&ids, 2, 0, 0, label);
             // Label 1's saddle faces two different labels (2 != 3), so it
             // connects; the single-corner labels have no saddle at all.
-            emit_label_window(0, 0, &place, case, true, &flat_vertex, &mut tris);
+            emit_label_window(0, 0, &place, case, true, &indexed, &mut tris);
         }
         let window_area = (64.0f32 / 256.0) * (64.0 / 256.0);
         assert!(
