@@ -2244,10 +2244,6 @@ fn emit_lattice_closure(
                 x: at.x * EDGE + lx,
                 z: at.z * EDGE + lz,
             };
-            let material = world.underlay(cell);
-            if material == Material::Void {
-                continue; // a Void cell's rim is the marched closure's face
-            }
             // Painted relief cells close on the subcell lattice (the stride
             // their caps tessellated at); every other cell — and the whole
             // raw view — closes on the cell lattice.
@@ -2256,8 +2252,13 @@ fn emit_lattice_closure(
             if relief {
                 for sj in 0..SUB {
                     for si in 0..SUB {
-                        if world.underlay_point(cell, si, sj) != material {
-                            continue; // a hole / material rim lofts as a marched wall
+                        // The point's own material, not the cell's cascade — a
+                        // stone point on a grass cell closes its own
+                        // same-material breaks, and a Void point's rim lofts as
+                        // a marched wall.
+                        let material = world.underlay_point(cell, si, sj);
+                        if material == Material::Void {
+                            continue; // a hole's rim lofts as a marched wall
                         }
                         let level = world.point_surface_level(cell, si, sj);
                         let mut cached: Option<[f32; 4]> = None;
@@ -2313,6 +2314,10 @@ fn emit_lattice_closure(
                     }
                 }
             } else {
+                let material = world.underlay(cell);
+                if material == Material::Void {
+                    continue; // a Void cell's rim is the marched closure's face
+                }
                 let cell_level = world.surface_level(cell);
                 let mut cached: Option<[f32; 4]> = None;
                 for edge in &WALL_DIRECTIONS {
@@ -2561,8 +2566,17 @@ fn emit_contour_closure(
                     // color source, never the split — a low-owned window still
                     // closes its segment.
                     if is_void {
-                        let step_m = STEP_MAX_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
-                        if (yt_p - yb_p).max(yt_q - yb_q) <= step_m {
+                        // A Void low side lofts only where the high side stands
+                        // past the step ceiling above the void's floor: its
+                        // enclosed groove floor where authored below the
+                        // surrounding ground ([`void_floor_level`]), else the
+                        // lowest neighbor ground the skirt drops toward. A flat
+                        // void edge — the high side level with its surroundings
+                        // — lofts nothing, so a cliff-free world stays
+                        // wall-free even where grass meets an open border.
+                        let floor = void_floor_level(world, lo_anchor_p, owner)
+                            .min(void_floor_level(world, lo_anchor_q, owner));
+                        if high_level - floor <= STEP_MAX_OCTIMETERS {
                             continue;
                         }
                     } else if high_level - low_level <= STEP_MAX_OCTIMETERS {
@@ -2583,13 +2597,34 @@ fn emit_contour_closure(
     }
 }
 
+/// The floor a Void point grooves to — the bordering solid cell whose
+/// `cliff_material` colors it — or `None` when the point is an open
+/// silhouette edge that skirts instead. A groove is an **authored
+/// depression**: the point's [`World::point_height`] stands below its cell's
+/// base ground ([`World::height`], so a negative authored delta), *and* the
+/// joint is enclosed by solid within the fill-over reach
+/// ([`void_fill_border`]). An inherited Void point — a raised plateau's
+/// cut-away silhouette rather than a dug well — carries the cell's base
+/// height, not a floor, so it drops the skirt toward its surroundings. The
+/// floor level itself is the void point's `point_height`.
+fn void_groove_floor(world: &World, cell: CellPos, sub_x: i32, sub_z: i32) -> Option<CellPos> {
+    if world.underlay_point(cell, sub_x, sub_z) != Material::Void {
+        return None;
+    }
+    if world.point_height(cell, sub_x, sub_z) >= world.height(cell) {
+        return None; // no authored depression — an open edge, not a groove
+    }
+    let gx = cell.x * SUB + sub_x;
+    let gz = cell.z * SUB + sub_z;
+    void_fill_border(world, gx, gz)
+}
+
 /// The base a Void low side closes to at a marched segment endpoint: the
-/// void point's stored floor height ([`World::point_height`] — the height
-/// plane is total, so a void point still carries a height, void being only a
-/// material flag) when the joint is enclosed by solid within the fill-over
-/// reach ([`void_fill_border`]), so wall / floor / wall reads as a real
-/// flat-bottomed groove; else `yt` dropped by the unbounded-void skirt, the
-/// one case with no far rim within the bound.
+/// void point's stored floor height ([`World::point_height`]) when the joint
+/// is an enclosed authored groove ([`void_groove_floor`]), so wall / floor /
+/// wall reads as a real flat-bottomed groove; else `yt` dropped by the
+/// unbounded-void skirt (the cut-away silhouette of a plateau, or a void that
+/// reaches the world border within the fill-over bound).
 fn void_low_base(world: &World, anchor_oct: [i32; 2], yt: f32) -> f32 {
     let cell = CellPos {
         x: anchor_oct[0].div_euclid(256),
@@ -2597,14 +2632,38 @@ fn void_low_base(world: &World, anchor_oct: [i32; 2], yt: f32) -> f32 {
     };
     let sub_x = anchor_oct[0].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
     let sub_z = anchor_oct[1].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
-    let gx = cell.x * SUB + sub_x;
-    let gz = cell.z * SUB + sub_z;
-    if world.underlay_point(cell, sub_x, sub_z) == Material::Void
-        && void_fill_border(world, gx, gz).is_some()
-    {
+    if void_groove_floor(world, cell, sub_x, sub_z).is_some() {
         return world.point_height(cell, sub_x, sub_z) as f32 / OCTIMETERS_PER_METER;
     }
     yt - WALL_VOID_SKIRT_OCTIMETERS as f32 / OCTIMETERS_PER_METER
+}
+
+/// The floor level in octimeters the Void split test reads at a segment
+/// endpoint: the groove floor of an enclosed authored depression
+/// ([`void_groove_floor`]), else the lowest of the owner's four neighbor
+/// ground levels — the surroundings the skirt drops toward. Gating the skirt
+/// on the surrounding ground (not the fixed skirt depth) is what keeps a flat
+/// void edge, where the high side sits level with its neighbors, wall-free.
+fn void_floor_level(world: &World, anchor_oct: [i32; 2], owner: CellPos) -> i32 {
+    let cell = CellPos {
+        x: anchor_oct[0].div_euclid(256),
+        z: anchor_oct[1].div_euclid(256),
+    };
+    let sub_x = anchor_oct[0].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
+    let sub_z = anchor_oct[1].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
+    if void_groove_floor(world, cell, sub_x, sub_z).is_some() {
+        return world.point_height(cell, sub_x, sub_z);
+    }
+    [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .into_iter()
+        .map(|(dx, dz)| {
+            world.surface_level(CellPos {
+                x: owner.x + dx,
+                z: owner.z + dz,
+            })
+        })
+        .min()
+        .unwrap_or_else(|| world.surface_level(owner))
 }
 
 /// The color source for a Void point's fill-over floor, or `None` when the
@@ -2644,13 +2703,15 @@ fn void_fill_border(world: &World, gx0: i32, gz0: i32) -> Option<CellPos> {
 }
 
 /// Emit the fill-over floor caps: every chunk-local Void point that
-/// [`void_fill_border`] proves enclosed floors over at its stored point
-/// height in the bordering cell's cliff material at base shade — the
-/// bottom-of-groove shadow. The rim walls closing the groove's sides are the
-/// marched closure's Void faces, dropped to this same stored height
-/// ([`void_low_base`]), so the floor and its walls meet watertight. Painted
-/// only; the raw calibration view has no partition and no fill-over. A cell
-/// with no Void point emits nothing, so a solid world stays byte-identical.
+/// [`void_groove_floor`] proves an enclosed authored depression floors over at
+/// its stored point height in the bordering cell's cliff material at base
+/// shade — the bottom-of-groove shadow. The rim walls closing the groove's
+/// sides are the marched closure's Void faces, dropped to this same stored
+/// height ([`void_low_base`]), so the floor and its walls meet watertight.
+/// Painted only; the raw calibration view has no partition and no fill-over. A
+/// cell with no floored Void point emits nothing, so a solid world — and a
+/// plateau's cut-away silhouette, whose Void points carry no authored
+/// depression — stays byte-identical.
 fn emit_void_floors(
     world: &World,
     at: ChunkPos,
@@ -2665,13 +2726,8 @@ fn emit_void_floors(
             };
             for sj in 0..SUB {
                 for si in 0..SUB {
-                    if world.underlay_point(cell, si, sj) != Material::Void {
-                        continue;
-                    }
-                    let gx = cell.x * SUB + si;
-                    let gz = cell.z * SUB + sj;
-                    let Some(border) = void_fill_border(world, gx, gz) else {
-                        continue; // open skirt — no floor
+                    let Some(border) = void_groove_floor(world, cell, si, sj) else {
+                        continue; // open skirt or no authored depression — no floor
                     };
                     let y = world.point_height(cell, si, sj) as f32 / OCTIMETERS_PER_METER;
                     let cliff = world.cliff_material(border);
