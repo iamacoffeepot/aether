@@ -113,7 +113,7 @@ use contour::{
     minimize_corners, push_quad, repartition,
 };
 use style::{
-    ResolvedCell, StyleTable, hsl_to_linear_rgb, raw_field, resolve_cell, rim_strength,
+    ResolvedCell, StyleTable, fbm, hsl_to_linear_rgb, raw_field, resolve_cell, rim_strength,
     wash_lightness,
 };
 
@@ -156,12 +156,36 @@ const SKIRT_BASE_SHADE: f32 = 0.55;
 /// noise field to calibrate; it only keeps the terrain closed.
 const RAW_SKIRT_GRAY: f32 = 0.35;
 
-/// The overlay rim layer lift — one octimeter over the underlay.
-const OVERLAY_RIM_LIFT: f32 = 1.0 / OCTIMETERS_PER_METER;
+/// The overlay rim layer lift — two octimeters over the underlay, one
+/// above the encroachment flap so an overlay contour always draws over a
+/// material margin that grew across the same seam.
+const OVERLAY_RIM_LIFT: f32 = 2.0 / OCTIMETERS_PER_METER;
 
 /// The overlay body layer lift — one octimeter over the rim, so the body
 /// sits on top of the rim it insets from.
-const OVERLAY_BODY_LIFT: f32 = 2.0 / OCTIMETERS_PER_METER;
+const OVERLAY_BODY_LIFT: f32 = 3.0 / OCTIMETERS_PER_METER;
+
+/// The encroachment flap layer lift — one octimeter over the underlay.
+/// The lower material's geometry is untouched at `y = 0`; the higher-rank
+/// material's noise-ragged margin rides just above it, reading as growth
+/// over the seam (grass over a dirt path, sand over a waterline) rather
+/// than a hard partition line.
+const ENCROACH_LIFT: f32 = 1.0 / OCTIMETERS_PER_METER;
+
+/// Base seed for the encroachment margin's raggedness noise, distinct from
+/// the color-field seeds so the ragged edge decorrelates from the quilt.
+const SEED_ENCROACH: u32 = 130_077;
+
+/// The raggedness noise wavelength in cells — a little over a cell, so the
+/// margin waves in and out roughly once per cell of seam.
+const ENCROACH_NOISE_WAVELENGTH: f32 = 1.3;
+
+/// Octave count for the raggedness noise — two octaves give the margin a
+/// coarse wave plus a finer fray without a heavy fractal.
+const ENCROACH_NOISE_OCTAVES: u32 = 2;
+
+/// Per-octave amplitude falloff for the raggedness noise.
+const ENCROACH_NOISE_PERSISTENCE: f32 = 0.5;
 
 /// Upsample factor for a non-water material's smoothed contour grid.
 const CONTOUR_UPSAMPLE: usize = 2;
@@ -405,7 +429,7 @@ fn mesh_underlay(world: &World, at: ChunkPos, styles: &StyleTable, tris: &mut Ve
     };
 
     let upsample = CONTOUR_UPSAMPLE;
-    let (grid, gw, _gh) = repartition(&ids, n, n, upsample, &params);
+    let (grid, gw, gh) = repartition(&ids, n, n, upsample, &params);
     let u = upsample as i32;
     let step_oct = OCTIMETERS_PER_SUBCELL / u;
 
@@ -501,6 +525,28 @@ fn mesh_underlay(world: &World, at: ChunkPos, styles: &StyleTable, tris: &mut Ve
     emit_partition_windows(
         world, at, &display, gw, apron, step_oct, &interior, lo, styles, tris,
     );
+
+    let place = chunk_placement(at, apron, step_oct);
+    emit_encroach_flaps(world, at, &grid, gw, gh, &place, styles, tris);
+}
+
+/// Where a chunk's partition grid lands in the world: sample `(0, 0)`'s
+/// octimeter center, offset back by the apron and forward half a step so
+/// each sample sits at a subcell-lattice center, at `step_oct` spacing.
+/// Both the partition-window and encroachment-flap passes place their
+/// marches through this, so they agree on the lattice sample-for-sample.
+fn chunk_placement(at: ChunkPos, apron: i32, step_oct: i32) -> GridPlacement {
+    let base_oct = [
+        at.x * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
+        at.z * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
+    ];
+    GridPlacement {
+        origin_oct: [
+            base_oct[0] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
+            base_oct[1] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
+        ],
+        step_oct,
+    }
 }
 
 /// Emit the marching-squares windows of the partition's boundary zone.
@@ -527,18 +573,8 @@ fn emit_partition_windows(
 ) {
     let hi = EDGE;
     let cells_w = (hi - lo) as usize;
-    let base_oct = [
-        at.x * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
-        at.z * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
-    ];
-    let origin_oct = [
-        base_oct[0] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
-        base_oct[1] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
-    ];
-    let place = GridPlacement {
-        origin_oct,
-        step_oct,
-    };
+    let place = chunk_placement(at, apron, step_oct);
+    let origin_oct = place.origin_oct;
     // A pending run of uniform windows: (label, owner cell, start wi).
     let mut run: Option<(u8, CellPos, usize)> = None;
     let flush = |run: &mut Option<(u8, CellPos, usize)>,
@@ -725,6 +761,244 @@ fn emit_mixed_window(
             }
         };
         emit_label_window(wi as i32, wj as i32, place, case, connected, &vertex, tris);
+    }
+}
+
+/// The world cell under grid sample `(gx, gz)` of a partition grid placed
+/// by `place`: the sample sits at `origin_oct + idx * step_oct` octimeters
+/// and the cell is that position floored by the 256-octimeter cell size.
+fn sample_cell(place: &GridPlacement, gx: i32, gz: i32) -> CellPos {
+    CellPos {
+        x: (place.origin_oct[0] + gx * place.step_oct).div_euclid(256),
+        z: (place.origin_oct[1] + gz * place.step_oct).div_euclid(256),
+    }
+}
+
+/// Barrier-respecting step distance from `encroacher`'s samples to every
+/// sample of the repartitioned label grid, in orthogonal grid steps (each
+/// `place.step_oct` octimeters). A bounded multi-source breadth-first flood
+/// off every `encroacher` sample: because each step costs one, the first
+/// time the flood reaches a sample is its exact geodesic distance. A step
+/// between two samples is refused when the world cells under them stand a
+/// cliff apart ([`World::edge_is_cliff`]), so the margin grows *around* a
+/// cliff line rather than pouring down the face — the same break the skirt
+/// owns. The flood stops at `max_steps` (the reach ceiling in steps), so it
+/// stays inside the chunk's apron and cheap; a sample the flood never
+/// reaches within the cap reads [`i32::MAX`].
+fn encroach_distance(
+    world: &World,
+    grid: &[u8],
+    gw: usize,
+    place: &GridPlacement,
+    encroacher: u8,
+    max_steps: i32,
+) -> Vec<i32> {
+    let mut dist = vec![i32::MAX; grid.len()];
+    let mut frontier: Vec<usize> = Vec::new();
+    for (idx, &m) in grid.iter().enumerate() {
+        if m == encroacher {
+            dist[idx] = 0;
+            frontier.push(idx);
+        }
+    }
+    let gwi = gw as i32;
+    let gh = (grid.len() / gw) as i32;
+    let mut step = 0;
+    while step < max_steps && !frontier.is_empty() {
+        step += 1;
+        let mut next: Vec<usize> = Vec::new();
+        for &idx in &frontier {
+            let gx = (idx % gw) as i32;
+            let gz = (idx / gw) as i32;
+            let here = sample_cell(place, gx, gz);
+            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let nx = gx + dx;
+                let nz = gz + dz;
+                if nx < 0 || nz < 0 || nx >= gwi || nz >= gh {
+                    continue;
+                }
+                let nidx = nz as usize * gw + nx as usize;
+                if dist[nidx] <= step {
+                    continue;
+                }
+                let there = sample_cell(place, nx, nz);
+                if here != there && world.edge_is_cliff(here, there) {
+                    continue;
+                }
+                dist[nidx] = step;
+                next.push(nidx);
+            }
+        }
+        frontier = next;
+    }
+    dist
+}
+
+/// The encroachment mask for one `encroacher` material over the
+/// repartitioned label grid: `true` at every sample whose own material has
+/// strictly lower [`encroach_rank`](style::MaterialStyle::encroach_rank)
+/// and whose barrier-respecting distance from `encroacher` is within the
+/// noise-modulated reach `reach_octimeters × (1 − raggedness × noise)`. The
+/// noise is a world-anchored [`fbm`] sample (mapped to `[0, 1]` so the
+/// raggedness only ever eats *into* the reach, never past it), so two
+/// chunks resolve the same sample identically and the margin agrees over
+/// their shared border. Void samples are never encroached — an empty cell
+/// has no ground for a flap to lie on.
+fn encroach_mask(
+    world: &World,
+    grid: &[u8],
+    gw: usize,
+    gh: usize,
+    place: &GridPlacement,
+    encroacher: Material,
+    styles: &StyleTable,
+) -> Vec<bool> {
+    let s = styles.get(encroacher);
+    let rank = s.encroach_rank;
+    let reach_octimeters = s.encroach_reach_octimeters;
+    let raggedness = s.encroach_raggedness;
+    let max_steps = reach_octimeters / place.step_oct;
+    let dist = encroach_distance(world, grid, gw, place, encroacher.to_u8(), max_steps);
+    let mut mask = vec![false; grid.len()];
+    for gz in 0..gh {
+        for gx in 0..gw {
+            let idx = gz * gw + gx;
+            let d = dist[idx];
+            if d == i32::MAX {
+                continue;
+            }
+            let sample = grid[idx];
+            if sample == 0 {
+                continue;
+            }
+            if styles.get(Material::from_u8_or_void(sample)).encroach_rank >= rank {
+                continue;
+            }
+            let wx =
+                (place.origin_oct[0] + gx as i32 * place.step_oct) as f32 / OCTIMETERS_PER_METER;
+            let wz =
+                (place.origin_oct[1] + gz as i32 * place.step_oct) as f32 / OCTIMETERS_PER_METER;
+            let noise = fbm(
+                wx,
+                wz,
+                SEED_ENCROACH.wrapping_add(s.seed_offset),
+                ENCROACH_NOISE_OCTAVES,
+                ENCROACH_NOISE_WAVELENGTH,
+                ENCROACH_NOISE_PERSISTENCE,
+            );
+            let noise01 = (noise * 0.5 + 0.5).clamp(0.0, 1.0);
+            let reach = reach_octimeters as f32 * (1.0 - raggedness * noise01);
+            if (d * place.step_oct) as f32 <= reach {
+                mask[idx] = true;
+            }
+        }
+    }
+    mask
+}
+
+/// Emit the encroachment flap layer: for each material present in the grid
+/// that can encroach (rank and reach both positive), build its mask and
+/// march it as a marched surface one octimeter above the untouched
+/// underlay. Materials draw lowest-rank first so a higher-rank flap wins
+/// the depth test wherever two margins overlap the same lower sample. The
+/// whole layer only runs in the painted underlay pass, so the raw
+/// calibration view (a noise-field instrument) never carries it.
+#[allow(clippy::too_many_arguments)] // one call site; the flap state travels together
+fn emit_encroach_flaps(
+    world: &World,
+    at: ChunkPos,
+    grid: &[u8],
+    gw: usize,
+    gh: usize,
+    place: &GridPlacement,
+    styles: &StyleTable,
+    tris: &mut Vec<DrawTriangle>,
+) {
+    let mut present = [false; 6];
+    for &m in grid {
+        present[m as usize] = true;
+    }
+    let mut encroachers: Vec<Material> = (1..6u8)
+        .filter(|&m| present[m as usize])
+        .map(Material::from_u8_or_void)
+        .filter(|&mat| {
+            let s = styles.get(mat);
+            s.encroach_rank > 0 && s.encroach_reach_octimeters > 0
+        })
+        .collect();
+    encroachers.sort_by_key(|&mat| styles.get(mat).encroach_rank);
+    for encroacher in encroachers {
+        let mask = encroach_mask(world, grid, gw, gh, place, encroacher, styles);
+        emit_encroach_windows(world, at, &mask, gw, gh, place, encroacher, styles, tris);
+    }
+}
+
+/// March one encroacher's mask into flap polygons under the same
+/// window-center ownership rule as [`emit_partition_windows`]: a window is
+/// emitted only by the chunk holding the cell under its center, so the
+/// layer is emitted once fleet-wide against the per-frame vertex budget.
+/// Each window's polygon is colored as the encroacher keyed at its owner
+/// cell (the [`emit_mixed_window`] convention) and every vertex lifts
+/// through [`label_lift`] plus [`ENCROACH_LIFT`] — so a flap at a cliff top
+/// clamps to the high side as a small overhanging lip, and a flap over a
+/// water cell rides the flat authored plane level rather than the lakebed.
+#[allow(clippy::too_many_arguments)] // one call site; the flap state travels together
+fn emit_encroach_windows(
+    world: &World,
+    at: ChunkPos,
+    mask: &[bool],
+    gw: usize,
+    gh: usize,
+    place: &GridPlacement,
+    encroacher: Material,
+    styles: &StyleTable,
+    tris: &mut Vec<DrawTriangle>,
+) {
+    let step_oct = place.step_oct;
+    let s = styles.get(encroacher);
+    for wj in 0..gh - 1 {
+        for wi in 0..gw - 1 {
+            let bl = mask[wj * gw + wi];
+            let br = mask[wj * gw + wi + 1];
+            let tl = mask[(wj + 1) * gw + wi];
+            let tr = mask[(wj + 1) * gw + wi + 1];
+            let case = u8::from(bl) | u8::from(br) << 1 | u8::from(tr) << 2 | u8::from(tl) << 3;
+            if case == 0 {
+                continue;
+            }
+            let x_lo = place.origin_oct[0] + wi as i32 * step_oct;
+            let z_lo = place.origin_oct[1] + wj as i32 * step_oct;
+            let x_center_cell = (x_lo + step_oct / 2).div_euclid(256);
+            let z_center_cell = (z_lo + step_oct / 2).div_euclid(256);
+            let x_owner_local = x_center_cell - at.x * EDGE;
+            let z_owner_local = z_center_cell - at.z * EDGE;
+            if !(0..EDGE).contains(&x_owner_local) || !(0..EDGE).contains(&z_owner_local) {
+                continue;
+            }
+            let owner = CellPos {
+                x: x_center_cell,
+                z: z_center_cell,
+            };
+            let resolved = resolve_cell(s, owner.x as f32 + 0.5, owner.z as f32 + 0.5, None);
+            let vertex = |wx: f32, wz: f32| {
+                let (y, shade) = label_lift(world, owner, wx, wz);
+                let light = wash_lightness(s, resolved.light, wx, wz, resolved.stroke);
+                let rgb = hsl_to_linear_rgb(
+                    resolved.hue,
+                    resolved.sat,
+                    (light * shade).clamp(0.0, 100.0),
+                );
+                Vertex {
+                    x: wx,
+                    y: y + ENCROACH_LIFT,
+                    z: wz,
+                    r: rgb[0],
+                    g: rgb[1],
+                    b: rgb[2],
+                }
+            };
+            emit_label_window(wi as i32, wj as i32, place, case, true, &vertex, tris);
+        }
     }
 }
 
@@ -1866,6 +2140,14 @@ mod tests {
         assert!(!mesh.is_empty());
         for v in mesh.iter().flat_map(|t| t.verts.iter()) {
             let surface = world.surface_height(v.x, v.z);
+            // Encroachment flaps ride ENCROACH_LIFT above the ground on
+            // purpose (the grass-over-sand margin lies on top of the seam);
+            // the drawn-equals-stood-on invariant is about the ground a
+            // mover stands on, so skip the flap layer and hold every other
+            // vertex exactly on the surface.
+            if (v.y - surface - ENCROACH_LIFT).abs() < 1e-4 {
+                continue;
+            }
             assert!(
                 (v.y - surface).abs() < 1e-4,
                 "vertex ({}, {}) drawn at {} but stood on {surface}",
@@ -1982,9 +2264,10 @@ mod tests {
 
     #[test]
     fn overlay_rides_the_surface_at_its_lift() {
-        // A stone overlay on the ramp keeps its one- and two-octimeter
-        // lifts measured from the surface, not from `y = 0` — the drape
-        // rule for overlays over sloped ground.
+        // A stone overlay on the ramp keeps its rim and body lifts measured
+        // from the surface, not from `y = 0` — the drape rule for overlays
+        // over sloped ground. The grass-over-sand encroachment flap rides
+        // the same surface one octimeter up, so it is a third legal lift.
         let mut world = ramp_world();
         let at = ChunkPos { x: 0, z: 0 };
         let mut chunk = world.chunk(at).expect("chunk").clone();
@@ -2003,8 +2286,9 @@ mod tests {
                 overlay_verts += 1;
                 assert!(
                     (lift - OVERLAY_RIM_LIFT).abs() < 1e-4
-                        || (lift - OVERLAY_BODY_LIFT).abs() < 1e-4,
-                    "overlay lift {lift} is neither rim nor body at ({}, {})",
+                        || (lift - OVERLAY_BODY_LIFT).abs() < 1e-4
+                        || (lift - ENCROACH_LIFT).abs() < 1e-4,
+                    "surface layer lift {lift} is neither rim, body, nor flap at ({}, {})",
                     v.x,
                     v.z,
                 );
@@ -2095,6 +2379,9 @@ mod tests {
             wash_grade: grass.wash_grade,
             water_depth_darken: grass.water_depth_darken,
             blob_merge_degrees: grass.blob_merge_degrees,
+            encroach_rank: grass.encroach_rank,
+            encroach_reach_octimeters: grass.encroach_reach_octimeters,
+            encroach_raggedness: grass.encroach_raggedness,
         });
         let tuned_mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted, &tuned);
 
@@ -2216,5 +2503,259 @@ mod tests {
             }),
             "the shaped silhouette stays inside the cell",
         );
+    }
+
+    /// A full `SetMaterialStyle` write mirroring `row` for `material` — the
+    /// verbose per-field copy a live tuning pass would send, so a test can
+    /// nudge one field off the defaults and apply it.
+    fn style_msg(material: Material, row: &style::MaterialStyle) -> SetMaterialStyle {
+        SetMaterialStyle {
+            material: material.to_u8(),
+            base_hue: row.base_hue,
+            base_sat: row.base_sat,
+            base_light: row.base_light,
+            amp_hue: row.amp_hue,
+            amp_sat: row.amp_sat,
+            amp_light: row.amp_light,
+            wavelength: row.wavelength,
+            octaves: row.octaves,
+            persistence: row.persistence,
+            seed_offset: row.seed_offset,
+            flow_wavelength: row.flow_wavelength,
+            smoothing_degrees: row.smoothing_degrees,
+            smoothing_iterations: row.smoothing_iterations,
+            rim_inset_octimeters: row.rim_inset_octimeters,
+            rim_darken: row.rim_darken,
+            wash_grade: row.wash_grade,
+            water_depth_darken: row.water_depth_darken,
+            blob_merge_degrees: row.blob_merge_degrees,
+            encroach_rank: row.encroach_rank,
+            encroach_reach_octimeters: row.encroach_reach_octimeters,
+            encroach_raggedness: row.encroach_raggedness,
+        }
+    }
+
+    /// Does the mesh carry an encroachment flap — a triangle whose vertices
+    /// all sit exactly `ENCROACH_LIFT` above a flat (`y = 0`) ground?
+    fn has_flap(mesh: &[DrawTriangle]) -> bool {
+        mesh.iter()
+            .any(|t| t.verts.iter().all(|v| (v.y - ENCROACH_LIFT).abs() < 1e-4))
+    }
+
+    #[test]
+    fn encroach_distance_wraps_around_a_cliff_barrier() {
+        // A wall of cliff-high cells at local x = 2 blocks the flood from
+        // stepping straight across it; the one low cell at the wall's end
+        // is the only gap. The flood must route down to that gap and back,
+        // so a cell just past the wall reads a distance far longer than the
+        // blocked straight line — the margin grows around a cliff instead
+        // of pouring across it.
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        for lz in 0..EDGE {
+            for lx in 0..EDGE {
+                let wall = lx == 2 && lz < EDGE - 1;
+                chunk.height[(lz * EDGE + lx) as usize] = if wall { 10_000 } else { 0 };
+            }
+        }
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
+        // One grid sample per cell: samples sit at cell centers (128 oct),
+        // so adjacent samples map to edge-adjacent cells and the flood's
+        // barrier test is exactly the cell cliff test.
+        let place = GridPlacement {
+            origin_oct: [128, 128],
+            step_oct: 256,
+        };
+        let gw = EDGE as usize;
+        let gh = EDGE as usize;
+        // Every sample is material 2, except the source column x = 0.
+        let mut grid = vec![2u8; gw * gh];
+        for gz in 0..gh {
+            grid[gz * gw] = 1;
+        }
+        let dist = encroach_distance(&world, &grid, gw, &place, 1, 10_000);
+        let target = 3; // (x = 3, z = 0), directly past the wall on the source row
+        assert_ne!(
+            dist[target],
+            i32::MAX,
+            "the gap at the wall's end lets the flood through",
+        );
+        assert!(
+            dist[target] > 3,
+            "the flood routed around the wall, not across the cliff (got {})",
+            dist[target],
+        );
+    }
+
+    #[test]
+    fn encroach_mask_excludes_equal_or_higher_rank() {
+        // Sand encroaches only over strictly-lower-rank samples: a grass
+        // sample one step away (higher rank) and a sand sample (equal rank)
+        // stay out of the mask even though both are within reach, while a
+        // dirt sample the same one step off is covered. The rank gate, not
+        // distance, decides who a margin may grow over.
+        let mut world = World::new();
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, Chunk::empty()); // flat, no cliffs
+        let styles = StyleTable::default();
+        let place = GridPlacement {
+            origin_oct: [16, 16],
+            step_oct: 32,
+        };
+        // sand source, grass, sand source, dirt — all within one cell.
+        let grid = vec![4u8, 1, 4, 2];
+        let mask = encroach_mask(&world, &grid, 4, 1, &place, Material::Sand, &styles);
+        assert!(!mask[0], "a sand source is not in its own mask");
+        assert!(!mask[1], "grass (higher rank) is excluded though in range");
+        assert!(!mask[2], "sand (equal rank) is excluded though in range");
+        assert!(mask[3], "dirt (lower rank) within reach is covered");
+    }
+
+    #[test]
+    fn equal_rank_seam_emits_no_flap() {
+        // The default grass (rank 3) over sand (rank 2) grows a margin, but
+        // lifting sand to grass's rank must silence it: equal ranks never
+        // encroach on each other, so the seam falls back to the hard
+        // partition line with no flap layer at all.
+        let world = sand_band_world(None);
+        let at = ChunkPos { x: 0, z: 0 };
+        let default_mesh = mesh_chunk(&world, at, ViewMode::Painted, &StyleTable::default());
+        assert!(
+            has_flap(&default_mesh),
+            "unequal ranks grow a margin over the seam",
+        );
+
+        let defaults = StyleTable::default();
+        let mut sand = style_msg(Material::Sand, defaults.get(Material::Sand));
+        sand.encroach_rank = defaults.get(Material::Grass).encroach_rank;
+        let mut styles = StyleTable::default();
+        styles.apply(&sand);
+        let equal_mesh = mesh_chunk(&world, at, ViewMode::Painted, &styles);
+        assert!(
+            !has_flap(&equal_mesh),
+            "an equal-rank seam emits no encroachment flap",
+        );
+    }
+
+    #[test]
+    fn encroach_flaps_tile_the_seam_across_a_chunk_border() {
+        // Grass (rank 3) over a sand band (rank 2), the seam running
+        // horizontally across the x = 16 chunk border. With a full-cell
+        // reach and no raggedness the margin is a clean deterministic band,
+        // emitted under the single-owner window rule: the two chunks must
+        // together cover the seam band with no window emitted twice and no
+        // hole at the border. An ownership slip doubles a flap; an
+        // apron-read slip leaves a gap.
+        let mut world = World::new();
+        world.insert_region(
+            1,
+            Region {
+                name: "meadow".into(),
+                default_material: Material::Grass,
+                cliff_material: Material::Stone,
+            },
+        );
+        for cx in 0..2 {
+            let mut chunk = Chunk::empty();
+            chunk.region = [1; CELLS_PER_CHUNK_AREA];
+            for lz in 8..EDGE {
+                for lx in 0..EDGE {
+                    chunk.underlay[(lz * EDGE + lx) as usize] = Material::Sand;
+                }
+            }
+            world.insert_chunk(ChunkPos { x: cx, z: 0 }, chunk);
+        }
+        // A clean full-cell margin: reach one cell, raggedness off.
+        let defaults = StyleTable::default();
+        let mut grass = style_msg(Material::Grass, defaults.get(Material::Grass));
+        grass.encroach_reach_octimeters = 256;
+        grass.encroach_raggedness = 0.0;
+        let mut styles = StyleTable::default();
+        styles.apply(&grass);
+
+        let mesh0 = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted, &styles);
+        let mesh1 = mesh_chunk(&world, ChunkPos { x: 1, z: 0 }, ViewMode::Painted, &styles);
+        let is_flap = |t: &DrawTriangle| t.verts.iter().all(|v| (v.y - ENCROACH_LIFT).abs() < 1e-4);
+        let flaps0: Vec<&DrawTriangle> = mesh0.iter().filter(|t| is_flap(t)).collect();
+        let flaps1: Vec<&DrawTriangle> = mesh1.iter().filter(|t| is_flap(t)).collect();
+        assert!(
+            !flaps0.is_empty() && !flaps1.is_empty(),
+            "each chunk emits its own side of the seam flap",
+        );
+
+        // No flap window is emitted by both chunks (single-owner rule).
+        let key = |t: &DrawTriangle| {
+            let mut k = [(0u32, 0u32, 0u32); 3];
+            for (i, v) in t.verts.iter().enumerate() {
+                k[i] = (v.x.to_bits(), v.y.to_bits(), v.z.to_bits());
+            }
+            k
+        };
+        for t0 in &flaps0 {
+            assert!(
+                !flaps1.iter().any(|t1| key(t0) == key(t1)),
+                "a flap window was emitted by both chunks",
+            );
+        }
+
+        // The union covers the seam band continuously across the border.
+        let flap_covers =
+            |flaps: &[&DrawTriangle], px: f32, pz: f32| flaps.iter().any(|t| covers(t, px, pz));
+        for i in 0..=40 {
+            let px = (i as f32).mul_add(0.05, 15.0); // 15.0 .. 17.0
+            let pz = 8.5;
+            assert!(
+                flap_covers(&flaps0, px, pz) || flap_covers(&flaps1, px, pz),
+                "flap seam hole at ({px}, {pz})",
+            );
+        }
+    }
+
+    #[test]
+    fn encroach_flap_over_water_rides_the_plane() {
+        // Grass grows over a waterline the same as any lower-rank seam, and
+        // its flap must ride the flat authored water plane, not the lakebed
+        // a meter below it — the on-top read over water for free. A 3x3
+        // water pool (surface at the datum, lakebed a meter down) in a grass
+        // field: some grass flap vertex lands inside the pool footprint and
+        // sits at the plane level plus the flap lift.
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        chunk.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+        for lz in 7..10 {
+            for lx in 7..10 {
+                let idx = (lz * EDGE + lx) as usize;
+                chunk.underlay[idx] = Material::Water;
+                chunk.height[idx] = -256; // lakebed one meter below the datum plane
+            }
+        }
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
+        let mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
+        let mut found = false;
+        for t in &mesh {
+            // A grass flap is green (the encroacher's body color) and lifted
+            // above the ground.
+            let green = t.verts.iter().all(|v| v.g > v.r && v.g > v.b);
+            if !green {
+                continue;
+            }
+            for v in &t.verts {
+                // Strictly inside the pool footprint (the margin only reaches
+                // the outer ring, so the covered band sits near the edges).
+                if v.y > 0.0005 && (7.05..=9.95).contains(&v.x) && (7.05..=9.95).contains(&v.z) {
+                    found = true;
+                    assert!(
+                        (v.y - ENCROACH_LIFT).abs() < 1e-4,
+                        "a grass flap over water rides the plane, got y = {} (lakebed would be ~-1)",
+                        v.y,
+                    );
+                }
+            }
+        }
+        assert!(found, "a grass flap grows over the water pool");
     }
 }

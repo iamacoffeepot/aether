@@ -43,6 +43,12 @@ use core::f32::consts::FRAC_1_SQRT_2;
 
 use crate::world::{MAX_SMOOTHING_ITERATIONS, Material, SetMaterialStyle};
 
+/// The encroachment reach ceiling in octimeters — one cell.
+/// [`StyleTable::apply`] clamps a live write here so a margin never reaches
+/// past the mesher's eight-subcell apron and the `R = 1` neighbor
+/// invalidation that keep two chunks agreeing on a flap byte-identically.
+pub const MAX_ENCROACH_REACH_OCTIMETERS: i32 = 256;
+
 /// One material's complete render style. Indexed by [`Material`] through
 /// [`StyleTable::get`]; the [`Material::Void`] row is a placeholder that
 /// is never painted.
@@ -88,6 +94,18 @@ pub struct MaterialStyle {
     /// Blob-merge hue-step threshold in degrees: same-material cells whose
     /// resolved hue differs by more than this pool a rim between them.
     pub blob_merge_degrees: f32,
+    /// Encroachment dominance in a total order: at a seam the higher-rank
+    /// material grows a noise-ragged margin over the lower one, lifted a
+    /// hair above it. `0` never encroaches, and equal ranks never encroach
+    /// on each other.
+    pub encroach_rank: u8,
+    /// How far in octimeters the margin reaches past the seam into the
+    /// lower material before the raggedness noise carves it back. `0`
+    /// disables the layer for this material.
+    pub encroach_reach_octimeters: i32,
+    /// The fraction `[0, 1]` of the reach the world-anchored noise eats, so
+    /// the margin reads ragged rather than a clean offset band.
+    pub encroach_raggedness: f32,
 }
 
 /// Per-material style rows. Base colors are the HSL of the ground palette's
@@ -118,6 +136,9 @@ const STYLES: [MaterialStyle; 6] = [
         wash_grade: 0.10,
         water_depth_darken: 0.0,
         blob_merge_degrees: 6.0,
+        encroach_rank: 0,
+        encroach_reach_octimeters: 0,
+        encroach_raggedness: 0.0,
     },
     // Grass — hsl(110, 37.5, 40).
     MaterialStyle {
@@ -139,6 +160,9 @@ const STYLES: [MaterialStyle; 6] = [
         wash_grade: 0.10,
         water_depth_darken: 0.0,
         blob_merge_degrees: 6.0,
+        encroach_rank: 3,
+        encroach_reach_octimeters: 96,
+        encroach_raggedness: 0.6,
     },
     // Dirt — hsl(31, 42.9, 31.5).
     MaterialStyle {
@@ -160,6 +184,9 @@ const STYLES: [MaterialStyle; 6] = [
         wash_grade: 0.10,
         water_depth_darken: 0.0,
         blob_merge_degrees: 6.0,
+        encroach_rank: 1,
+        encroach_reach_octimeters: 0,
+        encroach_raggedness: 0.5,
     },
     // Stone — hsl(240, 3.45, 56.5).
     MaterialStyle {
@@ -181,6 +208,9 @@ const STYLES: [MaterialStyle; 6] = [
         wash_grade: 0.08,
         water_depth_darken: 0.0,
         blob_merge_degrees: 6.0,
+        encroach_rank: 0,
+        encroach_reach_octimeters: 0,
+        encroach_raggedness: 0.0,
     },
     // Sand — hsl(46, 50, 70).
     MaterialStyle {
@@ -202,6 +232,9 @@ const STYLES: [MaterialStyle; 6] = [
         wash_grade: 0.10,
         water_depth_darken: 0.0,
         blob_merge_degrees: 6.0,
+        encroach_rank: 2,
+        encroach_reach_octimeters: 64,
+        encroach_raggedness: 0.5,
     },
     // Water — hsl(216, 55.6, 45).
     MaterialStyle {
@@ -223,6 +256,9 @@ const STYLES: [MaterialStyle; 6] = [
         wash_grade: 0.06,
         water_depth_darken: 9.0,
         blob_merge_degrees: 6.0,
+        encroach_rank: 0,
+        encroach_reach_octimeters: 0,
+        encroach_raggedness: 0.0,
     },
 ];
 
@@ -251,9 +287,12 @@ impl StyleTable {
     /// mail, clamping `smoothing_iterations` to [`MAX_SMOOTHING_ITERATIONS`]
     /// and `smoothing_degrees` to `[45, 90]` — the same rule
     /// [`crate::world::World::insert_smoothing_profile`] applies to the
-    /// per-cell smoothing table. An undecodable or `Void` material byte is
-    /// a no-op; the caller (the `WorldView` handler) is expected to have
-    /// already rejected it with a warn log.
+    /// per-cell smoothing table — plus `encroach_reach_octimeters` to
+    /// `[0, MAX_ENCROACH_REACH_OCTIMETERS]` and `encroach_raggedness` to
+    /// `[0, 1]` so a live write can never push a margin past the mesher's
+    /// apron. An undecodable or `Void` material byte is a no-op; the caller
+    /// (the `WorldView` handler) is expected to have already rejected it
+    /// with a warn log.
     pub fn apply(&mut self, msg: &SetMaterialStyle) {
         let Ok(material) = Material::try_from(msg.material) else {
             return;
@@ -280,6 +319,11 @@ impl StyleTable {
             wash_grade: msg.wash_grade,
             water_depth_darken: msg.water_depth_darken,
             blob_merge_degrees: msg.blob_merge_degrees,
+            encroach_rank: msg.encroach_rank,
+            encroach_reach_octimeters: msg
+                .encroach_reach_octimeters
+                .clamp(0, MAX_ENCROACH_REACH_OCTIMETERS),
+            encroach_raggedness: msg.encroach_raggedness.clamp(0.0, 1.0),
         };
     }
 }
@@ -331,7 +375,14 @@ fn value_noise(x: f32, z: f32, seed: u32) -> f32 {
 }
 
 /// Fractal value noise (lacunarity 2) in `[-1, 1]`.
-fn fbm(x: f32, z: f32, seed: u32, octaves: u32, wavelength: f32, persistence: f32) -> f32 {
+pub(crate) fn fbm(
+    x: f32,
+    z: f32,
+    seed: u32,
+    octaves: u32,
+    wavelength: f32,
+    persistence: f32,
+) -> f32 {
     let mut amp = 1.0;
     let mut freq = 1.0 / wavelength;
     let mut sum = 0.0;
@@ -879,10 +930,50 @@ mod tests {
             wash_grade: 0.10,
             water_depth_darken: 0.0,
             blob_merge_degrees: 6.0,
+            encroach_rank: 3,
+            encroach_reach_octimeters: 96,
+            encroach_raggedness: 0.6,
         });
         let row = styles.get(Material::Grass);
         assert_eq!(row.smoothing_iterations, MAX_SMOOTHING_ITERATIONS);
         assert_eq!(row.smoothing_degrees, 45);
+    }
+
+    #[test]
+    fn apply_clamps_encroach_reach_and_raggedness() {
+        // Catches a dropped clamp on the encroachment margin: the mesher's
+        // barrier flood is capped at the one-cell apron, so a reach past
+        // MAX_ENCROACH_REACH_OCTIMETERS would let a margin outrun the
+        // apron and disagree across a chunk border, and a raggedness past 1
+        // would drive the reach negative.
+        let mut styles = StyleTable::default();
+        styles.apply(&SetMaterialStyle {
+            material: Material::Grass.to_u8(),
+            base_hue: 110.0,
+            base_sat: 37.5,
+            base_light: 40.0,
+            amp_hue: 8.0,
+            amp_sat: 0.0,
+            amp_light: 6.0,
+            wavelength: 6.0,
+            octaves: 2,
+            persistence: 0.45,
+            seed_offset: 20011,
+            flow_wavelength: 4.0,
+            smoothing_degrees: 90,
+            smoothing_iterations: 1,
+            rim_inset_octimeters: 32,
+            rim_darken: 0.15,
+            wash_grade: 0.10,
+            water_depth_darken: 0.0,
+            blob_merge_degrees: 6.0,
+            encroach_rank: 3,
+            encroach_reach_octimeters: 4096,
+            encroach_raggedness: 2.5,
+        });
+        let row = styles.get(Material::Grass);
+        assert_eq!(row.encroach_reach_octimeters, MAX_ENCROACH_REACH_OCTIMETERS);
+        assert_eq!(row.encroach_raggedness, 1.0);
     }
 
     #[test]
@@ -913,6 +1004,9 @@ mod tests {
                 wash_grade: 1.0,
                 water_depth_darken: 1.0,
                 blob_merge_degrees: 1.0,
+                encroach_rank: 1,
+                encroach_reach_octimeters: 1,
+                encroach_raggedness: 1.0,
             });
         }
         let grass = styles.get(Material::Grass);
