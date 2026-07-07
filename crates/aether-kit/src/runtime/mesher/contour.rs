@@ -90,17 +90,35 @@ fn corner_flip(
     }
 }
 
+/// The per-sample threshold the windowed 5x5 rule fires at, from the
+/// sample's angle setting; `99` (unreachable — the window holds 24
+/// neighbors) disables the rule at 90 degrees.
+fn t24_of(smoothing_degrees: u32) -> i32 {
+    if smoothing_degrees >= 90 {
+        99
+    } else {
+        13 + ((smoothing_degrees as i32 - 45) * 2 + 15) / 30
+    }
+}
+
 /// Upsample `mask` (`width × height`) by `upsample` and minimize its
-/// corners per `params`. Returns the smoothed grid and its dimensions
-/// (`width * upsample`, `height * upsample`).
+/// corners, each mask sample governed by its own entry in `params` (a
+/// slice parallel to `mask` — index `z * width + x`). The pass loop runs
+/// to the slice's maximum iteration count; a sample flips in pass `k`
+/// only where its own `iterations` exceeds `k`, and the angle gate reads
+/// its own `smoothing_degrees` — so a spatially varying field degrades
+/// into an authored crisp↔smooth seam with no reconciliation pass.
+/// Returns the smoothed grid and its dimensions (`width * upsample`,
+/// `height * upsample`).
 #[must_use]
 pub fn minimize_corners(
     mask: &[bool],
     width: usize,
     height: usize,
     upsample: usize,
-    params: SmoothParams,
+    params: &[SmoothParams],
 ) -> (Vec<bool>, usize, usize) {
+    debug_assert_eq!(params.len(), mask.len(), "one SmoothParams per sample");
     let upsample = upsample.max(1);
     let gw = width * upsample;
     let gh = height * upsample;
@@ -117,19 +135,24 @@ pub fn minimize_corners(
             );
         }
     }
-    if params.iterations < 1 {
+    let max_iterations = params.iter().map(|p| p.iterations).max().unwrap_or(0);
+    if max_iterations < 1 {
         return (grid, gw, gh);
     }
 
     // Pass one: rasterize the analytic cell-level 45-degree chamfer onto
     // the upsampled grid. A corner triangle flips only when its two
     // orthogonal neighbors and the diagonal all agree, so one rule covers
-    // both a convex cut and a concave fill.
+    // both a convex cut and a concave fill. A sample whose own cell sits
+    // at zero iterations keeps its raw value.
     let inv = 1.0 / upsample as f32;
     for gz in 0..gh {
         for gx in 0..gw {
             let cx = (gx / upsample) as i32;
             let cz = (gz / upsample) as i32;
+            if params[cz as usize * width + cx as usize].iterations < 1 {
+                continue;
+            }
             let fx = ((gx % upsample) as f32 + 0.5) * inv;
             let fz = ((gz % upsample) as f32 + 0.5) * inv;
             let m0 = in_mask(mask, width, height, cx, cz, false);
@@ -194,26 +217,83 @@ pub fn minimize_corners(
     // catches a chamfer apex that straddles two subcells; a windowed 5x5
     // count grades the gentler junctions when the angle setting is under
     // 90 degrees.
-    let t24 = if params.smoothing_degrees >= 90 {
-        99
-    } else {
-        13 + ((params.smoothing_degrees as i32 - 45) * 2 + 15) / 30
-    };
-    for _pass in 1..params.iterations {
-        grid = cellular_pass(&grid, gw, gh, t24);
+    for pass in 1..max_iterations {
+        grid = cellular_pass(&grid, gw, gh, params, width, upsample, pass);
     }
+
+    grid = prune_one_wide_artifacts(grid, gw, gh, params, width, upsample);
     (grid, gw, gh)
 }
 
-/// One cellular corner-flip pass over `grid`. A cell flips when a true
+/// Converge away one-sample-wide artifacts the final cellular pass had no
+/// successor to eat — a fill made while its neighbors were cut reads as a
+/// bump jutting off the boundary once marched. A covered sample attached
+/// by at most one orthogonal side cuts; an uncovered sample enclosed on
+/// three or more orthogonal sides fills; every staircase or corner sample
+/// carries exactly two sides, so legitimate contours are untouchable and
+/// the sweep is a no-op on them. Gated per sample like the passes — a
+/// zero-iteration zone keeps its raw mask verbatim.
+fn prune_one_wide_artifacts(
+    mut grid: Vec<bool>,
+    gw: usize,
+    gh: usize,
+    params: &[SmoothParams],
+    mask_width: usize,
+    upsample: usize,
+) -> Vec<bool> {
+    for _sweep in 0..8 {
+        let mut changed = false;
+        let mut next = grid.clone();
+        for gz in 0..gh as i32 {
+            for gx in 0..gw as i32 {
+                let own = params[(gz as usize / upsample) * mask_width + gx as usize / upsample];
+                if own.iterations < 1 {
+                    continue;
+                }
+                let m = grid[gz as usize * gw + gx as usize];
+                let orth_covered = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+                    .iter()
+                    .filter(|(dx, dz)| in_mask(&grid, gw, gh, gx + dx, gz + dz, m))
+                    .count();
+                if (m && orth_covered <= 1) || (!m && orth_covered >= 3) {
+                    next[gz as usize * gw + gx as usize] = !m;
+                    changed = true;
+                }
+            }
+        }
+        grid = next;
+        if !changed {
+            break;
+        }
+    }
+    grid
+}
+
+/// One cellular corner-flip pass over `grid`. A sample flips when a true
 /// right-angle corner is detected pointwise (five-plus of the eight
 /// neighbors differ), when the parity shoulder fires (four differ with two
-/// adjacent orthogonal sides), or — when `t24` is enabled (under 90
-/// degrees) — when the 5x5 window count reaches `t24`.
-fn cellular_pass(grid: &[bool], gw: usize, gh: usize, t24: i32) -> Vec<bool> {
+/// adjacent orthogonal sides), or — when its own angle setting is under 90
+/// degrees — when the 5x5 window count reaches its threshold. Neighborhood
+/// counts read the whole shared grid; only the flip decision is gated by
+/// the sample's own cell (`params` at mask resolution, still in pass
+/// `pass` when its `iterations` exceeds it).
+fn cellular_pass(
+    grid: &[bool],
+    gw: usize,
+    gh: usize,
+    params: &[SmoothParams],
+    mask_width: usize,
+    upsample: usize,
+    pass: u32,
+) -> Vec<bool> {
     let mut next = grid.to_vec();
     for gz in 0..gh as i32 {
         for gx in 0..gw as i32 {
+            let own = params[(gz as usize / upsample) * mask_width + gx as usize / upsample];
+            if own.iterations <= pass {
+                continue;
+            }
+            let t24 = t24_of(own.smoothing_degrees);
             let m = grid[gz as usize * gw + gx as usize];
             let mut c8 = 0;
             for dz in -1..=1 {
@@ -477,6 +557,18 @@ mod tests {
         grid.iter().filter(|&&b| b).count()
     }
 
+    /// A uniform per-sample params slice — the single-setting case every
+    /// caller had before the field made params spatial.
+    fn uniform(iterations: u32, smoothing_degrees: u32, len: usize) -> Vec<SmoothParams> {
+        vec![
+            SmoothParams {
+                iterations,
+                smoothing_degrees,
+            };
+            len
+        ]
+    }
+
     /// A raw upsample of `mask` by `factor` — the identity `minimize_corners`
     /// must reproduce at zero iterations.
     fn raw_upsample(mask: &[bool], w: usize, h: usize, factor: usize) -> Vec<bool> {
@@ -611,11 +703,7 @@ mod tests {
         mask[w + 1] = true;
         mask[w + 2] = true;
         mask[2 * w + 1] = true;
-        let params = SmoothParams {
-            iterations: 0,
-            smoothing_degrees: 90,
-        };
-        let (grid, gw, gh) = minimize_corners(&mask, w, h, 3, params);
+        let (grid, gw, gh) = minimize_corners(&mask, w, h, 3, &uniform(0, 90, w * h));
         assert_eq!((gw, gh), (12, 12));
         assert_eq!(grid, raw_upsample(&mask, w, h, 3));
     }
@@ -628,45 +716,9 @@ mod tests {
         let (w, h) = (5usize, 5usize);
         let mut mask = vec![false; w * h];
         mask[2 * w + 2] = true;
-        let raw = count_true(
-            &minimize_corners(
-                &mask,
-                w,
-                h,
-                4,
-                SmoothParams {
-                    iterations: 0,
-                    smoothing_degrees: 45,
-                },
-            )
-            .0,
-        );
-        let one = count_true(
-            &minimize_corners(
-                &mask,
-                w,
-                h,
-                4,
-                SmoothParams {
-                    iterations: 1,
-                    smoothing_degrees: 45,
-                },
-            )
-            .0,
-        );
-        let two = count_true(
-            &minimize_corners(
-                &mask,
-                w,
-                h,
-                4,
-                SmoothParams {
-                    iterations: 3,
-                    smoothing_degrees: 45,
-                },
-            )
-            .0,
-        );
+        let raw = count_true(&minimize_corners(&mask, w, h, 4, &uniform(0, 45, w * h)).0);
+        let one = count_true(&minimize_corners(&mask, w, h, 4, &uniform(1, 45, w * h)).0);
+        let two = count_true(&minimize_corners(&mask, w, h, 4, &uniform(3, 45, w * h)).0);
         assert_eq!(raw, 16, "a lone cell upsamples to 4x4");
         assert!(one < raw, "the chamfer cuts the corners: {one} < {raw}");
         assert!(two < one, "cellular passes keep flattening: {two} < {one}");
@@ -684,11 +736,7 @@ mod tests {
                 mask[z * w + x] = true;
             }
         }
-        let params = SmoothParams {
-            iterations: 3,
-            smoothing_degrees: 90,
-        };
-        let (grid, _, _) = minimize_corners(&mask, w, h, 4, params);
+        let (grid, _, _) = minimize_corners(&mask, w, h, 4, &uniform(3, 90, w * h));
         assert_eq!(
             grid,
             raw_upsample(&mask, w, h, 4),
@@ -712,28 +760,8 @@ mod tests {
                 }
             }
         }
-        let one = minimize_corners(
-            &mask,
-            w,
-            h,
-            2,
-            SmoothParams {
-                iterations: 1,
-                smoothing_degrees: 90,
-            },
-        )
-        .0;
-        let five = minimize_corners(
-            &mask,
-            w,
-            h,
-            2,
-            SmoothParams {
-                iterations: 5,
-                smoothing_degrees: 90,
-            },
-        )
-        .0;
+        let one = minimize_corners(&mask, w, h, 2, &uniform(1, 90, w * h)).0;
+        let five = minimize_corners(&mask, w, h, 2, &uniform(5, 90, w * h)).0;
         assert_eq!(
             one, five,
             "the cellular passes leave a 45-degree diagonal alone at 90 degrees"
@@ -754,36 +782,119 @@ mod tests {
                 mask[z * w + x] = true;
             }
         }
-        let at_90 = count_true(
-            &minimize_corners(
-                &mask,
-                w,
-                h,
-                2,
-                SmoothParams {
-                    iterations: 8,
-                    smoothing_degrees: 90,
-                },
-            )
-            .0,
-        );
-        let at_45 = count_true(
-            &minimize_corners(
-                &mask,
-                w,
-                h,
-                2,
-                SmoothParams {
-                    iterations: 8,
-                    smoothing_degrees: 45,
-                },
-            )
-            .0,
-        );
+        let at_90 = count_true(&minimize_corners(&mask, w, h, 2, &uniform(8, 90, w * h)).0);
+        let at_45 = count_true(&minimize_corners(&mask, w, h, 2, &uniform(8, 45, w * h)).0);
         assert!(
             at_45 < at_90,
             "the 45-degree gate flattens more: {at_45} < {at_90}"
         );
+    }
+
+    #[test]
+    fn a_split_field_smooths_only_its_own_side() {
+        // Two identical squares, one field: the left square's cells sit at
+        // zero iterations, the right square's at three. The left square
+        // must come out exactly as the raw upsample (a crisp authored
+        // zone), the right must lose corner area — and the right side must
+        // match a uniform run over the same square, so a zone boundary
+        // never bleeds smoothing into (or steals it from) the other side.
+        let (w, h) = (16usize, 8usize);
+        let mut mask = vec![false; w * h];
+        for z in 2..6 {
+            for x in 2..6 {
+                mask[z * w + x] = true; // left square
+            }
+            for x in 10..14 {
+                mask[z * w + x] = true; // right square
+            }
+        }
+        let mut params = uniform(0, 45, w * h);
+        for z in 0..h {
+            for x in w / 2..w {
+                params[z * w + x].iterations = 3;
+            }
+        }
+        let (grid, gw, _) = minimize_corners(&mask, w, h, 2, &params);
+
+        // Left half: identical to the raw upsample.
+        let raw = raw_upsample(&mask, w, h, 2);
+        for gz in 0..h * 2 {
+            for gx in 0..w {
+                assert_eq!(
+                    grid[gz * gw + gx],
+                    raw[gz * gw + gx],
+                    "the zero-iteration side stays raw at ({gx}, {gz})",
+                );
+            }
+        }
+
+        // Right half: smoothed — and exactly as a uniform run smooths it.
+        let right_zone: usize = (0..h * 2)
+            .flat_map(|gz| (w..w * 2).map(move |gx| (gx, gz)))
+            .filter(|&(gx, gz)| grid[gz * gw + gx])
+            .count();
+        let raw_zone = 8 * 8;
+        assert!(
+            right_zone < raw_zone,
+            "the smoothing side loses corner area: {right_zone} < {raw_zone}"
+        );
+        let (uniform_grid, ugw, _) = minimize_corners(&mask, w, h, 2, &uniform(3, 45, w * h));
+        for gz in 0..h * 2 {
+            for gx in w + 4..w * 2 {
+                assert_eq!(
+                    grid[gz * gw + gx],
+                    uniform_grid[gz * ugw + gx],
+                    "away from the seam the field side matches a uniform run at ({gx}, {gz})",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn smoothed_boundaries_carry_no_one_wide_artifacts() {
+        // An organic shoreline-shaped mask (a section of the demo lake)
+        // drives the cellular passes into their known failure mode: the
+        // final pass fills samples whose neighbors it simultaneously cut,
+        // leaving one-sample-wide bumps that march into triangles jutting
+        // off the boundary. The prune sweep must converge them away: every
+        // covered sample in the output has at least two covered orthogonal
+        // neighbors, and every uncovered sample at most two covered ones.
+        let rows = [
+            "..........................",
+            "..........................",
+            "..........##..............",
+            ".......#########..........",
+            "......############........",
+            ".....###############......",
+            ".....##################...",
+            ".....#####################",
+            ".....#####################",
+            ".....#####################",
+            ".....#####################",
+            ".....#####################",
+            ".....#####################",
+            ".....#####################",
+        ];
+        let (w, h) = (rows[0].len(), rows.len());
+        let mask: Vec<bool> = rows
+            .iter()
+            .flat_map(|r| r.bytes().map(|b| b == b'#'))
+            .collect();
+        let (grid, gw, gh) = minimize_corners(&mask, w, h, 2, &uniform(3, 90, w * h));
+        for gz in 0..gh as i32 {
+            for gx in 0..gw as i32 {
+                let m = grid[gz as usize * gw + gx as usize];
+                let orth_covered = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+                    .iter()
+                    .filter(|(dx, dz)| in_mask(&grid, gw, gh, gx + dx, gz + dz, m))
+                    .count();
+                if m {
+                    assert!(orth_covered >= 2, "one-wide bump survived at ({gx}, {gz})");
+                } else {
+                    assert!(orth_covered <= 2, "one-wide notch survived at ({gx}, {gz})");
+                }
+            }
+        }
     }
 
     #[test]

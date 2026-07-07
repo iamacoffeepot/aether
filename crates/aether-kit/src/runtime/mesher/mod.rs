@@ -21,18 +21,27 @@
 //! planes alone, so two chunks agree on their shared border with no shared
 //! state.
 //!
-//! # Underlay pass — the keyed quilt
+//! # Underlay pass — the keyed quilt, base and patches
 //!
-//! One flat cell per non-[`Material::Void`] underlay cell at `y = 0`,
-//! world-space in meters (`1 cell = 1 m`). The cell's color resolves from
-//! its world center: the material's base HSL plus world-anchored value
-//! noise on hue and lightness, converted to linear RGB
-//! ([`resolve_cell`]). A low-amplitude wash grades the interior
-//! lightness along a stroke flow field. A pooled rim darkens a cell side
-//! where the paint changes — the neighbor is Void or a different material,
-//! or the same material whose hue steps past the blob-merge threshold —
-//! rendered as a nine-slice (interior, four edge strips, four corners); a
-//! cell with no rimmed side collapses to one flat quad.
+//! The ground splits into a base plane and contoured patches. The base is
+//! one flat keyed cell per cell whose region-cascade default is non-Void,
+//! at `y = 0`, world-space in meters (`1 cell = 1 m`) — drawn under
+//! explicit patches too, so a patch boundary always has ground beneath
+//! it. A cell's color resolves from its world center: the material's base
+//! HSL plus world-anchored value noise on hue and lightness, converted to
+//! linear RGB ([`resolve_cell`]). A low-amplitude wash grades the
+//! interior lightness along a stroke flow field; same-material hue steps
+//! past the blob-merge threshold pool a nine-slice rim, and a cell with
+//! no rimmed side collapses to one flat quad.
+//!
+//! Every explicit underlay material (resolved differing from the cell's
+//! own cascade default) meshes as a **patch**: its cell mask runs through
+//! the same corner minimization as the overlay (honoring the per-cell
+//! smoothing field), marches a pooled rim band over the base, and lays a
+//! keyed body above whose interior keeps the flat per-cell quilt and
+//! whose boundary refines to per-subcell and per-sample quads hugging the
+//! smoothed edge. Each material takes its own slot in a lift ladder so
+//! adjacent patches resolve by deterministic painter's order.
 //!
 //! # Overlay pass — corner-minimized contours
 //!
@@ -40,13 +49,18 @@
 //! field runs through [`minimize_corners`] (upsample, one analytic
 //! 45-degree chamfer, angle-gated cellular passes) and then
 //! [`march_grid`] into crisp contour polygons plus greedy-merged
-//! interior. The pooled rim is a second marched layer over an eroded mask:
-//! the smoothed shape draws in a darkened rim color, and the body draws
-//! one octimeter above it inset by the rim width. Water skips the greedy
-//! merge and instead emits a graded quad per subcell, its lightness driven
-//! down by a bounded shore-distance scan and its hue varied per subcell.
-//! Overlay geometry lifts above the underlay so the coplanar passes never
-//! z-fight, and it carries its own flat vertices so the seam stays hard.
+//! interior. Smoothing params are spatial: each subcell reads its owning
+//! cell's smoothing-field override ([`World::smoothing_override`]) with
+//! the material's style row as the fallback, so where an edge reads soft
+//! versus crisp is authored on the map. The pooled rim is a second marched
+//! layer over an eroded mask: the smoothed shape draws in a darkened rim
+//! color, and the body draws one octimeter above it inset by the rim
+//! width. Water's body swaps the flat marched interior for a graded quad
+//! per subcell fully inside the eroded region — lightness driven down by a
+//! bounded shore-distance scan, hue varied per subcell — while the marched
+//! rim band beneath carries the smoothed shoreline silhouette. Overlay
+//! geometry lifts above the underlay so the coplanar passes never z-fight,
+//! and it carries its own flat vertices so the seam stays hard.
 
 pub mod contour;
 pub mod style;
@@ -83,12 +97,31 @@ const OCTIMETERS_PER_METER: f32 = 256.0;
 /// The underlay's ground plane.
 const UNDERLAY_Y: f32 = 0.0;
 
-/// The overlay rim layer lift — one octimeter over the underlay.
-const OVERLAY_RIM_LIFT: f32 = 1.0 / OCTIMETERS_PER_METER;
+/// One octimeter, the lift ladder's step.
+const LIFT_STEP: f32 = 1.0 / OCTIMETERS_PER_METER;
 
-/// The overlay body layer lift — one octimeter over the rim, so the body
-/// sits on top of the rim it insets from.
-const OVERLAY_BODY_LIFT: f32 = 2.0 / OCTIMETERS_PER_METER;
+/// Rim-layer lift for an underlay patch of `material` — each material
+/// takes its own two-step slot in the lift ladder so adjacent patches
+/// whose smoothed contours overlap by a sample resolve by deterministic
+/// painter's order, identically on both sides of a chunk border (the slot
+/// is a function of the material id, never of what else a chunk holds).
+fn patch_rim_lift(material: Material) -> f32 {
+    (2 * material as u32 - 1) as f32 * LIFT_STEP
+}
+
+/// Body-layer lift for an underlay patch of `material` — one step over
+/// its rim.
+fn patch_body_lift(material: Material) -> f32 {
+    (2 * material as u32) as f32 * LIFT_STEP
+}
+
+/// The overlay rim layer lift — above the whole underlay patch ladder
+/// (five materials, two steps each).
+const OVERLAY_RIM_LIFT: f32 = 11.0 / OCTIMETERS_PER_METER;
+
+/// The overlay body layer lift — one step over the overlay rim, so the
+/// body sits on top of the rim it insets from.
+const OVERLAY_BODY_LIFT: f32 = 12.0 / OCTIMETERS_PER_METER;
 
 /// Upsample factor for a non-water material's smoothed contour grid.
 const CONTOUR_UPSAMPLE: usize = 2;
@@ -112,19 +145,32 @@ pub fn mesh_chunk(world: &World, at: ChunkPos, mode: ViewMode) -> Vec<DrawTriang
         ViewMode::Raw => mesh_raw(world, at, &mut tris),
         ViewMode::Painted => {
             mesh_underlay(world, at, &mut tris);
+            mesh_underlay_patches(world, at, &mut tris);
             mesh_overlay(world, at, &mut tris);
         }
     }
     tris
 }
 
+/// Which materials a rim comparison sees on each side of a cell.
+enum RimContext {
+    /// The base ground plane: compare cascade defaults. A differing or
+    /// absent default (a region boundary) pools a full rim.
+    Defaults,
+    /// A patch body interior: compare resolved materials, rimming only
+    /// same-material hue steps — the smoothed patch contour owns every
+    /// material-change edge.
+    SameMaterialOnly,
+}
+
 /// The per-side pooled-rim strengths `[left, right, top, bottom]` for a
-/// cell: a full rim where the neighbor is Void or a different material,
-/// and a proportional rim where a same-material neighbor's hue steps past
-/// the blob-merge threshold. A pure function of the cell and its four
-/// neighbors, so the two cells sharing an edge agree on the rim there.
-fn cell_rims(world: &World, cell: CellPos) -> [f32; 4] {
-    let material = world.underlay(cell);
+/// cell of `material`: a proportional rim where a same-material
+/// neighbor's hue steps past the blob-merge threshold, plus — in the
+/// [`RimContext::Defaults`] base context — a full rim where the
+/// neighbor's default is Void or a different material. A pure function of
+/// the cell and its four neighbors, so the two cells sharing an edge
+/// agree on the rim there.
+fn cell_rims(world: &World, cell: CellPos, material: Material, context: &RimContext) -> [f32; 4] {
     let hue_a = resolve_cell(material, cell.x as f32 + 0.5, cell.z as f32 + 0.5, None).hue;
     let threshold = style(material).blob_merge_degrees;
     let sides = [
@@ -135,9 +181,16 @@ fn cell_rims(world: &World, cell: CellPos) -> [f32; 4] {
     ];
     let mut rims = [0.0f32; 4];
     for (k, (nx, nz)) in sides.iter().enumerate() {
-        let neighbor = world.underlay(CellPos { x: *nx, z: *nz });
-        let present = neighbor != Material::Void;
+        let npos = CellPos { x: *nx, z: *nz };
+        let neighbor = match context {
+            RimContext::Defaults => world.cell_default(npos),
+            RimContext::SameMaterialOnly => world.underlay(npos),
+        };
         let same = neighbor == material;
+        if !same && matches!(context, RimContext::SameMaterialOnly) {
+            continue; // the patch contour rims this edge
+        }
+        let present = neighbor != Material::Void;
         let hue_b = if same {
             resolve_cell(neighbor, *nx as f32 + 0.5, *nz as f32 + 0.5, None).hue
         } else {
@@ -148,8 +201,9 @@ fn cell_rims(world: &World, cell: CellPos) -> [f32; 4] {
     rims
 }
 
-/// Emit the keyed-quilt underlay: one flat keyed cell per non-Void cell,
-/// with pooled rims where the paint changes.
+/// Emit the base ground plane: one flat keyed cell per cell whose cascade
+/// default is non-Void — drawn under explicit patches too, so the patch
+/// layers above always have ground beneath their smoothed boundary.
 fn mesh_underlay(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
     let base_x = at.x * EDGE;
     let base_z = at.z * EDGE;
@@ -159,13 +213,13 @@ fn mesh_underlay(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
                 x: base_x + lx,
                 z: base_z + lz,
             };
-            let material = world.underlay(cell);
+            let material = world.cell_default(cell);
             if material == Material::Void {
                 continue;
             }
             let resolved = resolve_cell(material, cell.x as f32 + 0.5, cell.z as f32 + 0.5, None);
-            let rims = cell_rims(world, cell);
-            emit_underlay_cell(material, &resolved, cell.x, cell.z, rims, tris);
+            let rims = cell_rims(world, cell, material, &RimContext::Defaults);
+            emit_underlay_cell(material, &resolved, cell.x, cell.z, rims, UNDERLAY_Y, tris);
         }
     }
 }
@@ -179,6 +233,7 @@ fn emit_underlay_cell(
     cx: i32,
     cz: i32,
     rims: [f32; 4],
+    y: f32,
     tris: &mut Vec<DrawTriangle>,
 ) {
     let s = style(material);
@@ -193,24 +248,39 @@ fn emit_underlay_cell(
     let z2 = z3 - inset;
 
     if rims.iter().all(|&r| r == 0.0) {
-        emit_quad_shaded(material, resolved, [x0, z0, x3, z3], 0.0, tris);
+        emit_quad_shaded(material, resolved, [x0, z0, x3, z3], 0.0, y, tris);
         return;
     }
     let darken = s.rim_darken;
     let (left, right, top, bottom) = (rims[0], rims[1], rims[2], rims[3]);
     // Interior.
-    emit_quad_shaded(material, resolved, [x1, z1, x2, z2], 0.0, tris);
+    emit_quad_shaded(material, resolved, [x1, z1, x2, z2], 0.0, y, tris);
     // Edge strips.
-    emit_quad_shaded(material, resolved, [x0, z1, x1, z2], darken * left, tris);
-    emit_quad_shaded(material, resolved, [x2, z1, x3, z2], darken * right, tris);
-    emit_quad_shaded(material, resolved, [x1, z0, x2, z1], darken * top, tris);
-    emit_quad_shaded(material, resolved, [x1, z2, x2, z3], darken * bottom, tris);
+    emit_quad_shaded(material, resolved, [x0, z1, x1, z2], darken * left, y, tris);
+    emit_quad_shaded(
+        material,
+        resolved,
+        [x2, z1, x3, z2],
+        darken * right,
+        y,
+        tris,
+    );
+    emit_quad_shaded(material, resolved, [x1, z0, x2, z1], darken * top, y, tris);
+    emit_quad_shaded(
+        material,
+        resolved,
+        [x1, z2, x2, z3],
+        darken * bottom,
+        y,
+        tris,
+    );
     // Corners darken by the stronger of their two adjacent sides.
     emit_quad_shaded(
         material,
         resolved,
         [x0, z0, x1, z1],
         darken * left.max(top),
+        y,
         tris,
     );
     emit_quad_shaded(
@@ -218,6 +288,7 @@ fn emit_underlay_cell(
         resolved,
         [x2, z0, x3, z1],
         darken * right.max(top),
+        y,
         tris,
     );
     emit_quad_shaded(
@@ -225,6 +296,7 @@ fn emit_underlay_cell(
         resolved,
         [x0, z2, x1, z3],
         darken * left.max(bottom),
+        y,
         tris,
     );
     emit_quad_shaded(
@@ -232,18 +304,20 @@ fn emit_underlay_cell(
         resolved,
         [x2, z2, x3, z3],
         darken * right.max(bottom),
+        y,
         tris,
     );
 }
 
 /// Push the two triangles of one underlay quad spanning `rect`
-/// (`[x0, z0, x1, z1]` octimeters), each corner shaded by the wash field
-/// at its own world position and darkened by `rim_darken`.
+/// (`[x0, z0, x1, z1]` octimeters) at `y`, each corner shaded by the wash
+/// field at its own world position and darkened by `rim_darken`.
 fn emit_quad_shaded(
     material: Material,
     resolved: &ResolvedCell,
     rect: [i32; 4],
     rim_darken: f32,
+    lift: f32,
     tris: &mut Vec<DrawTriangle>,
 ) {
     let corner = |xo: i32, zo: i32| {
@@ -251,14 +325,14 @@ fn emit_quad_shaded(
         let wz = zo as f32 / OCTIMETERS_PER_METER;
         let light = wash_lightness(material, resolved.light, wx, wz, resolved.stroke);
         let light = (light * (1.0 - rim_darken)).clamp(0.0, 100.0);
-        let c = hsl_to_linear_rgb(resolved.hue, resolved.sat, light);
+        let rgb = hsl_to_linear_rgb(resolved.hue, resolved.sat, light);
         Vertex {
             x: wx,
-            y: UNDERLAY_Y,
+            y: lift,
             z: wz,
-            r: c[0],
-            g: c[1],
-            b: c[2],
+            r: rgb[0],
+            g: rgb[1],
+            b: rgb[2],
         }
     };
     let a = corner(rect[0], rect[1]);
@@ -283,6 +357,188 @@ fn subcell_covered(world: &World, at: ChunkPos, six: i32, siz: i32, material: Ma
     }
     let bit = (siz.rem_euclid(SUB) * SUB + six.rem_euclid(SUB)) as u32;
     (world.overlay_mask(cell) >> bit) & 1 == 1
+}
+
+/// Is the cell owning chunk-local subcell `(six, siz)` an underlay patch
+/// of `material` — resolved to it and differing from its own cascade
+/// default? The whole cell answers alike, expressing the cell mask at
+/// subcell resolution so the patch rides the same contour machinery as
+/// the overlay.
+fn patch_covered(world: &World, at: ChunkPos, six: i32, siz: i32, material: Material) -> bool {
+    let cell = CellPos {
+        x: at.x * EDGE + six.div_euclid(SUB),
+        z: at.z * EDGE + siz.div_euclid(SUB),
+    };
+    world.underlay(cell) == material && world.cell_default(cell) != material
+}
+
+/// Emit the underlay patch layers: every explicit material present in the
+/// chunk or its apron (resolved underlay differing from the cell's own
+/// cascade default) contours through the same smoothing path as the
+/// overlay — a marched pooled rim band over the base ground, then a keyed
+/// body whose interior keeps the flat per-cell quilt and whose boundary
+/// refines to per-subcell and per-sample quads hugging the smoothed edge.
+fn mesh_underlay_patches(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
+    let mut present = [false; 6];
+    let apron_cells = MAX_APRON_SUBCELLS / SUB;
+    for lz in -apron_cells..EDGE + apron_cells {
+        for lx in -apron_cells..EDGE + apron_cells {
+            let cell = CellPos {
+                x: at.x * EDGE + lx,
+                z: at.z * EDGE + lz,
+            };
+            let resolved = world.underlay(cell);
+            if resolved != Material::Void && resolved != world.cell_default(cell) {
+                present[resolved as usize] = true;
+            }
+        }
+    }
+    for (id, seen) in present.iter().enumerate() {
+        if *seen {
+            mesh_underlay_patch(world, at, Material::from_u8_or_void(id as u8), tris);
+        }
+    }
+}
+
+/// Contour one underlay patch material: smooth its cell mask (expressed at
+/// subcell resolution) per the spatial smoothing field, march the pooled
+/// rim band, and emit the keyed body above.
+fn mesh_underlay_patch(
+    world: &World,
+    at: ChunkPos,
+    material: Material,
+    tris: &mut Vec<DrawTriangle>,
+) {
+    let s = style(material);
+    let apron = MAX_APRON_SUBCELLS;
+    let n = (SUBCELLS_PER_CHUNK_EDGE + 2 * apron) as usize;
+    let mut field = vec![false; n * n];
+    for sj in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
+        for si in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
+            let idx = (sj + apron) as usize * n + (si + apron) as usize;
+            field[idx] = patch_covered(world, at, si, sj, material);
+        }
+    }
+    let params = sample_params(world, at, material, apron, n);
+    let base_oct = [
+        at.x * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
+        at.z * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
+    ];
+
+    let upsample = CONTOUR_UPSAMPLE;
+    let (smoothed, gw, gh) = minimize_corners(&field, n, n, upsample, &params);
+    let step_oct = OCTIMETERS_PER_SUBCELL / upsample as i32;
+    let origin_oct = [
+        base_oct[0] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
+        base_oct[1] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
+    ];
+    let rim_color = hsl_to_linear_rgb(s.base_hue, s.base_sat, s.base_light * (1.0 - s.rim_darken));
+    let rim_place = GridPlacement {
+        origin_oct,
+        step_oct,
+        y_lift: patch_rim_lift(material),
+    };
+    march_grid(&smoothed, gw, gh, &rim_place, rim_color, tris);
+    let rim_width = (s.rim_inset_octimeters / step_oct).max(1);
+    let eroded = erode(&smoothed, gw, gh, rim_width);
+    emit_patch_body(world, at, material, &eroded, gw, apron, upsample, tris);
+}
+
+/// Emit a patch's keyed body over its eroded smoothed grid: whole cells
+/// keep the quilt cell (with same-material hue-step rims); boundary cells
+/// refine to per-subcell and per-sample quads, all flat in the owning
+/// cell's resolved color.
+#[allow(clippy::too_many_arguments)] // one call site; the grid tuple travels together
+fn emit_patch_body(
+    world: &World,
+    at: ChunkPos,
+    material: Material,
+    eroded: &[bool],
+    gw: usize,
+    apron: i32,
+    upsample: usize,
+    tris: &mut Vec<DrawTriangle>,
+) {
+    let u = upsample as i32;
+    let step_oct = OCTIMETERS_PER_SUBCELL / u;
+    let body_y = patch_body_lift(material);
+    let sample = |gx: i32, gz: i32| {
+        // The grid is square (n × n upsampled), so gw bounds both.
+        gx >= 0
+            && gz >= 0
+            && (gx as usize) < gw
+            && (gz as usize) < gw
+            && eroded[gz as usize * gw + gx as usize]
+    };
+    let block_inside = |gx0: i32, gz0: i32, span: i32| {
+        (0..span).all(|dz| (0..span).all(|dx| sample(gx0 + dx, gz0 + dz)))
+    };
+    for lz in 0..EDGE {
+        for lx in 0..EDGE {
+            let cell = CellPos {
+                x: at.x * EDGE + lx,
+                z: at.z * EDGE + lz,
+            };
+            if world.underlay(cell) != material || world.cell_default(cell) == material {
+                continue;
+            }
+            let resolved = resolve_cell(material, cell.x as f32 + 0.5, cell.z as f32 + 0.5, None);
+            let x0_grid = (lx * SUB + apron) * u;
+            let z0_grid = (lz * SUB + apron) * u;
+            if block_inside(x0_grid, z0_grid, SUB * u) {
+                let rims = cell_rims(world, cell, material, &RimContext::SameMaterialOnly);
+                emit_underlay_cell(material, &resolved, cell.x, cell.z, rims, body_y, tris);
+                continue;
+            }
+            // Boundary cell: per-subcell quads where the subcell's sample
+            // block is inside, per-sample quads on the fringe.
+            for sz in 0..SUB {
+                for sx in 0..SUB {
+                    let gx0 = x0_grid + sx * u;
+                    let gz0 = z0_grid + sz * u;
+                    let x_oct = (cell.x * SUB + sx) * OCTIMETERS_PER_SUBCELL;
+                    let z_oct = (cell.z * SUB + sz) * OCTIMETERS_PER_SUBCELL;
+                    if block_inside(gx0, gz0, u) {
+                        emit_quad_shaded(
+                            material,
+                            &resolved,
+                            [
+                                x_oct,
+                                z_oct,
+                                x_oct + OCTIMETERS_PER_SUBCELL,
+                                z_oct + OCTIMETERS_PER_SUBCELL,
+                            ],
+                            0.0,
+                            body_y,
+                            tris,
+                        );
+                        continue;
+                    }
+                    for dz in 0..u {
+                        for dx in 0..u {
+                            if sample(gx0 + dx, gz0 + dz) {
+                                let x_fringe_oct = x_oct + dx * step_oct;
+                                let z_fringe_oct = z_oct + dz * step_oct;
+                                emit_quad_shaded(
+                                    material,
+                                    &resolved,
+                                    [
+                                        x_fringe_oct,
+                                        z_fringe_oct,
+                                        x_fringe_oct + step_oct,
+                                        z_fringe_oct + step_oct,
+                                    ],
+                                    0.0,
+                                    body_y,
+                                    tris,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Emit the overlay pass: for each distinct overlay material present in
@@ -318,9 +574,49 @@ fn sample_field(world: &World, at: ChunkPos, material: Material, apron: i32) -> 
     (field, n)
 }
 
-/// Contour one overlay material's subcell field: smooth its corners, then
-/// march a rim layer and an inset body layer (or, for water, per-subcell
-/// depth-graded quads).
+/// Build the per-subcell smoothing params parallel to [`sample_field`]'s
+/// grid: each subcell reads its owning cell's smoothing-field override
+/// ([`World::smoothing_override`]), falling back to the material's style
+/// row. Pure over world coordinates like every other paint decision, so
+/// both sides of a chunk border resolve the same params through the apron.
+fn sample_params(
+    world: &World,
+    at: ChunkPos,
+    material: Material,
+    apron: i32,
+    n: usize,
+) -> Vec<SmoothParams> {
+    let s = style(material);
+    let default = SmoothParams {
+        iterations: s.smoothing_iterations,
+        smoothing_degrees: s.smoothing_degrees,
+    };
+    let mut params = vec![default; n * n];
+    for sj in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
+        for si in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
+            let cell = CellPos {
+                x: at.x * EDGE + si.div_euclid(SUB),
+                z: at.z * EDGE + sj.div_euclid(SUB),
+            };
+            if let Some(profile) = world.smoothing_override(cell) {
+                let idx = (sj + apron) as usize * n + (si + apron) as usize;
+                params[idx] = SmoothParams {
+                    iterations: profile.iterations,
+                    smoothing_degrees: profile.degrees,
+                };
+            }
+        }
+    }
+    params
+}
+
+/// Contour one overlay material's subcell field: smooth its corners per
+/// the spatial smoothing field, then march a rim layer and an inset body
+/// layer. Water's body swaps the flat marched interior for per-subcell
+/// depth-graded quads over the eroded region, keeping the smoothed rim
+/// band as its shoreline silhouette. The apron is fixed at the maximum a
+/// profile can demand ([`MAX_APRON_SUBCELLS`]), so field content never
+/// changes a chunk's read reach.
 fn mesh_overlay_material(
     world: &World,
     at: ChunkPos,
@@ -328,31 +624,22 @@ fn mesh_overlay_material(
     tris: &mut Vec<DrawTriangle>,
 ) {
     let s = style(material);
-    let apron = (2 * s.smoothing_iterations as i32).clamp(1, MAX_APRON_SUBCELLS);
+    let apron = MAX_APRON_SUBCELLS;
     let (field, n) = sample_field(world, at, material, apron);
+    let params = sample_params(world, at, material, apron, n);
     let base_oct = [
         at.x * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
         at.z * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
     ];
-    let params = SmoothParams {
-        iterations: s.smoothing_iterations,
-        smoothing_degrees: s.smoothing_degrees,
-    };
-
-    if material == Material::Water {
-        emit_water(&field, n, base_oct, apron, params, tris);
-        return;
-    }
 
     let upsample = CONTOUR_UPSAMPLE;
-    let (smoothed, gw, gh) = minimize_corners(&field, n, n, upsample, params);
+    let (smoothed, gw, gh) = minimize_corners(&field, n, n, upsample, &params);
     let step_oct = OCTIMETERS_PER_SUBCELL / upsample as i32;
     let origin_oct = [
         base_oct[0] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
         base_oct[1] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
     ];
     let rim_color = hsl_to_linear_rgb(s.base_hue, s.base_sat, s.base_light * (1.0 - s.rim_darken));
-    let body_color = hsl_to_linear_rgb(s.base_hue, s.base_sat, s.base_light);
     let rim_place = GridPlacement {
         origin_oct,
         step_oct,
@@ -361,6 +648,13 @@ fn mesh_overlay_material(
     march_grid(&smoothed, gw, gh, &rim_place, rim_color, tris);
     let rim_width = (s.rim_inset_octimeters / step_oct).max(1);
     let eroded = erode(&smoothed, gw, gh, rim_width);
+
+    if material == Material::Water {
+        emit_water(&eroded, gw, apron, upsample, base_oct, tris);
+        return;
+    }
+
+    let body_color = hsl_to_linear_rgb(s.base_hue, s.base_sat, s.base_light);
     let body_place = GridPlacement {
         origin_oct,
         step_oct,
@@ -369,56 +663,106 @@ fn mesh_overlay_material(
     march_grid(&eroded, gw, gh, &body_place, body_color, tris);
 }
 
-/// Emit water: smooth the shoreline, then a graded quad per covered
-/// subcell whose lightness falls with derived shore depth and whose hue
-/// varies per subcell.
+/// Emit water's body: a graded quad per subcell whose sample block sits
+/// fully inside the eroded smoothed grid, lightness falling with derived
+/// shore depth and hue varying per subcell. A shoreline subcell only
+/// partially inside refines to per-sample quads over its covered samples,
+/// so the body hugs the smoothed contour at the smoothing grid's own
+/// resolution and the marched rim band beneath shows as an even pooled
+/// edge instead of subcell-scale teeth.
 fn emit_water(
-    field: &[bool],
-    n: usize,
-    base_oct: [i32; 2],
+    eroded: &[bool],
+    gw: usize,
     apron: i32,
-    params: SmoothParams,
+    upsample: usize,
+    base_oct: [i32; 2],
     tris: &mut Vec<DrawTriangle>,
 ) {
-    let (smoothed, _, _) = minimize_corners(field, n, n, 1, params);
+    let u = upsample as i32;
+    let sample = |gx: i32, gz: i32| {
+        // The grid is square (n × n upsampled), so gw bounds both.
+        gx >= 0
+            && gz >= 0
+            && (gx as usize) < gw
+            && (gz as usize) < gw
+            && eroded[gz as usize * gw + gx as usize]
+    };
+    let inside = |six: i32, siz: i32| {
+        let gx0 = (six + apron) * u;
+        let gz0 = (siz + apron) * u;
+        (0..u).all(|dz| (0..u).all(|dx| sample(gx0 + dx, gz0 + dz)))
+    };
+    let step_oct = OCTIMETERS_PER_SUBCELL / u;
     for sj in 0..SUBCELLS_PER_CHUNK_EDGE {
         for si in 0..SUBCELLS_PER_CHUNK_EDGE {
-            let gx = si + apron;
-            let gz = sj + apron;
-            if !smoothed[gz as usize * n + gx as usize] {
-                continue;
-            }
-            let depth = shore_depth(&smoothed, n, gx, gz);
             let x_oct = base_oct[0] + si * OCTIMETERS_PER_SUBCELL;
             let z_oct = base_oct[1] + sj * OCTIMETERS_PER_SUBCELL;
+            if inside(si, sj) {
+                let depth = subcell_shore_depth(&inside, si, sj);
+                let center_x = (x_oct + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
+                let center_z = (z_oct + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
+                let resolved = resolve_cell(Material::Water, center_x, center_z, Some(depth));
+                let color = hsl_to_linear_rgb(resolved.hue, resolved.sat, resolved.light);
+                push_quad(
+                    tris,
+                    x_oct,
+                    z_oct,
+                    x_oct + OCTIMETERS_PER_SUBCELL,
+                    z_oct + OCTIMETERS_PER_SUBCELL,
+                    OVERLAY_BODY_LIFT,
+                    color,
+                );
+                continue;
+            }
+            // Shoreline refinement: per-sample quads over the covered
+            // samples of a partially-inside subcell, at the shore depth.
+            let gx0 = (si + apron) * u;
+            let gz0 = (sj + apron) * u;
+            let mut any = false;
+            for dz in 0..u {
+                for dx in 0..u {
+                    if sample(gx0 + dx, gz0 + dz) {
+                        any = true;
+                    }
+                }
+            }
+            if !any {
+                continue;
+            }
             let center_x = (x_oct + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
             let center_z = (z_oct + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
-            let resolved = resolve_cell(Material::Water, center_x, center_z, Some(depth));
+            let resolved = resolve_cell(Material::Water, center_x, center_z, Some(0.0));
             let color = hsl_to_linear_rgb(resolved.hue, resolved.sat, resolved.light);
-            push_quad(
-                tris,
-                x_oct,
-                z_oct,
-                x_oct + OCTIMETERS_PER_SUBCELL,
-                z_oct + OCTIMETERS_PER_SUBCELL,
-                OVERLAY_RIM_LIFT,
-                color,
-            );
+            for dz in 0..u {
+                for dx in 0..u {
+                    if sample(gx0 + dx, gz0 + dz) {
+                        let sx = x_oct + dx * step_oct;
+                        let sz = z_oct + dz * step_oct;
+                        push_quad(
+                            tris,
+                            sx,
+                            sz,
+                            sx + step_oct,
+                            sz + step_oct,
+                            OVERLAY_BODY_LIFT,
+                            color,
+                        );
+                    }
+                }
+            }
         }
     }
 }
 
-/// Derived shore depth `[0, 1]` for a covered subcell: a bounded four-way
-/// outward scan for the nearest uncovered subcell. `0` at the shore edge,
-/// rising monotonically inward to `1` past the scan reach.
-fn shore_depth(field: &[bool], n: usize, x: i32, z: i32) -> f32 {
-    let covered = |px: i32, pz: i32| {
-        px >= 0 && pz >= 0 && px < n as i32 && pz < n as i32 && field[pz as usize * n + px as usize]
-    };
+/// Derived shore depth `[0, 1]` for a water subcell: a bounded four-way
+/// outward scan (in subcells) for the nearest subcell not fully inside
+/// the water body. `0` at the shore edge, rising monotonically inward to
+/// `1` past the scan reach.
+fn subcell_shore_depth(inside: &impl Fn(i32, i32) -> bool, x: i32, z: i32) -> f32 {
     let mut nearest = MAX_SHORE_SCAN;
     for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
         for step in 1..=MAX_SHORE_SCAN {
-            if !covered(x + dx * step, z + dz * step) {
+            if !inside(x + dx * step, z + dz * step) {
                 nearest = nearest.min(step);
                 break;
             }
@@ -453,7 +797,7 @@ fn mesh_raw(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::{CELLS_PER_CHUNK_AREA, Chunk};
+    use crate::world::{CELLS_PER_CHUNK_AREA, Chunk, Region, SmoothingProfile};
     use style::ResolvedCell;
 
     fn grass_cell() -> ResolvedCell {
@@ -477,7 +821,15 @@ mod tests {
         // (two triangles), not the nine-slice — the common interior case
         // must not pay for rim geometry it does not have.
         let mut tris = Vec::new();
-        emit_underlay_cell(Material::Grass, &grass_cell(), 3, 5, [0.0; 4], &mut tris);
+        emit_underlay_cell(
+            Material::Grass,
+            &grass_cell(),
+            3,
+            5,
+            [0.0; 4],
+            UNDERLAY_Y,
+            &mut tris,
+        );
         assert_eq!(tris.len(), 2, "no rims is one flat quad");
     }
 
@@ -487,7 +839,15 @@ mod tests {
         // every vertex stays inside the cell — the rim only pools inward, it
         // never invents geometry outside the cell.
         let mut tris = Vec::new();
-        emit_underlay_cell(Material::Grass, &grass_cell(), 3, 5, [1.0; 4], &mut tris);
+        emit_underlay_cell(
+            Material::Grass,
+            &grass_cell(),
+            3,
+            5,
+            [1.0; 4],
+            UNDERLAY_Y,
+            &mut tris,
+        );
         assert_eq!(tris.len(), 18, "a fully-rimmed cell is a nine-slice");
         for v in tris.iter().flat_map(|t| t.verts.iter()) {
             assert!(
@@ -524,8 +884,18 @@ mod tests {
         right.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
         world.insert_chunk(ChunkPos { x: 1, z: 0 }, right);
 
-        let left_cell_right_rim = cell_rims(&world, CellPos { x: 15, z: 4 })[1];
-        let right_cell_left_rim = cell_rims(&world, CellPos { x: 16, z: 4 })[0];
+        let left_cell_right_rim = cell_rims(
+            &world,
+            CellPos { x: 15, z: 4 },
+            Material::Grass,
+            &RimContext::SameMaterialOnly,
+        )[1];
+        let right_cell_left_rim = cell_rims(
+            &world,
+            CellPos { x: 16, z: 4 },
+            Material::Grass,
+            &RimContext::SameMaterialOnly,
+        )[0];
         assert_eq!(
             left_cell_right_rim, right_cell_left_rim,
             "both sides must agree on the shared-edge rim",
@@ -535,20 +905,22 @@ mod tests {
     #[test]
     fn water_depth_is_monotone_inward_and_absent_outside() {
         // Shore depth must be zero at the shoreline and rise monotonically
-        // toward the interior; a cell one step from open water is shallower
-        // than one buried deep. Depth outside the covered field is never
-        // sampled (the caller skips uncovered subcells).
-        let n = 24usize;
-        let mut field = vec![false; n * n];
-        for z in 0..n as i32 {
-            for x in 0..n as i32 {
+        // toward the interior; a subcell one step from open water is
+        // shallower than one buried deep. Depth outside the water body is
+        // never sampled (the caller skips subcells not fully inside).
+        let n = 24i32;
+        let mut field = vec![false; (n * n) as usize];
+        for z in 0..n {
+            for x in 0..n {
                 if (x - 12) * (x - 12) + (z - 12) * (z - 12) <= 81 {
-                    field[z as usize * n + x as usize] = true;
+                    field[(z * n + x) as usize] = true;
                 }
             }
         }
-        let center = shore_depth(&field, n, 12, 12);
-        let shore = shore_depth(&field, n, 21, 12);
+        let inside =
+            |x: i32, z: i32| x >= 0 && z >= 0 && x < n && z < n && field[(z * n + x) as usize];
+        let center = subcell_shore_depth(&inside, 12, 12);
+        let shore = subcell_shore_depth(&inside, 21, 12);
         assert!(center > shore, "deeper inside: {center} > {shore}");
         assert_eq!(shore, 0.0, "a subcell touching open water is at depth 0");
         assert_eq!(center, 1.0, "the middle of a wide lake is fully deep");
@@ -556,10 +928,14 @@ mod tests {
 
     #[test]
     fn full_water_chunk_budget_is_pinned() {
-        // Tripwire: a fully-covered water chunk grades every subcell, so its
-        // overlay triangle count is exactly two per subcell over the 64x64
-        // grid. A change to the water resolution or grading fan-out moves
-        // this and must be deliberate.
+        // Tripwire: the water budget is body + rim, all derivable. Body: a
+        // graded quad per subcell fully inside the eroded grid — with water
+        // on every side, all 64*64 subcells qualify = 8192 tris. Rim: the
+        // smoothed grid is all-true, so its march greedy-merges to one quad
+        // (2 tris); water never marches the eroded grid (the body quads
+        // replace that layer). Total 8194. A change to the water
+        // resolution, rim width, or grading fan-out moves this and must be
+        // deliberate.
         let mut world = World::new();
         for dz in -1..=1 {
             for dx in -1..=1 {
@@ -570,7 +946,99 @@ mod tests {
             }
         }
         let tris = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
-        assert_eq!(overlay_tris(&tris), 8192, "64*64 subcells * 2 tris");
+        assert_eq!(overlay_tris(&tris), 8194, "8192 body + one merged rim quad");
+    }
+
+    #[test]
+    fn water_shoreline_is_smoothed_and_rimmed() {
+        // The waterline flows through the same corner minimization and rim
+        // march as land contours: a lone water square must emit strictly
+        // more than its raw per-subcell quads (the marched rim band is
+        // present) and its smoothed silhouette must cut the square's
+        // corners (some rim geometry sits off the subcell lattice).
+        let mut world = World::new();
+        let mut c = Chunk::empty();
+        // A 4x4-cell water square in the chunk interior.
+        for lz in 6..10 {
+            for lx in 6..10 {
+                c.overlay[(lz * EDGE + lx) as usize] = Material::Water;
+                c.overlay_mask[(lz * EDGE + lx) as usize] = 0xFFFF;
+            }
+        }
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, c);
+        let tris = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
+
+        let rim_tris = tris
+            .iter()
+            .filter(|t| t.verts.iter().all(|v| v.y > 0.0 && v.y < OVERLAY_BODY_LIFT))
+            .count();
+        assert!(rim_tris > 0, "water marches a shoreline rim layer");
+        // The smoothed rim contour cuts corners between subcell lattice
+        // points: some rim vertex sits on the half-subcell grid (odd
+        // multiple of 1/8 m), which raw per-subcell quads never produce.
+        let off_lattice = tris
+            .iter()
+            .filter(|t| t.verts.iter().all(|v| v.y > 0.0 && v.y < OVERLAY_BODY_LIFT))
+            .flat_map(|t| t.verts.iter())
+            .any(|v| {
+                let scaled = v.x * 8.0;
+                let eighths = scaled.round();
+                (scaled - eighths).abs() < 1e-4 && (eighths as i64) % 2 != 0
+            });
+        assert!(off_lattice, "the shoreline silhouette is corner-minimized");
+    }
+
+    #[test]
+    fn smoothing_field_overrides_agree_across_a_chunk_border() {
+        // A field-painted crisp zone must beat the material default on both
+        // sides of a chunk border identically. Stone (which smooths by
+        // default) covers a band across the border; every cell in both
+        // chunks points at a zero-iteration profile, so both chunks must
+        // emit exactly the raw blocky contour — and agree with each other.
+        // If either side dropped the override (or read it only inside its
+        // own chunk, not through the apron), its smoothed rim contour would
+        // put vertices on the half-subcell grid. Only the rim layer is
+        // checked: the body layer's eroded boundary legitimately sits
+        // mid-window (half-subcell positions) even when raw.
+        let mut world = World::new();
+        world.insert_smoothing_profile(
+            1,
+            SmoothingProfile {
+                iterations: 0,
+                degrees: 90,
+            },
+        );
+        for cx in 0..2 {
+            let mut chunk = Chunk::empty();
+            chunk.smoothing = [1; CELLS_PER_CHUNK_AREA];
+            for lz in 6..10 {
+                for lx in 0..EDGE {
+                    let global = cx * EDGE + lx;
+                    if (12..20).contains(&global) {
+                        chunk.overlay[(lz * EDGE + lx) as usize] = Material::Stone;
+                        chunk.overlay_mask[(lz * EDGE + lx) as usize] = 0xFFFF;
+                    }
+                }
+            }
+            world.insert_chunk(ChunkPos { x: cx, z: 0 }, chunk);
+        }
+        for cx in 0..2 {
+            let tris = mesh_chunk(&world, ChunkPos { x: cx, z: 0 }, ViewMode::Painted);
+            for v in tris
+                .iter()
+                .filter(|t| t.verts.iter().all(|v| v.y > 0.0 && v.y < OVERLAY_BODY_LIFT))
+                .flat_map(|t| t.verts.iter())
+            {
+                let eighths = v.x * 8.0;
+                let is_half_subcell =
+                    (eighths - eighths.round()).abs() < 1e-4 && (eighths.round() as i64) % 2 != 0;
+                assert!(
+                    !is_half_subcell,
+                    "chunk {cx}: a zero-iteration field zone stays raw, vertex x = {}",
+                    v.x,
+                );
+            }
+        }
     }
 
     #[test]
@@ -623,6 +1091,137 @@ mod tests {
             edge0 >= 16.0,
             "chunk 0 overlay reaches its border, got {edge0}"
         );
+    }
+
+    /// Two chunks of grass-default region with an explicit sand band over
+    /// cells `10..22 × 4..8` (crossing the chunk border at `x = 16`).
+    /// `crisp` points every cell's smoothing plane at a zero-iteration
+    /// profile.
+    fn sand_band_world(crisp: bool) -> World {
+        let mut world = World::new();
+        world.insert_region(
+            1,
+            Region {
+                name: "meadow".into(),
+                default_material: Material::Grass,
+            },
+        );
+        if crisp {
+            world.insert_smoothing_profile(
+                1,
+                SmoothingProfile {
+                    iterations: 0,
+                    degrees: 90,
+                },
+            );
+        }
+        for cx in 0..2 {
+            let mut chunk = Chunk::empty();
+            chunk.region = [1; CELLS_PER_CHUNK_AREA];
+            if crisp {
+                chunk.smoothing = [1; CELLS_PER_CHUNK_AREA];
+            }
+            for lz in 4..8 {
+                for lx in 0..EDGE {
+                    if (10..22).contains(&(cx * EDGE + lx)) {
+                        chunk.underlay[(lz * EDGE + lx) as usize] = Material::Sand;
+                    }
+                }
+            }
+            world.insert_chunk(ChunkPos { x: cx, z: 0 }, chunk);
+        }
+        world
+    }
+
+    /// Vertices of a mesh's sand-patch rim layer (above the base, below
+    /// the sand body lift).
+    fn sand_rim_verts(mesh: &[DrawTriangle]) -> Vec<&Vertex> {
+        mesh.iter()
+            .filter(|t| {
+                t.verts
+                    .iter()
+                    .all(|v| v.y > UNDERLAY_Y && v.y < patch_body_lift(Material::Sand))
+            })
+            .flat_map(|t| t.verts.iter())
+            .collect()
+    }
+
+    fn is_half_subcell(x: f32) -> bool {
+        let eighths = x * 8.0;
+        (eighths - eighths.round()).abs() < 1e-4 && (eighths.round() as i64) % 2 != 0
+    }
+
+    #[test]
+    fn underlay_patch_boundary_smooths_and_the_field_governs_it() {
+        // The sand-grass boundary flows through corner minimization: the
+        // patch rim contour must put vertices on the half-subcell grid
+        // (sand's default smoothing chamfers the band's corners), and
+        // pointing every cell at a zero-iteration profile must remove
+        // every one of them — the smoothing field governs underlay
+        // boundaries exactly as it governs overlay contours.
+        let smoothed = mesh_chunk(
+            &sand_band_world(false),
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+        );
+        assert!(
+            sand_rim_verts(&smoothed)
+                .iter()
+                .any(|v| is_half_subcell(v.x)),
+            "sand's default smoothing chamfers the patch boundary",
+        );
+        let crisp = mesh_chunk(
+            &sand_band_world(true),
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+        );
+        assert!(
+            !sand_rim_verts(&crisp).iter().any(|v| is_half_subcell(v.x)),
+            "a zero-iteration field zone keeps the raw staircase",
+        );
+    }
+
+    #[test]
+    fn underlay_patch_agrees_across_a_chunk_border() {
+        // The sand band crosses the chunk border; each chunk meshes
+        // independently through the apron, and their patch layers must
+        // overlap at the seam rather than leaving a gap.
+        let world = sand_band_world(false);
+        let mesh0 = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
+        let mesh1 = mesh_chunk(&world, ChunkPos { x: 1, z: 0 }, ViewMode::Painted);
+        let max_x0 = sand_rim_verts(&mesh0)
+            .iter()
+            .map(|v| v.x)
+            .fold(f32::MIN, f32::max);
+        let min_x1 = sand_rim_verts(&mesh1)
+            .iter()
+            .map(|v| v.x)
+            .fold(f32::MAX, f32::min);
+        assert!(
+            max_x0 >= 16.0,
+            "chunk 0's patch reaches its border: {max_x0}"
+        );
+        assert!(min_x1 <= 16.0, "chunk 1's patch reaches back: {min_x1}");
+    }
+
+    #[test]
+    fn base_ground_draws_beneath_a_patch() {
+        // The region default paints under an explicit patch cell — the
+        // smoothed boundary always has ground beneath it — and the patch
+        // body draws above at its ladder lift.
+        let world = sand_band_world(false);
+        let mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
+        let in_cell = |v: &Vertex| (12.0..=13.0).contains(&v.x) && (5.0..=6.0).contains(&v.z);
+        let base_here = mesh
+            .iter()
+            .flat_map(|t| t.verts.iter())
+            .any(|v| v.y == UNDERLAY_Y && in_cell(v));
+        assert!(base_here, "base ground under the sand cell");
+        let body_here = mesh
+            .iter()
+            .flat_map(|t| t.verts.iter())
+            .any(|v| (v.y - patch_body_lift(Material::Sand)).abs() < 1e-6 && in_cell(v));
+        assert!(body_here, "sand body above at its ladder lift");
     }
 
     #[test]
