@@ -1,6 +1,6 @@
 # ADR-0096: Multi-actor wasm modules
 
-- **Status:** Accepted (hosted-actor addressing later revised by [ADR-0099](0099-actor-identity-and-addressing.md); the actor-type tag here is reused as the ActorId)
+- **Status:** Accepted (hosted-actor addressing later revised by [ADR-0099](0099-actor-identity-and-addressing.md); the actor-type tag here is reused as the ActorId; the default-entry clause of §3 later superseded by [ADR-0138](0138-opt-in-default-entry-for-multi-actor-modules.md))
 - **Date:** 2026-06-06
 
 ## Context
