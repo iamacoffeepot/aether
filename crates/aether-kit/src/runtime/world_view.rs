@@ -22,6 +22,9 @@
 //! - `aether.kit.world.set_chunk` — write one chunk's planes and remesh
 //!   that chunk plus its eight cached neighbors (their border rims and
 //!   contours read the new planes through the apron).
+//! - `aether.kit.world.set_cell_points` — stamp one cell's underlay
+//!   material points and remesh that cell's chunk plus its eight cached
+//!   neighbors (the single-cell live-paint counterpart to `set_chunk`).
 //! - `aether.kit.world.set_region` — register a region so the underlay
 //!   cascade has a default to resolve to; remeshes every cached chunk
 //!   (a region default can change any chunk's cascade-resolved underlay).
@@ -54,8 +57,8 @@ use aether_kinds::Render;
 use super::mesher::mesh_chunk;
 use super::mesher::style::StyleTable;
 use crate::world::{
-    ChunkPos, Material, SetChunk, SetMaterialStyle, SetRegion, SetSmoothingProfile, SetViewMode,
-    SetWaterPlane, ViewMode, World, WorldLoad,
+    ChunkPos, Material, SetCellPoints, SetChunk, SetMaterialStyle, SetRegion, SetSmoothingProfile,
+    SetViewMode, SetWaterPlane, ViewMode, World, WorldLoad,
 };
 
 /// World-view component: holds the world plane stack and a per-chunk
@@ -87,6 +90,29 @@ impl WorldView {
         for pos in positions {
             self.meshes
                 .insert(pos, mesh_chunk(&self.world, pos, self.mode, &self.styles));
+        }
+    }
+
+    /// Remesh `pos` and its eight cached neighbors after a write inside
+    /// `pos`. The mesher's rims and contours read a bounded apron into the
+    /// neighbors, so a write changes the border geometry of any cached
+    /// neighbor as well as `pos`'s own mesh. Neighbors with no cached mesh
+    /// are not rendered, so they need no remesh; an empty neighbor's border
+    /// geometry is already covered by this chunk's own apron windows.
+    fn remesh_around(&mut self, pos: ChunkPos) {
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let neighbor = ChunkPos {
+                    x: pos.x + dx,
+                    z: pos.z + dz,
+                };
+                if (dx == 0 && dz == 0) || self.meshes.contains_key(&neighbor) {
+                    self.meshes.insert(
+                        neighbor,
+                        mesh_chunk(&self.world, neighbor, self.mode, &self.styles),
+                    );
+                }
+            }
         }
     }
 }
@@ -142,20 +168,26 @@ impl WasmActor for WorldView {
     fn on_set_chunk(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetChunk) {
         let pos = msg.chunk_pos();
         self.world.insert_chunk(pos, msg.into_chunk());
-        for dz in -1..=1 {
-            for dx in -1..=1 {
-                let neighbor = ChunkPos {
-                    x: pos.x + dx,
-                    z: pos.z + dz,
-                };
-                if (dx == 0 && dz == 0) || self.meshes.contains_key(&neighbor) {
-                    self.meshes.insert(
-                        neighbor,
-                        mesh_chunk(&self.world, neighbor, self.mode, &self.styles),
-                    );
-                }
-            }
-        }
+        self.remesh_around(pos);
+    }
+
+    /// Stamp one cell's underlay material points into the world, then remesh
+    /// that cell's chunk and its eight cached neighbors — a border cell's
+    /// points feed the neighbor's rims and contours through the same apron
+    /// as a chunk write.
+    ///
+    /// # Agent
+    /// Send `aether.kit.world.set_cell_points` with a cell address (`x`,
+    /// `z`) and up to SUB² point bytes in `z*SUB + x` subcell order (a
+    /// `Material` byte, `255` = inherit the cell's cascade, or `0` = an
+    /// authored `Void` that cuts a hole). A short vector leaves the cell's
+    /// remaining points inheriting. `capture_frame` to verify the marched
+    /// silhouette.
+    #[handler]
+    fn on_set_cell_points(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetCellPoints) {
+        let cell = msg.cell();
+        self.world.set_cell_points(cell, &msg.points);
+        self.remesh_around(cell.chunk());
     }
 
     /// Switch the view between the painted gouache grammar and the raw
