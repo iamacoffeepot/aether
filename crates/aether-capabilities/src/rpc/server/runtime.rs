@@ -99,6 +99,7 @@ pub struct RpcServerState {
     /// `NativeInitCtx::mailer()`; the cap is single-threaded
     /// post-ADR-0038 so direct storage is fine.
     pub mailer: Arc<Mailer>,
+    pub bind_addr: String,
     pub listener_port: u16,
     pub accept_shutdown: Arc<AtomicBool>,
     pub accept_thread: Option<JoinHandle<()>>,
@@ -466,6 +467,7 @@ impl NativeActor for RpcServerCapability {
             peer_kind: config.peer_kind,
             self_mailbox: self_id,
             mailer: ctx.mailer(),
+            bind_addr: config.bind_addr.clone(),
             listener_port: port,
             accept_shutdown,
             accept_thread: Some(thread),
@@ -478,11 +480,19 @@ impl NativeActor for RpcServerCapability {
     }
 
     fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
-        // Stop the accept thread.
+        // Stop the accept thread; self-connect to unblock its blocking
+        // `accept()`.
         state.accept_shutdown.store(true, Ordering::Release);
-        let addr_str = format!("127.0.0.1:{}", state.listener_port);
-        if let Ok(addr) = addr_str.parse::<SocketAddr>() {
-            let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(100));
+        let wake_addr =
+            crate::shared::net::teardown_connect_addr(&state.bind_addr, state.listener_port);
+        if let Err(error) = TcpStream::connect_timeout(&wake_addr, Duration::from_millis(100)) {
+            tracing::warn!(
+                target: "aether_substrate::rpc",
+                port = state.listener_port,
+                addr = %wake_addr,
+                %error,
+                "rpc server teardown wake self-connect failed; accept-thread join may stall",
+            );
         }
         if let Some(t) = state.accept_thread.take() {
             let _ = t.join();
