@@ -63,6 +63,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-behavior"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-data",
+ "serde",
+]
+
+[[package]]
+name = "aether-behavior-derive"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-behavior",
+ "aether-data",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "syn",
+ "trybuild",
+]
+
+[[package]]
 name = "aether-capabilities"
 version = "0.3.0-alpha"
 dependencies = [

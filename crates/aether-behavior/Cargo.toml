@@ -1,0 +1,28 @@
+[package]
+name = "aether-behavior"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Script-side SDK for behavior scripts (ADR-0137). One crate with two
+# faces: the always-compiled trunk holds the host<->script envelope, the
+# packed-pointer ABI, the exports-manifest decoder, and the reserved
+# lifecycle sentinels — a later issue's host consumes exactly this trunk
+# with `default-features = false`. The `runtime` feature (on by default,
+# so a bare wasm32 build produces the full guest surface) adds the
+# authoring SDK: `BehaviorCtx`, the widget/child/panel handles, the
+# decode-once mirror, the effect accumulator, and the `Behavior`
+# lifecycle trait. The crate depends on `aether-data` and `serde` only —
+# never `aether-actor`, never `wasmi` — which is what keeps a behavior
+# cdylib from classifying as a component (structural discovery keys on an
+# `aether-actor` dependency) and keeps the tier boundary legible.
+[features]
+default = ["runtime"]
+runtime = []
+
+[dependencies]
+aether-data = { path = "../aether-data", default-features = false, features = ["derive"] }
+serde = { workspace = true, default-features = false, features = ["alloc", "derive"] }
+
+[lints]
+workspace = true
