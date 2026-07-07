@@ -28,7 +28,7 @@ use super::{HttpInboundReady, HttpServerCapability, HttpServerConfig, HttpServer
 use aether_actor::runtime;
 
 pub use std::collections::HashMap;
-pub use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+pub use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 pub use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 pub use std::sync::{Arc, RwLock, mpsc};
 pub use std::thread;
@@ -54,6 +54,7 @@ use crate::http::kinds::{
     RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf,
     UnregisterRoutesAll,
 };
+use crate::shared::net::teardown_connect_addr;
 pub use aether_kinds::trace::Settled;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -82,26 +83,6 @@ pub use websocket::*;
 
 #[cfg(test)]
 mod unit_tests;
-
-/// Reconstructs the teardown self-connect target (see `unwire` below)
-/// from state the runtime already holds — no new state field. The
-/// listener's bound IP equals the configured `bind_addr`'s IP (`bind`
-/// only resolves the *port* when it is `0`), so this pairs that IP with
-/// the resolved `listener_port`. A wildcard bind (`0.0.0.0` / `::`) has
-/// no address a self-connect can land on, so it maps to the matching
-/// loopback instead; an unparseable `bind_addr` falls back to IPv4
-/// loopback.
-fn teardown_connect_addr(bind_addr: &str, listener_port: u16) -> SocketAddr {
-    let ip = bind_addr
-        .parse::<SocketAddr>()
-        .map_or(IpAddr::V4(Ipv4Addr::LOCALHOST), |addr| addr.ip());
-    let ip = match ip {
-        IpAddr::V4(v4) if v4.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
-        IpAddr::V6(v6) if v6.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
-        other => other,
-    };
-    SocketAddr::new(ip, listener_port)
-}
 
 #[runtime]
 impl NativeActor for HttpServerCapability {
