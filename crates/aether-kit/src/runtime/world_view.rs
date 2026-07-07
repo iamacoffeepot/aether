@@ -183,7 +183,7 @@ impl WasmActor for WorldView {
     /// authored `Void` that cuts a hole). A short vector leaves the cell's
     /// remaining points inheriting. `capture_frame` to verify the marched
     /// silhouette.
-    #[handler]
+    #[handler::single]
     fn on_set_cell_points(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetCellPoints) {
         let cell = msg.cell();
         self.world.set_cell_points(cell, &msg.points);
