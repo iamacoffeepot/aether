@@ -49,7 +49,11 @@ pub mod widgets;
 pub mod world;
 
 pub use theme::{SetTheme, Theme, WidgetState};
-pub use widgets::{Collect, WidgetChildSpec, WidgetConfig, WidgetDrawItem, WidgetDrawList};
+pub use widgets::{
+    ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, LabelConfig, PanelConfig,
+    RadioConfig, RadioSelected, SliderChanged, SliderConfig, TextCommitted, TextFieldConfig,
+    WidgetChildSpec, WidgetConfig, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+};
 pub use world::{
     CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk, ChunkPos, Material, Region,
     SetChunk, SetRegion, SetSmoothingProfile, SetViewMode, SmoothingProfile, ViewMode, World,

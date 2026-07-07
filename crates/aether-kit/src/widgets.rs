@@ -34,6 +34,8 @@ use alloc::vec::Vec;
 use aether_math::Vec2;
 use serde::{Deserialize, Serialize};
 
+use crate::theme::Theme;
+
 /// `aether.kit.widget.collect` — a per-frame poll a compositing node
 /// sends to each of its children in layout order. The child answers with
 /// its [`WidgetDrawList`]. Fieldless: the poll carries no data, because
@@ -160,6 +162,156 @@ pub struct WidgetConfig {
     pub chrome: Vec<WidgetDrawItem>,
     pub intrinsic: Option<[f32; 2]>,
     pub children: Vec<WidgetChildSpec>,
+}
+
+/// The four data-down lanes of the widget set (config / style / layout
+/// frame) and the one events-up lane (value) that the reference panel root
+/// drives its inline widget children through. The kinds carry **no widget
+/// identity field**: a value-up reply is attributed by the root against the
+/// `MailboxId` it recorded when it spawned each child (`ctx.source_mailbox`),
+/// so a widget's identity stays its inline subname rather than a field the
+/// widget could get wrong. Layout and focus flow down the same way the
+/// compositing `Collect` does — the root owns every child's rect and focus,
+/// and the widget only reacts.
+///
+/// Each per-widget `Config` embeds a [`Theme`] (the theme-first sequencing:
+/// there is no separate widget-style kind — a widget's whole look is its
+/// theme), and is both the `spawn_inline_child` init config and a re-sendable
+/// data-down mail: sending a widget its `Config` kind again reconfigures it in
+/// place.
+/// `aether.kit.widget.slider.config` — a horizontal value slider over
+/// `min..=max`, snapped to `step`, starting at `initial`. The consumer maps
+/// the reported `f32` onto its own domain (a `u8` intensity, a preset index).
+/// A `step` of `0` (or less) leaves the value continuous.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.slider.config")]
+pub struct SliderConfig {
+    pub min: f32,
+    pub max: f32,
+    pub step: f32,
+    pub initial: f32,
+    pub theme: Theme,
+}
+
+/// `aether.kit.widget.text_field.config` — a single-line editable string
+/// starting at `initial`, capped at `max_chars` characters (`0` = no cap).
+/// The field holds a `String` and a byte-offset caret; there is no selection
+/// in v1.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.text_field.config")]
+pub struct TextFieldConfig {
+    pub initial: String,
+    pub max_chars: u32,
+    pub theme: Theme,
+}
+
+/// `aether.kit.widget.radio.config` — a vertical list of mutually-exclusive
+/// `options`, one selected at a time, starting at `initial_index` (clamped
+/// into range at init). Each option draws as one theme row.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.radio.config")]
+pub struct RadioConfig {
+    pub options: Vec<String>,
+    pub initial_index: u32,
+    pub theme: Theme,
+}
+
+/// `aether.kit.widget.button.config` — a momentary push button showing
+/// `label`, firing [`ButtonClicked`] on a press-then-release-inside.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.button.config")]
+pub struct ButtonConfig {
+    pub label: String,
+    pub theme: Theme,
+}
+
+/// `aether.kit.widget.label.config` — static, non-interactive `text`. A label
+/// is not focus-eligible (the root's focus register skips it).
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.label.config")]
+pub struct LabelConfig {
+    pub text: String,
+    pub theme: Theme,
+}
+
+/// `aether.kit.widget.slider.changed` — a slider's value-up event.
+/// `committed` is `false` for the live values a drag streams and `true` for
+/// the final value when the drag releases (or an arrow-key nudge lands), so a
+/// consumer can throttle expensive work to committed values while still
+/// previewing the drag.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.slider.changed")]
+pub struct SliderChanged {
+    pub value: f32,
+    pub committed: bool,
+}
+
+/// `aether.kit.widget.text_field.committed` — a text field's value-up event,
+/// emitted when the field's Enter key commits its current contents.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.text_field.committed")]
+pub struct TextCommitted {
+    pub text: String,
+}
+
+/// `aether.kit.widget.radio.selected` — a radio group's value-up event,
+/// carrying the newly selected option's zero-based `index`.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.radio.selected")]
+pub struct RadioSelected {
+    pub index: u32,
+}
+
+/// `aether.kit.widget.button.clicked` — a button's value-up event, fired once
+/// per completed press-then-release-inside. Fieldless: the click carries no
+/// data, and which button clicked is the root's `source_mailbox` attribution.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.button.clicked")]
+pub struct ButtonClicked;
+
+/// `aether.kit.widget.frame` — the layout rect the root assigns a child,
+/// data-down. `(x, y)` is the child's top-left in window pixels and
+/// `(width, height)` its size. The child caches it to lay out its own local
+/// draw and to map a forwarded pointer position into its local space; the
+/// root keeps the same rect in its layout table to offset the child's draws
+/// and to hit-test pointer input.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.frame")]
+pub struct WidgetFrame {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// `aether.kit.widget.focus_gained` — the root tells a child it now holds
+/// keyboard focus, so the child draws its focus ring and caret. Fieldless.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.focus_gained")]
+pub struct FocusGained;
+
+/// `aether.kit.widget.focus_lost` — the root tells a child it no longer holds
+/// keyboard focus, so the child stops drawing its focus ring and caret.
+/// Fieldless.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.focus_lost")]
+pub struct FocusLost;
+
+/// `aether.kit.widget.panel.config` — the reference panel root's layout
+/// config: where the vertical widget stack sits (`x` / `y` top-left, `width`),
+/// its base [`Theme`], and the font it loads through `aether.text` to fill the
+/// theme's `font_id`. The panel spawns a fixed demonstration stack (a label, a
+/// slider, a radio group, a text field, an apply button) from this — the
+/// copy-paste starting point a real editor panel forks.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.panel.config")]
+pub struct PanelConfig {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub font_namespace: String,
+    pub font_path: String,
+    pub theme: Theme,
 }
 
 #[cfg(test)]

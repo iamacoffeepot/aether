@@ -1,0 +1,220 @@
+//! Widget-set end-to-end scenario (issue 2660).
+//!
+//! Load the reference `WidgetPanel` root, drive it with synthetic pointer and
+//! keyboard input, and assert the value-up events reach the panel end-to-end —
+//! the kit-owned routing (`Focus` hit-test / drag-capture / Tab cycle), the
+//! slider drag-value math, radio selection, and text editing all working
+//! through the real inline-cluster FIFO drain, not just the unit tests over
+//! the helper structs. The panel logs each value-up into its per-actor log
+//! ring (ADR-0081); the scenario tails the ring and reads the attributed
+//! events back.
+//!
+//! Value-up events flow child → panel *inside the cluster*, so they never
+//! cross the observable render / broadcast sink `count_observed` watches — the
+//! log ring is the correct observation surface here. The rendered-output gate
+//! (one `DrawSolidQuads` per cluster) is issue 2659's `widget_compositing`
+//! scenario and is not duplicated.
+//!
+//! Skipped when no wgpu adapter is available or the `aether_kit` wasm has not
+//! been pre-built (the shared `require_runtime` gate). CI sets
+//! `AETHER_REQUIRE_RUNTIME=1` to turn either skip into a hard failure.
+
+// Integration-test skip diagnostic: emit via stderr so `cargo test` surfaces
+// "skipping: ..." alongside `test ... ok` (issue 891).
+#![allow(clippy::print_stderr)]
+// Pixel-rect layout constants read clearest as float literals inline.
+#![allow(clippy::cast_precision_loss)]
+
+use std::fs;
+
+use aether_actor::Addressable;
+use aether_data::Kind;
+use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_TAB};
+use aether_kinds::mouse_button::LEFT;
+use aether_kinds::{
+    Key, LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, MouseMove,
+    TextInput, Tick,
+};
+use aether_kit::{PanelConfig, Theme};
+use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+
+/// The full trampoline address the loaded panel registers at (ADR-0099 §4).
+fn panel_address() -> String {
+    format!(
+        "aether.component/{}:panel",
+        aether_capabilities::WasmTrampoline::NAMESPACE,
+    )
+}
+
+/// Load the `WidgetPanel` root under the name `panel` (export
+/// `aether.kit.widget.panel`) with a config that places its stack at
+/// `(10, 10)` 200px wide, no font (`font_path` empty, so no `aether.text`
+/// dependency), and the default theme.
+fn load_panel(bench: &mut TestBench, wasm: &[u8]) {
+    let config = PanelConfig {
+        x: 10.0,
+        y: 10.0,
+        width: 200.0,
+        font_namespace: String::new(),
+        font_path: String::new(),
+        theme: Theme::DEFAULT,
+    };
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm: wasm.to_vec(),
+                    name: Some("panel".to_owned()),
+                    config: config.encode_into_bytes(),
+                    export: Some("aether.kit.widget.panel".to_owned()),
+                },
+            ),
+        )])
+        .expect("load sequence");
+    match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        LoadResult::Ok { name, .. } => assert!(
+            name.ends_with(":panel"),
+            "the panel root should register under :panel; got {name}",
+        ),
+        LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
+    }
+}
+
+/// Every log message in the panel's ring, oldest first.
+fn panel_log_messages(bench: &mut TestBench) -> Vec<String> {
+    match bench.log_tail(&panel_address(), None) {
+        LogTailResult::Ok { entries, .. } => entries.into_iter().map(|e| e.message).collect(),
+        LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
+    }
+}
+
+/// A left mouse-button press at `(x, y)`.
+fn press(x: f32, y: f32) -> MouseButton {
+    MouseButton { button: LEFT, x, y }
+}
+
+/// A left mouse-button release at `(x, y)`.
+fn release(x: f32, y: f32) -> MouseButtonRelease {
+    MouseButtonRelease { button: LEFT, x, y }
+}
+
+/// Drive the reference panel through a full input session — a slider drag, a
+/// Tab-then-arrow keyboard move, a radio click, and a text entry — and read
+/// the attributed value-up events back off the panel's log ring.
+///
+/// Layout under the default theme (`row_height` 24, `gap` 6), stack at
+/// `(10, 10)` 200px wide:
+///   label   y 10..34   slider  y 40..64   radio y 70..142
+///   text    y 148..172 button  y 178..202
+#[test]
+fn panel_routes_input_to_widgets_and_reports_values_up() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = TestBench::start_with_size(240, 220).expect("boot");
+    load_panel(&mut bench, &wasm);
+
+    let panel = panel_address();
+    // The first tick spawns the widget stack and assigns each child its frame;
+    // every later step drives one input event, settling its whole in-cluster
+    // chain before the next.
+    // Each input kind is fire-and-forget (no reply), so `send_mail` — which
+    // still blocks until the whole dispatched chain settles — is the op;
+    // `send_and_await` would hang waiting for a reply that never comes.
+    bench
+        .execute(vec![
+            ("spawn", BenchOp::send_mail(&panel, &Tick)),
+            // Slider drag: press mid-track, drag right, release — the release
+            // commits at the dragged value (x=160 → 75% of 0..255 ≈ 191). The
+            // press also focuses the slider.
+            (
+                "drag_press",
+                BenchOp::send_mail(&panel, &press(110.0, 52.0)),
+            ),
+            (
+                "drag_move",
+                BenchOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 }),
+            ),
+            (
+                "drag_release",
+                BenchOp::send_mail(&panel, &release(160.0, 52.0)),
+            ),
+            // Tab moves focus off the slider to the radio group; Down then
+            // routes to the focused radio, moving its selection to index 1.
+            ("tab", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            (
+                "radio_key",
+                BenchOp::send_mail(&panel, &Key { code: KEY_DOWN }),
+            ),
+            // A click on the third radio row (y 118..142) selects index 2.
+            (
+                "radio_press",
+                BenchOp::send_mail(&panel, &press(30.0, 125.0)),
+            ),
+            (
+                "radio_release",
+                BenchOp::send_mail(&panel, &release(30.0, 125.0)),
+            ),
+            // Focus the text field (y 148..172), type into it, and commit.
+            (
+                "text_focus",
+                BenchOp::send_mail(&panel, &press(50.0, 160.0)),
+            ),
+            (
+                "text_focus_up",
+                BenchOp::send_mail(&panel, &release(50.0, 160.0)),
+            ),
+            (
+                "type",
+                BenchOp::send_mail(
+                    &panel,
+                    &TextInput {
+                        text: "hi".to_owned(),
+                    },
+                ),
+            ),
+            (
+                "commit",
+                BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }),
+            ),
+        ])
+        .expect("input session");
+
+    let log = panel_log_messages(&mut bench);
+    let joined = log.join("\n");
+
+    assert!(
+        log.iter()
+            .any(|m| m.contains("widget slider changed") && m.contains("committed=true")),
+        "the slider drag-release should log a committed change; log was:\n{joined}",
+    );
+    assert!(
+        log.iter().any(|m| m.contains("widget slider changed")
+            && m.contains("widget=slider")
+            && m.contains("committed=false")),
+        "the drag should stream at least one uncommitted change; log was:\n{joined}",
+    );
+    assert!(
+        log.iter()
+            .any(|m| m.contains("widget radio selected") && m.contains("index=1")),
+        "Tab-then-Down should route to the radio and select index 1 — proving the \
+         focus cycle and keyboard routing; log was:\n{joined}",
+    );
+    assert!(
+        log.iter()
+            .any(|m| m.contains("widget radio selected") && m.contains("index=2")),
+        "the radio row click should select index 2; log was:\n{joined}",
+    );
+    assert!(
+        log.iter()
+            .any(|m| m.contains("widget text committed") && m.contains("text=hi")),
+        "the text entry then Enter should commit \"hi\" — proving pointer focus \
+         and text routing; log was:\n{joined}",
+    );
+}

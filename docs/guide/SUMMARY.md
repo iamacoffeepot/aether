@@ -25,6 +25,7 @@
   - [The scheduler](systems/scheduler.md)
   - [Components & lifecycle](systems/components.md)
   - [Rendering & camera](systems/rendering.md)
+  - [Widget set & focus model](systems/widgets.md)
   - [Mesh authoring & the DSL]()
   - [Input streams](systems/input.md)
   - [The frame lifecycle](systems/lifecycle.md)
