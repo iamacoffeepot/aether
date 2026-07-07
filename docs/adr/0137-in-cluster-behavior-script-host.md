@@ -1,0 +1,81 @@
+# ADR-0137: In-cluster behavior script host
+
+- **Status:** Proposed
+- **Date:** 2026-07-07
+
+## Context
+
+The engine has two ways to run guest code today, and they occupy two corners of a two-axis space: *when* code arrives (load time vs. runtime) and *where* it runs (its own environment vs. inside an existing cluster). `load_component` (ADR-0022, ADR-0116) is runtime + own environment — new wasm arrives while the engine runs, but it becomes its own component instance with its own mailbox lineage. `#[actor]` + `export!` with inline children (ADR-0114) is load-time + shared — actors co-locate in one wasm instance and settle mail cascades in-cluster, but the set of actor types is fixed when the module is compiled. The runtime + shared cell is empty: there is no way to inject code into a *running cluster* so it participates in that cluster's mail traffic.
+
+The forcing consumer is widget scripting. A widget tree (ADR-0117 compositing, plus the declarative child-spec composition of issue #2681) is assembled from stock kit actors — sliders, text fields, buttons — and the behavior that makes a particular panel *this* panel ("when the slider passes 0.8, clamp it and flash the label") is glue logic. Requiring a full component build, upload, and `load_component` round trip for every piece of glue makes the widget kit unusable for live authoring: the glue is small, changes constantly, and belongs *at* the widget it modifies. What live authoring needs is code injected at a point in the tree, transforming the mail already flowing there, swappable without disturbing the widgets around it.
+
+Two constraints shape the mechanism. First, wasm instances are sealed: injecting new code into a live instance's code space is architecturally impossible — a wasm module's functions are fixed at instantiation, and no host API grows them. Any injection mechanism therefore interposes *around* existing actors rather than patching them. Second, injected code is less trusted than compiled-in code: it arrives at runtime, possibly authored moments ago, and a broken script must not take the widget tree down with it.
+
+## Decision
+
+### The mechanism: a script host actor, generic; widgets, the first consumer
+
+We add a **behavior script host**: a stock actor (`BehaviorHost`, in `aether-kit`) that embeds a [`wasmi`](https://crates.io/crates/wasmi) interpreter and runs small wasm **behavior scripts** against the mail flowing through its position in an inline-actor cluster. The mechanism is generic — any cluster position whose traffic is worth transforming can host a behavior — and the widget tree is its first consumer, the same generic-mechanism + first-consumer shape as ADR-0114: state the reusable primitive generally, ground it with one forcing consumer, and defer everything the consumer does not force.
+
+**Interposition is tree position.** The host occupies a child slot (spawned from a child spec like any widget, per issue #2681) and spawns the actor it wraps as its *own* inline child. Down-lane mail addressed to the slot arrives at the host, is offered to the script, and forwards to the wrapped child; up-lane mail from the wrapped child arrives at the host (it is the child's `ctx.parent()`) and forwards up after the same offer. No routing-override primitive is added — the ADR-0114 membrane already routes this way by construction. Precedence is tree order, and stacking is chaining: a host wrapping a host wrapping a widget applies two scripts in tree order.
+
+**Mail is the placement and lifecycle seam; the filter call is the execution seam.** Placing a behavior, loading its script bytes, swapping the script — all mail, addressed to the host like any actor. Executing the script is not mail: for each lane kind the script declares, the host makes a synchronous in-guest call into the interpreter (encode the kind's bytes into the script's linear memory, call the script's filter export, decode the result) inside its own handler dispatch, before the mail moves on. The script never appears in the mailbox topology and is invisible to settlement — the chain sees the host, and the host's handler cost includes the script.
+
+### The firewall: fuel-metered, fail-open
+
+Every filter call runs under a wasmi **fuel** budget, so a runaway script terminates deterministically. On any trap — fuel exhaustion, memory fault, missing export, a failed decode — the host **fails open**: the in-flight mail forwards untransformed, the failure is logged, and after a bounded number of consecutive traps the script is disabled into a pure passthrough until replaced. This deliberately inverts the usual firewall default. A fail-closed filter is right when the filter is a security boundary; this filter is a convenience layer over traffic that flowed fine before the script existed, and the degraded-but-alive widget is the correct residue of a broken script — never a dead subtree. Scripts are consequently not a security or correctness boundary: anything that must *block* traffic to be safe belongs in a real actor, not a behavior.
+
+An **exports manifest** (a custom section in the script wasm listing the kind ids its handlers cover) lets the host skip the interpreter entirely for undeclared kinds — the common case for high-rate lane traffic a script does not care about costs a map lookup, not a wasm call.
+
+### The vocabulary boundary: scripts transform, components declare
+
+A behavior script transforms **existing** kind vocabularies. It never declares a new kind: it carries no `aether.kinds` section, registers nothing, and its mail surface is exactly the kinds already flowing past its host. This keeps the schema story closed — `describe_kinds` remains complete without enumerating scripts — and it draws the graduation path: a script that wants its own vocabulary, its own mailbox, or its own subscriptions has outgrown the shared cell and becomes a component (`load_component`, the runtime + own-environment quadrant).
+
+### The authoring surface: `#[behavior]`, signature-encoded intent
+
+The author-facing surface is the point of the feature; the raw filter ABI beneath it is plumbing of the same rank as `receive_p32`. A behavior is a plain struct with a `#[behavior]` impl, mirroring `#[actor]`:
+
+- `#[on(K)]` handlers, kind inferred from the parameter type exactly as `#[handler]` infers it. The signature encodes intent: `&mut K` intercepts (the mutated value forwards — the parameter is re-encoded unconditionally after the call; kinds are bytes-sized, so no dirty tracking); `&K` observes. `ctx.consume()` drops the in-flight mail; consume plus an emitted effect substitutes. There is no verdict type in author code — mutation *is* the verdict.
+- **Lifecycle**: `#[on_attach]` (runs post-restore with mirrors primed and ctx available), `#[on(Collect)]` or `#[on_frame]` for per-frame work, `#[on_detach]` best-effort (fail-open exempts trapped scripts), and overridable `state_save` / `state_load` for migration. There is no wire/unwire override: those are the host's actor-level hooks, a script's subscriptions *are* its `#[on]` manifest, and reaching into widget wiring would cross the capability line.
+- **Effects as method-projected mail**: `ctx.widget().set(…)`, `ctx.panel().emit(…)`, `ctx.child(path).send(…)` accumulate into an effect buffer inside the pure filter call; the host drains it into real cluster sends after the call returns.
+
+**Effect-drain semantics** (fixed, load-bearing): (1) verdict before effects — the in-flight mail forwards (or is consumed) first, then effects apply in recorded order, so stacked behaviors see each other's *forwards* and never each other's in-flight effects; (2) echo suppression with truthful mirrors — a script's own `set()` is never offered back through its own filter, and the host integrates outbound effect bytes into the mirror at send time so reads reflect the script's own writes; (3) `report()` has no return value — its reply is the target widget's re-emitted kinds arriving up-lane and filling the mirror before handlers run.
+
+### Addressing and discovery: subnames, membership events
+
+Subnames are the script's entire address space. `ctx.child(path)` resolves path-relative against the host's subtree; the host maps subname → cluster address in the effect drain; scripts never see `MailboxId`s. A behavior's reach is its own subtree plus its parent lane — wider reach means emitting up and letting compiled panel code route onward.
+
+Discovery is event-carried. The `Composite` helper (ADR-0117) already funnels every slot add and remove, so it emits a `children_changed { added: [(subname, type)], removed: [subname] }` event up the lane mechanically — no author discipline required, and any observer (a debugger, an MCP agent) inherits the same signal. `ctx.tree()` is a cache over these events: a snapshot at attach plus deltas, correct for subtrees that spawn and despawn from inside.
+
+### State: the mirror for reads, set-kinds for writes, authored state persisted
+
+**Reads never cross as state.** Each handle (`ctx.widget()`, `ctx.child(path)`) carries a last-value-per-kind mirror — `last::<K>() -> Option<&K>` — maintained by SDK dispatch from the kinds already flowing through the interposition, before handler dispatch, and primed at attach by a replay request (`report()` asks the widget to re-emit its observable kinds as live-shaped traffic through the ordinary `#[on]` path). A read costs a field access into script memory; the mirror pays serialize-once-per-*change* on bytes already in flight rather than serialize-per-*read*, which is the shape that scales if behaviors ever attach to state-heavy actors. Views are script-memory copies, so write-prevention is free by construction — wasmi's separate linear memory means nothing crosses by reference. There is no view macro and no per-widget view declaration: the mirror works automatically for every kind that flows, including custom widgets' kinds; grouped view structs are ordinary author code. Accepted residue: internal transients that never flow as mail are invisible, and the per-widget fix is an opt-in event kind — the mail surface stays the only surface. The host always offers the low-rate mirror-kind set (config, values, focus, membership) to SDK dispatch regardless of the handler manifest.
+
+**Writes** go through the target's existing config/set kinds, never field access.
+
+**Persistence** rides the existing composite-bundle machinery (ADR-0113/ADR-0114): the wrapped widget's state persists under the widget's own bundle entry, ownership unmoved and script-independent; the host's entry carries `{ child_spec, script_source (fs ref | inline), script_bytes (resident running copy), script_state (opaque state_save blob) }`. `state_save` serializes exactly the author's struct fields (serde, macro-derived, overridable); mirrors, tree cache, and pending effects are deliberately excluded — they rebuild from the attach snapshot, replay, and traffic, and persisting derived data invites resurrection-stale bugs. Rehydrate re-instantiates from resident bytes with no fs refetch and offers the old blob to `state_load` (`PriorState` semantics); an undecodable blob boots fresh with a warning, fail-open. A script swap touches exactly one bundle entry and offers the old state blob to the new script.
+
+### The interpreter: wasmi, with a named escalation door
+
+The interpreter is **wasmi 1.1** (`default-features = false`): it is `no_std`, runs inside a wasm guest on stable toolchains, and carries built-in fuel metering. The evaluated escalation — native same-store linking, where the substrate instantiates the script into the host's own wasm store so filter calls become direct calls instead of interpretation — is deferred, not rejected: the position-independent side-module toolchain it requires is experimental today. The `#[behavior]` surface and the filter ABI are designed so that escalation swaps the execution engine under an unchanged authoring surface; this door stays named in the host's design and closes nothing now.
+
+## Consequences
+
+- The runtime + shared quadrant is filled: glue logic is injectable at a tree position, swappable in place, and metered — without a component build cycle. Live widget authoring (an agent writing a behavior, pointing the host at it, iterating) becomes a mail-only loop.
+- A new authoring surface enters the SDK tier: `#[behavior]` and its ctx, mirroring `#[actor]` closely enough that the concepts transfer, plus a new script-side crate pair to maintain (SDK + derive).
+- `aether-kit` gains a wasmi dependency behind a feature gate, and the kit wasm grows by the interpreter's footprint when the feature is on.
+- Script execution cost lands inside the host's handler cost (visible in `actor_cost`), and scripts are invisible to tracing/settlement — acceptable at glue scale, and the manifest skip keeps undeclared-kind traffic near-free. If script-level observability is ever needed, it is host-side instrumentation, not topology.
+- Fail-open means a behavior cannot be a gate. Documentation must state this plainly; anything gate-shaped graduates to a component.
+- The membership event (`children_changed`) becomes part of the widget lane vocabulary with observers beyond scripting (debuggers, agents), landing as its own surface.
+- Behavior scripts are a second kind of wasm artifact (no `aether.kinds` section, not a component); build and test infrastructure that discovers component wasm structurally must not misclassify them, and fixture builds for tests need their own wiring.
+
+## Alternatives considered
+
+- **Live instance code injection** — architecturally impossible; a wasm instance's functions are fixed at instantiation. Interposition around actors is the only shape.
+- **`load_component` for glue** — the runtime + own-environment quadrant: every script becomes a full component with its own lineage, build, and upload cycle; wrong weight for per-widget glue, and it cannot sit *inside* a cluster's mail path. It remains the graduation target.
+- **Native same-store linking** — better steady-state execution (no interpretation), but the position-independent side-module toolchain is experimental; deferred behind the same authoring surface and ABI as a named escalation.
+- **A verdict-typed filter API** (`fn on(k: K) -> Verdict`) — rejected as author surface; the load-bearing authoring condition is that interception reads as ordinary mutation (`&mut K`), with consume/emit as ctx verbs. The verdict exists only in the host↔script envelope.
+- **Parameter-injected views** (handler signature `(self, ctx, mail, view)`) — rejected: `#[actor]` handlers are exactly `(self, ctx, mail)` and `#[on]` mirrors that; views are lazy mirror reads that belong at use sites, and the signature's one meaning stays intercept-vs-observe.
+- **Snapshot state introspection** (a request the widget answers with its ADR-0113 `State` kind) — replaced by replay: snapshots freeze widget internals into a second state surface and pay serialize + copy per read; replay re-emits observable kinds as live-shaped traffic, so one code path primes and maintains the mirror and widget internals stay unfrozen.
+- **Declared view types** (a `widget_view!` macro per widget) — superseded by the `last::<K>()` mirror: per-widget declarations reintroduce widget participation and freeze a view schema; the mirror is automatic for every kind that flows. A no-argument `#[derive(View)]` grouping sugar is named as later extraction if real scripts repeat the boilerplate.
+- **Fail-closed traps** — right for security filters, wrong here: a broken script silencing a widget subtree is strictly worse than a passthrough, and scripts are declared a non-boundary instead.
