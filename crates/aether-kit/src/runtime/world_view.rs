@@ -28,6 +28,11 @@
 //! - `aether.kit.world.set_smoothing_profile` — register a contour-
 //!   smoothing profile the per-cell smoothing plane points at; remeshes
 //!   every cached chunk.
+//! - `aether.kit.world.set_material_style` — write a material's complete
+//!   live style row (base HSL, noise shape, smoothing defaults, rim /
+//!   wash / water tunables) and remesh every cached chunk, so a tuning
+//!   pass needs no rebuild. An undecodable or `Void` material byte is
+//!   rejected with a warn log and leaves the table untouched.
 //! - `aether.kit.world.set_view_mode` — switch between the painted gouache
 //!   grammar and the raw grayscale calibration field; remeshes all.
 //! - `aether.kit.world.load` — fetch a serialized world through
@@ -44,8 +49,10 @@ use aether_capabilities::{FsCapability, LifecycleCapability, RenderCapability};
 use aether_kinds::Render;
 
 use super::mesher::mesh_chunk;
+use super::mesher::style::StyleTable;
 use crate::world::{
-    ChunkPos, SetChunk, SetRegion, SetSmoothingProfile, SetViewMode, ViewMode, World, WorldLoad,
+    ChunkPos, Material, SetChunk, SetMaterialStyle, SetRegion, SetSmoothingProfile, SetViewMode,
+    ViewMode, World, WorldLoad,
 };
 
 /// World-view component: holds the world plane stack and a per-chunk
@@ -64,18 +71,19 @@ pub struct WorldView {
     world: World,
     meshes: BTreeMap<ChunkPos, Vec<DrawTriangle>>,
     mode: ViewMode,
+    styles: StyleTable,
 }
 
 impl WorldView {
     /// Rebuild every chunk's cached mesh from the current world — used
-    /// after a whole-world change (region default, world load, view mode)
-    /// that can alter any chunk's mesh.
+    /// after a whole-world change (region default, world load, view mode,
+    /// material style) that can alter any chunk's mesh.
     fn remesh_all(&mut self) {
         self.meshes.clear();
         let positions: Vec<ChunkPos> = self.world.chunks().map(|(pos, _)| pos).collect();
         for pos in positions {
             self.meshes
-                .insert(pos, mesh_chunk(&self.world, pos, self.mode));
+                .insert(pos, mesh_chunk(&self.world, pos, self.mode, &self.styles));
         }
     }
 }
@@ -89,6 +97,7 @@ impl WasmActor for WorldView {
             world: World::new(),
             meshes: BTreeMap::new(),
             mode: ViewMode::default(),
+            styles: StyleTable::default(),
         })
     }
 
@@ -137,8 +146,10 @@ impl WasmActor for WorldView {
                     z: pos.z + dz,
                 };
                 if (dx == 0 && dz == 0) || self.meshes.contains_key(&neighbor) {
-                    self.meshes
-                        .insert(neighbor, mesh_chunk(&self.world, neighbor, self.mode));
+                    self.meshes.insert(
+                        neighbor,
+                        mesh_chunk(&self.world, neighbor, self.mode, &self.styles),
+                    );
                 }
             }
         }
@@ -184,6 +195,37 @@ impl WasmActor for WorldView {
         self.world
             .insert_smoothing_profile(msg.profile_id, msg.profile());
         self.remesh_all();
+    }
+
+    /// Write a material's complete live style row, then remesh every
+    /// cached chunk — a style change alters the resolved color, noise
+    /// field, and smoothing defaults of every cell of that material. An
+    /// undecodable or `Void` material byte is rejected with a warn log and
+    /// leaves the table untouched.
+    ///
+    /// # Agent
+    /// Send `aether.kit.world.set_material_style` with a raw `material`
+    /// byte (`1` Grass … `5` Water) and every `MaterialStyle` field — it is
+    /// a full-row write, not a delta. Tune against `capture_frame`, and
+    /// switch to `aether.kit.world.set_view_mode`'s raw mode to read the
+    /// noise field directly. Tuned values are session-scoped; commit the
+    /// judged row back into `mesher::style`'s const table as the new
+    /// default once satisfied.
+    #[handler]
+    fn on_set_material_style(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetMaterialStyle) {
+        match Material::try_from(msg.material) {
+            Ok(Material::Void) | Err(_) => {
+                tracing::warn!(
+                    target: "aether_kit",
+                    material = msg.material,
+                    "set_material_style: undecodable or Void material byte; table unchanged",
+                );
+            }
+            Ok(_) => {
+                self.styles.apply(&msg);
+                self.remesh_all();
+            }
+        }
     }
 
     /// Trigger an asynchronous world load. The reply arrives as
