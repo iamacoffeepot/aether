@@ -30,7 +30,7 @@
 //! - **Wave** — a single expanding arc (one ~90° sector of an outward ring);
 //!   step out of its path as the radial front sweeps past.
 
-use crate::runtime::{GRID_H, GRID_W};
+use super::{GRID_H, GRID_W};
 
 /// Hazard sub-cells per tile, per axis: the hazard grid is this much finer
 /// than the tile grid.

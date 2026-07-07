@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 use aether_math::Vec2;
 use serde::{Deserialize, Serialize};
 
-use crate::theme::Theme;
+use crate::widget::theme::Theme;
 
 /// `aether.kit.widget.collect` — a per-frame poll a compositing node
 /// sends to each of its children in layout order. The child answers with

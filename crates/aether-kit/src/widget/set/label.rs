@@ -1,5 +1,5 @@
 // `#[handler]` methods take their decoded mail by value per the ADR-0033
-// dispatch ABI (see `runtime/widget.rs`).
+// dispatch ABI (see `widget/mod.rs`).
 #![allow(clippy::needless_pass_by_value)]
 
 //! The static label (issue 2660).
@@ -13,9 +13,9 @@ use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 
-use crate::runtime::widgets::text_origin_y;
-use crate::theme::{SetTheme, Theme};
-use crate::widgets::{Collect, LabelConfig, WidgetDrawItem, WidgetDrawList, WidgetFrame};
+use crate::widget::set::text_origin_y;
+use crate::widget::theme::{SetTheme, Theme};
+use crate::widget::{Collect, LabelConfig, WidgetDrawItem, WidgetDrawList, WidgetFrame};
 
 /// A static text label. Holds the text plus the cached theme / frame.
 pub struct LabelWidget {

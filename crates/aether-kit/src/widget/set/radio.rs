@@ -1,5 +1,5 @@
 // `#[handler]` methods take their decoded mail by value per the ADR-0033
-// dispatch ABI (see `runtime/widget.rs`).
+// dispatch ABI (see `widget/mod.rs`).
 #![allow(clippy::needless_pass_by_value)]
 
 //! The radio group (issue 2660).
@@ -17,9 +17,9 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton};
 
-use crate::runtime::widgets::{push_border, quad, text_origin_y};
-use crate::theme::{SetTheme, Theme, WidgetState};
-use crate::widgets::{
+use crate::widget::set::{push_border, quad, text_origin_y};
+use crate::widget::theme::{SetTheme, Theme, WidgetState};
+use crate::widget::{
     Collect, FocusGained, FocusLost, RadioConfig, RadioSelected, WidgetDrawItem, WidgetDrawList,
     WidgetFrame,
 };

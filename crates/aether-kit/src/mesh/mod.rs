@@ -32,6 +32,9 @@
 //! 4. Every `aether.lifecycle.render` stage re-emits the cached
 //!    triangles to `"aether.render"`.
 
+mod kinds;
+pub use kinds::*;
+
 use aether_actor::{
     ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
@@ -43,7 +46,6 @@ use aether_kinds::{MeshLoadResult, Render};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
 
-use crate::mesh::LoadMesh;
 use core::str;
 
 const OUTLINE_WIDTH: f32 = 0.012;

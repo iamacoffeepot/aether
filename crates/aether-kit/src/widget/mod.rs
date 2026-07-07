@@ -36,6 +36,16 @@
 //! `Collect` handler — where it holds a send-capable ctx. The root spawns
 //! on its first `Tick` for the one code path.
 
+mod kinds;
+pub use kinds::*;
+pub mod composite;
+pub mod focus;
+mod panel;
+pub mod set;
+pub mod theme;
+
+pub use panel::WidgetPanel;
+
 use aether_actor::{
     ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
@@ -47,8 +57,7 @@ use aether_data::Kind;
 use aether_kinds::{QuadSpace, Tick};
 use aether_math::Vec2;
 
-use crate::runtime::composite::Composite;
-use crate::widgets::{Collect, WidgetConfig, WidgetDrawItem, WidgetDrawList};
+use crate::widget::composite::Composite;
 
 /// A compositing widget node. `config` fixes its role and layout;
 /// `composite` accumulates its subtree each frame; `spawned` guards the
@@ -97,26 +106,13 @@ impl Widget {
         }
     }
 
-    /// Drain any buffered membership change and emit it up the lane. The
-    /// first-spawn burst of the whole stack drains as one batched
-    /// `ChildrenChanged`; a later single add/remove as one event. A loaded
-    /// root has no up-lane consumer, so the drain is a harmless no-send there
-    /// (kept mechanical for uniformity and future re-parenting).
-    fn flush_membership(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
-        if let Some(changed) = self.composite.take_membership_changes()
-            && let Some(parent) = ctx.parent()
-        {
-            parent.send(&changed);
-        }
-    }
-
     /// Open a frame and fan `Collect` to every child. Resets the
     /// composite, lays down own chrome, then polls each child in layout
     /// order. A leaf (no children) is already complete, so it finishes on
     /// the spot; a node with children finishes later, from `on_draw_list`.
     fn drive_frame(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
         self.ensure_spawned(ctx);
-        self.flush_membership(ctx);
+        flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
         self.composite
             .extend_chrome(self.config.chrome.iter().cloned());
@@ -140,6 +136,35 @@ impl Widget {
             parent.send(&list);
         }
     }
+}
+
+/// Drain any buffered membership change and emit it up the parent lane. The
+/// first-spawn burst of the whole stack drains as one batched
+/// `ChildrenChanged`; a later single add/remove as one event. A loaded root
+/// has no up-lane consumer, so the drain is a harmless no-send there (kept
+/// mechanical for uniformity and future re-parenting). Shared by the
+/// compositing node and the reference panel, which both own a `Composite`.
+pub(crate) fn flush_membership(composite: &mut Composite, ctx: &mut WasmCtx<'_, Manual>) {
+    if let Some(changed) = composite.take_membership_changes()
+        && let Some(parent) = ctx.parent()
+    {
+        parent.send(&changed);
+    }
+}
+
+/// Attribute an inbound child draw list to its slot by the reply source and
+/// report whether the frame's slots have now all filled. The caller
+/// discharges the completed composite its own way (the node replies up or
+/// emits; the panel emits), so only the fill + completeness check is shared.
+pub(crate) fn accept_child_list(
+    composite: &mut Composite,
+    ctx: &mut WasmCtx<'_, Manual>,
+    list: WidgetDrawList,
+) -> bool {
+    if let Some(source) = ctx.source_mailbox() {
+        composite.fill(source, list);
+    }
+    composite.is_complete()
 }
 
 /// Emit a flattened subtree as the cluster's single render + text output:
@@ -261,10 +286,7 @@ impl WasmActor for Widget {
     /// A child's reply; not useful to send manually.
     #[handler::manual]
     fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Manual>, list: WidgetDrawList) {
-        if let Some(source) = ctx.source_mailbox() {
-            self.composite.fill(source, list);
-        }
-        if self.composite.is_complete() {
+        if accept_child_list(&mut self.composite, ctx, list) {
             self.finish(ctx);
         }
     }

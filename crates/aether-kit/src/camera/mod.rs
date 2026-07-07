@@ -43,6 +43,9 @@
 //! aren't a stable named contract through `aether-kinds`). Control
 //! mail is the driver surface.
 
+mod kinds;
+pub use kinds::*;
+
 use std::collections::HashMap;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
@@ -52,11 +55,6 @@ use aether_capabilities::render::Camera;
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
 use aether_kinds::{Render, Tick, WindowSize};
 use aether_math::{Mat4, PI, Quat, TAU, Vec2, Vec3};
-
-use crate::camera::{
-    CameraCreate, CameraDestroy, CameraOrbitSet, CameraSetActive, CameraSetMode, CameraTopdownSet,
-    ModeInit, OrbitParams, TopdownParams,
-};
 
 const Z_NEAR: f32 = 0.1;
 const Z_FAR: f32 = 100.0;

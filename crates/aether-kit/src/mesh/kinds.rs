@@ -1,5 +1,5 @@
-//! Mesh-viewer trunk types. The runtime actor
-//! ([`crate::runtime::MeshViewer`]) loads a mesh file from the
+//! Mesh-viewer wire kinds. The actor
+//! ([`crate::mesh::MeshViewer`]) loads a mesh file from the
 //! substrate's I/O surface (ADR-0041 namespace + path) and replays it
 //! as `DrawTriangle` mail every tick. It dispatches on file
 //! extension: `.dsl` runs through the `aether-mesh` parser+mesher

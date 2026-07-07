@@ -12,7 +12,7 @@
 use aether_capabilities::render::DrawTriangle;
 use aether_kit::{
     CELLS_PER_CHUNK_AREA, Chunk, ChunkPos, Material, Region, ViewMode, WaterPlane, World,
-    runtime::{StyleTable, mesher::mesh_chunk},
+    world::mesher::{mesh_chunk, style::StyleTable},
 };
 
 fn lake_world() -> World {

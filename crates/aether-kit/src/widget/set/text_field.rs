@@ -1,5 +1,5 @@
 // `#[handler]` methods take their decoded mail by value per the ADR-0033
-// dispatch ABI (see `runtime/widget.rs`).
+// dispatch ABI (see `widget/mod.rs`).
 #![allow(clippy::needless_pass_by_value)]
 
 //! The single-line text field (issue 2660).
@@ -22,9 +22,9 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::keycode::{KEY_BACKSPACE, KEY_ENTER, KEY_LEFT, KEY_RIGHT};
 use aether_kinds::{ImePreedit, Key, Modifiers, TextInput};
 
-use crate::runtime::widgets::{approx_text_width, push_border, quad, text_origin_y};
-use crate::theme::{SetTheme, Theme, WidgetState};
-use crate::widgets::{
+use crate::widget::set::{approx_text_width, push_border, quad, text_origin_y};
+use crate::widget::theme::{SetTheme, Theme, WidgetState};
+use crate::widget::{
     Collect, FocusGained, FocusLost, TextCommitted, TextFieldConfig, WidgetDrawItem,
     WidgetDrawList, WidgetFrame,
 };

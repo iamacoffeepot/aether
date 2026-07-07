@@ -16,7 +16,7 @@
 
 //! The world-view mesher: a pure function over the plane stack
 //! ([`crate::world`]) that turns one chunk into a triangle list, read by
-//! the [`world_view`](super::world_view) actor and replayed to
+//! the [`WorldView`](super::WorldView) actor and replayed to
 //! `"aether.render"` each frame.
 //!
 //! [`mesh_chunk`] paints the gouache grammar in two passes over the chunk,
@@ -81,7 +81,7 @@
 //! Every vertex lifts onto the plate-resolved height surface
 //! ([`World::surface_height_in`]): cell heights blend into continuous
 //! slopes where neighbors sit within the step ceiling
-//! ([`crate::world::STEP_MAX_OCTIMETERS`]) and break where they exceed
+//! ([`STEP_MAX_OCTIMETERS`]) and break where they exceed
 //! it. Where a cell carries authored per-point relief
 //! (`World::cell_has_height_relief`) the pass resolves one stride down: the
 //! interior cap tessellates to `SUB × SUB` subcell quads over point patches
@@ -4212,7 +4212,7 @@ mod tests {
         // A pyramid: 12 octimeters per subcell up to the middle and back down
         // on both axes, flat (zero) by every chunk edge so the grass never
         // stands above the Void surround and nothing cliffs anywhere.
-        let ramp = |g: i32| (12 * (g.min(60 - g)).max(0)) as i16;
+        let ramp = |g: i32| (12 * g.min(60 - g).max(0)) as i16;
         for lz in 0..EDGE {
             for lx in 0..EDGE {
                 let mut deltas = [0i16; SUBCELLS_PER_CELL];

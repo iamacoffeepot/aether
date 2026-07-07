@@ -1,4 +1,4 @@
-//! Wire kinds for the [`crate::runtime::WorldMover`] body — the mail a peer
+//! Wire kinds for the [`crate::mover::WorldMover`] body — the mail a peer
 //! sends to place the controllable marker on the painted world. Core driving
 //! reuses the substrate input kinds (`Key` / `MouseButton` / …), so this is
 //! the mover's whole bespoke wire surface.

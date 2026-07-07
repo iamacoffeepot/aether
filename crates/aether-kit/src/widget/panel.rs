@@ -1,5 +1,5 @@
 // `#[handler]` methods take their decoded mail by value per the ADR-0033
-// dispatch ABI (see `runtime/widget.rs`).
+// dispatch ABI (see `widget/mod.rs`).
 #![allow(clippy::needless_pass_by_value)]
 // A radio group's row count is its (small) option count; the `usize as f32`
 // for its stacked pixel height cannot lose precision at any real option count.
@@ -37,6 +37,7 @@
 //!   reference logs it.
 
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_actor::{
@@ -55,18 +56,18 @@ use aether_kinds::{
 };
 use aether_math::Vec2;
 
-use crate::runtime::composite::Composite;
-use crate::runtime::focus::{Focus, FocusTransition};
-use crate::runtime::widget::emit;
-use crate::runtime::widgets::{
+use crate::widget::composite::Composite;
+use crate::widget::focus::{Focus, FocusTransition};
+use crate::widget::set::{
     ButtonWidget, LabelWidget, RadioGroupWidget, SliderWidget, TextFieldWidget, quad,
 };
-use crate::theme::{SetTheme, Theme};
-use crate::widgets::{
+use crate::widget::theme::{SetTheme, Theme};
+use crate::widget::{
     ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, LabelConfig, PanelConfig,
     RadioConfig, RadioSelected, SliderChanged, SliderConfig, TextCommitted, TextFieldConfig,
     WidgetChildSpec, WidgetDrawList, WidgetFrame, WidgetKind,
 };
+use crate::widget::{accept_child_list, emit, flush_membership};
 
 /// One spawned child's alias plus the logical name the panel attributes its
 /// value-up events under (for the map-editor translation / logging) — the
@@ -211,19 +212,6 @@ impl WidgetPanel {
         self.children.push(ChildRef { id, name });
     }
 
-    /// Drain any buffered membership change and emit it up the lane. The panel
-    /// is a loaded root with no up-lane consumer, so this is a no-send in
-    /// practice; it is kept mechanical (draining the buffer so it never grows,
-    /// uniform with the compositing widget and correct if the panel is ever
-    /// re-parented).
-    fn flush_membership(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
-        if let Some(changed) = self.composite.take_membership_changes()
-            && let Some(parent) = ctx.parent()
-        {
-            parent.send(&changed);
-        }
-    }
-
     /// Discharge a closed frame: flatten the composite and emit it as the
     /// panel's single render + text output.
     fn finish(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
@@ -280,7 +268,7 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
         origin: [0.0, 0.0],
         config,
     };
-    alloc::vec![
+    vec![
         spec(
             "label",
             WidgetKind::Label,
@@ -306,7 +294,7 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
             "radio",
             WidgetKind::Radio,
             RadioConfig {
-                options: alloc::vec![
+                options: vec![
                     String::from("Low"),
                     String::from("Medium"),
                     String::from("High"),
@@ -384,7 +372,7 @@ fn spawn_behavior_host(
     spec: &WidgetChildSpec,
     row: f32,
 ) -> Option<(MailboxId, f32, bool, &'static str)> {
-    use crate::widgets::{BehaviorHostSpec, ScriptRef};
+    use crate::widget::{BehaviorHostSpec, ScriptRef};
     use aether_actor::ActorTypeTag;
     use aether_behavior::HostConfig;
     use aether_behavior::host::{ChildSpec, ScriptSource};
@@ -530,7 +518,7 @@ impl WasmActor for WidgetPanel {
     #[handler::manual]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Manual>, _tick: Tick) {
         self.ensure_spawned(ctx);
-        self.flush_membership(ctx);
+        flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
         let background = quad(
             self.config.x,
@@ -555,10 +543,7 @@ impl WasmActor for WidgetPanel {
     /// A child's reply; not useful to send manually.
     #[handler::manual]
     fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Manual>, list: WidgetDrawList) {
-        if let Some(source) = ctx.source_mailbox() {
-            self.composite.fill(source, list);
-        }
-        if self.composite.is_complete() {
+        if accept_child_list(&mut self.composite, ctx, list) {
             self.finish(ctx);
         }
     }
@@ -743,7 +728,7 @@ impl WasmActor for WidgetPanel {
 #[cfg(all(test, feature = "behavior"))]
 mod behavior_tests {
     use super::*;
-    use crate::widgets::{BehaviorHostSpec, ScriptRef};
+    use crate::widget::{BehaviorHostSpec, ScriptRef};
     use aether_actor::ActorTypeTag;
     use aether_data::Kind;
 
@@ -785,7 +770,7 @@ mod behavior_tests {
     fn host_spec_round_trips_through_child_config() {
         let spec = BehaviorHostSpec {
             wrapped: WidgetKind::Slider,
-            wrapped_config: alloc::vec![1, 2, 3],
+            wrapped_config: vec![1, 2, 3],
             script: ScriptRef::FsRef {
                 namespace: String::from("assets"),
                 path: String::from("scripts/knob.wasm"),

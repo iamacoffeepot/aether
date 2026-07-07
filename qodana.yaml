@@ -35,6 +35,16 @@ exclude:
   - name: RsCompileErrorMacro
     paths:
       - crates/aether-capabilities
+  # The `locomotion` actor is being phased out to legacy, so its Qodana
+  # findings aren't worth acting on. Its DuplicatedCode findings all pair
+  # pre-existing camera / movement code shared with the `mover` actor —
+  # duplication inherent to two similar demo actors, not a defect this
+  # refactor introduced. Scoped to the locomotion module so genuine
+  # duplication elsewhere stays active; remove this entry when the module
+  # is deleted.
+  - name: DuplicatedCode
+    paths:
+      - crates/aether-kit/src/locomotion
   - name: All
     paths:
       - target
