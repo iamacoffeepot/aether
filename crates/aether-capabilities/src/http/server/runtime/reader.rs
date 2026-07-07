@@ -557,25 +557,30 @@ pub fn run_reader_loop(
         } else {
             None
         };
-        if ws_key.is_none() {
-            // Framing rejects for the buffered path (ADR-0128): smuggling
-            // / non-`chunked` codings always, and a lone `chunked` body to
-            // a buffered handler (no length to buffer under).
-            match (head.framing, streaming) {
-                (BodyFraming::Invalid, _) | (BodyFraming::Chunked, false) => {
-                    reject_and_close(&mut stream, sink, conn_id, 411, "length required");
-                    return;
-                }
-                _ => {}
+        // Whether this request will be buffered rather than streamed: a
+        // websocket upgrade always buffers (line ~594 forces the
+        // `else`-branch below) regardless of the `streaming` flag; a
+        // non-upgrade request buffers unless it is both streaming-capable
+        // and not an upgrade (the ADR-0128 streaming exemption). Shared by
+        // both the framing rejects and the body-size cap below so the two
+        // checks read off one determinant.
+        let will_buffer = ws_key.is_some() || !streaming;
+        // Framing rejects, applied on every path — upgrade included
+        // (ADR-0128 + ADR-0129): a websocket handshake carries no body
+        // (RFC 6455), so a smuggling shape or a lone `chunked` body on an
+        // upgrade is anomalous with no length to buffer under, same as on
+        // the non-upgrade path. `Invalid` (smuggling / a non-`chunked`
+        // coding) always rejects; a lone `chunked` body only rejects when
+        // the request will buffer.
+        match (head.framing, will_buffer) {
+            (BodyFraming::Invalid, _) | (BodyFraming::Chunked, true) => {
+                reject_and_close(&mut stream, sink, conn_id, 411, "length required");
+                return;
             }
+            _ => {}
         }
-        // The body-size cap applies whenever the request will be buffered
-        // — a websocket upgrade always buffers (line ~594 forces the
-        // `else`-branch) regardless of the `streaming` flag, so the cap
-        // must not be gated on `ws_key.is_none()`. A non-upgrade request
-        // still keeps the ADR-0128 streaming exemption: only the
-        // `streaming && ws_key.is_none()` combination skips this check.
-        if (ws_key.is_some() || !streaming)
+        // The body-size cap applies whenever the request will be buffered.
+        if will_buffer
             && let BodyFraming::Length(n) = head.framing
             && n > max_request_bytes
         {
