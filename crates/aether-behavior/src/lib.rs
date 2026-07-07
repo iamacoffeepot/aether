@@ -42,6 +42,17 @@ pub mod runtime;
 #[cfg(feature = "runtime")]
 pub use runtime::{Behavior, BehaviorCtx, ChildHandle, PanelHandle, WidgetHandle};
 
+/// The host face (ADR-0137, issue 2687), behind the non-default `host`
+/// feature: [`BehaviorHost`](host::BehaviorHost), the wasm actor that embeds a
+/// `wasmi` interpreter and interposes at a tree slot. Turns on the optional
+/// `aether-actor` / `wasmi` / `aether-capabilities` deps the default face
+/// names none of, so a script build never links them.
+#[cfg(feature = "host")]
+pub mod host;
+
+#[cfg(feature = "host")]
+pub use host::{BehaviorHost, HostConfig};
+
 /// Items the `#[behavior]` macro's generated code names by absolute path,
 /// re-exported so a script depends on `aether-behavior` alone (never a
 /// direct `aether-data` path) for the surface the codegen touches.

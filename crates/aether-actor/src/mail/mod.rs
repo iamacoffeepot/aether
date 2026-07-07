@@ -238,6 +238,28 @@ impl Mail<'_> {
         let bytes = unsafe { slice::from_raw_parts(self.ptr as *const u8, self.byte_len as usize) };
         K::decode_from_bytes(bytes)
     }
+
+    /// The raw inbound payload — the `byte_len` bytes the substrate wrote at
+    /// `ptr` for this delivery. The type-erased counterpart of
+    /// [`Self::decode_kind`], for a mail-forwarding interposer (the ADR-0137
+    /// behavior host, issue 2687) that reroutes an arbitrary inbound kind it
+    /// holds no Rust type for, pairing with
+    /// [`RelativeMailbox::send_bytes`](crate::RelativeMailbox::send_bytes). A
+    /// zero length short-circuits to an empty slice so a null pointer is never
+    /// dereferenced.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        if self.byte_len == 0 {
+            &[]
+        } else {
+            // SAFETY: `self.ptr` / `self.byte_len` originate from the
+            // substrate's receive ABI, which guarantees `self.byte_len` bytes
+            // valid at `self.ptr` for this `Mail`'s lifetime — the same
+            // invariant `decode_kind` relies on. The `len == 0` branch avoids
+            // forming a slice over a possibly-null pointer.
+            unsafe { slice::from_raw_parts(self.ptr as *const u8, self.byte_len as usize) }
+        }
+    }
 }
 
 /// Opaque view of a prior state bundle handed to `on_rehydrate` by

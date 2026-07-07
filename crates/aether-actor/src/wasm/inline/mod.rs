@@ -673,7 +673,6 @@ mod tests {
     use super::{ChainMode, Registry, RouteDecision, drain_cluster_queue, membrane_dispatch};
     use crate::WasmCtx;
     use crate::mail::{Mail, PriorState};
-    use crate::model::ctx::OutboundReply;
     use crate::wasm::ErasedWasmActor;
     use aether_data::MailboxId;
     use alloc::boxed::Box;

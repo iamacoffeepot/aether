@@ -191,6 +191,55 @@ pub enum WidgetKind {
     TextField,
     /// A push button — `config` decodes as [`ButtonConfig`].
     Button,
+    /// A behavior-script host wrapping one stock widget (ADR-0137, issue
+    /// 2687) — `config` decodes as [`BehaviorHostSpec`] (the wrapped widget's
+    /// kind + config plus the script), and the panel spawns the host by tag
+    /// (`aether-behavior`'s `BehaviorHost`) instead of a widget. Only spawnable
+    /// under the kit's `behavior` feature; without it the slot is skipped.
+    BehaviorHost,
+}
+
+/// Where a wrapped host's script comes from — the kit-local mirror of
+/// `aether_behavior`'s `ScriptSource`, carried in a [`BehaviorHostSpec`] so the
+/// trunk (always compiled) names no `aether-behavior` type. The `behavior`
+/// arm maps it across.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub enum ScriptRef {
+    /// No script — the host runs wrapper-transparent until one is loaded.
+    #[default]
+    None,
+    /// The script's wasm bytes inline.
+    Inline(Vec<u8>),
+    /// Fetch the script from an `aether.fs` namespace at boot.
+    FsRef {
+        /// The `aether.fs` namespace prefix (`"save"`, `"assets"`, `"config"`).
+        namespace: String,
+        /// The path within the namespace.
+        path: String,
+    },
+}
+
+/// `aether.kit.behavior_host_spec` — the config bytes a [`WidgetChildSpec`]
+/// carries for a [`WidgetKind::BehaviorHost`] slot (issue 2687). It names the
+/// wrapped widget's kind + its own pre-encoded config (the same opaque bytes a
+/// direct widget slot would carry) plus the script and its fuel knobs. Not
+/// recursive — `wrapped` is a plain [`WidgetKind`] discriminant, and
+/// `WidgetKind::BehaviorHost` is a unit variant that references nothing back,
+/// so the `Schema` derive stays acyclic.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.behavior_host_spec")]
+pub struct BehaviorHostSpec {
+    /// The stock widget the host interposes on.
+    pub wrapped: WidgetKind,
+    /// The wrapped widget's own config, pre-encoded (as a direct slot's
+    /// `config` would be).
+    pub wrapped_config: Vec<u8>,
+    /// The behavior script.
+    pub script: ScriptRef,
+    /// Fuel budget per filter call (`0` ⇒ the host default).
+    pub fuel_per_call: u64,
+    /// Consecutive-trap disable threshold (`0` ⇒ the host default).
+    pub disable_after_traps: u32,
 }
 
 /// One child's placement in a compositing node's layout table. `subname`

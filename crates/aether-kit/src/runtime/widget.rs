@@ -37,8 +37,7 @@
 //! on its first `Tick` for the one code path.
 
 use aether_actor::{
-    ActorInitError, Addressable, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx,
-    actor,
+    ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::{DrawSolidQuads, SolidQuad};

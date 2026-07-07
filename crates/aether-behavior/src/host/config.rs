@@ -1,0 +1,132 @@
+//! The behavior host's boot config and control-mail vocabulary (ADR-0137,
+//! issue 2687).
+//!
+//! [`HostConfig`] rides the by-value `WasmActor::Config` path — the host is
+//! a wasm actor, so its config crosses the spawn boundary as encoded bytes
+//! and is handed to `init` by value (as `PanelConfig` is to the reference
+//! widget panel), never the ADR-0090 Resolver derive (unreachable without
+//! `aether-substrate`, which this crate's boundary forbids). Since #2694 the
+//! composite reload reconstructs a typed-config inline child from its *real*
+//! retained config bytes, so `HostConfig` carries no decode-from-empty
+//! requirement: the real config arrives once, on the first spawn from the
+//! #2681 child spec, and is retained in the slot for every later reload.
+
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use aether_data::{Kind, KindId, Schema};
+use serde::{Deserialize, Serialize};
+
+/// The wrapped child the host interposes on: the child actor's type tag
+/// (the `hash(NAMESPACE)` `u64` — `ActorTypeTag::of::<W>().0` on the kit
+/// side, the SDK-sanctioned hash), its subname, and its pre-encoded config
+/// bytes. Stored as a raw `u64` because [`ChildSpec`] is a `Schema`-derived
+/// config that wire-encodes and persists cleanly; the host wraps it as
+/// `ActorTypeTag(type_tag)` at the spawn call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Schema)]
+pub struct ChildSpec {
+    /// `hash(NAMESPACE)` of the wrapped actor type.
+    pub type_tag: u64,
+    /// The wrapped child's subname within the cluster.
+    pub subname: String,
+    /// The wrapped child's `Config` encoded to its wire shape (empty for a
+    /// `Config = ()` child).
+    pub config: Vec<u8>,
+}
+
+/// Where the host's script bytes come from at boot / on a swap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Schema)]
+pub enum ScriptSource {
+    /// Boot wrapper-transparent — no script until a `load_script` /
+    /// `set_script` swaps one in.
+    None,
+    /// The script bytes inline (the kit's `set_script` path, or a config
+    /// that ships the wasm directly).
+    Inline(Vec<u8>),
+    /// Fetch the script from a substrate I/O namespace at boot
+    /// (`aether.fs.read`).
+    FsRef {
+        /// The `aether.fs` namespace prefix (`"save"`, `"assets"`, `"config"`).
+        namespace: String,
+        /// The path within the namespace.
+        path: String,
+    },
+}
+
+/// The behavior host's boot config (ADR-0137). Handed to `init` by value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Kind, Schema)]
+#[kind(name = "aether.behavior.host_config")]
+pub struct HostConfig {
+    /// The wrapped child the host spawns and interposes on.
+    pub child: ChildSpec,
+    /// The initial script source.
+    pub script: ScriptSource,
+    /// Fuel budget per filter call — reset before every call, so a script
+    /// that overruns it traps and fails open rather than wedging the host.
+    pub fuel_per_call: u64,
+    /// After this many consecutive traps the script is disabled (pure
+    /// passthrough) until the next `load_script` / `set_script`.
+    pub disable_after_traps: u32,
+    /// The kind id whose arrival down-lane the host maps onto the reserved
+    /// FRAME sentinel (the script's per-frame hook). `0` disables the frame
+    /// mapping. Configurable rather than hard-wired to a kit kind so the SDK
+    /// keeps no `aether-kit` dependency — the kit arm sets this to its own
+    /// `Collect` id.
+    pub frame_trigger: u64,
+}
+
+impl HostConfig {
+    /// Default fuel budget per filter call (~1M — generous for a small
+    /// intercept, bounded enough that a runaway loop traps promptly).
+    pub const DEFAULT_FUEL_PER_CALL: u64 = 1_000_000;
+
+    /// Default consecutive-trap threshold before the script is disabled.
+    pub const DEFAULT_DISABLE_AFTER_TRAPS: u32 = 3;
+
+    /// The configured frame-trigger kind, or `None` when the mapping is off.
+    #[must_use]
+    pub fn frame_trigger_kind(&self) -> Option<KindId> {
+        (self.frame_trigger != 0).then_some(KindId(self.frame_trigger))
+    }
+}
+
+/// `aether.behavior.load_script` — swap the running script for one fetched
+/// from an `aether.fs` namespace. Replies `LoadScriptResult` once the read
+/// settles (parked reply, ADR-0041 correlation by echoed namespace/path).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Kind, Schema)]
+#[kind(name = "aether.behavior.load_script")]
+pub struct LoadScript {
+    /// The `aether.fs` namespace prefix.
+    pub namespace: String,
+    /// The path within the namespace.
+    pub path: String,
+}
+
+/// `aether.behavior.set_script` — swap the running script for inline bytes.
+/// The synchronous counterpart of `LoadScript`; the reply *is* the handler's
+/// return value (`#[handler::single]`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Kind, Schema)]
+#[kind(name = "aether.behavior.set_script")]
+pub struct SetScript {
+    /// The replacement script's wasm bytes.
+    pub bytes: Vec<u8>,
+}
+
+/// Reply to `LoadScript` / `SetScript` — mirrors `aether.fs.read_result`'s
+/// Ok/Err shape. `Ok` reports the resident script's byte count; `Err`
+/// carries the failure text, and the prior running script is kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Kind, Schema)]
+#[kind(name = "aether.behavior.load_script_result")]
+pub enum LoadScriptResult {
+    /// The swap succeeded; `resident_bytes` is the new script's size.
+    Ok {
+        /// Byte length of the now-resident script.
+        resident_bytes: u64,
+    },
+    /// The swap failed (bad bytes, validation error, read error); the prior
+    /// script keeps running.
+    Err {
+        /// Human-readable failure detail.
+        error: String,
+    },
+}
