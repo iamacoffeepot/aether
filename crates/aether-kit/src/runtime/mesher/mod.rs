@@ -9,6 +9,10 @@
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap
 )]
+// The bilinear-patch and shade arithmetic is written as explicit
+// multiply-add chains for readability; a fused mul_add would need a libm
+// symbol on the wasm target and does not change the result meaningfully.
+#![allow(clippy::suboptimal_flops)]
 
 //! The world-view mesher: a pure function over the plane stack
 //! ([`crate::world`]) that turns one chunk into a triangle list, read by
@@ -23,8 +27,8 @@
 //!
 //! # Underlay pass — one surface, repartitioned
 //!
-//! The ground is a single flat surface at `y = 0`, world-space in meters
-//! (`1 cell = 1 m`), tiled exactly by its material regions. The
+//! The ground is a single surface, world-space in meters (`1 cell =
+//! 1 m`), tiled exactly by its material regions. The
 //! cascade-resolved material grid runs through [`repartition`] — the
 //! multi-label corner minimization, honoring the per-cell smoothing field
 //! — so smoothing moves samples between materials rather than layering
@@ -56,8 +60,27 @@
 //! per subcell fully inside the eroded region — lightness driven down by a
 //! bounded shore-distance scan, hue varied per subcell — while the marched
 //! rim band beneath carries the smoothed shoreline silhouette. Overlay
-//! geometry lifts above the underlay so the coplanar passes never z-fight,
-//! and it carries its own flat vertices so the seam stays hard.
+//! geometry lifts a hair above the underlay surface so the coplanar
+//! passes never z-fight, and it carries its own vertices so the seam
+//! stays hard.
+//!
+//! # Height pass — plates, slopes, and skirts
+//!
+//! Every vertex lifts onto the plate-resolved height surface
+//! ([`World::surface_height_in`]): cell heights blend into continuous
+//! slopes where neighbors sit within the step ceiling
+//! ([`crate::world::STEP_MAX_OCTIMETERS`]) and break where they exceed
+//! it — the corner plates split exactly on cliff edges, an interior
+//! cell's owner-pinned patch lands the break on the cell line, and
+//! the skirt pass closes that gap with a vertical face wearing the high
+//! cell's region cliff material, darkened toward its base. Boundary
+//! windows and overlay contours lift each vertex through its own
+//! (floor) cell — continuous wherever no cliff intervenes — and water
+//! rides the same surface for now (an authored per-body water level is
+//! future work). A slope shade from the patch normal bakes into vertex
+//! color so slopes read under the flat-color grammar; it multiplies by
+//! exactly one on level ground, so an all-flat world meshes
+//! byte-identically to a world with no height pass at all.
 
 pub mod contour;
 pub mod style;
@@ -66,9 +89,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_capabilities::render::{DrawTriangle, Vertex};
+use aether_math::Vec3;
 
 use crate::world::{
-    CELLS_PER_CHUNK, CellPos, ChunkPos, Material, SUBCELLS_PER_CELL_EDGE, ViewMode, World,
+    CELLS_PER_CHUNK, CellPos, ChunkPos, Material, STEP_MAX_OCTIMETERS, SUBCELLS_PER_CELL_EDGE,
+    ViewMode, World,
 };
 use contour::{
     GridPlacement, SmoothParams, emit_label_window, erode, label_case, march_grid,
@@ -94,8 +119,28 @@ const OCTIMETERS_PER_SUBCELL: i32 = 256 / SUB;
 /// emit.
 const OCTIMETERS_PER_METER: f32 = 256.0;
 
-/// The underlay's ground plane — the whole partition draws here.
-const UNDERLAY_Y: f32 = 0.0;
+/// The directional light the slope shade reads, world-space (Y up). Only
+/// the direction matters — the shade divides by the Y component, so flat
+/// ground multiplies by exactly one and stays untouched by the height
+/// pass.
+const SLOPE_LIGHT: Vec3 = Vec3::new(0.4, 1.0, 0.6);
+
+/// Slope-shade floor — the darkest a steep away-facing slope goes.
+const SLOPE_SHADE_MIN: f32 = 0.55;
+
+/// Slope-shade ceiling — the brightest a light-facing slope goes.
+const SLOPE_SHADE_MAX: f32 = 1.25;
+
+/// Cliff-face lightness multiplier at the top of a skirt.
+const SKIRT_TOP_SHADE: f32 = 0.80;
+
+/// Cliff-face lightness multiplier at the base of a skirt — darker than
+/// the top, so the face reads as receding toward the ground shadow.
+const SKIRT_BASE_SHADE: f32 = 0.55;
+
+/// The raw calibration view's flat gray for cliff faces — a skirt has no
+/// noise field to calibrate; it only keeps the terrain closed.
+const RAW_SKIRT_GRAY: f32 = 0.35;
 
 /// The overlay rim layer lift — one octimeter over the underlay.
 const OVERLAY_RIM_LIFT: f32 = 1.0 / OCTIMETERS_PER_METER;
@@ -129,7 +174,91 @@ pub fn mesh_chunk(world: &World, at: ChunkPos, mode: ViewMode) -> Vec<DrawTriang
             mesh_overlay(world, at, &mut tris);
         }
     }
+    emit_skirts(world, at, mode, &mut tris);
     tris
+}
+
+/// One cell's bilinear surface patch: the four plate-resolved corner
+/// heights ([`World::cell_corner_heights`]) plus the height and shade
+/// evaluations the mesher builds vertices from. Owner-pinned — a vertex
+/// on a cliff edge evaluated through the high cell's patch reads the
+/// high plate, which is exactly how the drawn break lands on the cliff
+/// line.
+struct CellLift {
+    x0: f32,
+    z0: f32,
+    corners: [f32; 4],
+}
+
+impl CellLift {
+    fn of(world: &World, cell: CellPos) -> Self {
+        Self {
+            x0: cell.x as f32,
+            z0: cell.z as f32,
+            corners: world.cell_corner_heights(cell),
+        }
+    }
+
+    /// The patch height at `(wx, wz)` meters, coordinates clamped to the
+    /// cell span — [`World::surface_height_in`] over the cached corners.
+    fn y(&self, wx: f32, wz: f32) -> f32 {
+        let fx = (wx - self.x0).clamp(0.0, 1.0);
+        let fz = (wz - self.z0).clamp(0.0, 1.0);
+        let bottom = self.corners[0] + (self.corners[1] - self.corners[0]) * fx;
+        let top = self.corners[2] + (self.corners[3] - self.corners[2]) * fx;
+        bottom + (top - bottom) * fz
+    }
+
+    /// The slope-shade multiplier at `(wx, wz)`: the patch normal against
+    /// [`SLOPE_LIGHT`], scaled so level ground reads exactly one.
+    fn shade(&self, wx: f32, wz: f32) -> f32 {
+        let fx = (wx - self.x0).clamp(0.0, 1.0);
+        let fz = (wz - self.z0).clamp(0.0, 1.0);
+        let c = &self.corners;
+        let grad_x = (c[1] - c[0]) * (1.0 - fz) + (c[3] - c[2]) * fz;
+        let grad_z = (c[2] - c[0]) * (1.0 - fx) + (c[3] - c[1]) * fx;
+        let normal = Vec3::new(-grad_x, 1.0, -grad_z).normalize();
+        (normal.dot(SLOPE_LIGHT) / SLOPE_LIGHT.y).clamp(SLOPE_SHADE_MIN, SLOPE_SHADE_MAX)
+    }
+}
+
+/// The surface height and slope shade at a world point, resolved through
+/// the point's own (floor) cell — the position-pure form overlay vertices
+/// lift through, continuous wherever no cliff intervenes.
+fn point_lift(world: &World, wx: f32, wz: f32) -> (f32, f32) {
+    let lift = CellLift::of(
+        world,
+        CellPos {
+            x: floor_to_i32(wx),
+            z: floor_to_i32(wz),
+        },
+    );
+    (lift.y(wx, wz), lift.shade(wx, wz))
+}
+
+/// The lift for a vertex of label geometry owned by `owner`: position-pure
+/// through the vertex's own (floor) cell, unless that cell stands a cliff
+/// apart from the owner — then the owner's clamped patch wins, so a
+/// boundary polygon at a cliff stays on its own side of the break instead
+/// of stretching down the face (the skirt draws the face). On continuous
+/// ground the two forms agree and the rule is invisible.
+fn label_lift(world: &World, owner: CellPos, wx: f32, wz: f32) -> (f32, f32) {
+    let cell = CellPos {
+        x: floor_to_i32(wx),
+        z: floor_to_i32(wz),
+    };
+    if cell != owner && (world.height(cell) - world.height(owner)).abs() > STEP_MAX_OCTIMETERS {
+        let lift = CellLift::of(world, owner);
+        return (lift.y(wx, wz), lift.shade(wx, wz));
+    }
+    point_lift(world, wx, wz)
+}
+
+/// Floor to `i32` — `as i32` truncates toward zero, which is wrong for
+/// negative world coordinates, so step down when it rounded up.
+fn floor_to_i32(v: f32) -> i32 {
+    let t = v as i32;
+    if (t as f32) > v { t - 1 } else { t }
 }
 
 /// The per-side pooled-rim strengths `[left, right, top, bottom]` for an
@@ -311,11 +440,14 @@ fn mesh_underlay(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
             let material = world.underlay(cell);
             let resolved = resolve_cell(material, cell.x as f32 + 0.5, cell.z as f32 + 0.5, None);
             let rims = cell_rims(world, cell, material);
-            emit_underlay_cell(material, &resolved, cell.x, cell.z, rims, UNDERLAY_Y, tris);
+            let lift = CellLift::of(world, cell);
+            emit_underlay_cell(material, &resolved, cell.x, cell.z, rims, &lift, tris);
         }
     }
 
-    emit_partition_windows(at, &display, gw, apron, step_oct, &interior, lo, tris);
+    emit_partition_windows(
+        world, at, &display, gw, apron, step_oct, &interior, lo, tris,
+    );
 }
 
 /// Emit the marching-squares windows of the partition's boundary zone.
@@ -329,6 +461,7 @@ fn mesh_underlay(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
 /// order so every window tiles exactly.
 #[allow(clippy::too_many_arguments)] // one call site; the partition state travels together
 fn emit_partition_windows(
+    world: &World,
     at: ChunkPos,
     display: &[u8],
     gw: usize,
@@ -351,7 +484,6 @@ fn emit_partition_windows(
     let place = GridPlacement {
         origin_oct,
         step_oct,
-        y_lift: UNDERLAY_Y,
     };
     // A pending run of uniform windows: (label, owner cell, start wi).
     let mut run: Option<(u8, CellPos, usize)> = None;
@@ -362,20 +494,13 @@ fn emit_partition_windows(
         let Some((label, owner, start_wi)) = run.take() else {
             return;
         };
-        let material = Material::from_u8_or_void(label.div_ceil(2));
-        let resolved = resolve_cell(material, owner.x as f32 + 0.5, owner.z as f32 + 0.5, None);
-        let rim = if label % 2 == 1 {
-            style(material).rim_darken
-        } else {
-            0.0
-        };
         let rect = [
             origin_oct[0] + start_wi as i32 * step_oct,
             origin_oct[1] + wj as i32 * step_oct,
             origin_oct[0] + end_wi as i32 * step_oct,
             origin_oct[1] + (wj + 1) as i32 * step_oct,
         ];
-        emit_quad_shaded(material, &resolved, rect, rim, UNDERLAY_Y, tris);
+        emit_label_quad(world, label, owner, rect, tris);
     };
     let windows = gw - 1;
     for wj in 0..windows {
@@ -425,7 +550,13 @@ fn emit_partition_windows(
                 x: x_center_cell,
                 z: z_center_cell,
             };
-            // A uniform window joins (or starts) a strip run.
+            // A uniform window joins (or starts) a strip run. A run's quad
+            // takes position-pure corner heights, and its edges lie on
+            // sample-lattice lines where the bilinear surface is linear —
+            // so the merge stays crack-free on sloped ground too (the quad
+            // interior deviates from the surface by at most the tiny
+            // cross-term over one window row, and nothing else draws
+            // there).
             if corners[0] != 0 && corners.iter().all(|&c| c == corners[0]) {
                 match run {
                     Some((label, cell, _)) if label == corners[0] && cell == owner => {}
@@ -437,19 +568,42 @@ fn emit_partition_windows(
                 continue;
             }
             flush(&mut run, wi, wj, tris);
-            emit_mixed_window(display, gw, wi, wj, corners, owner, &place, tris);
+            emit_mixed_window(world, display, gw, wi, wj, corners, owner, &place, tris);
         }
         flush(&mut run, windows, wj, tris);
     }
 }
 
+/// Emit one display label's quad over `rect`, colored through its owning
+/// cell and lifted position-pure — the strip-run emit. Windows overhang
+/// their owner by half a window, so each corner reads the surface through
+/// its own cell rather than the owner's clamped patch.
+fn emit_label_quad(
+    world: &World,
+    label: u8,
+    owner: CellPos,
+    rect: [i32; 4],
+    tris: &mut Vec<DrawTriangle>,
+) {
+    let material = Material::from_u8_or_void(label.div_ceil(2));
+    let resolved = resolve_cell(material, owner.x as f32 + 0.5, owner.z as f32 + 0.5, None);
+    let rim = if label % 2 == 1 {
+        style(material).rim_darken
+    } else {
+        0.0
+    };
+    let surface = |wx: f32, wz: f32| label_lift(world, owner, wx, wz);
+    emit_quad_shaded(material, &resolved, rect, rim, &surface, tris);
+}
+
 /// Emit every label's case polygon for one mixed boundary window, colored
 /// by its material keyed at the window's owning cell (rim labels
-/// darkened). A two-label saddle resolves by label order — the higher
-/// label connects its diagonal, the lower splits — so the window always
-/// tiles exactly.
+/// darkened) and lifted per vertex through the vertex's own cell. A
+/// two-label saddle resolves by label order — the higher label connects
+/// its diagonal, the lower splits — so the window always tiles exactly.
 #[allow(clippy::too_many_arguments)] // one call site; the window state travels together
 fn emit_mixed_window(
+    world: &World,
     display: &[u8],
     gw: usize,
     wi: usize,
@@ -489,8 +643,23 @@ fn emit_mixed_window(
         if label % 2 == 1 {
             light *= 1.0 - s.rim_darken;
         }
-        let color = hsl_to_linear_rgb(resolved.hue, resolved.sat, light.clamp(0.0, 100.0));
-        emit_label_window(wi as i32, wj as i32, place, case, connected, color, tris);
+        let vertex = |wx: f32, wz: f32| {
+            let (y, shade) = label_lift(world, owner, wx, wz);
+            let rgb = hsl_to_linear_rgb(
+                resolved.hue,
+                resolved.sat,
+                (light * shade).clamp(0.0, 100.0),
+            );
+            Vertex {
+                x: wx,
+                y,
+                z: wz,
+                r: rgb[0],
+                g: rgb[1],
+                b: rgb[2],
+            }
+        };
+        emit_label_window(wi as i32, wj as i32, place, case, connected, &vertex, tris);
     }
 }
 
@@ -503,9 +672,11 @@ fn emit_underlay_cell(
     cx: i32,
     cz: i32,
     rims: [f32; 4],
-    y: f32,
+    patch: &CellLift,
     tris: &mut Vec<DrawTriangle>,
 ) {
+    let surface = |wx: f32, wz: f32| (patch.y(wx, wz), patch.shade(wx, wz));
+    let surface = &surface;
     let s = style(material);
     let inset = s.rim_inset_octimeters;
     let x0 = cx * 256;
@@ -518,30 +689,44 @@ fn emit_underlay_cell(
     let z2 = z3 - inset;
 
     if rims.iter().all(|&r| r == 0.0) {
-        emit_quad_shaded(material, resolved, [x0, z0, x3, z3], 0.0, y, tris);
+        emit_quad_shaded(material, resolved, [x0, z0, x3, z3], 0.0, surface, tris);
         return;
     }
     let darken = s.rim_darken;
     let (left, right, top, bottom) = (rims[0], rims[1], rims[2], rims[3]);
     // Interior.
-    emit_quad_shaded(material, resolved, [x1, z1, x2, z2], 0.0, y, tris);
+    emit_quad_shaded(material, resolved, [x1, z1, x2, z2], 0.0, surface, tris);
     // Edge strips.
-    emit_quad_shaded(material, resolved, [x0, z1, x1, z2], darken * left, y, tris);
+    emit_quad_shaded(
+        material,
+        resolved,
+        [x0, z1, x1, z2],
+        darken * left,
+        surface,
+        tris,
+    );
     emit_quad_shaded(
         material,
         resolved,
         [x2, z1, x3, z2],
         darken * right,
-        y,
+        surface,
         tris,
     );
-    emit_quad_shaded(material, resolved, [x1, z0, x2, z1], darken * top, y, tris);
+    emit_quad_shaded(
+        material,
+        resolved,
+        [x1, z0, x2, z1],
+        darken * top,
+        surface,
+        tris,
+    );
     emit_quad_shaded(
         material,
         resolved,
         [x1, z2, x2, z3],
         darken * bottom,
-        y,
+        surface,
         tris,
     );
     // Corners darken by the stronger of their two adjacent sides.
@@ -550,7 +735,7 @@ fn emit_underlay_cell(
         resolved,
         [x0, z0, x1, z1],
         darken * left.max(top),
-        y,
+        surface,
         tris,
     );
     emit_quad_shaded(
@@ -558,7 +743,7 @@ fn emit_underlay_cell(
         resolved,
         [x2, z0, x3, z1],
         darken * right.max(top),
-        y,
+        surface,
         tris,
     );
     emit_quad_shaded(
@@ -566,7 +751,7 @@ fn emit_underlay_cell(
         resolved,
         [x0, z2, x1, z3],
         darken * left.max(bottom),
-        y,
+        surface,
         tris,
     );
     emit_quad_shaded(
@@ -574,31 +759,34 @@ fn emit_underlay_cell(
         resolved,
         [x2, z2, x3, z3],
         darken * right.max(bottom),
-        y,
+        surface,
         tris,
     );
 }
 
 /// Push the two triangles of one underlay quad spanning `rect`
-/// (`[x0, z0, x1, z1]` octimeters) at `y`, each corner shaded by the wash
-/// field at its own world position and darkened by `rim_darken`.
+/// (`[x0, z0, x1, z1]` octimeters) on the given surface evaluator
+/// (`(wx, wz)` meters to `(y, slope shade)`), each corner shaded by the
+/// wash field and the slope shade at its own world position and darkened
+/// by `rim_darken`.
 fn emit_quad_shaded(
     material: Material,
     resolved: &ResolvedCell,
     rect: [i32; 4],
     rim_darken: f32,
-    lift: f32,
+    surface: &impl Fn(f32, f32) -> (f32, f32),
     tris: &mut Vec<DrawTriangle>,
 ) {
     let corner = |xo: i32, zo: i32| {
         let wx = xo as f32 / OCTIMETERS_PER_METER;
         let wz = zo as f32 / OCTIMETERS_PER_METER;
+        let (y, shade) = surface(wx, wz);
         let light = wash_lightness(material, resolved.light, wx, wz, resolved.stroke);
-        let light = (light * (1.0 - rim_darken)).clamp(0.0, 100.0);
+        let light = (light * (1.0 - rim_darken) * shade).clamp(0.0, 100.0);
         let rgb = hsl_to_linear_rgb(resolved.hue, resolved.sat, light);
         Vertex {
             x: wx,
-            y: lift,
+            y,
             z: wz,
             r: rgb[0],
             g: rgb[1],
@@ -728,27 +916,38 @@ fn mesh_overlay_material(
         base_oct[1] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
     ];
     let rim_color = hsl_to_linear_rgb(s.base_hue, s.base_sat, s.base_light * (1.0 - s.rim_darken));
-    let rim_place = GridPlacement {
+    let place = GridPlacement {
         origin_oct,
         step_oct,
-        y_lift: OVERLAY_RIM_LIFT,
     };
-    march_grid(&smoothed, gw, gh, &rim_place, rim_color, tris);
+    let rim_vertex = surface_vertex(world, OVERLAY_RIM_LIFT, rim_color);
+    march_grid(&smoothed, gw, gh, &place, &rim_vertex, tris);
     let rim_width = (s.rim_inset_octimeters / step_oct).max(1);
     let eroded = erode(&smoothed, gw, gh, rim_width);
 
     if material == Material::Water {
-        emit_water(&eroded, gw, apron, upsample, base_oct, tris);
+        emit_water(world, &eroded, gw, apron, upsample, base_oct, tris);
         return;
     }
 
     let body_color = hsl_to_linear_rgb(s.base_hue, s.base_sat, s.base_light);
-    let body_place = GridPlacement {
-        origin_oct,
-        step_oct,
-        y_lift: OVERLAY_BODY_LIFT,
-    };
-    march_grid(&eroded, gw, gh, &body_place, body_color, tris);
+    let body_vertex = surface_vertex(world, OVERLAY_BODY_LIFT, body_color);
+    march_grid(&eroded, gw, gh, &place, &body_vertex, tris);
+}
+
+/// A vertex builder for overlay geometry: one flat color, lifted `lift`
+/// above the surface at the vertex's own (floor) cell — overlay contours
+/// drape the terrain; a contour crossing a cliff line stretches down the
+/// face rather than floating.
+fn surface_vertex(world: &World, lift: f32, color: [f32; 3]) -> impl Fn(f32, f32) -> Vertex + '_ {
+    move |wx: f32, wz: f32| Vertex {
+        x: wx,
+        y: point_lift(world, wx, wz).0 + lift,
+        z: wz,
+        r: color[0],
+        g: color[1],
+        b: color[2],
+    }
 }
 
 /// Emit water's body: a graded quad per subcell whose sample block sits
@@ -759,6 +958,7 @@ fn mesh_overlay_material(
 /// resolution and the marched rim band beneath shows as an even pooled
 /// edge instead of subcell-scale teeth.
 fn emit_water(
+    world: &World,
     eroded: &[bool],
     gw: usize,
     apron: i32,
@@ -797,8 +997,7 @@ fn emit_water(
                     z_oct,
                     x_oct + OCTIMETERS_PER_SUBCELL,
                     z_oct + OCTIMETERS_PER_SUBCELL,
-                    OVERLAY_BODY_LIFT,
-                    color,
+                    &surface_vertex(world, OVERLAY_BODY_LIFT, color),
                 );
                 continue;
             }
@@ -821,20 +1020,13 @@ fn emit_water(
             let center_z = (z_oct + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
             let resolved = resolve_cell(Material::Water, center_x, center_z, Some(0.0));
             let color = hsl_to_linear_rgb(resolved.hue, resolved.sat, resolved.light);
+            let vertex = surface_vertex(world, OVERLAY_BODY_LIFT, color);
             for dz in 0..u {
                 for dx in 0..u {
                     if sample(gx0 + dx, gz0 + dz) {
                         let sx = x_oct + dx * step_oct;
                         let sz = z_oct + dz * step_oct;
-                        push_quad(
-                            tris,
-                            sx,
-                            sz,
-                            sx + step_oct,
-                            sz + step_oct,
-                            OVERLAY_BODY_LIFT,
-                            color,
-                        );
+                        push_quad(tris, sx, sz, sx + step_oct, sz + step_oct, &vertex);
                     }
                 }
             }
@@ -859,8 +1051,10 @@ fn subcell_shore_depth(inside: &impl Fn(i32, i32) -> bool, x: i32, z: i32) -> f3
     ((nearest - 1) as f32 / (MAX_SHORE_SCAN - 1) as f32).clamp(0.0, 1.0)
 }
 
-/// Emit the raw calibration view: one flat grayscale quad per non-Void
-/// underlay cell, its value the cell's own hue-noise field.
+/// Emit the raw calibration view: one grayscale quad per non-Void
+/// underlay cell on the cell's surface patch, its value the cell's own
+/// hue-noise field (no slope shade — the gray is the calibration
+/// instrument).
 fn mesh_raw(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
     let base_x = at.x * EDGE;
     let base_z = at.z * EDGE;
@@ -877,7 +1071,130 @@ fn mesh_raw(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
             let v = raw_field(material, cell.x as f32 + 0.5, cell.z as f32 + 0.5);
             let x0 = cell.x * 256;
             let z0 = cell.z * 256;
-            push_quad(tris, x0, z0, x0 + 256, z0 + 256, UNDERLAY_Y, [v, v, v]);
+            let lift = CellLift::of(world, cell);
+            let vertex = |wx: f32, wz: f32| Vertex {
+                x: wx,
+                y: lift.y(wx, wz),
+                z: wz,
+                r: v,
+                g: v,
+                b: v,
+            };
+            push_quad(tris, x0, z0, x0 + 256, z0 + 256, &vertex);
+        }
+    }
+}
+
+/// Emit the vertical cliff faces this chunk owns: for every local cell
+/// standing strictly higher than an edge neighbor past the step ceiling,
+/// a quad from the high plate corners down to the low ones. The high cell
+/// owns the face, so a chunk-border cliff is emitted exactly once
+/// fleet-wide. Faces wear the high cell's region cliff material
+/// ([`World::cliff_material`]), darkened toward the base; the raw view
+/// keeps them a flat gray so the terrain stays closed without polluting
+/// the calibration field. Where the corner walk merged the two sides'
+/// plates the gap tapers to nothing and the face is skipped.
+fn emit_skirts(world: &World, at: ChunkPos, mode: ViewMode, tris: &mut Vec<DrawTriangle>) {
+    // Per direction: neighbor offset, the shared edge's two lattice
+    // corners as indices into the high cell's corner order, and the same
+    // lattice points in the neighbor's order (the low side's plates).
+    struct SkirtEdge {
+        offset: (i32, i32),
+        top: [usize; 2],
+        bottom: [usize; 2],
+    }
+    const DIRECTIONS: [SkirtEdge; 4] = [
+        SkirtEdge {
+            offset: (1, 0),
+            top: [1, 3],
+            bottom: [0, 2],
+        },
+        SkirtEdge {
+            offset: (-1, 0),
+            top: [0, 2],
+            bottom: [1, 3],
+        },
+        SkirtEdge {
+            offset: (0, 1),
+            top: [2, 3],
+            bottom: [0, 1],
+        },
+        SkirtEdge {
+            offset: (0, -1),
+            top: [0, 1],
+            bottom: [2, 3],
+        },
+    ];
+    for lz in 0..EDGE {
+        for lx in 0..EDGE {
+            let cell = CellPos {
+                x: at.x * EDGE + lx,
+                z: at.z * EDGE + lz,
+            };
+            let cell_height = world.height(cell);
+            let mut cached: Option<[f32; 4]> = None;
+            for edge in &DIRECTIONS {
+                let neighbor = CellPos {
+                    x: cell.x + edge.offset.0,
+                    z: cell.z + edge.offset.1,
+                };
+                if cell_height <= world.height(neighbor) || !world.edge_is_cliff(cell, neighbor) {
+                    continue;
+                }
+                let top = *cached.get_or_insert_with(|| world.cell_corner_heights(cell));
+                let bottom = world.cell_corner_heights(neighbor);
+                let y_top = [top[edge.top[0]], top[edge.top[1]]];
+                let y_bottom = [bottom[edge.bottom[0]], bottom[edge.bottom[1]]];
+                if (y_top[0] - y_bottom[0]).abs() < f32::EPSILON
+                    && (y_top[1] - y_bottom[1]).abs() < f32::EPSILON
+                {
+                    continue;
+                }
+                // Lattice-corner positions in meters from the index order
+                // [(x, z), (x+1, z), (x, z+1), (x+1, z+1)].
+                let corner_pos = |k: usize| {
+                    (
+                        cell.x as f32 + if k % 2 == 1 { 1.0 } else { 0.0 },
+                        cell.z as f32 + if k >= 2 { 1.0 } else { 0.0 },
+                    )
+                };
+                let (x0, z0) = corner_pos(edge.top[0]);
+                let (x1, z1) = corner_pos(edge.top[1]);
+                let (top_rgb, bottom_rgb) = match mode {
+                    ViewMode::Raw => ([RAW_SKIRT_GRAY; 3], [RAW_SKIRT_GRAY; 3]),
+                    ViewMode::Painted => {
+                        let material = world.cliff_material(cell);
+                        let resolved =
+                            resolve_cell(material, cell.x as f32 + 0.5, cell.z as f32 + 0.5, None);
+                        (
+                            hsl_to_linear_rgb(
+                                resolved.hue,
+                                resolved.sat,
+                                (resolved.light * SKIRT_TOP_SHADE).clamp(0.0, 100.0),
+                            ),
+                            hsl_to_linear_rgb(
+                                resolved.hue,
+                                resolved.sat,
+                                (resolved.light * SKIRT_BASE_SHADE).clamp(0.0, 100.0),
+                            ),
+                        )
+                    }
+                };
+                let vert = |x: f32, z: f32, y: f32, rgb: [f32; 3]| Vertex {
+                    x,
+                    y,
+                    z,
+                    r: rgb[0],
+                    g: rgb[1],
+                    b: rgb[2],
+                };
+                let a = vert(x0, z0, y_top[0], top_rgb);
+                let b = vert(x1, z1, y_top[1], top_rgb);
+                let c = vert(x1, z1, y_bottom[1], bottom_rgb);
+                let d = vert(x0, z0, y_bottom[0], bottom_rgb);
+                tris.push(DrawTriangle { verts: [a, b, c] });
+                tris.push(DrawTriangle { verts: [a, c, d] });
+            }
         }
     }
 }
@@ -894,6 +1211,15 @@ mod tests {
             sat: 37.5,
             light: 40.0,
             stroke: (1.0, 0.0),
+        }
+    }
+
+    /// A level surface patch for cell `(cx, cz)` — the flat-world case.
+    fn flat_lift(cx: i32, cz: i32) -> CellLift {
+        CellLift {
+            x0: cx as f32,
+            z0: cz as f32,
+            corners: [0.0; 4],
         }
     }
 
@@ -915,7 +1241,7 @@ mod tests {
             3,
             5,
             [0.0; 4],
-            UNDERLAY_Y,
+            &flat_lift(3, 5),
             &mut tris,
         );
         assert_eq!(tris.len(), 2, "no rims is one flat quad");
@@ -933,7 +1259,7 @@ mod tests {
             3,
             5,
             [1.0; 4],
-            UNDERLAY_Y,
+            &flat_lift(3, 5),
             &mut tris,
         );
         assert_eq!(tris.len(), 18, "a fully-rimmed cell is a nine-slice");
@@ -1182,6 +1508,7 @@ mod tests {
             Region {
                 name: "meadow".into(),
                 default_material: Material::Grass,
+                cliff_material: Material::Stone,
             },
         );
         if let Some(p) = profile {
@@ -1213,7 +1540,7 @@ mod tests {
     /// boundary off the cell lattice.
     fn has_smoothed_crossing(mesh: &[DrawTriangle]) -> bool {
         mesh.iter()
-            .filter(|t| t.verts.iter().all(|v| v.y == UNDERLAY_Y))
+            .filter(|t| t.verts.iter().all(|v| v.y == 0.0))
             .flat_map(|t| t.verts.iter())
             .any(|v| {
                 let oct = v.x * 256.0;
@@ -1282,7 +1609,7 @@ mod tests {
         let mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
         let ground: Vec<&DrawTriangle> = mesh
             .iter()
-            .filter(|t| t.verts.iter().all(|v| v.y == UNDERLAY_Y))
+            .filter(|t| t.verts.iter().all(|v| v.y == 0.0))
             .collect();
         for j in 0..32 {
             for i in 0..32 {
@@ -1308,7 +1635,7 @@ mod tests {
         let mesh1 = mesh_chunk(&world, ChunkPos { x: 1, z: 0 }, ViewMode::Painted);
         let ground_covers = |mesh: &[DrawTriangle], px: f32, pz: f32| {
             mesh.iter()
-                .filter(|t| t.verts.iter().all(|v| v.y == UNDERLAY_Y))
+                .filter(|t| t.verts.iter().all(|v| v.y == 0.0))
                 .any(|t| covers(t, px, pz))
         };
         for j in 0..64 {
@@ -1334,6 +1661,7 @@ mod tests {
             Region {
                 name: "meadow".into(),
                 default_material: Material::Grass,
+                cliff_material: Material::Stone,
             },
         );
         world.insert_region(
@@ -1341,6 +1669,7 @@ mod tests {
             Region {
                 name: "shore".into(),
                 default_material: Material::Sand,
+                cliff_material: Material::Stone,
             },
         );
         let mut chunk = Chunk::empty();
@@ -1356,6 +1685,170 @@ mod tests {
             has_smoothed_crossing(&mesh),
             "a region-default boundary smooths like any material boundary",
         );
+    }
+
+    /// The sand-band world over a gentle eastward ramp — heights step 8
+    /// octimeters per cell, capped at the step ceiling so nothing cliffs
+    /// anywhere (a 64-octimeter drop against the unloaded zero-height
+    /// surroundings is a legal step, not a cliff).
+    fn ramp_world() -> World {
+        let mut world = sand_band_world(None);
+        for cx in 0..2 {
+            let at = ChunkPos { x: cx, z: 0 };
+            let mut chunk = world.chunk(at).expect("chunk").clone();
+            for lz in 0..EDGE {
+                for lx in 0..EDGE {
+                    let global_x = cx * EDGE + lx;
+                    chunk.height[(lz * EDGE + lx) as usize] =
+                        (8 * global_x).min(STEP_MAX_OCTIMETERS);
+                }
+            }
+            world.insert_chunk(at, chunk);
+        }
+        world
+    }
+
+    #[test]
+    fn drawn_ground_equals_stood_on_height() {
+        // The drawn-equals-stood-on tripwire: on a cliff-free ramp every
+        // vertex sits exactly on `World::surface_height` — the same patch
+        // a mover will stand on. Any lift path that misses a vertex
+        // (nine-slice, strip, window poly) diverges here.
+        let world = ramp_world();
+        let mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
+        assert!(!mesh.is_empty());
+        for v in mesh.iter().flat_map(|t| t.verts.iter()) {
+            let surface = world.surface_height(v.x, v.z);
+            assert!(
+                (v.y - surface).abs() < 1e-4,
+                "vertex ({}, {}) drawn at {} but stood on {surface}",
+                v.x,
+                v.z,
+                v.y,
+            );
+        }
+    }
+
+    #[test]
+    fn ramp_ground_still_has_no_gaps() {
+        // The no-gap probe on sloped ground: the strip fallback and the
+        // per-window bilinear quads must tile exactly like the flat path.
+        let world = ramp_world();
+        let mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
+        for j in 0..32 {
+            for i in 0..32 {
+                let px = (i as f32 + 0.37) * 0.5;
+                let pz = (j as f32 + 0.53) * 0.5;
+                assert!(
+                    mesh.iter().any(|t| covers(t, px, pz)),
+                    "ground hole at ({px}, {pz})",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_cliff_emits_its_skirt_from_the_high_chunk() {
+        // A plateau chunk one meter up beside a ground chunk: the cliff
+        // face on the shared border belongs to the high cell, so the high
+        // chunk emits it exactly once and the low chunk never does —
+        // double emission would z-fight, omission would leave a window
+        // through the terrain.
+        let mut world = World::new();
+        let mut low = Chunk::empty();
+        low.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, low);
+        let mut high = Chunk::empty();
+        high.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+        high.height = [256; CELLS_PER_CHUNK_AREA];
+        world.insert_chunk(ChunkPos { x: 1, z: 0 }, high);
+
+        let is_border_skirt = |t: &DrawTriangle| {
+            t.verts.iter().all(|v| (v.x - 16.0).abs() < 1e-6)
+                && t.verts.iter().any(|v| v.y > 0.9)
+                && t.verts.iter().any(|v| v.y < 0.1)
+        };
+        let low_mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
+        let high_mesh = mesh_chunk(&world, ChunkPos { x: 1, z: 0 }, ViewMode::Painted);
+        assert!(
+            high_mesh.iter().any(is_border_skirt),
+            "the high chunk closes its cliff face",
+        );
+        assert!(
+            !low_mesh.iter().any(is_border_skirt),
+            "the low chunk does not double-draw the shared face",
+        );
+    }
+
+    #[test]
+    fn a_material_boundary_at_a_cliff_does_not_drape() {
+        // Sand plateau (1 m up) against grass ground, material boundary on
+        // the cliff line: every colored (non-skirt) triangle must stay on
+        // its own side of the break — the cliff face belongs to the gray
+        // skirt. Position-pure lifting would stretch the boundary windows
+        // into meter-tall sand and grass walls down the face.
+        let mut world = World::new();
+        let mut low = Chunk::empty();
+        low.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+        let mut high = Chunk::empty();
+        high.underlay = [Material::Sand; CELLS_PER_CHUNK_AREA];
+        high.height = [256; CELLS_PER_CHUNK_AREA];
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, low);
+        world.insert_chunk(ChunkPos { x: 1, z: 0 }, high);
+
+        for at in [ChunkPos { x: 0, z: 0 }, ChunkPos { x: 1, z: 0 }] {
+            let mesh = mesh_chunk(&world, at, ViewMode::Painted);
+            for t in &mesh {
+                let gray = t
+                    .verts
+                    .iter()
+                    .all(|v| (v.r - v.b).abs() < 0.05 && (v.g - v.b).abs() < 0.05);
+                if gray {
+                    continue; // skirts own the vertical face
+                }
+                let max_y = t.verts.iter().map(|v| v.y).fold(f32::MIN, f32::max);
+                let min_y = t.verts.iter().map(|v| v.y).fold(f32::MAX, f32::min);
+                assert!(
+                    max_y - min_y < 0.5,
+                    "chunk {at:?}: a colored triangle drapes the cliff (span {} at x {})",
+                    max_y - min_y,
+                    t.verts[0].x,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn overlay_rides_the_surface_at_its_lift() {
+        // A stone overlay on the ramp keeps its one- and two-octimeter
+        // lifts measured from the surface, not from `y = 0` — the drape
+        // rule for overlays over sloped ground.
+        let mut world = ramp_world();
+        let at = ChunkPos { x: 0, z: 0 };
+        let mut chunk = world.chunk(at).expect("chunk").clone();
+        for lz in 5..9 {
+            for lx in 2..6 {
+                chunk.overlay[(lz * EDGE + lx) as usize] = Material::Stone;
+                chunk.overlay_mask[(lz * EDGE + lx) as usize] = 0xFFFF;
+            }
+        }
+        world.insert_chunk(at, chunk);
+        let mesh = mesh_chunk(&world, at, ViewMode::Painted);
+        let mut overlay_verts = 0;
+        for v in mesh.iter().flat_map(|t| t.verts.iter()) {
+            let lift = v.y - world.surface_height(v.x, v.z);
+            if lift > 1e-5 {
+                overlay_verts += 1;
+                assert!(
+                    (lift - OVERLAY_RIM_LIFT).abs() < 1e-4
+                        || (lift - OVERLAY_BODY_LIFT).abs() < 1e-4,
+                    "overlay lift {lift} is neither rim nor body at ({}, {})",
+                    v.x,
+                    v.z,
+                );
+            }
+        }
+        assert!(overlay_verts > 0, "the overlay emitted");
     }
 
     #[test]

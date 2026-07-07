@@ -22,6 +22,7 @@ fn lake_world() -> World {
         Region {
             name: "meadow".into(),
             default_material: Material::Grass,
+            cliff_material: Material::Stone,
         },
     );
     let in_lake = |x: f32, z: f32| {

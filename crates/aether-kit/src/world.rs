@@ -7,6 +7,14 @@
 // `chunk_index` casts a `rem_euclid` result (always `0..16`) to `usize`;
 // the sign-loss the lint warns about cannot occur.
 #![allow(clippy::cast_sign_loss)]
+// The surface-height math casts octimeter heights and cell coordinates
+// (small bounded integers) to f32; the precision loss the lint warns
+// about cannot occur in this range.
+#![allow(clippy::cast_precision_loss)]
+// The bilinear surface interpolation is written as explicit multiply-add
+// chains for readability; a fused mul_add would need a libm symbol on
+// the wasm target and does not change the result meaningfully.
+#![allow(clippy::suboptimal_flops)]
 
 //! The chunked world plane stack.
 //!
@@ -196,7 +204,18 @@ impl TryFrom<u8> for Material {
 pub struct Region {
     pub name: String,
     pub default_material: Material,
+    /// The material a cliff face wears where this region's ground breaks
+    /// past the step ceiling — the skirt color, and the future hook for
+    /// generated rock banding. Defaults to [`Material::Stone`].
+    pub cliff_material: Material,
 }
+
+/// The step ceiling in octimeters: two edge-adjacent cells whose heights
+/// differ by strictly more than this meet at a cliff instead of a
+/// continuous slope. The mesher derives cliff faces from it, and movement
+/// will read the same constant as its traversability rule, so the drawn
+/// break and the walkable break can never disagree.
+pub const STEP_MAX_OCTIMETERS: i32 = 64;
 
 /// Ceiling on a smoothing profile's iteration count. The contour pass
 /// reads `2 × iterations` subcells outward, so this cap keeps every
@@ -349,6 +368,129 @@ impl World {
             .map_or(0, |chunk| chunk.height[cell.chunk_index()])
     }
 
+    /// Do two edge-adjacent cells meet at a cliff — a height step strictly
+    /// past [`STEP_MAX_OCTIMETERS`]? The rule is pairwise over the two
+    /// heights, so any caller holding two adjacent cells derives the same
+    /// answer.
+    #[must_use]
+    pub fn edge_is_cliff(&self, a: CellPos, b: CellPos) -> bool {
+        (self.height(a) - self.height(b)).abs() > STEP_MAX_OCTIMETERS
+    }
+
+    /// The plate-resolved elevation of lattice corner `(kx, kz)` as seen
+    /// from `cell` (one of the corner's four incident cells), in meters.
+    /// The four incident cells partition into groups connected by
+    /// non-cliff shared edges — a walk around the corner — and the plate
+    /// containing `cell` averages its members' heights. Connected cells
+    /// share a plate (the surface blends); a cliff splits the plates (the
+    /// surface breaks, and the gap is the skirt's job).
+    fn corner_plate(&self, kx: i32, kz: i32, cell: CellPos) -> f32 {
+        // Incident cells in cyclic order, so consecutive entries (mod 4)
+        // share an edge and the diagonal pairs do not.
+        let cells = [
+            CellPos {
+                x: kx - 1,
+                z: kz - 1,
+            },
+            CellPos { x: kx, z: kz - 1 },
+            CellPos { x: kx, z: kz },
+            CellPos { x: kx - 1, z: kz },
+        ];
+        let heights = cells.map(|c| self.height(c));
+        let start = cells.iter().position(|&c| c == cell);
+        debug_assert!(start.is_some(), "cell must be incident to the corner");
+        let start = start.unwrap_or(2);
+        let mut member = [false; 4];
+        member[start] = true;
+        // Closure over the four cyclic edges to a fixpoint (at most three
+        // rounds absorb everything reachable).
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for k in 0..4 {
+                let a = k;
+                let b = (k + 1) % 4;
+                let connected = (heights[a] - heights[b]).abs() <= STEP_MAX_OCTIMETERS;
+                if connected && member[a] != member[b] {
+                    member[a] = true;
+                    member[b] = true;
+                    changed = true;
+                }
+            }
+        }
+        let mut sum = 0i32;
+        let mut count = 0i32;
+        for k in 0..4 {
+            if member[k] {
+                sum += heights[k];
+                count += 1;
+            }
+        }
+        sum as f32 / count as f32 / OCTIMETERS_PER_CELL as f32
+    }
+
+    /// The plate-resolved elevations of `cell`'s four corners, in meters,
+    /// ordered `[(x, z), (x+1, z), (x, z+1), (x+1, z+1)]` — the bilinear
+    /// patch [`World::surface_height_in`] interpolates and the mesher
+    /// emits.
+    #[must_use]
+    pub fn cell_corner_heights(&self, cell: CellPos) -> [f32; 4] {
+        [
+            self.corner_plate(cell.x, cell.z, cell),
+            self.corner_plate(cell.x + 1, cell.z, cell),
+            self.corner_plate(cell.x, cell.z + 1, cell),
+            self.corner_plate(cell.x + 1, cell.z + 1, cell),
+        ]
+    }
+
+    /// The ground elevation in meters at `(wx, wz)` (meters, `1 cell =
+    /// 1 m`) as `cell`'s bilinear surface patch reads it — coordinates
+    /// clamp to the cell's span. This cell-pinned form is what the mesher
+    /// emits vertices from: on a cliff edge the two sides read their own
+    /// plates, so the drawn break is exactly the plate break. Two cells
+    /// meeting without a cliff share their edge plates and therefore agree
+    /// along the whole shared edge.
+    #[must_use]
+    pub fn surface_height_in(&self, cell: CellPos, wx: f32, wz: f32) -> f32 {
+        let corners = self.cell_corner_heights(cell);
+        let fx = (wx - cell.x as f32).clamp(0.0, 1.0);
+        let fz = (wz - cell.z as f32).clamp(0.0, 1.0);
+        let bottom = corners[0] + (corners[1] - corners[0]) * fx;
+        let top = corners[2] + (corners[3] - corners[2]) * fx;
+        bottom + (top - bottom) * fz
+    }
+
+    /// The ground elevation in meters at `(wx, wz)`, resolved through the
+    /// owning cell (floor). This is the stood-on height for movers,
+    /// ray-picks, and the camera — the same bilinear patch the mesher
+    /// draws, so what is drawn is what is stood on. A point exactly on a
+    /// cliff edge reads the higher-coordinate side (the floor convention).
+    #[must_use]
+    pub fn surface_height(&self, wx: f32, wz: f32) -> f32 {
+        let cell = CellPos {
+            x: floor_to_i32(wx),
+            z: floor_to_i32(wz),
+        };
+        self.surface_height_in(cell, wx, wz)
+    }
+
+    /// The material `cell`'s cliff faces wear — its region's
+    /// `cliff_material`, or [`Material::Stone`] for no region, an
+    /// unregistered region, or a missing chunk.
+    #[must_use]
+    pub fn cliff_material(&self, cell: CellPos) -> Material {
+        let Some(chunk) = self.chunks.get(&cell.chunk()) else {
+            return Material::Stone;
+        };
+        let region_id = chunk.region[cell.chunk_index()];
+        if region_id != 0
+            && let Some(region) = self.regions.get(region_id as usize - 1)
+        {
+            return region.cliff_material;
+        }
+        Material::Stone
+    }
+
     /// The chunk at `at`, if present.
     #[must_use]
     pub fn chunk(&self, at: ChunkPos) -> Option<&Chunk> {
@@ -375,6 +517,7 @@ impl World {
                 Region {
                     name: String::new(),
                     default_material: Material::Void,
+                    cliff_material: Material::Stone,
                 },
             );
         }
@@ -497,25 +640,47 @@ impl SetChunk {
 
 /// `aether.kit.world.set_region` — register a region in the table under a
 /// 1-based `region_id`, giving the underlay cascade a default material to
-/// fall through to. `default_material` is a raw `Material` byte.
+/// fall through to. `default_material` and `cliff_material` are raw
+/// `Material` bytes; a `cliff_material` byte that decodes to `Void` or
+/// nothing falls back to Stone (a cliff face always wears something).
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.world.set_region")]
 pub struct SetRegion {
     pub region_id: u32,
     pub name: String,
     pub default_material: u8,
+    pub cliff_material: u8,
 }
 
 impl SetRegion {
     /// The [`Region`] this registers, decoding `default_material`
-    /// (unknown → `Void`).
+    /// (unknown → `Void`) and `cliff_material` (unknown or `Void` →
+    /// Stone).
     #[must_use]
     pub fn into_region(self) -> Region {
         Region {
             name: self.name,
             default_material: Material::from_u8_or_void(self.default_material),
+            cliff_material: cliff_material_from_u8(self.cliff_material),
         }
     }
+}
+
+/// Decode a cliff-material byte: an unknown value or `Void` reads as
+/// [`Material::Stone`] — a cliff face always wears a paintable material.
+fn cliff_material_from_u8(byte: u8) -> Material {
+    match Material::try_from(byte) {
+        Ok(Material::Void) | Err(_) => Material::Stone,
+        Ok(material) => material,
+    }
+}
+
+/// Floor to `i32` — `as i32` truncates toward zero, which is wrong for
+/// negative world coordinates, so step down when it rounded up.
+fn floor_to_i32(v: f32) -> i32 {
+    #[allow(clippy::cast_possible_truncation)] // world coordinates are far inside i32
+    let t = v as i32;
+    if (t as f32) > v { t - 1 } else { t }
 }
 
 /// `aether.kit.world.set_smoothing_profile` — register a contour-smoothing
@@ -604,11 +769,13 @@ pub enum WorldDecodeError {
     BadName,
 }
 
-/// The current write version. Version 2 adds the smoothing-profile table
-/// (after the region table) and the per-chunk smoothing plane (after the
-/// region plane); version 1 buffers still decode, reading as an empty
-/// table and an all-zero plane.
-const WORLD_FORMAT_VERSION: u8 = 2;
+/// The current write version. Version 3 adds a cliff-material byte to
+/// each region record; version 2 adds the smoothing-profile table (after
+/// the region table) and the per-chunk smoothing plane (after the region
+/// plane). Older buffers still decode: a pre-3 region reads Stone cliffs,
+/// a version-1 buffer reads an empty profile table and an all-zero
+/// smoothing plane.
+const WORLD_FORMAT_VERSION: u8 = 3;
 
 /// The oldest version [`World::from_bytes`] still decodes.
 const WORLD_FORMAT_VERSION_MIN: u8 = 1;
@@ -628,6 +795,7 @@ impl World {
             out.extend_from_slice(&(name.len() as u16).to_le_bytes());
             out.extend_from_slice(name);
             out.push(region.default_material.to_u8());
+            out.push(region.cliff_material.to_u8());
         }
         out.extend_from_slice(&(self.smoothing_profiles.len() as u32).to_le_bytes());
         for profile in &self.smoothing_profiles {
@@ -658,10 +826,11 @@ impl World {
         out
     }
 
-    /// Decode the [`World::to_bytes`] format, current or version 1 (which
-    /// carries no smoothing table or plane — both read empty / zero). A
-    /// truncated buffer or unknown version returns `Err` rather than
-    /// panicking; the caller keeps its prior world on any error.
+    /// Decode the [`World::to_bytes`] format, current or older (a pre-3
+    /// region reads Stone cliffs; a version-1 buffer carries no smoothing
+    /// table or plane — both read empty / zero). A truncated buffer or
+    /// unknown version returns `Err` rather than panicking; the caller
+    /// keeps its prior world on any error.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WorldDecodeError> {
         let mut reader = Reader::new(bytes);
         let version = reader.u8()?;
@@ -676,9 +845,15 @@ impl World {
             let name =
                 String::from_utf8(name_bytes.to_vec()).map_err(|_| WorldDecodeError::BadName)?;
             let default_material = Material::from_u8_or_void(reader.u8()?);
+            let cliff_material = if version >= 3 {
+                cliff_material_from_u8(reader.u8()?)
+            } else {
+                Material::Stone
+            };
             regions.push(Region {
                 name,
                 default_material,
+                cliff_material,
             });
         }
         let mut smoothing_profiles = Vec::new();
@@ -832,6 +1007,7 @@ mod tests {
             Region {
                 name: "meadow".into(),
                 default_material: Material::Grass,
+                cliff_material: Material::Stone,
             },
         );
 
@@ -860,6 +1036,7 @@ mod tests {
             Region {
                 name: "r".into(),
                 default_material: Material::Grass,
+                cliff_material: Material::Stone,
             },
         );
         // Underlay cascades to Grass; overlay stays raw Void.
@@ -957,6 +1134,7 @@ mod tests {
             Region {
                 name: "meadow".into(),
                 default_material: Material::Grass,
+                cliff_material: Material::Stone,
             },
         );
         world.insert_region(
@@ -964,6 +1142,7 @@ mod tests {
             Region {
                 name: "shore".into(),
                 default_material: Material::Sand,
+                cliff_material: Material::Dirt,
             },
         );
         world.insert_smoothing_profile(
@@ -1084,6 +1263,104 @@ mod tests {
         assert_eq!(World::from_bytes(&buf), Err(WorldDecodeError::Truncated));
     }
 
+    /// A world with one chunk whose heights come from `f(x, z)` over the
+    /// chunk-local cells.
+    fn height_world(f: impl Fn(i32, i32) -> i32) -> World {
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        for z in 0..CELLS_PER_CHUNK {
+            for x in 0..CELLS_PER_CHUNK {
+                chunk.height[(z * CELLS_PER_CHUNK + x) as usize] = f(x, z);
+            }
+        }
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
+        world
+    }
+
+    #[test]
+    fn step_ceiling_is_strictly_greater() {
+        // Δh == STEP_MAX_OCTIMETERS is a legal step, one past it is a
+        // cliff — the strictly-greater semantic movement will share.
+        let world = height_world(|x, _| match x {
+            0 => 0,
+            1 => STEP_MAX_OCTIMETERS,
+            _ => 2 * STEP_MAX_OCTIMETERS + 1,
+        });
+        assert!(!world.edge_is_cliff(cell(0, 0), cell(1, 0)));
+        assert!(world.edge_is_cliff(cell(1, 0), cell(2, 0)));
+    }
+
+    #[test]
+    fn corner_plates_split_by_the_cliff_walk() {
+        // Rows z=0 at 0 and z=1 at 200 octimeters: a cliff runs along the
+        // whole shared edge, so at corner (1,1) the four incident cells
+        // split 2/2 and each side reads its own plate mean.
+        let world = height_world(|_, z| if z == 0 { 0 } else { 200 });
+        let low = world.cell_corner_heights(cell(0, 0));
+        let high = world.cell_corner_heights(cell(0, 1));
+        // Cell (0,0)'s far corners (indices 2, 3 — the z+1 pair) sit on the
+        // cliff line and read the low plate; cell (0,1)'s near corners
+        // (indices 0, 1) read the high plate at the same lattice points.
+        assert_eq!(low[2], 0.0);
+        assert_eq!(low[3], 0.0);
+        assert_eq!(high[0], 200.0 / 256.0);
+        assert_eq!(high[1], 200.0 / 256.0);
+    }
+
+    #[test]
+    fn connected_corner_is_one_plate() {
+        // Heights within the step ceiling all around a corner: every
+        // incident cell reads the same mean — the blended-slope case.
+        let world = height_world(|x, z| match (x, z) {
+            (0, 0) => 0,
+            (0, 1) => 64,
+            _ => 32,
+        });
+        let mean = (0.0 + 32.0 + 64.0 + 32.0) / 4.0 / 256.0;
+        assert_eq!(world.cell_corner_heights(cell(0, 0))[3], mean);
+        assert_eq!(world.cell_corner_heights(cell(1, 0))[2], mean);
+        assert_eq!(world.cell_corner_heights(cell(0, 1))[1], mean);
+        assert_eq!(world.cell_corner_heights(cell(1, 1))[0], mean);
+    }
+
+    #[test]
+    fn non_cliff_neighbors_agree_along_the_shared_edge() {
+        // The drawn-equals-stood-on contract's continuity half: without a
+        // cliff, the two cells' patches read the same height anywhere on
+        // the shared edge (shared plates), so the meshes cannot crack.
+        let world = height_world(|x, z| 8 * x + 4 * z);
+        for step in 0..=4 {
+            let wz = 3.0 + step as f32 / 4.0;
+            let a = world.surface_height_in(cell(4, 3), 5.0, wz);
+            let b = world.surface_height_in(cell(5, 3), 5.0, wz);
+            assert!((a - b).abs() < 1e-6, "edge disagreement at wz {wz}");
+        }
+    }
+
+    #[test]
+    fn uniform_height_reads_everywhere() {
+        let world = height_world(|_, _| 128);
+        assert_eq!(world.surface_height(4.25, 7.75), 0.5);
+        assert_eq!(world.surface_height_in(cell(3, 3), 3.5, 3.5), 0.5);
+    }
+
+    #[test]
+    fn pre_v3_region_decodes_stone_cliffs() {
+        // A version-2 buffer's region record has no cliff byte; it must
+        // decode with the Stone default. Hand-built like the v1 tripwire:
+        // one region, empty profile table, no chunks.
+        let mut buf = vec![2u8];
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one region
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(b"r");
+        buf.push(Material::Grass.to_u8());
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no profiles
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no chunks
+        let world = World::from_bytes(&buf).expect("a v2 buffer still decodes");
+        assert_eq!(world.regions[0].cliff_material, Material::Stone);
+        assert_eq!(world.regions[0].default_material, Material::Grass);
+    }
+
     #[test]
     fn insert_region_ignores_zero_and_grows_table() {
         let mut world = World::new();
@@ -1092,6 +1369,7 @@ mod tests {
             Region {
                 name: "ignored".into(),
                 default_material: Material::Grass,
+                cliff_material: Material::Stone,
             },
         );
         // id 0 is the no-region sentinel — table stays empty, so a cell
@@ -1108,6 +1386,7 @@ mod tests {
             Region {
                 name: "third".into(),
                 default_material: Material::Stone,
+                cliff_material: Material::Stone,
             },
         );
         let mut chunk3 = Chunk::empty();
