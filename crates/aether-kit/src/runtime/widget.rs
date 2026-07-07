@@ -131,7 +131,7 @@ impl Widget {
 /// extra hop through the text cap lands its glyphs after the direct quad
 /// batch the same frame — the fills-under-labels layering the shipped
 /// `aether.ui` cap already relies on.
-fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
+pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
     let quads: Vec<SolidQuad> = list
         .items
         .iter()

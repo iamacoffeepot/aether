@@ -1,0 +1,331 @@
+// `#[handler]` methods take their decoded mail by value per the ADR-0033
+// dispatch ABI (see `runtime/widget.rs`).
+#![allow(clippy::needless_pass_by_value)]
+
+//! The horizontal value slider (issue 2660).
+//!
+//! A left press within the track begins a drag (the root holds the pointer
+//! capture), setting the value from the cursor's x mapped through the cached
+//! frame and streaming an uncommitted [`SliderChanged`]; each move updates it;
+//! the release commits. Arrow keys nudge by `step` while focused and commit at
+//! once. The value maps `min..=max` snapped to `step`; the consumer maps the
+//! reported `f32` onto its own domain.
+
+use alloc::vec::Vec;
+
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_kinds::keycode::{KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP};
+use aether_kinds::mouse_button;
+use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
+
+use crate::runtime::widgets::{push_border, quad};
+use crate::theme::{SetTheme, Theme, WidgetState};
+use crate::widgets::{
+    Collect, FocusGained, FocusLost, SliderChanged, SliderConfig, WidgetDrawItem, WidgetDrawList,
+    WidgetFrame,
+};
+
+/// A horizontal value slider. Local draw is a track with a fill from the left
+/// to the current value, plus a focus ring when focused.
+pub struct SliderWidget {
+    min: f32,
+    max: f32,
+    step: f32,
+    value: f32,
+    theme: Theme,
+    frame: WidgetFrame,
+    focused: bool,
+    /// Whether a drag is in flight (a left press landed and no release has
+    /// cleared it). Streams uncommitted values while set.
+    dragging: bool,
+}
+
+impl SliderWidget {
+    /// Clamp `raw` into `min..=max` and snap it to the nearest `step`. A
+    /// non-positive `step` leaves the value continuous (clamp only).
+    fn snapped(&self, raw: f32) -> f32 {
+        let clamped = raw.clamp(self.min, self.max);
+        if self.step > 0.0 {
+            let steps = ((clamped - self.min) / self.step).round();
+            steps.mul_add(self.step, self.min).clamp(self.min, self.max)
+        } else {
+            clamped
+        }
+    }
+
+    /// The value a local-x within the track maps to: the fraction of the
+    /// track width, remapped across `min..=max` and snapped. Owned math — the
+    /// unit tests pin it.
+    fn value_from_local_x(&self, local_x: f32) -> f32 {
+        let width = self.frame.width.max(1.0);
+        let frac = (local_x / width).clamp(0.0, 1.0);
+        self.snapped(frac.mul_add(self.max - self.min, self.min))
+    }
+
+    /// The value a window-space pointer x maps to, via the cached frame's
+    /// left edge.
+    fn value_from_pointer_x(&self, pointer_x: f32) -> f32 {
+        self.value_from_local_x(pointer_x - self.frame.x)
+    }
+
+    /// The nudge one arrow press applies: `step` when set, else a hundredth of
+    /// the range so a continuous slider still moves.
+    fn nudge_amount(&self) -> f32 {
+        if self.step > 0.0 {
+            self.step
+        } else {
+            (self.max - self.min) * 0.01
+        }
+    }
+
+    /// The value as a `0.0..=1.0` fraction of the range, for the fill width.
+    fn fill_fraction(&self) -> f32 {
+        let span = self.max - self.min;
+        if span > 0.0 {
+            ((self.value - self.min) / span).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Emit the current value up to the panel root, `committed` distinguishing
+    /// a drag stream from a settled value.
+    fn emit(&self, ctx: &WasmCtx<'_>, committed: bool) {
+        if let Some(parent) = ctx.parent() {
+            parent.send(&SliderChanged {
+                value: self.value,
+                committed,
+            });
+        }
+    }
+}
+
+/// A slider widget. Spawned inline by a panel root with a [`SliderConfig`];
+/// reports [`SliderChanged`] up as it is dragged or nudged.
+///
+/// # Agent
+/// Not loaded directly — the panel root spawns it as an inline child. Send it
+/// its `SliderConfig` again to reconfigure the range or theme in place.
+#[actor(instanced)]
+impl WasmActor for SliderWidget {
+    type Config = SliderConfig;
+    const NAMESPACE: &'static str = "aether.kit.widget.slider";
+
+    fn init(config: SliderConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        let mut slider = SliderWidget {
+            min: config.min,
+            max: config.max,
+            step: config.step,
+            value: config.initial,
+            theme: config.theme,
+            frame: WidgetFrame {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            },
+            focused: false,
+            dragging: false,
+        };
+        slider.value = slider.snapped(config.initial);
+        Ok(slider)
+    }
+
+    /// Reconfigure the range / step / theme in place, re-clamping the current
+    /// value into the new range. `initial` is ignored on re-config (it seeds
+    /// the value only at init) so a restyle does not jump the value.
+    #[handler]
+    fn on_config(&mut self, _ctx: &mut WasmCtx<'_>, config: SliderConfig) {
+        self.min = config.min;
+        self.max = config.max;
+        self.step = config.step;
+        self.theme = config.theme;
+        self.value = self.snapped(self.value);
+    }
+
+    /// Restyle: adopt the fanned theme.
+    #[handler]
+    fn on_set_theme(&mut self, _ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        self.theme = set.theme;
+    }
+
+    /// Cache the layout rect the root assigned.
+    #[handler]
+    fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
+        self.frame = frame;
+    }
+
+    /// Take keyboard focus (draw the focus ring).
+    #[handler]
+    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
+        self.focused = true;
+    }
+
+    /// Release keyboard focus.
+    #[handler]
+    fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
+        self.focused = false;
+    }
+
+    /// A left press begins a drag and sets the value from the cursor.
+    #[handler]
+    fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
+        if press.button != mouse_button::LEFT {
+            return;
+        }
+        self.dragging = true;
+        self.value = self.value_from_pointer_x(press.x);
+        self.emit(ctx, false);
+    }
+
+    /// A move while dragging updates the value and streams it uncommitted.
+    #[handler]
+    fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
+        if !self.dragging {
+            return;
+        }
+        self.value = self.value_from_pointer_x(moved.x);
+        self.emit(ctx, false);
+    }
+
+    /// A left release ends the drag and commits the value.
+    #[handler]
+    fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
+        if release.button != mouse_button::LEFT || !self.dragging {
+            return;
+        }
+        self.value = self.value_from_pointer_x(release.x);
+        self.dragging = false;
+        self.emit(ctx, true);
+    }
+
+    /// Arrow keys nudge by `step` and commit at once (focused only — the root
+    /// forwards keyboard mail to the focused child).
+    #[handler]
+    fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
+        let delta = match key.code {
+            KEY_LEFT | KEY_DOWN => -self.nudge_amount(),
+            KEY_RIGHT | KEY_UP => self.nudge_amount(),
+            _ => return,
+        };
+        self.value = self.snapped(self.value + delta);
+        self.emit(ctx, true);
+    }
+
+    /// Reply the slider's local draw: track, fill, and a focus ring when
+    /// focused.
+    ///
+    /// # Agent
+    /// The panel root's per-frame poll; not useful to send manually.
+    #[handler]
+    fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
+        let width = self.frame.width;
+        let height = self.frame.height;
+        let track_height = (height * 0.35).clamp(4.0, height.max(4.0));
+        let track_y = (height - track_height) * 0.5;
+
+        let mut items: Vec<WidgetDrawItem> = Vec::new();
+        items.push(quad(
+            0.0,
+            track_y,
+            width,
+            track_height,
+            self.theme
+                .fill(self.theme.surface_raised, WidgetState::Normal),
+        ));
+        items.push(quad(
+            0.0,
+            track_y,
+            width * self.fill_fraction(),
+            track_height,
+            self.theme.fill(self.theme.accent, WidgetState::Normal),
+        ));
+        if self.focused {
+            push_border(&mut items, width, height, 2.0, self.theme.accent);
+        }
+        if let Some(parent) = ctx.parent() {
+            parent.send(&WidgetDrawList {
+                intrinsic: None,
+                items,
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slider(min: f32, max: f32, step: f32, initial: f32) -> SliderWidget {
+        SliderWidget {
+            min,
+            max,
+            step,
+            value: initial,
+            theme: Theme::DEFAULT,
+            frame: WidgetFrame {
+                x: 100.0,
+                y: 0.0,
+                width: 200.0,
+                height: 24.0,
+            },
+            focused: false,
+            dragging: false,
+        }
+    }
+
+    #[test]
+    fn pointer_maps_across_the_track_and_snaps_to_step() {
+        let s = slider(0.0, 100.0, 10.0, 0.0);
+        // Left edge of the frame → min.
+        assert_eq!(s.value_from_pointer_x(100.0), 0.0);
+        // Right edge → max.
+        assert_eq!(s.value_from_pointer_x(300.0), 100.0);
+        // Middle → 50, already on a step boundary.
+        assert_eq!(s.value_from_pointer_x(200.0), 50.0);
+        // A point at 27% of the track (x=154 → local 54 → 27.0 raw) snaps to 30.
+        assert_eq!(s.value_from_pointer_x(154.0), 30.0);
+    }
+
+    #[test]
+    fn pointer_past_the_edges_clamps_into_range() {
+        let s = slider(-1.0, 1.0, 0.0, 0.0);
+        assert_eq!(
+            s.value_from_pointer_x(50.0),
+            -1.0,
+            "left of the track clamps to min"
+        );
+        assert_eq!(
+            s.value_from_pointer_x(500.0),
+            1.0,
+            "right of the track clamps to max"
+        );
+    }
+
+    #[test]
+    fn continuous_slider_does_not_snap() {
+        let s = slider(0.0, 1.0, 0.0, 0.0);
+        // Quarter of the track → 0.25, no snapping.
+        assert_eq!(s.value_from_pointer_x(150.0), 0.25);
+    }
+
+    #[test]
+    fn nudge_amount_falls_back_to_a_hundredth_of_range() {
+        assert_eq!(slider(0.0, 100.0, 5.0, 0.0).nudge_amount(), 5.0);
+        assert_eq!(slider(0.0, 100.0, 0.0, 0.0).nudge_amount(), 1.0);
+    }
+
+    #[test]
+    fn fill_fraction_tracks_value_within_range() {
+        let mut s = slider(0.0, 100.0, 0.0, 0.0);
+        assert_eq!(s.fill_fraction(), 0.0);
+        s.value = 25.0;
+        assert_eq!(s.fill_fraction(), 0.25);
+        s.value = 200.0;
+        assert_eq!(
+            s.fill_fraction(),
+            1.0,
+            "an out-of-range value clamps the fill"
+        );
+    }
+}
