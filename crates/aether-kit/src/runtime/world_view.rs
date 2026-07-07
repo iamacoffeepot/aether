@@ -8,23 +8,25 @@
 //! lifecycle stage.
 //!
 //! The mesher lives in [`super::mesher`] as a pure function
-//! ([`mesh_chunk`]); this actor keeps only the per-chunk mesh cache and
-//! its invalidation. Each chunk becomes corner-blended underlay quads
-//! (per-cell geometry carrying a jittered, cross-cell-averaged color) and
-//! marching-squares overlay contours over the subcell masks, in
-//! world-space meters (`1 cell = 1 m`) with the existing `aether.camera`
-//! `view_proj` handling projection. A chunk's border corners and overlay
-//! contours read one cell into its neighbors (the `R = 1` apron), so a
-//! write invalidates its own mesh and its eight cached neighbors.
+//! ([`mesh_chunk`]); this actor keeps the per-chunk mesh cache, the active
+//! view mode, and the cache invalidation. Each chunk becomes keyed-quilt
+//! underlay cells (flat world-anchored color with pooled rims and a wash
+//! gradient) and corner-minimized overlay contours over the subcell masks,
+//! in world-space meters (`1 cell = 1 m`) with the existing `aether.camera`
+//! `view_proj` handling projection. A chunk's rims and contours read a
+//! bounded apron into its neighbors, so a write invalidates its own mesh
+//! and its eight cached neighbors.
 //!
 //! # Mail surface
 //!
 //! - `aether.kit.world.set_chunk` — write one chunk's planes and remesh
-//!   that chunk plus its eight cached neighbors (their border corners and
+//!   that chunk plus its eight cached neighbors (their border rims and
 //!   contours read the new planes through the apron).
 //! - `aether.kit.world.set_region` — register a region so the underlay
 //!   cascade has a default to resolve to; remeshes every cached chunk
 //!   (a region default can change any chunk's cascade-resolved underlay).
+//! - `aether.kit.world.set_view_mode` — switch between the painted gouache
+//!   grammar and the raw grayscale calibration field; remeshes all.
 //! - `aether.kit.world.load` — fetch a serialized world through
 //!   `aether.fs`, decode, atomically swap, and remesh all. A decode or
 //!   read failure keeps the prior world (errors go to logs).
@@ -39,7 +41,7 @@ use aether_capabilities::{FsCapability, LifecycleCapability, RenderCapability};
 use aether_kinds::Render;
 
 use super::mesher::mesh_chunk;
-use crate::world::{ChunkPos, SetChunk, SetRegion, World, WorldLoad};
+use crate::world::{ChunkPos, SetChunk, SetRegion, SetViewMode, ViewMode, World, WorldLoad};
 
 /// World-view component: holds the world plane stack and a per-chunk
 /// mesh cache, and replays the cache to the render sink each frame.
@@ -49,22 +51,26 @@ use crate::world::{ChunkPos, SetChunk, SetRegion, World, WorldLoad};
 /// sending `aether.kit.world.set_chunk` (one chunk's planes) and
 /// `aether.kit.world.set_region` (a region default for the underlay
 /// cascade); each send remeshes and the meadow renders every frame under
-/// the active `aether.camera` view. `aether.kit.world.load` swaps a
-/// serialized world from `aether.fs`. Use `capture_frame` to verify.
+/// the active `aether.camera` view. `aether.kit.world.set_view_mode`
+/// toggles the raw grayscale field for calibrating the material table;
+/// `aether.kit.world.load` swaps a serialized world from `aether.fs`. Use
+/// `capture_frame` to verify.
 pub struct WorldView {
     world: World,
     meshes: BTreeMap<ChunkPos, Vec<DrawTriangle>>,
+    mode: ViewMode,
 }
 
 impl WorldView {
     /// Rebuild every chunk's cached mesh from the current world — used
-    /// after a whole-world change (region default, world load) that can
-    /// alter any chunk's cascade-resolved underlay.
+    /// after a whole-world change (region default, world load, view mode)
+    /// that can alter any chunk's mesh.
     fn remesh_all(&mut self) {
         self.meshes.clear();
         let positions: Vec<ChunkPos> = self.world.chunks().map(|(pos, _)| pos).collect();
         for pos in positions {
-            self.meshes.insert(pos, mesh_chunk(&self.world, pos));
+            self.meshes
+                .insert(pos, mesh_chunk(&self.world, pos, self.mode));
         }
     }
 }
@@ -77,6 +83,7 @@ impl WasmActor for WorldView {
         Ok(WorldView {
             world: World::new(),
             meshes: BTreeMap::new(),
+            mode: ViewMode::default(),
         })
     }
 
@@ -108,13 +115,12 @@ impl WasmActor for WorldView {
     }
 
     /// Write one chunk's planes into the world, then remesh that chunk and
-    /// its eight cached neighbors. The mesher's corner blending and overlay
-    /// contours read one cell into the neighbors (the `R = 1` apron), so a
-    /// write changes the border corners and edge contours of any cached
-    /// neighbor as well as the written chunk's own mesh. Neighbors with no
-    /// cached mesh are not rendered, so they need no remesh; an empty
-    /// neighbor's border geometry is already covered by this chunk's own
-    /// apron windows.
+    /// its eight cached neighbors. The mesher's rims and overlay contours
+    /// read a bounded apron into the neighbors, so a write changes the
+    /// border rims and edge contours of any cached neighbor as well as the
+    /// written chunk's own mesh. Neighbors with no cached mesh are not
+    /// rendered, so they need no remesh; an empty neighbor's border
+    /// geometry is already covered by this chunk's own apron windows.
     #[handler]
     fn on_set_chunk(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetChunk) {
         let pos = msg.chunk_pos();
@@ -127,10 +133,24 @@ impl WasmActor for WorldView {
                 };
                 if (dx == 0 && dz == 0) || self.meshes.contains_key(&neighbor) {
                     self.meshes
-                        .insert(neighbor, mesh_chunk(&self.world, neighbor));
+                        .insert(neighbor, mesh_chunk(&self.world, neighbor, self.mode));
                 }
             }
         }
+    }
+
+    /// Switch the view between the painted gouache grammar and the raw
+    /// grayscale field, then remesh every cached chunk — the mode changes
+    /// how every cell paints. A repeat of the current mode still remeshes.
+    ///
+    /// # Agent
+    /// Send `aether.kit.world.set_view_mode` with `mode = 0` for the
+    /// painted look or `mode = 1` for the raw hue-noise field, used to
+    /// calibrate the material table by eye. `capture_frame` to compare.
+    #[handler]
+    fn on_set_view_mode(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetViewMode) {
+        self.mode = msg.view_mode();
+        self.remesh_all();
     }
 
     /// Register a region in the world's table so the underlay cascade has

@@ -12,11 +12,11 @@
 //!   `aether_kit@aether.mesh_viewer` export. Its `aether.mesh.load`
 //!   kind lives in [`crate::mesh`].
 //! - [`world_view::WorldView`] — meshes the chunked world plane stack
-//!   ([`crate::world`]) into corner-blended ground quads and
-//!   marching-squares overlay contours and replays them to the render
-//!   sink each frame, selected by the `aether_kit@aether.world` export.
-//!   Its `aether.kit.world.*` kinds live in [`crate::world`]; the pure
-//!   mesher it drives lives in [`mesher`].
+//!   ([`crate::world`]) into keyed-quilt ground cells and corner-minimized
+//!   overlay contours and replays them to the render sink each frame,
+//!   selected by the `aether_kit@aether.world` export. Its
+//!   `aether.kit.world.*` kinds live in [`crate::world`]; the pure mesher
+//!   it drives lives in [`mesher`].
 //!
 //! `export!(Locomotion, CameraComponent, MeshViewer, WorldView)` lists
 //! the entry first; the macro emits the wasm32 FFI shims and the
