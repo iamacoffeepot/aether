@@ -24,8 +24,8 @@ use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
     AnthropicConfig, AudioCapability, CaptureBackend, ComponentHostConfig, ContentGenConfig,
     GeminiConfig, HttpServerConfig, InputConfig, RenderCapability, RenderConfig,
-    UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf, fs::NamespaceRoots,
-    http::HttpConfig as HttpConf,
+    RenderTuningConfig, UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf,
+    fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
 use aether_kinds::BinaryManifest;
 use aether_kinds::WindowMode;
@@ -214,6 +214,10 @@ pub struct DesktopEnv {
     /// `AETHER_LOCAL_STICKY_MAX` / …). Default is
     /// [`SchedulerTuning::default`] (the built-in scheduler literals).
     pub scheduler_tuning: SchedulerTuning,
+    /// Issue 2706: render boot knobs resolved from the
+    /// `RenderTuningConfig` knob (`AETHER_RENDER_VERTEX_BUFFER_BYTES`).
+    /// Threaded into the render cap's `RenderConfig` in `build_inner`.
+    pub render_tuning: RenderTuningConfig,
     /// Force-complete deadline (ms) for a pending lifecycle advance's
     /// `Settled` (issue 1048). Resolved from
     /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS` via `ChassisBootConfig`;
@@ -335,6 +339,10 @@ impl DesktopEnv {
         // `AETHER_*_COST_*` (ADR-0090 §4 hard-error on an unparseable
         // known value, surfaced as `DesktopBootError::Config`).
         let scheduler_tuning = SchedulerTuningConfig::try_from_env()?.to_scheduler_tuning();
+        // Issue 2706: resolve the render boot knobs
+        // (`AETHER_RENDER_VERTEX_BUFFER_BYTES`; ADR-0090 §4 hard-error
+        // on an unparseable known value).
+        let render_tuning = RenderTuningConfig::try_from_env()?;
 
         Ok(Self {
             event_loop,
@@ -354,6 +362,7 @@ impl DesktopEnv {
             workers,
             ring_caps,
             scheduler_tuning,
+            render_tuning,
             lifecycle_advance_timeout_millis,
             autoload,
         })
@@ -388,6 +397,7 @@ impl DesktopChassis {
             workers,
             ring_caps,
             scheduler_tuning,
+            render_tuning,
             lifecycle_advance_timeout_millis,
             autoload,
         } = env;
@@ -406,6 +416,10 @@ impl DesktopChassis {
         // so `RedrawRequested` picks it up on the next frame.
         let proxy_for_render = event_loop.create_proxy();
         let render_config = RenderConfig {
+            // Issue 2706: the resolved vertex-buffer cap sizes both the
+            // cap accumulator's truncation and (via `RenderHandles`)
+            // the GPU vertex buffer the driver creates.
+            vertex_buffer_bytes: render_tuning.vertex_buffer_bytes,
             capture_backend: Some(CaptureBackend {
                 queue: capture_queue.clone(),
                 wake: Arc::new(move || {

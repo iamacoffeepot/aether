@@ -67,7 +67,10 @@ use aether_kinds::CaptureFrame;
 // see only the identity ZST + Actor / HandlesKind impls, not these heavy
 // GPU-bound types.
 #[cfg(feature = "render-runtime")]
-pub use runtime::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
+pub use runtime::{
+    CaptureBackend, RenderConfig, RenderGpu, RenderHandles, RenderTuningConfig,
+    RenderTuningConfigLayer, RenderTuningOverlay,
+};
 
 // `#[actor]` sits on each capability struct (the struct-hosted ADR-0123
 // form): it reads the cap's sibling runtime module off disk and emits the

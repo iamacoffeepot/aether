@@ -5,10 +5,32 @@ use aether_substrate::render::VERTEX_BUFFER_BYTES;
 
 use super::capture::CaptureBackend;
 
+/// Boot knobs for `RenderCapability` (ADR-0090). The
+/// `#[derive(aether_substrate::Config)]` emits the env-shaped
+/// `RenderTuningConfigLayer`, the clap-shaped `RenderTuningOverlay`,
+/// the `FromArgvThenEnv` impl, and the inherent `from_env` /
+/// `from_argv_then_env` shims — mirrors `AudioConfig`. The chassis
+/// main resolves it and threads the value into the hand-built
+/// [`RenderConfig`], which also carries non-knob wiring (capture
+/// backend, test observability) and so can't ride the derive itself.
+#[derive(Clone, Debug, aether_substrate::Config)]
+#[config(env_prefix = "AETHER_RENDER", cli_prefix = "render")]
+pub struct RenderTuningConfig {
+    /// `AETHER_RENDER_VERTEX_BUFFER_BYTES=<bytes>` per-frame vertex
+    /// buffer cap: the size the GPU vertex buffer is created with and
+    /// the byte count the render accumulator truncates to (with a
+    /// warn) when a frame's triangles exceed it. Default
+    /// [`VERTEX_BUFFER_BYTES`] (64 MiB, ~932k triangles at 72 bytes
+    /// each).
+    #[config(default = 67_108_864)]
+    pub vertex_buffer_bytes: usize,
+}
+
 /// Configuration for `RenderCapability`. `vertex_buffer_bytes` is
 /// the maximum bytes the render accumulator will hold before
-/// truncating with a warn — desktop and test-bench both pass
-/// [`VERTEX_BUFFER_BYTES`].
+/// truncating with a warn, and the size the GPU vertex buffer is
+/// created with — default [`VERTEX_BUFFER_BYTES`]; the chassis main
+/// overrides it from the resolved [`RenderTuningConfig`] knob.
 ///
 /// `observed_kinds`, when set, has every successfully-dispatched
 /// inbound mail's kind name pushed to it from the cap's `#[handler]`

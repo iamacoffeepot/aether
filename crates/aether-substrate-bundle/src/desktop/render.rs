@@ -237,6 +237,7 @@ impl Gpu {
             config.width,
             config.height,
             polygon_mode,
+            render_handles.vertex_buffer_bytes,
         ));
 
         // Wireframe overlay pipeline: same vertex/uniform layout, but

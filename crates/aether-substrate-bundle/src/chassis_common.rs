@@ -25,6 +25,7 @@ use aether_capabilities::gemini::{GeminiBoot, GeminiConfigLayer};
 use aether_capabilities::http::HttpConfigLayer;
 use aether_capabilities::http::HttpServerConfigLayer;
 use aether_capabilities::lifecycle::LifecycleGraphData;
+use aether_capabilities::render::RenderTuningConfigLayer;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
@@ -390,7 +391,8 @@ impl ChassisBootConfig {
 
 /// Assemble the chassis-wide [`KnownKeys`] set (ADR-0090 §4): every
 /// migrated `*Layer::META` (http / gemini / anthropic / audio / fs /
-/// actor-ring / scheduler-tuning / chassis-boot / window / tick) plus
+/// render / actor-ring / scheduler-tuning / chassis-boot / window /
+/// tick) plus
 /// the hand-registered chassis knobs ([`CHASSIS_KNOBS`] — the RPC port
 /// and the orphaned frame-size knob) and the runtime log-filter /
 /// panic-hook knobs (`aether_substrate::runtime::RUNTIME_KNOBS`). e1's
@@ -423,6 +425,7 @@ fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
         &AnthropicConfigLayer::META,
         &AudioConfigLayer::META,
         &NamespaceRootsLayer::META,
+        &RenderTuningConfigLayer::META,
         &ActorRingConfigLayer::META,
         &SchedulerTuningConfigLayer::META,
         &SettlementConfigLayer::META,

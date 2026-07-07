@@ -37,10 +37,14 @@ mod pipeline;
 mod quad;
 mod texture;
 
-// The cap-root re-exports source these four names through `runtime`: `pub use
-// runtime::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};`.
+// The cap-root re-exports source these names through `runtime`: `pub use
+// runtime::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles, …};`.
+// The `RenderTuning*` trio is the derive-Config surface (ADR-0090) the
+// chassis resolves the render boot knobs through.
 pub use self::capture::CaptureBackend;
-pub use self::config::RenderConfig;
+pub use self::config::{
+    RenderConfig, RenderTuningConfig, RenderTuningConfigLayer, RenderTuningOverlay,
+};
 pub use self::pipeline::{RenderGpu, RenderHandles};
 
 // The moved `#[runtime] impl NativeActor for RenderCapability` body names the
@@ -136,6 +140,7 @@ impl NativeActor for RenderCapability {
             quad_last_submitted: Arc::new(Mutex::new(Vec::new())),
             textures: Arc::new(Mutex::new(TextureRegistry::new())),
             gpu: Arc::new(OnceLock::new()),
+            vertex_buffer_bytes: config.vertex_buffer_bytes,
         };
         let mailer = ctx.mailer();
         let registry = Arc::clone(mailer.registry());

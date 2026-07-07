@@ -81,6 +81,7 @@ impl Gpu {
             width,
             height,
             wgpu::PolygonMode::Fill,
+            render_handles.vertex_buffer_bytes,
         ));
 
         Self {

@@ -38,11 +38,15 @@ pub use targets::Targets;
 /// shader reads `position` from offset 0 and `color` from offset 12.
 pub const VERTEX_STRIDE: u64 = 24;
 
-/// Maximum size of the per-frame vertex buffer. Render sinks truncate
-/// to this cap before forwarding bytes; if a future caller bypasses
-/// the sink-side clamp, `record_main_pass` drops the frame with a
-/// warn rather than overflow the GPU buffer.
-pub const VERTEX_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+/// Default maximum size of the per-frame vertex buffer: 64 MiB
+/// (~2.8M vertices at [`VERTEX_STRIDE`]). The render capability's
+/// `vertex_buffer_bytes` boot knob (`AETHER_RENDER_VERTEX_BUFFER_BYTES`,
+/// ADR-0090) overrides it per chassis; [`build_main_pipeline`] sizes
+/// the GPU buffer from the resolved value. Render sinks truncate to
+/// the resolved cap before forwarding bytes; if a future caller
+/// bypasses the sink-side clamp, `record_main_pass` drops the frame
+/// with a warn rather than overflow the GPU buffer.
+pub const VERTEX_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 
 /// Camera uniform buffer size: a single 4×4 column-major `f32` view-
 /// projection matrix. The vertex shader applies `camera.view_proj *

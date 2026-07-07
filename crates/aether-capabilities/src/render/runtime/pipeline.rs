@@ -75,6 +75,11 @@ pub struct RenderHandles {
     /// called before install — in practice every code path that
     /// calls them runs after the install site.
     pub gpu: Arc<OnceLock<RenderGpu>>,
+    /// Resolved per-frame vertex buffer cap (`RenderConfig::
+    /// vertex_buffer_bytes`), carried here so the driver sizes the GPU
+    /// vertex buffer ([`RenderGpu::new`]) to the same value the cap's
+    /// accumulator truncates at.
+    pub vertex_buffer_bytes: usize,
 }
 
 /// Commit a frame's live accumulator into its cache, the shared
@@ -517,7 +522,10 @@ impl RenderGpu {
     /// `polygon_mode` is `Fill` for the normal case; desktop's
     /// `AETHER_WIREFRAME=line` chassis env passes `Line` so the main
     /// pipeline draws as wireframe instead of building a separate
-    /// overlay pipeline.
+    /// overlay pipeline. `vertex_buffer_bytes` sizes the per-frame GPU
+    /// vertex buffer — drivers pass
+    /// [`RenderHandles::vertex_buffer_bytes`] so the buffer matches the
+    /// cap accumulator's resolved truncation cap.
     #[must_use]
     pub fn new(
         device: Arc<wgpu::Device>,
@@ -526,8 +534,15 @@ impl RenderGpu {
         width: u32,
         height: u32,
         polygon_mode: wgpu::PolygonMode,
+        vertex_buffer_bytes: usize,
     ) -> Self {
-        let pipeline = build_main_pipeline(&device, &queue, color_format, polygon_mode);
+        let pipeline = build_main_pipeline(
+            &device,
+            &queue,
+            color_format,
+            polygon_mode,
+            vertex_buffer_bytes,
+        );
         let quad_pipeline = build_quad_pipeline(&device, color_format);
         let targets = Targets::new(&device, color_format, width, height);
         Self {
