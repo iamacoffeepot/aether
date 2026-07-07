@@ -30,7 +30,8 @@ pub use http_handler::{
     WebSocketHandler,
 };
 pub use inline_child::{
-    InlineDespawnParent, InlineParent, InlineStatefulChild, InlineStatefulParent,
+    InlineConfiguredChild, InlineConfiguredParent, InlineDespawnParent, InlineParent,
+    InlineStatefulChild, InlineStatefulParent,
 };
 pub use mat4_source::MatSource;
 pub use matrix_sweep::{MatrixChild, MatrixParent};
@@ -64,6 +65,8 @@ aether_actor::export!(
     InlineStatefulParent,
     InlineStatefulChild,
     InlineDespawnParent,
+    InlineConfiguredParent,
+    InlineConfiguredChild,
     Counter,
     Sidecar,
 );

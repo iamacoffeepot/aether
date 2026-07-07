@@ -41,6 +41,23 @@
 //!
 //! Consumers load this actor from the `inline_child` bundle with
 //! `export: Some("test.inline.despawn_parent")`.
+//!
+//! # `InlineConfiguredParent` / `InlineConfiguredChild`
+//!
+//! Issue 2690 fixture: the coverage hole every other inline-child fixture
+//! here leaves open. `InlineStatefulChild` above carries durable state
+//! but spawns with a `()` config, which decodes `Some(())` from empty
+//! bytes on reconstruct — the branch that never exercises a typed
+//! (non-`()`) config's decode-from-real-bytes path. The entry
+//! `InlineConfiguredParent` spawns a co-located `InlineConfiguredChild`
+//! in `wire` with a **non-default** `InlineConfiguredChildConfig`
+//! (`initial: CONFIGURED_CHILD_INITIAL`), and the child's durable
+//! `InlineCounterState` starts from that config value rather than `0` —
+//! so a reload that silently re-inited from a default/empty config would
+//! be distinguishable from one that decoded the real bytes.
+//!
+//! Consumers load this actor from the `inline_child` bundle with
+//! `export: Some("test.inline.configured_parent")`.
 
 // `#[handler::manual]` methods take `&mut self` to match the dispatch ABI
 // even though stateless replies never read it. `rehydrate` takes its
@@ -53,8 +70,8 @@ use aether_actor::{
 };
 use aether_data::MailboxId;
 use aether_test_fixtures_kinds::{
-    Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
-    InlineProbe,
+    Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD,
+    INLINE_WHO_PARENT, InlineConfiguredChildConfig, InlineEcho, InlineProbe,
 };
 
 /// Durable state the `InlineStatefulChild` carries across `replace_component`.
@@ -278,5 +295,97 @@ impl WasmActor for InlineDespawnChild {
     #[handler::manual]
     fn on_despawn(&mut self, ctx: &mut WasmCtx<'_, Manual>, _trigger: DespawnChild) {
         let _ = ctx.despawn_inline_child(ctx.mailbox_id());
+    }
+}
+
+/// Entry export for issue 2690's config-carrying inline-child reload
+/// fixture. Spawns a co-located `InlineConfiguredChild` in `wire` with a
+/// non-default typed config.
+///
+/// Load from the `inline_child` bundle with
+/// `export: Some("test.inline.configured_parent")`.
+pub struct InlineConfiguredParent;
+
+#[actor]
+impl WasmActor for InlineConfiguredParent {
+    const NAMESPACE: &'static str = "test.inline.configured_parent";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(InlineConfiguredParent)
+    }
+
+    /// ADR-0114: co-locate an `InlineConfiguredChild` under the `Named`
+    /// subname `widget`, spawned with a non-default config so the child's
+    /// durable counter starts from `CONFIGURED_CHILD_INITIAL`, not `0`.
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+        let _ = ctx.spawn_inline_child::<InlineConfiguredChild>(
+            Subname::Named("widget"),
+            &InlineConfiguredChildConfig {
+                initial: CONFIGURED_CHILD_INITIAL,
+            },
+        );
+    }
+
+    /// The parent ignores mail addressed to its own id — only the child
+    /// carries state. A `#[fallback]` keeps the parent a valid receiver.
+    #[fallback]
+    fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
+}
+
+/// Config-carrying inline child for issue 2690's reload fixture. `init`
+/// seeds the durable counter from the config's `initial` rather than a
+/// hardcoded `0`, so a test can move the state off *that* config-derived
+/// value and assert the moved value — not the config default — survives
+/// a `replace_component` swap. `Instanced` satisfies the
+/// `spawn_inline_child` bound; it is in the `export!` list so the
+/// rehydrate reconstruct can re-`init` it by type, decoding its real
+/// config bytes (the branch issue 2690 fixes).
+pub struct InlineConfiguredChild {
+    count: u32,
+}
+
+#[actor(instanced)]
+impl WasmActor for InlineConfiguredChild {
+    type Config = InlineConfiguredChildConfig;
+    const NAMESPACE: &'static str = "test.inline.configured_child";
+
+    /// ADR-0113: the durable shape, shared with `InlineStatefulChild` —
+    /// both carry a plain counter, packed / restored through the
+    /// composite migration bundle (ADR-0114 §5).
+    type State = InlineCounterState;
+
+    fn init(
+        config: InlineConfiguredChildConfig,
+        _ctx: &mut WasmInitCtx<'_>,
+    ) -> Result<Self, ActorInitError> {
+        Ok(InlineConfiguredChild {
+            count: config.initial,
+        })
+    }
+
+    /// Save-side accessor: snapshot the live counter for the composite.
+    fn dehydrate(&self) -> InlineCounterState {
+        InlineCounterState { count: self.count }
+    }
+
+    /// Restore-side accessor: adopt the recovered snapshot after the swap.
+    fn rehydrate(&mut self, state: InlineCounterState) {
+        self.count = state.count;
+    }
+
+    /// Increment the child's in-memory counter (mail demuxed to the
+    /// child's alias).
+    #[handler]
+    fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
+        self.count += 1;
+    }
+
+    /// Reply with the live counter so a test can read the child's state
+    /// across a swap.
+    #[handler::manual]
+    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
+        if ctx.reply_target().is_some() {
+            ctx.reply(&CountReport { count: self.count });
+        }
     }
 }

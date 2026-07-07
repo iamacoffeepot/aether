@@ -34,6 +34,8 @@
 //!   version:      u32 LE
 //!   state_len:    u32 LE
 //!   state_bytes:  state_len bytes
+//!   config_len:   u32 LE
+//!   config_bytes: config_len bytes
 //! ```
 
 use alloc::string::String;
@@ -69,6 +71,10 @@ pub struct ChildEntry {
     pub version: u32,
     /// The child's `on_dehydrate` bundle bytes.
     pub state_bytes: Vec<u8>,
+    /// The child's encoded `Config` bytes (from the slot's retained
+    /// `config_bytes`), so reconstruct can re-init the child from its real
+    /// config instead of empty bytes (issue 2690).
+    pub config_bytes: Vec<u8>,
 }
 
 /// The parent half of a decomposed bundle — exactly the `(version,
@@ -119,6 +125,8 @@ pub fn compose(
         out.extend_from_slice(&child.version.to_le_bytes());
         out.extend_from_slice(&len_u32(child.state_bytes.len()).to_le_bytes());
         out.extend_from_slice(&child.state_bytes);
+        out.extend_from_slice(&len_u32(child.config_bytes.len()).to_le_bytes());
+        out.extend_from_slice(&child.config_bytes);
     }
     (COMPOSITE_VERSION, out)
 }
@@ -173,6 +181,8 @@ fn parse_framed(bytes: &[u8]) -> Option<Decomposed> {
         let version = cursor.read_u32()?;
         let state_len = cursor.read_u32()? as usize;
         let state_bytes = cursor.take(state_len)?.to_vec();
+        let config_len = cursor.read_u32()? as usize;
+        let config_bytes = cursor.take(config_len)?.to_vec();
         children.push(ChildEntry {
             alias_id,
             type_tag,
@@ -180,6 +190,7 @@ fn parse_framed(bytes: &[u8]) -> Option<Decomposed> {
             full_subname: subname,
             version,
             state_bytes,
+            config_bytes,
         });
     }
     Some(Decomposed {
@@ -241,6 +252,7 @@ mod tests {
     use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
+    use core::slice;
 
     fn child(alias: u64, tag: u64, name: &str, state: &[u8]) -> ChildEntry {
         ChildEntry {
@@ -250,6 +262,7 @@ mod tests {
             full_subname: String::from(name),
             version: 0,
             state_bytes: state.to_vec(),
+            config_bytes: Vec::new(),
         }
     }
 
@@ -317,6 +330,37 @@ mod tests {
         assert_eq!(
             decomposed.children, children,
             "every child entry survives the composite round-trip",
+        );
+    }
+
+    /// Step 2 tripwire: a child's non-empty `config_bytes` survive the
+    /// compose → decompose round-trip alongside its `state_bytes` — the
+    /// write/read symmetry the appended `config_len` + bytes span
+    /// introduces (issue 2690). Guards the framed-layout format, not a
+    /// derive or another crate's machinery.
+    #[test]
+    fn child_config_bytes_round_trip_through_compose() {
+        let entry = ChildEntry {
+            config_bytes: vec![0x10, 0x20, 0x30, 0x40, 0x50],
+            ..child(0x5555, 0x6666, "configured", &[0xAA, 0xBB])
+        };
+
+        let (version, bytes) = compose(1, &[], slice::from_ref(&entry));
+        let decomposed = decompose(version, &bytes);
+
+        assert_eq!(
+            decomposed.children.len(),
+            1,
+            "exactly the one entry round-trips",
+        );
+        assert_eq!(
+            decomposed.children[0].config_bytes, entry.config_bytes,
+            "the child's config bytes survive the composite round-trip \
+             alongside its state bytes",
+        );
+        assert_eq!(
+            decomposed.children[0].state_bytes, entry.state_bytes,
+            "state bytes are unaffected by the appended config span",
         );
     }
 

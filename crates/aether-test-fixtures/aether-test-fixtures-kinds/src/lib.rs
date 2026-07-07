@@ -286,6 +286,37 @@ pub const INLINE_WHO_CHILD: u32 = 2;
 #[kind(name = "aether.test_fixtures.despawn_child")]
 pub struct DespawnChild;
 
+/// Issue 2690 typed config for the config-carrying inline-child reload
+/// fixture: the durable counter's starting value. Distinct from the
+/// `()`-config `InlineStatefulChild` — this is the config-bytes case the
+/// composite reload bundle dropped before the fix (`reconstruct_one_child`
+/// re-inited every child from empty config bytes, so a typed (non-`()`)
+/// `Config` decoded `None` and the child was skipped, not just reset).
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+)]
+#[kind(name = "aether.test_fixtures.inline_configured_child_config")]
+pub struct InlineConfiguredChildConfig {
+    pub initial: u32,
+}
+
+/// The non-default `initial` value the `inline_child` bundle's
+/// `InlineConfiguredParent` spawns its child with — distinct from
+/// `InlineConfiguredChildConfig::default()`'s `0`, so a reload that
+/// silently re-inited from a default/empty config is distinguishable
+/// from one that decoded the real config bytes. Shared here (not just
+/// hardcoded in the fixture) so the `FleetBench` reload scenario asserts
+/// against the same constant rather than a magic number.
+pub const CONFIGURED_CHILD_INITIAL: u32 = 100;
+
 /// Issue 1958: trigger sent to a `source_observer` fixture to request that
 /// it forward a `SourceQuery` to the named target mailbox. The fixture then
 /// sends `SourceQuery` to `MailboxId(to)`, making itself the component

@@ -88,6 +88,11 @@ struct InlineSlot {
     /// guest cannot reproduce a relative's id by folding; it looks the
     /// recorded id up instead).
     parent: u64,
+    /// The child's encoded `Config` bytes (`A::Config::encode_into_bytes`
+    /// at spawn time). Retained so a `replace_component` swap can decode
+    /// the real config on reconstruct (`reconstruct_one_child`) instead of
+    /// re-`init`ing a typed-config child from empty bytes (issue 2690).
+    config_bytes: Vec<u8>,
     actor: Option<Box<dyn ErasedWasmActor>>,
 }
 
@@ -105,6 +110,10 @@ pub(crate) struct InlineChildMeta {
     pub(crate) full_subname: String,
     /// Whether the original spawn used a counter discriminator.
     pub(crate) is_counter: bool,
+    /// The child's encoded `Config` bytes, carried into the dehydrate
+    /// bundle's `ChildEntry` so reconstruct can re-init from the real
+    /// config instead of empty bytes (issue 2690).
+    pub(crate) config_bytes: Vec<u8>,
 }
 
 /// One intra-cluster send buffered on the per-component queue
@@ -237,6 +246,9 @@ impl Registry {
     /// alongside the actor box. Replaces the actor + metadata if `id` is
     /// already present (a re-spawn / rehydrate re-register of the same
     /// alias). O(log n).
+    // The parameters are the slot's reconstruct record (ADR-0114 §5); see
+    // `install_inline_child` for the same shape on the spawn side.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn insert_child(
         &self,
         id: MailboxId,
@@ -244,6 +256,7 @@ impl Registry {
         full_subname: String,
         is_counter: bool,
         parent: u64,
+        config_bytes: Vec<u8>,
         actor: Box<dyn ErasedWasmActor>,
     ) {
         // SAFETY: single-threaded guest + serialized delivery — no other
@@ -257,6 +270,7 @@ impl Registry {
                 full_subname,
                 is_counter,
                 parent,
+                config_bytes,
                 actor: Some(actor),
             },
         );
@@ -330,6 +344,7 @@ impl Registry {
                 type_tag: slot.type_tag,
                 full_subname: slot.full_subname.clone(),
                 is_counter: slot.is_counter,
+                config_bytes: slot.config_bytes.clone(),
             })
             .collect()
     }
@@ -766,6 +781,7 @@ mod tests {
             String::from("widget"),
             false,
             0,
+            Vec::new(),
             Box::new(RecordingChild::new().0),
         );
         let taken = registry
@@ -796,6 +812,7 @@ mod tests {
             String::from("widget"),
             false,
             0,
+            Vec::new(),
             Box::new(RecordingChild::new().0),
         );
 
@@ -836,6 +853,7 @@ mod tests {
             String::from("widget"),
             false,
             0,
+            Vec::new(),
             Box::new(recording),
         );
 
@@ -888,6 +906,7 @@ mod tests {
             String::from("widget"),
             false,
             0,
+            Vec::new(),
             Box::new(SelfDespawningChild {
                 id: MailboxId(child),
                 drops: Rc::clone(&drops),
@@ -927,6 +946,7 @@ mod tests {
             String::from("recording"),
             false,
             parent,
+            Vec::new(),
             Box::new(recording),
         );
         dispatches
@@ -952,6 +972,7 @@ mod tests {
             String::from("bar"),
             false,
             root,
+            Vec::new(),
             Box::new(RecordingChild::new().0),
         );
         registry.insert_child(
@@ -960,6 +981,7 @@ mod tests {
             String::from("baz"),
             false,
             root,
+            Vec::new(),
             Box::new(RecordingChild::new().0),
         );
         registry.insert_child(
@@ -968,6 +990,7 @@ mod tests {
             String::from("button"),
             false,
             bar.0,
+            Vec::new(),
             Box::new(RecordingChild::new().0),
         );
 
@@ -1192,6 +1215,7 @@ mod tests {
             String::from("recording"),
             false,
             parent,
+            Vec::new(),
             Box::new(recording),
         );
         (dispatches, source)
