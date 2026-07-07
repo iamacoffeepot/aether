@@ -301,6 +301,25 @@ impl World {
         Material::Void
     }
 
+    /// The cell's cascade default alone — its region's `default_material`
+    /// (`Void` for no region, an unregistered region, or a missing chunk),
+    /// ignoring any explicit underlay. The mesher's base/patch split reads
+    /// this: a cell whose resolved underlay differs from its own default is
+    /// a contoured patch over the default ground.
+    #[must_use]
+    pub fn cell_default(&self, cell: CellPos) -> Material {
+        let Some(chunk) = self.chunks.get(&cell.chunk()) else {
+            return Material::Void;
+        };
+        let region_id = chunk.region[cell.chunk_index()];
+        if region_id == 0 {
+            return Material::Void;
+        }
+        self.regions
+            .get(region_id as usize - 1)
+            .map_or(Material::Void, |region| region.default_material)
+    }
+
     /// The raw overlay material at `cell` — never cascade-resolved.
     #[must_use]
     pub fn overlay(&self, cell: CellPos) -> Material {
