@@ -1517,10 +1517,11 @@ impl Mcp {
     /// Resolve a `MailSpec` against the per-engine merged kind view
     /// (static prefill + cached `ListKinds` reply, ADR-0091) and build
     /// the `engine = Some` wire envelope — the shared front half of
-    /// [`Self::deliver_one`] / [`Self::deliver_one_fire`]. A miss
-    /// against an engine that has loaded a component triggers one
-    /// `aether.inventory.kinds` refresh before erroring "unknown
-    /// kind"; the encode then succeeds for the component's own kinds.
+    /// [`Self::deliver_one`] / [`Self::deliver_one_fire`]. The resolve +
+    /// encode runs through [`Self::resolve_and_encode`], so an unknown-kind
+    /// miss *or* a field-mismatch encode failure (a kind widened in place,
+    /// ADR-0091 §3) triggers one `aether.inventory.kinds` refresh-and-retry
+    /// before the error surfaces.
     async fn build_mail_envelope(&self, spec: MailSpec) -> anyhow::Result<MailEnvelope> {
         // ADR-0098/0099 wire boundary: `recipient_name` is user-controlled
         // and folds to a registry key, so cap its scope depth / byte size
@@ -1531,13 +1532,10 @@ impl Mcp {
             Uuid::parse_str(&spec.engine_id)
                 .map_err(|e| anyhow::anyhow!("engine_id is not a valid UUID: {e}"))?,
         );
-        let desc = self.lookup_descriptor(engine, &spec.kind_name).await?;
         let params = spec.params.unwrap_or(serde_json::Value::Null);
-        let params = resolve_bytes_params(params, &desc.schema, max_frame_size())
-            .await
-            .map_err(|e| anyhow::anyhow!("resolving blob params: {e}"))?;
-        let payload = aether_codec::encode_schema(&params, &desc.schema)
-            .map_err(|e| anyhow::anyhow!("param encode failed: {e}"))?;
+        let (desc, payload) = self
+            .resolve_and_encode(engine, &spec.kind_name, params)
+            .await?;
         Ok(MailEnvelope {
             to: MailboxAddress {
                 engine: Some(engine),
@@ -1554,6 +1552,76 @@ impl Mcp {
             correlation_id: None,
             payload,
         })
+    }
+
+    /// Resolve `params` against the engine's live schema for `kind_name`
+    /// and schema-encode them, refreshing the per-engine kind cache once
+    /// on a staleness signal (ADR-0091 §3). The single shared encode path
+    /// behind `send_mail` ([`Self::build_mail_envelope`]),
+    /// `send_mail_traced` ([`Self::encode_traced_bundle`]), and
+    /// `capture_frame` ([`Self::encode_capture_bundle`]).
+    ///
+    /// Two staleness triggers refresh the cache from
+    /// `aether.inventory.kinds`, both bounded to exactly one refresh
+    /// round-trip:
+    ///
+    /// - **Unknown-kind miss** — handled one layer down by
+    ///   [`Self::lookup_descriptor`]: the name isn't in the cache, so the
+    ///   refresh runs before the descriptor is returned.
+    /// - **Field-mismatch encode failure** — the name *is* cached but its
+    ///   schema is stale (a kind widened in place, e.g. `aether.mouse_button`
+    ///   gaining a field). The name resolves, so `lookup_descriptor` returns
+    ///   a hit with the narrow schema, and `encode_schema` rejects the new
+    ///   field. That encode failure — and *only* an encode failure, not a
+    ///   `resolve_bytes_params` blob-IO error — triggers the same refresh,
+    ///   re-resolves + re-encodes against the fresh schema once, and returns.
+    ///
+    /// The retry re-runs `resolve_bytes_params` (not just `encode_schema`)
+    /// so a widening that adds a `Bytes` field descends into it and resolves
+    /// its `$`-sigil embed against the fresh schema. It is bounded to one
+    /// refresh + one re-encode and never re-enters the refresh branch, so
+    /// there is no retry loop by construction. If the fresh vocab still
+    /// rejects the params the retry's error surfaces; if the name vanished
+    /// from the fresh vocab (a removal, not a widening) the original encode
+    /// error surfaces.
+    async fn resolve_and_encode(
+        &self,
+        engine: EngineId,
+        kind_name: &str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<(KindDescriptor, Vec<u8>)> {
+        let desc = self.lookup_descriptor(engine, kind_name).await?;
+        let resolved = resolve_bytes_params(params.clone(), &desc.schema, max_frame_size())
+            .await
+            .map_err(|e| anyhow::anyhow!("resolving blob params: {e}"))?;
+        match aether_codec::encode_schema(&resolved, &desc.schema) {
+            Ok(payload) => Ok((desc, payload)),
+            Err(encode_err) => {
+                // The cached schema may be stale from an in-place kind
+                // widening (ADR-0091 §3). Unlike the miss path, we don't
+                // re-check cache presence after taking the guard — a
+                // stale-schema name *is* present, so a presence re-check
+                // would wrongly short-circuit before refreshing. N
+                // concurrent field-mismatch retries can each issue a
+                // refresh RPC; an accepted cold-path cost (encode failures
+                // are mistakes, not hot traffic), still one refresh per
+                // retry, no loop.
+                let guard = self.refresh_guard(engine);
+                let _refresh = guard.lock().await;
+                self.refresh_engine_kinds(engine).await;
+                let Some(fresh) = self.cache_lookup(engine, kind_name) else {
+                    // The name vanished from the fresh vocab (a removal,
+                    // not a widening) — surface the original encode error.
+                    return Err(anyhow::anyhow!("param encode failed: {encode_err}"));
+                };
+                let resolved = resolve_bytes_params(params, &fresh.schema, max_frame_size())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("resolving blob params: {e}"))?;
+                let payload = aether_codec::encode_schema(&resolved, &fresh.schema)
+                    .map_err(|e| anyhow::anyhow!("param encode failed: {e}"))?;
+                Ok((fresh, payload))
+            }
+        }
     }
 
     /// Ensure `engine`'s reverse-name map is built (ADR-0088 §8). On the
@@ -1608,6 +1676,11 @@ impl Mcp {
     /// the name (a typoed kind, or a kind belonging to a component
     /// that hasn't been loaded yet — distinguishable by the error
     /// type at the substrate's later dispatch attempt).
+    ///
+    /// This covers only the unknown-**name** trigger. A cached name whose
+    /// *schema* has gone stale (a kind widened in place) still resolves to
+    /// a hit here; that field-mismatch staleness is caught one layer up in
+    /// [`Self::resolve_and_encode`], which refreshes on the encode failure.
     async fn lookup_descriptor(
         &self,
         engine: EngineId,
@@ -2317,15 +2390,11 @@ impl Mcp {
     ) -> anyhow::Result<Vec<NamedMail>> {
         let mut out = Vec::with_capacity(specs.len());
         for spec in specs {
-            let desc = self.lookup_descriptor(engine, &spec.kind_name).await?;
             let params = spec.params.clone().unwrap_or(serde_json::Value::Null);
-            let params = resolve_bytes_params(params, &desc.schema, max_frame_size())
+            let (_desc, payload) = self
+                .resolve_and_encode(engine, &spec.kind_name, params)
                 .await
-                .map_err(|e| {
-                    anyhow::anyhow!("resolving blob params for {}: {e}", spec.kind_name)
-                })?;
-            let payload = aether_codec::encode_schema(&params, &desc.schema)
-                .map_err(|e| anyhow::anyhow!("param encode failed for {}: {e}", spec.kind_name))?;
+                .map_err(|e| anyhow::anyhow!("{e} (kind {})", spec.kind_name))?;
             out.push(NamedMail {
                 recipient_name: spec.recipient_name.clone(),
                 kind_name: spec.kind_name.clone(),
@@ -2414,15 +2483,11 @@ impl Mcp {
     ) -> anyhow::Result<Vec<NamedMail>> {
         let mut out = Vec::with_capacity(specs.len());
         for spec in specs {
-            let desc = self.lookup_descriptor(engine, &spec.kind_name).await?;
             let params = spec.params.clone().unwrap_or(serde_json::Value::Null);
-            let params = resolve_bytes_params(params, &desc.schema, max_frame_size())
+            let (_desc, payload) = self
+                .resolve_and_encode(engine, &spec.kind_name, params)
                 .await
-                .map_err(|e| {
-                    anyhow::anyhow!("resolving blob params for {}: {e}", spec.kind_name)
-                })?;
-            let payload = aether_codec::encode_schema(&params, &desc.schema)
-                .map_err(|e| anyhow::anyhow!("param encode failed for {}: {e}", spec.kind_name))?;
+                .map_err(|e| anyhow::anyhow!("{e} (kind {})", spec.kind_name))?;
             out.push(NamedMail {
                 recipient_name: spec.recipient_name.clone(),
                 kind_name: spec.kind_name.clone(),
@@ -2943,6 +3008,114 @@ fn level_to_str(level: u8) -> &'static str {
     }
 }
 
+// Imports for the `#[cfg(test)]` `RouteInventorySink` loopback fixture
+// (issue 2672). Brought into scope (rather than named by absolute path
+// inline) to satisfy the `clippy::absolute_paths` restriction.
+#[cfg(test)]
+use aether_actor::actor;
+#[cfg(test)]
+use aether_capabilities::engine::kinds::{CallSettled, RouteEnvelope};
+#[cfg(test)]
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+#[cfg(test)]
+use aether_substrate::chassis::error::BootError;
+#[cfg(test)]
+use aether_substrate::mail::mailer::Mailer;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// The canned live vocabulary a [`RouteInventorySink`] replies with, plus
+/// a counter of how many refresh RPCs it has fielded (issue 2672). Shared
+/// by value into the fixture so a test both controls the widened schema
+/// the refresh observes and asserts the refresh fired exactly once.
+#[cfg(test)]
+#[derive(Clone)]
+struct RouteLoopbackConfig {
+    reply: ListKindsResult,
+    calls: Arc<AtomicUsize>,
+}
+
+/// `#[cfg(test)]` loopback engines-cap double (issue 2672). Registers at
+/// the `aether.engine` mailbox — the id the `RpcServerCapability` routes
+/// every `engine = Some` `Call` to via a `RouteEnvelope` — and answers the
+/// harness's `aether.inventory.kinds` refresh RPC locally with a canned
+/// [`ListKindsResult`](aether_kinds::ListKindsResult), so the
+/// field-mismatch refresh-and-retry path in [`Mcp::resolve_and_encode`] is
+/// exercised end-to-end without forking a real substrate + proxy.
+///
+/// Lives at file root (not nested in `mod tests`) so the `#[actor]`
+/// macro's marker emission stays addressable, mirroring the engines-cap's
+/// own `ReplySink`. It stands in for the real `EngineServer` (never
+/// co-installed with it, so the shared `aether.engine` mailbox id is
+/// unambiguous): on a `RouteEnvelope` it pushes the reply and the
+/// `CallSettled` terminal straight back to the originating server,
+/// correlation preserved, so the forwarded wire call closes the way a
+/// proxy's `CallSettled` would.
+#[cfg(test)]
+struct RouteInventorySink {
+    reply: ListKindsResult,
+    calls: Arc<AtomicUsize>,
+    mailer: Arc<Mailer>,
+}
+
+#[cfg(test)]
+#[actor(singleton)]
+impl NativeActor for RouteInventorySink {
+    type Config = RouteLoopbackConfig;
+    const NAMESPACE: &'static str = "aether.engine";
+
+    fn init(config: RouteLoopbackConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self {
+            reply: config.reply,
+            calls: config.calls,
+            // Cached like the real engines cap does (its `on_route`
+            // propagates the inbound reply-to, which `NativeCtx` sends
+            // would overwrite with this cap as sender).
+            mailer: ctx.mailer(),
+        })
+    }
+
+    #[handler::single]
+    fn on_route(&mut self, ctx: &mut NativeCtx<'_>, _mail: RouteEnvelope) {
+        use aether_substrate::mail::{Mail, Source, SourceAddr};
+
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let reply_to = ctx.reply_target();
+        // A routed call always carries a Component reply-to (the
+        // originating server); without one there's nowhere to stream to.
+        let SourceAddr::Component(target) = reply_to.addr else {
+            return;
+        };
+        let correlation = reply_to.correlation_id;
+
+        // ReplyEvent: the canned live vocabulary. The server matches it to
+        // the in-flight wire call by the preserved correlation.
+        self.mailer.push(
+            Mail::new(
+                target,
+                <ListKindsResult as Kind>::ID,
+                self.reply.encode_into_bytes(),
+                1,
+            )
+            .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
+        );
+        // ReplyEnd: a forwarded call has no local chain to settle, so the
+        // server's `engine = Some` path waits on this explicit terminal
+        // (in production the proxy lifts the substrate's `ReplyEnd` into
+        // it). Pushed after the reply so the server writes the ReplyEvent
+        // frame first, then closes on the CallSettled.
+        self.mailer.push(
+            Mail::new(
+                target,
+                <CallSettled as Kind>::ID,
+                CallSettled::Ok.encode_into_bytes(),
+                1,
+            )
+            .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
+        );
+    }
+}
+
 #[cfg(test)]
 // Test-setup unwraps (tagged-id encode of literal ids, JSON build) panic
 // on failure, which is the assertion.
@@ -3439,6 +3612,185 @@ mod tests {
             .expect("RpcServerHandle published")
             .local_port;
         (chassis, port)
+    }
+
+    /// Hub-shape chassis whose `aether.engine` mailbox is a
+    /// [`RouteInventorySink`] loopback (issue 2672) rather than the real
+    /// `EngineServer`, so the harness's `engine = Some`
+    /// `aether.inventory.kinds` refresh RPC lands locally and returns
+    /// `reply`. `calls` counts the refreshes the sink fielded, so a test
+    /// can assert the refresh-and-retry fired exactly once (no loop).
+    /// Unlike `boot_hub_with_inventory` this installs no `EngineServer`
+    /// (which would warn/settle-err an `engine = Some` for an unregistered
+    /// engine) and no `InventoryCapability` (the sink answers `ListKinds`
+    /// from the canned reply directly).
+    fn boot_hub_with_route_loopback(
+        reply: ListKindsResult,
+        calls: Arc<AtomicUsize>,
+    ) -> (PassiveChassis<TestChassis>, u16) {
+        let registry = Arc::new(Registry::new());
+        for d in descriptors::all() {
+            let _ = registry.register_kind_with_descriptor(d);
+        }
+        let (outbound, _rx) = HubOutbound::attached_loopback();
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<TraceDispatchCapability>(())
+            .with_actor::<RouteInventorySink>(RouteLoopbackConfig { reply, calls })
+            .with_actor::<RpcServerCapability>(RpcServerConfig {
+                bind_addr: "127.0.0.1:0".into(),
+                peer_kind: PeerKind::Substrate {
+                    engine_name: "test-hub".into(),
+                    engine_version: "0.1.0".into(),
+                    kinds: vec![],
+                },
+            })
+            .build_passive()
+            .expect("hub caps boot");
+        let port = chassis
+            .handle::<RpcServerHandle>()
+            .expect("RpcServerHandle published")
+            .local_port;
+        (chassis, port)
+    }
+
+    /// One-field `{ button: String }` struct schema — the widened shape a
+    /// kind gains in place (issue 2672); the narrow shape is the empty
+    /// struct `narrow_struct_schema`.
+    fn widened_struct_schema() -> SchemaType {
+        use aether_data::NamedField;
+        SchemaType::Struct {
+            fields: vec![NamedField {
+                name: "button".into(),
+                ty: SchemaType::String,
+            }]
+            .into(),
+            repr_c: false,
+        }
+    }
+
+    /// The empty-struct schema a widened kind had *before* it gained a
+    /// field — the stale shape the harness holds cached (issue 2672).
+    fn narrow_struct_schema() -> SchemaType {
+        SchemaType::Struct {
+            fields: vec![].into(),
+            repr_c: false,
+        }
+    }
+
+    /// Build the single-entry `ListKindsResult` a `RouteInventorySink`
+    /// serves for `name` at `schema` — the wire projection the real
+    /// inventory cap performs (issue 2672).
+    fn canned_kinds_reply(name: &str, schema: &SchemaType) -> ListKindsResult {
+        use aether_kinds::KindDescriptorWire;
+        ListKindsResult {
+            kinds: vec![KindDescriptorWire {
+                id: KindId(kind_id_from_parts(name, schema)),
+                name: name.to_owned(),
+                schema_wire: wire::to_vec(schema).expect("SchemaType wire-encodes"),
+            }],
+        }
+    }
+
+    /// Issue 2672: a kind widened in place (same name, a new field) —
+    /// the harness holds the stale narrow descriptor, so the name
+    /// resolves to a cache hit and `lookup_descriptor` never refreshes.
+    /// The field-mismatch `encode_schema` failure must itself trigger the
+    /// `aether.inventory.kinds` refresh-and-retry, so a `send_mail` that
+    /// supplies the new field succeeds against the widened schema. The
+    /// last correctness gap in ADR-0091's lazy-on-miss cache.
+    #[tokio::test]
+    async fn resolve_and_encode_refreshes_on_field_mismatch() {
+        use aether_data::KindDescriptor;
+
+        let name = "aether.test.widened_kind";
+        let widened = widened_struct_schema();
+
+        // The live engine's vocabulary carries the widened shape.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (_chassis, port) =
+            boot_hub_with_route_loopback(canned_kinds_reply(name, &widened), Arc::clone(&calls));
+        let mcp = connect_mcp(port);
+
+        // Pre-seed the per-engine cache with the STALE narrow shape, so
+        // the name is a cache hit (no unknown-kind-miss refresh) — only
+        // the encode failure can drive the refresh.
+        let engine = EngineId(Uuid::from_u128(0x2672_dead_beef));
+        mcp.merge_into_engine_cache(
+            engine,
+            vec![KindDescriptor {
+                name: name.to_owned(),
+                schema: narrow_struct_schema(),
+            }],
+        );
+
+        // Params carrying the new field: rejected by the narrow cached
+        // schema, accepted by the widened live one.
+        let params = serde_json::json!({ "button": "left" });
+        let (desc, payload) = mcp
+            .resolve_and_encode(engine, name, params.clone())
+            .await
+            .expect("field-mismatch encode failure refreshes and retries");
+
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "the field-mismatch triggered exactly one refresh RPC",
+        );
+        assert_eq!(
+            desc.schema, widened,
+            "resolve_and_encode returns the fresh (widened) descriptor",
+        );
+        let decoded = aether_codec::decode_schema(&payload, &widened)
+            .expect("payload decodes against the widened schema");
+        assert_eq!(
+            decoded, params,
+            "the new field round-trips through the refreshed schema",
+        );
+    }
+
+    /// Issue 2672: the refresh-and-retry is bounded to exactly one
+    /// refresh — when the fresh vocabulary *still* rejects the params (a
+    /// field that isn't in the live schema either, not an in-place
+    /// widening), `resolve_and_encode` surfaces the error after a single
+    /// refresh rather than looping. The tripwire for the "retry-once"
+    /// invariant.
+    #[tokio::test]
+    async fn resolve_and_encode_retry_is_bounded_to_one_refresh() {
+        use aether_data::KindDescriptor;
+
+        let name = "aether.test.narrow_kind";
+
+        // The live vocabulary is *also* narrow — the refresh changes
+        // nothing, so the re-encode fails identically.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (_chassis, port) = boot_hub_with_route_loopback(
+            canned_kinds_reply(name, &narrow_struct_schema()),
+            Arc::clone(&calls),
+        );
+        let mcp = connect_mcp(port);
+
+        let engine = EngineId(Uuid::from_u128(0x2672_beef_cafe));
+        mcp.merge_into_engine_cache(
+            engine,
+            vec![KindDescriptor {
+                name: name.to_owned(),
+                schema: narrow_struct_schema(),
+            }],
+        );
+
+        let params = serde_json::json!({ "button": "left" });
+        let result = mcp.resolve_and_encode(engine, name, params).await;
+
+        assert!(
+            result.is_err(),
+            "a field the fresh vocab still lacks surfaces an error, not a hang",
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "the retry refreshed exactly once — no loop",
+        );
     }
 
     /// `list_engines` over the RPC round-trip yields an object with empty

@@ -222,6 +222,7 @@ dependencies = [
 name = "aether-mcp"
 version = "0.3.0-alpha"
 dependencies = [
+ "aether-actor",
  "aether-capabilities",
  "aether-codec",
  "aether-data",
