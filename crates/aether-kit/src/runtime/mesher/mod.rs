@@ -85,11 +85,11 @@
 //! it. Where a cell carries authored per-point relief
 //! (`World::cell_has_height_relief`) the pass resolves one stride down: the
 //! interior cap tessellates to `SUB × SUB` subcell quads over point patches
-//! (`SubPatch`) so a subcell break shows, the marched wall gate reads
-//! point (not cell) levels so a silhouette raised by deltas alone lofts its
+//! (`SubPatch`) so a subcell break shows, the marched wall split reads
+//! point (not cell) levels so a silhouette raised by deltas alone closes its
 //! wall on the authored line, and same-material breaks — where no material
-//! boundary exists for the marched pass to follow — loft as subcell-lattice
-//! relief walls (`emit_relief_walls`) standing exactly on the authored
+//! boundary exists for the marched pass to follow — close as subcell-lattice
+//! walls (`emit_lattice_closure`) standing exactly on the authored
 //! break lines, cell interiors included. Contour smoothing freezes at a
 //! break (`partition_inputs` hands [`repartition`] a frozen mask over the
 //! flanking samples): paint may not smooth across a physical cliff, so a
@@ -186,14 +186,13 @@ const SKIRT_BASE_SHADE: f32 = 0.55;
 /// noise field to calibrate; it only keeps the terrain closed.
 const RAW_SKIRT_GRAY: f32 = 0.35;
 
-/// How far in octimeters a wall's base tucks under the low side's surface,
-/// so the low cap covers the seam with no crack.
-const WALL_TUCK_OCTIMETERS: i32 = 8;
-
-/// How far in octimeters a wall drops below its top edge where the low side
-/// is a Void hole with no ground — a hole reads as thick ground rather than
-/// a paper-thin lip.
-const WALL_VOID_DROP_OCTIMETERS: i32 = 512;
+/// How far in octimeters an unbounded-void wall drops below its top edge —
+/// the border-skirt fallback for the one void case with no far rim within
+/// the fill-over march bound (a void that reaches the world border). A
+/// bounded void joint closes instead as a real groove: wall down to the void
+/// floor, floor across, wall back up (see [`emit_void_floors`]). The skirt
+/// reads as thick ground rather than a paper-thin lip.
+const WALL_VOID_SKIRT_OCTIMETERS: i32 = 512;
 
 /// The overlay rim layer lift — two octimeters over the underlay, one
 /// above the encroachment flap so an overlay contour always draws over a
@@ -592,9 +591,9 @@ fn clip_window_poly(
 /// leaves a sliver of this label's display over the far side's raised (or
 /// dropped) fabric, honestly lifted to that fabric's plate, and its
 /// lattice-line edges would otherwise be open cracks. The shared chord of
-/// each adjacent fragment pair is walled from the higher side's lift down
-/// to a tuck under the lower — gated to authored-material-differing lines
-/// so a same-material break stays the relief walk's (and only its) face.
+/// each adjacent fragment pair is walled from the higher side's lift down to
+/// the lower's committed edge — gated to authored-material-differing lines so
+/// a same-material break stays the closure walk's (and only its) face.
 #[allow(clippy::too_many_lines)] // one pass: pair fragments, gate, loft
 fn emit_clip_gap_walls(
     world: &World,
@@ -603,7 +602,6 @@ fn emit_clip_gap_walls(
     styles: &StyleTable,
     tris: &mut Vec<DrawTriangle>,
 ) {
-    let tuck = WALL_TUCK_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
     let mut colors: Option<([f32; 3], [f32; 3])> = None;
     for axis in 0..2 {
         for (fa, sa) in fragments {
@@ -720,8 +718,8 @@ fn emit_clip_gap_walls(
                         c1[1] / OCTIMETERS_PER_METER,
                         top[1],
                     ],
-                    base[0] - tuck,
-                    base[1] - tuck,
+                    base[0],
+                    base[1],
                     top_rgb,
                     base_rgb,
                 );
@@ -1075,6 +1073,10 @@ fn mesh_underlay(
 
     let place = chunk_placement(at, apron, step_oct);
     emit_encroach_flaps(world, at, &grid, gw, gh, &place, styles, tris);
+
+    // The fill-over floor caps for enclosed Void joints — the flat groove
+    // bottoms the marched closure's Void walls drop to.
+    emit_void_floors(world, at, styles, tris);
 
     Some(DisplayPartition {
         display,
@@ -2146,16 +2148,21 @@ const WALL_SEGMENTS: [&[(u8, u8)]; 16] = [
     &[],               // 15
 ];
 
-/// Emit the chunk's vertical cliff faces as the union of three segment
-/// classes lofted from one shared partition: marched walls where a material
-/// or Void boundary stands past the step ceiling ([`emit_marched_walls`]),
-/// cell-edge lattice walls where a same-material cliff leaves no marched
-/// boundary ([`emit_lattice_walls`]), and subcell-stride relief walls where
-/// authored point deltas break a same-material surface inside or across
-/// cells ([`emit_relief_walls`] — it owns every relief cell's same-material
-/// faces, and the cell-edge walk skips those cells). The raw calibration
-/// view has no partition, so it closes every cliff at cell resolution in
-/// flat gray.
+/// Emit the chunk's vertical cliff faces by closure: a wall lofts wherever
+/// the two sides of a shared boundary edge committed different cap heights,
+/// so the split decision lives in one place — the plate lift the caps drew
+/// from — and can never drift between a predicting wall pass and the cap it
+/// should meet. The lattice/subcell closure ([`emit_lattice_closure`]) walls
+/// every same-material cell-edge and subcell-edge break; the marched closure
+/// ([`emit_contour_closure`], painted only) walls every material or Void
+/// boundary along the display partition's contours, dropping a fillable Void
+/// low side to its groove floor. A face lofts iff the high side committed
+/// strictly above the low side there — a legal step merges the plates (the
+/// committed edges agree) and lofts nothing, a cliff splits them and lofts a
+/// face whose top and bottom vertices are the two caps' shared-edge vertices,
+/// watertight by construction. The raw calibration view has no partition, so
+/// it closes every cliff at cell resolution in flat gray and runs neither the
+/// subcell nor the marched closure.
 fn emit_walls(
     world: &World,
     at: ChunkPos,
@@ -2164,37 +2171,226 @@ fn emit_walls(
     partition: Option<&DisplayPartition>,
     tris: &mut Vec<DrawTriangle>,
 ) {
+    let painted = partition.is_some();
+    emit_lattice_closure(world, at, mode, painted, styles, tris);
     if let Some(part) = partition {
-        emit_marched_walls(world, at, part, styles, tris);
-        emit_lattice_walls(world, at, mode, styles, true, tris);
-        emit_relief_walls(world, at, styles, tris);
-    } else {
-        emit_lattice_walls(world, at, mode, styles, false, tris);
+        emit_contour_closure(world, at, part, styles, tris);
     }
 }
 
-/// Loft the marched cliff walls: over the boundary windows of the display
+/// The top / base wall shades for a cliff owned by `cell`: the raw view's
+/// flat calibration gray, or the painted view's cliff material keyed at the
+/// cell center and graded top-to-base toward the ground shadow. A pure
+/// function of the cell, so the two sides of a shared edge agree on the color.
+fn wall_shades(
+    world: &World,
+    cell: CellPos,
+    mode: ViewMode,
+    styles: &StyleTable,
+) -> ([f32; 3], [f32; 3]) {
+    match mode {
+        ViewMode::Raw => ([RAW_SKIRT_GRAY; 3], [RAW_SKIRT_GRAY; 3]),
+        ViewMode::Painted => {
+            let cliff = world.cliff_material(cell);
+            let resolved = resolve_cell(
+                styles.get(cliff),
+                cell.x as f32 + 0.5,
+                cell.z as f32 + 0.5,
+                None,
+            );
+            (
+                hsl_to_linear_rgb(
+                    resolved.hue,
+                    resolved.sat,
+                    (resolved.light * SKIRT_TOP_SHADE).clamp(0.0, 100.0),
+                ),
+                hsl_to_linear_rgb(
+                    resolved.hue,
+                    resolved.sat,
+                    (resolved.light * SKIRT_BASE_SHADE).clamp(0.0, 100.0),
+                ),
+            )
+        }
+    }
+}
+
+/// Close the same-material cliff faces of the chunk on the cell lattice — or,
+/// where a cell carries authored relief in the painted view, on its subcell
+/// lattice, the stride its cap tessellated at. For every chunk-local cell and
+/// each of its four outgoing shared edges the two sides' committed cap edges
+/// are read through the same corner plates the caps drew from
+/// ([`World::cell_corner_heights`] / [`World::subcell_corner_heights`]); a
+/// face lofts iff this (the higher) side committed above the neighbor and the
+/// committed edges differ. A merged plate — flat ground or a legal step —
+/// leaves the edges equal and lofts nothing, so the step size is never gated
+/// directly; the plate merge is the one split decision. The high side owns
+/// the face and cells iterate chunk-local, so a chunk-border cliff lofts
+/// exactly once fleet-wide. In the painted view a material or Void boundary
+/// edge is skipped here — the marched closure owns those; the raw view has no
+/// partition and closes every cell-edge cliff in flat gray.
+#[allow(clippy::too_many_lines)] // one closure walk over the cell and subcell strides
+fn emit_lattice_closure(
+    world: &World,
+    at: ChunkPos,
+    mode: ViewMode,
+    painted: bool,
+    styles: &StyleTable,
+    tris: &mut Vec<DrawTriangle>,
+) {
+    let sub_span = 1.0 / SUB as f32;
+    for lz in 0..EDGE {
+        for lx in 0..EDGE {
+            let cell = CellPos {
+                x: at.x * EDGE + lx,
+                z: at.z * EDGE + lz,
+            };
+            // Painted relief cells close on the subcell lattice (the stride
+            // their caps tessellated at); every other cell — and the whole
+            // raw view — closes on the cell lattice.
+            let relief = painted && world.cell_has_height_relief(cell);
+            let (top_rgb, base_rgb) = wall_shades(world, cell, mode, styles);
+            if relief {
+                for sj in 0..SUB {
+                    for si in 0..SUB {
+                        // The point's own material, not the cell's cascade — a
+                        // stone point on a grass cell closes its own
+                        // same-material breaks, and a Void point's rim lofts as
+                        // a marched wall.
+                        let material = world.underlay_point(cell, si, sj);
+                        if material == Material::Void {
+                            continue; // a hole's rim lofts as a marched wall
+                        }
+                        let level = world.point_surface_level(cell, si, sj);
+                        let mut cached: Option<[f32; 4]> = None;
+                        for edge in &WALL_DIRECTIONS {
+                            let gx = cell.x * SUB + si + edge.offset.0;
+                            let gz = cell.z * SUB + sj + edge.offset.1;
+                            let neighbor = CellPos {
+                                x: gx.div_euclid(SUB),
+                                z: gz.div_euclid(SUB),
+                            };
+                            let nsx = gx.rem_euclid(SUB);
+                            let nsz = gz.rem_euclid(SUB);
+                            if world.underlay_point(neighbor, nsx, nsz) != material {
+                                continue; // material / Void boundaries loft as marched walls
+                            }
+                            // Ownership: only the strictly-higher point lofts,
+                            // so each face is emitted once. The step size is
+                            // not gated — a legal step merges the point plates
+                            // and the committed-edge test below leaves nothing.
+                            if level <= world.point_surface_level(neighbor, nsx, nsz) {
+                                continue;
+                            }
+                            let top = *cached
+                                .get_or_insert_with(|| world.subcell_corner_heights(cell, si, sj));
+                            let bottom = world.subcell_corner_heights(neighbor, nsx, nsz);
+                            let y_top = [top[edge.top[0]], top[edge.top[1]]];
+                            let y_low = [bottom[edge.bottom[0]], bottom[edge.bottom[1]]];
+                            if (y_top[0] - y_low[0]).abs() < f32::EPSILON
+                                && (y_top[1] - y_low[1]).abs() < f32::EPSILON
+                            {
+                                continue; // the point plates merged — no break to close
+                            }
+                            let base_x = cell.x as f32 + si as f32 * sub_span;
+                            let base_z = cell.z as f32 + sj as f32 * sub_span;
+                            let corner_pos = |k: usize| {
+                                (
+                                    base_x + if k % 2 == 1 { sub_span } else { 0.0 },
+                                    base_z + if k >= 2 { sub_span } else { 0.0 },
+                                )
+                            };
+                            let (x0, z0) = corner_pos(edge.top[0]);
+                            let (x1, z1) = corner_pos(edge.top[1]);
+                            push_wall_quad(
+                                tris,
+                                [x0, z0, y_top[0]],
+                                [x1, z1, y_top[1]],
+                                y_low[0],
+                                y_low[1],
+                                top_rgb,
+                                base_rgb,
+                            );
+                        }
+                    }
+                }
+            } else {
+                let material = world.underlay(cell);
+                if material == Material::Void {
+                    continue; // a Void cell's rim is the marched closure's face
+                }
+                let cell_level = world.surface_level(cell);
+                let mut cached: Option<[f32; 4]> = None;
+                for edge in &WALL_DIRECTIONS {
+                    let neighbor = CellPos {
+                        x: cell.x + edge.offset.0,
+                        z: cell.z + edge.offset.1,
+                    };
+                    if painted && world.underlay(neighbor) != material {
+                        continue; // a material boundary lofts as a marched wall
+                    }
+                    // Ownership: only the strictly-higher cell lofts. The step
+                    // size is not gated — a legal step merges the plates and
+                    // the committed-edge test below leaves nothing to close.
+                    if cell_level <= world.surface_level(neighbor) {
+                        continue;
+                    }
+                    let top = *cached.get_or_insert_with(|| world.cell_corner_heights(cell));
+                    let bottom = world.cell_corner_heights(neighbor);
+                    let y_top = [top[edge.top[0]], top[edge.top[1]]];
+                    let y_low = [bottom[edge.bottom[0]], bottom[edge.bottom[1]]];
+                    if (y_top[0] - y_low[0]).abs() < f32::EPSILON
+                        && (y_top[1] - y_low[1]).abs() < f32::EPSILON
+                    {
+                        continue; // the plates merged — no break to close
+                    }
+                    let corner_pos = |k: usize| {
+                        (
+                            cell.x as f32 + if k % 2 == 1 { 1.0 } else { 0.0 },
+                            cell.z as f32 + if k >= 2 { 1.0 } else { 0.0 },
+                        )
+                    };
+                    let (x0, z0) = corner_pos(edge.top[0]);
+                    let (x1, z1) = corner_pos(edge.top[1]);
+                    push_wall_quad(
+                        tris,
+                        [x0, z0, y_top[0]],
+                        [x1, z1, y_top[1]],
+                        y_low[0],
+                        y_low[1],
+                        top_rgb,
+                        base_rgb,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Close the marched cliff walls: over the boundary windows of the display
 /// partition, wherever a segment separates two materials — or a material
-/// from a Void hole — whose point surface levels stand past the step
-/// ceiling, drop the segment's marched contour from the high side down to
-/// the low ground. Each window is owned by the cell under its center, the
-/// same ownership the cap walk uses; the owner is the fleet-wide dedup key
-/// (a window emits only from the chunk holding its owner) and the color
-/// source, never the gate — the gate is per-segment and side-aware, reading
-/// the `a`-side corner's point level against the crossed side's, because
-/// along a contour the window center alternates sides subcell to subcell
-/// and an owner-level gate would picket-fence the wall. A wall's top
-/// vertices lift through the identical anchored patch ([`anchored_lift`]
-/// on the `a`-side corner sample) the high cap's crossing vertices took —
-/// landing the top edge exactly on the cap's contour, watertight by
-/// construction under any smoothing displacement.
-/// A grounded low side takes per-endpoint bases on the low side's own lift
-/// over relief (a flat min base where no relief engages), tucked under the
-/// low cap; a Void low side drops [`WALL_VOID_DROP_OCTIMETERS`] so the hole
-/// reads as thick ground.
-#[allow(clippy::too_many_lines)] // one boundary walk: classify sides, extract segments, loft
+/// from a Void hole — whose point surface levels split the caps, drop the
+/// segment's marched contour from the high cap's committed edge to the low
+/// side's. Each window is owned by the cell under its center, the same
+/// ownership the cap walk uses; the owner is the fleet-wide dedup key (a
+/// window emits only from the chunk holding its owner) and the color source,
+/// never the gate — the split is per-segment and side-aware, reading the
+/// `a`-side corner's point level against the crossed side's, because along a
+/// contour the window center alternates sides subcell to subcell and an
+/// owner-level test would picket-fence the wall. A wall's top vertices lift
+/// through the identical anchored patch ([`anchored_lift`] on the `a`-side
+/// corner sample) the high cap's crossing vertices took — landing the top
+/// edge exactly on the cap's contour, watertight by construction under any
+/// smoothing displacement. A grounded low side takes per-endpoint bases on
+/// the low side's own committed lift over relief (a flat min base where no
+/// relief engages), coincident with the low cap. A Void low side closes to
+/// its fill-over floor ([`World::point_height`], the total height plane) when
+/// the joint is enclosed ([`void_fill_border`]) — wall down, floor across
+/// ([`emit_void_floors`]), wall up at the far rim — else drops the
+/// unbounded-void skirt [`WALL_VOID_SKIRT_OCTIMETERS`] so an open hole reads
+/// as thick ground.
+#[allow(clippy::too_many_lines)] // one boundary walk: classify sides, extract segments, close
 #[allow(clippy::similar_names)] // the segment's two endpoints read clearest as `_p` / `_q` pairs
-fn emit_marched_walls(
+fn emit_contour_closure(
     world: &World,
     at: ChunkPos,
     part: &DisplayPartition,
@@ -2245,20 +2441,6 @@ fn emit_marched_walls(
             if mats.iter().all(|&m| m == mats[0]) {
                 continue; // uniform window — no material boundary to loft
             }
-            // The lowest edge neighbor of the owner: a Void hole floors to
-            // the high cell, so its drop is gated on the high side standing a
-            // real cliff above its cell surroundings rather than on the
-            // hole's meaningless level.
-            let min_neighbor = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-                .into_iter()
-                .map(|(dx, dz)| {
-                    world.surface_level(CellPos {
-                        x: owner.x + dx,
-                        z: owner.z + dz,
-                    })
-                })
-                .min()
-                .unwrap_or_else(|| world.surface_level(owner));
             // Does authored relief engage anywhere this window can read? The
             // per-endpoint wall bases below switch on this, so relief-free
             // worlds keep their flat base byte-identically.
@@ -2339,17 +2521,6 @@ fn emit_marched_walls(
                     let is_void = mat_p == 0 || mat_q == 0;
                     let low_level = lvl_p.min(lvl_q);
                     let high_level = hi_p.max(hi_q);
-                    // Only a genuine cliff lofts. A material boundary reads
-                    // the point drop across the segment; a Void hole reads
-                    // the high side's drop to its cell surroundings (the
-                    // hole's own points carry no ground level). A flat
-                    // boundary falls through here; the owner is only the
-                    // fleet-wide dedup key and the color source, never the
-                    // gate — a low-owned window still lofts its segment.
-                    let base_level = if is_void { min_neighbor } else { low_level };
-                    if high_level - base_level <= STEP_MAX_OCTIMETERS {
-                        continue;
-                    }
                     let mp = mid(p);
                     let mq = mid(q);
                     let wx_p = mp[0] as f32 / OCTIMETERS_PER_METER;
@@ -2362,24 +2533,55 @@ fn emit_marched_walls(
                     // vertices under any smoothing displacement.
                     let yt_p = anchored_lift(world, owner, hi_anchor_p, wx_p, wz_p).0;
                     let yt_q = anchored_lift(world, owner, hi_anchor_q, wx_q, wz_q).0;
+                    // The low side's committed base, per endpoint. A material
+                    // boundary reads the low cap's own committed lift (over
+                    // relief the low cap splits to its own plates, so a flat
+                    // min base would gap where the low ground varies along the
+                    // segment; a relief-free owner keeps the flat min base
+                    // byte-identically). A Void low side closes to its
+                    // fill-over floor when the joint is enclosed — wall down,
+                    // floor across ([`emit_void_floors`]), wall up — coincident
+                    // with the groove floor cap; an unbounded void keeps the
+                    // open skirt.
                     let (yb_p, yb_q) = if is_void {
-                        let drop = WALL_VOID_DROP_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
-                        (yt_p - drop, yt_q - drop)
-                    } else if relief {
-                        // Per-endpoint bases anchored to the low corners —
-                        // over relief the low cap splits to its own plates,
-                        // so a flat min base would gap where the low ground
-                        // varies along the segment. Tucked under the low cap
-                        // exactly as the flat base is.
-                        let tuck = WALL_TUCK_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
                         (
-                            anchored_lift(world, owner, lo_anchor_p, wx_p, wz_p).0 - tuck,
-                            anchored_lift(world, owner, lo_anchor_q, wx_q, wz_q).0 - tuck,
+                            void_low_base(world, lo_anchor_p, yt_p),
+                            void_low_base(world, lo_anchor_q, yt_q),
+                        )
+                    } else if relief {
+                        (
+                            anchored_lift(world, owner, lo_anchor_p, wx_p, wz_p).0,
+                            anchored_lift(world, owner, lo_anchor_q, wx_q, wz_q).0,
                         )
                     } else {
-                        let base = (low_level - WALL_TUCK_OCTIMETERS) as f32 / OCTIMETERS_PER_METER;
+                        let base = low_level as f32 / OCTIMETERS_PER_METER;
                         (base, base)
                     };
+                    // The split test: a face closes only where the high side
+                    // committed above the low side past the step ceiling — a
+                    // merged plate (flat ground or a legal step) closes
+                    // nothing. The solid side tests the point-level split (the
+                    // plate break); the Void side tests the committed drop to
+                    // its stored floor. The owner is only the dedup key and
+                    // color source, never the split — a low-owned window still
+                    // closes its segment.
+                    if is_void {
+                        // A Void low side lofts only where the high side stands
+                        // past the step ceiling above the void's floor: its
+                        // enclosed groove floor where authored below the
+                        // surrounding ground ([`void_floor_level`]), else the
+                        // lowest neighbor ground the skirt drops toward. A flat
+                        // void edge — the high side level with its surroundings
+                        // — lofts nothing, so a cliff-free world stays
+                        // wall-free even where grass meets an open border.
+                        let floor = void_floor_level(world, lo_anchor_p, owner)
+                            .min(void_floor_level(world, lo_anchor_q, owner));
+                        if high_level - floor <= STEP_MAX_OCTIMETERS {
+                            continue;
+                        }
+                    } else if high_level - low_level <= STEP_MAX_OCTIMETERS {
+                        continue;
+                    }
                     push_wall_quad(
                         tris,
                         [wx_p, wz_p, yt_p],
@@ -2395,109 +2597,170 @@ fn emit_marched_walls(
     }
 }
 
-/// Loft the cell-edge cliff walls: for every chunk-local cell standing a
-/// cliff above an edge neighbor, a vertical face on the shared cell-edge
-/// lattice line — the break the owner-pinned patches already draw. The high
-/// cell owns the face, so a chunk-border cliff lofts exactly once
-/// fleet-wide. In the painted view `same_material_only` restricts this to
-/// same-material cliffs (a material boundary lofts as a marched wall
-/// instead); the raw calibration view has no partition, so it closes every
-/// cliff here in flat gray. Where the corner walk merged the two sides'
-/// plates the gap tapers to nothing and the face is skipped.
-#[allow(clippy::too_many_lines)] // one linear pass: enumerate, classify, color, emit
-fn emit_lattice_walls(
+/// The floor a Void point grooves to — the bordering solid cell whose
+/// `cliff_material` colors it — or `None` when the point is an open
+/// silhouette edge that skirts instead. A groove is an **authored
+/// depression**: the point's [`World::point_height`] stands below its cell's
+/// base ground ([`World::height`], so a negative authored delta), *and* the
+/// joint is enclosed by solid within the fill-over reach
+/// ([`void_fill_border`]). An inherited Void point — a raised plateau's
+/// cut-away silhouette rather than a dug well — carries the cell's base
+/// height, not a floor, so it drops the skirt toward its surroundings. The
+/// floor level itself is the void point's `point_height`.
+fn void_groove_floor(world: &World, cell: CellPos, sub_x: i32, sub_z: i32) -> Option<CellPos> {
+    if world.underlay_point(cell, sub_x, sub_z) != Material::Void {
+        return None;
+    }
+    if world.point_height(cell, sub_x, sub_z) >= world.height(cell) {
+        return None; // no authored depression — an open edge, not a groove
+    }
+    let gx = cell.x * SUB + sub_x;
+    let gz = cell.z * SUB + sub_z;
+    void_fill_border(world, gx, gz)
+}
+
+/// The base a Void low side closes to at a marched segment endpoint: the
+/// void point's stored floor height ([`World::point_height`]) when the joint
+/// is an enclosed authored groove ([`void_groove_floor`]), so wall / floor /
+/// wall reads as a real flat-bottomed groove; else `yt` dropped by the
+/// unbounded-void skirt (the cut-away silhouette of a plateau, or a void that
+/// reaches the world border within the fill-over bound).
+fn void_low_base(world: &World, anchor_oct: [i32; 2], yt: f32) -> f32 {
+    let cell = CellPos {
+        x: anchor_oct[0].div_euclid(256),
+        z: anchor_oct[1].div_euclid(256),
+    };
+    let sub_x = anchor_oct[0].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
+    let sub_z = anchor_oct[1].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
+    if void_groove_floor(world, cell, sub_x, sub_z).is_some() {
+        return world.point_height(cell, sub_x, sub_z) as f32 / OCTIMETERS_PER_METER;
+    }
+    yt - WALL_VOID_SKIRT_OCTIMETERS as f32 / OCTIMETERS_PER_METER
+}
+
+/// The floor level in octimeters the Void split test reads at a segment
+/// endpoint: the groove floor of an enclosed authored depression
+/// ([`void_groove_floor`]), else the lowest of the owner's four neighbor
+/// ground levels — the surroundings the skirt drops toward. Gating the skirt
+/// on the surrounding ground (not the fixed skirt depth) is what keeps a flat
+/// void edge, where the high side sits level with its neighbors, wall-free.
+fn void_floor_level(world: &World, anchor_oct: [i32; 2], owner: CellPos) -> i32 {
+    let cell = CellPos {
+        x: anchor_oct[0].div_euclid(256),
+        z: anchor_oct[1].div_euclid(256),
+    };
+    let sub_x = anchor_oct[0].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
+    let sub_z = anchor_oct[1].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
+    if void_groove_floor(world, cell, sub_x, sub_z).is_some() {
+        return world.point_height(cell, sub_x, sub_z);
+    }
+    [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .into_iter()
+        .map(|(dx, dz)| {
+            world.surface_level(CellPos {
+                x: owner.x + dx,
+                z: owner.z + dz,
+            })
+        })
+        .min()
+        .unwrap_or_else(|| world.surface_level(owner))
+}
+
+/// The color source for a Void point's fill-over floor, or `None` when the
+/// point is not enclosed. The void point at global subcell `(gx0, gz0)` is
+/// enclosed when every one of the four axis directions reaches a solid point
+/// within [`MAX_APRON_SUBCELLS`] subcells — a bounded march past void; the
+/// returned cell is the closest such solid point's, whose `cliff_material`
+/// colors the groove. A direction that runs to the bound still in void means
+/// the void reaches the world border within reach: an open skirt, no floor.
+/// The bound is the `R = 1` remesh read reach, so the march never reads past
+/// what invalidation covers.
+fn void_fill_border(world: &World, gx0: i32, gz0: i32) -> Option<CellPos> {
+    let mut nearest: Option<(i32, CellPos)> = None;
+    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        let mut hit = false;
+        for step in 1..=MAX_APRON_SUBCELLS {
+            let gx = gx0 + dx * step;
+            let gz = gz0 + dz * step;
+            let cell = CellPos {
+                x: gx.div_euclid(SUB),
+                z: gz.div_euclid(SUB),
+            };
+            if world.underlay_point(cell, gx.rem_euclid(SUB), gz.rem_euclid(SUB)) != Material::Void
+            {
+                if nearest.is_none_or(|(d, _)| step < d) {
+                    nearest = Some((step, cell));
+                }
+                hit = true;
+                break;
+            }
+        }
+        if !hit {
+            return None; // open toward this side within reach — keep the skirt
+        }
+    }
+    nearest.map(|(_, cell)| cell)
+}
+
+/// Emit the fill-over floor caps: every chunk-local Void point that
+/// [`void_groove_floor`] proves an enclosed authored depression floors over at
+/// its stored point height in the bordering cell's cliff material at base
+/// shade — the bottom-of-groove shadow. The rim walls closing the groove's
+/// sides are the marched closure's Void faces, dropped to this same stored
+/// height ([`void_low_base`]), so the floor and its walls meet watertight.
+/// Painted only; the raw calibration view has no partition and no fill-over. A
+/// cell with no floored Void point emits nothing, so a solid world — and a
+/// plateau's cut-away silhouette, whose Void points carry no authored
+/// depression — stays byte-identical.
+fn emit_void_floors(
     world: &World,
     at: ChunkPos,
-    mode: ViewMode,
     styles: &StyleTable,
-    same_material_only: bool,
     tris: &mut Vec<DrawTriangle>,
 ) {
-    let tuck = WALL_TUCK_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
     for lz in 0..EDGE {
         for lx in 0..EDGE {
             let cell = CellPos {
                 x: at.x * EDGE + lx,
                 z: at.z * EDGE + lz,
             };
-            let material = world.underlay(cell);
-            if material == Material::Void {
-                continue;
-            }
-            // In the painted view a relief cell's same-material faces belong
-            // to the subcell-stride walk ([`emit_relief_walls`]) — skipping
-            // here is what keeps every face owned by exactly one walk. The
-            // raw view keeps its cell-resolution closure over relief cells.
-            if same_material_only && world.cell_has_height_relief(cell) {
-                continue;
-            }
-            let cell_level = world.surface_level(cell);
-            let mut cached: Option<[f32; 4]> = None;
-            for edge in &WALL_DIRECTIONS {
-                let neighbor = CellPos {
-                    x: cell.x + edge.offset.0,
-                    z: cell.z + edge.offset.1,
-                };
-                if same_material_only && world.underlay(neighbor) != material {
-                    continue; // a material boundary lofts as a marched wall
+            for sj in 0..SUB {
+                for si in 0..SUB {
+                    let Some(border) = void_groove_floor(world, cell, si, sj) else {
+                        continue; // open skirt or no authored depression — no floor
+                    };
+                    let y = world.point_height(cell, si, sj) as f32 / OCTIMETERS_PER_METER;
+                    let cliff = world.cliff_material(border);
+                    let resolved = resolve_cell(
+                        styles.get(cliff),
+                        border.x as f32 + 0.5,
+                        border.z as f32 + 0.5,
+                        None,
+                    );
+                    let rgb = hsl_to_linear_rgb(
+                        resolved.hue,
+                        resolved.sat,
+                        (resolved.light * SKIRT_BASE_SHADE).clamp(0.0, 100.0),
+                    );
+                    let x0 = cell.x * 256 + si * OCTIMETERS_PER_SUBCELL;
+                    let z0 = cell.z * 256 + sj * OCTIMETERS_PER_SUBCELL;
+                    let vertex = |wx: f32, wz: f32| Vertex {
+                        x: wx,
+                        y,
+                        z: wz,
+                        r: rgb[0],
+                        g: rgb[1],
+                        b: rgb[2],
+                    };
+                    push_quad(
+                        tris,
+                        x0,
+                        z0,
+                        x0 + OCTIMETERS_PER_SUBCELL,
+                        z0 + OCTIMETERS_PER_SUBCELL,
+                        &vertex,
+                    );
                 }
-                if cell_level <= world.surface_level(neighbor)
-                    || !world.edge_is_cliff(cell, neighbor)
-                {
-                    continue;
-                }
-                let top = *cached.get_or_insert_with(|| world.cell_corner_heights(cell));
-                let bottom = world.cell_corner_heights(neighbor);
-                let y_top = [top[edge.top[0]], top[edge.top[1]]];
-                let y_low = [bottom[edge.bottom[0]], bottom[edge.bottom[1]]];
-                if (y_top[0] - y_low[0]).abs() < f32::EPSILON
-                    && (y_top[1] - y_low[1]).abs() < f32::EPSILON
-                {
-                    continue;
-                }
-                // Lattice-corner positions in meters from the index order
-                // [(x, z), (x+1, z), (x, z+1), (x+1, z+1)].
-                let corner_pos = |k: usize| {
-                    (
-                        cell.x as f32 + if k % 2 == 1 { 1.0 } else { 0.0 },
-                        cell.z as f32 + if k >= 2 { 1.0 } else { 0.0 },
-                    )
-                };
-                let (x0, z0) = corner_pos(edge.top[0]);
-                let (x1, z1) = corner_pos(edge.top[1]);
-                let (top_rgb, base_rgb) = match mode {
-                    ViewMode::Raw => ([RAW_SKIRT_GRAY; 3], [RAW_SKIRT_GRAY; 3]),
-                    ViewMode::Painted => {
-                        let cliff = world.cliff_material(cell);
-                        let resolved = resolve_cell(
-                            styles.get(cliff),
-                            cell.x as f32 + 0.5,
-                            cell.z as f32 + 0.5,
-                            None,
-                        );
-                        (
-                            hsl_to_linear_rgb(
-                                resolved.hue,
-                                resolved.sat,
-                                (resolved.light * SKIRT_TOP_SHADE).clamp(0.0, 100.0),
-                            ),
-                            hsl_to_linear_rgb(
-                                resolved.hue,
-                                resolved.sat,
-                                (resolved.light * SKIRT_BASE_SHADE).clamp(0.0, 100.0),
-                            ),
-                        )
-                    }
-                };
-                push_wall_quad(
-                    tris,
-                    [x0, z0, y_top[0]],
-                    [x1, z1, y_top[1]],
-                    y_low[0] - tuck,
-                    y_low[1] - tuck,
-                    top_rgb,
-                    base_rgb,
-                );
             }
         }
     }
@@ -2505,10 +2768,9 @@ fn emit_lattice_walls(
 
 /// Per wall direction: neighbor offset, the shared edge's two lattice
 /// corners as indices into the high side's corner order, and the same
-/// lattice points in the neighbor's order (the low side's plates). Shared by
-/// the cell-edge walk ([`emit_lattice_walls`]) and its subcell-stride analog
-/// ([`emit_relief_walls`]) — the corner index order is the same at both
-/// strides.
+/// lattice points in the neighbor's order (the low side's plates). Used by
+/// the closure walk ([`emit_lattice_closure`]) at both the cell and subcell
+/// strides — the corner index order is the same at both.
 struct WallEdge {
     offset: (i32, i32),
     top: [usize; 2],
@@ -2537,138 +2799,6 @@ const WALL_DIRECTIONS: [WallEdge; 4] = [
         bottom: [2, 3],
     },
 ];
-
-/// Loft the same-material height-break walls of relief cells at subcell
-/// stride: for every subcell of a chunk-local cell where the point path
-/// engages (`World::cell_has_height_relief`), a vertical face on any
-/// subcell-lattice edge whose same-material neighbor point stands more than
-/// the step ceiling below — the authored break lines per-point deltas draw,
-/// including lines crossing a cell interior, where the cell-edge walk cannot
-/// stand. The subcell-stride analog of [`emit_lattice_walls`], which skips
-/// relief cells in the painted view so every same-material face is owned by
-/// exactly one walk; a material or Void boundary is skipped here the same
-/// way the cell walk skips it (the marched pass lofts those). The high
-/// subcell owns the face and cells iterate chunk-local, so a chunk-border
-/// break lofts exactly once fleet-wide; tops come from the high subcell's
-/// point plates ([`World::subcell_corner_heights`] — the same patch its cap
-/// quads drew), bottoms from the neighbor's, tucked
-/// [`WALL_TUCK_OCTIMETERS`] under the low cap, and merged plates skip.
-///
-/// Handoff to the marched pass: where a break line meets a material
-/// boundary the relief wall ends at a subcell corner and the marched wall's
-/// curtain continues along the contour. Both classes lift their tops
-/// through the same point patches, so the tops meet on the shared cap
-/// surface; the vertical planes differ (marching contour vs subcell
-/// lattice), which is the same sample-resolution quantization the break
-/// lines themselves carry.
-fn emit_relief_walls(
-    world: &World,
-    at: ChunkPos,
-    styles: &StyleTable,
-    tris: &mut Vec<DrawTriangle>,
-) {
-    let tuck = WALL_TUCK_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
-    let sub_span = 1.0 / SUB as f32;
-    for lz in 0..EDGE {
-        for lx in 0..EDGE {
-            let cell = CellPos {
-                x: at.x * EDGE + lx,
-                z: at.z * EDGE + lz,
-            };
-            if !world.cell_has_height_relief(cell) {
-                continue; // no relief nearby — the cell-edge walk owns it
-            }
-            // The wall color is per owning cell, resolved lazily on the
-            // first face the cell lofts.
-            let mut colors: Option<([f32; 3], [f32; 3])> = None;
-            for sj in 0..SUB {
-                for si in 0..SUB {
-                    let material = world.underlay_point(cell, si, sj);
-                    if material == Material::Void {
-                        continue; // a hole's rim lofts as a marched wall
-                    }
-                    let level = world.point_surface_level(cell, si, sj);
-                    let mut cached: Option<[f32; 4]> = None;
-                    for edge in &WALL_DIRECTIONS {
-                        // The neighbor subcell on the global subcell lattice —
-                        // it may sit in an adjacent cell (or chunk).
-                        let gx = cell.x * SUB + si + edge.offset.0;
-                        let gz = cell.z * SUB + sj + edge.offset.1;
-                        let neighbor = CellPos {
-                            x: gx.div_euclid(SUB),
-                            z: gz.div_euclid(SUB),
-                        };
-                        let nsx = gx.rem_euclid(SUB);
-                        let nsz = gz.rem_euclid(SUB);
-                        if world.underlay_point(neighbor, nsx, nsz) != material {
-                            continue; // material / Void boundaries loft as marched walls
-                        }
-                        // Only the high side of a genuine point cliff lofts —
-                        // a low side, an equal pair, and a legal step all fall
-                        // through, so each face is emitted exactly once.
-                        if level - world.point_surface_level(neighbor, nsx, nsz)
-                            <= STEP_MAX_OCTIMETERS
-                        {
-                            continue;
-                        }
-                        let top = *cached
-                            .get_or_insert_with(|| world.subcell_corner_heights(cell, si, sj));
-                        let bottom = world.subcell_corner_heights(neighbor, nsx, nsz);
-                        let y_top = [top[edge.top[0]], top[edge.top[1]]];
-                        let y_low = [bottom[edge.bottom[0]], bottom[edge.bottom[1]]];
-                        if (y_top[0] - y_low[0]).abs() < f32::EPSILON
-                            && (y_top[1] - y_low[1]).abs() < f32::EPSILON
-                        {
-                            continue; // the point plates merged — no gap to close
-                        }
-                        // Subcell-corner positions in meters, same index order
-                        // as the cell walk at 1/SUB scale.
-                        let base_x = cell.x as f32 + si as f32 * sub_span;
-                        let base_z = cell.z as f32 + sj as f32 * sub_span;
-                        let corner_pos = |k: usize| {
-                            (
-                                base_x + if k % 2 == 1 { sub_span } else { 0.0 },
-                                base_z + if k >= 2 { sub_span } else { 0.0 },
-                            )
-                        };
-                        let (x0, z0) = corner_pos(edge.top[0]);
-                        let (x1, z1) = corner_pos(edge.top[1]);
-                        let (top_rgb, base_rgb) = *colors.get_or_insert_with(|| {
-                            let cliff = world.cliff_material(cell);
-                            let resolved = resolve_cell(
-                                styles.get(cliff),
-                                cell.x as f32 + 0.5,
-                                cell.z as f32 + 0.5,
-                                None,
-                            );
-                            (
-                                hsl_to_linear_rgb(
-                                    resolved.hue,
-                                    resolved.sat,
-                                    (resolved.light * SKIRT_TOP_SHADE).clamp(0.0, 100.0),
-                                ),
-                                hsl_to_linear_rgb(
-                                    resolved.hue,
-                                    resolved.sat,
-                                    (resolved.light * SKIRT_BASE_SHADE).clamp(0.0, 100.0),
-                                ),
-                            )
-                        });
-                        push_wall_quad(
-                            tris,
-                            [x0, z0, y_top[0]],
-                            [x1, z1, y_top[1]],
-                            y_low[0] - tuck,
-                            y_low[1] - tuck,
-                            top_rgb,
-                            base_rgb,
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
 
 /// Push the two triangles of one vertical wall quad: a top edge from
 /// `top_a` to `top_b` (`[wx, wz, y]` meters) dropped to `y_bottom_a` /
@@ -4565,9 +4695,10 @@ mod tests {
     fn delta_break_walls_seal_both_caps() {
         // Watertightness across the delta break: every wall top vertex
         // coincides with a high-cap vertex, and every wall bottom vertex
-        // sits exactly one tuck below a low-cap vertex at the same position
-        // — the wall spans precisely the vertical gap the split caps open,
-        // no pinholes, no overlap.
+        // coincides with a low-cap vertex at the same position — under
+        // closure the base is the low cap's committed edge exactly, so the
+        // wall spans precisely the vertical gap the split caps open, no
+        // pinholes, no overlap.
         let world = delta_column_world();
         let mesh = mesh_chunk(
             &world,
@@ -4575,7 +4706,6 @@ mod tests {
             ViewMode::Painted,
             &StyleTable::default(),
         );
-        let tuck = WALL_TUCK_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
         let cap_verts: Vec<&Vertex> = mesh
             .iter()
             .filter(|t| xz_area_doubled(t) > 1e-6)
@@ -4599,8 +4729,8 @@ mod tests {
                 );
             } else {
                 assert!(
-                    seals(v.x, v.z, v.y + tuck),
-                    "wall base ({}, {}, {}) + tuck misses the low cap",
+                    seals(v.x, v.z, v.y),
+                    "wall base ({}, {}, {}) misses the low cap",
                     v.x,
                     v.z,
                     v.y,
@@ -4707,7 +4837,6 @@ mod tests {
         }
         let splits = cap_splits(&mesh);
         assert!(!splits.is_empty(), "the authored breaks split the caps");
-        let tuck = WALL_TUCK_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
         let walls: Vec<&DrawTriangle> = mesh
             .iter()
             .filter(|t| xz_area_doubled(t) < 1e-6 && y_span(t) > 0.25)
@@ -4744,9 +4873,8 @@ mod tests {
                 "split at ({x}, {z}) has no wall top at {hi}",
             );
             assert!(
-                covered(x, z, lo - tuck),
-                "split at ({x}, {z}) has no wall base at {}",
-                lo - tuck,
+                covered(x, z, lo),
+                "split at ({x}, {z}) has no wall base at {lo}",
             );
         }
     }
@@ -4906,7 +5034,6 @@ mod tests {
             "only {} cap splits — the flaps collapsed onto one plate",
             splits.len(),
         );
-        let tuck = WALL_TUCK_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
         let walls: Vec<&Vertex> = mesh
             .iter()
             .filter(|t| xz_area_doubled(t) < 1e-6 && y_span(t) > 0.5)
@@ -4923,9 +5050,8 @@ mod tests {
                 "split at ({x}, {z}) has no wall top at {hi} — a picket gap",
             );
             assert!(
-                at(lo - tuck),
-                "split at ({x}, {z}) has no wall base at {} — an unsealed foot",
-                lo - tuck,
+                at(lo),
+                "split at ({x}, {z}) has no wall base at {lo} — an unsealed foot",
             );
         }
     }
@@ -4933,10 +5059,9 @@ mod tests {
     #[test]
     fn smoothed_break_walls_seal_both_caps() {
         // Watertightness in the smoothing-displaced regime: every wall top
-        // vertex coincides with a cap vertex and every wall base sits
-        // exactly one tuck below one — the anchored lifts hand the wall the
-        // same values the flaps drew, for crossings anywhere off the
-        // lattice.
+        // vertex coincides with a cap vertex and every wall base coincides
+        // with one — the anchored lifts hand the wall the same values the
+        // flaps drew, for crossings anywhere off the lattice.
         let world = smoothed_diamond_world();
         let mesh = mesh_chunk(
             &world,
@@ -4944,7 +5069,6 @@ mod tests {
             ViewMode::Painted,
             &StyleTable::default(),
         );
-        let tuck = WALL_TUCK_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
         let cap_verts: Vec<&Vertex> = mesh
             .iter()
             .filter(|t| xz_area_doubled(t) > 1e-6)
@@ -4971,8 +5095,8 @@ mod tests {
                 );
             } else {
                 assert!(
-                    seals(v.x, v.z, v.y + tuck),
-                    "wall base ({}, {}, {}) + tuck misses the low cap",
+                    seals(v.x, v.z, v.y),
+                    "wall base ({}, {}, {}) misses the low cap",
                     v.x,
                     v.z,
                     v.y,
@@ -5012,6 +5136,51 @@ mod tests {
         assert_eq!(
             baseline, after,
             "a net-zero delta plane meshes identically to no plane",
+        );
+    }
+
+    #[test]
+    fn a_fillable_void_joint_floors_and_walls() {
+        // Tripwire: an enclosed Void well one meter deep in a grass field
+        // closes as a real flat-bottomed cut — a floor cap at the void
+        // points' stored height and rim walls from the grass down to it, no
+        // open bottom. A prediction pass blind to the void depth would leave
+        // the groove open (a wall to a fixed drop, or no wall at all); the
+        // floor and its walls both read the one total height plane.
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        chunk.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
+        // Cell (7, 7) is a full Void well, floored one meter down and enclosed
+        // by grass on every side.
+        let cell = CellPos { x: 7, z: 7 };
+        world.set_cell_points(cell, &[Material::Void.to_u8(); SUBCELLS_PER_CELL]);
+        world.set_cell_heights(cell, &[-256; SUBCELLS_PER_CELL]);
+
+        let mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
+        let floor = -256.0 / OCTIMETERS_PER_METER;
+        let has_floor = mesh.iter().any(|t| {
+            xz_area_doubled(t) > 1e-6 && t.verts.iter().all(|v| (v.y - floor).abs() < 1e-3)
+        });
+        assert!(
+            has_floor,
+            "the enclosed void floors over at its stored depth"
+        );
+        // A rim wall spans the grass edge (y ~ 0) down to the floor (y ~ -1 m)
+        // — the groove is closed, not open-bottomed.
+        let has_rim_wall = mesh.iter().any(|t| {
+            xz_area_doubled(t) < 1e-6
+                && t.verts.iter().any(|v| v.y > -0.1)
+                && t.verts.iter().any(|v| (v.y - floor).abs() < 1e-3)
+        });
+        assert!(
+            has_rim_wall,
+            "the void rim walls down to the floor, no open bottom",
         );
     }
 }
