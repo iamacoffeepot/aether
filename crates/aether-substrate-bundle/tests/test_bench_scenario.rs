@@ -46,8 +46,9 @@ use aether_capabilities::{UiBar, UiPanel};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
     CachedFontMetrics, CaptureFrame, CaptureFrameResult, DropComponent, DropResult, FrameCheck,
-    FrameCheckResult, FrameReduction, ListComponents, ListComponentsResult, LoadComponent,
-    LoadResult, NamedMail, Ping, QuadScale, QuadSpace, ReplaceComponent, ReplaceResult,
+    FrameCheckResult, FrameRect, FrameReduction, ListComponents, ListComponentsResult,
+    LoadComponent, LoadResult, NamedMail, Ping, QuadScale, QuadSpace, ReplaceComponent,
+    ReplaceResult,
 };
 use aether_math::{Mat4, Vec3};
 use aether_substrate_bundle::test_bench::{
@@ -1098,6 +1099,11 @@ fn capture_frame_checks_return_substrate_verdict() {
         // None → partition against the frame's top-left pixel (the clear
         // color), matching the decode-based scenarios' convention.
         background: None,
+        // None → score the whole frame; the region-scoped assertion below
+        // (`capture_frame_region_scopes_reduction_to_one_widget_rect`)
+        // demonstrates the composition target this whole-frame verdict
+        // predates.
+        region: None,
     };
 
     let result = bench
@@ -1177,6 +1183,118 @@ fn capture_frame_checks_return_substrate_verdict() {
             );
         }
         other => panic!("expected BoundingBox result, got {other:?}"),
+    }
+}
+
+/// A region-scoped `FrameCheck` restricts a reduction to one screen
+/// rect — the composition primitive a per-widget assertion needs so it
+/// doesn't fold every widget in the scene into one whole-frame number
+/// (iamacoffeepot/aether#2673). Draws two disjoint solid quads standing
+/// in for two widgets and scores a region-scoped `coverage` +
+/// `centroid` against only the first quad's rect: coverage lands near
+/// 1.0 (the region is fully covered by its own quad, unlike the
+/// whole-frame reading which would fold in the empty space between the
+/// quads) and the centroid stays inside that quad rather than blending
+/// toward the second quad the region excludes.
+#[test]
+fn capture_frame_region_scopes_reduction_to_one_widget_rect() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let (frame_width, frame_height) = (64u32, 48u32);
+    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+
+    let (first_x, first_y, first_w, first_h) = (4.0f32, 4.0f32, 12.0f32, 12.0f32);
+    let (second_x, second_y, second_w, second_h) = (40.0f32, 4.0f32, 12.0f32, 12.0f32);
+    let draw = envelope(
+        "aether.render",
+        &DrawSolidQuads {
+            space: QuadSpace::Screen,
+            quads: vec![
+                SolidQuad {
+                    x: first_x,
+                    y: first_y,
+                    width: first_w,
+                    height: first_h,
+                    color: [1.0, 1.0, 1.0, 1.0],
+                },
+                SolidQuad {
+                    x: second_x,
+                    y: second_y,
+                    width: second_w,
+                    height: second_h,
+                    color: [1.0, 1.0, 1.0, 1.0],
+                },
+            ],
+        },
+    );
+
+    let tolerance = 5u8;
+    // Region hugs the first quad's own screen rect exactly (pixel
+    // coordinates matching first_x/first_y/first_w/first_h above),
+    // leaving the second quad entirely outside it.
+    let region = FrameRect {
+        min_x: 4,
+        min_y: 4,
+        max_x: 15,
+        max_y: 15,
+    };
+    let region_check = |reduction| FrameCheck {
+        reduction,
+        tolerance,
+        background: None,
+        region: Some(region),
+    };
+
+    let result = bench
+        .execute(vec![(
+            "snap",
+            BenchOp::send_and_await(
+                "aether.render",
+                &CaptureFrame {
+                    mails: vec![draw],
+                    after_mails: vec![],
+                    checks: vec![
+                        region_check(FrameReduction::Coverage),
+                        region_check(FrameReduction::Centroid),
+                    ],
+                    similarity: None,
+                },
+            ),
+        )])
+        .expect("send_and_await(CaptureFrame) with region-scoped checks");
+    let reply: CaptureFrameResult = result.reply("snap").expect("decode CaptureFrameResult");
+    let verdict = match reply {
+        CaptureFrameResult::Ok { verdict, .. } => {
+            verdict.expect("a checks request returns a verdict")
+        }
+        CaptureFrameResult::Err { error } => panic!("capture_frame replied Err: {error}"),
+    };
+    assert_eq!(verdict.results.len(), 2);
+
+    match &verdict.results[0] {
+        FrameCheckResult::Coverage { fraction, .. } => {
+            assert!(
+                *fraction > 0.9,
+                "region-scoped coverage {fraction} should be near 1.0 — the region is fully \
+                 covered by its own quad",
+            );
+        }
+        other => panic!("expected Coverage result, got {other:?}"),
+    }
+    match &verdict.results[1] {
+        FrameCheckResult::Centroid { centroid, .. } => {
+            let [cx, cy] = centroid.expect("the region has a lit centroid");
+            assert!(
+                cx >= first_x
+                    && cx <= first_x + first_w
+                    && cy >= first_y
+                    && cy <= first_y + first_h,
+                "region-scoped centroid ({cx}, {cy}) should sit inside the first quad's rect, \
+                 not blended toward the second quad the region excludes",
+            );
+        }
+        other => panic!("expected Centroid result, got {other:?}"),
     }
 }
 

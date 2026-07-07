@@ -1612,6 +1612,18 @@ mod control_plane {
         pub reduction: FrameReduction,
         pub tolerance: u8,
         pub background: Option<[u8; 3]>,
+        /// `None` scores the whole frame (today's behavior). `Some(rect)`
+        /// restricts every reduction to the frame-clamped intersection of
+        /// `rect`: coverage divides by the clamped region's pixel count
+        /// (not the whole-frame pixel count); `centroid` / `bounding_box`
+        /// report absolute frame coordinates, not region-relative ones;
+        /// and the background reference is unchanged — still the frame's
+        /// top-left pixel unless `background` pins one, never the
+        /// region's own top-left (which is routinely inside the drawn
+        /// geometry). A region that clips to zero pixels (fully out of
+        /// bounds, or a degenerate `min > max`) scores the established
+        /// empty-mask result rather than erroring.
+        pub region: Option<FrameRect>,
     }
 
     /// Which `test_bench::visual` reduction a [`FrameCheck`] runs. The
