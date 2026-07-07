@@ -56,13 +56,25 @@
 //! versus crisp is authored on the map. The pooled rim is a second marched
 //! layer over an eroded mask: the smoothed shape draws in a darkened rim
 //! color, and the body draws one octimeter above it inset by the rim
-//! width. Water's body swaps the flat marched interior for a graded quad
-//! per subcell fully inside the eroded region — lightness driven down by a
-//! bounded shore-distance scan, hue varied per subcell — while the marched
-//! rim band beneath carries the smoothed shoreline silhouette. Overlay
-//! geometry lifts a hair above the underlay surface so the coplanar
-//! passes never z-fight, and it carries its own vertices so the seam
-//! stays hard.
+//! width. Every overlay material contours identically — water is underlay
+//! ground fabric (below), so an overlay-painted water body draws as a
+//! generic marched surface with no special treatment. Overlay geometry
+//! lifts a hair above the underlay surface so the coplanar passes never
+//! z-fight, and it carries its own vertices so the seam stays hard.
+//!
+//! # Water — a flat underlay plane
+//!
+//! [`Material::Water`] is an underlay partition material, so the waterline
+//! smooths, rims, and tiles through the underlay repartition like every
+//! other boundary. What makes it read as water is the surface level: a
+//! water cell resolves its corners at its authored water-plane level
+//! ([`World::water_level`]) rather than its lakebed [`World::height`], and a
+//! corner plate with any water member pins to that level — so the surface
+//! is exactly flat, a connected shore blends down to the waterline (beach),
+//! and a past-step bank splits and wears the skirt down to the water. An
+//! interior water cell tiles the flat patch with a depth-graded quad per
+//! subcell, depth derived as the plane level minus the bilinear lakebed
+//! [`World::height`] over [`WATER_DEPTH_FULL_OCTIMETERS`].
 //!
 //! # Height pass — plates, slopes, and skirts
 //!
@@ -75,9 +87,11 @@
 //! the skirt pass closes that gap with a vertical face wearing the high
 //! cell's region cliff material, darkened toward its base. Boundary
 //! windows and overlay contours lift each vertex through its own
-//! (floor) cell — continuous wherever no cliff intervenes — and water
-//! rides the same surface for now (an authored per-body water level is
-//! future work). A slope shade from the patch normal bakes into vertex
+//! (floor) cell — continuous wherever no cliff intervenes — and a water
+//! cell reads its flat authored plane level (the water section above)
+//! rather than the lakebed, so a lake on sloped terrain lies flat and a
+//! bank above it wears the skirt down to the water. A slope shade from the
+//! patch normal bakes into vertex
 //! color so slopes read under the flat-color grammar; it multiplies by
 //! exactly one on level ground, so an all-flat world meshes
 //! byte-identically to a world with no height pass at all.
@@ -92,8 +106,7 @@ use aether_capabilities::render::{DrawTriangle, Vertex};
 use aether_math::Vec3;
 
 use crate::world::{
-    CELLS_PER_CHUNK, CellPos, ChunkPos, Material, STEP_MAX_OCTIMETERS, SUBCELLS_PER_CELL_EDGE,
-    ViewMode, World,
+    CELLS_PER_CHUNK, CellPos, ChunkPos, Material, SUBCELLS_PER_CELL_EDGE, ViewMode, World,
 };
 use contour::{
     GridPlacement, SmoothParams, emit_label_window, erode, label_case, march_grid,
@@ -157,9 +170,11 @@ const CONTOUR_UPSAMPLE: usize = 2;
 /// within the eight-neighbor remesh the `R = 1` invalidation covers.
 const MAX_APRON_SUBCELLS: i32 = 8;
 
-/// Bounded outward scan length in subcells for the water shore-distance
-/// derivation.
-const MAX_SHORE_SCAN: i32 = 8;
+/// Water depth in octimeters at which the depth grading reaches full
+/// darkening — one meter of water below the surface. Shallower water grades
+/// proportionally between the shore (depth `0`) and this floor; deeper
+/// water clamps here.
+const WATER_DEPTH_FULL_OCTIMETERS: f32 = 256.0;
 
 /// Mesh one chunk into its triangle list. Pure — no wgpu, no ctx — so it
 /// is unit-testable host-side. Reads neighbor cells through [`World`] (a
@@ -254,7 +269,7 @@ fn label_lift(world: &World, owner: CellPos, wx: f32, wz: f32) -> (f32, f32) {
         x: floor_to_i32(wx),
         z: floor_to_i32(wz),
     };
-    if cell != owner && (world.height(cell) - world.height(owner)).abs() > STEP_MAX_OCTIMETERS {
+    if cell != owner && world.edge_is_cliff(cell, owner) {
         let lift = CellLift::of(world, owner);
         return (lift.y(wx, wz), lift.shade(wx, wz));
     }
@@ -461,6 +476,10 @@ fn mesh_underlay(world: &World, at: ChunkPos, styles: &StyleTable, tris: &mut Ve
                 z: at.z * EDGE + lz,
             };
             let material = world.underlay(cell);
+            if material == Material::Water {
+                emit_water_cell(world, cell, styles, tris);
+                continue;
+            }
             let resolved = resolve_cell(
                 styles.get(material),
                 cell.x as f32 + 0.5,
@@ -620,11 +639,12 @@ fn emit_label_quad(
     tris: &mut Vec<DrawTriangle>,
 ) {
     let material = Material::from_u8_or_void(label.div_ceil(2));
+    let depth = (material == Material::Water).then(|| owner_water_depth(world, owner));
     let resolved = resolve_cell(
         styles.get(material),
         owner.x as f32 + 0.5,
         owner.z as f32 + 0.5,
-        None,
+        depth,
     );
     let rim = if label % 2 == 1 {
         styles.get(material).rim_darken
@@ -678,7 +698,8 @@ fn emit_mixed_window(
         };
         let material = Material::from_u8_or_void(label.div_ceil(2));
         let s = styles.get(material);
-        let resolved = resolve_cell(s, owner.x as f32 + 0.5, owner.z as f32 + 0.5, None);
+        let depth = (material == Material::Water).then(|| owner_water_depth(world, owner));
+        let resolved = resolve_cell(s, owner.x as f32 + 0.5, owner.z as f32 + 0.5, depth);
         let mut light = wash_lightness(s, resolved.light, wash_x, wash_z, resolved.stroke);
         if label % 2 == 1 {
             light *= 1.0 - s.rim_darken;
@@ -874,6 +895,84 @@ fn emit_quad_shaded(
     tris.push(DrawTriangle { verts: [a, c, d] });
 }
 
+/// The bilinear lakebed height in octimeters at world point `(wx, wz)`
+/// (meters), interpolated over the raw per-cell [`World::height`] plane
+/// anchored at cell centers — the ground the water depth grades against.
+fn bilinear_lakebed(world: &World, wx: f32, wz: f32) -> f32 {
+    let fx = wx - 0.5;
+    let fz = wz - 0.5;
+    let x0 = floor_to_i32(fx);
+    let z0 = floor_to_i32(fz);
+    let tx = fx - x0 as f32;
+    let tz = fz - z0 as f32;
+    let h = |cx: i32, cz: i32| world.height(CellPos { x: cx, z: cz }) as f32;
+    let bottom = h(x0, z0) * (1.0 - tx) + h(x0 + 1, z0) * tx;
+    let top = h(x0, z0 + 1) * (1.0 - tx) + h(x0 + 1, z0 + 1) * tx;
+    bottom * (1.0 - tz) + top * tz
+}
+
+/// The water depth `[0, 1]` at world point `(wx, wz)` for a surface at
+/// `level_octimeters`: the surface-to-lakebed drop over
+/// [`WATER_DEPTH_FULL_OCTIMETERS`], clamped. `0` at the waterline, `1` in
+/// water at least [`WATER_DEPTH_FULL_OCTIMETERS`] deep.
+fn water_depth(world: &World, level_octimeters: i32, wx: f32, wz: f32) -> f32 {
+    ((level_octimeters as f32 - bilinear_lakebed(world, wx, wz)) / WATER_DEPTH_FULL_OCTIMETERS)
+        .clamp(0.0, 1.0)
+}
+
+/// The depth to grade a water label owned by `owner`: the depth at the
+/// owner's center when it is a water cell, else `0` (a water polygon owned
+/// by a land cell reads as the shallow rim, not deep water).
+fn owner_water_depth(world: &World, owner: CellPos) -> f32 {
+    world.water_level(owner).map_or(0.0, |level| {
+        water_depth(world, level, owner.x as f32 + 0.5, owner.z as f32 + 0.5)
+    })
+}
+
+/// Emit one interior water cell's body: the flat water patch at the plane
+/// level, tiled as a depth-graded quad per subcell. Each subcell grades
+/// toward the pooled deep-water hue by the lakebed drop below the surface
+/// at its center, so a shelving lakebed reads as shallows deepening inward
+/// while the surface stays exactly flat. No pooled-rim nine-slice — the
+/// shoreline rim is the partition's marched band around the water body.
+fn emit_water_cell(
+    world: &World,
+    cell: CellPos,
+    styles: &StyleTable,
+    tris: &mut Vec<DrawTriangle>,
+) {
+    let level = world.water_level(cell).unwrap_or(0);
+    let s = styles.get(Material::Water);
+    let lift = CellLift::of(world, cell);
+    for sj in 0..SUB {
+        for si in 0..SUB {
+            let x0 = cell.x * 256 + si * OCTIMETERS_PER_SUBCELL;
+            let z0 = cell.z * 256 + sj * OCTIMETERS_PER_SUBCELL;
+            let center_x = (x0 + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
+            let center_z = (z0 + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
+            let depth = water_depth(world, level, center_x, center_z);
+            let resolved = resolve_cell(s, center_x, center_z, Some(depth));
+            let color = hsl_to_linear_rgb(resolved.hue, resolved.sat, resolved.light);
+            let vertex = |wx: f32, wz: f32| Vertex {
+                x: wx,
+                y: lift.y(wx, wz),
+                z: wz,
+                r: color[0],
+                g: color[1],
+                b: color[2],
+            };
+            push_quad(
+                tris,
+                x0,
+                z0,
+                x0 + OCTIMETERS_PER_SUBCELL,
+                z0 + OCTIMETERS_PER_SUBCELL,
+                &vertex,
+            );
+        }
+    }
+}
+
 /// Is the subcell at chunk-local index `(six, siz)` covered by `material`?
 /// Indices range over the field plus its apron; an out-of-chunk index
 /// resolves to a neighbor cell through [`World`], reading empty for a
@@ -962,11 +1061,11 @@ fn sample_params(
 
 /// Contour one overlay material's subcell field: smooth its corners per
 /// the spatial smoothing field, then march a rim layer and an inset body
-/// layer. Water's body swaps the flat marched interior for per-subcell
-/// depth-graded quads over the eroded region, keeping the smoothed rim
-/// band as its shoreline silhouette. The apron is fixed at the maximum a
-/// profile can demand ([`MAX_APRON_SUBCELLS`]), so field content never
-/// changes a chunk's read reach.
+/// layer. Every overlay material contours the same way — water is ground
+/// fabric in the underlay, so an overlay-painted water body draws as a
+/// generic marched surface with no special treatment. The apron is fixed at
+/// the maximum a profile can demand ([`MAX_APRON_SUBCELLS`]), so field
+/// content never changes a chunk's read reach.
 fn mesh_overlay_material(
     world: &World,
     at: ChunkPos,
@@ -1000,11 +1099,6 @@ fn mesh_overlay_material(
     let rim_width = (s.rim_inset_octimeters / step_oct).max(1);
     let eroded = erode(&smoothed, gw, gh, rim_width);
 
-    if material == Material::Water {
-        emit_water(world, &eroded, gw, apron, upsample, base_oct, styles, tris);
-        return;
-    }
-
     let body_color = hsl_to_linear_rgb(s.base_hue, s.base_sat, s.base_light);
     let body_vertex = surface_vertex(world, OVERLAY_BODY_LIFT, body_color);
     march_grid(&eroded, gw, gh, &place, &body_vertex, tris);
@@ -1023,110 +1117,6 @@ fn surface_vertex(world: &World, lift: f32, color: [f32; 3]) -> impl Fn(f32, f32
         g: color[1],
         b: color[2],
     }
-}
-
-/// Emit water's body: a graded quad per subcell whose sample block sits
-/// fully inside the eroded smoothed grid, lightness falling with derived
-/// shore depth and hue varying per subcell. A shoreline subcell only
-/// partially inside refines to per-sample quads over its covered samples,
-/// so the body hugs the smoothed contour at the smoothing grid's own
-/// resolution and the marched rim band beneath shows as an even pooled
-/// edge instead of subcell-scale teeth.
-#[allow(clippy::too_many_arguments)] // one call site; the water pass state travels together
-fn emit_water(
-    world: &World,
-    eroded: &[bool],
-    gw: usize,
-    apron: i32,
-    upsample: usize,
-    base_oct: [i32; 2],
-    styles: &StyleTable,
-    tris: &mut Vec<DrawTriangle>,
-) {
-    let u = upsample as i32;
-    let sample = |gx: i32, gz: i32| {
-        // The grid is square (n × n upsampled), so gw bounds both.
-        gx >= 0
-            && gz >= 0
-            && (gx as usize) < gw
-            && (gz as usize) < gw
-            && eroded[gz as usize * gw + gx as usize]
-    };
-    let inside = |six: i32, siz: i32| {
-        let gx0 = (six + apron) * u;
-        let gz0 = (siz + apron) * u;
-        (0..u).all(|dz| (0..u).all(|dx| sample(gx0 + dx, gz0 + dz)))
-    };
-    let step_oct = OCTIMETERS_PER_SUBCELL / u;
-    for sj in 0..SUBCELLS_PER_CHUNK_EDGE {
-        for si in 0..SUBCELLS_PER_CHUNK_EDGE {
-            let x_oct = base_oct[0] + si * OCTIMETERS_PER_SUBCELL;
-            let z_oct = base_oct[1] + sj * OCTIMETERS_PER_SUBCELL;
-            if inside(si, sj) {
-                let depth = subcell_shore_depth(&inside, si, sj);
-                let center_x = (x_oct + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
-                let center_z = (z_oct + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
-                let resolved =
-                    resolve_cell(styles.get(Material::Water), center_x, center_z, Some(depth));
-                let color = hsl_to_linear_rgb(resolved.hue, resolved.sat, resolved.light);
-                push_quad(
-                    tris,
-                    x_oct,
-                    z_oct,
-                    x_oct + OCTIMETERS_PER_SUBCELL,
-                    z_oct + OCTIMETERS_PER_SUBCELL,
-                    &surface_vertex(world, OVERLAY_BODY_LIFT, color),
-                );
-                continue;
-            }
-            // Shoreline refinement: per-sample quads over the covered
-            // samples of a partially-inside subcell, at the shore depth.
-            let gx0 = (si + apron) * u;
-            let gz0 = (sj + apron) * u;
-            let mut any = false;
-            for dz in 0..u {
-                for dx in 0..u {
-                    if sample(gx0 + dx, gz0 + dz) {
-                        any = true;
-                    }
-                }
-            }
-            if !any {
-                continue;
-            }
-            let center_x = (x_oct + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
-            let center_z = (z_oct + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
-            let resolved = resolve_cell(styles.get(Material::Water), center_x, center_z, Some(0.0));
-            let color = hsl_to_linear_rgb(resolved.hue, resolved.sat, resolved.light);
-            let vertex = surface_vertex(world, OVERLAY_BODY_LIFT, color);
-            for dz in 0..u {
-                for dx in 0..u {
-                    if sample(gx0 + dx, gz0 + dz) {
-                        let sx = x_oct + dx * step_oct;
-                        let sz = z_oct + dz * step_oct;
-                        push_quad(tris, sx, sz, sx + step_oct, sz + step_oct, &vertex);
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Derived shore depth `[0, 1]` for a water subcell: a bounded four-way
-/// outward scan (in subcells) for the nearest subcell not fully inside
-/// the water body. `0` at the shore edge, rising monotonically inward to
-/// `1` past the scan reach.
-fn subcell_shore_depth(inside: &impl Fn(i32, i32) -> bool, x: i32, z: i32) -> f32 {
-    let mut nearest = MAX_SHORE_SCAN;
-    for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-        for step in 1..=MAX_SHORE_SCAN {
-            if !inside(x + dx * step, z + dz * step) {
-                nearest = nearest.min(step);
-                break;
-            }
-        }
-    }
-    ((nearest - 1) as f32 / (MAX_SHORE_SCAN - 1) as f32).clamp(0.0, 1.0)
 }
 
 /// Emit the raw calibration view: one grayscale quad per non-Void
@@ -1220,14 +1210,16 @@ fn emit_skirts(
                 x: at.x * EDGE + lx,
                 z: at.z * EDGE + lz,
             };
-            let cell_height = world.height(cell);
+            let cell_level = world.surface_level(cell);
             let mut cached: Option<[f32; 4]> = None;
             for edge in &DIRECTIONS {
                 let neighbor = CellPos {
                     x: cell.x + edge.offset.0,
                     z: cell.z + edge.offset.1,
                 };
-                if cell_height <= world.height(neighbor) || !world.edge_is_cliff(cell, neighbor) {
+                if cell_level <= world.surface_level(neighbor)
+                    || !world.edge_is_cliff(cell, neighbor)
+                {
                     continue;
                 }
                 let top = *cached.get_or_insert_with(|| world.cell_corner_heights(cell));
@@ -1295,7 +1287,10 @@ fn emit_skirts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::{CELLS_PER_CHUNK_AREA, Chunk, Region, SetMaterialStyle, SmoothingProfile};
+    use crate::world::{
+        CELLS_PER_CHUNK_AREA, Chunk, Region, STEP_MAX_OCTIMETERS, SetMaterialStyle,
+        SmoothingProfile,
+    };
     use style::ResolvedCell;
 
     fn grass_cell() -> ResolvedCell {
@@ -1314,12 +1309,6 @@ mod tests {
             z0: cz as f32,
             corners: [0.0; 4],
         }
-    }
-
-    fn overlay_tris(tris: &[DrawTriangle]) -> usize {
-        tris.iter()
-            .filter(|t| t.verts.iter().all(|v| v.y > 0.0))
-            .count()
     }
 
     #[test]
@@ -1412,45 +1401,52 @@ mod tests {
     }
 
     #[test]
-    fn water_depth_is_monotone_inward_and_absent_outside() {
-        // Shore depth must be zero at the shoreline and rise monotonically
-        // toward the interior; a subcell one step from open water is
-        // shallower than one buried deep. Depth outside the water body is
-        // never sampled (the caller skips subcells not fully inside).
-        let n = 24i32;
-        let mut field = vec![false; (n * n) as usize];
-        for z in 0..n {
-            for x in 0..n {
-                if (x - 12) * (x - 12) + (z - 12) * (z - 12) <= 81 {
-                    field[(z * n + x) as usize] = true;
-                }
+    fn water_depth_grades_with_the_lakebed_and_clamps() {
+        // Depth is the surface-to-lakebed drop over
+        // WATER_DEPTH_FULL_OCTIMETERS: zero at the waterline, rising as the
+        // lakebed falls away, clamped to full a meter down. A lakebed
+        // shelving eastward reads monotonically deeper — the level-minus-
+        // lakebed grading that replaced the shore-distance scan.
+        let mut chunk = Chunk::empty();
+        for lz in 0..EDGE {
+            for lx in 0..EDGE {
+                // Lakebed drops 20 octimeters per cell to the east.
+                chunk.height[(lz * EDGE + lx) as usize] = -20 * lx;
             }
         }
-        let inside =
-            |x: i32, z: i32| x >= 0 && z >= 0 && x < n && z < n && field[(z * n + x) as usize];
-        let center = subcell_shore_depth(&inside, 12, 12);
-        let shore = subcell_shore_depth(&inside, 21, 12);
-        assert!(center > shore, "deeper inside: {center} > {shore}");
-        assert_eq!(shore, 0.0, "a subcell touching open water is at depth 0");
-        assert_eq!(center, 1.0, "the middle of a wide lake is fully deep");
+        let mut world = World::new();
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
+        // Surface at the datum; depth rises with the eastward lakebed drop.
+        let shallow = water_depth(&world, 0, 2.5, 5.5);
+        let deep = water_depth(&world, 0, 8.5, 5.5);
+        assert!(deep > shallow, "deeper east: {deep} > {shallow}");
+        assert_eq!(
+            water_depth(&world, 0, 0.5, 5.5),
+            0.0,
+            "at the waterline depth is zero",
+        );
+        // Cell 14's lakebed is -280 octimeters, past a meter — clamps to 1.
+        assert_eq!(
+            water_depth(&world, 0, 14.5, 5.5),
+            1.0,
+            "past full depth clamps"
+        );
     }
 
     #[test]
     fn full_water_chunk_budget_is_pinned() {
-        // Tripwire: the water budget is body + rim, all derivable. Body: a
-        // graded quad per subcell fully inside the eroded grid — with water
-        // on every side, all 64*64 subcells qualify = 8192 tris. Rim: the
-        // smoothed grid is all-true, so its march greedy-merges to one quad
-        // (2 tris); water never marches the eroded grid (the body quads
-        // replace that layer). Total 8194. A change to the water
-        // resolution, rim width, or grading fan-out moves this and must be
-        // deliberate.
+        // Tripwire: water is underlay fabric, so a fully-water chunk is all
+        // interior body — each of its 256 cells tiles the flat water patch
+        // with one depth-graded quad per subcell (16 subcells x 2 tris), and
+        // nothing else draws (no partition windows inside a uniform body, no
+        // overlay, no skirts on flat water). 256 * 32 = 8192. A change to the
+        // per-subcell water resolution or the interior body path moves this
+        // and must be deliberate.
         let mut world = World::new();
         for dz in -1..=1 {
             for dx in -1..=1 {
                 let mut c = Chunk::empty();
-                c.overlay = [Material::Water; CELLS_PER_CHUNK_AREA];
-                c.overlay_mask = [0xFFFF; CELLS_PER_CHUNK_AREA];
+                c.underlay = [Material::Water; CELLS_PER_CHUNK_AREA];
                 world.insert_chunk(ChunkPos { x: dx, z: dz }, c);
             }
         }
@@ -1460,23 +1456,22 @@ mod tests {
             ViewMode::Painted,
             &StyleTable::default(),
         );
-        assert_eq!(overlay_tris(&tris), 8194, "8192 body + one merged rim quad");
+        assert_eq!(tris.len(), 8192, "256 cells x 16 subcells x 2 tris");
     }
 
     #[test]
     fn water_shoreline_is_smoothed_and_rimmed() {
-        // The waterline flows through the same corner minimization and rim
-        // march as land contours: a lone water square must emit strictly
-        // more than its raw per-subcell quads (the marched rim band is
-        // present) and its smoothed silhouette must cut the square's
-        // corners (some rim geometry sits off the subcell lattice).
+        // Water is underlay fabric: a water square painted into a grass
+        // field smooths and rims its waterline through the same partition as
+        // any material boundary (a crossing lands off the cell lattice), and
+        // the body renders as blue water.
         let mut world = World::new();
         let mut c = Chunk::empty();
+        c.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
         // A 4x4-cell water square in the chunk interior.
         for lz in 6..10 {
             for lx in 6..10 {
-                c.overlay[(lz * EDGE + lx) as usize] = Material::Water;
-                c.overlay_mask[(lz * EDGE + lx) as usize] = 0xFFFF;
+                c.underlay[(lz * EDGE + lx) as usize] = Material::Water;
             }
         }
         world.insert_chunk(ChunkPos { x: 0, z: 0 }, c);
@@ -1486,25 +1481,16 @@ mod tests {
             ViewMode::Painted,
             &StyleTable::default(),
         );
-
-        let rim_tris = tris
-            .iter()
-            .filter(|t| t.verts.iter().all(|v| v.y > 0.0 && v.y < OVERLAY_BODY_LIFT))
-            .count();
-        assert!(rim_tris > 0, "water marches a shoreline rim layer");
-        // The smoothed rim contour cuts corners between subcell lattice
-        // points: some rim vertex sits on the half-subcell grid (odd
-        // multiple of 1/8 m), which raw per-subcell quads never produce.
-        let off_lattice = tris
-            .iter()
-            .filter(|t| t.verts.iter().all(|v| v.y > 0.0 && v.y < OVERLAY_BODY_LIFT))
-            .flat_map(|t| t.verts.iter())
-            .any(|v| {
-                let scaled = v.x * 8.0;
-                let eighths = scaled.round();
-                (scaled - eighths).abs() < 1e-4 && (eighths as i64) % 2 != 0
-            });
-        assert!(off_lattice, "the shoreline silhouette is corner-minimized");
+        assert!(
+            has_smoothed_crossing(&tris),
+            "the waterline is corner-minimized like any material boundary",
+        );
+        assert!(
+            tris.iter()
+                .flat_map(|t| t.verts.iter())
+                .any(|v| v.b > v.r && v.b > v.g),
+            "the water body renders as blue water",
+        );
     }
 
     #[test]

@@ -42,8 +42,8 @@
 //!   cascade resolves ([`World::underlay`]): the cell's own underlay if
 //!   non-[`Material::Void`], else the cell's region's `default_material`,
 //!   else `Void`.
-//! - [`Chunk::overlay`] — an optional crisp placed surface (path, water,
-//!   floor). `Void` means no overlay. Never cascade-resolved
+//! - [`Chunk::overlay`] — an optional crisp placed surface (path, floor).
+//!   `Void` means no overlay. Never cascade-resolved
 //!   ([`World::overlay`] is a raw plane read).
 //! - [`Chunk::overlay_mask`] — a subcell coverage bitmask per cell. Each
 //!   cell holds a [`SUBCELLS_PER_CELL_EDGE`]² bit grid (bit `z*SUB + x`,
@@ -54,6 +54,19 @@
 //!   painter's order applies across layers. Reserved here — the wire
 //!   layout is final, but mask meshing is a follow-up; nothing in this
 //!   module interprets the bits.
+//!
+//! # Water planes
+//!
+//! [`Material::Water`] is underlay ground fabric, not an overlay: a cell
+//! painted Water in the underlay reads as water, tiling and smoothing
+//! through the same partition as every other material. What makes its
+//! surface flat is a **water-plane table** — [`WaterPlane`] rows holding a
+//! [`WaterPlane::level_octimeters`], referenced by 1-based id from the
+//! per-cell [`Chunk::water_plane`] plane (`0` = the datum-0 level). A water
+//! cell resolves its surface at its plane's level ([`World::water_level`])
+//! rather than its own lakebed [`Chunk::height`], so the surface lies flat
+//! regardless of the ground beneath — disconnected areas sharing a plane
+//! share a level (one sea row every coastal cell references).
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -239,8 +252,21 @@ pub struct SmoothingProfile {
     pub degrees: u32,
 }
 
-/// One `16 × 16` block of the world, as a struct-of-arrays: five
-/// property planes, each row-major (`z * 16 + x`).
+/// An authored water surface level. Water cells reference a plane by
+/// 1-based id from the per-cell water plane (`0` = the datum-0 level); the
+/// table is positional like the region table, so a plane's id is its index
+/// in [`World`]'s table plus one. Disconnected water bodies can share a
+/// plane (one sea row every coastal cell points at); the level is authored,
+/// not derived from the ground.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WaterPlane {
+    /// The surface height in octimeters the referencing water cells lie at,
+    /// regardless of their lakebed [`Chunk::height`].
+    pub level_octimeters: i32,
+}
+
+/// One `16 × 16` block of the world, as a struct-of-arrays: property
+/// planes, each row-major (`z * 16 + x`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Chunk {
     /// Ground fabric — cascade-resolved by [`World::underlay`].
@@ -256,6 +282,11 @@ pub struct Chunk {
     pub height: [i32; CELLS_PER_CHUNK_AREA],
     /// Region id per cell (`0` = no region).
     pub region: [u16; CELLS_PER_CHUNK_AREA],
+    /// Water-plane id per cell (`0` = none — the datum-0 level). Meaningful
+    /// only where the cascade-resolved underlay is [`Material::Water`];
+    /// selects the row of [`World`]'s water-plane table whose level the
+    /// cell's water surface lies at.
+    pub water_plane: [u16; CELLS_PER_CHUNK_AREA],
     /// Smoothing-profile id per cell (`0` = no override — the material's
     /// own smoothing applies).
     pub smoothing: [u8; CELLS_PER_CHUNK_AREA],
@@ -271,6 +302,7 @@ impl Chunk {
             overlay_mask: [0; CELLS_PER_CHUNK_AREA],
             height: [0; CELLS_PER_CHUNK_AREA],
             region: [0; CELLS_PER_CHUNK_AREA],
+            water_plane: [0; CELLS_PER_CHUNK_AREA],
             smoothing: [0; CELLS_PER_CHUNK_AREA],
         }
     }
@@ -289,6 +321,7 @@ pub struct World {
     chunks: BTreeMap<ChunkPos, Chunk>,
     regions: Vec<Region>,
     smoothing_profiles: Vec<SmoothingProfile>,
+    water_planes: Vec<WaterPlane>,
 }
 
 impl World {
@@ -360,7 +393,9 @@ impl World {
             .map_or(0, |chunk| chunk.overlay_mask[cell.chunk_index()])
     }
 
-    /// Elevation at `cell` in octimeters. Unset cells read `0`.
+    /// Elevation at `cell` in octimeters — the raw lakebed read. Unset
+    /// cells read `0`. Under a water cell this is the ground beneath the
+    /// surface, not the water level ([`World::water_level`] resolves that).
     #[must_use]
     pub fn height(&self, cell: CellPos) -> i32 {
         self.chunks
@@ -368,22 +403,67 @@ impl World {
             .map_or(0, |chunk| chunk.height[cell.chunk_index()])
     }
 
-    /// Do two edge-adjacent cells meet at a cliff — a height step strictly
-    /// past [`STEP_MAX_OCTIMETERS`]? The rule is pairwise over the two
-    /// heights, so any caller holding two adjacent cells derives the same
-    /// answer.
+    /// The authored water surface level in octimeters at `cell`, or `None`
+    /// if the cell is not water. `Some` exactly when the cascade-resolved
+    /// underlay is [`Material::Water`]: the level is the cell's water
+    /// plane's [`WaterPlane::level_octimeters`], with the datum `0` for
+    /// plane id `0` or an unregistered id — the level is authored, never
+    /// derived from the lakebed [`World::height`].
+    #[must_use]
+    pub fn water_level(&self, cell: CellPos) -> Option<i32> {
+        if self.underlay(cell) != Material::Water {
+            return None;
+        }
+        let Some(chunk) = self.chunks.get(&cell.chunk()) else {
+            return Some(0);
+        };
+        let plane_id = chunk.water_plane[cell.chunk_index()];
+        if plane_id == 0 {
+            return Some(0);
+        }
+        Some(
+            self.water_planes
+                .get(plane_id as usize - 1)
+                .map_or(0, |plane| plane.level_octimeters),
+        )
+    }
+
+    /// The effective surface level in octimeters at `cell`: the water
+    /// level for a water cell, else the lakebed [`World::height`]. The
+    /// surface-resolution machinery — [`World::edge_is_cliff`], the corner
+    /// plate walk, the mesher's lift and skirt passes — reads this so a
+    /// water cell resolves at its flat authored level instead of the ground
+    /// beneath it.
+    pub(crate) fn surface_level(&self, cell: CellPos) -> i32 {
+        self.water_level(cell).unwrap_or_else(|| self.height(cell))
+    }
+
+    /// Do two edge-adjacent cells meet at a cliff — an effective-level step
+    /// strictly past [`STEP_MAX_OCTIMETERS`]? The rule is pairwise over the
+    /// two [`World::surface_level`]s, so any caller holding two adjacent
+    /// cells derives the same answer, and a bank standing past the step
+    /// ceiling above a water surface cliffs against it.
     #[must_use]
     pub fn edge_is_cliff(&self, a: CellPos, b: CellPos) -> bool {
-        (self.height(a) - self.height(b)).abs() > STEP_MAX_OCTIMETERS
+        (self.surface_level(a) - self.surface_level(b)).abs() > STEP_MAX_OCTIMETERS
     }
 
     /// The plate-resolved elevation of lattice corner `(kx, kz)` as seen
     /// from `cell` (one of the corner's four incident cells), in meters.
     /// The four incident cells partition into groups connected by
     /// non-cliff shared edges — a walk around the corner — and the plate
-    /// containing `cell` averages its members' heights. Connected cells
-    /// share a plate (the surface blends); a cliff splits the plates (the
-    /// surface breaks, and the gap is the skirt's job).
+    /// containing `cell` averages its members' effective surface levels
+    /// ([`World::surface_level`]). Connected cells share a plate (the
+    /// surface blends); a cliff splits the plates (the surface breaks, and
+    /// the gap is the skirt's job).
+    ///
+    /// A plate with any water member pins to the mean of its **water**
+    /// members' levels alone, not the mixed mean — so an interior water
+    /// corner is exactly flat at the authored level, and a connected shore
+    /// corner (land within the step ceiling of the level) meets the water
+    /// plane exactly, blending the land down to the waterline like a beach
+    /// with no slit and no extra geometry. Past the step ceiling the plates
+    /// split as usual and the skirt closes the face.
     fn corner_plate(&self, kx: i32, kz: i32, cell: CellPos) -> f32 {
         // Incident cells in cyclic order, so consecutive entries (mod 4)
         // share an edge and the diagonal pairs do not.
@@ -396,7 +476,8 @@ impl World {
             CellPos { x: kx, z: kz },
             CellPos { x: kx - 1, z: kz },
         ];
-        let heights = cells.map(|c| self.height(c));
+        let levels = cells.map(|c| self.surface_level(c));
+        let is_water = cells.map(|c| self.water_level(c).is_some());
         let start = cells.iter().position(|&c| c == cell);
         debug_assert!(start.is_some(), "cell must be incident to the corner");
         let start = start.unwrap_or(2);
@@ -410,7 +491,7 @@ impl World {
             for k in 0..4 {
                 let a = k;
                 let b = (k + 1) % 4;
-                let connected = (heights[a] - heights[b]).abs() <= STEP_MAX_OCTIMETERS;
+                let connected = (levels[a] - levels[b]).abs() <= STEP_MAX_OCTIMETERS;
                 if connected && member[a] != member[b] {
                     member[a] = true;
                     member[b] = true;
@@ -418,11 +499,14 @@ impl World {
                 }
             }
         }
+        // A water member pins the plate to the water level: average only the
+        // water members when any is present, else the whole connected plate.
+        let any_water = (0..4).any(|k| member[k] && is_water[k]);
         let mut sum = 0i32;
         let mut count = 0i32;
         for k in 0..4 {
-            if member[k] {
-                sum += heights[k];
+            if member[k] && (!any_water || is_water[k]) {
+                sum += levels[k];
                 count += 1;
             }
         }
@@ -460,11 +544,14 @@ impl World {
         bottom + (top - bottom) * fz
     }
 
-    /// The ground elevation in meters at `(wx, wz)`, resolved through the
+    /// The surface elevation in meters at `(wx, wz)`, resolved through the
     /// owning cell (floor). This is the stood-on height for movers,
     /// ray-picks, and the camera — the same bilinear patch the mesher
-    /// draws, so what is drawn is what is stood on. A point exactly on a
-    /// cliff edge reads the higher-coordinate side (the floor convention).
+    /// draws, so what is drawn is what is stood on. Over a water cell the
+    /// patch reads the water surface (the corner plates pin to the water
+    /// level), so a mover on water stands at the surface — the swimming
+    /// datum, ahead of any blocking rules. A point exactly on a cliff edge
+    /// reads the higher-coordinate side (the floor convention).
     #[must_use]
     pub fn surface_height(&self, wx: f32, wz: f32) -> f32 {
         let cell = CellPos {
@@ -549,6 +636,27 @@ impl World {
         self.smoothing_profiles[index] = clamped;
     }
 
+    /// Register a water plane under a 1-based `id`. The table is positional
+    /// like the region table, so this grows it (padding intervening slots
+    /// with the datum-0 level) and writes `plane` at index `id - 1`.
+    /// `id == 0` is ignored (`0` is the "no plane" sentinel — the datum-0
+    /// level).
+    pub fn insert_water_plane(&mut self, id: u32, plane: WaterPlane) {
+        if id == 0 {
+            return;
+        }
+        let index = id as usize - 1;
+        if index >= self.water_planes.len() {
+            self.water_planes.resize(
+                index + 1,
+                WaterPlane {
+                    level_octimeters: 0,
+                },
+            );
+        }
+        self.water_planes[index] = plane;
+    }
+
     /// The smoothing override at `cell`, if the cell's smoothing plane
     /// points at a registered profile. `None` — plane `0`, missing chunk,
     /// or an unregistered id — means the material default applies.
@@ -571,8 +679,8 @@ impl World {
 
 /// `aether.kit.world.set_chunk` — write one chunk's planes. The three
 /// ground planes ride as raw `Bytes` (256 material/shape bytes each);
-/// `height` / `region` ride as length-256 vectors. Shorter vectors pad
-/// with `Void` / `0`; longer ones truncate.
+/// `height` / `region` / `water_plane` ride as length-256 vectors. Shorter
+/// vectors pad with `Void` / `0`; longer ones truncate.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.world.set_chunk")]
 pub struct SetChunk {
@@ -590,6 +698,9 @@ pub struct SetChunk {
     pub height: Vec<i32>,
     /// Region-id plane — 256 values. `0` = no region.
     pub region: Vec<u32>,
+    /// Water-plane-id plane — 256 values, narrowing to `u16` like `region`.
+    /// `0` = the datum-0 level; meaningful only under a water cell.
+    pub water_plane: Vec<u32>,
     /// Smoothing-profile-id plane — 256 raw bytes. `0` = no override.
     pub smoothing: Vec<u8>,
 }
@@ -629,6 +740,9 @@ impl SetChunk {
             *dst = *value;
         }
         for (dst, value) in chunk.region.iter_mut().zip(&self.region) {
+            *dst = *value as u16;
+        }
+        for (dst, value) in chunk.water_plane.iter_mut().zip(&self.water_plane) {
             *dst = *value as u16;
         }
         for (dst, byte) in chunk.smoothing.iter_mut().zip(&self.smoothing) {
@@ -704,6 +818,28 @@ impl SetSmoothingProfile {
         SmoothingProfile {
             iterations: self.iterations,
             degrees: self.degrees,
+        }
+    }
+}
+
+/// `aether.kit.world.set_water_plane` — register a water plane in the table
+/// under a 1-based `plane_id`, giving water cells a flat authored surface
+/// level to resolve at. The per-cell water plane (`aether.kit.world.set_chunk`'s
+/// `water_plane`) points at the row; retuning a lake's level is this one
+/// table write, live like `set_region`.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.world.set_water_plane")]
+pub struct SetWaterPlane {
+    pub plane_id: u32,
+    pub level_octimeters: i32,
+}
+
+impl SetWaterPlane {
+    /// The [`WaterPlane`] this registers.
+    #[must_use]
+    pub fn plane(&self) -> WaterPlane {
+        WaterPlane {
+            level_octimeters: self.level_octimeters,
         }
     }
 }
@@ -827,22 +963,26 @@ pub enum WorldDecodeError {
     BadName,
 }
 
-/// The current write version. Version 3 adds a cliff-material byte to
-/// each region record; version 2 adds the smoothing-profile table (after
-/// the region table) and the per-chunk smoothing plane (after the region
-/// plane). Older buffers still decode: a pre-3 region reads Stone cliffs,
-/// a version-1 buffer reads an empty profile table and an all-zero
-/// smoothing plane.
-const WORLD_FORMAT_VERSION: u8 = 3;
+/// The current write version. Version 4 adds the water-plane table (after
+/// the smoothing-profile table) and the per-chunk water-plane plane (after
+/// the height plane); version 3 adds a cliff-material byte to each region
+/// record; version 2 adds the smoothing-profile table (after the region
+/// table) and the per-chunk smoothing plane (after the region plane).
+/// Older buffers still decode: a pre-4 buffer reads an empty water-plane
+/// table and an all-zero water plane, a pre-3 region reads Stone cliffs, a
+/// version-1 buffer reads an empty profile table and an all-zero smoothing
+/// plane.
+const WORLD_FORMAT_VERSION: u8 = 4;
 
 /// The oldest version [`World::from_bytes`] still decodes.
 const WORLD_FORMAT_VERSION_MIN: u8 = 1;
 
 impl World {
     /// Serialize to the compact `aether.kit.world.load` binary format: a
-    /// version byte, the region table, the smoothing-profile table, then
-    /// per-chunk plane records — all little-endian. Region and profile ids
-    /// are positional (index + 1), so the table order is the id order.
+    /// version byte, the region table, the smoothing-profile table, the
+    /// water-plane table, then per-chunk plane records — all little-endian.
+    /// Region, profile, and water-plane ids are positional (index + 1), so
+    /// the table order is the id order.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -860,6 +1000,10 @@ impl World {
             out.push(profile.iterations as u8);
             out.extend_from_slice(&(profile.degrees as u16).to_le_bytes());
         }
+        out.extend_from_slice(&(self.water_planes.len() as u32).to_le_bytes());
+        for plane in &self.water_planes {
+            out.extend_from_slice(&plane.level_octimeters.to_le_bytes());
+        }
         out.extend_from_slice(&(self.chunks.len() as u32).to_le_bytes());
         for (pos, chunk) in &self.chunks {
             out.extend_from_slice(&pos.x.to_le_bytes());
@@ -876,6 +1020,9 @@ impl World {
             for h in &chunk.height {
                 out.extend_from_slice(&h.to_le_bytes());
             }
+            for w in &chunk.water_plane {
+                out.extend_from_slice(&w.to_le_bytes());
+            }
             for r in &chunk.region {
                 out.extend_from_slice(&r.to_le_bytes());
             }
@@ -884,11 +1031,12 @@ impl World {
         out
     }
 
-    /// Decode the [`World::to_bytes`] format, current or older (a pre-3
-    /// region reads Stone cliffs; a version-1 buffer carries no smoothing
-    /// table or plane — both read empty / zero). A truncated buffer or
-    /// unknown version returns `Err` rather than panicking; the caller
-    /// keeps its prior world on any error.
+    /// Decode the [`World::to_bytes`] format, current or older (a pre-4
+    /// buffer carries no water-plane table or plane — both read empty /
+    /// zero; a pre-3 region reads Stone cliffs; a version-1 buffer carries
+    /// no smoothing table or plane). A truncated buffer or unknown version
+    /// returns `Err` rather than panicking; the caller keeps its prior
+    /// world on any error.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WorldDecodeError> {
         let mut reader = Reader::new(bytes);
         let version = reader.u8()?;
@@ -927,6 +1075,16 @@ impl World {
                 });
             }
         }
+        let mut water_planes = Vec::new();
+        if version >= 4 {
+            let plane_count = reader.u32()? as usize;
+            water_planes.reserve(plane_count);
+            for _ in 0..plane_count {
+                water_planes.push(WaterPlane {
+                    level_octimeters: reader.i32()?,
+                });
+            }
+        }
         let chunk_count = reader.u32()? as usize;
         let mut chunks = BTreeMap::new();
         for _ in 0..chunk_count {
@@ -945,6 +1103,11 @@ impl World {
             for slot in &mut chunk.height {
                 *slot = reader.i32()?;
             }
+            if version >= 4 {
+                for slot in &mut chunk.water_plane {
+                    *slot = reader.u16()?;
+                }
+            }
             for slot in &mut chunk.region {
                 *slot = reader.u16()?;
             }
@@ -959,6 +1122,7 @@ impl World {
             chunks,
             regions,
             smoothing_profiles,
+            water_planes,
         })
     }
 }
@@ -1127,6 +1291,7 @@ mod tests {
             overlay_mask: vec![0u8; OVERLAY_MASK_WIRE_BYTES],
             height: vec![0i32; CELLS_PER_CHUNK_AREA],
             region,
+            water_plane: vec![0u32; CELLS_PER_CHUNK_AREA],
             smoothing: vec![0u8; CELLS_PER_CHUNK_AREA],
         };
         assert_eq!(set.chunk_pos(), ChunkPos { x: 2, z: -1 });
@@ -1154,6 +1319,7 @@ mod tests {
             overlay_mask,
             height: Vec::new(),
             region: Vec::new(),
+            water_plane: Vec::new(),
             smoothing: Vec::new(),
         };
         let chunk = set.into_chunk();
@@ -1172,6 +1338,7 @@ mod tests {
             overlay_mask: Vec::new(),
             height: vec![5i32; 1],
             region: Vec::new(),
+            water_plane: Vec::new(),
             smoothing: vec![3u8; 1], // short → rest no-override
         };
         let chunk = set.into_chunk();
@@ -1210,12 +1377,25 @@ mod tests {
                 degrees: 60,
             },
         );
+        world.insert_water_plane(
+            1,
+            WaterPlane {
+                level_octimeters: -17,
+            },
+        );
+        world.insert_water_plane(
+            2,
+            WaterPlane {
+                level_octimeters: 320,
+            },
+        );
         let mut a = Chunk::empty();
         a.underlay[0] = Material::Stone;
         a.overlay[5] = Material::Water;
         a.overlay_mask[5] = 0x0F0F;
         a.height[10] = -42;
         a.region[20] = 2;
+        a.water_plane[40] = 2;
         a.smoothing[30] = 1;
         world.insert_chunk(ChunkPos { x: 1, z: -3 }, a);
         let mut b = Chunk::empty();
@@ -1228,6 +1408,7 @@ mod tests {
         // Structural equality across the whole world.
         assert_eq!(decoded.regions, world.regions);
         assert_eq!(decoded.smoothing_profiles, world.smoothing_profiles);
+        assert_eq!(decoded.water_planes, world.water_planes);
         assert_eq!(
             decoded.chunk(ChunkPos { x: 1, z: -3 }),
             world.chunk(ChunkPos { x: 1, z: -3 })
@@ -1451,5 +1632,161 @@ mod tests {
         chunk3.region[0] = 3;
         world.insert_chunk(ChunkPos { x: 1, z: 0 }, chunk3);
         assert_eq!(world.underlay(cell(16, 0)), Material::Stone);
+    }
+
+    #[test]
+    fn pre_v4_buffer_decodes_empty_water_table_and_zero_plane() {
+        // Tripwire: a version-3 buffer carries no water-plane table and no
+        // per-chunk water plane; both must read empty / zero, and a water
+        // cell in it resolves at the datum-0 level. Hand-built: no regions
+        // or profiles, one chunk with a water cell and the exact v3 plane
+        // bytes (no water plane between height and region).
+        let mut buf = vec![3u8];
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no regions
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no profiles
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one chunk
+        buf.extend_from_slice(&0i32.to_le_bytes()); // chunk x
+        buf.extend_from_slice(&0i32.to_le_bytes()); // chunk z
+        let mut underlay = [0u8; CELLS_PER_CHUNK_AREA];
+        underlay[0] = Material::Water.to_u8();
+        buf.extend_from_slice(&underlay);
+        buf.extend_from_slice(&[0u8; CELLS_PER_CHUNK_AREA]); // overlay
+        buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // masks
+        buf.extend_from_slice(&[0u8; 4 * CELLS_PER_CHUNK_AREA]); // heights
+        buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // regions
+        buf.extend_from_slice(&[0u8; CELLS_PER_CHUNK_AREA]); // smoothing
+
+        let world = World::from_bytes(&buf).expect("a v3 buffer still decodes");
+        assert!(world.water_planes.is_empty());
+        let chunk = world.chunk(ChunkPos { x: 0, z: 0 }).expect("chunk");
+        assert_eq!(chunk.water_plane, [0u16; CELLS_PER_CHUNK_AREA]);
+        assert_eq!(world.water_level(cell(0, 0)), Some(0), "datum-0 level");
+    }
+
+    /// A one-chunk world whose underlay / water-plane / height planes come
+    /// from `fill(lx, lz) -> (material, plane id, lakebed height)`, with the
+    /// given `(id, level)` water planes registered.
+    fn plane_world(
+        planes: &[(u32, i32)],
+        fill: impl Fn(i32, i32) -> (Material, u16, i32),
+    ) -> World {
+        let mut chunk = Chunk::empty();
+        for lz in 0..CELLS_PER_CHUNK {
+            for lx in 0..CELLS_PER_CHUNK {
+                let (material, plane, height) = fill(lx, lz);
+                let i = (lz * CELLS_PER_CHUNK + lx) as usize;
+                chunk.underlay[i] = material;
+                chunk.water_plane[i] = plane;
+                chunk.height[i] = height;
+            }
+        }
+        let mut world = World::new();
+        for &(id, level) in planes {
+            world.insert_water_plane(
+                id,
+                WaterPlane {
+                    level_octimeters: level,
+                },
+            );
+        }
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
+        world
+    }
+
+    #[test]
+    fn water_level_resolves_plane_then_datum_and_none_off_water() {
+        // A water cell reads its plane's level; plane 0 and an unregistered
+        // id both read the datum 0; a non-water cell reads None.
+        let world = plane_world(&[(1, 100)], |lx, _| match lx {
+            0 => (Material::Water, 1, 0),  // registered plane 1
+            1 => (Material::Water, 0, 0),  // plane 0 → datum
+            2 => (Material::Water, 9, 0),  // unregistered id → datum
+            3 => (Material::Grass, 0, 50), // not water
+            _ => (Material::Void, 0, 0),
+        });
+        assert_eq!(world.water_level(cell(0, 0)), Some(100));
+        assert_eq!(world.water_level(cell(1, 0)), Some(0));
+        assert_eq!(world.water_level(cell(2, 0)), Some(0));
+        assert_eq!(world.water_level(cell(3, 0)), None);
+        // The lakebed read is unchanged — height stays the raw ground.
+        assert_eq!(world.height(cell(3, 0)), 50);
+    }
+
+    #[test]
+    fn interior_water_surface_is_flat_at_the_plane_level() {
+        // A block of water on one plane renders exactly flat at the authored
+        // level regardless of the lakebed heights beneath — every corner of
+        // an interior water cell pins to the level.
+        let world = plane_world(&[(1, 128)], |lx, lz| {
+            // A bumpy lakebed under the water so a non-pinned plate would tilt.
+            (Material::Water, 1, 11 * lx - 7 * lz)
+        });
+        let level_m = 128.0 / 256.0;
+        for corner in world.cell_corner_heights(cell(5, 5)) {
+            assert!(
+                (corner - level_m).abs() < 1e-6,
+                "water corner {corner} not flat at {level_m}",
+            );
+        }
+        // And it is the stood-on surface, while height stays the raw lakebed.
+        assert!((world.surface_height(5.5, 5.5) - level_m).abs() < 1e-6);
+        assert_eq!(world.height(cell(5, 5)), 11 * 5 - 7 * 5);
+    }
+
+    #[test]
+    fn connected_shore_land_blends_to_the_water_level() {
+        // Land within the step ceiling of the water level shares the corner
+        // plate, and the plate pins to the water members — so the land's
+        // shared corner meets the water plane exactly (the beach blend), not
+        // the mixed mean.
+        let world = plane_world(&[(1, 100)], |_, lz| {
+            if lz == 0 {
+                (Material::Water, 1, 0) // level 100, lakebed 0
+            } else {
+                (Material::Grass, 0, 140) // within 64 of 100 → connected
+            }
+        });
+        let level_m = 100.0 / 256.0;
+        // Corner (1, 1) is shared by the two water cells (0,0),(1,0) and the
+        // two land cells (0,1),(1,1); the plate has water members, so every
+        // incident cell reads the water level there.
+        assert!((world.cell_corner_heights(cell(0, 0))[3] - level_m).abs() < 1e-6);
+        assert!(
+            (world.cell_corner_heights(cell(1, 1))[0] - level_m).abs() < 1e-6,
+            "connected shore land does not blend to the waterline",
+        );
+    }
+
+    #[test]
+    fn past_step_bank_splits_from_the_water_plane() {
+        // Land standing past the step ceiling above the water cliffs against
+        // it: the corner plates split, the water side stays at its level and
+        // the bank reads its own height — the gap the skirt closes.
+        let world = plane_world(&[(1, 100)], |_, lz| {
+            if lz == 0 {
+                (Material::Water, 1, 0) // level 100
+            } else {
+                (Material::Grass, 0, 200) // |200 - 100| = 100 > 64 → cliff
+            }
+        });
+        assert!(world.edge_is_cliff(cell(0, 0), cell(0, 1)));
+        // At corner (1, 1) the water side reads 100 and the bank reads 200.
+        assert!((world.cell_corner_heights(cell(0, 0))[3] - 100.0 / 256.0).abs() < 1e-6);
+        assert!((world.cell_corner_heights(cell(1, 1))[0] - 200.0 / 256.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_water_plane_row_rewrite_retunes_the_level() {
+        // Retuning a lake is one table write: the same water cell resolves at
+        // the new level after re-registering its plane id.
+        let mut world = plane_world(&[(1, 100)], |_, _| (Material::Water, 1, 0));
+        assert_eq!(world.water_level(cell(3, 3)), Some(100));
+        world.insert_water_plane(
+            1,
+            WaterPlane {
+                level_octimeters: 240,
+            },
+        );
+        assert_eq!(world.water_level(cell(3, 3)), Some(240));
     }
 }

@@ -28,6 +28,9 @@
 //! - `aether.kit.world.set_smoothing_profile` — register a contour-
 //!   smoothing profile the per-cell smoothing plane points at; remeshes
 //!   every cached chunk.
+//! - `aether.kit.world.set_water_plane` — register a water plane so water
+//!   cells pointing at it resolve their flat surface level; remeshes every
+//!   cached chunk (retuning a level restyles every referencing water body).
 //! - `aether.kit.world.set_material_style` — write a material's complete
 //!   live style row (base HSL, noise shape, smoothing defaults, rim /
 //!   wash / water tunables) and remesh every cached chunk, so a tuning
@@ -52,7 +55,7 @@ use super::mesher::mesh_chunk;
 use super::mesher::style::StyleTable;
 use crate::world::{
     ChunkPos, Material, SetChunk, SetMaterialStyle, SetRegion, SetSmoothingProfile, SetViewMode,
-    ViewMode, World, WorldLoad,
+    SetWaterPlane, ViewMode, World, WorldLoad,
 };
 
 /// World-view component: holds the world plane stack and a per-chunk
@@ -194,6 +197,22 @@ impl WasmActor for WorldView {
     fn on_set_smoothing_profile(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetSmoothingProfile) {
         self.world
             .insert_smoothing_profile(msg.profile_id, msg.profile());
+        self.remesh_all();
+    }
+
+    /// Register a water plane in the world's table, then remesh every cached
+    /// chunk — the level sets the flat surface of every water cell pointing
+    /// at this plane, so retuning it repaints all of them.
+    ///
+    /// # Agent
+    /// Send `aether.kit.world.set_water_plane` with a 1-based `plane_id` and
+    /// a `level_octimeters`. Point water cells at it through the
+    /// `water_plane` plane of `aether.kit.world.set_chunk` (id = plane,
+    /// `0` = the datum-0 level). One write retunes a whole lake live; use
+    /// `capture_frame` to verify.
+    #[handler]
+    fn on_set_water_plane(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetWaterPlane) {
+        self.world.insert_water_plane(msg.plane_id, msg.plane());
         self.remesh_all();
     }
 
