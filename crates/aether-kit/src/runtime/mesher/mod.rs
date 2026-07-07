@@ -71,26 +71,37 @@
 //! ([`World::water_level`]) rather than its lakebed [`World::height`], and a
 //! corner plate with any water member pins to that level — so the surface
 //! is exactly flat, a connected shore blends down to the waterline (beach),
-//! and a past-step bank splits and wears the skirt down to the water. An
+//! and a past-step bank splits and wears the wall down to the water. An
 //! interior water cell tiles the flat patch with a depth-graded quad per
 //! subcell, depth derived as the plane level minus the bilinear lakebed
 //! [`World::height`] over `WATER_DEPTH_FULL_OCTIMETERS`.
 //!
-//! # Height pass — plates, slopes, and skirts
+//! # Height pass — plates, slopes, and walls
 //!
 //! Every vertex lifts onto the plate-resolved height surface
 //! ([`World::surface_height_in`]): cell heights blend into continuous
 //! slopes where neighbors sit within the step ceiling
 //! ([`crate::world::STEP_MAX_OCTIMETERS`]) and break where they exceed
 //! it — the corner plates split exactly on cliff edges, an interior
-//! cell's owner-pinned patch lands the break on the cell line, and
-//! the skirt pass closes that gap with a vertical face wearing the high
-//! cell's region cliff material, darkened toward its base. Boundary
+//! cell's owner-pinned patch lands the break on the cell line, and the
+//! wall pass closes that gap with a vertical face wearing the high cell's
+//! region cliff material, darkened toward its base. The walls stitch from
+//! the same repartitioned sample grid the caps march, as the union of two
+//! segment classes over one pass: a material or Void boundary standing past
+//! the step ceiling lofts its marched contour down as a curtain — the
+//! wall's top vertices are the cap contour's own vertices lifted through
+//! the same owner-clamped patch, so the seam is watertight by construction
+//! rather than by stitching two independently derived lines — while a
+//! same-material cliff, which the material partition leaves no boundary to
+//! follow, lofts the cell-edge lattice line the owner-pinned patches
+//! already break on. Where the low side is a Void hole with no ground the
+//! curtain drops a fixed depth so the hole reads as thick ground rather
+//! than a paper lip. Boundary
 //! windows and overlay contours lift each vertex through its own
 //! (floor) cell — continuous wherever no cliff intervenes — and a water
 //! cell reads its flat authored plane level (the water section above)
 //! rather than the lakebed, so a lake on sloped terrain lies flat and a
-//! bank above it wears the skirt down to the water. A slope shade from the
+//! bank above it wears the wall down to the water. A slope shade from the
 //! patch normal bakes into vertex
 //! color so slopes read under the flat-color grammar; it multiplies by
 //! exactly one on level ground, so an all-flat world meshes
@@ -106,7 +117,8 @@ use aether_capabilities::render::{DrawTriangle, Vertex};
 use aether_math::Vec3;
 
 use crate::world::{
-    CELLS_PER_CHUNK, CellPos, ChunkPos, Material, SUBCELLS_PER_CELL_EDGE, ViewMode, World,
+    CELLS_PER_CHUNK, CellPos, ChunkPos, Material, STEP_MAX_OCTIMETERS, SUBCELLS_PER_CELL_EDGE,
+    ViewMode, World,
 };
 use contour::{
     GridPlacement, SmoothParams, emit_label_window, erode, label_case, march_grid,
@@ -152,9 +164,18 @@ const SKIRT_TOP_SHADE: f32 = 0.80;
 /// the top, so the face reads as receding toward the ground shadow.
 const SKIRT_BASE_SHADE: f32 = 0.55;
 
-/// The raw calibration view's flat gray for cliff faces — a skirt has no
+/// The raw calibration view's flat gray for cliff faces — a wall has no
 /// noise field to calibrate; it only keeps the terrain closed.
 const RAW_SKIRT_GRAY: f32 = 0.35;
+
+/// How far in octimeters a wall's base tucks under the low side's surface,
+/// so the low cap covers the seam with no crack.
+const WALL_TUCK_OCTIMETERS: i32 = 8;
+
+/// How far in octimeters a wall drops below its top edge where the low side
+/// is a Void hole with no ground — a hole reads as thick ground rather than
+/// a paper-thin lip.
+const WALL_VOID_DROP_OCTIMETERS: i32 = 512;
 
 /// The overlay rim layer lift — two octimeters over the underlay, one
 /// above the encroachment flap so an overlay contour always draws over a
@@ -214,14 +235,30 @@ pub fn mesh_chunk(
 ) -> Vec<DrawTriangle> {
     let mut tris = Vec::new();
     match mode {
-        ViewMode::Raw => mesh_raw(world, at, styles, &mut tris),
+        ViewMode::Raw => {
+            mesh_raw(world, at, styles, &mut tris);
+            emit_walls(world, at, mode, styles, None, &mut tris);
+        }
         ViewMode::Painted => {
-            mesh_underlay(world, at, styles, &mut tris);
+            let partition = mesh_underlay(world, at, styles, &mut tris);
             mesh_overlay(world, at, styles, &mut tris);
+            emit_walls(world, at, mode, styles, partition.as_ref(), &mut tris);
         }
     }
-    emit_skirts(world, at, mode, styles, &mut tris);
     tris
+}
+
+/// The repartitioned material grid the underlay pass marches its caps from,
+/// handed to the wall pass so it lofts its curtains from the same samples —
+/// the shared grid is what makes a wall top land exactly on a cap contour
+/// vertex. Carries the display labels, the grid width, and the octimeter
+/// placement (apron offset and sample step) the boundary walk reconstructs
+/// window positions from.
+struct DisplayPartition {
+    display: Vec<u8>,
+    gw: usize,
+    apron: i32,
+    step_oct: i32,
 }
 
 /// One cell's bilinear surface patch: the four plate-resolved corner
@@ -420,13 +457,18 @@ fn display_label(material: u8, body: bool) -> u8 {
 /// and its one-sample surround are uniformly body, and per-window marching
 /// polygons everywhere else, all at `y = 0` with no lifts. Every decision
 /// is a pure function of world coordinates, so two chunks emit identical
-/// geometry over their shared apron and the overlap is invisible.
-fn mesh_underlay(world: &World, at: ChunkPos, styles: &StyleTable, tris: &mut Vec<DrawTriangle>) {
+/// geometry over their shared apron and the overlap is invisible. Returns
+/// the split display grid so the wall pass lofts from the same samples;
+/// `None` when the whole chunk plus apron is Void (nothing to mesh).
+fn mesh_underlay(
+    world: &World,
+    at: ChunkPos,
+    styles: &StyleTable,
+    tris: &mut Vec<DrawTriangle>,
+) -> Option<DisplayPartition> {
     let apron = MAX_APRON_SUBCELLS;
     let n = (SUBCELLS_PER_CHUNK_EDGE + 2 * apron) as usize;
-    let Some((ids, params)) = partition_inputs(world, at, apron, n, styles) else {
-        return;
-    };
+    let (ids, params) = partition_inputs(world, at, apron, n, styles)?;
 
     let upsample = CONTOUR_UPSAMPLE;
     let (grid, gw, gh) = repartition(&ids, n, n, upsample, &params);
@@ -528,6 +570,13 @@ fn mesh_underlay(world: &World, at: ChunkPos, styles: &StyleTable, tris: &mut Ve
 
     let place = chunk_placement(at, apron, step_oct);
     emit_encroach_flaps(world, at, &grid, gw, gh, &place, styles, tris);
+
+    Some(DisplayPartition {
+        display,
+        gw,
+        apron,
+        step_oct,
+    })
 }
 
 /// Where a chunk's partition grid lands in the world: sample `(0, 0)`'s
@@ -1435,59 +1484,299 @@ fn mesh_raw(world: &World, at: ChunkPos, styles: &StyleTable, tris: &mut Vec<Dra
     }
 }
 
-/// Emit the vertical cliff faces this chunk owns: for every local cell
-/// standing strictly higher than an edge neighbor past the step ceiling,
-/// a quad from the high plate corners down to the low ones. The high cell
-/// owns the face, so a chunk-border cliff is emitted exactly once
-/// fleet-wide. Faces wear the high cell's region cliff material
-/// ([`World::cliff_material`]), darkened toward the base; the raw view
-/// keeps them a flat gray so the terrain stays closed without polluting
-/// the calibration field. Where the corner walk merged the two sides'
-/// plates the gap tapers to nothing and the face is skipped.
-#[allow(clippy::too_many_lines)] // one linear pass: enumerate, color, emit — no seams to split at
-fn emit_skirts(
+/// The marching-squares contour segments for one label's window case,
+/// indexed by the 4-bit case `BL | BR<<1 | TR<<2 | TL<<3` (`1` = the corner
+/// holds the label). Each entry lists the boundary segments as pairs of
+/// edge-midpoint indices over the window's eight points (edge midpoints
+/// `4 = bottom, 5 = right, 6 = top, 7 = left`) — the same crossings the cap
+/// polygon draws, so a wall lofted from them shares the cap's vertices.
+/// Cases `0` and `15` have no boundary; the two saddles (`5`, `10`) split
+/// into their two corner crossings.
+const WALL_SEGMENTS: [&[(u8, u8)]; 16] = [
+    &[],               // 0
+    &[(7, 4)],         // 1  BL
+    &[(4, 5)],         // 2  BR
+    &[(7, 5)],         // 3  BL BR
+    &[(5, 6)],         // 4  TR
+    &[(7, 4), (5, 6)], // 5  BL TR (saddle)
+    &[(4, 6)],         // 6  BR TR
+    &[(7, 6)],         // 7  BL BR TR
+    &[(6, 7)],         // 8  TL
+    &[(4, 6)],         // 9  BL TL
+    &[(4, 5), (6, 7)], // 10 BR TL (saddle)
+    &[(5, 6)],         // 11 BL BR TL
+    &[(7, 5)],         // 12 TR TL
+    &[(4, 5)],         // 13 BL TR TL
+    &[(4, 7)],         // 14 BR TR TL
+    &[],               // 15
+];
+
+/// Emit the chunk's vertical cliff faces as the union of two segment
+/// classes lofted from one shared partition: marched walls where a material
+/// or Void boundary stands past the step ceiling
+/// ([`emit_marched_walls`]), and cell-edge lattice walls where a
+/// same-material cliff leaves no marched boundary ([`emit_lattice_walls`]).
+/// The raw calibration view has no partition, so it closes every cliff at
+/// cell resolution in flat gray.
+fn emit_walls(
     world: &World,
     at: ChunkPos,
     mode: ViewMode,
     styles: &StyleTable,
+    partition: Option<&DisplayPartition>,
     tris: &mut Vec<DrawTriangle>,
 ) {
-    // Per direction: neighbor offset, the shared edge's two lattice
-    // corners as indices into the high cell's corner order, and the same
-    // lattice points in the neighbor's order (the low side's plates).
-    struct SkirtEdge {
+    if let Some(part) = partition {
+        emit_marched_walls(world, at, part, styles, tris);
+        emit_lattice_walls(world, at, mode, styles, true, tris);
+    } else {
+        emit_lattice_walls(world, at, mode, styles, false, tris);
+    }
+}
+
+/// Loft the marched cliff walls: over the boundary windows of the display
+/// partition, wherever a segment separates two materials — or a material
+/// from a Void hole — whose surface levels stand past the step ceiling,
+/// drop the segment's marched contour from the high side down to the low
+/// ground. Each window is owned by the cell under its center, the same
+/// ownership the cap walk uses, so a wall's top vertices lift through the
+/// identical owner-clamped patch ([`label_lift`]) the cap drew — landing
+/// the top edge exactly on the cap's contour, watertight by construction.
+/// Emission gates on the owner standing a cliff above the segment's low
+/// side, so exactly the high-owned window lofts a given face and a
+/// low-owned window (whose top would clamp low) stays silent. A grounded
+/// low side tucks under its surface so the low cap covers the base; a Void
+/// low side drops [`WALL_VOID_DROP_OCTIMETERS`] so the hole reads as thick
+/// ground.
+#[allow(clippy::too_many_lines)] // one boundary walk: classify sides, extract segments, loft
+#[allow(clippy::similar_names)] // the segment's two endpoints read clearest as `_p` / `_q` pairs
+fn emit_marched_walls(
+    world: &World,
+    at: ChunkPos,
+    part: &DisplayPartition,
+    styles: &StyleTable,
+    tris: &mut Vec<DrawTriangle>,
+) {
+    let display = &part.display;
+    let gw = part.gw;
+    let apron = part.apron;
+    let step_oct = part.step_oct;
+    let base_oct = [
+        at.x * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
+        at.z * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
+    ];
+    let origin_oct = [
+        base_oct[0] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
+        base_oct[1] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
+    ];
+    let half = step_oct / 2;
+    let windows = gw - 1;
+    for wj in 0..windows {
+        for wi in 0..windows {
+            let x_lo = origin_oct[0] + wi as i32 * step_oct;
+            let z_lo = origin_oct[1] + wj as i32 * step_oct;
+            let x_hi = x_lo + step_oct;
+            let z_hi = z_lo + step_oct;
+            // Ownership: the cell under the window center, chunk-local only —
+            // covers every window exactly once across the fleet and matches
+            // the cap walk's owner, so the lofted top reuses the cap's patch.
+            let owner = CellPos {
+                x: (x_lo + half).div_euclid(256),
+                z: (z_lo + half).div_euclid(256),
+            };
+            if !(0..EDGE).contains(&(owner.x - at.x * EDGE))
+                || !(0..EDGE).contains(&(owner.z - at.z * EDGE))
+            {
+                continue;
+            }
+            // Corner materials in order [BL, BR, TR, TL] (the case-bit
+            // order), folding the rim/body display split back to the plain
+            // material — a wall follows a material boundary, not a rim edge.
+            let mats = [
+                display[wj * gw + wi].div_ceil(2),
+                display[wj * gw + wi + 1].div_ceil(2),
+                display[(wj + 1) * gw + wi + 1].div_ceil(2),
+                display[(wj + 1) * gw + wi].div_ceil(2),
+            ];
+            if mats.iter().all(|&m| m == mats[0]) {
+                continue; // uniform window — no material boundary to loft
+            }
+            let owner_level = world.surface_level(owner);
+            // The lowest edge neighbor of the owner: a Void hole floors to
+            // the owner's own (high) cell, so its drop is gated on the owner
+            // standing a real cliff above its surroundings rather than on the
+            // hole's meaningless level.
+            let min_neighbor = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                .into_iter()
+                .map(|(dx, dz)| {
+                    world.surface_level(CellPos {
+                        x: owner.x + dx,
+                        z: owner.z + dz,
+                    })
+                })
+                .min()
+                .unwrap_or(owner_level);
+            // Corner sample floor-cell surface levels, same order as `mats`.
+            let level = [[x_lo, z_lo], [x_hi, z_lo], [x_hi, z_hi], [x_lo, z_hi]].map(|[cx, cz]| {
+                world.surface_level(CellPos {
+                    x: cx.div_euclid(256),
+                    z: cz.div_euclid(256),
+                })
+            });
+            let mid = |m: u8| -> [i32; 2] {
+                match m {
+                    4 => [x_lo + half, z_lo],
+                    5 => [x_hi, z_lo + half],
+                    6 => [x_lo + half, z_hi],
+                    _ => [x_lo, z_lo + half],
+                }
+            };
+            let edge_corners = |m: u8| -> (usize, usize) {
+                match m {
+                    4 => (0, 1),
+                    5 => (1, 2),
+                    6 => (2, 3),
+                    _ => (3, 0),
+                }
+            };
+            // Wall color: the owning (high) cell's cliff material, top-to-base
+            // shaded. The owner is the high side wherever a wall lofts.
+            let cliff = world.cliff_material(owner);
+            let resolved = resolve_cell(
+                styles.get(cliff),
+                owner.x as f32 + 0.5,
+                owner.z as f32 + 0.5,
+                None,
+            );
+            let top_rgb = hsl_to_linear_rgb(
+                resolved.hue,
+                resolved.sat,
+                (resolved.light * SKIRT_TOP_SHADE).clamp(0.0, 100.0),
+            );
+            let base_rgb = hsl_to_linear_rgb(
+                resolved.hue,
+                resolved.sat,
+                (resolved.light * SKIRT_BASE_SHADE).clamp(0.0, 100.0),
+            );
+            for a in 1..6u8 {
+                if !mats.contains(&a) {
+                    continue;
+                }
+                let case = u8::from(mats[0] == a)
+                    | u8::from(mats[1] == a) << 1
+                    | u8::from(mats[2] == a) << 2
+                    | u8::from(mats[3] == a) << 3;
+                for &(p, q) in WALL_SEGMENTS[case as usize] {
+                    // The low side along the segment: each crossed edge's
+                    // non-`a` corner. Void wins (a hole drops the fixed
+                    // depth); otherwise the lower ground governs the base.
+                    let low_of = |m: u8| {
+                        let (i, j) = edge_corners(m);
+                        let k = if mats[i] == a { j } else { i };
+                        (mats[k], level[k])
+                    };
+                    let (mat_p, lvl_p) = low_of(p);
+                    let (mat_q, lvl_q) = low_of(q);
+                    let is_void = mat_p == 0 || mat_q == 0;
+                    let low_level = lvl_p.min(lvl_q);
+                    // Only a genuine cliff under the high owner lofts. A
+                    // material boundary reads the drop to the low neighbor
+                    // cell; a Void hole reads the owner's drop to its
+                    // surroundings. Either way a low-owned window (its top
+                    // would clamp low) and a flat boundary fall through here.
+                    let base_level = if is_void { min_neighbor } else { low_level };
+                    if owner_level - base_level <= STEP_MAX_OCTIMETERS {
+                        continue;
+                    }
+                    let mp = mid(p);
+                    let mq = mid(q);
+                    let wx_p = mp[0] as f32 / OCTIMETERS_PER_METER;
+                    let wz_p = mp[1] as f32 / OCTIMETERS_PER_METER;
+                    let wx_q = mq[0] as f32 / OCTIMETERS_PER_METER;
+                    let wz_q = mq[1] as f32 / OCTIMETERS_PER_METER;
+                    let yt_p = label_lift(world, owner, wx_p, wz_p).0;
+                    let yt_q = label_lift(world, owner, wx_q, wz_q).0;
+                    let (yb_p, yb_q) = if is_void {
+                        let drop = WALL_VOID_DROP_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
+                        (yt_p - drop, yt_q - drop)
+                    } else {
+                        let base = (low_level - WALL_TUCK_OCTIMETERS) as f32 / OCTIMETERS_PER_METER;
+                        (base, base)
+                    };
+                    push_wall_quad(
+                        tris,
+                        [wx_p, wz_p, yt_p],
+                        [wx_q, wz_q, yt_q],
+                        yb_p,
+                        yb_q,
+                        top_rgb,
+                        base_rgb,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Loft the cell-edge cliff walls: for every chunk-local cell standing a
+/// cliff above an edge neighbor, a vertical face on the shared cell-edge
+/// lattice line — the break the owner-pinned patches already draw. The high
+/// cell owns the face, so a chunk-border cliff lofts exactly once
+/// fleet-wide. In the painted view `same_material_only` restricts this to
+/// same-material cliffs (a material boundary lofts as a marched wall
+/// instead); the raw calibration view has no partition, so it closes every
+/// cliff here in flat gray. Where the corner walk merged the two sides'
+/// plates the gap tapers to nothing and the face is skipped.
+#[allow(clippy::too_many_lines)] // one linear pass: enumerate, classify, color, emit
+fn emit_lattice_walls(
+    world: &World,
+    at: ChunkPos,
+    mode: ViewMode,
+    styles: &StyleTable,
+    same_material_only: bool,
+    tris: &mut Vec<DrawTriangle>,
+) {
+    // Per direction: neighbor offset, the shared edge's two lattice corners
+    // as indices into the high cell's corner order, and the same lattice
+    // points in the neighbor's order (the low side's plates).
+    struct WallEdge {
         offset: (i32, i32),
         top: [usize; 2],
         bottom: [usize; 2],
     }
-    const DIRECTIONS: [SkirtEdge; 4] = [
-        SkirtEdge {
+    const DIRECTIONS: [WallEdge; 4] = [
+        WallEdge {
             offset: (1, 0),
             top: [1, 3],
             bottom: [0, 2],
         },
-        SkirtEdge {
+        WallEdge {
             offset: (-1, 0),
             top: [0, 2],
             bottom: [1, 3],
         },
-        SkirtEdge {
+        WallEdge {
             offset: (0, 1),
             top: [2, 3],
             bottom: [0, 1],
         },
-        SkirtEdge {
+        WallEdge {
             offset: (0, -1),
             top: [0, 1],
             bottom: [2, 3],
         },
     ];
+    let tuck = WALL_TUCK_OCTIMETERS as f32 / OCTIMETERS_PER_METER;
     for lz in 0..EDGE {
         for lx in 0..EDGE {
             let cell = CellPos {
                 x: at.x * EDGE + lx,
                 z: at.z * EDGE + lz,
             };
+            let material = world.underlay(cell);
+            if material == Material::Void {
+                continue;
+            }
             let cell_level = world.surface_level(cell);
             let mut cached: Option<[f32; 4]> = None;
             for edge in &DIRECTIONS {
@@ -1495,6 +1784,9 @@ fn emit_skirts(
                     x: cell.x + edge.offset.0,
                     z: cell.z + edge.offset.1,
                 };
+                if same_material_only && world.underlay(neighbor) != material {
+                    continue; // a material boundary lofts as a marched wall
+                }
                 if cell_level <= world.surface_level(neighbor)
                     || !world.edge_is_cliff(cell, neighbor)
                 {
@@ -1503,9 +1795,9 @@ fn emit_skirts(
                 let top = *cached.get_or_insert_with(|| world.cell_corner_heights(cell));
                 let bottom = world.cell_corner_heights(neighbor);
                 let y_top = [top[edge.top[0]], top[edge.top[1]]];
-                let y_bottom = [bottom[edge.bottom[0]], bottom[edge.bottom[1]]];
-                if (y_top[0] - y_bottom[0]).abs() < f32::EPSILON
-                    && (y_top[1] - y_bottom[1]).abs() < f32::EPSILON
+                let y_low = [bottom[edge.bottom[0]], bottom[edge.bottom[1]]];
+                if (y_top[0] - y_low[0]).abs() < f32::EPSILON
+                    && (y_top[1] - y_low[1]).abs() < f32::EPSILON
                 {
                     continue;
                 }
@@ -1519,12 +1811,12 @@ fn emit_skirts(
                 };
                 let (x0, z0) = corner_pos(edge.top[0]);
                 let (x1, z1) = corner_pos(edge.top[1]);
-                let (top_rgb, bottom_rgb) = match mode {
+                let (top_rgb, base_rgb) = match mode {
                     ViewMode::Raw => ([RAW_SKIRT_GRAY; 3], [RAW_SKIRT_GRAY; 3]),
                     ViewMode::Painted => {
-                        let material = world.cliff_material(cell);
+                        let cliff = world.cliff_material(cell);
                         let resolved = resolve_cell(
-                            styles.get(material),
+                            styles.get(cliff),
                             cell.x as f32 + 0.5,
                             cell.z as f32 + 0.5,
                             None,
@@ -1543,23 +1835,47 @@ fn emit_skirts(
                         )
                     }
                 };
-                let vert = |x: f32, z: f32, y: f32, rgb: [f32; 3]| Vertex {
-                    x,
-                    y,
-                    z,
-                    r: rgb[0],
-                    g: rgb[1],
-                    b: rgb[2],
-                };
-                let a = vert(x0, z0, y_top[0], top_rgb);
-                let b = vert(x1, z1, y_top[1], top_rgb);
-                let c = vert(x1, z1, y_bottom[1], bottom_rgb);
-                let d = vert(x0, z0, y_bottom[0], bottom_rgb);
-                tris.push(DrawTriangle { verts: [a, b, c] });
-                tris.push(DrawTriangle { verts: [a, c, d] });
+                push_wall_quad(
+                    tris,
+                    [x0, z0, y_top[0]],
+                    [x1, z1, y_top[1]],
+                    y_low[0] - tuck,
+                    y_low[1] - tuck,
+                    top_rgb,
+                    base_rgb,
+                );
             }
         }
     }
+}
+
+/// Push the two triangles of one vertical wall quad: a top edge from
+/// `top_a` to `top_b` (`[wx, wz, y]` meters) dropped to `y_bottom_a` /
+/// `y_bottom_b` at the same footprint, top vertices in `top_rgb` and base
+/// in `base_rgb` so the face darkens toward the ground shadow.
+fn push_wall_quad(
+    tris: &mut Vec<DrawTriangle>,
+    top_a: [f32; 3],
+    top_b: [f32; 3],
+    y_bottom_a: f32,
+    y_bottom_b: f32,
+    top_rgb: [f32; 3],
+    base_rgb: [f32; 3],
+) {
+    let vert = |x: f32, z: f32, y: f32, rgb: [f32; 3]| Vertex {
+        x,
+        y,
+        z,
+        r: rgb[0],
+        g: rgb[1],
+        b: rgb[2],
+    };
+    let a = vert(top_a[0], top_a[1], top_a[2], top_rgb);
+    let b = vert(top_b[0], top_b[1], top_b[2], top_rgb);
+    let c = vert(top_b[0], top_b[1], y_bottom_b, base_rgb);
+    let d = vert(top_a[0], top_a[1], y_bottom_a, base_rgb);
+    tris.push(DrawTriangle { verts: [a, b, c] });
+    tris.push(DrawTriangle { verts: [a, c, d] });
 }
 
 #[cfg(test)]
@@ -1717,7 +2033,7 @@ mod tests {
         // interior body — each of its 256 cells tiles the flat water patch
         // with one depth-graded quad per subcell (16 subcells x 2 tris), and
         // nothing else draws (no partition windows inside a uniform body, no
-        // overlay, no skirts on flat water). 256 * 32 = 8192. A change to the
+        // overlay, no walls on flat water). 256 * 32 = 8192. A change to the
         // per-subcell water resolution or the interior body path moves this
         // and must be deliberate.
         let mut world = World::new();
@@ -2182,10 +2498,12 @@ mod tests {
     }
 
     #[test]
-    fn a_cliff_emits_its_skirt_from_the_high_chunk() {
-        // A plateau chunk one meter up beside a ground chunk: the cliff
-        // face on the shared border belongs to the high cell, so the high
-        // chunk emits it exactly once and the low chunk never does —
+    fn a_same_material_cliff_stands_a_wall_on_the_cell_line() {
+        // A grass plateau chunk one meter up beside a grass ground chunk:
+        // same material, so the material partition leaves no marched
+        // boundary and the wall stands on the shared cell-edge line — where
+        // the old skirt stood. The face belongs to the high cell, so the
+        // high chunk lofts it exactly once and the low chunk never does;
         // double emission would z-fight, omission would leave a window
         // through the terrain.
         let mut world = World::new();
@@ -2197,7 +2515,7 @@ mod tests {
         high.height = [256; CELLS_PER_CHUNK_AREA];
         world.insert_chunk(ChunkPos { x: 1, z: 0 }, high);
 
-        let is_border_skirt = |t: &DrawTriangle| {
+        let is_border_wall = |t: &DrawTriangle| {
             t.verts.iter().all(|v| (v.x - 16.0).abs() < 1e-6)
                 && t.verts.iter().any(|v| v.y > 0.9)
                 && t.verts.iter().any(|v| v.y < 0.1)
@@ -2215,11 +2533,11 @@ mod tests {
             &StyleTable::default(),
         );
         assert!(
-            high_mesh.iter().any(is_border_skirt),
-            "the high chunk closes its cliff face",
+            high_mesh.iter().any(is_border_wall),
+            "the high chunk stands the wall on the cell line",
         );
         assert!(
-            !low_mesh.iter().any(is_border_skirt),
+            !low_mesh.iter().any(is_border_wall),
             "the low chunk does not double-draw the shared face",
         );
     }
@@ -2227,10 +2545,10 @@ mod tests {
     #[test]
     fn a_material_boundary_at_a_cliff_does_not_drape() {
         // Sand plateau (1 m up) against grass ground, material boundary on
-        // the cliff line: every colored (non-skirt) triangle must stay on
+        // the cliff line: every colored (non-wall) triangle must stay on
         // its own side of the break — the cliff face belongs to the gray
-        // skirt. Position-pure lifting would stretch the boundary windows
-        // into meter-tall sand and grass walls down the face.
+        // wall. Position-pure lifting would stretch the boundary windows
+        // into meter-tall sand and grass caps down the face.
         let mut world = World::new();
         let mut low = Chunk::empty();
         low.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
@@ -2248,7 +2566,7 @@ mod tests {
                     .iter()
                     .all(|v| (v.r - v.b).abs() < 0.05 && (v.g - v.b).abs() < 0.05);
                 if gray {
-                    continue; // skirts own the vertical face
+                    continue; // walls own the vertical face
                 }
                 let max_y = t.verts.iter().map(|v| v.y).fold(f32::MIN, f32::max);
                 let min_y = t.verts.iter().map(|v| v.y).fold(f32::MAX, f32::min);
@@ -2757,5 +3075,172 @@ mod tests {
             }
         }
         assert!(found, "a grass flap grows over the water pool");
+    }
+
+    /// The vertical span of a triangle — a wall face stands ~1 m tall while
+    /// a cap or ground quad is near-flat, so the split filters walls from
+    /// the surfaces they join.
+    fn y_span(t: &DrawTriangle) -> f32 {
+        let max = t.verts.iter().map(|v| v.y).fold(f32::MIN, f32::max);
+        let min = t.verts.iter().map(|v| v.y).fold(f32::MAX, f32::min);
+        max - min
+    }
+
+    #[test]
+    fn marched_wall_tops_land_on_the_cap_contour() {
+        // The watertight pin: a material-boundary cliff lofts marched walls
+        // whose top vertices are the cap contour's own vertices. Sand plateau
+        // (1 m up, east) against grass ground: mesh the high chunk, split its
+        // triangles into walls (a tall vertical span) and caps (near-flat),
+        // and assert every wall-top vertex coincides exactly with a cap
+        // vertex — no gap and no overlap between the cliff face and the
+        // surfaces it joins. The wall lofts its top through the same
+        // owner-clamped patch the cap drew, so the match is bit-exact.
+        let mut world = World::new();
+        let mut low = Chunk::empty();
+        low.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+        let mut high = Chunk::empty();
+        high.underlay = [Material::Sand; CELLS_PER_CHUNK_AREA];
+        high.height = [256; CELLS_PER_CHUNK_AREA];
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, low);
+        world.insert_chunk(ChunkPos { x: 1, z: 0 }, high);
+
+        let mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 1, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
+        let walls: Vec<&DrawTriangle> = mesh.iter().filter(|t| y_span(t) > 0.5).collect();
+        assert!(
+            !walls.is_empty(),
+            "the material-boundary cliff lofts marched walls",
+        );
+        let cap_verts: Vec<&Vertex> = mesh
+            .iter()
+            .filter(|t| y_span(t) <= 0.5)
+            .flat_map(|t| t.verts.iter())
+            .collect();
+        for wall in &walls {
+            let top = wall.verts.iter().map(|v| v.y).fold(f32::MIN, f32::max);
+            for v in wall.verts.iter().filter(|v| (v.y - top).abs() < 1e-6) {
+                assert!(
+                    cap_verts.iter().any(|c| (c.x - v.x).abs() < 1e-6
+                        && (c.y - v.y).abs() < 1e-6
+                        && (c.z - v.z).abs() < 1e-6),
+                    "wall-top vertex ({}, {}, {}) has no matching cap vertex",
+                    v.x,
+                    v.y,
+                    v.z,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_flat_world_emits_no_walls() {
+        // Tripwire: a cliff-free world lofts no walls, so the wall pass adds
+        // nothing — the full mesh equals the underlay-plus-overlay mesh built
+        // without it, byte for byte. A wall pass that fired on flat ground
+        // (or double-counted a lattice against a marched segment) diverges
+        // here.
+        let world = world_with_underlay(ChunkPos { x: 0, z: 0 }, |_, _| Material::Grass);
+        let at = ChunkPos { x: 0, z: 0 };
+        let styles = StyleTable::default();
+        let mut expected = Vec::new();
+        let _ = mesh_underlay(&world, at, &styles, &mut expected);
+        mesh_overlay(&world, at, &styles, &mut expected);
+        let full = mesh_chunk(&world, at, ViewMode::Painted, &styles);
+        assert_eq!(full, expected, "the wall pass adds nothing to a flat world");
+    }
+
+    #[test]
+    fn adjacent_chunks_agree_on_a_wall_across_their_seam() {
+        // A grass cliff running in x across the vertical chunk seam at
+        // x = 16: cells at z < 8 sit 1 m up, z >= 8 at the datum, same
+        // material so the face is a cell-edge lattice wall. Each chunk owns
+        // its half of the line; at the shared seam the two halves must meet
+        // on identical vertices, or the wall would gap or double where the
+        // chunks join.
+        let mut world = World::new();
+        for cx in 0..2 {
+            let mut chunk = Chunk::empty();
+            chunk.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+            for lz in 0..EDGE {
+                for lx in 0..EDGE {
+                    chunk.height[(lz * EDGE + lx) as usize] = if lz < 8 { 256 } else { 0 };
+                }
+            }
+            world.insert_chunk(ChunkPos { x: cx, z: 0 }, chunk);
+        }
+        let seam_verts = |at| {
+            let mesh = mesh_chunk(&world, at, ViewMode::Painted, &StyleTable::default());
+            let mut verts: Vec<(i64, i64, i64)> = mesh
+                .iter()
+                .filter(|t| y_span(t) > 0.5)
+                .flat_map(|t| t.verts.iter())
+                .filter(|v| (v.x - 16.0).abs() < 1e-4)
+                .map(|v| {
+                    (
+                        (v.x * 256.0).round() as i64,
+                        (v.y * 256.0).round() as i64,
+                        (v.z * 256.0).round() as i64,
+                    )
+                })
+                .collect();
+            verts.sort_unstable();
+            verts.dedup();
+            verts
+        };
+        let west = seam_verts(ChunkPos { x: 0, z: 0 });
+        let east = seam_verts(ChunkPos { x: 1, z: 0 });
+        assert!(!west.is_empty(), "the seam carries a wall");
+        assert_eq!(
+            west, east,
+            "both chunks place the seam wall on identical vertices",
+        );
+    }
+
+    #[test]
+    fn a_raised_point_cell_wears_marched_walls() {
+        // A point-authored blob raised to a plateau wears walls that follow
+        // its marched silhouette, not the cell edge: a 2x2 grass point block
+        // in one grass cell (the rest Void points) lifted 2 m stands a
+        // Void-drop wall whose top vertices sit strictly inside the cell
+        // span, where its Grass/Void contour marches — the cap-detaches-
+        // from-the-cell-edge case the cell-edge skirt could not close.
+        let at = ChunkPos { x: 0, z: 0 };
+        let cell = CellPos { x: 8, z: 8 };
+        let sub = SUB as usize;
+        // Explicit Void points around a 2x2 grass core, so the raised cell's
+        // grass silhouette pulls inside its own edges.
+        let mut points = [Material::Void.to_u8(); SUBCELLS_PER_CELL];
+        for sub_z in 1..3 {
+            for sub_x in 1..3 {
+                points[sub_z * sub + sub_x] = Material::Grass.to_u8();
+            }
+        }
+        // Surround the raised cell with lower grass ground so the blob is a
+        // genuine plateau; the cell itself is grass at 512 octimeters.
+        let mut chunk = Chunk::empty();
+        chunk.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+        chunk.height[(cell.z * EDGE + cell.x) as usize] = 512;
+        let mut world = World::new();
+        world.insert_chunk(at, chunk);
+        world.set_cell_points(cell, &points);
+
+        let mesh = mesh_chunk(&world, at, ViewMode::Painted, &StyleTable::default());
+        let walls: Vec<&DrawTriangle> = mesh.iter().filter(|t| y_span(t) > 0.5).collect();
+        assert!(!walls.is_empty(), "the raised blob wears walls");
+        let inside = walls.iter().flat_map(|t| t.verts.iter()).any(|v| {
+            v.x > cell.x as f32 + 0.1
+                && v.x < cell.x as f32 + 0.9
+                && v.z > cell.z as f32 + 0.1
+                && v.z < cell.z as f32 + 0.9
+        });
+        assert!(
+            inside,
+            "the walls follow the marched silhouette inside the cell",
+        );
     }
 }
