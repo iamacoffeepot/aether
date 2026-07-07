@@ -71,6 +71,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+# The `#[actor]` attribute macro for the `tools.rs` test module's
+# `RouteInventorySink` loopback fixture (issue 2672) — a `#[cfg(test)]`
+# native actor at the `aether.engine` mailbox that answers the harness's
+# `engine = Some` `aether.inventory.kinds` refresh RPC locally, so the
+# field-mismatch refresh-and-retry path is exercised end-to-end without a
+# forked substrate. Test builds only; out of the production graph.
+aether-actor = { path = "../aether-actor" }
 # iamacoffeepot/aether#2517: `features = ["test-support"]` exposes the
 # canonical `aether_substrate::testing` fixture (`TestChassis`) the
 # `tools.rs` test module boots against. Dev-dependency feature unification
