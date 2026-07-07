@@ -80,8 +80,8 @@ pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyHandle};
 // `aether_actor::WasmCtx<'_>` / `aether_actor::WasmActor` / etc. without
 // an extra `wasm::` segment.
 pub use wasm::{
-    ActorInitError, ErasedWasmActor, RelativeMailbox, SpawnError, WasmActor, WasmActorMailbox,
-    WasmCtx, WasmDispatch, WasmDropCtx, WasmInitCtx,
+    ActorInitError, ActorTypeTag, ErasedWasmActor, RelativeMailbox, SpawnError, WasmActor,
+    WasmActorMailbox, WasmCtx, WasmDispatch, WasmDropCtx, WasmInitCtx,
 };
 
 // Issue 665 retired `MailTransport` and its `MailTransportTrait`
@@ -123,6 +123,11 @@ pub mod __macro_internals {
     // `Box<dyn ErasedWasmActor>`; re-export `Box` so the emitted code
     // doesn't depend on the guest crate's prelude exposing `alloc`.
     pub use alloc::boxed::Box;
+    // Issue 2692: the `@spawn_inline_child_by_tag` resolver arm hands the
+    // resolved subname to `spawn_one_child` as an owned `String`, so re-export
+    // `String` the same way — the emitted code stays free of an `alloc`
+    // prelude assumption on the guest crate.
+    pub use alloc::string::String;
     // ADR-0113: the `#[actor]`-generated `on_rehydrate` warns through
     // `::aether_actor::__macro_internals::tracing::warn!` on a non-empty
     // decode-miss, so the macro roots the warn here rather than forcing

@@ -49,7 +49,7 @@ use aether_data::MailboxId;
 use crate::mail::{Mail, NO_REPLY_HANDLE};
 use crate::wasm::ErasedWasmActor;
 use crate::wasm::bridge::mail;
-use crate::wasm::ctx::WasmCtx;
+use crate::wasm::ctx::{ActorTypeTag, SpawnError, WasmCtx};
 
 mod bundle;
 pub mod compose;
@@ -166,6 +166,20 @@ pub(crate) enum ChainMode {
     Detached,
 }
 
+/// The `export!`-installed resolver a
+/// [`WasmCtx::spawn_inline_child_by_tag`] call routes through (issue 2692).
+/// A plain `fn` pointer, not a boxed closure: the resolver is a
+/// non-capturing tag-match the macro emits over the module's exported type
+/// set — the same set [`crate::export!`]'s `@reconstruct_child` arm walks —
+/// so it coerces cleanly and stores in a `Cell`. Given the module's
+/// registry, a runtime [`ActorTypeTag`], the resolved `(is_counter,
+/// subname)` pair, and the child's config bytes, its matched branch
+/// allocates the alias and runs the shared decode + init core on the
+/// selected type; a tag matching none returns
+/// [`SpawnError::UnknownActorTag`].
+pub type SpawnByTagFn =
+    fn(&Registry, ActorTypeTag, bool, &str, &[u8]) -> Result<MailboxId, SpawnError>;
+
 /// The per-component inline-child registry (ADR-0114 decision #3), keyed
 /// by each child's alias [`MailboxId`]. The [`crate::export!`] macro emits
 /// one as a `static __AETHER_INLINE` per component (mirroring the parent's
@@ -198,6 +212,14 @@ pub struct Registry {
     /// handled by the queue — a busy target is just a later queue item —
     /// not by nested dispatch.
     queue: UnsafeCell<VecDeque<QueuedMail>>,
+    /// The `export!`-installed by-tag spawn resolver (issue 2692), or `None`
+    /// on a raw registry never wired by `export!` (a host-unit registry).
+    /// Set once from each init shim — the resolver enumerates the module's
+    /// exported type set, knowable only inside the macro expansion, so it is
+    /// installed here rather than reached as an SDK-side generic. Mirrors
+    /// `self_id`'s set-once-from-the-shim shape; a `fn` pointer is `Copy`, so
+    /// a `Cell` suffices.
+    spawn_resolver: Cell<Option<SpawnByTagFn>>,
 }
 
 // SAFETY: identical argument to [`crate::Slot`] — the WASM guest is
@@ -207,7 +229,9 @@ pub struct Registry {
 // local registry, reached from one test thread. The same argument covers
 // the added interior-mutable fields (`self_id`, `queue`): each is touched
 // only from the single run-token thread, and every borrow of `queue` is
-// taken fresh and released before return (never spanning a dispatch).
+// taken fresh and released before return (never spanning a dispatch). The
+// `spawn_resolver` cell is written once from an init shim and read from
+// guest handler code — again, only ever from the single run-token thread.
 unsafe impl Sync for Registry {}
 
 impl Registry {
@@ -218,6 +242,7 @@ impl Registry {
             inner: UnsafeCell::new(BTreeMap::new()),
             self_id: Cell::new(0),
             queue: UnsafeCell::new(VecDeque::new()),
+            spawn_resolver: Cell::new(None),
         }
     }
 
@@ -239,6 +264,23 @@ impl Registry {
     #[must_use]
     pub fn self_id(&self) -> u64 {
         self.self_id.get()
+    }
+
+    /// Install the module's by-tag spawn resolver (issue 2692), emitted by
+    /// `export!` over the exported type set and set once from each init shim
+    /// (mirroring [`Self::set_self_id`]). Idempotent re-sets write the same
+    /// `fn` pointer.
+    pub fn set_spawn_resolver(&self, resolver: SpawnByTagFn) {
+        self.spawn_resolver.set(Some(resolver));
+    }
+
+    /// The installed by-tag spawn resolver, or `None` on a registry never
+    /// wired by `export!` (a raw host-unit registry — the seam the
+    /// [`WasmCtx::spawn_inline_child_by_tag`] host tests drive with a
+    /// synthetic resolver). Backs the verb's resolver lookup.
+    #[must_use]
+    pub fn spawn_resolver(&self) -> Option<SpawnByTagFn> {
+        self.spawn_resolver.get()
     }
 
     /// Register a freshly-spawned (or reconstructed) inline child under
