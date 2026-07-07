@@ -11,7 +11,8 @@
 
 use aether_capabilities::render::DrawTriangle;
 use aether_kit::{
-    CELLS_PER_CHUNK_AREA, Chunk, ChunkPos, Material, Region, ViewMode, WaterPlane, World,
+    CELLS_PER_CHUNK_AREA, Chunk, ChunkPos, CliffStyle, Material, Region, ViewMode, WaterPlane,
+    World,
     runtime::{StyleTable, mesher::mesh_chunk},
 };
 
@@ -23,6 +24,7 @@ fn lake_world() -> World {
             name: "meadow".into(),
             default_material: Material::Grass,
             cliff_material: Material::Stone,
+            cliff_style: CliffStyle::Flat,
         },
     );
     // The lake surface plane every lake cell references.

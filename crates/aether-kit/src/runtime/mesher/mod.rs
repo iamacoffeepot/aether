@@ -106,7 +106,8 @@ use aether_capabilities::render::{DrawTriangle, Vertex};
 use aether_math::Vec3;
 
 use crate::world::{
-    CELLS_PER_CHUNK, CellPos, ChunkPos, Material, SUBCELLS_PER_CELL_EDGE, ViewMode, World,
+    CELLS_PER_CHUNK, CellPos, ChunkPos, CliffStyle, Material, SUBCELLS_PER_CELL_EDGE, ViewMode,
+    World,
 };
 use contour::{
     GridPlacement, SmoothParams, emit_label_window, erode, label_case, march_grid,
@@ -155,6 +156,27 @@ const SKIRT_BASE_SHADE: f32 = 0.55;
 /// The raw calibration view's flat gray for cliff faces — a skirt has no
 /// noise field to calibrate; it only keeps the terrain closed.
 const RAW_SKIRT_GRAY: f32 = 0.35;
+
+/// Octimeters per meter along an edge — one cell edge spans this many
+/// octimeters, the world period the basalt columns cut against.
+const OCTIMETERS_PER_CELL_EDGE: i32 = 256;
+
+/// How far below the interpolated low edge a basalt column's base tucks, in
+/// octimeters, so an offset column face never opens a seam against sloped
+/// ground beneath it.
+const COLUMN_BASE_TUCK: f32 = 8.0 / OCTIMETERS_PER_METER;
+
+/// Peak per-column lightness jitter as a fraction of the resolved cliff
+/// lightness — the joint lines between columns read from this step.
+const COLUMN_LIGHT_JITTER: f32 = 0.06;
+
+/// Distinct hash seeds for the three per-column jitters, so a column's
+/// offset, top drop, and lightness vary independently.
+const SEED_COLUMN_OFFSET: u32 = 0x00C0_1111;
+/// Seed for the per-column top-drop (stagger) jitter.
+const SEED_COLUMN_STAGGER: u32 = 0x00C0_2222;
+/// Seed for the per-column lightness jitter.
+const SEED_COLUMN_LIGHT: u32 = 0x00C0_3333;
 
 /// The overlay rim layer lift — one octimeter over the underlay.
 const OVERLAY_RIM_LIFT: f32 = 1.0 / OCTIMETERS_PER_METER;
@@ -1241,6 +1263,24 @@ fn emit_skirts(
                 };
                 let (x0, z0) = corner_pos(edge.top[0]);
                 let (x1, z1) = corner_pos(edge.top[1]);
+                // The columnar generator owns the Painted face when the high
+                // cell's region styles its cliffs `Columns`; the raw view
+                // always keeps the flat gray quad (a calibration instrument,
+                // not a geometry preview).
+                if mode == ViewMode::Painted && world.cliff_style(cell) == CliffStyle::Columns {
+                    emit_column_cliff(
+                        world,
+                        cell,
+                        edge.offset,
+                        (x0, z0),
+                        (x1, z1),
+                        y_top,
+                        y_bottom,
+                        styles,
+                        tris,
+                    );
+                    continue;
+                }
                 let (top_rgb, bottom_rgb) = match mode {
                     ViewMode::Raw => ([RAW_SKIRT_GRAY; 3], [RAW_SKIRT_GRAY; 3]),
                     ViewMode::Painted => {
@@ -1284,11 +1324,232 @@ fn emit_skirts(
     }
 }
 
+/// Whether `cell` emits a cliff skirt in direction `offset` — the primary
+/// gate the skirt pass uses (an effective surface level strictly higher
+/// than the neighbor's, past the step ceiling). The columnar generator
+/// reads this on the two along-edge neighbors to decide whether a column
+/// run flows on into the next cell (offsets carry through the shared
+/// boundary) or ends at a cliff-line corner (the end column returns to zero
+/// offset so the corner closes).
+fn cell_emits_cliff(world: &World, cell: CellPos, offset: (i32, i32)) -> bool {
+    let neighbor = CellPos {
+        x: cell.x + offset.0,
+        z: cell.z + offset.1,
+    };
+    world.surface_level(cell) > world.surface_level(neighbor) && world.edge_is_cliff(cell, neighbor)
+}
+
+/// A world-anchored integer hash in `[0, 1)`, keyed by a column's global
+/// index along the edge axis and the perpendicular lattice line of its
+/// cliff face — the same value-hash shape the material color field uses, so
+/// a column straddling a cell or chunk border resolves the same jitter from
+/// either bordering cell.
+#[allow(clippy::cast_precision_loss)] // the hash is a bit pattern; the [0,1) map tolerates it
+fn column_hash(index: i32, perp: i32, seed: u32) -> f32 {
+    let mut h = (index as u32).wrapping_mul(374_761_393)
+        ^ (perp as u32).wrapping_mul(668_265_263)
+        ^ seed.wrapping_mul(144_665);
+    h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
+    h ^= h >> 16;
+    (h as f32) / 4_294_967_296.0
+}
+
+/// Emit one cliff edge as basalt columns instead of the flat quad. The edge
+/// runs from `p0` to `p1` (meters, increasing along-axis coordinate), its
+/// top plate at `y_top` and the low neighbor's plate at `y_bottom` (meters,
+/// at `p0` / `p1`); `offset` is the outward face normal toward the low
+/// neighbor.
+///
+/// The edge is cut into columns anchored in world octimeters — column `k`
+/// spans world octimeters `[k·width, (k+1)·width]`, so the boundaries are a
+/// pure function of world position and a cliff line crossing cells and
+/// chunks cuts one continuous set. Each column carries a hashed outward
+/// offset, a hashed top drop, and a hashed lightness jitter (all keyed by
+/// its global index, so both bordering cells agree). Per column the pass
+/// emits the offset face quad (base tucked below the low edge), a cap
+/// closing the dropped top back to the un-offset terrain edge, and return
+/// quads bridging the offset step to each neighbor column. Where the
+/// along-edge neighbor cell does not continue the cliff (a corner) the end
+/// column returns to zero offset so the corner closes; where it does, the
+/// offset carries through the shared boundary with no seam.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn emit_column_cliff(
+    world: &World,
+    cell: CellPos,
+    offset: (i32, i32),
+    p0: (f32, f32),
+    p1: (f32, f32),
+    y_top: [f32; 2],
+    y_bottom: [f32; 2],
+    styles: &StyleTable,
+    tris: &mut Vec<DrawTriangle>,
+) {
+    let _ = p1; // the edge span is a fixed cell; p1 only fixes p0's along-axis order
+    let material = world.cliff_material(cell);
+    let s = styles.get(material);
+    let resolved = resolve_cell(s, cell.x as f32 + 0.5, cell.z as f32 + 0.5, None);
+    let width = s.column_width_octimeters.max(1);
+    let offset_max = s.column_offset_octimeters as f32;
+    let stagger_max = s.column_stagger_octimeters as f32;
+
+    // Edge basis: `axis_is_x` picks the along-edge axis; `normal` points
+    // outward toward the low neighbor. `perp_line` is the constant
+    // perpendicular lattice line the column jitters key on.
+    let axis_is_x = offset.0 == 0;
+    let (axis_x, axis_z) = if axis_is_x { (1.0, 0.0) } else { (0.0, 1.0) };
+    let normal_x = offset.0 as f32;
+    let normal_z = offset.1 as f32;
+    let (a_start_cells, perp_line) = if axis_is_x {
+        (p0.0 as i32, p0.1 as i32)
+    } else {
+        (p0.1 as i32, p0.0 as i32)
+    };
+    let a_start = a_start_cells * OCTIMETERS_PER_CELL_EDGE;
+    let a_end = a_start + OCTIMETERS_PER_CELL_EDGE;
+
+    // Direction-decorrelated base seed so two cliffs back-to-back on the
+    // same lattice line do not share a jitter.
+    let seed_base = (offset.0 as u32)
+        .wrapping_mul(2_246_822_519)
+        .wrapping_add((offset.1 as u32).wrapping_mul(3_266_489_917));
+
+    // A column's signed outward offset and top drop (meters) plus its
+    // lightness multiplier, hashed from its global index.
+    let column = |index: i32| -> (f32, f32, f32) {
+        let h_off = column_hash(index, perp_line, seed_base.wrapping_add(SEED_COLUMN_OFFSET));
+        let h_stag = column_hash(
+            index,
+            perp_line,
+            seed_base.wrapping_add(SEED_COLUMN_STAGGER),
+        );
+        let h_light = column_hash(index, perp_line, seed_base.wrapping_add(SEED_COLUMN_LIGHT));
+        let d = (h_off * 2.0 - 1.0) * offset_max / OCTIMETERS_PER_METER;
+        let drop = h_stag * stagger_max / OCTIMETERS_PER_METER;
+        let light = 1.0 + (h_light * 2.0 - 1.0) * COLUMN_LIGHT_JITTER;
+        (d, drop, light)
+    };
+
+    let top_at = |a: f32| y_top[0] + (y_top[1] - y_top[0]) * a;
+    let low_at = |a: f32| y_bottom[0] + (y_bottom[1] - y_bottom[0]) * a;
+    let point = |along: f32, out: f32, y: f32, rgb: [f32; 3]| Vertex {
+        x: p0.0 + along * axis_x + out * normal_x,
+        y,
+        z: p0.1 + along * axis_z + out * normal_z,
+        r: rgb[0],
+        g: rgb[1],
+        b: rgb[2],
+    };
+    let shade = |light_mul: f32, face_shade: f32| {
+        hsl_to_linear_rgb(
+            resolved.hue,
+            resolved.sat,
+            (resolved.light * light_mul * face_shade).clamp(0.0, 100.0),
+        )
+    };
+    let along_of =
+        |octimeters: i32| (octimeters - a_start) as f32 / OCTIMETERS_PER_CELL_EDGE as f32;
+
+    let first = a_start.div_euclid(width);
+    let last = (a_end - 1).div_euclid(width);
+
+    // Faces + caps, one column at a time (clipped to this cell's edge span).
+    for k in first..=last {
+        let (d, drop, light) = column(k);
+        let a_lo = along_of((k * width).max(a_start));
+        let a_hi = along_of(((k + 1) * width).min(a_end));
+        let top_rgb = shade(light, SKIRT_TOP_SHADE);
+        let base_rgb = shade(light, SKIRT_BASE_SHADE);
+        let tl = point(a_lo, d, top_at(a_lo) - drop, top_rgb);
+        let tr = point(a_hi, d, top_at(a_hi) - drop, top_rgb);
+        let br = point(a_hi, d, low_at(a_hi) - COLUMN_BASE_TUCK, base_rgb);
+        let bl = point(a_lo, d, low_at(a_lo) - COLUMN_BASE_TUCK, base_rgb);
+        tris.push(DrawTriangle {
+            verts: [tl, tr, br],
+        });
+        tris.push(DrawTriangle {
+            verts: [tl, br, bl],
+        });
+        if drop > 0.0 || d != 0.0 {
+            let f_lo = point(a_lo, d, top_at(a_lo) - drop, top_rgb);
+            let f_hi = point(a_hi, d, top_at(a_hi) - drop, top_rgb);
+            let b_hi = point(a_hi, 0.0, top_at(a_hi), top_rgb);
+            let b_lo = point(a_lo, 0.0, top_at(a_lo), top_rgb);
+            tris.push(DrawTriangle {
+                verts: [f_lo, f_hi, b_hi],
+            });
+            tris.push(DrawTriangle {
+                verts: [f_lo, b_hi, b_lo],
+            });
+        }
+    }
+
+    // Return quads span exactly the offset step between two adjacent columns
+    // at a shared boundary. `push_return` closes the vertical side gap at
+    // along-parameter `a_b`, from the left column's offset to the right's.
+    let mut push_return = |a_b: f32, d_left: f32, drop_left: f32, d_right: f32, drop_right: f32| {
+        if (d_left - d_right).abs() < f32::EPSILON {
+            return;
+        }
+        let top_rgb = shade(1.0, SKIRT_TOP_SHADE);
+        let base_rgb = shade(1.0, SKIRT_BASE_SHADE);
+        let base_y = low_at(a_b) - COLUMN_BASE_TUCK;
+        let l_top = point(a_b, d_left, top_at(a_b) - drop_left, top_rgb);
+        let l_bot = point(a_b, d_left, base_y, base_rgb);
+        let r_top = point(a_b, d_right, top_at(a_b) - drop_right, top_rgb);
+        let r_bot = point(a_b, d_right, base_y, base_rgb);
+        tris.push(DrawTriangle {
+            verts: [l_top, r_top, r_bot],
+        });
+        tris.push(DrawTriangle {
+            verts: [l_top, r_bot, l_bot],
+        });
+    };
+
+    // Interior boundaries between consecutive columns this cell owns.
+    for k in first..last {
+        let (d_left, drop_left, _) = column(k);
+        let (d_right, drop_right, _) = column(k + 1);
+        push_return(
+            along_of((k + 1) * width),
+            d_left,
+            drop_left,
+            d_right,
+            drop_right,
+        );
+    }
+
+    // Start boundary: carry the offset in from the previous cell's column,
+    // or return from zero when the cliff line starts here (a corner).
+    let axis_step = if axis_is_x { (1, 0) } else { (0, 1) };
+    let prev_cell = CellPos {
+        x: cell.x - axis_step.0,
+        z: cell.z - axis_step.1,
+    };
+    let next_cell = CellPos {
+        x: cell.x + axis_step.0,
+        z: cell.z + axis_step.1,
+    };
+    let (d_first, drop_first, _) = column(first);
+    if !cell_emits_cliff(world, prev_cell, offset) {
+        push_return(0.0, 0.0, 0.0, d_first, drop_first);
+    } else if a_start.rem_euclid(width) == 0 {
+        let (d_prev, drop_prev, _) = column(first - 1);
+        push_return(0.0, d_prev, drop_prev, d_first, drop_first);
+    }
+
+    // End boundary: the next cell owns its own start when it continues the
+    // cliff; otherwise close this end back to zero offset (a corner).
+    if !cell_emits_cliff(world, next_cell, offset) {
+        let (d_last, drop_last, _) = column(last);
+        push_return(1.0, d_last, drop_last, 0.0, 0.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::world::{
-        CELLS_PER_CHUNK_AREA, Chunk, Region, STEP_MAX_OCTIMETERS, SetMaterialStyle,
+        CELLS_PER_CHUNK_AREA, Chunk, CliffStyle, Region, STEP_MAX_OCTIMETERS, SetMaterialStyle,
         SmoothingProfile,
     };
     use style::ResolvedCell;
@@ -1625,6 +1886,7 @@ mod tests {
                 name: "meadow".into(),
                 default_material: Material::Grass,
                 cliff_material: Material::Stone,
+                cliff_style: CliffStyle::Flat,
             },
         );
         if let Some(p) = profile {
@@ -1795,6 +2057,7 @@ mod tests {
                 name: "meadow".into(),
                 default_material: Material::Grass,
                 cliff_material: Material::Stone,
+                cliff_style: CliffStyle::Flat,
             },
         );
         world.insert_region(
@@ -1803,6 +2066,7 @@ mod tests {
                 name: "shore".into(),
                 default_material: Material::Sand,
                 cliff_material: Material::Stone,
+                cliff_style: CliffStyle::Flat,
             },
         );
         let mut chunk = Chunk::empty();
@@ -2091,6 +2355,9 @@ mod tests {
             wash_grade: grass.wash_grade,
             water_depth_darken: grass.water_depth_darken,
             blob_merge_degrees: grass.blob_merge_degrees,
+            column_width_octimeters: grass.column_width_octimeters,
+            column_offset_octimeters: grass.column_offset_octimeters,
+            column_stagger_octimeters: grass.column_stagger_octimeters,
         });
         let tuned_mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted, &tuned);
 
@@ -2106,6 +2373,321 @@ mod tests {
                 .zip(tuned_mesh.iter())
                 .any(|(a, b)| base_color(a) != base_color(b)),
             "a live style-table write must change the painted mesh's colors",
+        );
+    }
+
+    /// A one-chunk world with cell `(cx, cz)` raised `high` octimeters over
+    /// an otherwise flat-zero field, so that cell owns a cliff on each of its
+    /// four edges and nothing else cliffs (the flat neighbors read a zero
+    /// void). `region` optionally styles it (region id 1 over the whole
+    /// chunk); `None` leaves the cell region-less (Flat cliffs, Stone
+    /// material).
+    fn one_high_cell(cx: i32, cz: i32, high: i32, region: Option<CliffStyle>) -> World {
+        let mut chunk = Chunk::empty();
+        chunk.height[(cz * EDGE + cx) as usize] = high;
+        if region.is_some() {
+            for slot in &mut chunk.region {
+                *slot = 1;
+            }
+        }
+        let mut world = World::new();
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
+        if let Some(style) = region {
+            world.insert_region(
+                1,
+                Region {
+                    name: "basalt".into(),
+                    default_material: Material::Stone,
+                    cliff_material: Material::Stone,
+                    cliff_style: style,
+                },
+            );
+        }
+        world
+    }
+
+    #[test]
+    fn flat_cliff_edge_is_two_pinned_triangles() {
+        // Tripwire: a Flat-style cliff edge is byte-identical to the
+        // pre-column skirt — exactly one vertical quad (two triangles) at the
+        // lattice line, high plate on top, low plate at the base, top and
+        // base shades over the resolved cliff material. The east face of a
+        // single 1-meter-high cell is isolated by its all-x==9 verts. A
+        // regression in the Flat path (a restructured quad, a shifted plate
+        // read, a changed shade) moves these exact vertices.
+        let world = one_high_cell(8, 8, 256, None);
+        let styles = StyleTable::default();
+        let mut tris = Vec::new();
+        emit_skirts(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &styles,
+            &mut tris,
+        );
+        let east: Vec<_> = tris
+            .iter()
+            .filter(|t| t.verts.iter().all(|v| v.x == 9.0))
+            .copied()
+            .collect();
+        assert_eq!(east.len(), 2, "a Flat cliff edge is exactly two triangles");
+
+        let resolved = resolve_cell(styles.get(Material::Stone), 8.5, 8.5, None);
+        let top_rgb = hsl_to_linear_rgb(
+            resolved.hue,
+            resolved.sat,
+            (resolved.light * SKIRT_TOP_SHADE).clamp(0.0, 100.0),
+        );
+        let base_rgb = hsl_to_linear_rgb(
+            resolved.hue,
+            resolved.sat,
+            (resolved.light * SKIRT_BASE_SHADE).clamp(0.0, 100.0),
+        );
+        let vert = |z: f32, y: f32, rgb: [f32; 3]| Vertex {
+            x: 9.0,
+            y,
+            z,
+            r: rgb[0],
+            g: rgb[1],
+            b: rgb[2],
+        };
+        let top_near = vert(8.0, 1.0, top_rgb);
+        let top_far = vert(9.0, 1.0, top_rgb);
+        let base_far = vert(9.0, 0.0, base_rgb);
+        let base_near = vert(8.0, 0.0, base_rgb);
+        assert_eq!(
+            east[0],
+            DrawTriangle {
+                verts: [top_near, top_far, base_far]
+            }
+        );
+        assert_eq!(
+            east[1],
+            DrawTriangle {
+                verts: [top_near, base_far, base_near]
+            }
+        );
+    }
+
+    #[test]
+    fn columns_cliff_closes_its_top_and_tucks_its_base() {
+        // A Columns cliff must stay watertight against the terrain: the top
+        // silhouette reaches the terrain edge exactly (caps close the dropped
+        // column heads back to the un-offset top line — no hole above a
+        // staggered column) and never rises above it, and the base tucks
+        // below the low edge (no seam against the ground). The terrain top is
+        // 1.0 m and the low edge is 0.0 m, so a closed top peaks at exactly
+        // 1.0 with a vertex on the un-offset lattice line, and the base sits
+        // exactly one tuck below zero.
+        let world = one_high_cell(8, 8, 256, Some(CliffStyle::Columns));
+        let styles = StyleTable::default();
+        let mut tris = Vec::new();
+        emit_skirts(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &styles,
+            &mut tris,
+        );
+        assert!(!tris.is_empty(), "a columns cliff emits geometry");
+
+        let max_y = tris
+            .iter()
+            .flat_map(|t| t.verts.iter())
+            .map(|v| v.y)
+            .fold(f32::MIN, f32::max);
+        let min_y = tris
+            .iter()
+            .flat_map(|t| t.verts.iter())
+            .map(|v| v.y)
+            .fold(f32::MAX, f32::min);
+        assert_eq!(max_y, 1.0, "the top silhouette reaches the terrain edge");
+        assert_eq!(
+            min_y, -COLUMN_BASE_TUCK,
+            "the base tucks one step below the low edge",
+        );
+        // The east cap / corner return closes back onto the terrain top edge
+        // (offset 0 → x == 9.0) at the terrain height — proof the top is not
+        // left open at the offset column face.
+        assert!(
+            tris.iter()
+                .flat_map(|t| t.verts.iter())
+                .any(|v| v.x == 9.0 && v.y == 1.0),
+            "a cap or return closes the top back to the terrain edge",
+        );
+    }
+
+    #[test]
+    fn columns_corner_return_spans_the_offset_step() {
+        // Tripwire: at a cliff-line end (here the start of the isolated east
+        // edge, whose along-axis neighbor is flat and does not continue the
+        // cliff) the first column returns from zero offset to its own offset
+        // with a vertical return quad — the watertight corner close. The two
+        // triangles are pinned by recomputing the first column's hashed
+        // offset and drop through the same `column_hash`, so a return that
+        // stops short of (or overshoots) the column's offset, or is dropped
+        // entirely, fails here.
+        let world = one_high_cell(8, 8, 256, Some(CliffStyle::Columns));
+        let styles = StyleTable::default();
+        let s = styles.get(Material::Stone);
+        let mut tris = Vec::new();
+        emit_skirts(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &styles,
+            &mut tris,
+        );
+
+        // The east edge (offset (1, 0)) runs along z from the p0 corner
+        // (9, 8); its first column is index floor(8 * 256 / width), keyed on
+        // the perpendicular lattice line x == 9.
+        let perp = 9;
+        let seed_base = 1u32.wrapping_mul(2_246_822_519);
+        let first = (8 * OCTIMETERS_PER_CELL_EDGE).div_euclid(s.column_width_octimeters);
+        let h_off = column_hash(first, perp, seed_base.wrapping_add(SEED_COLUMN_OFFSET));
+        let h_stag = column_hash(first, perp, seed_base.wrapping_add(SEED_COLUMN_STAGGER));
+        let d_first =
+            (h_off * 2.0 - 1.0) * s.column_offset_octimeters as f32 / OCTIMETERS_PER_METER;
+        let drop_first = h_stag * s.column_stagger_octimeters as f32 / OCTIMETERS_PER_METER;
+
+        let resolved = resolve_cell(s, 8.5, 8.5, None);
+        let top_rgb = hsl_to_linear_rgb(
+            resolved.hue,
+            resolved.sat,
+            (resolved.light * SKIRT_TOP_SHADE).clamp(0.0, 100.0),
+        );
+        let base_rgb = hsl_to_linear_rgb(
+            resolved.hue,
+            resolved.sat,
+            (resolved.light * SKIRT_BASE_SHADE).clamp(0.0, 100.0),
+        );
+        // The corner return sits at the edge start (z == 8.0), bridging the
+        // lattice line (x == 9.0, top at 1.0) to the first column's offset
+        // face (x == 9 + d_first, top dropped).
+        let vert = |x: f32, y: f32, rgb: [f32; 3]| Vertex {
+            x,
+            y,
+            z: 8.0,
+            r: rgb[0],
+            g: rgb[1],
+            b: rgb[2],
+        };
+        let l_top = vert(9.0, 1.0, top_rgb);
+        let l_bot = vert(9.0, -COLUMN_BASE_TUCK, base_rgb);
+        let r_top = vert(9.0 + d_first, 1.0 - drop_first, top_rgb);
+        let r_bot = vert(9.0 + d_first, -COLUMN_BASE_TUCK, base_rgb);
+        assert!(
+            tris.contains(&DrawTriangle {
+                verts: [l_top, r_top, r_bot]
+            }) && tris.contains(&DrawTriangle {
+                verts: [l_top, r_bot, l_bot]
+            }),
+            "the corner return must span exactly zero → the first column offset",
+        );
+    }
+
+    /// A world spanning two z-adjacent chunks with a vertical cliff line
+    /// running along z (a high block `x in [4, 8]`, low elsewhere) over every
+    /// row of both chunks, styled `Columns`. The cliff line crosses the
+    /// chunk border at z == 16.
+    fn columns_cliff_across_z_border() -> World {
+        let mut world = World::new();
+        for cz_chunk in [0, 1] {
+            let mut chunk = Chunk::empty();
+            for lz in 0..EDGE {
+                for lx in 0..EDGE {
+                    if (4..=8).contains(&lx) {
+                        chunk.height[(lz * EDGE + lx) as usize] = 256;
+                    }
+                    chunk.region[(lz * EDGE + lx) as usize] = 1;
+                }
+            }
+            world.insert_chunk(ChunkPos { x: 0, z: cz_chunk }, chunk);
+        }
+        world.insert_region(
+            1,
+            Region {
+                name: "basalt".into(),
+                default_material: Material::Grass,
+                cliff_material: Material::Stone,
+                cliff_style: CliffStyle::Columns,
+            },
+        );
+        world
+    }
+
+    #[test]
+    fn columns_are_continuous_across_a_chunk_border() {
+        // A cliff line crossing a chunk border cuts one continuous column
+        // set: the two bordering chunks must emit the same geometry on the
+        // shared seam. Column boundaries are world-anchored, so a width that
+        // does not divide the border position (16 m = 4096 octimeters) leaves
+        // a column straddling the seam — both chunks emit its two halves at
+        // the same world-anchored offset, so every skirt vertex *position* on
+        // the seam plane (z == 16) from one chunk is matched by the other. A
+        // chunk-relative cut (or a per-chunk offset reseed) would desync the
+        // straddling column and split the seam. (Only positions are compared:
+        // the face color resolves at the emitting cell's center — the same
+        // per-cell cliff coloring the flat skirt already uses — so it steps at
+        // the cell boundary by construction, not a geometry crack.)
+        let world = columns_cliff_across_z_border();
+        // A 48-octimeter width does not divide 4096, so the border is
+        // mid-column; give the columns real offset and stagger to exercise.
+        let defaults = StyleTable::default();
+        let stone = defaults.get(Material::Stone);
+        let mut styles = StyleTable::default();
+        styles.apply(&SetMaterialStyle {
+            material: Material::Stone.to_u8(),
+            base_hue: stone.base_hue,
+            base_sat: stone.base_sat,
+            base_light: stone.base_light,
+            amp_hue: stone.amp_hue,
+            amp_sat: stone.amp_sat,
+            amp_light: stone.amp_light,
+            wavelength: stone.wavelength,
+            octaves: stone.octaves,
+            persistence: stone.persistence,
+            seed_offset: stone.seed_offset,
+            flow_wavelength: stone.flow_wavelength,
+            smoothing_degrees: stone.smoothing_degrees,
+            smoothing_iterations: stone.smoothing_iterations,
+            rim_inset_octimeters: stone.rim_inset_octimeters,
+            rim_darken: stone.rim_darken,
+            wash_grade: stone.wash_grade,
+            water_depth_darken: stone.water_depth_darken,
+            blob_merge_degrees: stone.blob_merge_degrees,
+            column_width_octimeters: 48,
+            column_offset_octimeters: 24,
+            column_stagger_octimeters: 40,
+        });
+
+        let seam_verts = |chunk_z: i32| {
+            let mut tris = Vec::new();
+            emit_skirts(
+                &world,
+                ChunkPos { x: 0, z: chunk_z },
+                ViewMode::Painted,
+                &styles,
+                &mut tris,
+            );
+            let mut verts: Vec<[u32; 3]> = tris
+                .iter()
+                .flat_map(|t| t.verts.iter())
+                .filter(|v| v.z == 16.0)
+                .map(|v| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()])
+                .collect();
+            verts.sort_unstable();
+            verts.dedup();
+            verts
+        };
+
+        let below = seam_verts(0);
+        let above = seam_verts(1);
+        assert!(!below.is_empty(), "the seam carries column vertices");
+        assert_eq!(
+            below, above,
+            "both chunks must emit identical columns on the shared cliff seam",
         );
     }
 }

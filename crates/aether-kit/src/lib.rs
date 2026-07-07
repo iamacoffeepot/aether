@@ -55,9 +55,9 @@ pub use widgets::{
     WidgetChildSpec, WidgetConfig, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 pub use world::{
-    CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk, ChunkPos, Material, Region,
-    SetChunk, SetMaterialStyle, SetRegion, SetSmoothingProfile, SetViewMode, SetWaterPlane,
-    SmoothingProfile, ViewMode, WaterPlane, World, WorldDecodeError, WorldLoad,
+    CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk, ChunkPos, CliffStyle,
+    Material, Region, SetChunk, SetMaterialStyle, SetRegion, SetSmoothingProfile, SetViewMode,
+    SetWaterPlane, SmoothingProfile, ViewMode, WaterPlane, World, WorldDecodeError, WorldLoad,
 };
 
 #[cfg(feature = "runtime")]

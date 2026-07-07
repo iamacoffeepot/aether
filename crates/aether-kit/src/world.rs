@@ -209,6 +209,42 @@ impl TryFrom<u8> for Material {
     }
 }
 
+/// How a region's cliff faces are generated. Rides the wire and the world
+/// format as a raw `u8`, never as a schema enum, so a record has one
+/// canonical byte form; an unknown byte degrades to [`CliffStyle::Flat`]
+/// (the plain vertical quad), so an older or malformed record reads as the
+/// unstyled cliff rather than erroring.
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum CliffStyle {
+    /// One flat vertical quad per cliff edge — the unstyled face.
+    #[default]
+    Flat = 0,
+    /// Basalt columns: the face broken into world-anchored vertical column
+    /// facets with per-column horizontal offset, staggered tops, and
+    /// lightness jitter, reading as columnar jointing.
+    Columns = 1,
+}
+
+impl CliffStyle {
+    /// The raw wire byte.
+    #[must_use]
+    pub fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode a wire byte, degrading an unknown value to
+    /// [`CliffStyle::Flat`] — a malformed style byte becomes the plain
+    /// cliff, not a panic.
+    #[must_use]
+    pub fn from_u8_or_flat(byte: u8) -> Self {
+        match byte {
+            1 => Self::Columns,
+            _ => Self::Flat,
+        }
+    }
+}
+
 /// A semantic group of cells with a default ground material. Regions are
 /// referenced by 1-based id from the per-cell region plane (`0` = no
 /// region); the region table is positional, so a region's id is its
@@ -221,6 +257,11 @@ pub struct Region {
     /// past the step ceiling — the skirt color, and the future hook for
     /// generated rock banding. Defaults to [`Material::Stone`].
     pub cliff_material: Material,
+    /// How this region's cliff faces are generated — a plain vertical quad
+    /// ([`CliffStyle::Flat`], the default) or the basalt-column generator
+    /// ([`CliffStyle::Columns`]). Authored per region like `cliff_material`,
+    /// so where cliffs are columnar is a map property.
+    pub cliff_style: CliffStyle,
 }
 
 /// The step ceiling in octimeters: two edge-adjacent cells whose heights
@@ -579,6 +620,25 @@ impl World {
         Material::Stone
     }
 
+    /// The cliff-face style `cell`'s cliffs are generated with — its
+    /// region's `cliff_style`, or [`CliffStyle::Flat`] for no region, an
+    /// unregistered region, or a missing chunk. Mirrors
+    /// [`World::cliff_material`]; the skirt pass dispatches the high cell's
+    /// style per cliff edge.
+    #[must_use]
+    pub fn cliff_style(&self, cell: CellPos) -> CliffStyle {
+        let Some(chunk) = self.chunks.get(&cell.chunk()) else {
+            return CliffStyle::Flat;
+        };
+        let region_id = chunk.region[cell.chunk_index()];
+        if region_id != 0
+            && let Some(region) = self.regions.get(region_id as usize - 1)
+        {
+            return region.cliff_style;
+        }
+        CliffStyle::Flat
+    }
+
     /// The chunk at `at`, if present.
     #[must_use]
     pub fn chunk(&self, at: ChunkPos) -> Option<&Chunk> {
@@ -606,6 +666,7 @@ impl World {
                     name: String::new(),
                     default_material: Material::Void,
                     cliff_material: Material::Stone,
+                    cliff_style: CliffStyle::Flat,
                 },
             );
         }
@@ -758,6 +819,8 @@ impl SetChunk {
 /// fall through to. `default_material` and `cliff_material` are raw
 /// `Material` bytes; a `cliff_material` byte that decodes to `Void` or
 /// nothing falls back to Stone (a cliff face always wears something).
+/// `cliff_style` is a raw [`CliffStyle`] byte (`0` flat, `1` columns); an
+/// unknown byte reads as `Flat`.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.world.set_region")]
 pub struct SetRegion {
@@ -765,18 +828,20 @@ pub struct SetRegion {
     pub name: String,
     pub default_material: u8,
     pub cliff_material: u8,
+    pub cliff_style: u8,
 }
 
 impl SetRegion {
     /// The [`Region`] this registers, decoding `default_material`
-    /// (unknown → `Void`) and `cliff_material` (unknown or `Void` →
-    /// Stone).
+    /// (unknown → `Void`), `cliff_material` (unknown or `Void` → Stone),
+    /// and `cliff_style` (unknown → `Flat`).
     #[must_use]
     pub fn into_region(self) -> Region {
         Region {
             name: self.name,
             default_material: Material::from_u8_or_void(self.default_material),
             cliff_material: cliff_material_from_u8(self.cliff_material),
+            cliff_style: CliffStyle::from_u8_or_flat(self.cliff_style),
         }
     }
 }
@@ -901,6 +966,15 @@ pub struct SetMaterialStyle {
     /// Blob-merge hue-step threshold in degrees: same-material cells whose
     /// resolved hue differs by more than this pool a rim between them.
     pub blob_merge_degrees: f32,
+    /// Nominal basalt-column width in octimeters along a cliff edge. Clamped
+    /// to at least `16` on apply.
+    pub column_width_octimeters: i32,
+    /// Peak per-column horizontal offset in octimeters along the outward
+    /// face normal. Clamped to `[0, 64]` on apply.
+    pub column_offset_octimeters: i32,
+    /// Peak per-column top drop in octimeters below the terrain top edge.
+    /// Clamped to `[0, 64]` on apply.
+    pub column_stagger_octimeters: i32,
 }
 
 /// How the mesher paints a chunk: the finished gouache grammar, or the
@@ -964,16 +1038,18 @@ pub enum WorldDecodeError {
     BadName,
 }
 
-/// The current write version. Version 4 adds the water-plane table (after
-/// the smoothing-profile table) and the per-chunk water-plane plane (after
-/// the height plane); version 3 adds a cliff-material byte to each region
-/// record; version 2 adds the smoothing-profile table (after the region
-/// table) and the per-chunk smoothing plane (after the region plane).
-/// Older buffers still decode: a pre-4 buffer reads an empty water-plane
-/// table and an all-zero water plane, a pre-3 region reads Stone cliffs, a
-/// version-1 buffer reads an empty profile table and an all-zero smoothing
-/// plane.
-const WORLD_FORMAT_VERSION: u8 = 4;
+/// The current write version. Version 5 adds a cliff-style byte to each
+/// region record (after the cliff-material byte); version 4 adds the
+/// water-plane table (after the smoothing-profile table) and the per-chunk
+/// water-plane plane (after the height plane); version 3 adds a
+/// cliff-material byte to each region record; version 2 adds the
+/// smoothing-profile table (after the region table) and the per-chunk
+/// smoothing plane (after the region plane). Older buffers still decode: a
+/// pre-5 region reads a `Flat` cliff style, a pre-4 buffer reads an empty
+/// water-plane table and an all-zero water plane, a pre-3 region reads
+/// Stone cliffs, a version-1 buffer reads an empty profile table and an
+/// all-zero smoothing plane.
+const WORLD_FORMAT_VERSION: u8 = 5;
 
 /// The oldest version [`World::from_bytes`] still decodes.
 const WORLD_FORMAT_VERSION_MIN: u8 = 1;
@@ -995,6 +1071,7 @@ impl World {
             out.extend_from_slice(name);
             out.push(region.default_material.to_u8());
             out.push(region.cliff_material.to_u8());
+            out.push(region.cliff_style.to_u8());
         }
         out.extend_from_slice(&(self.smoothing_profiles.len() as u32).to_le_bytes());
         for profile in &self.smoothing_profiles {
@@ -1032,10 +1109,11 @@ impl World {
         out
     }
 
-    /// Decode the [`World::to_bytes`] format, current or older (a pre-4
-    /// buffer carries no water-plane table or plane — both read empty /
-    /// zero; a pre-3 region reads Stone cliffs; a version-1 buffer carries
-    /// no smoothing table or plane). A truncated buffer or unknown version
+    /// Decode the [`World::to_bytes`] format, current or older (a pre-5
+    /// region reads a `Flat` cliff style; a pre-4 buffer carries no
+    /// water-plane table or plane — both read empty / zero; a pre-3 region
+    /// reads Stone cliffs; a version-1 buffer carries no smoothing table or
+    /// plane). A truncated buffer or unknown version
     /// returns `Err` rather than panicking; the caller keeps its prior
     /// world on any error.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WorldDecodeError> {
@@ -1057,10 +1135,16 @@ impl World {
             } else {
                 Material::Stone
             };
+            let cliff_style = if version >= 5 {
+                CliffStyle::from_u8_or_flat(reader.u8()?)
+            } else {
+                CliffStyle::Flat
+            };
             regions.push(Region {
                 name,
                 default_material,
                 cliff_material,
+                cliff_style,
             });
         }
         let mut smoothing_profiles = Vec::new();
@@ -1231,6 +1315,7 @@ mod tests {
                 name: "meadow".into(),
                 default_material: Material::Grass,
                 cliff_material: Material::Stone,
+                cliff_style: CliffStyle::Flat,
             },
         );
 
@@ -1260,6 +1345,7 @@ mod tests {
                 name: "r".into(),
                 default_material: Material::Grass,
                 cliff_material: Material::Stone,
+                cliff_style: CliffStyle::Flat,
             },
         );
         // Underlay cascades to Grass; overlay stays raw Void.
@@ -1361,6 +1447,7 @@ mod tests {
                 name: "meadow".into(),
                 default_material: Material::Grass,
                 cliff_material: Material::Stone,
+                cliff_style: CliffStyle::Flat,
             },
         );
         world.insert_region(
@@ -1369,6 +1456,10 @@ mod tests {
                 name: "shore".into(),
                 default_material: Material::Sand,
                 cliff_material: Material::Dirt,
+                // A non-default style so the v5 record's cliff-style byte is
+                // exercised: the structural `decoded.regions == world.regions`
+                // below fails if the byte is not written and read back.
+                cliff_style: CliffStyle::Columns,
             },
         );
         world.insert_smoothing_profile(
@@ -1602,6 +1693,34 @@ mod tests {
     }
 
     #[test]
+    fn pre_v5_region_decodes_flat_cliffs() {
+        // Tripwire: a version-4 region record carries a cliff-material byte
+        // but no cliff-style byte; it must decode with the `Flat` default and
+        // must not consume a following byte as the style. Hand-built like the
+        // v1 / pre-v3 tripwires: one region, empty profile / water tables, no
+        // chunks. The region byte layout (name, default, cliff-material) is
+        // pinned here, so a mis-ordered v5 read that skipped the version gate
+        // would drift the region count or the profile table and this fails.
+        let mut buf = vec![4u8];
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one region
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(b"r");
+        buf.push(Material::Grass.to_u8()); // default material
+        buf.push(Material::Dirt.to_u8()); // cliff material (v3+)
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no profiles
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no water planes (v4+)
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no chunks
+        let world = World::from_bytes(&buf).expect("a v4 buffer still decodes");
+        assert_eq!(world.regions.len(), 1);
+        assert_eq!(world.regions[0].cliff_material, Material::Dirt);
+        assert_eq!(
+            world.regions[0].cliff_style,
+            CliffStyle::Flat,
+            "a pre-v5 region has no style byte and reads Flat",
+        );
+    }
+
+    #[test]
     fn insert_region_ignores_zero_and_grows_table() {
         let mut world = World::new();
         world.insert_region(
@@ -1610,6 +1729,7 @@ mod tests {
                 name: "ignored".into(),
                 default_material: Material::Grass,
                 cliff_material: Material::Stone,
+                cliff_style: CliffStyle::Flat,
             },
         );
         // id 0 is the no-region sentinel — table stays empty, so a cell
@@ -1627,6 +1747,7 @@ mod tests {
                 name: "third".into(),
                 default_material: Material::Stone,
                 cliff_material: Material::Stone,
+                cliff_style: CliffStyle::Flat,
             },
         );
         let mut chunk3 = Chunk::empty();

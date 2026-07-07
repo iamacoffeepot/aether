@@ -88,6 +88,20 @@ pub struct MaterialStyle {
     /// Blob-merge hue-step threshold in degrees: same-material cells whose
     /// resolved hue differs by more than this pool a rim between them.
     pub blob_merge_degrees: f32,
+    /// Nominal basalt-column width in octimeters along a cliff edge — the
+    /// world period the column intervals cut at (jittered per column).
+    /// Read only where a region styles its cliffs
+    /// [`crate::world::CliffStyle::Columns`]; clamped to at least `16` on
+    /// apply so a column is always a sane divisor of the meter edge.
+    pub column_width_octimeters: i32,
+    /// Peak per-column horizontal offset in octimeters along the outward
+    /// face normal — the column facet's break from the flat cliff plane,
+    /// hashed into `[-offset, +offset]` per column. Clamped to `[0, 64]`.
+    pub column_offset_octimeters: i32,
+    /// Peak per-column top drop in octimeters below the terrain top edge —
+    /// the staggered column heads, hashed into `[0, stagger]` per column.
+    /// Clamped to `[0, 64]`.
+    pub column_stagger_octimeters: i32,
 }
 
 /// Per-material style rows. Base colors are the HSL of the ground palette's
@@ -118,6 +132,9 @@ const STYLES: [MaterialStyle; 6] = [
         wash_grade: 0.10,
         water_depth_darken: 0.0,
         blob_merge_degrees: 6.0,
+        column_width_octimeters: 64,
+        column_offset_octimeters: 0,
+        column_stagger_octimeters: 0,
     },
     // Grass — hsl(110, 37.5, 40).
     MaterialStyle {
@@ -139,6 +156,9 @@ const STYLES: [MaterialStyle; 6] = [
         wash_grade: 0.10,
         water_depth_darken: 0.0,
         blob_merge_degrees: 6.0,
+        column_width_octimeters: 64,
+        column_offset_octimeters: 0,
+        column_stagger_octimeters: 0,
     },
     // Dirt — hsl(31, 42.9, 31.5).
     MaterialStyle {
@@ -160,6 +180,9 @@ const STYLES: [MaterialStyle; 6] = [
         wash_grade: 0.10,
         water_depth_darken: 0.0,
         blob_merge_degrees: 6.0,
+        column_width_octimeters: 64,
+        column_offset_octimeters: 0,
+        column_stagger_octimeters: 0,
     },
     // Stone — hsl(240, 3.45, 56.5).
     MaterialStyle {
@@ -181,6 +204,9 @@ const STYLES: [MaterialStyle; 6] = [
         wash_grade: 0.08,
         water_depth_darken: 0.0,
         blob_merge_degrees: 6.0,
+        column_width_octimeters: 64,
+        column_offset_octimeters: 16,
+        column_stagger_octimeters: 32,
     },
     // Sand — hsl(46, 50, 70).
     MaterialStyle {
@@ -202,6 +228,9 @@ const STYLES: [MaterialStyle; 6] = [
         wash_grade: 0.10,
         water_depth_darken: 0.0,
         blob_merge_degrees: 6.0,
+        column_width_octimeters: 64,
+        column_offset_octimeters: 0,
+        column_stagger_octimeters: 0,
     },
     // Water — hsl(216, 55.6, 45).
     MaterialStyle {
@@ -223,6 +252,9 @@ const STYLES: [MaterialStyle; 6] = [
         wash_grade: 0.06,
         water_depth_darken: 9.0,
         blob_merge_degrees: 6.0,
+        column_width_octimeters: 64,
+        column_offset_octimeters: 0,
+        column_stagger_octimeters: 0,
     },
 ];
 
@@ -251,7 +283,11 @@ impl StyleTable {
     /// mail, clamping `smoothing_iterations` to [`MAX_SMOOTHING_ITERATIONS`]
     /// and `smoothing_degrees` to `[45, 90]` — the same rule
     /// [`crate::world::World::insert_smoothing_profile`] applies to the
-    /// per-cell smoothing table. An undecodable or `Void` material byte is
+    /// per-cell smoothing table — and the basalt-column knobs to their safe
+    /// ranges (`column_width_octimeters` to at least `16` so a column stays
+    /// a sane divisor of the meter edge, `column_offset_octimeters` and
+    /// `column_stagger_octimeters` to `[0, 64]`). An undecodable or `Void`
+    /// material byte is
     /// a no-op; the caller (the `WorldView` handler) is expected to have
     /// already rejected it with a warn log.
     pub fn apply(&mut self, msg: &SetMaterialStyle) {
@@ -280,6 +316,9 @@ impl StyleTable {
             wash_grade: msg.wash_grade,
             water_depth_darken: msg.water_depth_darken,
             blob_merge_degrees: msg.blob_merge_degrees,
+            column_width_octimeters: msg.column_width_octimeters.max(16),
+            column_offset_octimeters: msg.column_offset_octimeters.clamp(0, 64),
+            column_stagger_octimeters: msg.column_stagger_octimeters.clamp(0, 64),
         };
     }
 }
@@ -879,10 +918,57 @@ mod tests {
             wash_grade: 0.10,
             water_depth_darken: 0.0,
             blob_merge_degrees: 6.0,
+            column_width_octimeters: 64,
+            column_offset_octimeters: 16,
+            column_stagger_octimeters: 32,
         });
         let row = styles.get(Material::Grass);
         assert_eq!(row.smoothing_iterations, MAX_SMOOTHING_ITERATIONS);
         assert_eq!(row.smoothing_degrees, 45);
+    }
+
+    #[test]
+    fn apply_clamps_the_column_knobs() {
+        // Catches a dropped clamp on the basalt-column knobs: the skirt
+        // pass's interval cut divides the meter edge by the width, so a
+        // width under 16 (or a negative one) would cut an absurd number of
+        // columns; the offset and stagger displace and drop a column and are
+        // held inside the meter so the face never inverts or punches through
+        // the terrain. Width floors at 16, offset and stagger clamp to
+        // [0, 64].
+        let base = SetMaterialStyle {
+            material: Material::Stone.to_u8(),
+            base_hue: 240.0,
+            base_sat: 3.45,
+            base_light: 56.5,
+            amp_hue: 4.0,
+            amp_sat: 0.0,
+            amp_light: 4.0,
+            wavelength: 7.0,
+            octaves: 2,
+            persistence: 0.45,
+            seed_offset: 60033,
+            flow_wavelength: 4.0,
+            smoothing_degrees: 75,
+            smoothing_iterations: 2,
+            rim_inset_octimeters: 32,
+            rim_darken: 0.16,
+            wash_grade: 0.08,
+            water_depth_darken: 0.0,
+            blob_merge_degrees: 6.0,
+            column_width_octimeters: 4,
+            column_offset_octimeters: 200,
+            column_stagger_octimeters: -30,
+        };
+        let mut styles = StyleTable::default();
+        styles.apply(&base);
+        let row = styles.get(Material::Stone);
+        assert_eq!(row.column_width_octimeters, 16, "width floors at 16");
+        assert_eq!(row.column_offset_octimeters, 64, "offset clamps to 64");
+        assert_eq!(
+            row.column_stagger_octimeters, 0,
+            "negative stagger clamps to 0"
+        );
     }
 
     #[test]
@@ -913,6 +999,9 @@ mod tests {
                 wash_grade: 1.0,
                 water_depth_darken: 1.0,
                 blob_merge_degrees: 1.0,
+                column_width_octimeters: 64,
+                column_offset_octimeters: 0,
+                column_stagger_octimeters: 0,
             });
         }
         let grass = styles.get(Material::Grass);
