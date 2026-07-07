@@ -49,8 +49,6 @@ pub struct ButtonRect {
 /// within a tick.
 #[derive(Default)]
 pub struct UiCapabilityState {
-    /// Latest cursor position from `MouseMove`, window pixels.
-    pub cursor: [f32; 2],
     /// Buttons recorded during the in-progress frame.
     pub current: Vec<ButtonRect>,
     /// Buttons from the last completed frame — the hit-test set.
@@ -63,12 +61,11 @@ pub struct UiCapabilityState {
 use super::UiCapability;
 use super::kinds::{UiBar, UiButton, UiClicked, UiLabel, UiPanel};
 use aether_actor::runtime;
-use aether_kinds::{MouseButton, MouseMove, Tick};
+use aether_kinds::{MouseButton, Tick, mouse_button};
 #[runtime]
 impl NativeActor for UiCapability {
     /// The runtime state this identity boots into (ADR-0122 split): the
-    /// state-bearing struct holding the cursor position and button-rect
-    /// double-buffer.
+    /// state-bearing struct holding the button-rect double-buffer.
     type State = UiCapabilityState;
 
     type Config = ();
@@ -82,14 +79,14 @@ impl NativeActor for UiCapability {
         Ok(UiCapabilityState::default())
     }
 
-    /// Subscribe the cursor + click streams and the frame edge.
+    /// Subscribe the click stream and the frame edge.
     ///
-    /// Mirrors the kit's input-subscription pattern: `MouseMove` /
-    /// `MouseButton` through `aether.input`, `Tick` through
+    /// Mirrors the kit's input-subscription pattern: `MouseButton`
+    /// through `aether.input` (which now carries the cursor position, so
+    /// no separate `MouseMove` subscription is needed), `Tick` through
     /// `aether.lifecycle`. The subscriptions survive `replace` (the
     /// mailbox id is stable) and clear on drop.
     fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
-        ctx.actor::<InputCapability>().subscribe::<MouseMove>();
         ctx.actor::<InputCapability>().subscribe::<MouseButton>();
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
     }
@@ -215,29 +212,21 @@ impl NativeActor for UiCapability {
         ctx.actor::<TextCapability>().send(&label);
     }
 
-    /// Cache the cursor position.
-    ///
-    /// # Agent
-    /// Fire-and-forget. Updates the latest cursor used by the next
-    /// `on_mouse_button` hit-test. No forwarded mail.
-    #[handler]
-    fn on_mouse_move(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: MouseMove) {
-        state.cursor = [mail.x, mail.y];
-    }
-
     /// Hit-test a left-click against the last frame's buttons.
     ///
     /// # Agent
-    /// Fire-and-forget. Tests the cached cursor against the last
-    /// completed frame's button rects, topmost-wins (later-drawn
-    /// buttons paint on top, so it scans in reverse draw order), and
-    /// on a hit sends `UiClicked { id }` to that button's recorded
-    /// owner by id. A click outside every rect does nothing. v1: the
-    /// mouse-button stream has no button discriminant or release, so
-    /// this fires on left-press only.
+    /// Fire-and-forget. Filters to the left button, then tests the
+    /// press position carried on the payload against the last completed
+    /// frame's button rects, topmost-wins (later-drawn buttons paint on
+    /// top, so it scans in reverse draw order), and on a hit sends
+    /// `UiClicked { id }` to that button's recorded owner by id. A click
+    /// outside every rect, or a non-left button, does nothing.
     #[handler]
-    fn on_mouse_button(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: MouseButton) {
-        let [cursor_x, cursor_y] = state.cursor;
+    fn on_mouse_button(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: MouseButton) {
+        if mail.button != mouse_button::LEFT {
+            return;
+        }
+        let (cursor_x, cursor_y) = (mail.x, mail.y);
         let target = state
             .last
             .iter()
@@ -281,7 +270,7 @@ mod tests {
 
     use super::UiCapability;
     use super::UiCapabilityState;
-    use super::{MouseButton, MouseMove, Tick, UiBar, UiButton, UiClicked, UiLabel, UiPanel};
+    use super::{MouseButton, Tick, UiBar, UiButton, UiClicked, UiLabel, UiPanel, mouse_button};
     use crate::render::DrawSolidQuads;
     use crate::text::DrawText;
     use aether_substrate::testing::test_mailer_and_rx;
@@ -548,8 +537,15 @@ mod tests {
         let mut ctx = make_ctx(&binding, component_sender(42));
         UiCapability::on_button(&mut state, &mut ctx, button(7, [10.0, 10.0, 100.0, 40.0]));
         UiCapability::on_tick(&mut state, &mut ctx, Tick);
-        UiCapability::on_mouse_move(&mut state, &mut ctx, MouseMove { x: 50.0, y: 25.0 });
-        UiCapability::on_mouse_button(&mut state, &mut ctx, MouseButton);
+        UiCapability::on_mouse_button(
+            &mut state,
+            &mut ctx,
+            MouseButton {
+                button: mouse_button::LEFT,
+                x: 50.0,
+                y: 25.0,
+            },
+        );
         let (recipient, clicked) = recv_clicked(&binding, &rx);
         assert_eq!(recipient, MailboxId(42), "clicked routes to the owner");
         assert_eq!(clicked.id, 7, "clicked carries the button id");
@@ -562,9 +558,16 @@ mod tests {
         let mut ctx = make_ctx(&binding, component_sender(42));
         UiCapability::on_button(&mut state, &mut ctx, button(7, [10.0, 10.0, 100.0, 40.0]));
         UiCapability::on_tick(&mut state, &mut ctx, Tick);
-        // Cursor outside the rect (right of x + width).
-        UiCapability::on_mouse_move(&mut state, &mut ctx, MouseMove { x: 200.0, y: 25.0 });
-        UiCapability::on_mouse_button(&mut state, &mut ctx, MouseButton);
+        // Press outside the rect (right of x + width).
+        UiCapability::on_mouse_button(
+            &mut state,
+            &mut ctx,
+            MouseButton {
+                button: mouse_button::LEFT,
+                x: 200.0,
+                y: 25.0,
+            },
+        );
         assert_no_clicked(&binding, &rx);
     }
 
@@ -583,9 +586,16 @@ mod tests {
             button(2, [50.0, 50.0, 100.0, 100.0]),
         );
         UiCapability::on_tick(&mut state, &mut ctx_b, Tick);
-        // Cursor inside both rects.
-        UiCapability::on_mouse_move(&mut state, &mut ctx_b, MouseMove { x: 60.0, y: 60.0 });
-        UiCapability::on_mouse_button(&mut state, &mut ctx_b, MouseButton);
+        // Press inside both rects.
+        UiCapability::on_mouse_button(
+            &mut state,
+            &mut ctx_b,
+            MouseButton {
+                button: mouse_button::LEFT,
+                x: 60.0,
+                y: 60.0,
+            },
+        );
         let (recipient, clicked) = recv_clicked(&binding, &rx);
         assert_eq!(
             recipient,

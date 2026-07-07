@@ -27,8 +27,9 @@ use aether_data::Kind;
 use aether_data::{encode, encode_empty, mailbox_id_from_name};
 use aether_kinds::{
     CaptureFrameResult, FocusWindow, FocusWindowResult, Key, KeyRelease, LifecycleAdvanceComplete,
-    MouseButton, MouseMove, Quit, SetWindowMode, SetWindowModeResult, SetWindowTitle,
-    SetWindowTitleResult, Tick, WindowMode, WindowSize, keycode,
+    MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Quit, SetWindowMode,
+    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, Tick, WindowMode, WindowSize,
+    keycode, mouse_button,
 };
 use aether_substrate::actor::native::local;
 // Only the unit tests name the `Envelope` (aka `OwnedDispatch`) type now —
@@ -52,7 +53,7 @@ use aether_substrate::{
     mail::{Mail, MailId, MailboxId},
 };
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, MouseButton as WinitMouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::monitor::{MonitorHandle, VideoModeHandle};
@@ -103,8 +104,15 @@ pub struct App {
     kind_key: aether_data::KindId,
     kind_key_release: aether_data::KindId,
     kind_mouse_button: aether_data::KindId,
+    kind_mouse_button_release: aether_data::KindId,
+    kind_mouse_wheel: aether_data::KindId,
     kind_mouse_move: aether_data::KindId,
     kind_window_size: aether_data::KindId,
+    /// Last cursor position seen in a `CursorMoved` event, in window
+    /// coordinates. Stamped onto each button / wheel event so a click or
+    /// scroll carries its location without the consumer correlating a
+    /// separate `MouseMove`.
+    last_cursor: (f32, f32),
     /// Cloned out of `RenderCapability::handles()` before the cap
     /// moves into the chassis builder. The app holds a clone so
     /// `Gpu::new` can install wgpu state and the per-frame loop can
@@ -391,6 +399,39 @@ fn parse_wxh(s: &str) -> Result<(u32, u32), String> {
         .parse()
         .map_err(|e| format!("invalid height {h:?}: {e}"))?;
     Ok((w, h))
+}
+
+/// Scroll lines are normalized to pixels at this rate. A tuning knob,
+/// not cap config — the wheel kind carries pixel-space deltas so a
+/// consumer never sees the winit line/pixel distinction.
+const PIXELS_PER_SCROLL_LINE: f32 = 40.0;
+
+/// Map winit's mouse button to the engine's `mouse_button` constant
+/// space. `Other(n)` maps to `None` — the caller pushes no mail,
+/// mirroring the unmapped-key contract in `keycode`.
+fn map_mouse_button(button: WinitMouseButton) -> Option<u32> {
+    match button {
+        WinitMouseButton::Left => Some(mouse_button::LEFT),
+        WinitMouseButton::Right => Some(mouse_button::RIGHT),
+        WinitMouseButton::Middle => Some(mouse_button::MIDDLE),
+        WinitMouseButton::Back => Some(mouse_button::BACK),
+        WinitMouseButton::Forward => Some(mouse_button::FORWARD),
+        WinitMouseButton::Other(_) => None,
+    }
+}
+
+/// Normalize a winit scroll delta to pixel-space `(delta_x, delta_y)`.
+/// Line deltas scale by `PIXELS_PER_SCROLL_LINE`; pixel deltas cast
+/// `f64 → f32` directly, matching the `CursorMoved` position cast.
+fn normalize_wheel(delta: MouseScrollDelta) -> (f32, f32) {
+    match delta {
+        MouseScrollDelta::LineDelta(x, y) => {
+            (x * PIXELS_PER_SCROLL_LINE, y * PIXELS_PER_SCROLL_LINE)
+        }
+        // Realistic scroll deltas stay well inside f32 mantissa.
+        #[allow(clippy::cast_possible_truncation)]
+        MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
+    }
 }
 
 /// Find a `VideoModeHandle` on `monitor` matching the given size +
@@ -1297,26 +1338,50 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                ..
-            } => {
-                self.push_chassis_root(
-                    self.input_mailbox,
-                    self.kind_mouse_button,
-                    encode_empty::<MouseButton>(),
-                    1,
-                );
+            WindowEvent::MouseInput { state, button, .. } => {
+                // winit's `Other(n)` buttons map to no engine constant and
+                // produce no mail, mirroring the unmapped-key contract.
+                if let Some(button) = map_mouse_button(button) {
+                    let (x, y) = self.last_cursor;
+                    match state {
+                        ElementState::Pressed => {
+                            self.push_chassis_root(
+                                self.input_mailbox,
+                                self.kind_mouse_button,
+                                encode(&MouseButton { button, x, y }),
+                                1,
+                            );
+                        }
+                        ElementState::Released => {
+                            self.push_chassis_root(
+                                self.input_mailbox,
+                                self.kind_mouse_button_release,
+                                encode(&MouseButtonRelease { button, x, y }),
+                                1,
+                            );
+                        }
+                    }
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (delta_x, delta_y) = normalize_wheel(delta);
+                let (x, y) = self.last_cursor;
+                let payload = encode(&MouseWheel {
+                    delta_x,
+                    delta_y,
+                    x,
+                    y,
+                });
+                self.push_chassis_root(self.input_mailbox, self.kind_mouse_wheel, payload, 1);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 // winit reports cursor position as f64; the input wire
                 // kind carries f32. Realistic window sizes (< 2^20 px)
                 // stay well inside f32 mantissa.
                 #[allow(clippy::cast_possible_truncation)]
-                let payload = encode(&MouseMove {
-                    x: position.x as f32,
-                    y: position.y as f32,
-                });
+                let (x, y) = (position.x as f32, position.y as f32);
+                self.last_cursor = (x, y);
+                let payload = encode(&MouseMove { x, y });
                 self.push_chassis_root(self.input_mailbox, self.kind_mouse_move, payload, 1);
             }
             _ => {}
@@ -1415,6 +1480,14 @@ impl DriverCapability for DesktopDriverCapability {
             .registry
             .kind_id(MouseButton::NAME)
             .expect("MouseButton registered");
+        let kind_mouse_button_release = boot
+            .registry
+            .kind_id(MouseButtonRelease::NAME)
+            .expect("MouseButtonRelease registered");
+        let kind_mouse_wheel = boot
+            .registry
+            .kind_id(MouseWheel::NAME)
+            .expect("MouseWheel registered");
         let kind_mouse_move = boot
             .registry
             .kind_id(MouseMove::NAME)
@@ -1493,8 +1566,11 @@ impl DriverCapability for DesktopDriverCapability {
             kind_key,
             kind_key_release,
             kind_mouse_button,
+            kind_mouse_button_release,
+            kind_mouse_wheel,
             kind_mouse_move,
             kind_window_size,
+            last_cursor: (0.0, 0.0),
             render_handles,
             capture_queue,
             outbound: Arc::clone(&boot.outbound),
@@ -1574,11 +1650,56 @@ mod tests {
     // in fixtures — reference id derivation, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
     use super::*;
+    use winit::dpi::PhysicalPosition;
 
     #[test]
     fn to_boot_title_none_returns_default() {
         // Unset title → "aether" default.
         assert_eq!(WindowConfig::default().to_boot_title(), "aether");
+    }
+
+    #[test]
+    fn map_mouse_button_covers_named_buttons() {
+        assert_eq!(
+            map_mouse_button(WinitMouseButton::Left),
+            Some(mouse_button::LEFT)
+        );
+        assert_eq!(
+            map_mouse_button(WinitMouseButton::Right),
+            Some(mouse_button::RIGHT)
+        );
+        assert_eq!(
+            map_mouse_button(WinitMouseButton::Middle),
+            Some(mouse_button::MIDDLE)
+        );
+        assert_eq!(
+            map_mouse_button(WinitMouseButton::Back),
+            Some(mouse_button::BACK)
+        );
+        assert_eq!(
+            map_mouse_button(WinitMouseButton::Forward),
+            Some(mouse_button::FORWARD)
+        );
+    }
+
+    #[test]
+    fn map_mouse_button_other_produces_no_mail() {
+        assert_eq!(map_mouse_button(WinitMouseButton::Other(9)), None);
+    }
+
+    #[test]
+    fn normalize_wheel_scales_line_delta() {
+        let (x, y) = normalize_wheel(MouseScrollDelta::LineDelta(1.0, -2.0));
+        assert_eq!(x, PIXELS_PER_SCROLL_LINE);
+        assert_eq!(y, -2.0 * PIXELS_PER_SCROLL_LINE);
+    }
+
+    #[test]
+    fn normalize_wheel_passes_pixel_delta_through() {
+        let delta = MouseScrollDelta::PixelDelta(PhysicalPosition::new(12.0, -3.0));
+        let (x, y) = normalize_wheel(delta);
+        assert_eq!(x, 12.0);
+        assert_eq!(y, -3.0);
     }
 
     #[test]

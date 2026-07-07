@@ -49,7 +49,9 @@ use aether_actor::actor;
 // gate, for every `#[handler]` parameter type the moved `#[runtime] impl`
 // declares — including these five stream-event kinds, not just the
 // subscribe/unsubscribe family.
-use aether_kinds::{Key, KeyRelease, MouseButton, MouseMove, WindowSize};
+use aether_kinds::{
+    Key, KeyRelease, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, WindowSize,
+};
 
 /// `aether.input` cap **identity** (ADR-0122 identity/runtime split). A
 /// ZST carrying only the addressing — the `Addressable` / `HandlesKind`
@@ -66,9 +68,9 @@ use aether_kinds::{Key, KeyRelease, MouseButton, MouseMove, WindowSize};
 ///    table on the runtime state. Reply target: the original sender.
 ///
 /// 2. **Input events** (`Key`, `KeyRelease`, `MouseMove`,
-///    `MouseButton`, `WindowSize`) — pushed by the chassis driver
-///    after each platform event; the cap fans out one mail per
-///    subscriber. Fire-and-forget; no reply.
+///    `MouseButton`, `MouseButtonRelease`, `MouseWheel`, `WindowSize`) —
+///    pushed by the chassis driver after each platform event; the cap
+///    fans out one mail per subscriber. Fire-and-forget; no reply.
 #[actor(singleton)]
 pub struct InputCapability;
 

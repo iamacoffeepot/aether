@@ -15,6 +15,7 @@ extern crate alloc;
 
 pub mod descriptors;
 pub mod keycode;
+pub mod mouse_button;
 pub mod text_metrics;
 pub mod trace;
 // First-party native `#[transform]`s (ADR-0048, issue 1464). Native-only
@@ -433,24 +434,53 @@ pub struct KeyRelease {
     pub code: u32,
 }
 
-/// A mouse-button press. No payload today — which button isn't tracked.
-/// Zero-sized but derives `Pod` / `Zeroable` for the same reason as
-/// `Tick` — see the note on that type.
+/// A mouse-button press. `button` identifies which button via the
+/// `mouse_button` constant space (`LEFT` / `RIGHT` / `MIDDLE` / …);
+/// `x` / `y` carry the cursor position at press time in window
+/// coordinates, matching `MouseMove` — so a click event is
+/// self-contained and needs no external cursor correlation. Omits `Eq`
+/// because the `f32` fields make it non-`Eq`, same as `MouseMove`.
 #[repr(C)]
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
 )]
 #[kind(name = "aether.mouse_button")]
-pub struct MouseButton;
+pub struct MouseButton {
+    pub button: u32,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Release counterpart of `MouseButton`. Dispatched once per button
+/// release, carrying the same `button` code the press carried and the
+/// cursor position at release time. Components tracking press-move-release
+/// drag pair subscription to both kinds so they can commit on release.
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
+)]
+#[kind(name = "aether.mouse_button_release")]
+pub struct MouseButtonRelease {
+    pub button: u32,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// A mouse-wheel scroll. `delta_x` / `delta_y` carry the scroll amount
+/// (line deltas normalized to pixels by the driver); `x` / `y` carry the
+/// cursor position at scroll time in window coordinates, so wheel-zoom-at-
+/// cursor needs no external cursor correlation.
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
+)]
+#[kind(name = "aether.mouse_wheel")]
+pub struct MouseWheel {
+    pub delta_x: f32,
+    pub delta_y: f32,
+    pub x: f32,
+    pub y: f32,
+}
 
 /// Cursor position in window coordinates, as logical pixels cast to f32.
 #[repr(C)]
