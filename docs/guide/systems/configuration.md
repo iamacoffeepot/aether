@@ -140,7 +140,7 @@ know going in:
   cross-compiles to wasm, where the config machinery isn't available; the
   `#[cfg_attr(feature = "runtime", …)]` keeps the wasm build carrying only the
   plain struct. Clippy runs host-native and won't catch a missing gate — the
-  wasm32 step in `scripts/preflight.sh` will.
+  wasm32 cross-build in CI will.
 - **Wire the argument overlay into the chassis CLI** so the per-spawn layer
   reaches your knob, and add a `*_defaults_match` test (the derive's literal
   default and your struct's `Default` are declared separately and a test keeps
@@ -152,8 +152,8 @@ that a knob is declared once and resolved by the layer, never read ad-hoc.
 
 A `clippy.toml` `disallowed-methods` entry bans `std::env::var` / `std::env::var_os`
 workspace-wide to keep that rule mechanical: a capability that reads the
-environment directly fails `cargo clippy -- -D warnings` (the same gate CI and
-`scripts/preflight.sh` run). A legitimately external read — the config machinery
+environment directly fails `cargo clippy -- -D warnings` (the CI gate). A
+legitimately external read — the config machinery
 itself, a process-level tuning knob, a standard `HOME` / `XDG` lookup, a build
 script, or test code — carries an `#[allow(clippy::disallowed_methods)]` with a
 one-line reason stating why it is not cap config.

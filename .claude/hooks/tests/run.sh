@@ -9,7 +9,7 @@
 # (the PreToolUse edit ask-gate), check-worktree-clean.sh (the PostToolUse
 # tripwire), and the session-worktree lock lifecycle (bind-session-worktree.sh
 # locks on bind, release-session-worktree.sh unlocks on session end). The
-# remaining wired hooks (check-pr-body, check-pre-push, check-host-fn-additions,
+# remaining wired hooks (check-pr-body, check-host-fn-additions,
 # check-no-divider-comments) are not yet covered here; the case table below is
 # the place to add them.
 #
@@ -109,43 +109,6 @@ else
   fail=$((fail+1)); printf 'FAIL  %-48s still locked after release\n' "release: worktree unlocked"
 fi
 expect "release: no session id -> exit 0" release-session-worktree.sh '{}' 0
-
-echo "## check-pre-push.sh — session-cwd worktree resolution"
-SESS_WT="$SCAFFOLD/.claude/worktrees/SESS"
-SESS_GITDIR=$(git -C "$SESS_WT" rev-parse --git-dir)
-SESS_HEAD=$(git -C "$SESS_WT" rev-parse HEAD)
-SESS_STAMP="$SESS_GITDIR/aether-preflight-passed"
-
-# (d) --no-verify bypasses the gate regardless of stamp state.
-rm -f "$SESS_STAMP"
-expect "pre-push: --no-verify bypasses gate" check-pre-push.sh \
-  "{\"cwd\":\"$SESS_WT\",\"tool_input\":{\"command\":\"git push --no-verify\"}}" 0
-
-# (b) absent stamp for worktree HEAD → block.
-expect "pre-push: no stamp for worktree HEAD -> block" check-pre-push.sh \
-  "{\"cwd\":\"$SESS_WT\",\"tool_input\":{\"command\":\"git push\"}}" 2
-
-# (a) correct stamp + bare push resolved via .cwd → allow (#2200 fix).
-echo "$SESS_HEAD" > "$SESS_STAMP"
-expect "pre-push: stamped worktree HEAD, bare push via cwd -> allow" check-pre-push.sh \
-  "{\"cwd\":\"$SESS_WT\",\"tool_input\":{\"command\":\"git push\"}}" 0
-
-# (c) correct stamp + explicit cd-prefix form → allow (#1199 regression guard).
-expect "pre-push: stamped worktree HEAD, cd-prefix form -> allow" check-pre-push.sh \
-  "{\"cwd\":\"$SCAFFOLD\",\"tool_input\":{\"command\":\"cd $SESS_WT && git push\"}}" 0
-
-# (e) cross-checkout allow: stamp lives in the SESS worktree's git-dir, but the
-#     push command runs from the main checkout cwd and names the worktree's
-#     branch explicitly (#2247 fix). The hook must scan all worktree stamps and
-#     allow on match.
-echo "$SESS_HEAD" > "$SESS_STAMP"
-expect "pre-push: stamped worktree, main-cwd push by branch name -> allow" check-pre-push.sh \
-  "{\"cwd\":\"$SCAFFOLD\",\"tool_input\":{\"command\":\"git push origin SESS\"}}" 0
-
-# (f) same main-checkout cwd but no stamp anywhere — must block.
-rm -f "$SESS_STAMP"
-expect "pre-push: no stamp, main-cwd push by branch name -> block" check-pre-push.sh \
-  "{\"cwd\":\"$SCAFFOLD\",\"tool_input\":{\"command\":\"git push origin SESS\"}}" 2
 
 echo
 echo "$pass passed, $fail failed"

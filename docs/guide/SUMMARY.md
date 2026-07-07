@@ -57,7 +57,7 @@
 
 # Contributing
 
-- [Local verification](local-verification.md)
+- [Local checks and CI](local-verification.md)
 
 # Reference
 

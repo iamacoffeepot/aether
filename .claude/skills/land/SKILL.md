@@ -91,41 +91,25 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
 
    On a read failure or absent field, default to `true` (conservative: treat as strict-on and rebase).
 
-   - **strict=false and `merge-tree`-clean** — GitHub does not require the branch to be up-to-date before merging, so behind+clean is already mergeable. Skip the rebase, re-attest, and force-push; proceed directly to step 4 (Qodana sweep) / step 5 (un-draft). Note "behind → merged direct (strict off)" in the summary.
+   - **strict=false and `merge-tree`-clean** — GitHub does not require the branch to be up-to-date before merging, so behind+clean is already mergeable. Skip the rebase and force-push; proceed directly to step 4 (Qodana sweep) / step 5 (un-draft). Note "behind → merged direct (strict off)" in the summary.
    - **strict=true (or read failure)** — the branch must be up-to-date before merging. Proceed with the full rebase sequence below.
 
    **Full rebase sequence (strict=true or read failure):**
 
    The rebase runs inside the branch's own worktree (`<m>` is the closing issue; step 8 sweeps exactly this path). `git rebase origin/main` with no branch argument rebases the worktree's current HEAD in place — git refuses the `<branch>` argument when that branch is checked out in another worktree, so the argument is dropped.
 
-   Capture the pre-rebase head first — it is the attestation key for detection:
    ```bash
    wt=.claude/worktrees/issue-<m>
-   old=$(git rev-parse origin/<branch>)
    git -C "$wt" fetch origin
    git -C "$wt" rebase origin/main
    ```
    If the rebase produces conflicts, the branch becomes `dirty` — surface and abort.
 
-   **Re-attest on the attested path.** Before the force-push, detect whether this PR is on the attested path using the same signal `ci.yml` keys on — the presence of a `refs/attestations/<sha>` ref:
-   ```bash
-   git ls-remote --exit-code origin "refs/attestations/$old"
-   ```
-   When the ref is present (exit 0), the PR was on the attested fast-path; run `scripts/attest.sh --publish` against the post-rebase worktree HEAD to publish a fresh `refs/attestations/<new-sha>` before CI sees the new push:
-   ```bash
-   (cd "$wt" && CARGO_TARGET_DIR=/mnt/dev/tmp/aether-attest-target \
-     TMPDIR=/mnt/dev/tmp \
-     scripts/attest.sh --publish)
-   ```
-   This must complete before the force-push so the attestation ref lands before CI's `synchronize` event triggers the `changes` job's ref-keyed opt-in check. When the ref is absent (exit non-zero), the PR was not on the attested path — skip re-attest; the force-push triggers normal heavy CI for the new sha, which is the correct behavior.
-
-   If attest tooling is unavailable (`witness` / `sshpk-conv` / Docker / signing key — see `/implement`'s "Attested path (`--attest`)" precondition table), degrade gracefully: surface that the attested fast-path was dropped for this rebase and proceed with the force-push. The merge is never blocked — `scripts/attest-verify.sh` exits 0 (pass-through) when no attestation ref is present for the head sha, so the new sha runs full heavy CI and still merges. The bare cost is the lost fast-path.
-
-   Then force-push:
+   Force-push the rebased branch:
    ```bash
    git -C "$wt" push --force-with-lease origin <branch>
    ```
-   Then re-predict. In `--sweep` mode the recompute loop iterates this same rebase action after every sibling merge, so a branch that becomes `behind` after a sibling lands is re-attested by the same path — no separate sweep handling is needed.
+   The force-push triggers a fresh CI run for the new sha, which is the gate. Then re-predict. In `--sweep` mode the recompute loop iterates this same rebase action after every sibling merge, so a branch that becomes `behind` after a sibling lands is rebased by the same path — no separate sweep handling is needed.
 
 4. **Qodana sweep (only when `Qodana scan` is the sole red).** When gate-check found `Qodana scan` as the one failing required check, resolve it before un-drafting — run the [Qodana sweep](#qodana-sweep): fetch the findings from the `qodana-report` artifact, triage and fix them in the worktree, re-push, and wait for `CI pass` green. Only then proceed. Skip this step when the PR is already fully green; bail to the user (do not un-draft) when the sweep surfaces an artifact-missing / outside-the-diff / uncertain case.
 
@@ -174,7 +158,7 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
 
 ## Qodana sweep
 
-Qodana is a required CI gate (`Qodana scan`, in `ci-pass`), not a local pre-flight step. `/implement` holds a draft whose only red is `Qodana scan` at `phase:refine`; `/land` resolves it here, before un-drafting. Invoked from [Landing sequence](#landing-sequence) step 4 when `Qodana scan` is the sole red.
+Qodana is a required CI gate (`Qodana scan`, in `ci-pass`). `/implement` holds a draft whose only red is `Qodana scan` at `phase:refine`; `/land` resolves it here, before un-drafting. Invoked from [Landing sequence](#landing-sequence) step 4 when `Qodana scan` is the sole red.
 
 1. **Confirm Qodana-only.** From the REST check-runs set, the failing required checks minus `CI pass` must be exactly `{Qodana scan}`. Any other red is a real failure — refuse and route to `/implement`.
 2. **Fetch + parse the findings.** `scripts/qodana-report.sh <pr>` downloads the PR's `qodana-report` CI artifact, parses the SARIF, filters to findings on the PR's own changes, and prints the actionable list (`file:line  [severity] ruleId — message`), exiting non-zero when PR-diff findings exist. `--all` prints the whole-tree set.

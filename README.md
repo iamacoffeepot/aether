@@ -63,10 +63,10 @@ A component lives in one crate that produces both outputs (`crate-type = ["cdyli
 
 Reference component in-tree: `aether-kit`, a multi-actor module (ADR-0096) packing locomotion, `camera`, and `mesh_viewer` into one cdylib. Third-party components follow the same shape — the convention is symmetric, not first-party-privileged. `aether-kinds` is reserved for the chassis primitives the substrate itself emits or consumes.
 
-## Testing and pre-flight
+## Testing and CI
 
 - **Tests** run under `cargo nextest run --workspace`. Timing-sensitive concurrency tests live in a `mod heavy` submodule so the runner serializes them; see the *Heavy tests* section of `CLAUDE.md`.
-- **Pre-flight**: `scripts/preflight.sh` runs the CI-equivalent checks locally (fmt, clippy, doc, tests, and the wasm32 component cross-build). Install the pre-push hook once per clone with `scripts/setup-githooks.sh`.
+- **CI is the build engine**: GitHub Actions runs the full check set (fmt, clippy, doc, tests, the wasm32 component cross-build, and qodana) on every push and is the merge gate. Locally, run `cargo fmt` before pushing; push early as a draft and fix any red as it surfaces. See [Local checks and CI](docs/guide/local-verification.md).
 
 ## Documentation
 

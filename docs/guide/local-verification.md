@@ -1,63 +1,27 @@
-# Local verification
+# Local checks and CI
 
-Two scripts reproduce the CI checks locally before you push.
+GitHub Actions is the build engine. CI runs the full check set — format, clippy, doc build, the marker-only host build, the workspace tests, and qodana — on every push, and it is the gate a PR merges through. There is no local pre-flight script and no pre-push hook: the heavy checks run on the runner, which builds many branches in parallel and never flakes on a local toolchain.
 
-`scripts/preflight.sh` runs the fast suite — format, clippy, doc build, and
-nextest — and on success stamps `.git/aether-preflight-passed` with the HEAD
-sha. The pre-push git hook reads that stamp; a re-push of the same commit
-short-circuits the whole check. Docs-only and CI-config-only changesets skip
-the Rust checks entirely (the script classifies them from the changed-file set).
-
-`scripts/attest.sh` runs a superset: the same checks, each wrapped by `witness`
-and signed with your SSH key, producing in-toto attestations the verifier
-workflow resolves against your GitHub account instead of re-running the checks
-on the CI runner. On success it stamps the same preflight file, so the pre-push
-hook treats a passing attest as a passing preflight. Running attest is optional
-for most contributors; the CI runner covers the case you skip it.
-
-## Scratch space and `AETHER_ATTEST_BASE`
-
-`scripts/attest.sh` writes three kinds of scratch under a single base directory:
-
-- a per-run `CARGO_TARGET_DIR` (build artifacts, nested under `RUNDIR`, removed on exit)
-- a persistent qodana analysis cache (JBR downloads and prior-analysis snapshots)
-- a per-run fresh clone of HEAD, `RUNDIR`, removed on exit
-
-All three derive from `AETHER_ATTEST_BASE`, which defaults to `$HOME/.cache`.
-On a host where `$HOME` lives on a small root filesystem, one full attest run
-overflows the volume. The failure surfaces as `ld: signal 7 (Bus error)` — the
-linker hit ENOSPC on an `mmap` — which reads as a compiler crash rather than a
-disk-full condition. Pointing `AETHER_ATTEST_BASE` at a larger volume is the
-remedy.
-
-There is one constraint on the target: it must be a path Docker can mount,
-because qodana runs in a container that mounts the per-run clone. A dedicated
-volume on an attached disk or a large mount already available on the host both
-work; a tmpfs or an NFS export the container daemon cannot reach would not.
-
-## Per-machine settings via `.env`
-
-`scripts/attest.sh` sources a gitignored `.env` at the main checkout root
-before it reads any environment variables, so per-machine settings apply
-consistently whether you run the script interactively, from a non-interactive
-shell, or from an agent session. The `.env` is resolved through the git
-common-dir so it is found from any linked worktree, not just the main
-checkout's `$ROOT`.
-
-Create or edit `<main-checkout-root>/.env`:
+Before you push, run one command:
 
 ```sh
-AETHER_ATTEST_BASE=/mnt/large-volume/.cache
+cargo fmt
 ```
 
-Substitute the path to a filesystem with enough room for build artifacts. On a
-fresh machine, a few gigabytes per attest run for the Rust target cache plus a
-few hundred megabytes for the qodana cache is a reasonable floor; each
-concurrent attest run carries its own full target tree (the default
-`CARGO_TARGET_DIR` is per-run and removed on exit), so N parallel runs need N
-times the target space. Pin `CARGO_TARGET_DIR` explicitly to share one warm
-cache across runs — at the cost of serializing on cargo's target lock.
+A formatting slip is the one CI red worth catching locally — instant to fix and the cheapest failure to avoid. Everything heavier is CI's job.
 
-The `.env` file is gitignored and not sourced by `scripts/preflight.sh` (which
-has no comparable scratch cost), so adding the file has no effect on the fast
-preflight path.
+## Watching CI
+
+Open your PR as a draft, then watch the checks and fix a red as soon as it surfaces rather than waiting for the whole run to finish:
+
+```sh
+scripts/wave-status.sh --wait <pr>
+```
+
+`--wait` polls CI over REST and exits 0 when the `CI pass` aggregator goes green, 1 when it fails. It fast-fails the moment a deterministic check — Format, Clippy, Docs, the marker-only host build, or the guardrail hook tests — concludes failure, so a cheap red surfaces without waiting out the slow test and qodana jobs. A fix pushed to the same branch supersedes the in-flight run, so an early fix costs nothing.
+
+`/implement` drives this loop for a scoped issue; see the [reference](reference.md) and `CLAUDE.md` for the full agent workflow.
+
+## Cross-worktree checks
+
+If you run `cargo doc` or `cargo clippy` by hand across several worktrees, keep each worktree on its own `target/` — never export a shared `CARGO_TARGET_DIR` across worktrees whose sources diverge. Cargo's incremental cache can otherwise surface a dependency last compiled from another worktree's source, producing phantom errors that look like regressions but are tooling artifacts.

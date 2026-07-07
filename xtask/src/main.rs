@@ -53,8 +53,8 @@ struct DistArgs {
     /// Cargo profile to build and package.
     #[arg(long, value_enum, default_value_t = Profile::Debug)]
     profile: Profile,
-    /// Skip the chassis (host-target) binary build + copy. The preflight
-    /// fast path uses this to stay wasm-only.
+    /// Skip the chassis (host-target) binary build + copy — a wasm-only fast
+    /// path for callers that only need the component wasm.
     #[arg(long)]
     no_bins: bool,
 }
@@ -654,8 +654,8 @@ mod tests {
         let components = discover_components(&metadata);
         let stems: BTreeSet<&str> = components.iter().map(|c| c.stem.as_str()).collect();
 
-        // Parity with the structural sweep preflight / CI ran before this
-        // xtask: a drop here surfaces as an AETHER_REQUIRE_RUNTIME panic. The
+        // Parity with the structural sweep CI runs before this xtask: a drop
+        // here surfaces as an AETHER_REQUIRE_RUNTIME panic. The
         // test fixtures are three single-output cdylib crates discovered the
         // same way as `aether-kit` — no example path.
         for expected in [

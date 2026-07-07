@@ -95,8 +95,7 @@ pub fn has_wgpu_adapter() -> bool {
 /// workspace root is always two levels up.
 #[must_use]
 // Test-only: CARGO_TARGET_DIR is the standard cargo build-output override, not
-// cap config — honor it so wasm built into an out-of-tree target dir (e.g. the
-// attestation producer's) is found.
+// cap config — honor it so wasm built into an out-of-tree target dir is found.
 #[allow(clippy::disallowed_methods)]
 pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))

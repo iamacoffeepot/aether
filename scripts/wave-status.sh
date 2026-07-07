@@ -11,7 +11,12 @@
 #   scripts/wave-status.sh 42 99             restrict to PR #42 and #99
 #   scripts/wave-status.sh --wait <pr>       loop (every 20s) until the `CI pass`
 #                                            aggregator for <pr> completes;
-#                                            exit 0 on success, 1 on failure
+#                                            exit 0 on success, 1 on failure.
+#                                            Fast-fails (exits 1 early) the moment
+#                                            a deterministic check (fmt / clippy /
+#                                            docs / marker build / hook tests)
+#                                            concludes failure, without waiting
+#                                            for the slow jobs to finish.
 #
 # Output (snapshot mode):
 #
@@ -137,8 +142,23 @@ if [[ $WAIT_MODE -eq 1 ]]; then
     fi
     sha=$(gh api "repos/$REPO/pulls/$WAIT_PR" --jq '.head.sha')
     echo "[wave-status] waiting for CI pass on PR #$WAIT_PR (sha ${sha:0:8}…)"
+    # Deterministic checks: never flaky, never auto-retried to green (ci-retry
+    # only re-runs resource-exhaustion flakes in the heavy test jobs). A failure
+    # in this set already dooms `CI pass`, so the caller fixes and re-pushes now
+    # rather than waiting out the slow jobs — the new push supersedes the run.
+    fast_fail_names='["Format","Clippy","Docs","Marker-only host build","Guardrail hook tests"]'
     while :; do
         runs=$(gh api "repos/$REPO/commits/$sha/check-runs" --paginate --jq '.check_runs' 2>/dev/null) || { sleep 20; continue; }
+        fast_red=$(echo "$runs" | jq -r --argjson ff "$fast_fail_names" \
+            '.[] | select(.status == "completed")
+                 | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure")
+                 | select(.name as $n | $ff | index($n))
+                 | .name + ": " + .conclusion')
+        if [[ -n "$fast_red" ]]; then
+            echo "[wave-status] deterministic check failed — fast-fail (other jobs may still be running):"
+            echo "$fast_red"
+            exit 1
+        fi
         agg_done=$(echo "$runs" | jq '[.[] | select(.name == "CI pass" and .status == "completed")] | length')
         pending=$(echo "$runs" | jq '[.[] | select(.status != "completed")] | length')
         if [[ "$agg_done" = "1" && "$pending" = "0" ]]; then

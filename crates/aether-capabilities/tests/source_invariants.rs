@@ -1,6 +1,6 @@
 //! Source-shape invariants for `aether-capabilities`, enforced through the
-//! run-everywhere `cargo test` harness so both local preflight and CI cover
-//! them (issue 2529). This replaced two CI-only regex greps
+//! run-everywhere `cargo test` harness so CI covers them (issue 2529). This
+//! replaced two CI-only regex greps
 //! (`check-no-scoped-visibility.sh`, `check-no-inline-runtime-mod.sh`) that
 //! could false-positive on the same tokens appearing in a string, comment, or
 //! macro body. Parsing each source file and walking its syntax tree makes the
@@ -9,8 +9,7 @@
 //! This is a lint expressed as a test, not a unit test of runtime logic: it
 //! reads the crate's own `src/**/*.rs`, so the checked property is computed
 //! from the AST rather than restating a declaration. It lives here because
-//! `cargo test` is the harness that reaches both `scripts/preflight.sh` and
-//! CI's workspace test job.
+//! `cargo test` is the harness CI's workspace test job runs.
 
 use std::fs;
 use std::path::PathBuf;
