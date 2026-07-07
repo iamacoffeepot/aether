@@ -48,6 +48,19 @@ pub struct KeyObserved {
     pub code: u32,
 }
 
+/// Broadcast payload the probe emits on each `TextInput` dispatch,
+/// echoing the committed `text`. Lets the ADR-0021 input round-trip
+/// scenario assert the `aether.input` cap fanned a `TextInput` out to a
+/// subscriber — the guard for the new text-stream fan-out handler being
+/// wired up, mirroring how [`KeyObserved`] guards the `Key` fan-out.
+#[derive(
+    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
+)]
+#[kind(name = "aether.test_fixture.text_input_observed")]
+pub struct TextInputObserved {
+    pub text: String,
+}
+
 /// Driver kind: scenarios send this to flip a probe fixture's render
 /// state. `visible == 0` halts the per-tick draw; any other value
 /// enables it. Cast-shape so encoding is just a memcpy of four

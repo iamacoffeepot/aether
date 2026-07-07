@@ -51,6 +51,9 @@ the `InputCapability` actor — the sole owner of the subscriber table
 | `aether.mouse_move` | cursor movement |
 | `aether.mouse_button` | a mouse-button press |
 | `aether.window_size` | a resize |
+| `aether.text_input` | committed, layout-resolved characters (typing / IME commit) |
+| `aether.ime_preedit` | in-flight IME composition (the underlined text being composed) |
+| `aether.modifiers` | the held modifier keys changed (Shift / Ctrl / Alt / Meta) |
 
 **`Tick` lives on the lifecycle, not here.** The per-frame advance is the
 substrate's frame-lifecycle state machine (`aether.lifecycle.tick`), so a
@@ -91,6 +94,35 @@ instances.** A `replace_component` keeps the same mailbox id, so the new instanc
 inherits the old one's subscriptions with nothing to redo. A `drop` is the end of
 them — the component host mails `unsubscribe_all`, so a torn-down mailbox can't
 keep receiving fan-out.
+
+**Text entry rides its own streams.** `aether.key` carries a physical scancode —
+which key moved, not which character it produces — so a text field would need a
+keyboard-layout table and its own shift tracking to turn a keypress into a
+character, wrong on every layout but US and impossible for CJK input. The
+substrate already resolves the character through the active layout and IME, so a
+field consumes that directly on three streams:
+
+- **`aether.text_input { text }`** delivers committed characters — the text the
+  user actually entered, one or more per event, already layout- and IME-resolved.
+  A field inserts `text` at its caret. Unlike `Key`, this stream forwards key
+  repeats, so holding a key types a run of characters. The desktop chassis dedupes
+  its two sources (a plain keystroke and an IME commit) behind a composition gate,
+  so a character arrives exactly once.
+- **`aether.ime_preedit { text, cursor_begin, cursor_end }`** carries the in-flight
+  composition an IME is still assembling — the underlined text to render inline
+  while the user composes, with the byte-offset cursor span the IME reports (both
+  offsets `None` when it gives no span). An empty `text` clears the preedit.
+- **`aether.modifiers { shift, ctrl, alt, meta }`** is a latest-wins state stream:
+  it fires whenever the held modifier keys change, and a field caches the last
+  value and consults it on a `Key` (to tell Ctrl+C from a bare C). `meta` is the
+  platform "super" key — Command on macOS, the Windows key elsewhere. This mirrors
+  how a component caches `WindowSize`; a late subscriber holds the all-false
+  default until the first change arrives.
+
+Editing commands — backspace, arrows, enter, home, end — compose from the
+`aether.key` scancodes paired with the cached modifiers; there's no separate kind
+for them. These three streams come from the desktop chassis only; the headless and
+hub chassis have no window and publish none of them, the same as `Key`.
 
 ## How to use it
 

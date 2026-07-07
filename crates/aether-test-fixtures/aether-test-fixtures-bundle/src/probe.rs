@@ -65,10 +65,10 @@ use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::{DrawTriangle, Vertex};
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
-use aether_kinds::{Key, Tick};
+use aether_kinds::{Key, TextInput, Tick};
 use aether_test_fixtures_kinds::{
     ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig, SetRender, TEST_BENCH_OBSERVER_MAILBOX_NAME,
-    TickObserved,
+    TextInputObserved, TickObserved,
 };
 
 pub struct Probe {
@@ -98,6 +98,7 @@ impl WasmActor for Probe {
     fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
         ctx.actor::<InputCapability>().subscribe::<Key>();
+        ctx.actor::<InputCapability>().subscribe::<TextInput>();
     }
 
     /// Counts ticks delivered to this mailbox; broadcasts the running
@@ -155,6 +156,22 @@ impl WasmActor for Probe {
         ctx.send_to_named::<KeyObserved>(
             TEST_BENCH_OBSERVER_MAILBOX_NAME,
             &KeyObserved { code: key.code },
+        );
+    }
+
+    /// Broadcasts a `text_input_observed` for each `TextInput` dispatch,
+    /// so the ADR-0021 round-trip scenario can assert the `aether.input`
+    /// cap fanned the committed-text stream out to a subscriber.
+    ///
+    /// # Agent
+    /// Not sent manually; the substrate's input fan-out fires it for
+    /// every `TextInput`-subscribed mailbox when text is committed.
+    /// Watch `receive_mail` for `aether.test_fixture.text_input_observed`.
+    #[handler]
+    fn on_text_input(&mut self, ctx: &mut WasmCtx<'_>, input: TextInput) {
+        ctx.send_to_named::<TextInputObserved>(
+            TEST_BENCH_OBSERVER_MAILBOX_NAME,
+            &TextInputObserved { text: input.text },
         );
     }
 

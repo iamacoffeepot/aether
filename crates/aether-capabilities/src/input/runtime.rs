@@ -5,9 +5,9 @@
 //! single `use runtime::*` glob in the parent.
 
 use super::{
-    InputCapability, Key, KeyRelease, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
-    SubscribeInput, SubscribeInputSelf, UnsubscribeAll, UnsubscribeInput, UnsubscribeInputSelf,
-    WindowSize,
+    ImePreedit, InputCapability, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease,
+    MouseMove, MouseWheel, SubscribeInput, SubscribeInputSelf, TextInput, UnsubscribeAll,
+    UnsubscribeInput, UnsubscribeInputSelf, WindowSize,
 };
 use aether_actor::runtime;
 
@@ -266,6 +266,24 @@ impl NativeActor for InputCapability {
     /// Window-resize fan-out.
     #[handler]
     fn on_window_size(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: WindowSize) {
+        state.fanout(ctx, &payload);
+    }
+
+    /// Committed text-input fan-out (layout/IME-resolved characters).
+    #[handler]
+    fn on_text_input(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: TextInput) {
+        state.fanout(ctx, &payload);
+    }
+
+    /// In-flight IME-composition fan-out.
+    #[handler]
+    fn on_ime_preedit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: ImePreedit) {
+        state.fanout(ctx, &payload);
+    }
+
+    /// Modifier-state fan-out (latest-wins chord state).
+    #[handler]
+    fn on_modifiers(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Modifiers) {
         state.fanout(ctx, &payload);
     }
 }

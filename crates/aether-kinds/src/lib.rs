@@ -520,6 +520,97 @@ pub struct WindowSize {
     pub height: u32,
 }
 
+/// Committed, layout-resolved text input (`aether.text_input`) — one or
+/// more characters the user typed, already translated through the active
+/// keyboard layout and IME. Published by the desktop chassis from two
+/// winit sources deduped by a composition gate: `KeyEvent.text` when no
+/// IME composition is active, and `Ime::Commit` when one is, so a
+/// character is never delivered twice. Unlike `Key` (a physical-scancode
+/// edge event), this stream forwards key repeats — holding a key types a
+/// run of characters. A text-field widget subscribes this and inserts
+/// `text` at its caret with no guest-side scancode keymap. Headless and
+/// hub chassis never publish — they have no window (same as `Key`).
+///
+/// Carries a `String`, so it rides the structured wire path
+/// (`Kind::encode_into_bytes` → `encode_wire`), not the `#[repr(C)]`
+/// cast path `Key` / `KeyRelease` use.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[kind(name = "aether.text_input")]
+pub struct TextInput {
+    pub text: String,
+}
+
+/// In-flight IME composition (`aether.ime_preedit`) — the underlined,
+/// not-yet-committed text a component renders inline while the user
+/// composes. Mirrors winit's `Ime::Preedit(String, Option<(usize,
+/// usize)>)`: `cursor_begin` / `cursor_end` are byte offsets into `text`
+/// marking the cursor/selection span the IME reports (both `None` when
+/// the IME gives no span). Empty `text` means the composition was
+/// cleared — the widget drops any preedit it was showing. Published by
+/// the desktop chassis only. Rides the structured wire path.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[kind(name = "aether.ime_preedit")]
+pub struct ImePreedit {
+    pub text: String,
+    pub cursor_begin: Option<u32>,
+    pub cursor_end: Option<u32>,
+}
+
+/// Latest-wins keyboard modifier state (`aether.modifiers`) — the chord
+/// keys currently held. Published by the desktop chassis on every
+/// `WindowEvent::ModifiersChanged`, following the same caching contract
+/// `WindowSize` documents: a component subscribes, caches the latest
+/// value, and consults it when it receives a `Key` (e.g. to tell Ctrl+C
+/// from a bare C). Named bool fields rather than a packed bit mask so a
+/// machine consumer reading the JSON schema sees `{ "shift": true }`
+/// directly. `meta` is the platform "super" key — Command on macOS, the
+/// Windows key elsewhere. A late subscriber holds the all-false default
+/// until the first `ModifiersChanged` arrives — the same warm-up every
+/// stream has. Carries `bool`s, so it rides the structured wire path.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[kind(name = "aether.modifiers")]
+// Four named bool fields are the wire contract: a machine consumer reads
+// `{ "shift": true }` off the JSON schema directly rather than decoding a
+// packed bit mask. A two-variant-enum refactor would defeat that.
+#[allow(clippy::struct_excessive_bools)]
+pub struct Modifiers {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub meta: bool,
+}
+
 // The render cap's drawing/texture kinds — `Vertex` / `DrawTriangle` /
 // `DRAW_TRIANGLE_BYTES` / `Camera` and the `aether.render.*` texture +
 // quad family — moved to `aether_capabilities::render::kinds` (ADR-0121,
