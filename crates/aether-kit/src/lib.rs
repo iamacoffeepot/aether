@@ -16,7 +16,10 @@
 //! kind lives in [`mesh`]. The [`world`] module holds the chunked world
 //! plane stack — the `World` / `Chunk` / `Material` data layer and its
 //! `aether.kit.world.{set_chunk,set_region,set_smoothing_profile,set_view_mode,load}` wire kinds
-//! — that `WorldView` meshes to the render sink.
+//! — that `WorldView` meshes to the render sink. The [`theme`] module
+//! holds the widget-tier visual tokens — the `Theme` struct,
+//! `WidgetState`, the `Theme::fill` state-overlay compositor, and the
+//! `aether.kit.widget.set_theme` live-restyle kind.
 //!
 //! # Units
 //!
@@ -38,8 +41,10 @@ use serde::{Deserialize, Serialize};
 
 pub mod camera;
 pub mod mesh;
+pub mod theme;
 pub mod world;
 
+pub use theme::{SetTheme, Theme, WidgetState};
 pub use world::{
     CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk, ChunkPos, Material, Region,
     SetChunk, SetRegion, SetSmoothingProfile, SetViewMode, SmoothingProfile, ViewMode, World,
