@@ -42,8 +42,6 @@ pub struct GridPlacement {
     pub origin_oct: [i32; 2],
     /// Octimeter distance between adjacent samples.
     pub step_oct: i32,
-    /// The `y` every emitted vertex lifts to.
-    pub y_lift: f32,
 }
 
 /// Corner-smoothing parameters for [`minimize_corners`].
@@ -604,7 +602,7 @@ pub fn emit_label_window(
     place: &GridPlacement,
     case: u8,
     connected: bool,
-    color: [f32; 3],
+    vertex: &impl Fn(f32, f32) -> Vertex,
     tris: &mut Vec<DrawTriangle>,
 ) {
     if case == 0 {
@@ -612,11 +610,11 @@ pub fn emit_label_window(
     }
     if (case == 5 || case == 10) && !connected {
         let (first, second) = SADDLE_SPLIT_POLYS[usize::from(case == 10)];
-        emit_window_poly(wi, wj, place, first, color, tris);
-        emit_window_poly(wi, wj, place, second, color, tris);
+        emit_window_poly(wi, wj, place, first, vertex, tris);
+        emit_window_poly(wi, wj, place, second, vertex, tris);
         return;
     }
-    emit_window_poly(wi, wj, place, CASE_POLYS[case as usize], color, tris);
+    emit_window_poly(wi, wj, place, CASE_POLYS[case as usize], vertex, tris);
 }
 
 /// Peel a `radius`-cell band off `grid`: a cell survives only when every
@@ -678,7 +676,7 @@ pub fn march_grid(
     gw: usize,
     gh: usize,
     place: &GridPlacement,
-    color: [f32; 3],
+    vertex: &impl Fn(f32, f32) -> Vertex,
     tris: &mut Vec<DrawTriangle>,
 ) {
     if gw < 2 || gh < 2 {
@@ -699,14 +697,14 @@ pub fn march_grid(
             full[wj * windows_x + wi] = case == 15;
         }
     }
-    merge_interior(&full, windows_x, windows_z, place, color, tris);
+    merge_interior(&full, windows_x, windows_z, place, vertex, tris);
     for wj in 0..windows_z {
         for wi in 0..windows_x {
             let case = case_grid[wj * windows_x + wi];
             if case == 0 || case == 15 {
                 continue;
             }
-            emit_window_contour(wi as i32, wj as i32, place, case, color, tris);
+            emit_window_contour(wi as i32, wj as i32, place, case, vertex, tris);
         }
     }
 }
@@ -719,7 +717,7 @@ fn merge_interior(
     windows_x: usize,
     windows_z: usize,
     place: &GridPlacement,
-    color: [f32; 3],
+    vertex: &impl Fn(f32, f32) -> Vertex,
     tris: &mut Vec<DrawTriangle>,
 ) {
     let mut consumed = vec![false; full.len()];
@@ -755,7 +753,7 @@ fn merge_interior(
             let x1 = place.origin_oct[0] + (wi + w) as i32 * place.step_oct;
             let z0 = place.origin_oct[1] + wj as i32 * place.step_oct;
             let z1 = place.origin_oct[1] + (wj + h) as i32 * place.step_oct;
-            push_quad(tris, x0, z0, x1, z1, place.y_lift, color);
+            push_quad(tris, x0, z0, x1, z1, vertex);
         }
     }
 }
@@ -766,10 +764,10 @@ fn emit_window_contour(
     wj: i32,
     place: &GridPlacement,
     case: u8,
-    color: [f32; 3],
+    vertex: &impl Fn(f32, f32) -> Vertex,
     tris: &mut Vec<DrawTriangle>,
 ) {
-    emit_window_poly(wi, wj, place, CASE_POLYS[case as usize], color, tris);
+    emit_window_poly(wi, wj, place, CASE_POLYS[case as usize], vertex, tris);
 }
 
 /// Fan-triangulate one window polygon given by its boundary-point indices
@@ -779,7 +777,7 @@ fn emit_window_poly(
     wj: i32,
     place: &GridPlacement,
     poly: &[u8],
-    color: [f32; 3],
+    vertex: &impl Fn(f32, f32) -> Vertex,
     tris: &mut Vec<DrawTriangle>,
 ) {
     let step_oct = place.step_oct;
@@ -800,13 +798,11 @@ fn emit_window_poly(
         [x_mid, z_hi],
         [x_lo, z_mid],
     ];
-    let vert = |p: [i32; 2]| Vertex {
-        x: p[0] as f32 / OCTIMETERS_PER_METER,
-        y: place.y_lift,
-        z: p[1] as f32 / OCTIMETERS_PER_METER,
-        r: color[0],
-        g: color[1],
-        b: color[2],
+    let vert = |p: [i32; 2]| {
+        vertex(
+            p[0] as f32 / OCTIMETERS_PER_METER,
+            p[1] as f32 / OCTIMETERS_PER_METER,
+        )
     };
     for k in 1..poly.len() - 1 {
         tris.push(DrawTriangle {
@@ -819,24 +815,22 @@ fn emit_window_poly(
     }
 }
 
-/// Push the two triangles of a flat quad spanning `[x0, x1] × [z0, z1]`
-/// (octimeters) at `y_lift`, all corners one color.
+/// Push the two triangles of a quad spanning `[x0, x1] × [z0, z1]`
+/// (octimeters), each corner built by `vertex` from its world position in
+/// meters — the caller owns height and color.
 pub fn push_quad(
     tris: &mut Vec<DrawTriangle>,
     x0: i32,
     z0: i32,
     x1: i32,
     z1: i32,
-    y_lift: f32,
-    color: [f32; 3],
+    vertex: &impl Fn(f32, f32) -> Vertex,
 ) {
-    let vert = |x: i32, z: i32| Vertex {
-        x: x as f32 / OCTIMETERS_PER_METER,
-        y: y_lift,
-        z: z as f32 / OCTIMETERS_PER_METER,
-        r: color[0],
-        g: color[1],
-        b: color[2],
+    let vert = |x: i32, z: i32| {
+        vertex(
+            x as f32 / OCTIMETERS_PER_METER,
+            z as f32 / OCTIMETERS_PER_METER,
+        )
     };
     let a = vert(x0, z0);
     let b = vert(x1, z0);
@@ -852,6 +846,19 @@ mod tests {
 
     fn count_true(grid: &[bool]) -> usize {
         grid.iter().filter(|&&b| b).count()
+    }
+
+    /// A flat colorless vertex builder — the `y = 0`, one-color case every
+    /// geometry test wants.
+    fn flat_vertex(wx: f32, wz: f32) -> Vertex {
+        Vertex {
+            x: wx,
+            y: 0.0,
+            z: wz,
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+        }
     }
 
     /// A uniform per-sample params slice — the single-setting case every
@@ -889,10 +896,9 @@ mod tests {
         let place = GridPlacement {
             origin_oct: [0, 0],
             step_oct: 64,
-            y_lift: 0.0,
         };
         let mut tris = Vec::new();
-        march_grid(&grid, 2, 2, &place, [0.0; 3], &mut tris);
+        march_grid(&grid, 2, 2, &place, &flat_vertex, &mut tris);
         assert_eq!(tris.len(), 4, "the connected hexagon fans to 4 triangles");
         // BL corner = (0,0) m; TR corner = (64,64) oct = (0.25,0.25) m.
         let joins = tris.iter().any(|t| {
@@ -921,10 +927,9 @@ mod tests {
         let place = GridPlacement {
             origin_oct: [0, 0],
             step_oct: 64,
-            y_lift: 0.0,
         };
         let mut tris = Vec::new();
-        march_grid(&grid, gw, gh, &place, [0.0; 3], &mut tris);
+        march_grid(&grid, gw, gh, &place, &flat_vertex, &mut tris);
         let xs: Vec<f32> = tris
             .iter()
             .flat_map(|t| t.verts.iter())
@@ -961,9 +966,8 @@ mod tests {
             &GridPlacement {
                 origin_oct: [0, 0],
                 step_oct: 64,
-                y_lift: 0.0,
             },
-            [0.0; 3],
+            &flat_vertex,
             &mut base,
         );
         let mut shifted = Vec::new();
@@ -974,9 +978,8 @@ mod tests {
             &GridPlacement {
                 origin_oct: [1024, 512],
                 step_oct: 64,
-                y_lift: 0.0,
             },
-            [0.0; 3],
+            &flat_vertex,
             &mut shifted,
         );
         assert_eq!(base.len(), shifted.len());
@@ -1283,7 +1286,6 @@ mod tests {
         let place = GridPlacement {
             origin_oct: [0, 0],
             step_oct: 64,
-            y_lift: 0.0,
         };
         // Samples [BL, BR, TL, TR] = [1, 2, 2, 1]: label 1 case 5, label 2
         // case 10. Label 2 wins the diagonal, label 1 splits.
@@ -1292,9 +1294,9 @@ mod tests {
         let case1 = label_case(&ids, 2, 0, 0, 1);
         let case2 = label_case(&ids, 2, 0, 0, 2);
         assert_eq!((case1, case2), (5, 10));
-        emit_label_window(0, 0, &place, case1, false, [0.0; 3], &mut tris);
+        emit_label_window(0, 0, &place, case1, false, &flat_vertex, &mut tris);
         let split_area = poly_area(&tris);
-        emit_label_window(0, 0, &place, case2, true, [0.0; 3], &mut tris);
+        emit_label_window(0, 0, &place, case2, true, &flat_vertex, &mut tris);
         let window_area = (64.0f32 / 256.0) * (64.0 / 256.0);
         assert!(
             (poly_area(&tris) - window_area).abs() < 1e-6,
@@ -1314,7 +1316,6 @@ mod tests {
         let place = GridPlacement {
             origin_oct: [0, 0],
             step_oct: 64,
-            y_lift: 0.0,
         };
         // Samples [BL, BR, TL, TR] = [1, 2, 3, 1]: label 1 case 5 (both
         // diagonal corners), labels 2 and 3 one corner each.
@@ -1324,7 +1325,7 @@ mod tests {
             let case = label_case(&ids, 2, 0, 0, label);
             // Label 1's saddle faces two different labels (2 != 3), so it
             // connects; the single-corner labels have no saddle at all.
-            emit_label_window(0, 0, &place, case, true, [0.0; 3], &mut tris);
+            emit_label_window(0, 0, &place, case, true, &flat_vertex, &mut tris);
         }
         let window_area = (64.0f32 / 256.0) * (64.0 / 256.0);
         assert!(
