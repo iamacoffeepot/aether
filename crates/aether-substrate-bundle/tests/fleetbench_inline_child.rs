@@ -18,7 +18,8 @@ mod fleetbench;
 mod tests {
     use aether_data::Kind;
     use aether_test_fixtures_kinds::{
-        INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho, InlineProbe,
+        Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, INLINE_WHO_CHILD,
+        INLINE_WHO_PARENT, InlineEcho, InlineProbe,
     };
 
     use crate::fleetbench::{FleetBench, dist_manifest_present};
@@ -101,5 +102,96 @@ mod tests {
             Some(engine),
             "the InlineProbe is routed to the forked engine",
         );
+    }
+
+    /// Issue 2690 reload gate: a typed-config inline child's state
+    /// survives a `replace_component` swap. Loads `InlineConfiguredParent`
+    /// (spawns `InlineConfiguredChild` with a non-default
+    /// `InlineConfiguredChildConfig`), bumps the child's counter off its
+    /// config-derived starting value, replaces the component in place with
+    /// the identical stem/export (the common same-SDK-build swap), and
+    /// asserts the moved value — not the config default, not a reset to
+    /// `0` — survives. Before the fix, `reconstruct_one_child` re-inited
+    /// every child from empty config bytes: a typed (non-`()`) `Config`
+    /// decoded `None` there, so the child was dropped outright (not
+    /// merely reset) and the post-replace query would have gone
+    /// unanswered by the child at all.
+    #[test]
+    fn fleetbench_inline_configured_child_state_survives_replace() {
+        const BUMPS: u32 = 3;
+        if !dist_manifest_present() {
+            return;
+        }
+        let mut bench = FleetBench::start();
+        let engine = bench.spawn_headless();
+        let parent = bench.load_full_export(
+            engine,
+            "aether_test_fixtures_bundle",
+            "test.inline.configured_parent",
+        );
+        let child_addr = format!("{}/aether.embedded:widget", parent.addr);
+
+        // Baseline: the child's durable counter starts from the spawn
+        // config's `initial`, not `0` — proving the spawn-time config path
+        // (not yet the reconstruct path this issue fixes) decoded the real
+        // bytes.
+        let baseline = count(&mut bench, engine, &child_addr);
+        assert_eq!(
+            baseline, CONFIGURED_CHILD_INITIAL,
+            "the child's counter starts from the spawn config's initial value",
+        );
+
+        // Move the state off both the config default (0) and the spawn
+        // config's initial value.
+        for _ in 0..BUMPS {
+            bench.send(engine, &child_addr, &Bump);
+        }
+        let moved = count(&mut bench, engine, &child_addr);
+        let expected_moved = CONFIGURED_CHILD_INITIAL + BUMPS;
+        assert_eq!(
+            moved, expected_moved,
+            "the child's counter moved off both the config default and its initial value",
+        );
+
+        // Same-stem in-place replace (ADR-0022): the common in-place
+        // rebuild where both sides are the same SDK build (per issue
+        // 2690's design notes on the composite bundle's transience).
+        bench.replace_export(
+            engine,
+            parent.mailbox_id,
+            "aether_test_fixtures_bundle",
+            "test.inline.configured_parent",
+        );
+
+        // The moved state — not the config default, not the spawn
+        // config's initial value, not silently dropped — survives the
+        // swap: the fix this issue makes.
+        let after_replace = count(&mut bench, engine, &child_addr);
+        assert_eq!(
+            after_replace, expected_moved,
+            "the typed-config child's moved state survives replace_component",
+        );
+    }
+
+    /// Send a `CountQuery` to `recipient` and decode the single
+    /// `CountReport` reply's `count`. Shared by the reload gate's
+    /// baseline / post-bump / post-replace reads.
+    fn count(bench: &mut FleetBench, engine: aether_data::EngineId, recipient: &str) -> u32 {
+        let replies = bench.send(engine, recipient, &CountQuery);
+        let reply = match replies.as_slice() {
+            [one] => one,
+            other => panic!(
+                "CountQuery should get exactly one reply, got {}",
+                other.len()
+            ),
+        };
+        assert_eq!(
+            reply.kind,
+            CountReport::ID,
+            "the reply should be a CountReport"
+        );
+        CountReport::decode_from_bytes(&reply.payload)
+            .expect("the CountReport reply decodes")
+            .count
     }
 }

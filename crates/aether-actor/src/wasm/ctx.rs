@@ -449,6 +449,7 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
             full_subname,
             is_counter,
             self.mailbox,
+            bytes,
             owned,
         )
     }
@@ -603,7 +604,14 @@ fn resolve_subname(subname: Subname<'_>) -> Result<(bool, String), SpawnError> {
 ///
 /// ADR-0114 §5: `type_tag` / `full_subname` / `is_counter` are recorded in
 /// the slot so a `replace_component` swap can reconstruct the child by
-/// type and re-fold its metadata.
+/// type and re-fold its metadata. `config_bytes` (issue 2690) is the
+/// child's encoded `Config` — the same bytes `config` was decoded from —
+/// retained in the slot so a subsequent dehydrate/reconstruct cycle can
+/// re-init the child from its real config instead of empty bytes.
+// The parameters are the slot's reconstruct record (ADR-0114 §5) plus the
+// decoded config — a fixed set with no meaningful grouping short of a
+// one-use struct.
+#[allow(clippy::too_many_arguments)]
 fn install_inline_child<A>(
     registry: &Registry,
     alias: MailboxId,
@@ -611,6 +619,7 @@ fn install_inline_child<A>(
     full_subname: String,
     is_counter: bool,
     parent: u64,
+    config_bytes: Vec<u8>,
     config: A::Config,
 ) -> Result<MailboxId, SpawnError>
 where
@@ -627,6 +636,7 @@ where
         full_subname,
         is_counter,
         parent,
+        config_bytes,
         Box::new(child),
     );
     Ok(alias)
@@ -1015,6 +1025,7 @@ mod tests {
     use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmDropCtx, WasmInitCtx};
     use aether_data::MailboxId;
     use alloc::string::String;
+    use alloc::vec::Vec;
     use core::mem::{align_of, size_of};
 
     /// Test inline child whose `init` always fails — drives the
@@ -1086,6 +1097,7 @@ mod tests {
             String::from("child"),
             false,
             0,
+            Vec::new(),
             (),
         );
         assert!(
@@ -1266,6 +1278,7 @@ mod tests {
             String::from("widget"),
             false,
             root,
+            Vec::new(),
             (),
         )
         .expect("a succeeding init installs the inline child");

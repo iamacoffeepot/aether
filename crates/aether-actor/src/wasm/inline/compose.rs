@@ -80,6 +80,7 @@ pub fn dehydrate(
             full_subname: meta.full_subname,
             version,
             state_bytes,
+            config_bytes: meta.config_bytes,
         });
     }
 
@@ -119,6 +120,10 @@ pub struct InlineChildToReconstruct<'a> {
     pub state_version: u32,
     /// The child's saved `on_dehydrate` bundle bytes.
     pub state_bytes: &'a [u8],
+    /// The child's encoded `Config` bytes, retained from the spawning
+    /// slot (issue 2690) — decoded to re-`init` the child from its real
+    /// config instead of empty bytes.
+    pub config_bytes: &'a [u8],
 }
 
 /// Decompose a migration bundle, run the parent's `on_rehydrate` with its
@@ -155,6 +160,7 @@ pub fn reconstruct_inline_children(
             full_subname: &entry.full_subname,
             state_version: entry.version,
             state_bytes: &entry.state_bytes,
+            config_bytes: &entry.config_bytes,
         };
         if !reconstruct_child(registry, &to_reconstruct) {
             // An unknown type tag (a replace that dropped a child type) or
@@ -176,12 +182,21 @@ pub fn reconstruct_inline_children(
 /// §5). Called by the `export!`-generated reconstruct callback once it has
 /// matched the child's type tag to one of the module's exported types.
 ///
-/// Returns `false` (and does not register) when `A::Config` cannot decode
-/// from empty bytes (a typed-config inline child — its config isn't
-/// persisted across replace) or `A::init` returns `Err`; the caller logs
-/// and skips. The substrate alias route under `alias` survived the swap
-/// (ADR-0022; the parent slot is stable), so re-keying the guest registry
-/// by `alias` restores addressing with no host round-trip.
+/// Decodes `A::Config` from `to_reconstruct.config_bytes` — the child's
+/// real encoded config, retained in the slot since spawn (issue 2690) — so
+/// a typed-config child re-`init`s with the config it was actually spawned
+/// with, not empty bytes. A `()`-config child still round-trips (empty
+/// bytes decode `Some(())`). Returns `false` (and does not register) when
+/// the config bytes fail to decode (a genuinely undecodable blob) or
+/// `A::init` returns `Err`; the caller logs and skips. The substrate alias
+/// route under `alias` survived the swap (ADR-0022; the parent slot is
+/// stable), so re-keying the guest registry by `alias` restores addressing
+/// with no host round-trip.
+///
+/// This is the "decode real config → init → insert" core #2692's
+/// `spawn_one_child` (tag-dispatched inline child spawn) is expected to
+/// share as a sibling function, adding only the `on_rehydrate` restore
+/// step below (per #2690's design notes, §Sequencing with #2692).
 #[must_use]
 pub fn reconstruct_one_child<A>(
     registry: &Registry,
@@ -194,11 +209,7 @@ where
     // identity's `ErasedWasmActor` impl satisfies this.
     <A as WasmActor>::State: ErasedWasmActor,
 {
-    // The child's config isn't part of the migration bundle; re-`init`
-    // from empty config bytes, the same shape the legacy zero-config
-    // `init` shim uses. A typed-config child decodes `None` here and is
-    // skipped.
-    let Some(config) = <A::Config as Kind>::decode_from_bytes(&[]) else {
+    let Some(config) = <A::Config as Kind>::decode_from_bytes(to_reconstruct.config_bytes) else {
         return false;
     };
     let mut init_ctx = WasmInitCtx::__new(to_reconstruct.alias.0);
@@ -234,6 +245,7 @@ where
         String::from(to_reconstruct.full_subname),
         to_reconstruct.is_counter,
         registry.self_id(),
+        to_reconstruct.config_bytes.to_vec(),
         Box::new(child),
     );
     true
@@ -241,13 +253,16 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Registry, dehydrate, reconstruct_inline_children};
-    use crate::Manual;
+    use super::{
+        InlineChildToReconstruct, Registry, dehydrate, reconstruct_inline_children,
+        reconstruct_one_child,
+    };
     use crate::mail::{Mail, PriorState};
-    use crate::wasm::ctx::WasmDropCtx;
+    use crate::wasm::ctx::{NO_INBOUND_SOURCE, WasmDropCtx, WasmInitCtx};
     use crate::wasm::inline::bundle;
-    use crate::wasm::{ErasedWasmActor, WasmCtx};
-    use aether_data::MailboxId;
+    use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmCtx};
+    use crate::{Addressable, Lifecycle, Manual};
+    use aether_data::{Kind, KindId, MailboxId};
     use alloc::boxed::Box;
     use alloc::string::String;
     use alloc::vec;
@@ -291,6 +306,7 @@ mod tests {
             String::from("a"),
             false,
             0,
+            vec![0x11, 0x22],
             Box::new(SavingChild { tag: 0x1111_2222 }),
         );
         registry.insert_child(
@@ -299,6 +315,7 @@ mod tests {
             String::from("b"),
             true,
             0,
+            Vec::new(),
             Box::new(SavingChild { tag: 0x3333_4444 }),
         );
 
@@ -325,6 +342,11 @@ mod tests {
             .expect("child a present");
         assert_eq!(a.type_tag, 0xAAAA);
         assert_eq!(a.state_bytes, 0x1111_2222u32.to_le_bytes().to_vec());
+        assert_eq!(
+            a.config_bytes,
+            vec![0x11, 0x22],
+            "child a's config bytes ride the compose alongside its state",
+        );
         let b = decomposed
             .children
             .iter()
@@ -332,6 +354,10 @@ mod tests {
             .expect("child b present");
         assert!(b.is_counter, "child b's counter flag is carried");
         assert_eq!(b.state_bytes, 0x3333_4444u32.to_le_bytes().to_vec());
+        assert!(
+            b.config_bytes.is_empty(),
+            "child b was spawned with no retained config bytes",
+        );
     }
 
     /// Step 4 coverage: each child entry is offered to the reconstruct
@@ -356,6 +382,7 @@ mod tests {
                 full_subname: String::from("a"),
                 version: 1,
                 state_bytes: vec![1, 2, 3],
+                config_bytes: Vec::new(),
             },
             ChildEntry {
                 alias_id: 0xC2,
@@ -364,6 +391,7 @@ mod tests {
                 full_subname: String::from("b"),
                 version: 2,
                 state_bytes: vec![4, 5],
+                config_bytes: Vec::new(),
             },
         ];
         let (version, bytes) = compose(5, &[7, 7], &children);
@@ -395,5 +423,152 @@ mod tests {
         );
         assert_eq!(offered[0].1, vec![1, 2, 3], "child a state is carried");
         assert_eq!(offered[1].1, vec![4, 5], "child b state is carried");
+    }
+
+    /// A typed (non-`()`) `Config` for step 5's reconstruct coverage: wraps
+    /// a `u32`. Hand-rolls `Kind` rather than deriving it (a host-only test
+    /// fixture needs no `Schema`/serde machinery) — `decode_from_bytes`
+    /// only succeeds on exactly 4 bytes, so it decodes `None` from empty
+    /// bytes just like a real typed config would, the branch
+    /// `reconstruct_one_child` must still honor.
+    #[derive(Clone, Copy)]
+    struct TypedConfig(u32);
+
+    impl Kind for TypedConfig {
+        const NAME: &'static str = "test.inline.typed_config";
+        const ID: KindId = KindId(0x7A11_0000_0000_0001);
+
+        fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+            let arr: [u8; 4] = bytes.try_into().ok()?;
+            Some(Self(u32::from_le_bytes(arr)))
+        }
+
+        fn encode_into_bytes(&self) -> Vec<u8> {
+            self.0.to_le_bytes().to_vec()
+        }
+    }
+
+    /// A typed-config inline child for step 5's reconstruct coverage.
+    /// `init` copies the decoded config into `observed`; `erased_dispatch`
+    /// returns it as the dispatch code so the test can read back the value
+    /// the child was actually `init`ed with — the erasure has no
+    /// downcasting, so the dispatch return code is the observation channel
+    /// (the same technique `RecordingChild` in `inline::mod`'s tests uses).
+    struct TypedConfigChild {
+        observed: u32,
+    }
+
+    impl Addressable for TypedConfigChild {
+        const NAMESPACE: &'static str = "test.inline.typed_config_child";
+        type Resolver = crate::Many;
+    }
+
+    impl Lifecycle<Self> for TypedConfigChild {
+        type Config = TypedConfig;
+        type InitError = ActorInitError;
+        type InitCtx<'a> = WasmInitCtx<'a>;
+        type Ctx<'a> = WasmCtx<'a>;
+
+        fn init(config: TypedConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+            Ok(Self { observed: config.0 })
+        }
+    }
+
+    impl WasmActor for TypedConfigChild {
+        type State = Self;
+        type Persist = ();
+    }
+
+    impl crate::WasmDispatch<Self> for TypedConfigChild {
+        fn dispatch(state: &mut Self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+            state.observed
+        }
+    }
+
+    impl ErasedWasmActor for TypedConfigChild {
+        fn erased_namespace(&self) -> &'static str {
+            Self::NAMESPACE
+        }
+        fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+            self.observed
+        }
+        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+        fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
+        fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
+    }
+
+    /// Step 5 coverage (the branch this issue fixes): `reconstruct_one_child`
+    /// over a `ChildEntry` carrying a typed-config child's real encoded
+    /// config bytes re-`init`s it with that config — not the empty-bytes
+    /// re-init that dropped every typed-config child before this fix. The
+    /// reconstructed child is registered (returns `true`) and its
+    /// `erased_dispatch` echoes back the decoded value, proving `init` saw
+    /// the real config rather than a default.
+    #[test]
+    fn reconstruct_one_child_reinits_typed_config_from_real_bytes() {
+        let registry = Registry::new();
+        let alias = MailboxId(0x9001);
+        let config = TypedConfig(0xDEAD_BEEF);
+        let config_bytes = config.encode_into_bytes();
+        let to_reconstruct = InlineChildToReconstruct {
+            alias,
+            type_tag: 0x1234,
+            is_counter: false,
+            full_subname: "typed",
+            state_version: 0,
+            state_bytes: &[],
+            config_bytes: &config_bytes,
+        };
+
+        let reconstructed = reconstruct_one_child::<TypedConfigChild>(&registry, &to_reconstruct);
+        assert!(
+            reconstructed,
+            "a typed-config child with real config bytes must reconstruct",
+        );
+
+        let mut child = registry
+            .take(alias)
+            .expect("the reconstructed child is registered under its alias");
+        let code = child.erased_dispatch(
+            &mut WasmCtx::__new(alias.0, &registry, NO_INBOUND_SOURCE),
+            // SAFETY: a zero-length mail frame — ptr 0 with len 0 spans no
+            // memory, and the probe child's dispatch reads no payload.
+            unsafe { Mail::__from_ptr(0, 1, 0, 1, crate::NO_REPLY_HANDLE, alias.0) },
+        );
+        assert_eq!(
+            code, 0xDEAD_BEEF,
+            "the child's init decoded the real config value, not a default",
+        );
+    }
+
+    /// Step 5 coverage: an empty-bytes entry for a typed-config child still
+    /// skips — the honest degradation for a genuinely undecodable blob
+    /// (`TypedConfig::decode_from_bytes` requires exactly 4 bytes). Distinct
+    /// from the `()`-config case, where empty bytes are the *correct*
+    /// encoding and always decode `Some(())`.
+    #[test]
+    fn reconstruct_one_child_skips_typed_config_with_undecodable_bytes() {
+        let registry = Registry::new();
+        let alias = MailboxId(0x9002);
+        let to_reconstruct = InlineChildToReconstruct {
+            alias,
+            type_tag: 0x1234,
+            is_counter: false,
+            full_subname: "typed",
+            state_version: 0,
+            state_bytes: &[],
+            config_bytes: &[],
+        };
+
+        let reconstructed = reconstruct_one_child::<TypedConfigChild>(&registry, &to_reconstruct);
+        assert!(
+            !reconstructed,
+            "empty bytes don't decode as a typed (non-unit) Config, so reconstruct skips",
+        );
+        assert!(
+            registry.take(alias).is_none(),
+            "a skipped child is never registered",
+        );
     }
 }
