@@ -1,8 +1,8 @@
 # Adding a substrate kind
 
 **Class:** recompile. You edit aether's Rust and rebuild, so the loop is
-`cargo` plus the pre-flight (`scripts/preflight.sh`). No running engine is
-required to land the kind; the MCP harness is handy for the final
+`cargo` locally, with CI running the full check set on every push. No running
+engine is required to land the kind; the MCP harness is handy for the final
 `describe_kinds` confirmation.
 
 Adding a substrate kind is how the engine's native vocabulary grows: a new
@@ -146,8 +146,7 @@ A moved id means producer and consumer must agree again:
 - **Rebuild prebuilt component wasm.** A wasm component bakes the kind's id into
   its `aether.kinds` custom section at build time. Stale prebuilt wasm carries
   the old id, so a test bench that loads it observes nothing. Re-run the wasm
-  cross-build (`scripts/preflight.sh` does this; CI pre-builds component wasm
-  before `cargo test`).
+  cross-build (CI pre-builds component wasm before `cargo test`).
 
 ## Staleness note
 

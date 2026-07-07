@@ -1,7 +1,7 @@
 # Adding a config knob
 
 > **Prereq (recompile class):** you're editing aether's Rust and rebuilding, so
-> you need `cargo` and the pre-flight loop (`scripts/preflight.sh`). The
+> you need `cargo`; CI runs the full check set on every push. The
 > [Configuration](../systems/configuration.md) explainer states the model this
 > recipe walks; [ADR-0090](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0090-application-configuration.md)
 > holds the design. Read the explainer first if "layered source-stack" and
@@ -131,8 +131,8 @@ no `.env()` source, so it's env-free and CI-safe (issue 464).
 > struct-level derive. The capabilities crate also cross-compiles to wasm, where
 > the config machinery isn't present, so the wasm build must carry only the plain
 > struct. Clippy runs host-native and won't catch a missing gate — the wasm32
-> cross-build step in `scripts/preflight.sh` (step 6) is what fails on it. Any
-> `parse` helper you add is `#[cfg(feature = "runtime")]` too.
+> cross-build in CI is what fails on it. Any `parse` helper you add is
+> `#[cfg(feature = "runtime")]` too.
 
 ### 3. Wire the argv overlay into each chassis CLI
 
@@ -183,15 +183,15 @@ a field on an existing struct shows up with no extra wiring — the META walk is
 discovery source of truth. If your knob is missing from the dump, the field isn't
 reaching the layer (re-check the `#[config]` hint and the `native` gate).
 
-### 5. Run the pre-flight
+### 5. Format and push
 
 ```sh
-scripts/preflight.sh
+cargo fmt
 ```
 
-This is the CI-equivalent loop: fmt, clippy, doc, nextest (which runs
+Then push. CI runs the full check set — fmt, clippy, doc, nextest (which runs
 `http_from_env_defaults_match`), and the wasm32 component cross-build that catches
-a missing `native` gate. Fix anything it flags before you push.
+a missing `native` gate. Fix anything CI flags.
 
 ## Adding a brand-new config struct
 
