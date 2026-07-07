@@ -23,7 +23,7 @@
 //! Movement is cell-committed on the [`CellPos`] rules. From the current
 //! cell the actor commits to the adjacent cell center in the held direction
 //! ([`CellPos::center_octimeters`]), glides toward it at
-//! [`SPEED_OCTIMETERS_PER_TICK`] with a velocity-normalized step (so a
+//! `SPEED_OCTIMETERS_PER_TICK` with a velocity-normalized step (so a
 //! diagonal covers the same ground per tick as a cardinal — no √2 speed-up),
 //! snaps on arrival, and re-commits. A left-click ray-picks the ground cell
 //! and walks the straight line to it; there is no pathfinder because blocking
