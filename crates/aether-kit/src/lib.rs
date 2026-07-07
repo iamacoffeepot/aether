@@ -44,10 +44,12 @@ use serde::{Deserialize, Serialize};
 
 pub mod camera;
 pub mod mesh;
+pub mod mover;
 pub mod theme;
 pub mod widgets;
 pub mod world;
 
+pub use mover::MoverTeleport;
 pub use theme::{SetTheme, Theme, WidgetState};
 pub use widgets::{
     ButtonClicked, ButtonConfig, ChildrenChanged, Collect, FocusGained, FocusLost, LabelConfig,
