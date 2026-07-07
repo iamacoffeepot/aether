@@ -49,6 +49,7 @@ pub use camera::CameraComponent;
 pub use locomotion::Locomotion;
 pub use mesh_viewer::MeshViewer;
 pub use mesher::mesh_chunk;
+pub use mesher::style::StyleTable;
 pub use widget::Widget;
 pub use widget_panel::WidgetPanel;
 pub use widgets::{ButtonWidget, LabelWidget, RadioGroupWidget, SliderWidget, TextFieldWidget};

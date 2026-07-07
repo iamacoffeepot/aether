@@ -100,7 +100,8 @@ use contour::{
     minimize_corners, push_quad, repartition,
 };
 use style::{
-    ResolvedCell, hsl_to_linear_rgb, raw_field, resolve_cell, rim_strength, style, wash_lightness,
+    ResolvedCell, StyleTable, hsl_to_linear_rgb, raw_field, resolve_cell, rim_strength,
+    wash_lightness,
 };
 
 /// Cells along one chunk edge, as a plain `i32` for loop bounds.
@@ -164,17 +165,23 @@ const MAX_SHORE_SCAN: i32 = 8;
 /// is unit-testable host-side. Reads neighbor cells through [`World`] (a
 /// bounded apron); a missing neighbor reads as empty. `mode` selects the
 /// painted gouache grammar or the raw grayscale calibration field.
+/// `styles` resolves each material's live style row.
 #[must_use]
-pub fn mesh_chunk(world: &World, at: ChunkPos, mode: ViewMode) -> Vec<DrawTriangle> {
+pub fn mesh_chunk(
+    world: &World,
+    at: ChunkPos,
+    mode: ViewMode,
+    styles: &StyleTable,
+) -> Vec<DrawTriangle> {
     let mut tris = Vec::new();
     match mode {
-        ViewMode::Raw => mesh_raw(world, at, &mut tris),
+        ViewMode::Raw => mesh_raw(world, at, styles, &mut tris),
         ViewMode::Painted => {
-            mesh_underlay(world, at, &mut tris);
-            mesh_overlay(world, at, &mut tris);
+            mesh_underlay(world, at, styles, &mut tris);
+            mesh_overlay(world, at, styles, &mut tris);
         }
     }
-    emit_skirts(world, at, mode, &mut tris);
+    emit_skirts(world, at, mode, styles, &mut tris);
     tris
 }
 
@@ -267,9 +274,15 @@ fn floor_to_i32(v: f32) -> i32 {
 /// edges rim through the partition's marched band, never here. A pure
 /// function of the cell and its four neighbors, so the two cells sharing
 /// an edge agree on the rim there.
-fn cell_rims(world: &World, cell: CellPos, material: Material) -> [f32; 4] {
-    let hue_a = resolve_cell(material, cell.x as f32 + 0.5, cell.z as f32 + 0.5, None).hue;
-    let threshold = style(material).blob_merge_degrees;
+fn cell_rims(world: &World, cell: CellPos, material: Material, styles: &StyleTable) -> [f32; 4] {
+    let hue_a = resolve_cell(
+        styles.get(material),
+        cell.x as f32 + 0.5,
+        cell.z as f32 + 0.5,
+        None,
+    )
+    .hue;
+    let threshold = styles.get(material).blob_merge_degrees;
     let sides = [
         (cell.x - 1, cell.z),
         (cell.x + 1, cell.z),
@@ -282,7 +295,13 @@ fn cell_rims(world: &World, cell: CellPos, material: Material) -> [f32; 4] {
         if neighbor != material {
             continue; // the partition's marched rim owns this edge
         }
-        let hue_b = resolve_cell(neighbor, *nx as f32 + 0.5, *nz as f32 + 0.5, None).hue;
+        let hue_b = resolve_cell(
+            styles.get(neighbor),
+            *nx as f32 + 0.5,
+            *nz as f32 + 0.5,
+            None,
+        )
+        .hue;
         rims[k] = rim_strength(true, true, hue_a, hue_b, threshold);
     }
     rims
@@ -297,6 +316,7 @@ fn partition_inputs(
     at: ChunkPos,
     apron: i32,
     n: usize,
+    styles: &StyleTable,
 ) -> Option<(Vec<u8>, Vec<SmoothParams>)> {
     let mut ids = vec![0u8; n * n];
     let mut params = vec![
@@ -319,7 +339,7 @@ fn partition_inputs(
             any |= material != Material::Void;
             params[idx] = world.smoothing_override(cell).map_or_else(
                 || {
-                    let s = style(material);
+                    let s = styles.get(material);
                     SmoothParams {
                         iterations: s.smoothing_iterations,
                         smoothing_degrees: s.smoothing_degrees,
@@ -358,10 +378,10 @@ fn display_label(material: u8, body: bool) -> u8 {
 /// polygons everywhere else, all at `y = 0` with no lifts. Every decision
 /// is a pure function of world coordinates, so two chunks emit identical
 /// geometry over their shared apron and the overlap is invisible.
-fn mesh_underlay(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
+fn mesh_underlay(world: &World, at: ChunkPos, styles: &StyleTable, tris: &mut Vec<DrawTriangle>) {
     let apron = MAX_APRON_SUBCELLS;
     let n = (SUBCELLS_PER_CHUNK_EDGE + 2 * apron) as usize;
-    let Some((ids, params)) = partition_inputs(world, at, apron, n) else {
+    let Some((ids, params)) = partition_inputs(world, at, apron, n, styles) else {
         return;
     };
 
@@ -381,8 +401,11 @@ fn mesh_underlay(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
             continue;
         }
         let region: Vec<bool> = grid.iter().map(|&g| g == m).collect();
-        let rim_width =
-            (style(Material::from_u8_or_void(m)).rim_inset_octimeters / step_oct).max(1);
+        let rim_width = (styles
+            .get(Material::from_u8_or_void(m))
+            .rim_inset_octimeters
+            / step_oct)
+            .max(1);
         let eroded = erode(&region, gw, gw, rim_width);
         for (idx, &g) in grid.iter().enumerate() {
             if g == m {
@@ -438,15 +461,22 @@ fn mesh_underlay(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
                 z: at.z * EDGE + lz,
             };
             let material = world.underlay(cell);
-            let resolved = resolve_cell(material, cell.x as f32 + 0.5, cell.z as f32 + 0.5, None);
-            let rims = cell_rims(world, cell, material);
+            let resolved = resolve_cell(
+                styles.get(material),
+                cell.x as f32 + 0.5,
+                cell.z as f32 + 0.5,
+                None,
+            );
+            let rims = cell_rims(world, cell, material, styles);
             let lift = CellLift::of(world, cell);
-            emit_underlay_cell(material, &resolved, cell.x, cell.z, rims, &lift, tris);
+            emit_underlay_cell(
+                material, &resolved, cell.x, cell.z, rims, &lift, styles, tris,
+            );
         }
     }
 
     emit_partition_windows(
-        world, at, &display, gw, apron, step_oct, &interior, lo, tris,
+        world, at, &display, gw, apron, step_oct, &interior, lo, styles, tris,
     );
 }
 
@@ -469,6 +499,7 @@ fn emit_partition_windows(
     step_oct: i32,
     interior: &[bool],
     lo: i32,
+    styles: &StyleTable,
     tris: &mut Vec<DrawTriangle>,
 ) {
     let hi = EDGE;
@@ -500,7 +531,7 @@ fn emit_partition_windows(
             origin_oct[0] + end_wi as i32 * step_oct,
             origin_oct[1] + (wj + 1) as i32 * step_oct,
         ];
-        emit_label_quad(world, label, owner, rect, tris);
+        emit_label_quad(world, label, owner, rect, styles, tris);
     };
     let windows = gw - 1;
     for wj in 0..windows {
@@ -568,7 +599,9 @@ fn emit_partition_windows(
                 continue;
             }
             flush(&mut run, wi, wj, tris);
-            emit_mixed_window(world, display, gw, wi, wj, corners, owner, &place, tris);
+            emit_mixed_window(
+                world, display, gw, wi, wj, corners, owner, &place, styles, tris,
+            );
         }
         flush(&mut run, windows, wj, tris);
     }
@@ -583,17 +616,23 @@ fn emit_label_quad(
     label: u8,
     owner: CellPos,
     rect: [i32; 4],
+    styles: &StyleTable,
     tris: &mut Vec<DrawTriangle>,
 ) {
     let material = Material::from_u8_or_void(label.div_ceil(2));
-    let resolved = resolve_cell(material, owner.x as f32 + 0.5, owner.z as f32 + 0.5, None);
+    let resolved = resolve_cell(
+        styles.get(material),
+        owner.x as f32 + 0.5,
+        owner.z as f32 + 0.5,
+        None,
+    );
     let rim = if label % 2 == 1 {
-        style(material).rim_darken
+        styles.get(material).rim_darken
     } else {
         0.0
     };
     let surface = |wx: f32, wz: f32| label_lift(world, owner, wx, wz);
-    emit_quad_shaded(material, &resolved, rect, rim, &surface, tris);
+    emit_quad_shaded(material, &resolved, rect, rim, &surface, styles, tris);
 }
 
 /// Emit every label's case polygon for one mixed boundary window, colored
@@ -611,6 +650,7 @@ fn emit_mixed_window(
     corners: [u8; 4],
     owner: CellPos,
     place: &GridPlacement,
+    styles: &StyleTable,
     tris: &mut Vec<DrawTriangle>,
 ) {
     let step_oct = place.step_oct;
@@ -637,9 +677,9 @@ fn emit_mixed_window(
             true
         };
         let material = Material::from_u8_or_void(label.div_ceil(2));
-        let s = style(material);
-        let resolved = resolve_cell(material, owner.x as f32 + 0.5, owner.z as f32 + 0.5, None);
-        let mut light = wash_lightness(material, resolved.light, wash_x, wash_z, resolved.stroke);
+        let s = styles.get(material);
+        let resolved = resolve_cell(s, owner.x as f32 + 0.5, owner.z as f32 + 0.5, None);
+        let mut light = wash_lightness(s, resolved.light, wash_x, wash_z, resolved.stroke);
         if label % 2 == 1 {
             light *= 1.0 - s.rim_darken;
         }
@@ -666,6 +706,8 @@ fn emit_mixed_window(
 /// Emit one cell's geometry: a single flat quad when no side rims, else a
 /// nine-slice whose edge strips and corners darken by the pooled-rim
 /// factor. All geometry stays inside the cell — the rim only pools inward.
+#[allow(clippy::too_many_arguments)] // one call site; the cell state travels together
+#[allow(clippy::too_many_lines)] // a flat sequence of nine quad emits; splitting hides the slice
 fn emit_underlay_cell(
     material: Material,
     resolved: &ResolvedCell,
@@ -673,11 +715,12 @@ fn emit_underlay_cell(
     cz: i32,
     rims: [f32; 4],
     patch: &CellLift,
+    styles: &StyleTable,
     tris: &mut Vec<DrawTriangle>,
 ) {
     let surface = |wx: f32, wz: f32| (patch.y(wx, wz), patch.shade(wx, wz));
     let surface = &surface;
-    let s = style(material);
+    let s = styles.get(material);
     let inset = s.rim_inset_octimeters;
     let x0 = cx * 256;
     let x3 = (cx + 1) * 256;
@@ -689,13 +732,29 @@ fn emit_underlay_cell(
     let z2 = z3 - inset;
 
     if rims.iter().all(|&r| r == 0.0) {
-        emit_quad_shaded(material, resolved, [x0, z0, x3, z3], 0.0, surface, tris);
+        emit_quad_shaded(
+            material,
+            resolved,
+            [x0, z0, x3, z3],
+            0.0,
+            surface,
+            styles,
+            tris,
+        );
         return;
     }
     let darken = s.rim_darken;
     let (left, right, top, bottom) = (rims[0], rims[1], rims[2], rims[3]);
     // Interior.
-    emit_quad_shaded(material, resolved, [x1, z1, x2, z2], 0.0, surface, tris);
+    emit_quad_shaded(
+        material,
+        resolved,
+        [x1, z1, x2, z2],
+        0.0,
+        surface,
+        styles,
+        tris,
+    );
     // Edge strips.
     emit_quad_shaded(
         material,
@@ -703,6 +762,7 @@ fn emit_underlay_cell(
         [x0, z1, x1, z2],
         darken * left,
         surface,
+        styles,
         tris,
     );
     emit_quad_shaded(
@@ -711,6 +771,7 @@ fn emit_underlay_cell(
         [x2, z1, x3, z2],
         darken * right,
         surface,
+        styles,
         tris,
     );
     emit_quad_shaded(
@@ -719,6 +780,7 @@ fn emit_underlay_cell(
         [x1, z0, x2, z1],
         darken * top,
         surface,
+        styles,
         tris,
     );
     emit_quad_shaded(
@@ -727,6 +789,7 @@ fn emit_underlay_cell(
         [x1, z2, x2, z3],
         darken * bottom,
         surface,
+        styles,
         tris,
     );
     // Corners darken by the stronger of their two adjacent sides.
@@ -736,6 +799,7 @@ fn emit_underlay_cell(
         [x0, z0, x1, z1],
         darken * left.max(top),
         surface,
+        styles,
         tris,
     );
     emit_quad_shaded(
@@ -744,6 +808,7 @@ fn emit_underlay_cell(
         [x2, z0, x3, z1],
         darken * right.max(top),
         surface,
+        styles,
         tris,
     );
     emit_quad_shaded(
@@ -752,6 +817,7 @@ fn emit_underlay_cell(
         [x0, z2, x1, z3],
         darken * left.max(bottom),
         surface,
+        styles,
         tris,
     );
     emit_quad_shaded(
@@ -760,6 +826,7 @@ fn emit_underlay_cell(
         [x2, z2, x3, z3],
         darken * right.max(bottom),
         surface,
+        styles,
         tris,
     );
 }
@@ -769,19 +836,25 @@ fn emit_underlay_cell(
 /// (`(wx, wz)` meters to `(y, slope shade)`), each corner shaded by the
 /// wash field and the slope shade at its own world position and darkened
 /// by `rim_darken`.
+// The resolved style row `s` plus the quad's four corners (`a`..`d`) read
+// clearest under these conventional short names.
+#[allow(clippy::many_single_char_names)]
+#[allow(clippy::too_many_arguments)] // two call sites; the quad state travels together
 fn emit_quad_shaded(
     material: Material,
     resolved: &ResolvedCell,
     rect: [i32; 4],
     rim_darken: f32,
     surface: &impl Fn(f32, f32) -> (f32, f32),
+    styles: &StyleTable,
     tris: &mut Vec<DrawTriangle>,
 ) {
+    let s = styles.get(material);
     let corner = |xo: i32, zo: i32| {
         let wx = xo as f32 / OCTIMETERS_PER_METER;
         let wz = zo as f32 / OCTIMETERS_PER_METER;
         let (y, shade) = surface(wx, wz);
-        let light = wash_lightness(material, resolved.light, wx, wz, resolved.stroke);
+        let light = wash_lightness(s, resolved.light, wx, wz, resolved.stroke);
         let light = (light * (1.0 - rim_darken) * shade).clamp(0.0, 100.0);
         let rgb = hsl_to_linear_rgb(resolved.hue, resolved.sat, light);
         Vertex {
@@ -819,7 +892,7 @@ fn subcell_covered(world: &World, at: ChunkPos, six: i32, siz: i32, material: Ma
 
 /// Emit the overlay pass: for each distinct overlay material present in
 /// the chunk, contour its subcell field.
-fn mesh_overlay(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
+fn mesh_overlay(world: &World, at: ChunkPos, styles: &StyleTable, tris: &mut Vec<DrawTriangle>) {
     let Some(chunk) = world.chunk(at) else {
         return;
     };
@@ -831,7 +904,7 @@ fn mesh_overlay(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
     }
     for (id, seen) in present.iter().enumerate() {
         if *seen {
-            mesh_overlay_material(world, at, Material::from_u8_or_void(id as u8), tris);
+            mesh_overlay_material(world, at, Material::from_u8_or_void(id as u8), styles, tris);
         }
     }
 }
@@ -861,8 +934,9 @@ fn sample_params(
     material: Material,
     apron: i32,
     n: usize,
+    styles: &StyleTable,
 ) -> Vec<SmoothParams> {
-    let s = style(material);
+    let s = styles.get(material);
     let default = SmoothParams {
         iterations: s.smoothing_iterations,
         smoothing_degrees: s.smoothing_degrees,
@@ -897,12 +971,13 @@ fn mesh_overlay_material(
     world: &World,
     at: ChunkPos,
     material: Material,
+    styles: &StyleTable,
     tris: &mut Vec<DrawTriangle>,
 ) {
-    let s = style(material);
+    let s = styles.get(material);
     let apron = MAX_APRON_SUBCELLS;
     let (field, n) = sample_field(world, at, material, apron);
-    let params = sample_params(world, at, material, apron, n);
+    let params = sample_params(world, at, material, apron, n, styles);
     let base_oct = [
         at.x * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
         at.z * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
@@ -926,7 +1001,7 @@ fn mesh_overlay_material(
     let eroded = erode(&smoothed, gw, gh, rim_width);
 
     if material == Material::Water {
-        emit_water(world, &eroded, gw, apron, upsample, base_oct, tris);
+        emit_water(world, &eroded, gw, apron, upsample, base_oct, styles, tris);
         return;
     }
 
@@ -957,6 +1032,7 @@ fn surface_vertex(world: &World, lift: f32, color: [f32; 3]) -> impl Fn(f32, f32
 /// so the body hugs the smoothed contour at the smoothing grid's own
 /// resolution and the marched rim band beneath shows as an even pooled
 /// edge instead of subcell-scale teeth.
+#[allow(clippy::too_many_arguments)] // one call site; the water pass state travels together
 fn emit_water(
     world: &World,
     eroded: &[bool],
@@ -964,6 +1040,7 @@ fn emit_water(
     apron: i32,
     upsample: usize,
     base_oct: [i32; 2],
+    styles: &StyleTable,
     tris: &mut Vec<DrawTriangle>,
 ) {
     let u = upsample as i32;
@@ -989,7 +1066,8 @@ fn emit_water(
                 let depth = subcell_shore_depth(&inside, si, sj);
                 let center_x = (x_oct + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
                 let center_z = (z_oct + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
-                let resolved = resolve_cell(Material::Water, center_x, center_z, Some(depth));
+                let resolved =
+                    resolve_cell(styles.get(Material::Water), center_x, center_z, Some(depth));
                 let color = hsl_to_linear_rgb(resolved.hue, resolved.sat, resolved.light);
                 push_quad(
                     tris,
@@ -1018,7 +1096,7 @@ fn emit_water(
             }
             let center_x = (x_oct + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
             let center_z = (z_oct + OCTIMETERS_PER_SUBCELL / 2) as f32 / OCTIMETERS_PER_METER;
-            let resolved = resolve_cell(Material::Water, center_x, center_z, Some(0.0));
+            let resolved = resolve_cell(styles.get(Material::Water), center_x, center_z, Some(0.0));
             let color = hsl_to_linear_rgb(resolved.hue, resolved.sat, resolved.light);
             let vertex = surface_vertex(world, OVERLAY_BODY_LIFT, color);
             for dz in 0..u {
@@ -1055,7 +1133,7 @@ fn subcell_shore_depth(inside: &impl Fn(i32, i32) -> bool, x: i32, z: i32) -> f3
 /// underlay cell on the cell's surface patch, its value the cell's own
 /// hue-noise field (no slope shade — the gray is the calibration
 /// instrument).
-fn mesh_raw(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
+fn mesh_raw(world: &World, at: ChunkPos, styles: &StyleTable, tris: &mut Vec<DrawTriangle>) {
     let base_x = at.x * EDGE;
     let base_z = at.z * EDGE;
     for lz in 0..EDGE {
@@ -1068,7 +1146,11 @@ fn mesh_raw(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
             if material == Material::Void {
                 continue;
             }
-            let v = raw_field(material, cell.x as f32 + 0.5, cell.z as f32 + 0.5);
+            let v = raw_field(
+                styles.get(material),
+                cell.x as f32 + 0.5,
+                cell.z as f32 + 0.5,
+            );
             let x0 = cell.x * 256;
             let z0 = cell.z * 256;
             let lift = CellLift::of(world, cell);
@@ -1094,7 +1176,14 @@ fn mesh_raw(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
 /// keeps them a flat gray so the terrain stays closed without polluting
 /// the calibration field. Where the corner walk merged the two sides'
 /// plates the gap tapers to nothing and the face is skipped.
-fn emit_skirts(world: &World, at: ChunkPos, mode: ViewMode, tris: &mut Vec<DrawTriangle>) {
+#[allow(clippy::too_many_lines)] // one linear pass: enumerate, color, emit — no seams to split at
+fn emit_skirts(
+    world: &World,
+    at: ChunkPos,
+    mode: ViewMode,
+    styles: &StyleTable,
+    tris: &mut Vec<DrawTriangle>,
+) {
     // Per direction: neighbor offset, the shared edge's two lattice
     // corners as indices into the high cell's corner order, and the same
     // lattice points in the neighbor's order (the low side's plates).
@@ -1164,8 +1253,12 @@ fn emit_skirts(world: &World, at: ChunkPos, mode: ViewMode, tris: &mut Vec<DrawT
                     ViewMode::Raw => ([RAW_SKIRT_GRAY; 3], [RAW_SKIRT_GRAY; 3]),
                     ViewMode::Painted => {
                         let material = world.cliff_material(cell);
-                        let resolved =
-                            resolve_cell(material, cell.x as f32 + 0.5, cell.z as f32 + 0.5, None);
+                        let resolved = resolve_cell(
+                            styles.get(material),
+                            cell.x as f32 + 0.5,
+                            cell.z as f32 + 0.5,
+                            None,
+                        );
                         (
                             hsl_to_linear_rgb(
                                 resolved.hue,
@@ -1202,7 +1295,7 @@ fn emit_skirts(world: &World, at: ChunkPos, mode: ViewMode, tris: &mut Vec<DrawT
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::{CELLS_PER_CHUNK_AREA, Chunk, Region, SmoothingProfile};
+    use crate::world::{CELLS_PER_CHUNK_AREA, Chunk, Region, SetMaterialStyle, SmoothingProfile};
     use style::ResolvedCell;
 
     fn grass_cell() -> ResolvedCell {
@@ -1242,6 +1335,7 @@ mod tests {
             5,
             [0.0; 4],
             &flat_lift(3, 5),
+            &StyleTable::default(),
             &mut tris,
         );
         assert_eq!(tris.len(), 2, "no rims is one flat quad");
@@ -1260,6 +1354,7 @@ mod tests {
             5,
             [1.0; 4],
             &flat_lift(3, 5),
+            &StyleTable::default(),
             &mut tris,
         );
         assert_eq!(tris.len(), 18, "a fully-rimmed cell is a nine-slice");
@@ -1298,8 +1393,18 @@ mod tests {
         right.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
         world.insert_chunk(ChunkPos { x: 1, z: 0 }, right);
 
-        let left_cell_right_rim = cell_rims(&world, CellPos { x: 15, z: 4 }, Material::Grass)[1];
-        let right_cell_left_rim = cell_rims(&world, CellPos { x: 16, z: 4 }, Material::Grass)[0];
+        let left_cell_right_rim = cell_rims(
+            &world,
+            CellPos { x: 15, z: 4 },
+            Material::Grass,
+            &StyleTable::default(),
+        )[1];
+        let right_cell_left_rim = cell_rims(
+            &world,
+            CellPos { x: 16, z: 4 },
+            Material::Grass,
+            &StyleTable::default(),
+        )[0];
         assert_eq!(
             left_cell_right_rim, right_cell_left_rim,
             "both sides must agree on the shared-edge rim",
@@ -1349,7 +1454,12 @@ mod tests {
                 world.insert_chunk(ChunkPos { x: dx, z: dz }, c);
             }
         }
-        let tris = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
+        let tris = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
         assert_eq!(overlay_tris(&tris), 8194, "8192 body + one merged rim quad");
     }
 
@@ -1370,7 +1480,12 @@ mod tests {
             }
         }
         world.insert_chunk(ChunkPos { x: 0, z: 0 }, c);
-        let tris = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
+        let tris = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
 
         let rim_tris = tris
             .iter()
@@ -1427,7 +1542,12 @@ mod tests {
             world.insert_chunk(ChunkPos { x: cx, z: 0 }, chunk);
         }
         for cx in 0..2 {
-            let tris = mesh_chunk(&world, ChunkPos { x: cx, z: 0 }, ViewMode::Painted);
+            let tris = mesh_chunk(
+                &world,
+                ChunkPos { x: cx, z: 0 },
+                ViewMode::Painted,
+                &StyleTable::default(),
+            );
             for v in tris
                 .iter()
                 .filter(|t| t.verts.iter().all(|v| v.y > 0.0 && v.y < OVERLAY_BODY_LIFT))
@@ -1474,8 +1594,18 @@ mod tests {
             }
             world.insert_chunk(ChunkPos { x: cx, z: 0 }, chunk);
         }
-        let mesh0 = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
-        let mesh1 = mesh_chunk(&world, ChunkPos { x: 1, z: 0 }, ViewMode::Painted);
+        let mesh0 = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
+        let mesh1 = mesh_chunk(
+            &world,
+            ChunkPos { x: 1, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
         let max_x = |mesh: &[DrawTriangle]| {
             mesh.iter()
                 .flat_map(|t| t.verts.iter())
@@ -1580,6 +1710,7 @@ mod tests {
             })),
             ChunkPos { x: 0, z: 0 },
             ViewMode::Painted,
+            &StyleTable::default(),
         );
         assert!(
             has_smoothed_crossing(&smoothed),
@@ -1592,6 +1723,7 @@ mod tests {
             })),
             ChunkPos { x: 0, z: 0 },
             ViewMode::Painted,
+            &StyleTable::default(),
         );
         assert!(
             !has_smoothed_crossing(&crisp),
@@ -1606,7 +1738,12 @@ mod tests {
         // ground-plane triangle. A saddle-rule or window-skip bug shows up
         // as a hole here.
         let world = sand_band_world(None);
-        let mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
+        let mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
         let ground: Vec<&DrawTriangle> = mesh
             .iter()
             .filter(|t| t.verts.iter().all(|v| v.y == 0.0))
@@ -1631,8 +1768,18 @@ mod tests {
         // classification disagreement between the two chunks shows up as a
         // hole here.
         let world = sand_band_world(None);
-        let mesh0 = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
-        let mesh1 = mesh_chunk(&world, ChunkPos { x: 1, z: 0 }, ViewMode::Painted);
+        let mesh0 = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
+        let mesh1 = mesh_chunk(
+            &world,
+            ChunkPos { x: 1, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
         let ground_covers = |mesh: &[DrawTriangle], px: f32, pz: f32| {
             mesh.iter()
                 .filter(|t| t.verts.iter().all(|v| v.y == 0.0))
@@ -1680,7 +1827,12 @@ mod tests {
             }
         }
         world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
-        let mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
+        let mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
         assert!(
             has_smoothed_crossing(&mesh),
             "a region-default boundary smooths like any material boundary",
@@ -1715,7 +1867,12 @@ mod tests {
         // a mover will stand on. Any lift path that misses a vertex
         // (nine-slice, strip, window poly) diverges here.
         let world = ramp_world();
-        let mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
+        let mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
         assert!(!mesh.is_empty());
         for v in mesh.iter().flat_map(|t| t.verts.iter()) {
             let surface = world.surface_height(v.x, v.z);
@@ -1734,7 +1891,12 @@ mod tests {
         // The no-gap probe on sloped ground: the strip fallback and the
         // per-window bilinear quads must tile exactly like the flat path.
         let world = ramp_world();
-        let mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
+        let mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
         for j in 0..32 {
             for i in 0..32 {
                 let px = (i as f32 + 0.37) * 0.5;
@@ -1768,8 +1930,18 @@ mod tests {
                 && t.verts.iter().any(|v| v.y > 0.9)
                 && t.verts.iter().any(|v| v.y < 0.1)
         };
-        let low_mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
-        let high_mesh = mesh_chunk(&world, ChunkPos { x: 1, z: 0 }, ViewMode::Painted);
+        let low_mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
+        let high_mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 1, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
         assert!(
             high_mesh.iter().any(is_border_skirt),
             "the high chunk closes its cliff face",
@@ -1797,7 +1969,7 @@ mod tests {
         world.insert_chunk(ChunkPos { x: 1, z: 0 }, high);
 
         for at in [ChunkPos { x: 0, z: 0 }, ChunkPos { x: 1, z: 0 }] {
-            let mesh = mesh_chunk(&world, at, ViewMode::Painted);
+            let mesh = mesh_chunk(&world, at, ViewMode::Painted, &StyleTable::default());
             for t in &mesh {
                 let gray = t
                     .verts
@@ -1833,7 +2005,7 @@ mod tests {
             }
         }
         world.insert_chunk(at, chunk);
-        let mesh = mesh_chunk(&world, at, ViewMode::Painted);
+        let mesh = mesh_chunk(&world, at, ViewMode::Painted, &StyleTable::default());
         let mut overlay_verts = 0;
         for v in mesh.iter().flat_map(|t| t.verts.iter()) {
             let lift = v.y - world.surface_height(v.x, v.z);
@@ -1857,12 +2029,22 @@ mod tests {
         // for calibration; switching back to painted must repaint in color
         // (some vertex has r != g). A stuck mode would fail one side.
         let world = world_with_underlay(ChunkPos { x: 0, z: 0 }, |_, _| Material::Grass);
-        let raw = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Raw);
+        let raw = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Raw,
+            &StyleTable::default(),
+        );
         assert!(!raw.is_empty(), "raw mode emits geometry");
         for v in raw.iter().flat_map(|t| t.verts.iter()) {
             assert!(v.r == v.g && v.g == v.b, "raw vertex is grayscale");
         }
-        let painted = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
+        let painted = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
         assert!(
             painted
                 .iter()
@@ -1876,7 +2058,68 @@ mod tests {
     fn void_chunk_meshes_to_nothing() {
         let mut world = World::new();
         world.insert_chunk(ChunkPos { x: 0, z: 0 }, Chunk::empty());
-        let tris = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
+        let tris = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
         assert!(tris.is_empty(), "an all-Void chunk emits no geometry");
+    }
+
+    #[test]
+    fn a_live_style_write_repaints_the_mesh() {
+        // Threading StyleTable through the mesher is mechanical (dozens of
+        // call sites); this catches any path that kept reading a stale
+        // baked-in row instead of the table argument — a grass world meshed
+        // against the default table and one with grass's base lightness
+        // moved far must paint different colors.
+        let world = world_with_underlay(ChunkPos { x: 0, z: 0 }, |_, _| Material::Grass);
+        let default_styles = StyleTable::default();
+        let baseline = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &default_styles,
+        );
+
+        let grass = default_styles.get(Material::Grass);
+        let mut tuned = StyleTable::default();
+        tuned.apply(&SetMaterialStyle {
+            material: Material::Grass.to_u8(),
+            base_hue: grass.base_hue,
+            base_sat: grass.base_sat,
+            base_light: grass.base_light + 30.0,
+            amp_hue: grass.amp_hue,
+            amp_sat: grass.amp_sat,
+            amp_light: grass.amp_light,
+            wavelength: grass.wavelength,
+            octaves: grass.octaves,
+            persistence: grass.persistence,
+            seed_offset: grass.seed_offset,
+            flow_wavelength: grass.flow_wavelength,
+            smoothing_degrees: grass.smoothing_degrees,
+            smoothing_iterations: grass.smoothing_iterations,
+            rim_inset_octimeters: grass.rim_inset_octimeters,
+            rim_darken: grass.rim_darken,
+            wash_grade: grass.wash_grade,
+            water_depth_darken: grass.water_depth_darken,
+            blob_merge_degrees: grass.blob_merge_degrees,
+        });
+        let tuned_mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted, &tuned);
+
+        assert_eq!(
+            baseline.len(),
+            tuned_mesh.len(),
+            "the same world tiles identically regardless of style values"
+        );
+        let base_color = |t: &DrawTriangle| (t.verts[0].r, t.verts[0].g, t.verts[0].b);
+        assert!(
+            baseline
+                .iter()
+                .zip(tuned_mesh.iter())
+                .any(|(a, b)| base_color(a) != base_color(b)),
+            "a live style-table write must change the painted mesh's colors",
+        );
     }
 }

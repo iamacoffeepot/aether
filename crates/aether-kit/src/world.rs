@@ -708,6 +708,64 @@ impl SetSmoothingProfile {
     }
 }
 
+/// `aether.kit.world.set_material_style` — write a material's complete
+/// live style row (base HSL, noise shape, smoothing defaults, rim / wash /
+/// water tunables), then remesh every cached chunk. A full-row write:
+/// every field of the resolved row is replaced, none carried over from the
+/// prior value. `smoothing_iterations` clamps to
+/// [`MAX_SMOOTHING_ITERATIONS`] and `smoothing_degrees` to `[45, 90]`, the
+/// same rule [`World::insert_smoothing_profile`] applies to the per-cell
+/// smoothing table. `material` is a raw [`Material`] byte; an undecodable
+/// byte or `Void` rejects the whole write (see
+/// `runtime::mesher::style::StyleTable::apply`).
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.world.set_material_style")]
+pub struct SetMaterialStyle {
+    pub material: u8,
+    /// Base hue in degrees `[0, 360)`.
+    pub base_hue: f32,
+    /// Base saturation in percent `[0, 100]`.
+    pub base_sat: f32,
+    /// Base lightness in percent `[0, 100]`.
+    pub base_light: f32,
+    /// Peak hue deviation in degrees the noise field adds.
+    pub amp_hue: f32,
+    /// Peak saturation deviation in percent.
+    pub amp_sat: f32,
+    /// Peak lightness deviation in percent.
+    pub amp_light: f32,
+    /// Noise wavelength in cells — the world distance over one lattice
+    /// period at the base octave.
+    pub wavelength: f32,
+    /// Fractal octave count.
+    pub octaves: u32,
+    /// Per-octave amplitude falloff (lacunarity is fixed at 2).
+    pub persistence: f32,
+    /// Seed offset folded into every channel so each material keys its own
+    /// decorrelated field.
+    pub seed_offset: u32,
+    /// Wavelength in cells of the stroke flow field the wash grades along.
+    pub flow_wavelength: f32,
+    /// Corner-smoothing angle in degrees for this material's overlay
+    /// contours (`45` chamfers hardest, `90` only true right-angle
+    /// corners). Clamped to `[45, 90]` on apply.
+    pub smoothing_degrees: u32,
+    /// Corner-smoothing iteration count (`0` = raw blocky contours).
+    /// Clamped to [`MAX_SMOOTHING_ITERATIONS`] on apply.
+    pub smoothing_iterations: u32,
+    /// Rim inset in octimeters — the width of a pooled edge strip.
+    pub rim_inset_octimeters: i32,
+    /// Rim lightness darkening `[0, 1]` where the paint pools.
+    pub rim_darken: f32,
+    /// Wash lightness gradient depth `[0, 1]` along the stroke direction.
+    pub wash_grade: f32,
+    /// Water lightness reduction in percent at full depth.
+    pub water_depth_darken: f32,
+    /// Blob-merge hue-step threshold in degrees: same-material cells whose
+    /// resolved hue differs by more than this pool a rim between them.
+    pub blob_merge_degrees: f32,
+}
+
 /// How the mesher paints a chunk: the finished gouache grammar, or the
 /// raw grayscale noise field for calibrating the material table by eye.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

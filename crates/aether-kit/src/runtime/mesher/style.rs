@@ -26,8 +26,11 @@
 //! its base color in HSL, per-channel noise amplitudes, the value-noise
 //! field shape (wavelength / octaves / persistence), a seed offset, the
 //! stroke flow-field wavelength, the corner-smoothing setting its overlay
-//! contours use, and the rim / wash / water tunables. [`style`] indexes
-//! the table by [`Material`].
+//! contours use, and the rim / wash / water tunables. [`StyleTable`] holds
+//! one row per [`Material`] as runtime state — [`StyleTable::get`] reads a
+//! row, [`StyleTable::apply`] overwrites one live from a
+//! `aether.kit.world.set_material_style` mail — so a tuning pass needs no
+//! rebuild.
 //!
 //! A cell's color resolves from its world coordinates alone: base HSL plus
 //! three world-anchored fractal value-noise samples (one per channel,
@@ -38,11 +41,11 @@
 
 use core::f32::consts::FRAC_1_SQRT_2;
 
-use crate::world::Material;
+use crate::world::{MAX_SMOOTHING_ITERATIONS, Material, SetMaterialStyle};
 
 /// One material's complete render style. Indexed by [`Material`] through
-/// [`style`]; the [`Material::Void`] row is a placeholder that is never
-/// painted.
+/// [`StyleTable::get`]; the [`Material::Void`] row is a placeholder that
+/// is never painted.
 pub struct MaterialStyle {
     /// Base hue in degrees `[0, 360)`.
     pub base_hue: f32,
@@ -223,10 +226,62 @@ const STYLES: [MaterialStyle; 6] = [
     },
 ];
 
-/// The style row for `material`.
-#[must_use]
-pub fn style(material: Material) -> &'static MaterialStyle {
-    &STYLES[material as usize]
+/// Runtime-authored material style rows. `Default` seeds every row from
+/// the built-in defaults; a `WorldView` actor holds one instance as
+/// session-scoped
+/// state (never serialized into the world format — the tuning loop's
+/// output is new source defaults, not world data) and applies live writes
+/// through [`StyleTable::apply`].
+pub struct StyleTable([MaterialStyle; 6]);
+
+impl Default for StyleTable {
+    fn default() -> Self {
+        Self(STYLES)
+    }
+}
+
+impl StyleTable {
+    /// The style row for `material`.
+    #[must_use]
+    pub fn get(&self, material: Material) -> &MaterialStyle {
+        &self.0[material as usize]
+    }
+
+    /// Write a full style row from a `aether.kit.world.set_material_style`
+    /// mail, clamping `smoothing_iterations` to [`MAX_SMOOTHING_ITERATIONS`]
+    /// and `smoothing_degrees` to `[45, 90]` — the same rule
+    /// [`crate::world::World::insert_smoothing_profile`] applies to the
+    /// per-cell smoothing table. An undecodable or `Void` material byte is
+    /// a no-op; the caller (the `WorldView` handler) is expected to have
+    /// already rejected it with a warn log.
+    pub fn apply(&mut self, msg: &SetMaterialStyle) {
+        let Ok(material) = Material::try_from(msg.material) else {
+            return;
+        };
+        if material == Material::Void {
+            return;
+        }
+        self.0[material as usize] = MaterialStyle {
+            base_hue: msg.base_hue,
+            base_sat: msg.base_sat,
+            base_light: msg.base_light,
+            amp_hue: msg.amp_hue,
+            amp_sat: msg.amp_sat,
+            amp_light: msg.amp_light,
+            wavelength: msg.wavelength,
+            octaves: msg.octaves,
+            persistence: msg.persistence,
+            seed_offset: msg.seed_offset,
+            flow_wavelength: msg.flow_wavelength,
+            smoothing_degrees: msg.smoothing_degrees.clamp(45, 90),
+            smoothing_iterations: msg.smoothing_iterations.min(MAX_SMOOTHING_ITERATIONS),
+            rim_inset_octimeters: msg.rim_inset_octimeters,
+            rim_darken: msg.rim_darken,
+            wash_grade: msg.wash_grade,
+            water_depth_darken: msg.water_depth_darken,
+            blob_merge_degrees: msg.blob_merge_degrees,
+        };
+    }
 }
 
 /// Base seed for the hue channel. Each channel keys a distinct seed so the
@@ -303,13 +358,12 @@ pub struct ResolvedCell {
     pub stroke: (f32, f32),
 }
 
-/// Resolve a cell's color from its world center `(wx, wz)` in cells. When
-/// `depth` is `Some`, the material is water and the lightness grades down
-/// toward the given shore depth `[0, 1]` with its noise amplitude
-/// enveloped by depth.
+/// Resolve a cell's color from its world center `(wx, wz)` in cells, using
+/// the resolved style row `s`. When `depth` is `Some`, the material is
+/// water and the lightness grades down toward the given shore depth
+/// `[0, 1]` with its noise amplitude enveloped by depth.
 #[must_use]
-pub fn resolve_cell(material: Material, wx: f32, wz: f32, depth: Option<f32>) -> ResolvedCell {
-    let s = style(material);
+pub fn resolve_cell(s: &MaterialStyle, wx: f32, wz: f32, depth: Option<f32>) -> ResolvedCell {
     let seed = s.seed_offset;
     let n_hue = fbm(
         wx,
@@ -366,13 +420,14 @@ fn stroke_byte(s: &MaterialStyle, wx: f32, wz: f32) -> u8 {
     floor_to_i32(n * 256.0).clamp(0, 255) as u8
 }
 
-/// The wash-adjusted lightness at a world vertex `(wx, wz)`: project the
-/// world position onto the cell's stroke direction and grade lightness by
-/// a low-frequency density field so the wash runs continuously along the
-/// stroke rather than restarting per cell.
+/// The wash-adjusted lightness at a world vertex `(wx, wz)`, using the
+/// resolved style row `s`: project the world position onto the cell's
+/// stroke direction and grade lightness by a low-frequency density field so
+/// the wash runs continuously along the stroke rather than restarting per
+/// cell.
 #[must_use]
-pub fn wash_lightness(material: Material, light: f32, wx: f32, wz: f32, stroke: (f32, f32)) -> f32 {
-    let grade = style(material).wash_grade;
+pub fn wash_lightness(s: &MaterialStyle, light: f32, wx: f32, wz: f32, stroke: (f32, f32)) -> f32 {
+    let grade = s.wash_grade;
     if grade == 0.0 {
         return light;
     }
@@ -383,10 +438,10 @@ pub fn wash_lightness(material: Material, light: f32, wx: f32, wz: f32, stroke: 
 }
 
 /// The raw hue-field sample for a cell, mapped to `[0, 1]` — the grayscale
-/// value the raw view mode paints for calibrating the table by eye.
+/// value the raw view mode paints for calibrating the table by eye. Uses
+/// the resolved style row `s`.
 #[must_use]
-pub fn raw_field(material: Material, wx: f32, wz: f32) -> f32 {
-    let s = style(material);
+pub fn raw_field(s: &MaterialStyle, wx: f32, wz: f32) -> f32 {
     let n = fbm(
         wx,
         wz,
@@ -724,7 +779,8 @@ mod tests {
         // linear RGB) folds into one pinned value. Any drift in the noise
         // or conversion re-keys every cell in every world, so a change here
         // must be deliberate.
-        let r = resolve_cell(Material::Grass, 8.5, 8.5, None);
+        let styles = StyleTable::default();
+        let r = resolve_cell(styles.get(Material::Grass), 8.5, 8.5, None);
         let rgb = hsl_to_linear_rgb(r.hue, r.sat, r.light);
         assert_eq!(rgb, [0.086_620_346, 0.271_466, 0.056_088_015]);
     }
@@ -734,8 +790,10 @@ mod tests {
         // The keyed quilt exists to make neighbors visibly distinct; if the
         // field collapsed to a constant, every grass cell would render the
         // same flat color.
-        let a = resolve_cell(Material::Grass, 8.5, 8.5, None);
-        let b = resolve_cell(Material::Grass, 9.5, 8.5, None);
+        let styles = StyleTable::default();
+        let grass = styles.get(Material::Grass);
+        let a = resolve_cell(grass, 8.5, 8.5, None);
+        let b = resolve_cell(grass, 9.5, 8.5, None);
         assert_ne!((a.hue, a.light), (b.hue, b.light));
     }
 
@@ -743,11 +801,12 @@ mod tests {
     fn hue_offset_stays_within_amplitude() {
         // The field must not push hue past its declared amplitude, or a
         // cell reads as a foreign material rather than a variant.
-        let s = style(Material::Grass);
+        let styles = StyleTable::default();
+        let s = styles.get(Material::Grass);
         for i in 0..64 {
             let wx = i as f32 * 0.37 - 5.0;
             let wz = i as f32 * -0.21 + 3.0;
-            let r = resolve_cell(Material::Grass, wx, wz, None);
+            let r = resolve_cell(s, wx, wz, None);
             assert!(
                 (r.hue - s.base_hue).abs() <= s.amp_hue + 1e-4,
                 "hue {} escaped base {} +/- {}",
@@ -791,5 +850,76 @@ mod tests {
         assert_eq!(rim_strength(true, true, 110.0, 112.0, 6.0), 2.0 / 6.0);
         assert_eq!(rim_strength(true, true, 110.0, 130.0, 6.0), 1.0);
         assert_eq!(rim_strength(true, true, 110.0, 110.0, 6.0), 0.0);
+    }
+
+    #[test]
+    fn apply_clamps_the_smoothing_pair() {
+        // Catches a dropped clamp: the mesher's fixed two-cell smoothing
+        // apron assumes `smoothing_iterations` never exceeds
+        // MAX_SMOOTHING_ITERATIONS, and the windowed smoothing rule assumes
+        // `smoothing_degrees` never drops below 45.
+        let mut styles = StyleTable::default();
+        styles.apply(&SetMaterialStyle {
+            material: Material::Grass.to_u8(),
+            base_hue: 110.0,
+            base_sat: 37.5,
+            base_light: 40.0,
+            amp_hue: 8.0,
+            amp_sat: 0.0,
+            amp_light: 6.0,
+            wavelength: 6.0,
+            octaves: 2,
+            persistence: 0.45,
+            seed_offset: 20011,
+            flow_wavelength: 4.0,
+            smoothing_degrees: 10,
+            smoothing_iterations: 99,
+            rim_inset_octimeters: 32,
+            rim_darken: 0.15,
+            wash_grade: 0.10,
+            water_depth_darken: 0.0,
+            blob_merge_degrees: 6.0,
+        });
+        let row = styles.get(Material::Grass);
+        assert_eq!(row.smoothing_iterations, MAX_SMOOTHING_ITERATIONS);
+        assert_eq!(row.smoothing_degrees, 45);
+    }
+
+    #[test]
+    fn apply_rejects_void_and_out_of_range_bytes() {
+        // Void (0) is never painted and a byte past Water (5) doesn't decode
+        // to a Material at all; both must leave every row untouched rather
+        // than panic on an out-of-bounds index or silently write a row no
+        // material reads.
+        let mut styles = StyleTable::default();
+        for byte in [0u8, 6, 255] {
+            styles.apply(&SetMaterialStyle {
+                material: byte,
+                base_hue: 1.0,
+                base_sat: 1.0,
+                base_light: 1.0,
+                amp_hue: 1.0,
+                amp_sat: 1.0,
+                amp_light: 1.0,
+                wavelength: 1.0,
+                octaves: 1,
+                persistence: 1.0,
+                seed_offset: 1,
+                flow_wavelength: 1.0,
+                smoothing_degrees: 45,
+                smoothing_iterations: 0,
+                rim_inset_octimeters: 1,
+                rim_darken: 1.0,
+                wash_grade: 1.0,
+                water_depth_darken: 1.0,
+                blob_merge_degrees: 1.0,
+            });
+        }
+        let grass = styles.get(Material::Grass);
+        assert_eq!(
+            (grass.base_hue, grass.base_sat, grass.base_light),
+            (110.0, 37.5, 40.0),
+            "an undecodable or Void material byte must not mutate the table",
+        );
     }
 }

@@ -12,7 +12,7 @@
 use aether_capabilities::render::DrawTriangle;
 use aether_kit::{
     CELLS_PER_CHUNK_AREA, Chunk, ChunkPos, Material, Region, ViewMode, World,
-    runtime::mesher::mesh_chunk,
+    runtime::{StyleTable, mesher::mesh_chunk},
 };
 
 fn lake_world() -> World {
@@ -69,8 +69,16 @@ fn lake_world() -> World {
 #[test]
 fn demo_world_ground_has_no_holes() {
     let world = lake_world();
+    let styles = StyleTable::default();
     let meshes: Vec<_> = (0..4)
-        .map(|k| mesh_chunk(&world, ChunkPos { x: k % 2, z: k / 2 }, ViewMode::Painted))
+        .map(|k| {
+            mesh_chunk(
+                &world,
+                ChunkPos { x: k % 2, z: k / 2 },
+                ViewMode::Painted,
+                &styles,
+            )
+        })
         .collect();
     let covers = |t: &DrawTriangle, px: f32, pz: f32| {
         let sign =
@@ -111,8 +119,17 @@ fn demo_world_fits_the_frame_vertex_budget() {
     // the failure mode that motivated window ownership and strip merging.
     // The four-chunk lake scene must sit comfortably inside it.
     let world = lake_world();
+    let styles = StyleTable::default();
     let total: usize = (0..4)
-        .map(|k| mesh_chunk(&world, ChunkPos { x: k % 2, z: k / 2 }, ViewMode::Painted).len())
+        .map(|k| {
+            mesh_chunk(
+                &world,
+                ChunkPos { x: k % 2, z: k / 2 },
+                ViewMode::Painted,
+                &styles,
+            )
+            .len()
+        })
         .sum();
     assert!(total < 45_000, "frame budget headroom: {total} triangles");
 }
