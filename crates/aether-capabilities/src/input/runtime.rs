@@ -5,8 +5,9 @@
 //! single `use runtime::*` glob in the parent.
 
 use super::{
-    InputCapability, Key, KeyRelease, MouseButton, MouseMove, SubscribeInput, SubscribeInputSelf,
-    UnsubscribeAll, UnsubscribeInput, UnsubscribeInputSelf, WindowSize,
+    InputCapability, Key, KeyRelease, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
+    SubscribeInput, SubscribeInputSelf, UnsubscribeAll, UnsubscribeInput, UnsubscribeInputSelf,
+    WindowSize,
 };
 use aether_actor::runtime;
 
@@ -239,9 +240,26 @@ impl NativeActor for InputCapability {
         state.fanout(ctx, &payload);
     }
 
-    /// Mouse-press fan-out. Empty payload.
+    /// Mouse-press fan-out.
     #[handler]
     fn on_mouse_button(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: MouseButton) {
+        state.fanout(ctx, &payload);
+    }
+
+    /// Mouse-release fan-out (paired with [`MouseButton`] for
+    /// press-move-release drag).
+    #[handler]
+    fn on_mouse_button_release(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        payload: MouseButtonRelease,
+    ) {
+        state.fanout(ctx, &payload);
+    }
+
+    /// Mouse-wheel fan-out.
+    #[handler]
+    fn on_mouse_wheel(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: MouseWheel) {
         state.fanout(ctx, &payload);
     }
 

@@ -81,7 +81,9 @@ use aether_capabilities::render::{Camera, DrawTriangle, Vertex};
 use aether_capabilities::{
     InputCapability, LifecycleCapability, RenderCapability, UiBar, UiCapability, UiPanel,
 };
-use aether_kinds::{Key, KeyRelease, MouseButton, MouseMove, Render, Tick, WindowSize, keycode};
+use aether_kinds::{
+    Key, KeyRelease, MouseButton, MouseMove, Render, Tick, WindowSize, keycode, mouse_button,
+};
 use aether_math::{Mat4, Vec3};
 
 use crate::arena::{Arena, HH, HW, SUB, ShapeClass};
@@ -452,8 +454,12 @@ impl WasmActor for Locomotion {
     }
 
     #[handler]
-    fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, _mail: MouseButton) {
-        self.click_to_move();
+    fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, mail: MouseButton) {
+        // Left-click paths the avatar; other buttons are ignored so a
+        // right-click no longer moves it.
+        if mail.button == mouse_button::LEFT {
+            self.click_to_move();
+        }
     }
 
     #[handler]

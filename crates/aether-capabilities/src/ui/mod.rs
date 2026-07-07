@@ -30,7 +30,7 @@ pub use kinds::{UiBar, UiButton, UiClicked, UiLabel, UiPanel};
 // `ui-runtime` runtime gate, so they reference these kinds from here. The
 // widget kinds (`UiPanel` / `UiBar` / `UiLabel`) resolve through the `pub
 // use kinds::{…}` re-export above.
-use aether_kinds::{MouseButton, MouseMove, Tick};
+use aether_kinds::{MouseButton, Tick};
 
 // The struct-hosted `#[actor(singleton)]` below stays always-on (the macro
 // divides what it emits). Everything that names an `aether_substrate` type —
