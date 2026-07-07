@@ -40,7 +40,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, Addressable, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx,
+    actor,
 };
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
@@ -128,27 +129,36 @@ impl WidgetPanel {
         let mut first = true;
         for spec in &specs {
             // Decode the concrete config, spawn the kind's actor, and derive
-            // the row height + focusability from that config. `None` from any
-            // arm (an undecodable config, a spawn failure, or a rejected
-            // container) skips the slot entirely so the stack stays honest.
+            // the row height + focusability from that config — plus the
+            // spawned type's `NAMESPACE` for the membership record, carried
+            // as data because the type is erased past this match. `None`
+            // from any arm (an undecodable config, a spawn failure, or a
+            // rejected container) skips the slot entirely so the stack
+            // stays honest.
             let placed = match spec.kind {
                 WidgetKind::Label => decode_child::<LabelConfig>(spec)
                     .and_then(|config| spawn::<LabelWidget>(ctx, &spec.subname, &config))
-                    .map(|id| (id, row, false)),
+                    .map(|id| (id, row, false, <LabelWidget as Addressable>::NAMESPACE)),
                 WidgetKind::Slider => decode_child::<SliderConfig>(spec)
                     .and_then(|config| spawn::<SliderWidget>(ctx, &spec.subname, &config))
-                    .map(|id| (id, row, true)),
+                    .map(|id| (id, row, true, <SliderWidget as Addressable>::NAMESPACE)),
                 WidgetKind::Radio => decode_child::<RadioConfig>(spec).and_then(|config| {
                     let height = row * config.options.len() as f32;
-                    spawn::<RadioGroupWidget>(ctx, &spec.subname, &config)
-                        .map(|id| (id, height, true))
+                    spawn::<RadioGroupWidget>(ctx, &spec.subname, &config).map(|id| {
+                        (
+                            id,
+                            height,
+                            true,
+                            <RadioGroupWidget as Addressable>::NAMESPACE,
+                        )
+                    })
                 }),
                 WidgetKind::TextField => decode_child::<TextFieldConfig>(spec)
                     .and_then(|config| spawn::<TextFieldWidget>(ctx, &spec.subname, &config))
-                    .map(|id| (id, row, true)),
+                    .map(|id| (id, row, true, <TextFieldWidget as Addressable>::NAMESPACE)),
                 WidgetKind::Button => decode_child::<ButtonConfig>(spec)
                     .and_then(|config| spawn::<ButtonWidget>(ctx, &spec.subname, &config))
-                    .map(|id| (id, row, true)),
+                    .map(|id| (id, row, true, <ButtonWidget as Addressable>::NAMESPACE)),
                 WidgetKind::Composite => {
                     tracing::warn!(
                         target: "aether_kit",
@@ -159,7 +169,7 @@ impl WidgetPanel {
                     None
                 }
             };
-            let Some((id, height, focusable)) = placed else {
+            let Some((id, height, focusable, type_namespace)) = placed else {
                 continue;
             };
             if !first {
@@ -172,6 +182,7 @@ impl WidgetPanel {
                 row_rect(y, height),
                 focusable,
                 spec.subname.clone(),
+                type_namespace,
             );
             y += height;
         }
@@ -179,8 +190,9 @@ impl WidgetPanel {
         self.panel_height = y - self.config.y;
     }
 
-    /// Record one spawned child's rect into the composite (as its draw offset)
-    /// and the focus table (as its hit rect), send it its `WidgetFrame`, and
+    /// Record one spawned child's rect into the composite (as its draw offset,
+    /// under its `name` subname and the spawned actor type `A`'s namespace) and
+    /// the focus table (as its hit rect), send it its `WidgetFrame`, and
     /// remember it for value-up attribution.
     fn place(
         &mut self,
@@ -189,13 +201,27 @@ impl WidgetPanel {
         frame: WidgetFrame,
         focusable: bool,
         name: String,
+        type_namespace: &'static str,
     ) {
         self.composite
-            .register_slot(id, Vec2::new(frame.x, frame.y));
+            .register_slot(id, Vec2::new(frame.x, frame.y), &name, type_namespace);
         self.focus
             .register(id, frame.x, frame.y, frame.width, frame.height, focusable);
         ctx.send_to(id, &frame);
         self.children.push(ChildRef { id, name });
+    }
+
+    /// Drain any buffered membership change and emit it up the lane. The panel
+    /// is a loaded root with no up-lane consumer, so this is a no-send in
+    /// practice; it is kept mechanical (draining the buffer so it never grows,
+    /// uniform with the compositing widget and correct if the panel is ever
+    /// re-parented).
+    fn flush_membership(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
+        if let Some(changed) = self.composite.take_membership_changes()
+            && let Some(parent) = ctx.parent()
+        {
+            parent.send(&changed);
+        }
     }
 
     /// Discharge a closed frame: flatten the composite and emit it as the
@@ -404,6 +430,7 @@ impl WasmActor for WidgetPanel {
     #[handler::manual]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Manual>, _tick: Tick) {
         self.ensure_spawned(ctx);
+        self.flush_membership(ctx);
         self.composite.begin_frame();
         let background = quad(
             self.config.x,

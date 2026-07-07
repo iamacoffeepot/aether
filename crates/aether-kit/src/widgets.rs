@@ -45,6 +45,37 @@ use crate::theme::Theme;
 #[kind(name = "aether.kit.widget.collect")]
 pub struct Collect;
 
+/// One added child's identity in a [`ChildrenChanged`] event: its inline
+/// `subname` and `type_namespace` — the spawned actor's `NAMESPACE` lineage
+/// string, the same address vocabulary lineage addressing speaks. Both are
+/// strings, not tags, because the observers this event serves (a debugger, an
+/// MCP agent, the behavior host's tree cache) read identity, not an opaque
+/// number. Not a kind on its own; only addressable inside
+/// [`ChildrenChanged::added`].
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MembershipEntry {
+    pub subname: String,
+    pub type_namespace: String,
+}
+
+/// `aether.kit.widget.children_changed` — a compositing node's membership
+/// delta, emitted up the lane whenever its slot set changes. `added` names
+/// each child that appeared (with its type); `removed` names each departed
+/// child by subname. The widget runtime buffers deltas at the slot
+/// chokepoints and drains them once per activation, so the initial spawn of a
+/// stack drains as one batched event carrying all N adds, and a later single
+/// despawn as one event with one `removed` entry. It is the discovery signal a
+/// lane observer (the behavior host's tree cache, a debugger) reads to know
+/// what a node contains and when that changed.
+#[derive(
+    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
+)]
+#[kind(name = "aether.kit.widget.children_changed")]
+pub struct ChildrenChanged {
+    pub added: Vec<MembershipEntry>,
+    pub removed: Vec<String>,
+}
+
 /// One draw in a [`WidgetDrawList`], in the widget's own local
 /// coordinates (offset by the parent at composite time). A widget emits a
 /// heterogeneous run of these in authored order — the single-list shape
