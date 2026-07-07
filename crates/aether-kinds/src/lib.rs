@@ -530,6 +530,11 @@ pub struct WindowSize {
 /// run of characters. A text-field widget subscribes this and inserts
 /// `text` at its caret with no guest-side scancode keymap. Headless and
 /// hub chassis never publish — they have no window (same as `Key`).
+/// `text` never carries a control character: named keys with a
+/// control-char text representation (Backspace, Enter, Tab, Escape,
+/// Delete) arrive only as `Key` scancode edges, and the chassis strips
+/// any control characters winit's `KeyEvent.text` reports before
+/// publishing.
 ///
 /// Carries a `String`, so it rides the structured wire path
 /// (`Kind::encode_into_bytes` → `encode_wire`), not the `#[repr(C)]`

@@ -324,9 +324,23 @@ enum TextSource {
 /// source of truth. `Preedit { active }` opens or closes the gate without
 /// publishing (the in-flight text rides `ImePreedit` instead); `Disabled`
 /// closes it. Winit-free so the dedupe is testable without a winit `App`.
+///
+/// `KeyText` also strips control characters before publishing. Winit
+/// reports a named key's (Backspace / Enter / Tab / Escape / Delete) text
+/// representation as a C0 control character, and those keys already
+/// arrive as `Key` scancode edges — publishing the control character too
+/// would double-report the keystroke as printable text (e.g. Backspace
+/// inserting a glyph on the same frame its scancode edge deletes one).
+/// The strip is per-character rather than whole-event: winit documents
+/// that `KeyEvent.text` can carry a dead-key char followed by a resolved
+/// character, so a run is not guaranteed to be a single glyph, and
+/// dropping only the control chars preserves any printable characters
+/// riding alongside them.
 fn text_input_gate(composing: &mut bool, source: TextSource) -> Option<String> {
     match source {
-        TextSource::KeyText(text) => (!*composing).then_some(text),
+        TextSource::KeyText(text) => (!*composing)
+            .then(|| text.chars().filter(|c| !c.is_control()).collect::<String>())
+            .filter(|t| !t.is_empty()),
         TextSource::Preedit { active } => {
             *composing = active;
             None
@@ -1860,6 +1874,44 @@ mod tests {
             text_input_gate(&mut composing, TextSource::KeyText("z".to_owned())).as_deref(),
             Some("z"),
         );
+    }
+
+    // Tripwire: a named key's control-char text representation must never
+    // publish as `TextInput` — Backspace's scancode edge is the sole
+    // delete signal, so a published `"\u{8}"` would re-insert a glyph on
+    // the same frame the edge deletes one.
+    #[test]
+    fn gate_suppresses_pure_backspace_keytext() {
+        let mut composing = false;
+        let out = text_input_gate(&mut composing, TextSource::KeyText("\u{8}".to_owned()));
+        assert_eq!(out, None);
+        assert!(!composing, "a suppressed control char opens no composition");
+    }
+
+    // Tripwire: Enter and Tab carry the same C0-control-char shape as
+    // Backspace and must be suppressed identically.
+    #[test]
+    fn gate_suppresses_pure_enter_and_tab_keytext() {
+        let mut composing = false;
+        assert_eq!(
+            text_input_gate(&mut composing, TextSource::KeyText("\r".to_owned())),
+            None
+        );
+        assert_eq!(
+            text_input_gate(&mut composing, TextSource::KeyText("\t".to_owned())),
+            None
+        );
+    }
+
+    // Tripwire: a run mixing a printable character with a control
+    // character strips only the control char, pinning strip-per-char over
+    // whole-event drop (winit can pair a dead-key char with a resolved
+    // character in one `KeyEvent.text`).
+    #[test]
+    fn gate_strips_control_char_from_mixed_keytext() {
+        let mut composing = false;
+        let out = text_input_gate(&mut composing, TextSource::KeyText("a\u{8}".to_owned()));
+        assert_eq!(out.as_deref(), Some("a"));
     }
 
     #[test]
