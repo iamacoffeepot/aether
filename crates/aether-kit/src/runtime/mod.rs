@@ -17,6 +17,12 @@
 //!   selected by the `aether_kit@aether.world` export. Its
 //!   `aether.kit.world.*` kinds live in [`crate::world`]; the pure mesher
 //!   it drives lives in [`mesher`].
+//! - [`mover::WorldMover`] — the input-driven body that walks the painted
+//!   world, selected by the `aether_kit@aether.kit.mover` export. It owns a
+//!   cell-committed marker on the [`crate::world`] lattice and a trailing
+//!   follow-camera, composing with [`world_view::WorldView`] over the shared
+//!   `aether.render` sink and latest-wins `view_proj` uniform. Its
+//!   `aether.kit.mover.teleport` placement kind lives in [`crate::mover`].
 //! - [`widget::Widget`] — the widget-compositing node (ADR-0117),
 //!   selected by the `aether_kit@aether.kit.widget` export. A cluster of
 //!   these draws local and composites up so the whole subtree is one
@@ -40,6 +46,7 @@ pub mod focus;
 pub mod locomotion;
 pub mod mesh_viewer;
 pub mod mesher;
+pub mod mover;
 pub mod widget;
 pub mod widget_panel;
 pub mod widgets;
@@ -50,6 +57,7 @@ pub use locomotion::Locomotion;
 pub use mesh_viewer::MeshViewer;
 pub use mesher::mesh_chunk;
 pub use mesher::style::StyleTable;
+pub use mover::WorldMover;
 pub use widget::Widget;
 pub use widget_panel::WidgetPanel;
 pub use widgets::{ButtonWidget, LabelWidget, RadioGroupWidget, SliderWidget, TextFieldWidget};
@@ -71,6 +79,7 @@ aether_actor::export!(
     CameraComponent,
     MeshViewer,
     WorldView,
+    WorldMover,
     Widget,
     SliderWidget,
     TextFieldWidget,
@@ -86,6 +95,7 @@ aether_actor::export!(
     CameraComponent,
     MeshViewer,
     WorldView,
+    WorldMover,
     Widget,
     SliderWidget,
     TextFieldWidget,
