@@ -21,27 +21,24 @@
 //! planes alone, so two chunks agree on their shared border with no shared
 //! state.
 //!
-//! # Underlay pass — the keyed quilt, base and patches
+//! # Underlay pass — one surface, repartitioned
 //!
-//! The ground splits into a base plane and contoured patches. The base is
-//! one flat keyed cell per cell whose region-cascade default is non-Void,
-//! at `y = 0`, world-space in meters (`1 cell = 1 m`) — drawn under
-//! explicit patches too, so a patch boundary always has ground beneath
-//! it. A cell's color resolves from its world center: the material's base
-//! HSL plus world-anchored value noise on hue and lightness, converted to
-//! linear RGB ([`resolve_cell`]). A low-amplitude wash grades the
-//! interior lightness along a stroke flow field; same-material hue steps
-//! past the blob-merge threshold pool a nine-slice rim, and a cell with
-//! no rimmed side collapses to one flat quad.
-//!
-//! Every explicit underlay material (resolved differing from the cell's
-//! own cascade default) meshes as a **patch**: its cell mask runs through
-//! the same corner minimization as the overlay (honoring the per-cell
-//! smoothing field), marches a pooled rim band over the base, and lays a
-//! keyed body above whose interior keeps the flat per-cell quilt and
-//! whose boundary refines to per-subcell and per-sample quads hugging the
-//! smoothed edge. Each material takes its own slot in a lift ladder so
-//! adjacent patches resolve by deterministic painter's order.
+//! The ground is a single flat surface at `y = 0`, world-space in meters
+//! (`1 cell = 1 m`), tiled exactly by its material regions. The
+//! cascade-resolved material grid runs through [`repartition`] — the
+//! multi-label corner minimization, honoring the per-cell smoothing field
+//! — so smoothing moves samples between materials rather than layering
+//! shapes; each material then splits into a pooled rim band (within the
+//! rim width of its contour) and a keyed body. Wherever a cell and its
+//! one-sample surround are uniformly body, the cell emits the flat keyed
+//! quilt cell — color resolved from its world center ([`resolve_cell`]),
+//! a low-amplitude wash along the stroke flow field, and same-material
+//! hue steps past the blob-merge threshold pooling a nine-slice rim.
+//! Everywhere else the partition marches per window, each label's
+//! polygon colored by its material keyed at the owning cell, rims
+//! darkened, saddles resolved by label order so every window tiles.
+//! Material boundaries smooth identically whether the materials differ by
+//! explicit paint or by region default.
 //!
 //! # Overlay pass — corner-minimized contours
 //!
@@ -73,7 +70,10 @@ use aether_capabilities::render::{DrawTriangle, Vertex};
 use crate::world::{
     CELLS_PER_CHUNK, CellPos, ChunkPos, Material, SUBCELLS_PER_CELL_EDGE, ViewMode, World,
 };
-use contour::{GridPlacement, SmoothParams, erode, march_grid, minimize_corners, push_quad};
+use contour::{
+    GridPlacement, SmoothParams, emit_label_window, erode, label_case, march_grid,
+    minimize_corners, push_quad, repartition,
+};
 use style::{
     ResolvedCell, hsl_to_linear_rgb, raw_field, resolve_cell, rim_strength, style, wash_lightness,
 };
@@ -94,34 +94,15 @@ const OCTIMETERS_PER_SUBCELL: i32 = 256 / SUB;
 /// emit.
 const OCTIMETERS_PER_METER: f32 = 256.0;
 
-/// The underlay's ground plane.
+/// The underlay's ground plane — the whole partition draws here.
 const UNDERLAY_Y: f32 = 0.0;
 
-/// One octimeter, the lift ladder's step.
-const LIFT_STEP: f32 = 1.0 / OCTIMETERS_PER_METER;
+/// The overlay rim layer lift — one octimeter over the underlay.
+const OVERLAY_RIM_LIFT: f32 = 1.0 / OCTIMETERS_PER_METER;
 
-/// Rim-layer lift for an underlay patch of `material` — each material
-/// takes its own two-step slot in the lift ladder so adjacent patches
-/// whose smoothed contours overlap by a sample resolve by deterministic
-/// painter's order, identically on both sides of a chunk border (the slot
-/// is a function of the material id, never of what else a chunk holds).
-fn patch_rim_lift(material: Material) -> f32 {
-    (2 * material as u32 - 1) as f32 * LIFT_STEP
-}
-
-/// Body-layer lift for an underlay patch of `material` — one step over
-/// its rim.
-fn patch_body_lift(material: Material) -> f32 {
-    (2 * material as u32) as f32 * LIFT_STEP
-}
-
-/// The overlay rim layer lift — above the whole underlay patch ladder
-/// (five materials, two steps each).
-const OVERLAY_RIM_LIFT: f32 = 11.0 / OCTIMETERS_PER_METER;
-
-/// The overlay body layer lift — one step over the overlay rim, so the
-/// body sits on top of the rim it insets from.
-const OVERLAY_BODY_LIFT: f32 = 12.0 / OCTIMETERS_PER_METER;
+/// The overlay body layer lift — one octimeter over the rim, so the body
+/// sits on top of the rim it insets from.
+const OVERLAY_BODY_LIFT: f32 = 2.0 / OCTIMETERS_PER_METER;
 
 /// Upsample factor for a non-water material's smoothed contour grid.
 const CONTOUR_UPSAMPLE: usize = 2;
@@ -145,32 +126,19 @@ pub fn mesh_chunk(world: &World, at: ChunkPos, mode: ViewMode) -> Vec<DrawTriang
         ViewMode::Raw => mesh_raw(world, at, &mut tris),
         ViewMode::Painted => {
             mesh_underlay(world, at, &mut tris);
-            mesh_underlay_patches(world, at, &mut tris);
             mesh_overlay(world, at, &mut tris);
         }
     }
     tris
 }
 
-/// Which materials a rim comparison sees on each side of a cell.
-enum RimContext {
-    /// The base ground plane: compare cascade defaults. A differing or
-    /// absent default (a region boundary) pools a full rim.
-    Defaults,
-    /// A patch body interior: compare resolved materials, rimming only
-    /// same-material hue steps — the smoothed patch contour owns every
-    /// material-change edge.
-    SameMaterialOnly,
-}
-
-/// The per-side pooled-rim strengths `[left, right, top, bottom]` for a
-/// cell of `material`: a proportional rim where a same-material
-/// neighbor's hue steps past the blob-merge threshold, plus — in the
-/// [`RimContext::Defaults`] base context — a full rim where the
-/// neighbor's default is Void or a different material. A pure function of
-/// the cell and its four neighbors, so the two cells sharing an edge
-/// agree on the rim there.
-fn cell_rims(world: &World, cell: CellPos, material: Material, context: &RimContext) -> [f32; 4] {
+/// The per-side pooled-rim strengths `[left, right, top, bottom]` for an
+/// interior cell of `material`: a proportional rim where a same-material
+/// neighbor's hue steps past the blob-merge threshold. Material-change
+/// edges rim through the partition's marched band, never here. A pure
+/// function of the cell and its four neighbors, so the two cells sharing
+/// an edge agree on the rim there.
+fn cell_rims(world: &World, cell: CellPos, material: Material) -> [f32; 4] {
     let hue_a = resolve_cell(material, cell.x as f32 + 0.5, cell.z as f32 + 0.5, None).hue;
     let threshold = style(material).blob_merge_degrees;
     let sides = [
@@ -181,46 +149,348 @@ fn cell_rims(world: &World, cell: CellPos, material: Material, context: &RimCont
     ];
     let mut rims = [0.0f32; 4];
     for (k, (nx, nz)) in sides.iter().enumerate() {
-        let npos = CellPos { x: *nx, z: *nz };
-        let neighbor = match context {
-            RimContext::Defaults => world.cell_default(npos),
-            RimContext::SameMaterialOnly => world.underlay(npos),
-        };
-        let same = neighbor == material;
-        if !same && matches!(context, RimContext::SameMaterialOnly) {
-            continue; // the patch contour rims this edge
+        let neighbor = world.underlay(CellPos { x: *nx, z: *nz });
+        if neighbor != material {
+            continue; // the partition's marched rim owns this edge
         }
-        let present = neighbor != Material::Void;
-        let hue_b = if same {
-            resolve_cell(neighbor, *nx as f32 + 0.5, *nz as f32 + 0.5, None).hue
-        } else {
-            hue_a
-        };
-        rims[k] = rim_strength(present, same, hue_a, hue_b, threshold);
+        let hue_b = resolve_cell(neighbor, *nx as f32 + 0.5, *nz as f32 + 0.5, None).hue;
+        rims[k] = rim_strength(true, true, hue_a, hue_b, threshold);
     }
     rims
 }
 
-/// Emit the base ground plane: one flat keyed cell per cell whose cascade
-/// default is non-Void — drawn under explicit patches too, so the patch
-/// layers above always have ground beneath their smoothed boundary.
-fn mesh_underlay(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
-    let base_x = at.x * EDGE;
-    let base_z = at.z * EDGE;
-    for lz in 0..EDGE {
-        for lx in 0..EDGE {
+/// The partition's inputs at subcell expression: the cascade-resolved
+/// material id and the smoothing params (the cell's field override, else
+/// the sample's own material's style row) for every sample of the chunk
+/// plus its apron. `None` when the whole area is Void — nothing to mesh.
+fn partition_inputs(
+    world: &World,
+    at: ChunkPos,
+    apron: i32,
+    n: usize,
+) -> Option<(Vec<u8>, Vec<SmoothParams>)> {
+    let mut ids = vec![0u8; n * n];
+    let mut params = vec![
+        SmoothParams {
+            iterations: 0,
+            smoothing_degrees: 90,
+        };
+        n * n
+    ];
+    let mut any = false;
+    for sj in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
+        for si in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
             let cell = CellPos {
-                x: base_x + lx,
-                z: base_z + lz,
+                x: at.x * EDGE + si.div_euclid(SUB),
+                z: at.z * EDGE + sj.div_euclid(SUB),
             };
-            let material = world.cell_default(cell);
-            if material == Material::Void {
+            let material = world.underlay(cell);
+            let idx = (sj + apron) as usize * n + (si + apron) as usize;
+            ids[idx] = material.to_u8();
+            any |= material != Material::Void;
+            params[idx] = world.smoothing_override(cell).map_or_else(
+                || {
+                    let s = style(material);
+                    SmoothParams {
+                        iterations: s.smoothing_iterations,
+                        smoothing_degrees: s.smoothing_degrees,
+                    }
+                },
+                |profile| SmoothParams {
+                    iterations: profile.iterations,
+                    smoothing_degrees: profile.degrees,
+                },
+            );
+        }
+    }
+    any.then_some((ids, params))
+}
+
+/// The display label a repartitioned material sample renders as: the
+/// pooled rim band (odd, `2m - 1`) within the rim width of the material's
+/// contour, or the keyed body (even, `2m`) inside it. Void stays `0`.
+/// Saddle conflicts resolve by label order, so the split is also the
+/// painter's priority.
+fn display_label(material: u8, body: bool) -> u8 {
+    if material == 0 {
+        0
+    } else if body {
+        2 * material
+    } else {
+        2 * material - 1
+    }
+}
+
+/// Emit the underlay as a partition of one flat surface: repartition the
+/// cascade-resolved material grid under the smoothing rules, split each
+/// material into rim band and body, then tile the ground exactly — flat
+/// keyed quilt cells (with same-material hue-step rims) wherever a cell
+/// and its one-sample surround are uniformly body, and per-window marching
+/// polygons everywhere else, all at `y = 0` with no lifts. Every decision
+/// is a pure function of world coordinates, so two chunks emit identical
+/// geometry over their shared apron and the overlap is invisible.
+fn mesh_underlay(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
+    let apron = MAX_APRON_SUBCELLS;
+    let n = (SUBCELLS_PER_CHUNK_EDGE + 2 * apron) as usize;
+    let Some((ids, params)) = partition_inputs(world, at, apron, n) else {
+        return;
+    };
+
+    let upsample = CONTOUR_UPSAMPLE;
+    let (grid, gw, _gh) = repartition(&ids, n, n, upsample, &params);
+    let u = upsample as i32;
+    let step_oct = OCTIMETERS_PER_SUBCELL / u;
+
+    // Split every material into rim band and body labels.
+    let mut display = vec![0u8; grid.len()];
+    let mut present = [false; 6];
+    for &m in &grid {
+        present[m as usize] = true;
+    }
+    for m in 1..6u8 {
+        if !present[m as usize] {
+            continue;
+        }
+        let region: Vec<bool> = grid.iter().map(|&g| g == m).collect();
+        let rim_width =
+            (style(Material::from_u8_or_void(m)).rim_inset_octimeters / step_oct).max(1);
+        let eroded = erode(&region, gw, gw, rim_width);
+        for (idx, &g) in grid.iter().enumerate() {
+            if g == m {
+                display[idx] = display_label(m, eroded[idx]);
+            }
+        }
+    }
+
+    // Interior cells: the cell's sample block plus a one-sample surround
+    // is uniformly its own material's body. Classified for every cell
+    // whose surround fits the grid (local -1..EDGE), identically on both
+    // sides of a chunk border, so the window skip below never disagrees
+    // with a neighbor's cell quad.
+    let lo = -1i32;
+    let hi = EDGE;
+    let cells_w = (hi - lo) as usize;
+    let mut interior = vec![false; cells_w * cells_w];
+    for lz in lo..hi {
+        for lx in lo..hi {
+            let cell = CellPos {
+                x: at.x * EDGE + lx,
+                z: at.z * EDGE + lz,
+            };
+            let m = world.underlay(cell).to_u8();
+            if m == 0 {
                 continue;
             }
+            let body = display_label(m, true);
+            let x0 = (lx * SUB + apron) * u;
+            let z0 = (lz * SUB + apron) * u;
+            let span = SUB * u;
+            let uniform = ((z0 - 1)..=(z0 + span)).all(|gz| {
+                ((x0 - 1)..=(x0 + span)).all(|gx| {
+                    gx >= 0
+                        && gz >= 0
+                        && (gx as usize) < gw
+                        && (gz as usize) < gw
+                        && display[gz as usize * gw + gx as usize] == body
+                })
+            });
+            interior[(lz - lo) as usize * cells_w + (lx - lo) as usize] = uniform;
+        }
+    }
+
+    // Chunk-local interior cells emit the keyed quilt cell.
+    for lz in 0..EDGE {
+        for lx in 0..EDGE {
+            if !interior[(lz - lo) as usize * cells_w + (lx - lo) as usize] {
+                continue;
+            }
+            let cell = CellPos {
+                x: at.x * EDGE + lx,
+                z: at.z * EDGE + lz,
+            };
+            let material = world.underlay(cell);
             let resolved = resolve_cell(material, cell.x as f32 + 0.5, cell.z as f32 + 0.5, None);
-            let rims = cell_rims(world, cell, material, &RimContext::Defaults);
+            let rims = cell_rims(world, cell, material);
             emit_underlay_cell(material, &resolved, cell.x, cell.z, rims, UNDERLAY_Y, tris);
         }
+    }
+
+    emit_partition_windows(at, &display, gw, apron, step_oct, &interior, lo, tris);
+}
+
+/// Emit the marching-squares windows of the partition's boundary zone.
+/// Each window is owned by exactly one chunk — the one holding the cell
+/// under its center — so the boundary zone is emitted once fleet-wide,
+/// with no cross-chunk duplicates against the fixed per-frame vertex
+/// budget. Windows fully covered by interior cell quads are skipped;
+/// uniform single-label windows coalesce into row strips (per owning
+/// cell, so the keyed color stays flat per cell); mixed windows emit each
+/// label's case polygon, rim labels darkened, saddles resolved by label
+/// order so every window tiles exactly.
+#[allow(clippy::too_many_arguments)] // one call site; the partition state travels together
+fn emit_partition_windows(
+    at: ChunkPos,
+    display: &[u8],
+    gw: usize,
+    apron: i32,
+    step_oct: i32,
+    interior: &[bool],
+    lo: i32,
+    tris: &mut Vec<DrawTriangle>,
+) {
+    let hi = EDGE;
+    let cells_w = (hi - lo) as usize;
+    let base_oct = [
+        at.x * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
+        at.z * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
+    ];
+    let origin_oct = [
+        base_oct[0] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
+        base_oct[1] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
+    ];
+    let place = GridPlacement {
+        origin_oct,
+        step_oct,
+        y_lift: UNDERLAY_Y,
+    };
+    // A pending run of uniform windows: (label, owner cell, start wi).
+    let mut run: Option<(u8, CellPos, usize)> = None;
+    let flush = |run: &mut Option<(u8, CellPos, usize)>,
+                 end_wi: usize,
+                 wj: usize,
+                 tris: &mut Vec<DrawTriangle>| {
+        let Some((label, owner, start_wi)) = run.take() else {
+            return;
+        };
+        let material = Material::from_u8_or_void(label.div_ceil(2));
+        let resolved = resolve_cell(material, owner.x as f32 + 0.5, owner.z as f32 + 0.5, None);
+        let rim = if label % 2 == 1 {
+            style(material).rim_darken
+        } else {
+            0.0
+        };
+        let rect = [
+            origin_oct[0] + start_wi as i32 * step_oct,
+            origin_oct[1] + wj as i32 * step_oct,
+            origin_oct[0] + end_wi as i32 * step_oct,
+            origin_oct[1] + (wj + 1) as i32 * step_oct,
+        ];
+        emit_quad_shaded(material, &resolved, rect, rim, UNDERLAY_Y, tris);
+    };
+    let windows = gw - 1;
+    for wj in 0..windows {
+        for wi in 0..windows {
+            let x_lo = origin_oct[0] + wi as i32 * step_oct;
+            let z_lo = origin_oct[1] + wj as i32 * step_oct;
+            // Ownership: the cell under the window's center. Emitting only
+            // chunk-local owners covers every window exactly once across
+            // the fleet, and a local owner keeps every overlapping cell
+            // within the classifiable range.
+            let x_center_cell = (x_lo + step_oct / 2).div_euclid(256);
+            let z_center_cell = (z_lo + step_oct / 2).div_euclid(256);
+            let x_owner_local = x_center_cell - at.x * EDGE;
+            let z_owner_local = z_center_cell - at.z * EDGE;
+            if !(0..EDGE).contains(&x_owner_local) || !(0..EDGE).contains(&z_owner_local) {
+                flush(&mut run, wi, wj, tris);
+                continue;
+            }
+            // The world cells this window's square overlaps.
+            let cx0 = x_lo.div_euclid(256);
+            let cx1 = (x_lo + step_oct - 1).div_euclid(256);
+            let cz0 = z_lo.div_euclid(256);
+            let cz1 = (z_lo + step_oct - 1).div_euclid(256);
+            let mut all_interior = true;
+            for cz in cz0..=cz1 {
+                for cx in cx0..=cx1 {
+                    let llx = cx - at.x * EDGE;
+                    let llz = cz - at.z * EDGE;
+                    debug_assert!(llx >= lo && llx < hi && llz >= lo && llz < hi);
+                    if !interior[(llz - lo) as usize * cells_w + (llx - lo) as usize] {
+                        all_interior = false;
+                    }
+                }
+            }
+            if all_interior {
+                // The cell quads already tile it.
+                flush(&mut run, wi, wj, tris);
+                continue;
+            }
+            let corners = [
+                display[wj * gw + wi],
+                display[wj * gw + wi + 1],
+                display[(wj + 1) * gw + wi],
+                display[(wj + 1) * gw + wi + 1],
+            ];
+            let owner = CellPos {
+                x: x_center_cell,
+                z: z_center_cell,
+            };
+            // A uniform window joins (or starts) a strip run.
+            if corners[0] != 0 && corners.iter().all(|&c| c == corners[0]) {
+                match run {
+                    Some((label, cell, _)) if label == corners[0] && cell == owner => {}
+                    _ => {
+                        flush(&mut run, wi, wj, tris);
+                        run = Some((corners[0], owner, wi));
+                    }
+                }
+                continue;
+            }
+            flush(&mut run, wi, wj, tris);
+            emit_mixed_window(display, gw, wi, wj, corners, owner, &place, tris);
+        }
+        flush(&mut run, windows, wj, tris);
+    }
+}
+
+/// Emit every label's case polygon for one mixed boundary window, colored
+/// by its material keyed at the window's owning cell (rim labels
+/// darkened). A two-label saddle resolves by label order — the higher
+/// label connects its diagonal, the lower splits — so the window always
+/// tiles exactly.
+#[allow(clippy::too_many_arguments)] // one call site; the window state travels together
+fn emit_mixed_window(
+    display: &[u8],
+    gw: usize,
+    wi: usize,
+    wj: usize,
+    corners: [u8; 4],
+    owner: CellPos,
+    place: &GridPlacement,
+    tris: &mut Vec<DrawTriangle>,
+) {
+    let step_oct = place.step_oct;
+    let x_lo = place.origin_oct[0] + wi as i32 * step_oct;
+    let z_lo = place.origin_oct[1] + wj as i32 * step_oct;
+    let wash_x = (x_lo + step_oct / 2) as f32 / OCTIMETERS_PER_METER;
+    let wash_z = (z_lo + step_oct / 2) as f32 / OCTIMETERS_PER_METER;
+    for k in 0..4 {
+        let label = corners[k];
+        if label == 0 || corners[..k].contains(&label) {
+            continue;
+        }
+        let case = label_case(display, gw, wi, wj, label);
+        let connected = if case == 5 || case == 10 {
+            // The other diagonal pair: [BR, TL] for case 5, [BL, TR] for
+            // case 10.
+            let (o1, o2) = if case == 5 {
+                (corners[1], corners[2])
+            } else {
+                (corners[0], corners[3])
+            };
+            o1 != o2 || label > o1
+        } else {
+            true
+        };
+        let material = Material::from_u8_or_void(label.div_ceil(2));
+        let s = style(material);
+        let resolved = resolve_cell(material, owner.x as f32 + 0.5, owner.z as f32 + 0.5, None);
+        let mut light = wash_lightness(material, resolved.light, wash_x, wash_z, resolved.stroke);
+        if label % 2 == 1 {
+            light *= 1.0 - s.rim_darken;
+        }
+        let color = hsl_to_linear_rgb(resolved.hue, resolved.sat, light.clamp(0.0, 100.0));
+        emit_label_window(wi as i32, wj as i32, place, case, connected, color, tris);
     }
 }
 
@@ -357,188 +627,6 @@ fn subcell_covered(world: &World, at: ChunkPos, six: i32, siz: i32, material: Ma
     }
     let bit = (siz.rem_euclid(SUB) * SUB + six.rem_euclid(SUB)) as u32;
     (world.overlay_mask(cell) >> bit) & 1 == 1
-}
-
-/// Is the cell owning chunk-local subcell `(six, siz)` an underlay patch
-/// of `material` — resolved to it and differing from its own cascade
-/// default? The whole cell answers alike, expressing the cell mask at
-/// subcell resolution so the patch rides the same contour machinery as
-/// the overlay.
-fn patch_covered(world: &World, at: ChunkPos, six: i32, siz: i32, material: Material) -> bool {
-    let cell = CellPos {
-        x: at.x * EDGE + six.div_euclid(SUB),
-        z: at.z * EDGE + siz.div_euclid(SUB),
-    };
-    world.underlay(cell) == material && world.cell_default(cell) != material
-}
-
-/// Emit the underlay patch layers: every explicit material present in the
-/// chunk or its apron (resolved underlay differing from the cell's own
-/// cascade default) contours through the same smoothing path as the
-/// overlay — a marched pooled rim band over the base ground, then a keyed
-/// body whose interior keeps the flat per-cell quilt and whose boundary
-/// refines to per-subcell and per-sample quads hugging the smoothed edge.
-fn mesh_underlay_patches(world: &World, at: ChunkPos, tris: &mut Vec<DrawTriangle>) {
-    let mut present = [false; 6];
-    let apron_cells = MAX_APRON_SUBCELLS / SUB;
-    for lz in -apron_cells..EDGE + apron_cells {
-        for lx in -apron_cells..EDGE + apron_cells {
-            let cell = CellPos {
-                x: at.x * EDGE + lx,
-                z: at.z * EDGE + lz,
-            };
-            let resolved = world.underlay(cell);
-            if resolved != Material::Void && resolved != world.cell_default(cell) {
-                present[resolved as usize] = true;
-            }
-        }
-    }
-    for (id, seen) in present.iter().enumerate() {
-        if *seen {
-            mesh_underlay_patch(world, at, Material::from_u8_or_void(id as u8), tris);
-        }
-    }
-}
-
-/// Contour one underlay patch material: smooth its cell mask (expressed at
-/// subcell resolution) per the spatial smoothing field, march the pooled
-/// rim band, and emit the keyed body above.
-fn mesh_underlay_patch(
-    world: &World,
-    at: ChunkPos,
-    material: Material,
-    tris: &mut Vec<DrawTriangle>,
-) {
-    let s = style(material);
-    let apron = MAX_APRON_SUBCELLS;
-    let n = (SUBCELLS_PER_CHUNK_EDGE + 2 * apron) as usize;
-    let mut field = vec![false; n * n];
-    for sj in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
-        for si in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
-            let idx = (sj + apron) as usize * n + (si + apron) as usize;
-            field[idx] = patch_covered(world, at, si, sj, material);
-        }
-    }
-    let params = sample_params(world, at, material, apron, n);
-    let base_oct = [
-        at.x * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
-        at.z * SUBCELLS_PER_CHUNK_EDGE * OCTIMETERS_PER_SUBCELL,
-    ];
-
-    let upsample = CONTOUR_UPSAMPLE;
-    let (smoothed, gw, gh) = minimize_corners(&field, n, n, upsample, &params);
-    let step_oct = OCTIMETERS_PER_SUBCELL / upsample as i32;
-    let origin_oct = [
-        base_oct[0] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
-        base_oct[1] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
-    ];
-    let rim_color = hsl_to_linear_rgb(s.base_hue, s.base_sat, s.base_light * (1.0 - s.rim_darken));
-    let rim_place = GridPlacement {
-        origin_oct,
-        step_oct,
-        y_lift: patch_rim_lift(material),
-    };
-    march_grid(&smoothed, gw, gh, &rim_place, rim_color, tris);
-    let rim_width = (s.rim_inset_octimeters / step_oct).max(1);
-    let eroded = erode(&smoothed, gw, gh, rim_width);
-    emit_patch_body(world, at, material, &eroded, gw, apron, upsample, tris);
-}
-
-/// Emit a patch's keyed body over its eroded smoothed grid: whole cells
-/// keep the quilt cell (with same-material hue-step rims); boundary cells
-/// refine to per-subcell and per-sample quads, all flat in the owning
-/// cell's resolved color.
-#[allow(clippy::too_many_arguments)] // one call site; the grid tuple travels together
-fn emit_patch_body(
-    world: &World,
-    at: ChunkPos,
-    material: Material,
-    eroded: &[bool],
-    gw: usize,
-    apron: i32,
-    upsample: usize,
-    tris: &mut Vec<DrawTriangle>,
-) {
-    let u = upsample as i32;
-    let step_oct = OCTIMETERS_PER_SUBCELL / u;
-    let body_y = patch_body_lift(material);
-    let sample = |gx: i32, gz: i32| {
-        // The grid is square (n × n upsampled), so gw bounds both.
-        gx >= 0
-            && gz >= 0
-            && (gx as usize) < gw
-            && (gz as usize) < gw
-            && eroded[gz as usize * gw + gx as usize]
-    };
-    let block_inside = |gx0: i32, gz0: i32, span: i32| {
-        (0..span).all(|dz| (0..span).all(|dx| sample(gx0 + dx, gz0 + dz)))
-    };
-    for lz in 0..EDGE {
-        for lx in 0..EDGE {
-            let cell = CellPos {
-                x: at.x * EDGE + lx,
-                z: at.z * EDGE + lz,
-            };
-            if world.underlay(cell) != material || world.cell_default(cell) == material {
-                continue;
-            }
-            let resolved = resolve_cell(material, cell.x as f32 + 0.5, cell.z as f32 + 0.5, None);
-            let x0_grid = (lx * SUB + apron) * u;
-            let z0_grid = (lz * SUB + apron) * u;
-            if block_inside(x0_grid, z0_grid, SUB * u) {
-                let rims = cell_rims(world, cell, material, &RimContext::SameMaterialOnly);
-                emit_underlay_cell(material, &resolved, cell.x, cell.z, rims, body_y, tris);
-                continue;
-            }
-            // Boundary cell: per-subcell quads where the subcell's sample
-            // block is inside, per-sample quads on the fringe.
-            for sz in 0..SUB {
-                for sx in 0..SUB {
-                    let gx0 = x0_grid + sx * u;
-                    let gz0 = z0_grid + sz * u;
-                    let x_oct = (cell.x * SUB + sx) * OCTIMETERS_PER_SUBCELL;
-                    let z_oct = (cell.z * SUB + sz) * OCTIMETERS_PER_SUBCELL;
-                    if block_inside(gx0, gz0, u) {
-                        emit_quad_shaded(
-                            material,
-                            &resolved,
-                            [
-                                x_oct,
-                                z_oct,
-                                x_oct + OCTIMETERS_PER_SUBCELL,
-                                z_oct + OCTIMETERS_PER_SUBCELL,
-                            ],
-                            0.0,
-                            body_y,
-                            tris,
-                        );
-                        continue;
-                    }
-                    for dz in 0..u {
-                        for dx in 0..u {
-                            if sample(gx0 + dx, gz0 + dz) {
-                                let x_fringe_oct = x_oct + dx * step_oct;
-                                let z_fringe_oct = z_oct + dz * step_oct;
-                                emit_quad_shaded(
-                                    material,
-                                    &resolved,
-                                    [
-                                        x_fringe_oct,
-                                        z_fringe_oct,
-                                        x_fringe_oct + step_oct,
-                                        z_fringe_oct + step_oct,
-                                    ],
-                                    0.0,
-                                    body_y,
-                                    tris,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// Emit the overlay pass: for each distinct overlay material present in
@@ -884,18 +972,8 @@ mod tests {
         right.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
         world.insert_chunk(ChunkPos { x: 1, z: 0 }, right);
 
-        let left_cell_right_rim = cell_rims(
-            &world,
-            CellPos { x: 15, z: 4 },
-            Material::Grass,
-            &RimContext::SameMaterialOnly,
-        )[1];
-        let right_cell_left_rim = cell_rims(
-            &world,
-            CellPos { x: 16, z: 4 },
-            Material::Grass,
-            &RimContext::SameMaterialOnly,
-        )[0];
+        let left_cell_right_rim = cell_rims(&world, CellPos { x: 15, z: 4 }, Material::Grass)[1];
+        let right_cell_left_rim = cell_rims(&world, CellPos { x: 16, z: 4 }, Material::Grass)[0];
         assert_eq!(
             left_cell_right_rim, right_cell_left_rim,
             "both sides must agree on the shared-edge rim",
@@ -1095,9 +1173,9 @@ mod tests {
 
     /// Two chunks of grass-default region with an explicit sand band over
     /// cells `10..22 × 4..8` (crossing the chunk border at `x = 16`).
-    /// `crisp` points every cell's smoothing plane at a zero-iteration
-    /// profile.
-    fn sand_band_world(crisp: bool) -> World {
+    /// `profile` paints every cell's smoothing plane with the given
+    /// profile-1 settings; `None` leaves the material defaults governing.
+    fn sand_band_world(profile: Option<SmoothingProfile>) -> World {
         let mut world = World::new();
         world.insert_region(
             1,
@@ -1106,19 +1184,13 @@ mod tests {
                 default_material: Material::Grass,
             },
         );
-        if crisp {
-            world.insert_smoothing_profile(
-                1,
-                SmoothingProfile {
-                    iterations: 0,
-                    degrees: 90,
-                },
-            );
+        if let Some(p) = profile {
+            world.insert_smoothing_profile(1, p);
         }
         for cx in 0..2 {
             let mut chunk = Chunk::empty();
             chunk.region = [1; CELLS_PER_CHUNK_AREA];
-            if crisp {
+            if profile.is_some() {
                 chunk.smoothing = [1; CELLS_PER_CHUNK_AREA];
             }
             for lz in 4..8 {
@@ -1133,95 +1205,157 @@ mod tests {
         world
     }
 
-    /// Vertices of a mesh's sand-patch rim layer (above the base, below
-    /// the sand body lift).
-    fn sand_rim_verts(mesh: &[DrawTriangle]) -> Vec<&Vertex> {
+    /// Does the underlay geometry carry a smoothed-crossing vertex? A
+    /// marched crossing sits at a window midpoint (x on the 32-oct
+    /// lattice); crisp cell-mask crossings land only on cell lines (0 mod
+    /// 256) and the nine-slice insets only at ±32 mod 256, so an x-residue
+    /// in {64, 96, 128, 160, 192} exists exactly when smoothing moved a
+    /// boundary off the cell lattice.
+    fn has_smoothed_crossing(mesh: &[DrawTriangle]) -> bool {
         mesh.iter()
-            .filter(|t| {
-                t.verts
-                    .iter()
-                    .all(|v| v.y > UNDERLAY_Y && v.y < patch_body_lift(Material::Sand))
-            })
+            .filter(|t| t.verts.iter().all(|v| v.y == UNDERLAY_Y))
             .flat_map(|t| t.verts.iter())
-            .collect()
+            .any(|v| {
+                let oct = v.x * 256.0;
+                let rounded = oct.round();
+                if (oct - rounded).abs() > 0.01 {
+                    return false;
+                }
+                let oct = rounded as i64;
+                oct % 32 == 0 && matches!(oct.rem_euclid(256), 64 | 96 | 128 | 160 | 192)
+            })
     }
 
-    fn is_half_subcell(x: f32) -> bool {
-        let eighths = x * 8.0;
-        (eighths - eighths.round()).abs() < 1e-4 && (eighths.round() as i64) % 2 != 0
+    /// Does `t` (projected to the ground plane) cover point `(px, pz)`?
+    fn covers(t: &DrawTriangle, px: f32, pz: f32) -> bool {
+        let sign = |ax: f32, az: f32, bx: f32, bz: f32| {
+            (ax - bx).mul_add(-(pz - bz), (px - bx) * (az - bz))
+        };
+        let d1 = sign(t.verts[0].x, t.verts[0].z, t.verts[1].x, t.verts[1].z);
+        let d2 = sign(t.verts[1].x, t.verts[1].z, t.verts[2].x, t.verts[2].z);
+        let d3 = sign(t.verts[2].x, t.verts[2].z, t.verts[0].x, t.verts[0].z);
+        let has_neg = d1 < -1e-6 || d2 < -1e-6 || d3 < -1e-6;
+        let has_pos = d1 > 1e-6 || d2 > 1e-6 || d3 > 1e-6;
+        !(has_neg && has_pos)
     }
 
     #[test]
-    fn underlay_patch_boundary_smooths_and_the_field_governs_it() {
-        // The sand-grass boundary flows through corner minimization: the
-        // patch rim contour must put vertices on the half-subcell grid
-        // (sand's default smoothing chamfers the band's corners), and
-        // pointing every cell at a zero-iteration profile must remove
-        // every one of them — the smoothing field governs underlay
-        // boundaries exactly as it governs overlay contours.
+    fn partition_boundary_smooths_and_the_field_governs_it() {
+        // The sand-grass boundary repartitions under the smoothing rules:
+        // with a strong field profile the marched partition must put
+        // crossings off the cell lattice, and a zero-iteration profile on
+        // the same world must put none anywhere — the field governs
+        // underlay boundaries exactly as it governs overlay contours.
         let smoothed = mesh_chunk(
-            &sand_band_world(false),
+            &sand_band_world(Some(SmoothingProfile {
+                iterations: 4,
+                degrees: 45,
+            })),
             ChunkPos { x: 0, z: 0 },
             ViewMode::Painted,
         );
         assert!(
-            sand_rim_verts(&smoothed)
-                .iter()
-                .any(|v| is_half_subcell(v.x)),
-            "sand's default smoothing chamfers the patch boundary",
+            has_smoothed_crossing(&smoothed),
+            "a strong field profile moves the boundary off the cell lattice",
         );
         let crisp = mesh_chunk(
-            &sand_band_world(true),
+            &sand_band_world(Some(SmoothingProfile {
+                iterations: 0,
+                degrees: 90,
+            })),
             ChunkPos { x: 0, z: 0 },
             ViewMode::Painted,
         );
         assert!(
-            !sand_rim_verts(&crisp).iter().any(|v| is_half_subcell(v.x)),
-            "a zero-iteration field zone keeps the raw staircase",
+            !has_smoothed_crossing(&crisp),
+            "a zero-iteration field zone keeps the raw cell staircase",
         );
     }
 
     #[test]
-    fn underlay_patch_agrees_across_a_chunk_border() {
-        // The sand band crosses the chunk border; each chunk meshes
-        // independently through the apron, and their patch layers must
-        // overlap at the seam rather than leaving a gap.
-        let world = sand_band_world(false);
+    fn partition_ground_has_no_gaps() {
+        // The partition must tile the painted ground exactly — every probe
+        // point strictly inside the chunk is covered by at least one
+        // ground-plane triangle. A saddle-rule or window-skip bug shows up
+        // as a hole here.
+        let world = sand_band_world(None);
+        let mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
+        let ground: Vec<&DrawTriangle> = mesh
+            .iter()
+            .filter(|t| t.verts.iter().all(|v| v.y == UNDERLAY_Y))
+            .collect();
+        for j in 0..32 {
+            for i in 0..32 {
+                let px = (i as f32 + 0.37) * 0.5;
+                let pz = (j as f32 + 0.53) * 0.5;
+                assert!(
+                    ground.iter().any(|t| covers(t, px, pz)),
+                    "ground hole at ({px}, {pz})",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn partition_chunks_tile_the_seam_together() {
+        // Every boundary window is owned by exactly one chunk (the one
+        // holding its center cell), so neither mesh alone covers the whole
+        // seam strip — but their union must, with no gap. An ownership or
+        // classification disagreement between the two chunks shows up as a
+        // hole here.
+        let world = sand_band_world(None);
         let mesh0 = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
         let mesh1 = mesh_chunk(&world, ChunkPos { x: 1, z: 0 }, ViewMode::Painted);
-        let max_x0 = sand_rim_verts(&mesh0)
-            .iter()
-            .map(|v| v.x)
-            .fold(f32::MIN, f32::max);
-        let min_x1 = sand_rim_verts(&mesh1)
-            .iter()
-            .map(|v| v.x)
-            .fold(f32::MAX, f32::min);
-        assert!(
-            max_x0 >= 16.0,
-            "chunk 0's patch reaches its border: {max_x0}"
-        );
-        assert!(min_x1 <= 16.0, "chunk 1's patch reaches back: {min_x1}");
+        let ground_covers = |mesh: &[DrawTriangle], px: f32, pz: f32| {
+            mesh.iter()
+                .filter(|t| t.verts.iter().all(|v| v.y == UNDERLAY_Y))
+                .any(|t| covers(t, px, pz))
+        };
+        for j in 0..64 {
+            let pz = (j as f32).mul_add(0.25, 0.13);
+            for i in 0..16 {
+                let px = (i as f32).mul_add(0.125, 15.06);
+                assert!(
+                    ground_covers(&mesh0, px, pz) || ground_covers(&mesh1, px, pz),
+                    "seam hole at ({px}, {pz})",
+                );
+            }
+        }
     }
 
     #[test]
-    fn base_ground_draws_beneath_a_patch() {
-        // The region default paints under an explicit patch cell — the
-        // smoothed boundary always has ground beneath it — and the patch
-        // body draws above at its ladder lift.
-        let world = sand_band_world(false);
+    fn region_default_boundary_smooths_too() {
+        // Two regions with different default materials and no explicit
+        // paint anywhere: the partition smooths the boundary all the same —
+        // it never mattered why the materials differ.
+        let mut world = World::new();
+        world.insert_region(
+            1,
+            Region {
+                name: "meadow".into(),
+                default_material: Material::Grass,
+            },
+        );
+        world.insert_region(
+            2,
+            Region {
+                name: "shore".into(),
+                default_material: Material::Sand,
+            },
+        );
+        let mut chunk = Chunk::empty();
+        for lz in 0..EDGE {
+            for lx in 0..EDGE {
+                // A diagonal-ish region boundary so corners exist to smooth.
+                chunk.region[(lz * EDGE + lx) as usize] = if lx + lz / 2 < 10 { 1 } else { 2 };
+            }
+        }
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
         let mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, ViewMode::Painted);
-        let in_cell = |v: &Vertex| (12.0..=13.0).contains(&v.x) && (5.0..=6.0).contains(&v.z);
-        let base_here = mesh
-            .iter()
-            .flat_map(|t| t.verts.iter())
-            .any(|v| v.y == UNDERLAY_Y && in_cell(v));
-        assert!(base_here, "base ground under the sand cell");
-        let body_here = mesh
-            .iter()
-            .flat_map(|t| t.verts.iter())
-            .any(|v| (v.y - patch_body_lift(Material::Sand)).abs() < 1e-6 && in_cell(v));
-        assert!(body_here, "sand body above at its ladder lift");
+        assert!(
+            has_smoothed_crossing(&mesh),
+            "a region-default boundary smooths like any material boundary",
+        );
     }
 
     #[test]
