@@ -1,6 +1,7 @@
 //! `aether.input` cap. Owns the ADR-0021 publish/subscribe routing
 //! table for substrate input streams (`Key`, `KeyRelease`,
-//! `MouseMove`, `MouseButton`, `WindowSize`).
+//! `MouseMove`, `MouseButton`, `MouseButtonRelease`, `MouseWheel`,
+//! `WindowSize`, `TextInput`, `ImePreedit`, `Modifiers`).
 //!
 //! `Tick` is not an input stream: it is a frame-lifecycle stage
 //! (`aether.lifecycle.tick`) a component subscribes directly on
@@ -47,10 +48,11 @@ use aether_actor::actor;
 // at module root too: `#[actor]` emits `impl HandlesKind<K> for
 // InputCapability {}` markers always-on, outside the `feature = "runtime"`
 // gate, for every `#[handler]` parameter type the moved `#[runtime] impl`
-// declares — including these five stream-event kinds, not just the
+// declares — including these ten stream-event kinds, not just the
 // subscribe/unsubscribe family.
 use aether_kinds::{
-    Key, KeyRelease, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, WindowSize,
+    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
+    TextInput, WindowSize,
 };
 
 /// `aether.input` cap **identity** (ADR-0122 identity/runtime split). A
@@ -68,9 +70,10 @@ use aether_kinds::{
 ///    table on the runtime state. Reply target: the original sender.
 ///
 /// 2. **Input events** (`Key`, `KeyRelease`, `MouseMove`,
-///    `MouseButton`, `MouseButtonRelease`, `MouseWheel`, `WindowSize`) —
-///    pushed by the chassis driver after each platform event; the cap
-///    fans out one mail per subscriber. Fire-and-forget; no reply.
+///    `MouseButton`, `MouseButtonRelease`, `MouseWheel`, `WindowSize`,
+///    `TextInput`, `ImePreedit`, `Modifiers`) — pushed by the chassis
+///    driver after each platform event; the cap fans out one mail per
+///    subscriber. Fire-and-forget; no reply.
 #[actor(singleton)]
 pub struct InputCapability;
 

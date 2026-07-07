@@ -21,9 +21,9 @@ use aether_actor::Addressable;
 use aether_capabilities::input::{SubscribeInputResult, UnsubscribeInput};
 use aether_capabilities::{ComponentHostCapability, InputCapability};
 use aether_data::{Kind, KindId, MailboxId};
-use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, LoadResult};
+use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, LoadResult, TextInput};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
-use aether_test_fixtures_kinds::KeyObserved;
+use aether_test_fixtures_kinds::{KeyObserved, TextInputObserved};
 use std::fs;
 
 /// Arbitrary key code for the synthetic `Key` events these tests inject.
@@ -123,6 +123,42 @@ fn empty_subscribers_means_no_delivery() {
         bench.count_observed(KeyObserved::NAME),
         0,
         "no probe loaded but key_observed was broadcast; observed kinds: {:?}",
+        bench.observed_kinds(),
+    );
+}
+
+/// A subscribed probe receives fanned-out `TextInput`. The plausible bug
+/// this guards: a new stream kind whose input-cap fan-out `#[handler]` is
+/// missing warn-drops silently at dispatch (the cap is a strict receiver),
+/// so a `TextInput`-subscribing widget would never see committed text.
+/// Injecting synthetic `TextInput` at `aether.input` and observing the
+/// probe's re-broadcast proves the `on_text_input` fan-out is wired.
+#[test]
+fn subscribed_component_receives_published_text_input() {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+        return;
+    };
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let _mbox = load_probe_named(&mut bench, &wasm_path, "typist");
+    let baseline = bench.count_observed(TextInputObserved::NAME);
+
+    bench
+        .execute(vec![(
+            "text",
+            BenchOp::send_mail(
+                "aether.input",
+                &TextInput {
+                    text: "hi".to_owned(),
+                },
+            ),
+        )])
+        .expect("text send sequence");
+
+    let delta = bench.count_observed(TextInputObserved::NAME) - baseline;
+    assert_eq!(
+        delta,
+        1,
+        "expected 1 text_input_observed broadcast; observed kinds: {:?}",
         bench.observed_kinds(),
     );
 }

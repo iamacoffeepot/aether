@@ -26,10 +26,10 @@ use aether_capabilities::RenderHandles;
 use aether_data::Kind;
 use aether_data::{encode, encode_empty, mailbox_id_from_name};
 use aether_kinds::{
-    CaptureFrameResult, FocusWindow, FocusWindowResult, Key, KeyRelease, LifecycleAdvanceComplete,
-    MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Quit, SetWindowMode,
-    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, Tick, WindowMode, WindowSize,
-    keycode, mouse_button,
+    CaptureFrameResult, FocusWindow, FocusWindowResult, ImePreedit, Key, KeyRelease,
+    LifecycleAdvanceComplete, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
+    Quit, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, TextInput,
+    Tick, WindowMode, WindowSize, keycode, mouse_button,
 };
 use aether_substrate::actor::native::local;
 // Only the unit tests name the `Envelope` (aka `OwnedDispatch`) type now —
@@ -53,7 +53,9 @@ use aether_substrate::{
     mail::{Mail, MailId, MailboxId},
 };
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton as WinitMouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{
+    ElementState, Ime, MouseButton as WinitMouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::monitor::{MonitorHandle, VideoModeHandle};
@@ -108,11 +110,21 @@ pub struct App {
     kind_mouse_wheel: aether_data::KindId,
     kind_mouse_move: aether_data::KindId,
     kind_window_size: aether_data::KindId,
+    kind_text_input: aether_data::KindId,
+    kind_ime_preedit: aether_data::KindId,
+    kind_modifiers: aether_data::KindId,
     /// Last cursor position seen in a `CursorMoved` event, in window
     /// coordinates. Stamped onto each button / wheel event so a click or
     /// scroll carries its location without the consumer correlating a
     /// separate `MouseMove`.
     last_cursor: (f32, f32),
+    /// Composition gate for the text-input stream. `true` while an IME
+    /// composition is active (a non-empty `Ime::Preedit` opened it,
+    /// `Ime::Commit` / `Ime::Disabled` / a synthetic empty `Preedit`
+    /// closes it). While composing, raw `KeyEvent.text` is suppressed so
+    /// a committed character is published once (via `Ime::Commit`), never
+    /// doubled. Driven by [`text_input_gate`].
+    composing: bool,
     /// Cloned out of `RenderCapability::handles()` before the cap
     /// moves into the chassis builder. The app holds a clone so
     /// `Gpu::new` can install wgpu state and the per-frame loop can
@@ -283,6 +295,51 @@ fn map_winit_keycode(k: KeyCode) -> Option<u32> {
         KeyCode::AltRight => keycode::KEY_ALT_RIGHT,
         _ => return None,
     })
+}
+
+/// A committed-text / composition signal lifted out of winit's event
+/// types so [`text_input_gate`]'s dedupe logic is unit-testable without
+/// a winit event loop — the same pure-helper factoring as
+/// [`map_winit_keycode`]. The desktop `KeyboardInput` / `Ime` arms
+/// translate their winit events into this before feeding the gate.
+enum TextSource {
+    /// A layout-resolved character run from `KeyEvent.text` on a physical
+    /// key press. Suppressed while an IME composition is active.
+    KeyText(String),
+    /// A `Ime::Preedit`. `active` is `true` for a non-empty preedit
+    /// (composition open) and `false` for the synthetic empty preedit
+    /// winit sends to clear it.
+    Preedit { active: bool },
+    /// A `Ime::Commit` — the composed string is final.
+    Commit(String),
+    /// A `Ime::Disabled` — composition ended without a commit.
+    Disabled,
+}
+
+/// Composition gate for the `TextInput` stream: update `composing` and
+/// return the text to publish (`Some`) or nothing (`None`). The bug it
+/// guards is a character delivered twice — once as `KeyEvent.text`, once
+/// as `Ime::Commit` — when both fire for one keystroke: while a
+/// composition is open, `KeyText` is dropped and the commit is the single
+/// source of truth. `Preedit { active }` opens or closes the gate without
+/// publishing (the in-flight text rides `ImePreedit` instead); `Disabled`
+/// closes it. Winit-free so the dedupe is testable without a winit `App`.
+fn text_input_gate(composing: &mut bool, source: TextSource) -> Option<String> {
+    match source {
+        TextSource::KeyText(text) => (!*composing).then_some(text),
+        TextSource::Preedit { active } => {
+            *composing = active;
+            None
+        }
+        TextSource::Commit(text) => {
+            *composing = false;
+            Some(text)
+        }
+        TextSource::Disabled => {
+            *composing = false;
+            None
+        }
+    }
 }
 
 /// Desktop window boot knobs (ADR-0090 §1/§2 applied to the chassis's
@@ -1072,6 +1129,12 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         let window = Arc::new(event_loop.create_window(attrs).expect("create_window"));
+        // Opt this window into IME event delivery. Most platforms send no
+        // `Ime` events (and therefore no composed/committed CJK text)
+        // unless the window has explicitly allowed IME. Candidate-window
+        // placement (`set_ime_cursor_area`) is deferred — its absence only
+        // floats the IME popup at a default position.
+        window.set_ime_allowed(true);
         self.gpu = Some(Gpu::new(
             Arc::clone(&window),
             self.render_handles.clone(),
@@ -1312,31 +1375,100 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::KeyboardInput {
                 event: key_event, ..
-            } if !key_event.repeat => {
-                let Some(code) = (match key_event.physical_key {
-                    PhysicalKey::Code(k) => map_winit_keycode(k),
-                    PhysicalKey::Unidentified(_) => None,
-                }) else {
-                    return;
-                };
-                match key_event.state {
-                    ElementState::Pressed => {
-                        self.push_chassis_root(
-                            self.input_mailbox,
-                            self.kind_key,
-                            encode(&Key { code }),
-                            1,
-                        );
+            } => {
+                // Text path: publish the layout-resolved characters from
+                // `KeyEvent.text` when no IME composition is active. Repeats
+                // are forwarded here (holding a key types a run of
+                // characters), unlike the named-key edge path below.
+                if key_event.state == ElementState::Pressed
+                    && let Some(text) = &key_event.text
+                    && let Some(committed) =
+                        text_input_gate(&mut self.composing, TextSource::KeyText(text.to_string()))
+                {
+                    let payload = TextInput { text: committed }.encode_into_bytes();
+                    self.push_chassis_root(self.input_mailbox, self.kind_text_input, payload, 1);
+                }
+                // Named-key edge path: `Key` / `KeyRelease` keep their
+                // no-repeat contract and their `#[repr(C)]` cast payload.
+                if !key_event.repeat
+                    && let Some(code) = (match key_event.physical_key {
+                        PhysicalKey::Code(k) => map_winit_keycode(k),
+                        PhysicalKey::Unidentified(_) => None,
+                    })
+                {
+                    match key_event.state {
+                        ElementState::Pressed => {
+                            self.push_chassis_root(
+                                self.input_mailbox,
+                                self.kind_key,
+                                encode(&Key { code }),
+                                1,
+                            );
+                        }
+                        ElementState::Released => {
+                            self.push_chassis_root(
+                                self.input_mailbox,
+                                self.kind_key_release,
+                                encode(&KeyRelease { code }),
+                                1,
+                            );
+                        }
                     }
-                    ElementState::Released => {
+                }
+            }
+            WindowEvent::Ime(ime) => match ime {
+                Ime::Preedit(text, cursor) => {
+                    text_input_gate(
+                        &mut self.composing,
+                        TextSource::Preedit {
+                            active: !text.is_empty(),
+                        },
+                    );
+                    // winit reports the cursor span as byte offsets into
+                    // the preedit string (usize); the wire kind carries
+                    // u32. A preedit is a handful of characters, far inside
+                    // u32.
+                    #[allow(clippy::cast_possible_truncation)]
+                    let (cursor_begin, cursor_end) = match cursor {
+                        Some((begin, end)) => (Some(begin as u32), Some(end as u32)),
+                        None => (None, None),
+                    };
+                    let payload = ImePreedit {
+                        text,
+                        cursor_begin,
+                        cursor_end,
+                    }
+                    .encode_into_bytes();
+                    self.push_chassis_root(self.input_mailbox, self.kind_ime_preedit, payload, 1);
+                }
+                Ime::Commit(text) => {
+                    if let Some(committed) =
+                        text_input_gate(&mut self.composing, TextSource::Commit(text))
+                    {
+                        let payload = TextInput { text: committed }.encode_into_bytes();
                         self.push_chassis_root(
                             self.input_mailbox,
-                            self.kind_key_release,
-                            encode(&KeyRelease { code }),
+                            self.kind_text_input,
+                            payload,
                             1,
                         );
                     }
                 }
+                Ime::Disabled => {
+                    text_input_gate(&mut self.composing, TextSource::Disabled);
+                }
+                Ime::Enabled => {}
+            },
+            WindowEvent::ModifiersChanged(modifiers) => {
+                let state = modifiers.state();
+                let payload = Modifiers {
+                    shift: state.shift_key(),
+                    ctrl: state.control_key(),
+                    alt: state.alt_key(),
+                    meta: state.super_key(),
+                }
+                .encode_into_bytes();
+                self.push_chassis_root(self.input_mailbox, self.kind_modifiers, payload, 1);
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 // winit's `Other(n)` buttons map to no engine constant and
@@ -1496,6 +1628,18 @@ impl DriverCapability for DesktopDriverCapability {
             .registry
             .kind_id(WindowSize::NAME)
             .expect("WindowSize registered");
+        let kind_text_input = boot
+            .registry
+            .kind_id(TextInput::NAME)
+            .expect("TextInput registered");
+        let kind_ime_preedit = boot
+            .registry
+            .kind_id(ImePreedit::NAME)
+            .expect("ImePreedit registered");
+        let kind_modifiers = boot
+            .registry
+            .kind_id(Modifiers::NAME)
+            .expect("Modifiers registered");
         let kind_set_window_mode = boot
             .registry
             .kind_id(SetWindowMode::NAME)
@@ -1570,7 +1714,11 @@ impl DriverCapability for DesktopDriverCapability {
             kind_mouse_wheel,
             kind_mouse_move,
             kind_window_size,
+            kind_text_input,
+            kind_ime_preedit,
+            kind_modifiers,
             last_cursor: (0.0, 0.0),
+            composing: false,
             render_handles,
             capture_queue,
             outbound: Arc::clone(&boot.outbound),
@@ -1656,6 +1804,62 @@ mod tests {
     fn to_boot_title_none_returns_default() {
         // Unset title → "aether" default.
         assert_eq!(WindowConfig::default().to_boot_title(), "aether");
+    }
+
+    // Tripwire: the composition gate must never publish a character twice.
+    // A plain keystroke with no IME active publishes its `KeyEvent.text`.
+    #[test]
+    fn gate_publishes_keytext_when_not_composing() {
+        let mut composing = false;
+        let out = text_input_gate(&mut composing, TextSource::KeyText("a".to_owned()));
+        assert_eq!(out.as_deref(), Some("a"));
+        assert!(!composing, "a bare keystroke opens no composition");
+    }
+
+    // Tripwire: while an IME composition is open, raw `KeyEvent.text` is
+    // suppressed — the commit is the single source of truth, so the
+    // committed character is not also emitted from the physical key.
+    #[test]
+    fn gate_suppresses_keytext_during_composition_and_commit_wins() {
+        let mut composing = false;
+        // A non-empty preedit opens the composition.
+        assert_eq!(
+            text_input_gate(&mut composing, TextSource::Preedit { active: true }),
+            None
+        );
+        assert!(composing);
+        // Raw key text arriving mid-composition is dropped.
+        assert_eq!(
+            text_input_gate(&mut composing, TextSource::KeyText("a".to_owned())),
+            None
+        );
+        // The commit publishes the composed text and closes the gate.
+        let out = text_input_gate(&mut composing, TextSource::Commit("\u{5416}".to_owned()));
+        assert_eq!(out.as_deref(), Some("\u{5416}"));
+        assert!(!composing, "commit closes the composition");
+    }
+
+    // Tripwire: text must not stay suppressed after a composition ends.
+    // The synthetic empty preedit and `Disabled` both clear `composing`,
+    // so a subsequent keystroke publishes again.
+    #[test]
+    fn gate_clears_composing_on_empty_preedit_and_disabled() {
+        let mut composing = true;
+        assert_eq!(
+            text_input_gate(&mut composing, TextSource::Preedit { active: false }),
+            None
+        );
+        assert!(!composing, "empty synthetic preedit clears the gate");
+
+        composing = true;
+        assert_eq!(text_input_gate(&mut composing, TextSource::Disabled), None);
+        assert!(!composing, "Disabled clears the gate");
+
+        // A keystroke after the clear publishes normally.
+        assert_eq!(
+            text_input_gate(&mut composing, TextSource::KeyText("z".to_owned())).as_deref(),
+            Some("z"),
+        );
     }
 
     #[test]
