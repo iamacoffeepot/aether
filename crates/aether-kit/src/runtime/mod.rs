@@ -17,21 +17,29 @@
 //!   selected by the `aether_kit@aether.world` export. Its
 //!   `aether.kit.world.*` kinds live in [`crate::world`]; the pure mesher
 //!   it drives lives in [`mesher`].
+//! - [`widget::Widget`] — the widget-compositing node (ADR-0117),
+//!   selected by the `aether_kit@aether.kit.widget` export. A cluster of
+//!   these draws local and composites up so the whole subtree is one
+//!   render sender in structural draw order; its wire kinds live in
+//!   [`crate::widgets`] and its compositing bookkeeping in [`composite`].
 //!
-//! `export!(Locomotion, CameraComponent, MeshViewer, WorldView)` lists
-//! the entry first; the macro emits the wasm32 FFI shims and the
-//! `aether.kinds` custom section for all four actors.
+//! `export!(Locomotion, CameraComponent, MeshViewer, WorldView, Widget)`
+//! lists the entry first; the macro emits the wasm32 FFI shims and the
+//! `aether.kinds` custom section for all five actors.
 
 pub mod camera;
+pub mod composite;
 pub mod locomotion;
 pub mod mesh_viewer;
 pub mod mesher;
+pub mod widget;
 pub mod world_view;
 
 pub use camera::CameraComponent;
 pub use locomotion::Locomotion;
 pub use mesh_viewer::MeshViewer;
 pub use mesher::mesh_chunk;
+pub use widget::Widget;
 pub use world_view::WorldView;
 
 // `arena` (the hazard-field builder) keys its fixed-size scratch on the
@@ -39,4 +47,4 @@ pub use world_view::WorldView;
 // module root where `arena` imports them.
 pub(crate) use locomotion::{GRID_H, GRID_W};
 
-aether_actor::export!(Locomotion, CameraComponent, MeshViewer, WorldView);
+aether_actor::export!(Locomotion, CameraComponent, MeshViewer, WorldView, Widget);
