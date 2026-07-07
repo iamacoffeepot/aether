@@ -33,7 +33,7 @@ use std::fs;
 
 use aether_data::Kind;
 use aether_kinds::{LoadComponent, LoadResult, NamedMail};
-use aether_kit::{WidgetChildSpec, WidgetConfig, WidgetDrawItem};
+use aether_kit::{WidgetChildSpec, WidgetConfig, WidgetDrawItem, WidgetKind};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{Image, background_top_left, decode_png};
 
@@ -156,11 +156,13 @@ fn flat_panel_is_one_sender_with_chrome_under_children() {
         children: vec![
             WidgetChildSpec {
                 subname: "a".to_owned(),
+                kind: WidgetKind::Composite,
                 origin: [12.0, 12.0],
                 config: leaf_config(12.0, 12.0, RED),
             },
             WidgetChildSpec {
                 subname: "b".to_owned(),
+                kind: WidgetKind::Composite,
                 origin: [36.0, 20.0],
                 config: leaf_config(12.0, 12.0, GREEN),
             },
@@ -240,6 +242,7 @@ fn nested_tree_draws_in_depth_first_order() {
         intrinsic: None,
         children: vec![WidgetChildSpec {
             subname: "b1".to_owned(),
+            kind: WidgetKind::Composite,
             origin: [2.0, 2.0],
             config: b1,
         }],
@@ -256,11 +259,13 @@ fn nested_tree_draws_in_depth_first_order() {
         children: vec![
             WidgetChildSpec {
                 subname: "a".to_owned(),
+                kind: WidgetKind::Composite,
                 origin: [12.0, 14.0],
                 config: leaf_config(8.0, 8.0, RED),
             },
             WidgetChildSpec {
                 subname: "b".to_owned(),
+                kind: WidgetKind::Composite,
                 origin: [30.0, 12.0],
                 config: interior_b,
             },
