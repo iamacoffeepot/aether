@@ -3,12 +3,12 @@
 //! lanes — config / style / layout-frame data-down, value events-up — over the
 //! ADR-0117 draw-compositing protocol.
 //!
-//! - [`slider::SliderWidget`] — a horizontal value slider, dragged or
+//! - [`SliderWidget`] — a horizontal value slider, dragged or
 //!   arrow-nudged.
-//! - [`text_field::TextFieldWidget`] — a single-line editable string.
-//! - [`radio::RadioGroupWidget`] — a vertical list of exclusive options.
-//! - [`button::ButtonWidget`] — a momentary push button.
-//! - [`label::LabelWidget`] — static, non-interactive text.
+//! - [`TextFieldWidget`] — a single-line editable string.
+//! - [`RadioGroupWidget`] — a vertical list of exclusive options.
+//! - [`ButtonWidget`] — a momentary push button.
+//! - [`LabelWidget`] — static, non-interactive text.
 //!
 //! Each caches its assigned [`WidgetFrame`](crate::widgets::WidgetFrame) rect
 //! and its [`Theme`](crate::theme::Theme), answers every
@@ -83,4 +83,15 @@ pub(crate) fn approx_text_width(char_count: usize, size_pixels: f32) -> f32 {
     #[allow(clippy::cast_precision_loss)]
     let count = char_count as f32;
     count * size_pixels * APPROX_ADVANCE_RATIO
+}
+
+/// The `Screen`-space `DrawText` origin y that vertically centers a single
+/// line of `size_pixels` text in a row `row_height` tall whose top is
+/// `row_top` (widget-local). `aether.text` treats a `Screen` draw `origin`
+/// as the line box's top-left and places the baseline one ascent below it,
+/// so centering the em box keeps the glyph ink inside the row without the
+/// font's exact ascent — which the theme does not fan to widgets (see
+/// [`APPROX_ADVANCE_RATIO`]).
+pub(crate) fn text_origin_y(row_top: f32, row_height: f32, size_pixels: f32) -> f32 {
+    (row_height - size_pixels).mul_add(0.5, row_top)
 }

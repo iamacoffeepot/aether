@@ -16,7 +16,7 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::mouse_button;
 use aether_kinds::{MouseButton, MouseButtonRelease};
 
-use crate::runtime::widgets::{push_border, quad};
+use crate::runtime::widgets::{push_border, quad, text_origin_y};
 use crate::theme::{SetTheme, Theme, WidgetState};
 use crate::widgets::{
     ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, WidgetDrawItem, WidgetDrawList,
@@ -165,7 +165,7 @@ impl WasmActor for ButtonWidget {
         if !self.label.is_empty() {
             items.push(WidgetDrawItem::Text {
                 x: self.theme.pad,
-                y: size.mul_add(0.35, height * 0.5),
+                y: text_origin_y(0.0, height, size),
                 font_id: self.theme.font_id,
                 text: self.label.clone(),
                 size_pixels: size,

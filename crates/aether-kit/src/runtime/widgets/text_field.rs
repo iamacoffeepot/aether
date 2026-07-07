@@ -22,7 +22,7 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::keycode::{KEY_BACKSPACE, KEY_ENTER, KEY_LEFT, KEY_RIGHT};
 use aether_kinds::{ImePreedit, Key, Modifiers, TextInput};
 
-use crate::runtime::widgets::{approx_text_width, push_border, quad};
+use crate::runtime::widgets::{approx_text_width, push_border, quad, text_origin_y};
 use crate::theme::{SetTheme, Theme, WidgetState};
 use crate::widgets::{
     Collect, FocusGained, FocusLost, TextCommitted, TextFieldConfig, WidgetDrawItem,
@@ -209,7 +209,7 @@ impl WasmActor for TextFieldWidget {
         let height = self.frame.height;
         let pad = self.theme.pad;
         let size = self.theme.value_size_pixels;
-        let baseline = size.mul_add(0.35, height * 0.5);
+        let text_y = text_origin_y(0.0, height, size);
 
         let mut items: Vec<WidgetDrawItem> = Vec::new();
         items.push(quad(
@@ -225,7 +225,7 @@ impl WasmActor for TextFieldWidget {
         if !shown.is_empty() {
             items.push(WidgetDrawItem::Text {
                 x: pad,
-                y: baseline,
+                y: text_y,
                 font_id: self.theme.font_id,
                 text: shown,
                 size_pixels: size,
@@ -239,7 +239,7 @@ impl WasmActor for TextFieldWidget {
             let preedit_width = approx_text_width(self.preedit.chars().count(), size);
             items.push(quad(
                 pad + committed_width,
-                baseline + 2.0,
+                text_y + size,
                 preedit_width,
                 1.0,
                 self.theme.accent,
