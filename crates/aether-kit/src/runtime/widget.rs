@@ -37,7 +37,8 @@
 //! on its first `Tick` for the one code path.
 
 use aether_actor::{
-    ActorInitError, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, Addressable, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx,
+    actor,
 };
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::{DrawSolidQuads, SolidQuad};
@@ -81,9 +82,12 @@ impl Widget {
                 continue;
             };
             match ctx.spawn_inline_child::<Self>(Subname::Named(&spec.subname), &child_config) {
-                Ok(alias) => self
-                    .composite
-                    .register_slot(alias, Vec2::new(spec.origin[0], spec.origin[1])),
+                Ok(alias) => self.composite.register_slot(
+                    alias,
+                    Vec2::new(spec.origin[0], spec.origin[1]),
+                    &spec.subname,
+                    <Self as Addressable>::NAMESPACE,
+                ),
                 Err(error) => tracing::warn!(
                     target: "aether_kit",
                     subname = %spec.subname,
@@ -94,12 +98,26 @@ impl Widget {
         }
     }
 
+    /// Drain any buffered membership change and emit it up the lane. The
+    /// first-spawn burst of the whole stack drains as one batched
+    /// `ChildrenChanged`; a later single add/remove as one event. A loaded
+    /// root has no up-lane consumer, so the drain is a harmless no-send there
+    /// (kept mechanical for uniformity and future re-parenting).
+    fn flush_membership(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
+        if let Some(changed) = self.composite.take_membership_changes()
+            && let Some(parent) = ctx.parent()
+        {
+            parent.send(&changed);
+        }
+    }
+
     /// Open a frame and fan `Collect` to every child. Resets the
     /// composite, lays down own chrome, then polls each child in layout
     /// order. A leaf (no children) is already complete, so it finishes on
     /// the spot; a node with children finishes later, from `on_draw_list`.
     fn drive_frame(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
         self.ensure_spawned(ctx);
+        self.flush_membership(ctx);
         self.composite.begin_frame();
         self.composite
             .extend_chrome(self.config.chrome.iter().cloned());
