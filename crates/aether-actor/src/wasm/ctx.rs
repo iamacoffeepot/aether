@@ -135,6 +135,18 @@ impl RelativeMailbox<'_> {
         );
     }
 
+    /// Forward pre-encoded `bytes` of kind `kind` to this relative — the
+    /// type-erased counterpart of [`Self::send`], for a mail-forwarding
+    /// interposer (the ADR-0137 behavior host, issue 2687) that reroutes an
+    /// arbitrary inbound kind it holds no Rust type for. Routes the same way
+    /// [`Self::send`] does — in place through the cluster membrane, inheriting
+    /// the handler's causal chain — so the interposer stays transparent to
+    /// settlement. `count` is fixed at 1: a forward carries one inbound mail.
+    pub fn send_bytes(&self, kind: aether_data::KindId, bytes: &[u8]) {
+        self.inline
+            .route_or_enqueue(self.id.0, kind.0, bytes, 1, ChainMode::Inherit, self.sender);
+    }
+
     /// Fire-and-forget send to this relative (ADR-0080 §7 detach signal).
     /// In-cluster the recipient dispatches in place regardless; the detach
     /// flag rides through only on the cross-cluster fallback path, which a
@@ -332,6 +344,20 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     #[must_use]
     pub fn reply_target(&self) -> Option<ReplyHandle> {
         self.sender
+    }
+
+    /// The inbound source — the folded [`MailboxId`] of whoever sent the
+    /// mail currently being dispatched, or `None` for a sourceless dispatch
+    /// (session / remote-engine / broadcast mail, or a lifecycle hook with
+    /// no inbound). Reads the same `source` field as
+    /// [`OutboundReply::source_mailbox`], but on the generic ctx so a
+    /// `#[fallback]` (which runs on the downgraded [`Single`] view, issue
+    /// 2687) can resolve a cluster-membrane interposer's lane direction —
+    /// compare the source against a stored child id: equal ⇒ up-lane, else
+    /// ⇒ down-lane.
+    #[must_use]
+    pub fn source_mailbox(&self) -> Option<MailboxId> {
+        (self.source != MailboxId::NONE.0).then_some(MailboxId(self.source))
     }
 
     /// The component's own mailbox id — the value the substrate uses to
@@ -845,14 +871,11 @@ impl OutboundReply for WasmCtx<'_, Manual> {
     }
 
     fn source_mailbox(&self) -> Option<MailboxId> {
-        // Issue 2001: the inbound source rides the ctx's `source` field on
-        // every dispatch — the in-place drain threads it (a drained item has
-        // no reply handle, since the local fast path is fire-and-forget), and
-        // the top-level `receive_p32` membrane threads the host-resolved source
-        // the same ABI slot delivers (issue 1987 completed the top-level half).
-        // So this is a single field read on both paths; `MailboxId::NONE` (0)
-        // means no peer-component origin (session / engine / broadcast mail).
-        (self.source != MailboxId::NONE.0).then_some(MailboxId(self.source))
+        // Issue 2687: delegate to the inherent generic accessor (the single
+        // source of truth), which the `Single` `#[fallback]` ctx also reads.
+        // The fully-qualified path resolves the inherent method, not this
+        // trait method, so there is no recursion.
+        WasmCtx::source_mailbox(self)
     }
 
     fn reply<K: Kind>(&mut self, payload: &K) {
@@ -1108,7 +1131,6 @@ mod tests {
     use crate::Addressable;
     use crate::mail::{Mail, PriorState};
     use crate::model::Subname;
-    use crate::model::ctx::OutboundReply;
     use crate::wasm::inline::RouteDecision;
     use crate::wasm::inline::compose::spawn_one_child;
     use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmDropCtx, WasmInitCtx};

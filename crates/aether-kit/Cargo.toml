@@ -25,9 +25,19 @@ crate-type = ["cdylib", "rlib"]
 # wasm32 build still produces the full component artifact.
 default = ["runtime"]
 runtime = []
+# ADR-0137 / issue 2687: wrap a stock widget slot in a behavior script host.
+# Forwards to `aether-behavior/host` and lights up the `WidgetKind::BehaviorHost`
+# spawn arm + the host's presence in the module's `export!` set. Non-default so
+# the ordinary kit build links neither `wasmi` nor the host, and is compiled in
+# a separate cargo invocation from behavior-script wasm (issue 2688).
+behavior = ["dep:aether-behavior", "aether-behavior/host"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
+# `behavior`-only: the script host actor + its config vocabulary. Its own
+# marker face is off (`default-features = false`); the `host` feature the kit
+# forwards to turns on exactly the host surface, not the guest `runtime` SDK.
+aether-behavior = { path = "../aether-behavior", default-features = false, optional = true }
 aether-capabilities = { path = "../aether-capabilities", default-features = false, features = ["render", "ui"] }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }

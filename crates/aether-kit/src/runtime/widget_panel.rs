@@ -40,8 +40,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, Addressable, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx,
-    actor,
+    ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
@@ -159,6 +158,7 @@ impl WidgetPanel {
                 WidgetKind::Button => decode_child::<ButtonConfig>(spec)
                     .and_then(|config| spawn::<ButtonWidget>(ctx, &spec.subname, &config))
                     .map(|id| (id, row, true, <ButtonWidget as Addressable>::NAMESPACE)),
+                WidgetKind::BehaviorHost => spawn_behavior_host(ctx, spec, row),
                 WidgetKind::Composite => {
                     tracing::warn!(
                         target: "aether_kit",
@@ -368,6 +368,123 @@ where
             None
         }
     }
+}
+
+/// Spawn a [`WidgetKind::BehaviorHost`] slot (issue 2687): decode the
+/// [`BehaviorHostSpec`], map the wrapped widget kind to its type tag, build the
+/// `aether-behavior` `HostConfig`, and spawn the host by tag (#2692) — the host
+/// then spawns the wrapped widget as its own inline child and interposes on the
+/// slot's mail. Returns the placed-tuple shape the other arms produce; `None`
+/// (slot skipped) on an unsupported wrapped kind, a decode failure, or a spawn
+/// error. The panel's per-frame `Collect` is handed to the host as its FRAME
+/// trigger.
+#[cfg(feature = "behavior")]
+fn spawn_behavior_host(
+    ctx: &mut WasmCtx<'_, Manual>,
+    spec: &WidgetChildSpec,
+    row: f32,
+) -> Option<(MailboxId, f32, bool, &'static str)> {
+    use crate::widgets::{BehaviorHostSpec, ScriptRef};
+    use aether_actor::ActorTypeTag;
+    use aether_behavior::HostConfig;
+    use aether_behavior::host::{ChildSpec, ScriptSource};
+
+    let host_spec = decode_child::<BehaviorHostSpec>(spec)?;
+    let Some(type_tag) = wrapped_widget_tag(host_spec.wrapped) else {
+        tracing::warn!(
+            target: "aether_kit",
+            subname = %spec.subname,
+            wrapped = ?host_spec.wrapped,
+            "BehaviorHost cannot wrap this widget kind (container or host); slot skipped",
+        );
+        return None;
+    };
+    let script = match host_spec.script {
+        ScriptRef::None => ScriptSource::None,
+        ScriptRef::Inline(bytes) => ScriptSource::Inline(bytes),
+        ScriptRef::FsRef { namespace, path } => ScriptSource::FsRef { namespace, path },
+    };
+    let fuel_per_call = if host_spec.fuel_per_call != 0 {
+        host_spec.fuel_per_call
+    } else {
+        HostConfig::DEFAULT_FUEL_PER_CALL
+    };
+    let disable_after_traps = if host_spec.disable_after_traps != 0 {
+        host_spec.disable_after_traps
+    } else {
+        HostConfig::DEFAULT_DISABLE_AFTER_TRAPS
+    };
+    let config = HostConfig {
+        child: ChildSpec {
+            // The wrapped widget nests under the host at a slot-unique subname
+            // (the inline model folds children flat, so the discriminator must
+            // be cluster-unique).
+            type_tag,
+            subname: alloc::format!("{}_wrapped", spec.subname),
+            config: host_spec.wrapped_config,
+        },
+        script,
+        fuel_per_call,
+        disable_after_traps,
+        // The panel drives the wrapped slot with `Collect` each frame; hand the
+        // host that kind as its FRAME sentinel trigger.
+        frame_trigger: Collect::ID.0,
+    };
+    let bytes = config.encode_into_bytes();
+    match ctx.spawn_inline_child_by_tag(
+        ActorTypeTag::of::<aether_behavior::BehaviorHost>(),
+        Subname::Named(&spec.subname),
+        &bytes,
+    ) {
+        Ok(id) => Some((
+            id,
+            row,
+            true,
+            <aether_behavior::BehaviorHost as Addressable>::NAMESPACE,
+        )),
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_kit",
+                subname = %spec.subname,
+                ?error,
+                "behavior host spawn failed; slot skipped",
+            );
+            None
+        }
+    }
+}
+
+/// The wrapped widget's actor type tag for the `behavior` spawn arm — the same
+/// `ActorTypeTag::of::<Concrete>()` mapping the direct-widget arms encode, one
+/// per stock widget. A container or a host is not wrappable ⇒ `None`.
+#[cfg(feature = "behavior")]
+fn wrapped_widget_tag(kind: WidgetKind) -> Option<u64> {
+    use aether_actor::ActorTypeTag;
+    let tag = match kind {
+        WidgetKind::Label => ActorTypeTag::of::<LabelWidget>().0,
+        WidgetKind::Slider => ActorTypeTag::of::<SliderWidget>().0,
+        WidgetKind::Radio => ActorTypeTag::of::<RadioGroupWidget>().0,
+        WidgetKind::TextField => ActorTypeTag::of::<TextFieldWidget>().0,
+        WidgetKind::Button => ActorTypeTag::of::<ButtonWidget>().0,
+        WidgetKind::Composite | WidgetKind::BehaviorHost => return None,
+    };
+    Some(tag)
+}
+
+/// The `behavior`-feature-off stub: a `WidgetKind::BehaviorHost` slot needs the
+/// host actor, which is only linked under the kit's `behavior` feature.
+#[cfg(not(feature = "behavior"))]
+fn spawn_behavior_host(
+    _ctx: &mut WasmCtx<'_, Manual>,
+    spec: &WidgetChildSpec,
+    _row: f32,
+) -> Option<(MailboxId, f32, bool, &'static str)> {
+    tracing::warn!(
+        target: "aether_kit",
+        subname = %spec.subname,
+        "WidgetKind::BehaviorHost needs the kit `behavior` feature; slot skipped",
+    );
+    None
 }
 
 /// The reference panel root. Load it as a component (export
@@ -637,5 +754,69 @@ impl WasmActor for WidgetPanel {
     fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
         self.theme = set.theme;
         self.fan_theme(ctx);
+    }
+}
+
+#[cfg(all(test, feature = "behavior"))]
+mod behavior_tests {
+    use super::*;
+    use crate::widgets::{BehaviorHostSpec, ScriptRef};
+    use aether_actor::ActorTypeTag;
+    use aether_data::Kind;
+
+    // Tripwire: the wrapped-widget tag mapping points each stock kind at its
+    // own concrete widget type (not a transposed neighbour) and refuses to
+    // wrap a container or a host. A mis-wired arm would spawn the wrong widget
+    // under a host — silent until the pixels are wrong.
+    #[test]
+    fn wrapped_tag_maps_each_stock_widget_and_rejects_unwrappable() {
+        assert_eq!(
+            wrapped_widget_tag(WidgetKind::Slider),
+            Some(ActorTypeTag::of::<SliderWidget>().0)
+        );
+        assert_eq!(
+            wrapped_widget_tag(WidgetKind::Button),
+            Some(ActorTypeTag::of::<ButtonWidget>().0)
+        );
+        assert_eq!(
+            wrapped_widget_tag(WidgetKind::Label),
+            Some(ActorTypeTag::of::<LabelWidget>().0)
+        );
+        assert_eq!(
+            wrapped_widget_tag(WidgetKind::Radio),
+            Some(ActorTypeTag::of::<RadioGroupWidget>().0)
+        );
+        assert_eq!(
+            wrapped_widget_tag(WidgetKind::TextField),
+            Some(ActorTypeTag::of::<TextFieldWidget>().0)
+        );
+        assert_eq!(wrapped_widget_tag(WidgetKind::Composite), None);
+        assert_eq!(wrapped_widget_tag(WidgetKind::BehaviorHost), None);
+    }
+
+    // Tripwire: a `BehaviorHostSpec` carrying a stock wrapped widget encodes as
+    // its `WidgetChildSpec.config` and decodes back through `decode_child`, so
+    // the panel arm can recover the wrapped kind + script it was handed.
+    #[test]
+    fn host_spec_round_trips_through_child_config() {
+        let spec = BehaviorHostSpec {
+            wrapped: WidgetKind::Slider,
+            wrapped_config: alloc::vec![1, 2, 3],
+            script: ScriptRef::FsRef {
+                namespace: String::from("assets"),
+                path: String::from("scripts/knob.wasm"),
+            },
+            fuel_per_call: 0,
+            disable_after_traps: 0,
+        };
+        let child = WidgetChildSpec {
+            subname: String::from("knob"),
+            kind: WidgetKind::BehaviorHost,
+            origin: [0.0, 0.0],
+            config: spec.encode_into_bytes(),
+        };
+        let decoded = decode_child::<BehaviorHostSpec>(&child).expect("host spec decodes");
+        assert_eq!(decoded.wrapped, WidgetKind::Slider);
+        assert!(matches!(decoded.script, ScriptRef::FsRef { .. }));
     }
 }

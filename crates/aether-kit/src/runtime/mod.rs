@@ -60,6 +60,12 @@ pub use world_view::WorldView;
 // module root where `arena` imports them.
 pub(crate) use locomotion::{GRID_H, GRID_W};
 
+// A cdylib carries one `export!` (the shared init/receive FFI entry). The
+// `behavior` feature (ADR-0137, issue 2687) appends `aether-behavior`'s
+// `BehaviorHost` to the exported set so the panel's `WidgetKind::BehaviorHost`
+// arm can spawn it by tag; the two invocations are cfg-exclusive, keeping the
+// ordinary kit build's exported set (and its `aether.kinds` section) unchanged.
+#[cfg(not(feature = "behavior"))]
 aether_actor::export!(
     Locomotion,
     CameraComponent,
@@ -72,4 +78,20 @@ aether_actor::export!(
     ButtonWidget,
     LabelWidget,
     WidgetPanel
+);
+
+#[cfg(feature = "behavior")]
+aether_actor::export!(
+    Locomotion,
+    CameraComponent,
+    MeshViewer,
+    WorldView,
+    Widget,
+    SliderWidget,
+    TextFieldWidget,
+    RadioGroupWidget,
+    ButtonWidget,
+    LabelWidget,
+    WidgetPanel,
+    aether_behavior::BehaviorHost
 );

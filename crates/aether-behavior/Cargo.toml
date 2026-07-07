@@ -7,22 +7,53 @@ license.workspace = true
 # Script-side SDK for behavior scripts (ADR-0137). One crate with two
 # faces: the always-compiled trunk holds the host<->script envelope, the
 # packed-pointer ABI, the exports-manifest decoder, and the reserved
-# lifecycle sentinels — a later issue's host consumes exactly this trunk
-# with `default-features = false`. The `runtime` feature (on by default,
-# so a bare wasm32 build produces the full guest surface) adds the
-# authoring SDK: `BehaviorCtx`, the widget/child/panel handles, the
-# decode-once mirror, the effect accumulator, and the `Behavior`
-# lifecycle trait. The crate depends on `aether-data` and `serde` only —
-# never `aether-actor`, never `wasmi` — which is what keeps a behavior
-# cdylib from classifying as a component (structural discovery keys on an
-# `aether-actor` dependency) and keeps the tier boundary legible.
+# lifecycle sentinels. The `runtime` feature (on by default, so a bare
+# wasm32 build produces the full guest surface) adds the authoring SDK:
+# `BehaviorCtx`, the widget/child/panel handles, the decode-once mirror,
+# the effect accumulator, and the `Behavior` lifecycle trait. The default
+# face depends on `aether-data` and `serde` only — never `aether-actor`,
+# never `wasmi` — which is what keeps a behavior cdylib from classifying
+# as a component (structural discovery keys on an `aether-actor`
+# dependency) and keeps the tier boundary legible.
+#
+# The non-default `host` feature is the third face (ADR-0137, issue
+# 2687): the `BehaviorHost` actor that embeds a `wasmi` interpreter and
+# interposes at a tree slot. It turns on the optional `aether-actor` /
+# `wasmi` / `aether-capabilities` deps, none of which the default face
+# names, so a script build never links them. Host-enabled wasm is
+# compiled in a separate cargo invocation from script wasm (issue 2688),
+# so `host` never feature-unifies into a script's build graph.
 [features]
 default = ["runtime"]
 runtime = []
+# ADR-0137 / issue 2687: the in-cluster behavior script host. Pulls the
+# actor SDK (the host is a wasm `#[actor]`), the `wasmi` interpreter it
+# embeds (no_std, built-in fuel metering), the capability crate for the
+# `aether.fs` surface the host fetches scripts through, and `tracing` for
+# the fail-open trap logs.
+host = ["dep:aether-actor", "dep:wasmi", "dep:aether-capabilities", "dep:tracing"]
 
 [dependencies]
 aether-data = { path = "../aether-data", default-features = false, features = ["derive"] }
 serde = { workspace = true, default-features = false, features = ["alloc", "derive"] }
+
+# `host`-only optional deps. `dep:`-gated so the default face's dependency
+# tree names none of them (the crate-boundary tripwire: `cargo tree -p
+# aether-behavior` shows neither `wasmi` nor `aether-actor`; `-F host`
+# shows both).
+aether-actor = { path = "../aether-actor", optional = true }
+# The capability crate carries the `aether.fs.{read,read_result}` kinds +
+# `FsCapability` the host fetches an `FsRef` script through. Marker layer
+# only (`default-features = false`) — no substrate runtime.
+aether-capabilities = { path = "../aether-capabilities", default-features = false, optional = true }
+wasmi = { version = "1.1", default-features = false, optional = true }
+tracing = { workspace = true, default-features = false, optional = true }
+
+[dev-dependencies]
+# Hand-built minimal wasm for the host-side unit tests (trap / passthrough
+# / manifest fixtures). Behavior-script fixtures compiled from Rust are
+# #2688's; these are tiny WAT modules parsed inline, no build wiring.
+wat = "1"
 
 [lints]
 workspace = true
