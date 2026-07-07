@@ -54,6 +54,7 @@ use crate::http::kinds::{
     RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf,
     UnregisterRoutesAll,
 };
+use crate::shared::net::teardown_connect_addr;
 pub use aether_kinds::trace::Settled;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -193,8 +194,7 @@ impl NativeActor for HttpServerCapability {
         // their own `unwire` (the chassis tears instanced actors down
         // alongside the caps).
         state.accept_shutdown.store(true, Ordering::Release);
-        let wake_addr =
-            crate::shared::net::teardown_connect_addr(&state.config.bind_addr, state.listener_port);
+        let wake_addr = teardown_connect_addr(&state.config.bind_addr, state.listener_port);
         if let Err(error) = TcpStream::connect_timeout(&wake_addr, Duration::from_millis(100)) {
             tracing::warn!(
                 target: "aether_substrate::http_server",

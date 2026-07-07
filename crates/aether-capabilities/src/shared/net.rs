@@ -9,6 +9,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 /// `listener_port`. A wildcard bind (`0.0.0.0` / `::`) has no address a
 /// self-connect can land on, so it maps to the matching loopback
 /// instead; an unparseable `bind_addr` falls back to IPv4 loopback.
+#[must_use]
 pub fn teardown_connect_addr(bind_addr: &str, listener_port: u16) -> SocketAddr {
     let ip = bind_addr
         .parse::<SocketAddr>()

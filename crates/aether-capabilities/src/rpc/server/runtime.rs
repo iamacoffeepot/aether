@@ -28,6 +28,7 @@
 // struct `RpcServerCapability` is the impl's `Self` type.
 use super::connection::{ConnId, ConnState, InboundEvent, run_reader_loop};
 use super::{PeerKind, RpcInboundReady, RpcServerCapability, RpcServerConfig, Settled};
+use crate::shared::net::teardown_connect_addr;
 use aether_actor::runtime;
 
 // Re-export every substrate / std / cross-crate type the top-level
@@ -467,7 +468,7 @@ impl NativeActor for RpcServerCapability {
             peer_kind: config.peer_kind,
             self_mailbox: self_id,
             mailer: ctx.mailer(),
-            bind_addr: config.bind_addr.clone(),
+            bind_addr: config.bind_addr,
             listener_port: port,
             accept_shutdown,
             accept_thread: Some(thread),
@@ -483,8 +484,7 @@ impl NativeActor for RpcServerCapability {
         // Stop the accept thread; self-connect to unblock its blocking
         // `accept()`.
         state.accept_shutdown.store(true, Ordering::Release);
-        let wake_addr =
-            crate::shared::net::teardown_connect_addr(&state.bind_addr, state.listener_port);
+        let wake_addr = teardown_connect_addr(&state.bind_addr, state.listener_port);
         if let Err(error) = TcpStream::connect_timeout(&wake_addr, Duration::from_millis(100)) {
             tracing::warn!(
                 target: "aether_substrate::rpc",
