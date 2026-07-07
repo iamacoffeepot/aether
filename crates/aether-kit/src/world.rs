@@ -440,7 +440,8 @@ impl World {
 
     /// Do two edge-adjacent cells meet at a cliff — an effective-level step
     /// strictly past [`STEP_MAX_OCTIMETERS`]? The rule is pairwise over the
-    /// two [`World::surface_level`]s, so any caller holding two adjacent
+    /// two cells' effective surface levels (`surface_level`), so any
+    /// caller holding two adjacent
     /// cells derives the same answer, and a bank standing past the step
     /// ceiling above a water surface cliffs against it.
     #[must_use]

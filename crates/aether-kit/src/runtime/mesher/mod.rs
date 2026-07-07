@@ -74,7 +74,7 @@
 //! and a past-step bank splits and wears the skirt down to the water. An
 //! interior water cell tiles the flat patch with a depth-graded quad per
 //! subcell, depth derived as the plane level minus the bilinear lakebed
-//! [`World::height`] over [`WATER_DEPTH_FULL_OCTIMETERS`].
+//! [`World::height`] over `WATER_DEPTH_FULL_OCTIMETERS`.
 //!
 //! # Height pass — plates, slopes, and skirts
 //!
