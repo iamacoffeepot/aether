@@ -334,6 +334,291 @@ fn cellular_pass(
     next
 }
 
+/// Read `ids` at `(x, z)`, returning `fallback` outside its bounds.
+fn id_at(ids: &[u8], width: usize, height: usize, x: i32, z: i32, fallback: u8) -> u8 {
+    if x < 0 || z < 0 || x >= width as i32 || z >= height as i32 {
+        fallback
+    } else {
+        ids[z as usize * width + x as usize]
+    }
+}
+
+/// The dominant label among `neighbors` that differs from `own`: the most
+/// frequent, ties resolved to the smallest id so both sides of a chunk
+/// border pick identically. `None` when every neighbor matches `own`.
+// `neighbors` is a 4-8 element ring, not a byte buffer — bytecount is noise.
+#[allow(clippy::naive_bytecount)]
+fn dominant_other(neighbors: &[u8], own: u8) -> Option<u8> {
+    let mut best: Option<(u8, usize)> = None;
+    for &candidate in neighbors {
+        if candidate == own {
+            continue;
+        }
+        let count = neighbors.iter().filter(|&&n| n == candidate).count();
+        let better = match best {
+            None => true,
+            Some((b, c)) => count > c || (count == c && candidate < b),
+        };
+        if better {
+            best = Some((candidate, count));
+        }
+    }
+    best.map(|(id, _)| id)
+}
+
+/// Upsample a material-id grid (`width × height`) by `upsample` and
+/// repartition it under the corner-minimization rules — the multi-label
+/// generalization of [`minimize_corners`]. Every rule that cut or filled
+/// a boolean mask becomes a reassignment: a sample flips to the agreeing
+/// (chamfer) or dominant (cellular, prune) neighboring material, and only
+/// when its own cell's entry in `params` allows — so a crisp zone neither
+/// yields territory nor absorbs any, and every pass preserves the
+/// partition by construction (samples change owner, never coverage).
+/// `params` is per mask sample, resolved by the caller from the sample's
+/// original material (or its cell's smoothing-field override) and held
+/// fixed across passes.
+#[must_use]
+pub fn repartition(
+    ids: &[u8],
+    width: usize,
+    height: usize,
+    upsample: usize,
+    params: &[SmoothParams],
+) -> (Vec<u8>, usize, usize) {
+    debug_assert_eq!(params.len(), ids.len(), "one SmoothParams per sample");
+    let upsample = upsample.max(1);
+    let gw = width * upsample;
+    let gh = height * upsample;
+    let mut grid = vec![0u8; gw * gh];
+    for gz in 0..gh {
+        for gx in 0..gw {
+            grid[gz * gw + gx] = id_at(
+                ids,
+                width,
+                height,
+                (gx / upsample) as i32,
+                (gz / upsample) as i32,
+                0,
+            );
+        }
+    }
+    let max_iterations = params.iter().map(|p| p.iterations).max().unwrap_or(0);
+    if max_iterations < 1 {
+        return (grid, gw, gh);
+    }
+
+    // Pass one: the analytic cell-level 45-degree chamfer. A corner
+    // triangle reassigns to the neighbor material when the two orthogonal
+    // neighbors and the diagonal all agree on it — one rule covers a cut
+    // and a fill, exactly as in the boolean form.
+    let inv = 1.0 / upsample as f32;
+    let mut out = grid.clone();
+    for gz in 0..gh {
+        for gx in 0..gw {
+            let cx = (gx / upsample) as i32;
+            let cz = (gz / upsample) as i32;
+            if params[cz as usize * width + cx as usize].iterations < 1 {
+                continue;
+            }
+            let fx = ((gx % upsample) as f32 + 0.5) * inv;
+            let fz = ((gz % upsample) as f32 + 0.5) * inv;
+            let m0 = id_at(ids, width, height, cx, cz, 0);
+            let corner: Option<[(i32, i32); 3]> = if fx - fz > 0.5 {
+                Some([(cx, cz - 1), (cx + 1, cz), (cx + 1, cz - 1)])
+            } else if fx + fz < 0.5 {
+                Some([(cx, cz - 1), (cx - 1, cz), (cx - 1, cz - 1)])
+            } else if fx + fz > 1.5 {
+                Some([(cx, cz + 1), (cx + 1, cz), (cx + 1, cz + 1)])
+            } else if fz - fx > 0.5 {
+                Some([(cx, cz + 1), (cx - 1, cz), (cx - 1, cz + 1)])
+            } else {
+                None
+            };
+            if let Some([n1, n2, diag]) = corner {
+                let a = id_at(ids, width, height, n1.0, n1.1, m0);
+                if a != m0
+                    && a == id_at(ids, width, height, n2.0, n2.1, m0)
+                    && a == id_at(ids, width, height, diag.0, diag.1, m0)
+                {
+                    out[gz * gw + gx] = a;
+                }
+            }
+        }
+    }
+    grid = out;
+
+    // Passes two and up: cellular reassignment at subgrid scale — the
+    // same pointwise, parity-shoulder, and windowed rules, with the flip
+    // target the dominant differing neighbor.
+    for pass in 1..max_iterations {
+        grid = cellular_repartition_pass(&grid, gw, gh, params, width, upsample, pass);
+    }
+
+    grid = prune_one_wide_labels(grid, gw, gh, params, width, upsample);
+    (grid, gw, gh)
+}
+
+/// One cellular reassignment pass over the id grid — the multi-label
+/// [`cellular_pass`]. Counts read "differs from mine"; a firing sample
+/// reassigns to its dominant differing eight-neighbor.
+fn cellular_repartition_pass(
+    grid: &[u8],
+    gw: usize,
+    gh: usize,
+    params: &[SmoothParams],
+    mask_width: usize,
+    upsample: usize,
+    pass: u32,
+) -> Vec<u8> {
+    let mut next = grid.to_vec();
+    for gz in 0..gh as i32 {
+        for gx in 0..gw as i32 {
+            let own = params[(gz as usize / upsample) * mask_width + gx as usize / upsample];
+            if own.iterations <= pass {
+                continue;
+            }
+            let t24 = t24_of(own.smoothing_degrees);
+            let m = grid[gz as usize * gw + gx as usize];
+            let mut ring = [m; 8];
+            let mut k = 0;
+            let mut c8 = 0;
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    if dx == 0 && dz == 0 {
+                        continue;
+                    }
+                    let n = id_at(grid, gw, gh, gx + dx, gz + dz, m);
+                    ring[k] = n;
+                    k += 1;
+                    if n != m {
+                        c8 += 1;
+                    }
+                }
+            }
+            let dn = id_at(grid, gw, gh, gx, gz - 1, m) != m;
+            let ds = id_at(grid, gw, gh, gx, gz + 1, m) != m;
+            let dw = id_at(grid, gw, gh, gx - 1, gz, m) != m;
+            let de = id_at(grid, gw, gh, gx + 1, gz, m) != m;
+            let adjacent_orthogonal = (dw || de) && (ds || dn);
+            let mut flip = c8 >= 5 || (c8 >= 4 && adjacent_orthogonal);
+            if !flip && t24 < 99 && c8 >= 2 {
+                let mut c24 = c8;
+                for dz in -2i32..=2 {
+                    for dx in -2i32..=2 {
+                        if dx.abs().max(dz.abs()) < 2 {
+                            continue;
+                        }
+                        if id_at(grid, gw, gh, gx + dx, gz + dz, m) != m {
+                            c24 += 1;
+                        }
+                    }
+                }
+                flip = c24 >= t24;
+            }
+            if flip && let Some(target) = dominant_other(&ring, m) {
+                next[gz as usize * gw + gx as usize] = target;
+            }
+        }
+    }
+    next
+}
+
+/// Converge away one-sample-wide artifacts in the id grid — the
+/// multi-label [`prune_one_wide_artifacts`], where the boolean cut and
+/// fill collapse into one rule: a sample attached to its own material by
+/// at most one orthogonal side reassigns to its dominant differing
+/// orthogonal neighbor. Staircase and corner samples carry exactly two
+/// same-material sides, so legitimate boundaries are untouchable.
+// `orth` is a 4-element ring, not a byte buffer — bytecount is noise.
+#[allow(clippy::naive_bytecount)]
+fn prune_one_wide_labels(
+    mut grid: Vec<u8>,
+    gw: usize,
+    gh: usize,
+    params: &[SmoothParams],
+    mask_width: usize,
+    upsample: usize,
+) -> Vec<u8> {
+    for _sweep in 0..8 {
+        let mut changed = false;
+        let mut next = grid.clone();
+        for gz in 0..gh as i32 {
+            for gx in 0..gw as i32 {
+                let own = params[(gz as usize / upsample) * mask_width + gx as usize / upsample];
+                if own.iterations < 1 {
+                    continue;
+                }
+                let m = grid[gz as usize * gw + gx as usize];
+                let orth = [
+                    id_at(&grid, gw, gh, gx - 1, gz, m),
+                    id_at(&grid, gw, gh, gx + 1, gz, m),
+                    id_at(&grid, gw, gh, gx, gz - 1, m),
+                    id_at(&grid, gw, gh, gx, gz + 1, m),
+                ];
+                let same = orth.iter().filter(|&&n| n == m).count();
+                if same <= 1
+                    && let Some(target) = dominant_other(&orth, m)
+                {
+                    next[gz as usize * gw + gx as usize] = target;
+                    changed = true;
+                }
+            }
+        }
+        grid = next;
+        if !changed {
+            break;
+        }
+    }
+    grid
+}
+
+/// The 4-bit marching case for `label` in window `(wi, wj)` of the id
+/// grid — `BL | BR<<1 | TR<<2 | TL<<3`, `1` = the corner sample holds
+/// `label`.
+#[must_use]
+pub fn label_case(ids: &[u8], gw: usize, wi: usize, wj: usize, label: u8) -> u8 {
+    let bl = ids[wj * gw + wi] == label;
+    let br = ids[wj * gw + wi + 1] == label;
+    let tl = ids[(wj + 1) * gw + wi] == label;
+    let tr = ids[(wj + 1) * gw + wi + 1] == label;
+    u8::from(bl) | u8::from(br) << 1 | u8::from(tr) << 2 | u8::from(tl) << 3
+}
+
+/// The two disconnected saddle triangles, indexed by saddle case: the
+/// id-priority loser of a two-label saddle window yields the center, so
+/// the winner's connected hexagon plus these tiles the window exactly.
+const SADDLE_SPLIT_POLYS: [(&[u8], &[u8]); 2] = [
+    (&[0, 4, 7], &[2, 6, 5]), // case 5: BL and TR corner triangles
+    (&[1, 5, 4], &[3, 7, 6]), // case 10: BR and TL corner triangles
+];
+
+/// Fan-triangulate one label's polygons for window `(wi, wj)` — the
+/// public window emitter for partition marching. `connected` selects the
+/// saddle resolution for cases 5 and 10: the id-priority winner connects
+/// its diagonal through the center, the loser splits into two corner
+/// triangles, and every other case has one fixed polygon. Case 0 emits
+/// nothing; case 15 emits the full window.
+pub fn emit_label_window(
+    wi: i32,
+    wj: i32,
+    place: &GridPlacement,
+    case: u8,
+    connected: bool,
+    color: [f32; 3],
+    tris: &mut Vec<DrawTriangle>,
+) {
+    if case == 0 {
+        return;
+    }
+    if (case == 5 || case == 10) && !connected {
+        let (first, second) = SADDLE_SPLIT_POLYS[usize::from(case == 10)];
+        emit_window_poly(wi, wj, place, first, color, tris);
+        emit_window_poly(wi, wj, place, second, color, tris);
+        return;
+    }
+    emit_window_poly(wi, wj, place, CASE_POLYS[case as usize], color, tris);
+}
+
 /// Peel a `radius`-cell band off `grid`: a cell survives only when every
 /// cell within its Chebyshev radius is also inside. Erode a smoothed grid
 /// then march the result to lay a body layer inset from a rim.
@@ -484,6 +769,19 @@ fn emit_window_contour(
     color: [f32; 3],
     tris: &mut Vec<DrawTriangle>,
 ) {
+    emit_window_poly(wi, wj, place, CASE_POLYS[case as usize], color, tris);
+}
+
+/// Fan-triangulate one window polygon given by its boundary-point indices
+/// (corners `0..4`, edge midpoints `4..8`).
+fn emit_window_poly(
+    wi: i32,
+    wj: i32,
+    place: &GridPlacement,
+    poly: &[u8],
+    color: [f32; 3],
+    tris: &mut Vec<DrawTriangle>,
+) {
     let step_oct = place.step_oct;
     let half = step_oct / 2;
     let x_lo = place.origin_oct[0] + wi * step_oct;
@@ -502,7 +800,6 @@ fn emit_window_contour(
         [x_mid, z_hi],
         [x_lo, z_mid],
     ];
-    let poly = CASE_POLYS[case as usize];
     let vert = |p: [i32; 2]| Vertex {
         x: p[0] as f32 / OCTIMETERS_PER_METER,
         y: place.y_lift,
@@ -895,6 +1192,145 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn repartition_matches_the_boolean_path_on_two_labels() {
+        // Tripwire: with exactly two labels the repartition must reproduce
+        // minimize_corners sample-for-sample — the chamfer target is the
+        // one other label, the dominant differing neighbor is too, and the
+        // unified prune rule covers the boolean cut and fill. The fixture
+        // is the shoreline mask that exercises the prune's failure mode.
+        let rows = [
+            "..........................",
+            "..........................",
+            "..........##..............",
+            ".......#########..........",
+            "......############........",
+            ".....###############......",
+            ".....##################...",
+            ".....#####################",
+            ".....#####################",
+            ".....#####################",
+            ".....#####################",
+            ".....#####################",
+            ".....#####################",
+            ".....#####################",
+        ];
+        let (w, h) = (rows[0].len(), rows.len());
+        let mask: Vec<bool> = rows
+            .iter()
+            .flat_map(|r| r.bytes().map(|b| b == b'#'))
+            .collect();
+        let ids: Vec<u8> = mask.iter().map(|&b| u8::from(b)).collect();
+        let params = uniform(3, 90, w * h);
+        let (bool_grid, gw, gh) = minimize_corners(&mask, w, h, 2, &params);
+        let (id_grid, igw, igh) = repartition(&ids, w, h, 2, &params);
+        assert_eq!((gw, gh), (igw, igh));
+        for (i, (&b, &id)) in bool_grid.iter().zip(&id_grid).enumerate() {
+            assert_eq!(u8::from(b), id, "two-label repartition diverges at {i}");
+        }
+    }
+
+    #[test]
+    fn repartition_never_moves_a_crisp_zone() {
+        // A sample flips only when its own cell's params allow, so a
+        // zero-iteration zone neither yields territory nor absorbs any —
+        // its samples come out exactly as the raw upsample.
+        let (w, h) = (12usize, 8usize);
+        let mut ids = vec![1u8; w * h];
+        for z in 0..h {
+            for x in 6..12 {
+                ids[z * w + x] = 2; // material 2 on the right half
+            }
+        }
+        // A notch in the boundary so smoothing has corners to eat.
+        ids[3 * w + 5] = 2;
+        let mut params = uniform(3, 45, w * h);
+        for z in 0..h {
+            for x in 0..6 {
+                params[z * w + x].iterations = 0; // left zone is crisp
+            }
+        }
+        let (grid, gw, _) = repartition(&ids, w, h, 2, &params);
+        for gz in 0..h * 2 {
+            for gx in 0..12 {
+                assert_eq!(
+                    grid[gz * gw + gx],
+                    ids[(gz / 2) * w + gx / 2],
+                    "crisp-zone sample moved at ({gx}, {gz})",
+                );
+            }
+        }
+    }
+
+    fn poly_area(tris: &[DrawTriangle]) -> f32 {
+        tris.iter()
+            .map(|t| {
+                let (ax, az) = (t.verts[0].x, t.verts[0].z);
+                let (bx, bz) = (t.verts[1].x, t.verts[1].z);
+                let (cx, cz) = (t.verts[2].x, t.verts[2].z);
+                (cx - ax).mul_add(-(bz - az), (bx - ax) * (cz - az)).abs() * 0.5
+            })
+            .sum()
+    }
+
+    #[test]
+    fn saddle_windows_tile_exactly() {
+        // A two-label saddle window: the higher label connects its
+        // diagonal, the lower splits into two corner triangles, and the
+        // union covers the window exactly once.
+        let place = GridPlacement {
+            origin_oct: [0, 0],
+            step_oct: 64,
+            y_lift: 0.0,
+        };
+        // Samples [BL, BR, TL, TR] = [1, 2, 2, 1]: label 1 case 5, label 2
+        // case 10. Label 2 wins the diagonal, label 1 splits.
+        let ids = [1u8, 2, 2, 1];
+        let mut tris = Vec::new();
+        let case1 = label_case(&ids, 2, 0, 0, 1);
+        let case2 = label_case(&ids, 2, 0, 0, 2);
+        assert_eq!((case1, case2), (5, 10));
+        emit_label_window(0, 0, &place, case1, false, [0.0; 3], &mut tris);
+        let split_area = poly_area(&tris);
+        emit_label_window(0, 0, &place, case2, true, [0.0; 3], &mut tris);
+        let window_area = (64.0f32 / 256.0) * (64.0 / 256.0);
+        assert!(
+            (poly_area(&tris) - window_area).abs() < 1e-6,
+            "the saddle window tiles exactly",
+        );
+        assert!(
+            (split_area - window_area / 4.0).abs() < 1e-6,
+            "the split loser holds its two corner triangles",
+        );
+    }
+
+    #[test]
+    fn three_label_windows_tile_exactly() {
+        // Three labels in one window: the diagonal-pair label connects,
+        // the two single-corner labels take their triangles, and the
+        // union tiles the window.
+        let place = GridPlacement {
+            origin_oct: [0, 0],
+            step_oct: 64,
+            y_lift: 0.0,
+        };
+        // Samples [BL, BR, TL, TR] = [1, 2, 3, 1]: label 1 case 5 (both
+        // diagonal corners), labels 2 and 3 one corner each.
+        let ids = [1u8, 2, 3, 1];
+        let mut tris = Vec::new();
+        for label in 1..=3u8 {
+            let case = label_case(&ids, 2, 0, 0, label);
+            // Label 1's saddle faces two different labels (2 != 3), so it
+            // connects; the single-corner labels have no saddle at all.
+            emit_label_window(0, 0, &place, case, true, [0.0; 3], &mut tris);
+        }
+        let window_area = (64.0f32 / 256.0) * (64.0 / 256.0);
+        assert!(
+            (poly_area(&tris) - window_area).abs() < 1e-6,
+            "three labels tile the window exactly",
+        );
     }
 
     #[test]
