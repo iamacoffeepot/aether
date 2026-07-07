@@ -114,10 +114,10 @@ fn demo_world_ground_has_no_holes() {
 
 #[test]
 fn demo_world_fits_the_frame_vertex_budget() {
-    // The desktop render capability accepts 4 MiB of vertices per frame
-    // (~58k triangles at 24-byte vertices) and warn-drops the excess —
-    // the failure mode that motivated window ownership and strip merging.
-    // The four-chunk lake scene must sit comfortably inside it.
+    // The desktop render capability accepts 64 MiB of vertices per frame
+    // by default (~932k triangles at 24-byte vertices) and warn-drops the
+    // excess — the failure mode that motivated window ownership and strip
+    // merging. The four-chunk lake scene must sit comfortably inside it.
     let world = lake_world();
     let styles = StyleTable::default();
     let total: usize = (0..4)

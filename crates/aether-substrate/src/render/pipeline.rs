@@ -10,8 +10,8 @@
 
 use super::targets::Targets;
 use super::{
-    CAMERA_UNIFORM_BYTES, DEPTH_FORMAT, IDENTITY_VIEW_PROJ, MAIN_SHADER_WGSL, VERTEX_BUFFER_BYTES,
-    VERTEX_STRIDE, vertex_buffer_layout,
+    CAMERA_UNIFORM_BYTES, DEPTH_FORMAT, IDENTITY_VIEW_PROJ, MAIN_SHADER_WGSL, VERTEX_STRIDE,
+    vertex_buffer_layout,
 };
 use std::slice;
 
@@ -20,8 +20,9 @@ use std::slice;
 /// so callers can decide whether to log + continue or escalate.
 #[derive(Debug)]
 pub enum RenderError {
-    /// Frame's vertex bytes exceed [`VERTEX_BUFFER_BYTES`]. The
-    /// pass is skipped — no draw, no encoder writes. Render sinks
+    /// Frame's vertex bytes exceed the size the vertex buffer was
+    /// created with ([`build_main_pipeline`]'s `vertex_buffer_bytes`).
+    /// The pass is skipped — no draw, no encoder writes. Render sinks
     /// already truncate before forwarding, so this is a belt-and-
     /// suspenders check; if a future caller bypasses the sink-side
     /// clamp this surfaces here instead of overflowing the GPU buffer.
@@ -55,12 +56,17 @@ pub struct Pipeline {
 /// the [`Targets`] colour target the pass attaches to. `polygon_mode`
 /// controls fill vs line at construction — desktop sets `Line` when
 /// `AETHER_WIREFRAME=line`; everything else passes `Fill`.
+/// `vertex_buffer_bytes` sizes the fixed per-frame vertex buffer —
+/// the render capability's resolved config value
+/// ([`super::VERTEX_BUFFER_BYTES`] unless the boot knob overrides it);
+/// `record_main_pass` clamps against the created size.
 #[must_use]
 pub fn build_main_pipeline(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     color_format: wgpu::TextureFormat,
     polygon_mode: wgpu::PolygonMode,
+    vertex_buffer_bytes: usize,
 ) -> Pipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("aether main shader"),
@@ -148,7 +154,7 @@ pub fn build_main_pipeline(
 
     let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("aether vertex buffer"),
-        size: VERTEX_BUFFER_BYTES as u64,
+        size: vertex_buffer_bytes as u64,
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -173,10 +179,10 @@ pub fn build_main_pipeline(
 /// here when `AETHER_WIREFRAME=overlay`; test-bench passes `&[]`.
 ///
 /// Returns `Err(RenderError::VertexBufferOverflow)` if the frame's
-/// bytes exceed [`VERTEX_BUFFER_BYTES`] — the pass is skipped, no
-/// encoder writes happen, the caller decides whether to log and
-/// continue (skipping submit) or short-circuit. Empty `vertices` is
-/// fine: the clear still runs, no draw is issued.
+/// bytes exceed the size the vertex buffer was created with — the
+/// pass is skipped, no encoder writes happen, the caller decides
+/// whether to log and continue (skipping submit) or short-circuit.
+/// Empty `vertices` is fine: the clear still runs, no draw is issued.
 pub fn record_main_pass(
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
@@ -187,24 +193,31 @@ pub fn record_main_pass(
     extra_pipelines: &[&wgpu::RenderPipeline],
 ) -> Result<(), RenderError> {
     let vertex_bytes = vertices.len();
-    if vertex_bytes > VERTEX_BUFFER_BYTES {
+    // Clamp against the buffer's created size, so the check tracks
+    // whatever `vertex_buffer_bytes` the boot knob resolved to.
+    let buffer_bytes = pipeline.vertex_buffer.size();
+    if vertex_bytes as u64 > buffer_bytes {
         tracing::warn!(
             target: "aether_substrate::render",
             vertex_bytes,
-            cap = VERTEX_BUFFER_BYTES,
+            cap = buffer_bytes,
             "dropping frame: vertex bytes exceed fixed buffer",
         );
+        // The buffer was created from a `usize`, so its size
+        // round-trips losslessly.
+        #[allow(clippy::cast_possible_truncation)]
         return Err(RenderError::VertexBufferOverflow {
             vertex_bytes,
-            cap: VERTEX_BUFFER_BYTES,
+            cap: buffer_bytes as usize,
         });
     }
     if !vertices.is_empty() {
         queue.write_buffer(&pipeline.vertex_buffer, 0, vertices);
     }
     queue.write_buffer(&pipeline.camera_buffer, 0, bytemuck::cast_slice(view_proj));
-    // `wgpu::RenderPass::draw` takes a `u32` vertex count; vertex
-    // buffer is bounded by `MAX_VERTEX_BYTES` (well below `u32::MAX`).
+    // `wgpu::RenderPass::draw` takes a `u32` vertex count; overflowing
+    // it would take a >100 GB vertex buffer, far beyond any
+    // configurable cap in practice.
     #[allow(clippy::cast_possible_truncation)]
     let vertex_count = (vertex_bytes as u64 / VERTEX_STRIDE) as u32;
 

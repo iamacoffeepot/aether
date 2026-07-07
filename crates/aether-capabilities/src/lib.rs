@@ -148,7 +148,7 @@ pub use render::HeadlessRenderCapability;
 #[cfg(feature = "render")]
 pub use render::RenderCapability;
 #[cfg(feature = "render-runtime")]
-pub use render::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
+pub use render::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles, RenderTuningConfig};
 pub use tcp::{TcpCapability, TcpListenerActor};
 pub use test_bench::UnsupportedTestBenchCapability;
 #[cfg(feature = "text")]
