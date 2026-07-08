@@ -29,7 +29,7 @@ use wasmi::Engine;
 
 use crate::envelope::EffectTarget;
 use crate::host::config::{HostConfig, LoadScript, LoadScriptResult, ScriptSource, SetScript};
-use crate::host::drain::{DrainEvent, DrainSink, EchoGuard, echo_kinds, run_drain};
+use crate::host::drain::{DrainEvent, DrainSink, EchoGuard, echo_effects, run_drain};
 use crate::host::persist::{HOST_PERSIST_VERSION, HostPersist};
 use crate::host::slot::{FilterOutcome, ScriptSlot, build_engine};
 use crate::sentinel;
@@ -228,7 +228,7 @@ impl WasmActor for BehaviorHost {
 
         // An up-lane echo of the script's own write forwards raw — never
         // re-offered to the same script's filter.
-        if is_up && self.echo.take(kind) {
+        if is_up && self.echo.take(kind, bytes) {
             self.forward_raw(&*ctx, is_up, kind, bytes);
             return;
         }
@@ -415,7 +415,7 @@ impl BehaviorHost {
             FilterOutcome::Output(output) => output,
             FilterOutcome::Passthrough => return false,
         };
-        let echoes = echo_kinds(&output);
+        let echoes = echo_effects(&output);
         run_drain(output, forward_kind, sink);
         self.echo.arm(echoes);
         true

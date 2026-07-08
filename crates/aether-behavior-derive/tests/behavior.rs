@@ -128,7 +128,8 @@ fn consume_drops_the_in_flight_mail() {
 fn consume_wins_over_the_intercept_re_encode() {
     let mut gate = Gate::default();
     let bytes = Gauge { value: 250 }.encode_into_bytes();
-    let mut ctx = BehaviorCtx::__new_inbound(Gauge::ID, &bytes);
+    let mut mirrors = MirrorStore::default();
+    let mut ctx = BehaviorCtx::__new_inbound(&mut mirrors, Gauge::ID, &bytes);
     gate.__aether_behavior_dispatch(&mut ctx, Gauge::ID, &bytes);
     let verdict = ctx.__into_output().verdict;
     // Tripwire: the macro's unconditional __forward_mutated after an
