@@ -11,4 +11,5 @@ fn ui() {
     t.compile_fail("tests/ui/fail_async_lifecycle.rs");
     t.compile_fail("tests/ui/fail_async_lifecycle_named_override.rs");
     t.compile_fail("tests/ui/fail_bad_handler_signature.rs");
+    t.compile_fail("tests/ui/fail_duplicate_kind_id.rs");
 }
