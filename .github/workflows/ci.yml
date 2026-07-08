@@ -123,19 +123,25 @@ jobs:
   # triples CI time without catching anything new. See ADR-0035 § CI
   # matrix scope.
   test:
-    name: Test (workspace, linux)
+    name: Test (workspace, linux, shard ${{ matrix.partition }}/2)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    # A warm-cache run is ~13 min (cargo xtask dist + the lightweight
-    # build/run + the heavy serial pass), so the old 15-min cap left
-    # almost no margin: under runner-load variance the heavy step ran
-    # into the wall and the job was cancelled mid-run ("The operation
-    # was canceled", no test failure). Cap at 30 — roughly 2× the warm
-    # run — so variance no longer trips it, while a genuine hang still
-    # can't eat the default 6h quota. Splitting the heavy pass into its
-    # own job to cut the warm time back down is tracked separately.
+    # The suite is sharded 2-way by nextest's deterministic name-hash
+    # partition (iamacoffeepot/aether#2803): each shard compiles the
+    # workspace against the shared rust-cache and runs half the tests,
+    # so the wall clock is setup + compile + half the execution. A
+    # build-once/nextest-archive split would serialize build -> run
+    # and ship multi-GB test binaries between jobs, which is slower
+    # end-to-end than two concurrent warm-cache compiles. A warm shard
+    # is ~8 min; cap at 30 so runner-load variance never cancels a
+    # healthy run mid-flight while a genuine hang still can't eat the
+    # default 6h quota.
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [ 1, 2 ]
     env:
       # Use mold to reduce peak link memory and speed up the test
       # build — keeps the linker OOM (collect2: ld terminated with
@@ -220,8 +226,13 @@ jobs:
       # steady-state cap.
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
+      # hash partitioning assigns each test to a shard by a stable hash
+      # of its name — every test runs in exactly one shard regardless of
+      # how many binaries it spans, and the slow substrate-bundle
+      # integration tests spread statistically instead of clumping.
       - name: Run tests (workspace, parallel)
         run: cargo nextest run --all-features --profile ci
+          --partition 'hash:${{ matrix.partition }}/2'
         env:
           AETHER_REQUIRE_RUNTIME: "1"
 
