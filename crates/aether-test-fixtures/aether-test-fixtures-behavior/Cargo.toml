@@ -1,0 +1,56 @@
+[package]
+name = "aether-test-fixtures-behavior"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Behavior-script fixtures for the #2688 end-to-end gate (ADR-0137). Each
+# `[[example]]` is one `cdylib` behavior script authored against the
+# `#[behavior]` SDK and cross-built to `wasm32-unknown-unknown` by the
+# `cargo xtask dist` behavior pass (`discover_behaviors`). The crate depends
+# on `aether-behavior` (never `aether-actor`) so structural component
+# discovery does not misclassify it — a component has an `aether-actor`
+# dependency, a behavior does not. That same absence rules out depending on
+# `aether-kit` for the widget kinds (kit deps `aether-actor` unconditionally),
+# so `src/lib.rs` carries local twins of the kinds the scripts transform,
+# re-derived under the matching `#[kind(name)]` so the `KindId` and wire bytes
+# match the kit originals.
+
+[lib]
+# The shared kind twins the example scripts consume. A plain rlib — only the
+# `[[example]]` targets are the wasm cdylib script artifacts.
+name = "aether_test_fixtures_behavior"
+
+[[example]]
+name = "intercept_slider"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "intercept_slider_v2"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "trap_script"
+crate-type = ["cdylib"]
+
+[dependencies]
+# The runtime (authoring) face is on by default: `BehaviorCtx`, the
+# widget/child/panel handles, and the `Behavior` lifecycle trait the scripts
+# target. Never `aether-actor` — the crate-boundary invariant that keeps a
+# behavior cdylib from classifying as a component.
+aether-behavior = { path = "../../aether-behavior" }
+# The `#[behavior]` attribute macro. `aether-behavior` re-exports it on its
+# runtime face, but the scripts name it directly, so it is a direct dep.
+aether-behavior-derive = { path = "../../aether-behavior-derive" }
+aether-data = { path = "../../aether-data", default-features = false, features = ["derive"] }
+serde = { workspace = true, default-features = false, features = ["alloc", "derive"] }
+
+# The `Kind` derive on the twins emits a `cfg(not(target_arch = "wasm32"))`
+# `inventory::submit!` for the native descriptor list; the wasm script build
+# gates it out. Only the host build of the lib (workspace check / the xtask
+# discovery test) needs `inventory` reachable.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = { workspace = true }
+
+[lints]
+workspace = true

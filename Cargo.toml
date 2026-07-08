@@ -30,6 +30,7 @@ members = [
     "crates/aether-test-fixtures/aether-test-fixtures-stateful-reshaped",
     "crates/aether-test-fixtures/aether-test-fixtures-split-cap",
     "crates/aether-test-fixtures/aether-test-fixtures-defaultless",
+    "crates/aether-test-fixtures/aether-test-fixtures-behavior",
     "xtask",
 ]
 exclude = [
