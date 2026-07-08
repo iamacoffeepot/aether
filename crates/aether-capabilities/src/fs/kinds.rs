@@ -48,11 +48,11 @@ pub struct Read {
 }
 
 /// Reply to `Read`. Both arms echo the `namespace` + `path` from
-/// the originating `Read` so the caller can correlate the reply
-/// to its source request without threading a pending-op queue or
-/// allocating correlation ids — operation identity comes from the
-/// reply kind itself (`aether.fs.read_result`), target identity
-/// from the echoed fields. `Ok` carries the full file contents;
+/// the originating `Read` as domain context and for compatibility
+/// with callers that group by file identity. A caller that can have
+/// duplicate in-flight reads for the same path should use the
+/// request id returned by `send_tracked` and match it against
+/// `ctx.in_reply_to()` instead. `Ok` carries the full file contents;
 /// `Err` carries an `FsError` variant.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.read_result")]
@@ -82,13 +82,13 @@ pub struct Write {
     pub bytes: Vec<u8>,
 }
 
-/// Reply to `Write`. Both arms echo `namespace` + `path` for
-/// correlation; the request's `bytes` field is *not* echoed so the
-/// reply payload stays small even when the write was megabytes
-/// (correlation needs the identity of the write, not its contents).
-/// `Err` carries an `FsError` — `Forbidden` for read-only
-/// namespaces (e.g. `assets://`), `AdapterError` for disk-full /
-/// permission / rename failures.
+/// Reply to `Write`. Both arms echo `namespace` + `path` as domain
+/// context; the request's `bytes` field is *not* echoed so the reply
+/// payload stays small even when the write was megabytes. Duplicate
+/// in-flight writes to the same path should be matched by
+/// `send_tracked` / `ctx.in_reply_to()`. `Err` carries an `FsError`
+/// — `Forbidden` for read-only namespaces (e.g. `assets://`),
+/// `AdapterError` for disk-full / permission / rename failures.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.write_result")]
 pub enum WriteResult {
@@ -131,12 +131,14 @@ pub struct Copy {
     pub to: NamespaceAddr,
 }
 
-/// Reply to `Copy`. Both arms echo `from` + `to` for correlation;
+/// Reply to `Copy`. Both arms echo `from` + `to` as domain context;
 /// no bytes are echoed so the reply stays small regardless of file
-/// size. `Err` carries an `FsError` — `NotFound` if `from` is absent
-/// on the host, `Forbidden` for a read-only destination namespace or
-/// a `to.path` that contains `..` / a leading `/`, `UnknownNamespace`
-/// if `to.namespace` was not registered.
+/// size. Duplicate in-flight copies with the same endpoints should be
+/// matched by `send_tracked` / `ctx.in_reply_to()`. `Err` carries an
+/// `FsError` — `NotFound` if `from` is absent on the host,
+/// `Forbidden` for a read-only destination namespace or a `to.path`
+/// that contains `..` / a leading `/`, `UnknownNamespace` if
+/// `to.namespace` was not registered.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.copy_result")]
 pub enum CopyResult {
@@ -162,10 +164,11 @@ pub struct Delete {
     pub path: String,
 }
 
-/// Reply to `Delete`. Both arms echo `namespace` + `path` for
-/// correlation. `Ok` on successful removal; `Err` on any
-/// adapter-reported failure, including `NotFound` for a file that
-/// wasn't there to delete.
+/// Reply to `Delete`. Both arms echo `namespace` + `path` as domain
+/// context. Duplicate in-flight deletes for the same path should be
+/// matched by `send_tracked` / `ctx.in_reply_to()`. `Ok` on
+/// successful removal; `Err` on any adapter-reported failure,
+/// including `NotFound` for a file that wasn't there to delete.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.delete_result")]
 pub enum DeleteResult {
@@ -192,7 +195,9 @@ pub struct List {
 }
 
 /// Reply to `List`. Both arms echo the originating `namespace` +
-/// `prefix` for correlation. `Ok` carries the matching entry
+/// `prefix` as domain context. Duplicate in-flight lists for the same
+/// prefix should be matched by `send_tracked` / `ctx.in_reply_to()`.
+/// `Ok` carries the matching entry
 /// names — bare file/dir names, not fully-qualified paths — so the
 /// caller composes `{prefix}{entry}` when turning an entry back
 /// into a read. Empty `entries` means "namespace exists, nothing
@@ -304,11 +309,12 @@ pub struct FsFetch {
     pub transforms: Vec<TransformId>,
 }
 
-/// Reply to `FsFetch`. Both arms echo `namespace` + `path` for
-/// correlation. `Ok` carries the folded output bytes (`data`) and
-/// the `output_kind` of the last transform (`None` when `transforms`
-/// was empty, i.e. a raw-read). `Err` carries a structured
-/// `FsFetchError`.
+/// Reply to `FsFetch`. Both arms echo `namespace` + `path` as domain
+/// context. Duplicate in-flight fetches for the same path should be
+/// matched by `send_tracked` / `ctx.in_reply_to()`. `Ok` carries the
+/// folded output bytes (`data`) and the `output_kind` of the last
+/// transform (`None` when `transforms` was empty, i.e. a raw-read).
+/// `Err` carries a structured `FsFetchError`.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.fetch_result")]
 pub enum FsFetchResult {

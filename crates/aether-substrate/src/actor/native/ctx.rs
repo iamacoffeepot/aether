@@ -27,7 +27,7 @@ use core::marker::PhantomData;
 use core::ptr;
 
 use crate::actor::native::mailbox::NativeActorMailbox;
-use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
+use aether_data::{Kind, KindId, MailId, MailboxId, RequestId, mailbox_id_from_name};
 
 use crate::actor::monitor::MonitorHandle;
 use crate::actor::native::binding::NativeBinding;
@@ -606,6 +606,18 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         match self.source.addr {
             SourceAddr::Component(id) => Some(id),
             _ => None,
+        }
+    }
+
+    /// Correlation id of the request this inbound reply answers.
+    #[must_use]
+    pub fn in_reply_to(&self) -> Option<RequestId> {
+        if matches!(self.source.addr, SourceAddr::None)
+            && self.source.correlation_id != Source::NO_CORRELATION
+        {
+            Some(RequestId(self.source.correlation_id))
+        } else {
+            None
         }
     }
 

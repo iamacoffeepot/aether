@@ -51,7 +51,7 @@ Bare `#[handler]` and `#[handler(mail)]` become pointed compile errors naming th
 ### Negative / limits
 
 - **A whole-tree migration** (~200 bare `#[handler]` sites plus the guide and CLAUDE.md examples) — mechanical, behavior-preserving, tracked separately from this ADR's implementation.
-- **Trace linkage from dispatch to emission is severed** — a detached root has no parent. Payload correlation is the domain-level linkage, as ADR-0133 accepted for HTTP.
+- **Trace linkage from dispatch to emission is severed** — a detached root has no parent. Payload correlation remains the domain-level linkage for multi emissions and other detached data phases, as ADR-0133 accepted for HTTP; one-shot request/reply paths use the envelope request id instead.
 - **A session-origin driver cannot sink emissions.** MCP `send_mail` dispatches carry no component source, so multi handlers are component-to-component surfaces — the same limit HTTP's data phase already has.
 - **One declared kind per multi handler.** Multi-kind conversations keep their other legs on `MailSender`, invisible to the reply contract. That is the price of a manifest that names one kind rather than reporting `Manual`-style opacity.
 

@@ -62,6 +62,10 @@ unsafe extern "C" {
     /// of this kind."
     #[link_name = "prev_correlation_p32"]
     pub fn prev_correlation() -> u64;
+    /// Issue 2791: return the current inbound reply's echoed correlation id.
+    /// Returns `0` when the dispatch is not a reply envelope.
+    #[link_name = "reply_correlation_p32"]
+    pub fn reply_correlation() -> u64;
     /// Issue 525 Phase 4b / issue 531: stage a `ActorInitError` message
     /// for the substrate to surface in `LoadResult::Err` after the
     /// guest's `init` returns non-zero. The `export!` macro is the
@@ -201,6 +205,21 @@ pub unsafe fn save_state(_version: u32, _ptr: u32, _len: u32) -> u32 {
 #[must_use]
 pub unsafe fn prev_correlation() -> u64 {
     panic!("aether-actor: prev_correlation called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::reply_correlation` import.
+/// Always panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn reply_correlation() -> u64 {
+    panic!("aether-actor: reply_correlation called outside the FFI guest");
 }
 
 /// Host-side stub for the FFI `aether::init_failed` import.

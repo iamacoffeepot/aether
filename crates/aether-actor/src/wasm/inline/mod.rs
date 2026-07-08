@@ -602,7 +602,7 @@ where
     let id = MailboxId(recipient);
     match registry.take(id) {
         Some(mut child) => {
-            let mut ctx = WasmCtx::__new(recipient, registry, source);
+            let mut ctx = WasmCtx::__new_local_dispatch(recipient, registry, source);
             let rc = child.erased_dispatch(&mut ctx, mail);
             registry.reinsert(id, child);
             rc

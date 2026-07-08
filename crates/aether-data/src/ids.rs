@@ -139,6 +139,15 @@ pub const fn type_name_for_type_id(type_id: u64) -> Option<&'static str> {
     }
 }
 
+/// Request/reply correlation id minted by the sending actor.
+///
+/// This is the correlation half of [`crate::MailId`]. Within one actor and
+/// one substrate run it is monotonic and unique; `0` is the shared
+/// no-correlation sentinel (`crate::Source::NO_CORRELATION`).
+#[repr(transparent)]
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RequestId(pub u64);
+
 /// Routing token for any mailbox — component or substrate-owned sink.
 /// Carries the ADR-0029 deterministic name hash with ADR-0064 tag
 /// bits in the high nibble. `#[repr(transparent)]` over `u64` so

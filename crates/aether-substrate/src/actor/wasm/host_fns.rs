@@ -508,6 +508,12 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         |caller: Caller<'_, ComponentCtx>| -> u64 { caller.data().prev_correlation() },
     )?;
 
+    linker.func_wrap(
+        "aether",
+        "reply_correlation_p32",
+        |caller: Caller<'_, ComponentCtx>| -> u64 { caller.data().reply_correlation() },
+    )?;
+
     // HOST_FN_OK: ADR-0002 / issue 531. The ActorInitError plumbing
     // can't ride a mail sink because mail is not dispatched until
     // the component finishes booting — the `init` FFI call itself

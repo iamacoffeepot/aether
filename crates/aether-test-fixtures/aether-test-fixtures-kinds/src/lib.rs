@@ -407,6 +407,42 @@ pub struct SourceReport {
     pub mailbox_id: u64,
 }
 
+/// Issue 2791: trigger for the request-correlation fixture. The fixture
+/// sends two `aether.fs.read` requests for this same namespace/path and
+/// demuxes the indistinguishable replies by `ctx.in_reply_to()`.
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Clone,
+    Default,
+)]
+#[kind(name = "aether.test_fixtures.run_fs_demux")]
+pub struct RunFsDemux {
+    pub namespace: String,
+    pub path: String,
+}
+
+/// Issue 2791: report emitted once both same-path fs replies were matched by
+/// request id rather than by echoed payload fields.
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+)]
+#[kind(name = "aether.test_fixtures.fs_demux_report")]
+pub struct FsDemuxReport {
+    pub first_matched: bool,
+    pub second_matched: bool,
+}
+
 /// Issue 1977 (ADR-0114 amendment) cluster-addressing matrix driver. Sent to
 /// the `matrix_sweep` fixture's parent over the wire to kick off the sweep:
 /// the parent drives every in-cluster addressing direction (parent → child,
