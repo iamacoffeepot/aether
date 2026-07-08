@@ -55,7 +55,7 @@ use std::str;
 use wasmparser::{BinaryReader, Parser, Payload, ProducersSectionReader};
 
 /// Section name the derive writes to for canonical schema bytes.
-/// Must match `aether-actor-derive`'s
+/// Must match `aether-data-derive`'s
 /// `#[link_section = "aether.kinds"]`.
 pub const MANIFEST_SECTION: &str = "aether.kinds";
 

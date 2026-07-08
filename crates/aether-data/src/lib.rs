@@ -76,18 +76,14 @@ pub use transform::{InvokeFn, TransformError};
 pub use transform::{TransformEntry, transforms};
 pub use wire_id::{EngineId, SessionToken, Uuid};
 
-/// Re-exported derive macros from `aether-actor-derive`. Behind the
+/// Re-exported derive macros from `aether-data-derive`. Behind the
 /// `derive` feature so `cargo build` on a guest that hand-writes
-/// `impl Kind` doesn't pay the proc-macro compile cost. Issue 552
-/// stage 0 consolidated the prior `aether-data-derive` +
-/// `aether-component`-internal-only macro split into a single
-/// `aether-actor-derive` proc-macro crate so the data-layer derives
-/// share a home with the actor-SDK attributes. Only the data-layer
-/// derives (`Kind`, `Schema`) are re-exported here; the actor-SDK
-/// attribute macros (`actor`, `capability`, `fallback`, `handler`,
-/// `local`) are exported from `aether-actor` directly.
+/// `impl Kind` doesn't pay the proc-macro compile cost. Only the
+/// data-layer derives (`Kind`, `Schema`) are re-exported here; the
+/// actor-SDK attribute macros (`actor`, `capability`, `fallback`,
+/// `handler`, `local`) are exported from `aether-actor` directly.
 #[cfg(feature = "derive")]
-pub use aether_actor_derive::{Kind, Schema};
+pub use aether_data_derive::{Kind, Schema};
 
 /// Re-exported `#[transform]` attribute macro from `aether-data-derive`
 /// (ADR-0048 §1). A transform is a pure `Kind -> Kind` data-layer

@@ -496,11 +496,14 @@ mod tests {
         let worker =
             thread::spawn(move || matches!(c2.acquire(|| None::<u32>), Acquired::Shutdown));
 
-        // Wait until the worker has committed to the idle list — so the
-        // `notify` below hits the park path (stamp + unpark), not the
-        // route-to-spinner fast path (which folds nothing).
+        // Wait until the worker has committed to the idle list and has
+        // stopped counting as a spinner — so the `notify` below hits the
+        // park path (stamp + unpark), not the route-to-spinner fast path
+        // (which folds nothing).
         assert!(
-            wait_until(Duration::from_secs(2), || !coord.idle().is_empty()),
+            wait_until(Duration::from_secs(2), || {
+                !coord.idle().is_empty() && coord.spinning.load(Ordering::Relaxed) == 0
+            }),
             "worker should register as parked",
         );
         coord.notify(); // stamp + unpark → the worker folds notify→wake
