@@ -241,6 +241,8 @@ mod tests {
             verdict: Verdict::Forward(vec![0]),
             effects: vec![
                 effect(EffectTarget::Widget, 42),
+                effect(EffectTarget::Child("slider".into()), 7),
+                effect(EffectTarget::Widget, 42),
                 effect(EffectTarget::Panel, 99),
             ],
         };
@@ -249,7 +251,11 @@ mod tests {
 
         // The panel effect provoked no armed echo.
         assert!(!guard.take(KindId(99)));
-        // The first up-lane 42 (the echo) is suppressed; the second is not.
+        // Child-targeted effects arm an echo just like widget-targeted ones.
+        assert!(guard.take(KindId(7)));
+        assert!(!guard.take(KindId(7)));
+        // A kind armed twice suppresses twice, then clears.
+        assert!(guard.take(KindId(42)));
         assert!(guard.take(KindId(42)));
         assert!(!guard.take(KindId(42)));
         assert!(guard.is_empty());

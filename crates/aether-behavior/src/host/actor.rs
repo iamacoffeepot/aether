@@ -567,9 +567,28 @@ mod tests {
     // rather than misreading it — the host keeps whatever `init` set.
     #[test]
     fn rehydrate_with_garbage_boots_fresh() {
-        let mut host = host(ScriptSource::None);
+        let kind = KindId(0x6789);
+        let resident = fixed_output_wasm(kind, &forward_output(b"resident"));
+        let mut host = host(ScriptSource::Inline(resident.clone()));
+        host.wrapped_child = Some(MailboxId(0xBEEF));
+
+        let before = host.slot.as_ref().map(|slot| slot.bytes().to_vec());
+        let before_source = host.script_source.clone();
         host.apply_rehydrate(b"garbage blob");
-        assert!(host.slot.is_none());
-        assert!(host.wrapped_child.is_none());
+        let after = host.slot.as_ref().map(|slot| slot.bytes().to_vec());
+
+        assert_eq!(
+            after, before,
+            "garbage rehydrate must keep the resident slot"
+        );
+        assert_eq!(
+            host.wrapped_child,
+            Some(MailboxId(0xBEEF)),
+            "garbage rehydrate must not clobber the wrapped child",
+        );
+        assert_eq!(
+            host.script_source, before_source,
+            "garbage rehydrate must keep the init-time script source",
+        );
     }
 }

@@ -38,6 +38,56 @@ pub(crate) fn fixed_output_wasm(handled: KindId, output: &FilterOutput) -> Vec<u
     module(&body, Some((2048, &encoded)), &[handled])
 }
 
+/// A module whose `filter` traps on `trap_kind` and otherwise returns a fixed,
+/// pre-encoded [`FilterOutput`]. Lets tests witness a trap before a clean call.
+pub(crate) fn conditional_trap_wasm(
+    handled: KindId,
+    trap_kind: KindId,
+    output: &FilterOutput,
+) -> Vec<u8> {
+    let encoded = envelope::encode(output);
+    let packed = (2048u64 << 32) | (encoded.len() as u64);
+    let body = format!(
+        r#"(func (export "filter") (param i64 i32 i32) (result i64)
+             (if (result i64)
+               (i64.eq (local.get 0) (i64.const {trap_kind}))
+               (then unreachable)
+               (else (i64.const {packed}))))"#,
+        trap_kind = trap_kind.0 as i64,
+        packed = packed as i64,
+    );
+    module(&body, Some((2048, &encoded)), &[handled, trap_kind])
+}
+
+/// A module whose `state_load` remembers the offered `(ptr, len)` region and
+/// whose `state_save` returns that region packed, or a baked default when no
+/// prior state was offered yet.
+pub(crate) fn stateful_wasm(handled: KindId, default_state: &[u8]) -> Vec<u8> {
+    let filter_output = envelope::encode(&forward_output(b"stateful"));
+    let filter_packed = (3072u64 << 32) | (filter_output.len() as u64);
+    let body = format!(
+        r#"(global $state_ptr (mut i32) (i32.const 2048))
+           (global $state_len (mut i32) (i32.const {default_len}))
+           (func (export "filter") (param i64 i32 i32) (result i64)
+             (i64.const {filter_packed}))
+           (func (export "state_load") (param $ptr i32) (param $len i32) (result i32)
+             (global.set $state_ptr (local.get $ptr))
+             (global.set $state_len (local.get $len))
+             (i32.const 0))
+           (func (export "state_save") (result i64)
+             (i64.or
+               (i64.shl (i64.extend_i32_u (global.get $state_ptr)) (i64.const 32))
+               (i64.extend_i32_u (global.get $state_len))))"#,
+        default_len = default_state.len(),
+        filter_packed = filter_packed as i64,
+    );
+    module_with_data(
+        &body,
+        &[(2048, default_state), (3072, &filter_output)],
+        &[handled],
+    )
+}
+
 /// A `Forward`-the-inbound `FilterOutput` for `bytes` — a passthrough script's
 /// output.
 pub(crate) fn forward_output(bytes: &[u8]) -> FilterOutput {
@@ -50,9 +100,18 @@ pub(crate) fn forward_output(bytes: &[u8]) -> FilterOutput {
 /// Assemble a module: a memory + bump allocator, the caller's `filter`, an
 /// optional data segment, and the exports custom section for `kinds`.
 fn module(filter_body: &str, data: Option<(u32, &[u8])>, kinds: &[KindId]) -> Vec<u8> {
-    let data_wat = data.map_or(String::new(), |(offset, bytes)| {
-        format!(r#"(data (i32.const {offset}) "{}")"#, byte_string(bytes))
-    });
+    match data {
+        Some(data) => module_with_data(filter_body, &[data], kinds),
+        None => module_with_data(filter_body, &[], kinds),
+    }
+}
+
+fn module_with_data(filter_body: &str, data: &[(u32, &[u8])], kinds: &[KindId]) -> Vec<u8> {
+    let data_wat = data
+        .iter()
+        .map(|(offset, bytes)| format!(r#"(data (i32.const {offset}) "{}")"#, byte_string(bytes)))
+        .collect::<Vec<_>>()
+        .join("\n             ");
     let section = custom_section_wat(&exports_section(kinds));
     let text = format!(
         r#"(module
