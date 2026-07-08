@@ -31,7 +31,7 @@ use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
     EngineConfigLayer, FsCapability, GeminiCapability, GeminiConfig, HttpCapability,
     HttpServerCapability, HttpServerConfig, InputCapability, InputConfig, InventoryCapability,
-    LifecycleConfig, TcpCapability, TextCapability, UiCapability,
+    LifecycleConfig, TcpCapability, TextCapability,
     fs::NamespaceRoots,
     http::HttpConfig,
     shared::contentgen::{ContentGenConfig, ContentGenConfigLayer},
@@ -639,7 +639,6 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_actor::<ComponentHostCapability>(boot.component_host_config)
         .with_actor::<FsCapability>(boot.namespace_roots)
         .with_actor::<TextCapability>(())
-        .with_actor::<UiCapability>(())
         .with_actor::<InventoryCapability>(())
         .with_actor::<HttpCapability>(boot.http)
         .with_actor::<TcpCapability>(())
@@ -667,7 +666,6 @@ pub fn common_cap_namespaces() -> Vec<&'static str> {
         <ComponentHostCapability as Addressable>::NAMESPACE,
         <FsCapability as Addressable>::NAMESPACE,
         <TextCapability as Addressable>::NAMESPACE,
-        <UiCapability as Addressable>::NAMESPACE,
         <InventoryCapability as Addressable>::NAMESPACE,
         <HttpCapability as Addressable>::NAMESPACE,
         <TcpCapability as Addressable>::NAMESPACE,

@@ -78,7 +78,7 @@ runtime = []
 
 [dependencies]
 aether-substrate = { path = "../aether-substrate", features = ["render"] }
-aether-capabilities = { path = "../aether-capabilities", features = ["render-runtime", "audio-runtime", "text-runtime", "ui-runtime"] }
+aether-capabilities = { path = "../aether-capabilities", features = ["render-runtime", "audio-runtime", "text-runtime"] }
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }

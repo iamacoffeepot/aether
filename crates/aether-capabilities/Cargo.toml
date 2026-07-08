@@ -81,11 +81,6 @@ audio = []
 # render-owned `CreateTextureResult` reply kind (ADR-0121) and addresses
 # the render texture/quad kinds — both now live in `crate::render`.
 text = ["render"]
-# ADR-0107 `aether.ui` cap marker. CPU-only — it composes the render
-# solid-quad and text surfaces entirely by mail — gated the same two-
-# layer way so a wasm component can address it via
-# `ctx.actor::<UiCapability>()` without pulling native deps.
-ui = ["text"]
 
 # Runtime impl layers — adds the substrate-side runtime + heavy deps
 # atop the marker layer. Chassis bins activate these. Each implies its
@@ -96,10 +91,6 @@ audio-runtime = ["audio", "runtime", "dep:cpal", "dep:crossbeam-queue", "dep:hou
 # the pure-Rust TTF parse + rasterize + horizontal layout the cap runs
 # off the hot path. Implies the marker layer + `runtime`.
 text-runtime = ["text", "runtime", "render", "dep:fontdue"]
-# `ui-runtime` has no heavy deps — the cap only sends mail to the render
-# and text caps. Implies the marker layer + `runtime` + the two surface
-# marker layers the runtime impl addresses.
-ui-runtime = ["ui", "runtime", "render", "text"]
 
 [dependencies]
 # Always-on: target-agnostic SDK + data layer + kind types. These
