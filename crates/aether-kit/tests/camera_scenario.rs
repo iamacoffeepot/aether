@@ -57,8 +57,8 @@ fn component_address() -> String {
 }
 
 /// Load `aether-kit`'s pre-built wasm into the bench, selecting the
-/// non-entry `camera` export (ADR-0096; the bare entry is
-/// `Locomotion`), and await `LoadResult`. Panics on load failure so
+/// `camera` export (ADR-0096; the kit is defaultless per ADR-0138, so
+/// the export selector is required), and await `LoadResult`. Panics on load failure so
 /// the calling test surfaces the error message rather than wedging on
 /// a missing subscription.
 fn load_camera(bench: &mut TestBench, wasm_path: &Path) {
