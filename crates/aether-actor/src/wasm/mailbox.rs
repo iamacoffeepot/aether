@@ -170,7 +170,7 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
         K: Kind,
     {
         match self.inline.route_decision(self.mailbox) {
-            RouteDecision::Local { .. } => {
+            RouteDecision::Local => {
                 tracing::warn!(
                     kind = <K as Kind>::NAME,
                     recipient = self.mailbox,
