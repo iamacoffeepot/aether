@@ -39,8 +39,9 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use aether_capabilities::rpc::{
     Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig,
@@ -141,6 +142,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// slow-but-healthy fork that registers late is not called dead.
 /// Overridable via `AETHER_FLEETBENCH_POLL_SECS`.
 const DEFAULT_POLL_SECS: u64 = 30;
+
+static STORE_ROOT_NONCE: AtomicU64 = AtomicU64::new(0);
 
 /// Resolve the in-test poll budget from `AETHER_FLEETBENCH_POLL_SECS`
 /// (default [`DEFAULT_POLL_SECS`]; `0` → wait forever).
@@ -1086,15 +1089,30 @@ impl Drop for FleetBench {
 /// `boot_hub` as `EngineConfig::engine_store_root` (ADR-0090) — not an
 /// env var — so the cap resolves it at `EngineServer::init`.
 fn isolate_store_root() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    // Each `FleetBench` in a process gets a fresh `nanos`-tagged root, so
-    // a concurrent bench in the same process can't collide either.
-    //
-    // The hub's binary store (ADR-0115) is isolated under `root/binaries`
-    // too, but that dir rides `EngineConfig::binary_store_dir` (ADR-0090).
-    env::temp_dir().join(format!("aether-fleetbench-{}-{nanos}", process::id()))
+    let temp_dir = env::temp_dir();
+    loop {
+        let nonce = STORE_ROOT_NONCE.fetch_add(1, Ordering::Relaxed);
+        // Each `FleetBench` in a process gets a fresh nonce-tagged root,
+        // and `create_dir` claims it before `boot_hub` opens
+        // `root/binaries`, so a concurrent same-process bench can't race on
+        // the path.
+        //
+        // The hub's binary store (ADR-0115) is isolated under
+        // `root/binaries` too, but that dir rides
+        // `EngineConfig::binary_store_dir` (ADR-0090).
+        let root = temp_dir.join(format!("aether-fleetbench-{}-{nonce}", process::id()));
+        match fs::create_dir(&root) {
+            Ok(()) => return root,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                panic!("test setup: creating store root {} ({e})", root.display())
+            }
+        }
+    }
+}
+
+pub fn allocate_store_root_for_test() -> PathBuf {
+    isolate_store_root()
 }
 
 /// Boot a hub-shaped passive chassis: a forwarding `RpcServerCapability`

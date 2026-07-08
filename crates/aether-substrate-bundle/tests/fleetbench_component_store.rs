@@ -8,9 +8,11 @@
 mod fleetbench;
 
 mod tests {
+    use std::collections::BTreeSet;
     use std::env;
     use std::fs;
     use std::process;
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use aether_actor::Addressable;
@@ -22,7 +24,8 @@ mod tests {
     };
 
     use crate::fleetbench::{
-        FleetBench, component_wasm_path, dist_component_available, poll_until,
+        FleetBench, allocate_store_root_for_test, component_wasm_path, dist_component_available,
+        poll_until,
     };
 
     /// The probe fixture's declared `Addressable::NAMESPACE` (distinct from the
@@ -130,6 +133,47 @@ mod tests {
             "an identical re-upload dedups to the same hash"
         );
         hash
+    }
+
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "infra test spawns same-process allocator threads to force contention"
+    )]
+    #[test]
+    fn fleetbench_store_roots_are_unique_and_created_before_use() {
+        const THREADS: usize = 8;
+
+        let mut handles = Vec::with_capacity(THREADS);
+        for _ in 0..THREADS {
+            handles.push(thread::spawn(allocate_store_root_for_test));
+        }
+        let roots: Vec<_> = handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("store-root allocator thread should not panic")
+            })
+            .collect();
+
+        let unique: BTreeSet<_> = roots.iter().cloned().collect();
+        assert_eq!(
+            unique.len(),
+            roots.len(),
+            "each allocator call should return a unique root: {roots:?}",
+        );
+        for root in &roots {
+            assert!(
+                root.is_dir(),
+                "the allocator should create the root before returning it: {}",
+                root.display(),
+            );
+        }
+        for root in roots {
+            fs::remove_dir_all(&root).unwrap_or_else(|e| {
+                panic!("cleanup of store root {} failed ({e})", root.display())
+            });
+        }
     }
 
     /// Upload the probe component by staged path, then assert the store
