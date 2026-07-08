@@ -8,5 +8,7 @@
 fn ui() {
     let t = trybuild::TestCases::new();
     t.pass("tests/ui/pass_behavior.rs");
+    t.compile_fail("tests/ui/fail_async_lifecycle.rs");
+    t.compile_fail("tests/ui/fail_async_lifecycle_named_override.rs");
     t.compile_fail("tests/ui/fail_bad_handler_signature.rs");
 }

@@ -1,0 +1,5 @@
+error: #[behavior] lifecycle hooks run synchronously - remove `async`
+  --> tests/ui/fail_async_lifecycle_named_override.rs:12:5
+   |
+12 |     async fn on_frame(&mut self, _ctx: &mut BehaviorCtx) {}
+   |     ^^^^^

@@ -164,6 +164,7 @@ fn expand_behavior(item: ItemImpl) -> syn::Result<TokenStream2> {
             });
             inherent_items.push(ImplItem::Fn(method));
         } else if let Some(idx) = lifecycle_idx {
+            reject_async(&method.sig, "lifecycle hooks run synchronously")?;
             let hook = Lifecycle::from_attr(&method.attrs[idx]).expect("checked present");
             method.attrs.remove(idx);
             lifecycle_hooks.push(LifecycleHook {
@@ -173,6 +174,7 @@ fn expand_behavior(item: ItemImpl) -> syn::Result<TokenStream2> {
             inherent_items.push(ImplItem::Fn(method));
         } else if matches!(name.as_str(), "on_attach" | "on_frame" | "on_detach") {
             // A directly-named lifecycle override stays in `impl Behavior`.
+            reject_async(&method.sig, "lifecycle hooks run synchronously")?;
             trait_overrides.push(ImplItem::Fn(method));
         } else if name == "state_save" {
             has_state_save = true;
@@ -260,6 +262,16 @@ fn extract_handler_kind(sig: &syn::Signature) -> syn::Result<(Type, bool)> {
     };
     let intercepts = reference.mutability.is_some();
     Ok(((*reference.elem).clone(), intercepts))
+}
+
+fn reject_async(sig: &syn::Signature, target: &str) -> syn::Result<()> {
+    if let Some(asyncness) = &sig.asyncness {
+        return Err(syn::Error::new_spanned(
+            asyncness,
+            format!("#[behavior] {target} - remove `async`"),
+        ));
+    }
+    Ok(())
 }
 
 /// The kind-id if-chain. Sentinel arms route lifecycle to the `Behavior`
