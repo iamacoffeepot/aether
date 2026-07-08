@@ -237,6 +237,10 @@ fn expand_behavior(item: ItemImpl) -> syn::Result<TokenStream2> {
 /// (intercept); the referenced type is the kind, the mutability is the
 /// intent.
 fn extract_handler_kind(sig: &syn::Signature) -> syn::Result<(Type, bool)> {
+    reject_async(
+        sig,
+        "#[on] handlers are synchronous - the dispatch table calls them as statements",
+    )?;
     if sig.inputs.len() != 3 {
         return Err(syn::Error::new_spanned(
             sig,
