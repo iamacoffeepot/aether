@@ -102,6 +102,7 @@ pub struct MirrorStore {
 /// handle reads. The host builds one per `filter` call and drains it after.
 pub struct BehaviorCtx<'m> {
     inbound: Vec<u8>,
+    fault: bool,
     verdict: VerdictState,
     effects: Vec<Effect>,
     mirrors: &'m mut MirrorStore,
@@ -117,6 +118,7 @@ impl<'m> BehaviorCtx<'m> {
     pub fn __new_inbound(mirrors: &'m mut MirrorStore, kind_id: KindId, bytes: &[u8]) -> Self {
         let ctx = Self {
             inbound: bytes.to_vec(),
+            fault: false,
             verdict: VerdictState::ForwardOriginal,
             effects: Vec::new(),
             mirrors,
@@ -162,6 +164,19 @@ impl<'m> BehaviorCtx<'m> {
         if !matches!(self.verdict, VerdictState::Consume) {
             self.verdict = VerdictState::ForwardMutated(bytes);
         }
+    }
+
+    /// Mark this filter call as faulted so the host counts it as fail-open.
+    #[doc(hidden)]
+    pub fn __fault(&mut self) {
+        self.fault = true;
+    }
+
+    /// Whether this filter call should surface as a host-visible fault.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __faulted(&self) -> bool {
+        self.fault
     }
 
     /// Consume the ctx into the wire [`FilterOutput`] the host drains.
@@ -347,6 +362,12 @@ pub fn run_filter(
 ) -> Vec<u8> {
     let mut ctx = BehaviorCtx::__new_inbound(mirrors, kind_id, inbound);
     dispatch(&mut ctx);
+    if ctx.__faulted() {
+        // `envelope::decode` returns `None` for empty buffers, while every
+        // well-formed output writes at least the version byte; use that
+        // existing host fault path for declared-kind decode failures.
+        return Vec::new();
+    }
     encode(&ctx.__into_output())
 }
 

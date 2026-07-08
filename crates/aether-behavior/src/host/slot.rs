@@ -228,6 +228,11 @@ impl ScriptSlot {
     /// Record a trap: bump the counter and disable at the threshold.
     fn record_trap(&mut self) {
         self.consecutive_traps = self.consecutive_traps.saturating_add(1);
+        tracing::warn!(
+            target: "aether_behavior",
+            consecutive = self.consecutive_traps,
+            "behavior filter failed open — forwarding untransformed"
+        );
         if self.disable_after_traps != 0 && self.consecutive_traps >= self.disable_after_traps {
             self.state = RunState::Disabled;
         }
@@ -279,7 +284,8 @@ mod tests {
     use super::*;
     use crate::envelope::{Effect, EffectTarget, Verdict};
     use crate::host::test_support::{
-        conditional_trap_wasm, fixed_output_wasm, forward_output, stateful_wasm, trapping_wasm,
+        conditional_trap_wasm, empty_return_wasm, fixed_output_wasm, forward_output, stateful_wasm,
+        trapping_wasm,
     };
     use alloc::vec;
 
@@ -309,6 +315,31 @@ mod tests {
             FilterOutcome::Passthrough
         ));
         assert_eq!(slot.consecutive_traps(), 3);
+        assert!(slot.is_disabled());
+    }
+
+    // Tripwire: an undecodable output (including the guest's empty return for
+    // a declared-kind decode failure) takes the same fail-open trap path.
+    #[test]
+    fn empty_return_counts_as_trap_and_disables_at_threshold() {
+        let kind = KindId(0x1001);
+        let engine = build_engine();
+        let mut slot =
+            ScriptSlot::instantiate(&engine, &empty_return_wasm(kind), None, 1_000_000, 2)
+                .expect("test setup: empty-return module instantiates");
+
+        assert!(matches!(
+            slot.filter(kind, b"malformed"),
+            FilterOutcome::Passthrough
+        ));
+        assert_eq!(slot.consecutive_traps(), 1);
+        assert!(!slot.is_disabled());
+
+        assert!(matches!(
+            slot.filter(kind, b"malformed"),
+            FilterOutcome::Passthrough
+        ));
+        assert_eq!(slot.consecutive_traps(), 2);
         assert!(slot.is_disabled());
     }
 

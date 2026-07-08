@@ -25,6 +25,17 @@ pub(crate) fn trapping_wasm(handled: KindId) -> Vec<u8> {
     )
 }
 
+/// A module whose `filter` returns an empty packed buffer. The host rejects
+/// this as undecodable output and records a fail-open trap.
+pub(crate) fn empty_return_wasm(handled: KindId) -> Vec<u8> {
+    module(
+        r#"(func (export "filter") (param i64 i32 i32) (result i64)
+             (i64.const 0))"#,
+        None,
+        &[handled],
+    )
+}
+
 /// A module whose `filter` returns a fixed, pre-encoded [`FilterOutput`] baked
 /// into a data segment (ignoring its inputs). A clean, counter-resetting call.
 pub(crate) fn fixed_output_wasm(handled: KindId, output: &FilterOutput) -> Vec<u8> {

@@ -79,6 +79,13 @@ fn dispatch<K: Kind>(limiter: &mut Limiter, kind: &K) -> Verdict {
     ctx.__into_output().verdict
 }
 
+fn dispatch_faulted<K: Kind>(limiter: &mut Limiter, bytes: &[u8]) -> bool {
+    let mut mirrors = MirrorStore::default();
+    let mut ctx = BehaviorCtx::__new_inbound(&mut mirrors, K::ID, bytes);
+    limiter.__aether_behavior_dispatch(&mut ctx, K::ID, bytes);
+    ctx.__faulted()
+}
+
 /// A `&mut K` handler's mutation is the verdict: the forwarded bytes are
 /// the re-encoded, mutated kind — not the inbound original.
 #[test]
@@ -128,7 +135,8 @@ fn consume_drops_the_in_flight_mail() {
 fn consume_wins_over_the_intercept_re_encode() {
     let mut gate = Gate::default();
     let bytes = Gauge { value: 250 }.encode_into_bytes();
-    let mut ctx = BehaviorCtx::__new_inbound(Gauge::ID, &bytes);
+    let mut mirrors = MirrorStore::default();
+    let mut ctx = BehaviorCtx::__new_inbound(&mut mirrors, Gauge::ID, &bytes);
     gate.__aether_behavior_dispatch(&mut ctx, Gauge::ID, &bytes);
     let verdict = ctx.__into_output().verdict;
     // Tripwire: the macro's unconditional __forward_mutated after an
@@ -158,6 +166,21 @@ fn undeclared_kind_falls_through_untouched() {
     };
     assert_eq!(bytes, inbound.encode_into_bytes());
     assert_eq!(limiter.hits, 0, "no handler ran");
+}
+
+/// Malformed bytes for a declared kind are surfaced as a fault instead of
+/// silently returning the default pass-through output.
+#[test]
+fn declared_kind_decode_failure_faults_the_context() {
+    let mut limiter = Limiter { cap: 100, hits: 0 };
+    let malformed = dispatch_faulted::<Gauge>(&mut limiter, b"\xff\xff");
+    assert!(malformed);
+    assert_eq!(limiter.hits, 0, "malformed payload never reaches handler");
+
+    let valid_bytes = Gauge { value: 12 }.encode_into_bytes();
+    let valid = dispatch_faulted::<Gauge>(&mut limiter, &valid_bytes);
+    assert!(!valid);
+    assert_eq!(limiter.hits, 1, "valid payload still reaches handler");
 }
 
 /// The emitted exports manifest lists exactly the `#[on]` kind ids — the
