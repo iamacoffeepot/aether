@@ -135,17 +135,16 @@ pub mod __macro_internals {
     pub use tracing;
 }
 
-/// ADR-0033 attribute macros and `Kind` / `Schema` derives. Issue 552
-/// stage 0 consolidated the proc-macros into `aether-actor-derive`.
-/// `Kind` / `Schema` / `KindId` / `MailboxId` forward through
-/// `aether-data` so the derive paths the macro emits
-/// (`::aether_data::Kind`, etc.) continue to resolve through the
-/// established re-export chain. The actor-SDK attribute macros
-/// (`actor`, `capability`, `fallback`, `handler`, `local`)
-/// are sourced directly from `aether-actor-derive` — `aether-data` is
-/// the foundational data-layer crate and no longer exports actor-SDK
-/// surface. Component and capability authors need only `aether-actor`
-/// in their dep list; the full macro surface is available from here.
+/// ADR-0033 actor-SDK attribute macros plus the data-layer
+/// `Kind` / `Schema` re-exports. `Kind` / `Schema` / `KindId` /
+/// `MailboxId` forward through `aether-data` so the derive paths the
+/// macro emits (`::aether_data::Kind`, etc.) continue to resolve through
+/// the established re-export chain. The actor-SDK attribute macros
+/// (`actor`, `capability`, `fallback`, `handler`, `local`) are sourced
+/// directly from `aether-actor-derive`; the data-layer derive macros are
+/// sourced by `aether-data` from `aether-data-derive`. Component and
+/// capability authors need only `aether-actor` in their dep list; the
+/// full macro surface is available from here.
 pub use aether_actor_derive::{actor, capability, fallback, handler, local, runtime};
 pub use aether_data::{Kind, KindId as DataKindId, MailboxId, Schema};
 // ADR-0119: the `#[derive(Singleton)]` / `#[derive(Instanced)]` /

@@ -41,7 +41,7 @@ pub struct MailId {
 }
 
 /// ADR-0080 §1: hand-written `Schema` impl. Cannot use the derive
-/// because it lives in `aether-actor-derive` and emits
+/// because it lives in `aether-data-derive` and emits
 /// `aether_data::...` paths that don't resolve from inside `aether-
 /// data` itself. The shape mirrors what the derive would produce for
 /// a two-field non-`#[repr(C)]` struct.
