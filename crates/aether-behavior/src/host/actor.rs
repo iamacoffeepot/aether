@@ -158,15 +158,18 @@ impl WasmActor for BehaviorHost {
 
     /// Restore from the host bundle — re-instantiate the script from its
     /// resident bytes (no fs re-fetch), offer the saved state to the fresh
-    /// script, and restore the wrapped-child id for the direction check. The
-    /// wrapped child is **not** re-spawned: the composite walk reconstructs it
-    /// from its own real config + runtime state (#2694), and the reload
-    /// `insert_child` carries no residency guard, so a host-side re-spawn would
-    /// double-spawn. The rehydrate body (the private `apply_rehydrate`) takes
-    /// no spawn surface, so the defer-to-the-walk invariant is enforced by the
-    /// signature, not just discipline.
-    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
-        self.apply_rehydrate(prior.bytes());
+    /// script, restore the wrapped-child id for the direction check, then offer
+    /// `ATTACH` when a script was restored. The wrapped child is **not**
+    /// re-spawned: the composite walk reconstructs it from its own real config
+    /// + runtime state (#2694), and the reload `insert_child` carries no
+    /// residency guard, so a host-side re-spawn would double-spawn. The
+    /// rehydrate body (the private `apply_rehydrate`) takes no spawn surface,
+    /// so the defer-to-the-walk invariant is enforced by the signature, not
+    /// just discipline.
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
+        self.apply_rehydrate_with_attach(prior.bytes(), |host| {
+            host.offer_sentinel(&*ctx, sentinel::ATTACH);
+        });
     }
 
     /// Load a script from an `aether.fs` namespace. Parks the requester's
@@ -187,25 +190,9 @@ impl WasmActor for BehaviorHost {
     /// `load_script_result` reply if one is pending.
     #[handler::manual]
     fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Manual>, reply: ReadResult) {
-        let result = match reply {
-            ReadResult::Ok { bytes, .. } => self.swap_script(&bytes),
-            ReadResult::Err { error, .. } => Err(alloc::format!("read failed: {error:?}")),
-        };
-        match &result {
-            Ok(_) => {
-                if let Some(source) = self.pending_source.take() {
-                    self.script_source = source;
-                }
-            }
-            Err(detail) => {
-                self.pending_source = None;
-                tracing::warn!(
-                    target: "aether_behavior",
-                    error = %detail,
-                    "load_script failed; keeping the prior running script",
-                );
-            }
-        }
+        let result = self.apply_read_result(reply, |host| {
+            host.offer_sentinel(&*ctx.as_single(), sentinel::ATTACH);
+        });
         if let Some(handle) = self.pending_reply.take() {
             ctx.reply_to(handle, &load_result(result));
         }
@@ -214,18 +201,10 @@ impl WasmActor for BehaviorHost {
     /// Swap the script for inline bytes — the synchronous counterpart of
     /// `load_script`. The return value *is* the `load_script_result` reply.
     #[handler::single]
-    fn on_set_script(&mut self, _ctx: &mut WasmCtx<'_>, msg: SetScript) -> LoadScriptResult {
-        let result = self.swap_script(&msg.bytes);
-        if result.is_ok() {
-            self.script_source = ScriptSource::Inline(msg.bytes);
-        } else if let Err(detail) = &result {
-            tracing::warn!(
-                target: "aether_behavior",
-                error = %detail,
-                "set_script failed; keeping the prior running script",
-            );
-        }
-        load_result(result)
+    fn on_set_script(&mut self, ctx: &mut WasmCtx<'_>, msg: SetScript) -> LoadScriptResult {
+        self.apply_set_script(msg, |host| {
+            host.offer_sentinel(&*ctx, sentinel::ATTACH);
+        })
     }
 
     /// Lane traffic: everything that is not the host's own control vocabulary.
@@ -271,6 +250,64 @@ impl WasmActor for BehaviorHost {
 }
 
 impl BehaviorHost {
+    fn apply_read_result(
+        &mut self,
+        reply: ReadResult,
+        mut offer_attach: impl FnMut(&mut Self),
+    ) -> Result<u64, String> {
+        let result = match reply {
+            ReadResult::Ok { bytes, .. } => self.swap_script(&bytes),
+            ReadResult::Err { error, .. } => Err(alloc::format!("read failed: {error:?}")),
+        };
+        match &result {
+            Ok(_) => {
+                if let Some(source) = self.pending_source.take() {
+                    self.script_source = source;
+                }
+                offer_attach(self);
+            }
+            Err(detail) => {
+                self.pending_source = None;
+                tracing::warn!(
+                    target: "aether_behavior",
+                    error = %detail,
+                    "load_script failed; keeping the prior running script",
+                );
+            }
+        }
+        result
+    }
+
+    fn apply_set_script(
+        &mut self,
+        msg: SetScript,
+        mut offer_attach: impl FnMut(&mut Self),
+    ) -> LoadScriptResult {
+        let result = self.swap_script(&msg.bytes);
+        if result.is_ok() {
+            self.script_source = ScriptSource::Inline(msg.bytes);
+            offer_attach(self);
+        } else if let Err(detail) = &result {
+            tracing::warn!(
+                target: "aether_behavior",
+                error = %detail,
+                "set_script failed; keeping the prior running script",
+            );
+        }
+        load_result(result)
+    }
+
+    fn apply_rehydrate_with_attach(
+        &mut self,
+        prior_bytes: &[u8],
+        mut offer_attach: impl FnMut(&mut Self),
+    ) {
+        self.apply_rehydrate(prior_bytes);
+        if self.slot.is_some() {
+            offer_attach(self);
+        }
+    }
+
     /// Whether an inbound source is the wrapped child (up-lane); any other
     /// source — the parent, or a sourceless dispatch — is down-lane.
     fn lane_is_up(&self, source: Option<MailboxId>) -> bool {
@@ -335,6 +372,10 @@ impl BehaviorHost {
         self.run_filter_and_drain(ctx, false, None, sentinel, &[]);
     }
 
+    fn offer_sentinel_to_sink(&mut self, sink: &mut impl DrainSink, sentinel: KindId) {
+        self.run_filter_and_drain_to_sink(sink, None, sentinel, &[]);
+    }
+
     /// Offer `(offer_kind, bytes)` to the script and, on a well-formed output,
     /// drain it: apply the verdict (forwarding on the `is_up` lane when
     /// `forward_kind` is `Some`) then the effects in order, arming echo
@@ -349,6 +390,22 @@ impl BehaviorHost {
         offer_kind: KindId,
         bytes: &[u8],
     ) -> bool {
+        let subname = self.config.child.subname.clone();
+        let mut sink = LaneSink {
+            ctx,
+            wrapped_subname: &subname,
+            is_up,
+        };
+        self.run_filter_and_drain_to_sink(&mut sink, forward_kind, offer_kind, bytes)
+    }
+
+    fn run_filter_and_drain_to_sink(
+        &mut self,
+        sink: &mut impl DrainSink,
+        forward_kind: Option<KindId>,
+        offer_kind: KindId,
+        bytes: &[u8],
+    ) -> bool {
         let Some(slot) = self.slot.as_mut() else {
             return false;
         };
@@ -357,13 +414,7 @@ impl BehaviorHost {
             FilterOutcome::Passthrough => return false,
         };
         let echoes = echo_kinds(&output);
-        let subname = self.config.child.subname.clone();
-        let mut sink = LaneSink {
-            ctx,
-            wrapped_subname: &subname,
-            is_up,
-        };
-        run_drain(output, forward_kind, &mut sink);
+        run_drain(output, forward_kind, sink);
         self.echo.arm(echoes);
         true
     }
@@ -472,11 +523,24 @@ impl DrainSink for LaneSink<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::envelope::{Effect, FilterOutput, Verdict};
     use crate::host::config::ChildSpec;
     use crate::host::test_support::{fixed_output_wasm, forward_output};
     use aether_actor::Lifecycle;
     use alloc::string::ToString;
+    use alloc::vec;
     use alloc::vec::Vec;
+
+    #[derive(Default)]
+    struct RecordingSink {
+        events: Vec<DrainEvent>,
+    }
+
+    impl DrainSink for RecordingSink {
+        fn record(&mut self, event: DrainEvent) {
+            self.events.push(event);
+        }
+    }
 
     fn config(script: ScriptSource) -> HostConfig {
         HostConfig {
@@ -495,6 +559,31 @@ mod tests {
     fn host(script: ScriptSource) -> BehaviorHost {
         let mut init_ctx = WasmInitCtx::__new(0x10);
         BehaviorHost::init(config(script), &mut init_ctx).expect("test setup: host inits")
+    }
+
+    fn attach_script() -> Vec<u8> {
+        fixed_output_wasm(
+            sentinel::ATTACH,
+            &FilterOutput {
+                verdict: Verdict::Consume,
+                effects: vec![Effect {
+                    target: EffectTarget::Widget,
+                    kind_id: 0xA77A,
+                    bytes: b"attached".to_vec(),
+                }],
+            },
+        )
+    }
+
+    fn assert_attach_offered(sink: &RecordingSink) {
+        assert_eq!(
+            sink.events,
+            vec![DrainEvent::Effect {
+                target: EffectTarget::Widget,
+                kind_id: 0xA77A,
+                bytes: b"attached".to_vec(),
+            }],
+        );
     }
 
     // Tripwire: the fallback's lane direction — an inbound source equal to the
@@ -532,6 +621,52 @@ mod tests {
         assert_eq!(before, after, "the prior script must survive a failed swap");
     }
 
+    // Tripwire: a script installed by the deferred fs/load_script path still
+    // receives exactly one ATTACH after the slot becomes resident.
+    #[test]
+    fn read_result_success_offers_attach_after_install() {
+        let mut host = host(ScriptSource::None);
+        host.pending_source = Some(ScriptSource::FsRef {
+            namespace: "assets".to_string(),
+            path: "behavior.wasm".to_string(),
+        });
+        let mut sink = RecordingSink::default();
+
+        let result = host.apply_read_result(
+            ReadResult::Ok {
+                namespace: "assets".to_string(),
+                path: "behavior.wasm".to_string(),
+                bytes: attach_script(),
+            },
+            |host| host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH),
+        );
+
+        assert!(matches!(result, Ok(_)));
+        assert!(host.slot.is_some());
+        assert!(matches!(host.script_source, ScriptSource::FsRef { .. }));
+        assert_attach_offered(&sink);
+    }
+
+    // Tripwire: a runtime inline swap receives exactly one ATTACH after the
+    // new slot becomes resident.
+    #[test]
+    fn set_script_success_offers_attach_after_install() {
+        let mut host = host(ScriptSource::None);
+        let mut sink = RecordingSink::default();
+
+        let result = host.apply_set_script(
+            SetScript {
+                bytes: attach_script(),
+            },
+            |host| host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH),
+        );
+
+        assert!(matches!(result, LoadScriptResult::Ok { .. }));
+        assert!(host.slot.is_some());
+        assert!(matches!(host.script_source, ScriptSource::Inline(_)));
+        assert_attach_offered(&sink);
+    }
+
     // Tripwire: `on_rehydrate`'s body restores the wrapped-child id + the
     // script from resident bytes through a ctx-free path — so it structurally
     // cannot re-spawn the wrapped child (spawn needs a ctx), the defer-to-the-
@@ -563,6 +698,28 @@ mod tests {
         assert!(matches!(host.script_source, ScriptSource::Inline(_)));
     }
 
+    // Tripwire: a rehydrate that restores a resident script receives exactly
+    // one ATTACH after the restored slot becomes resident.
+    #[test]
+    fn rehydrate_restored_script_offers_attach() {
+        let script = attach_script();
+        let bundle = HostPersist {
+            script_source: ScriptSource::Inline(script.clone()),
+            script_bytes: script,
+            script_state: Vec::new(),
+            wrapped_child_id: 0x1234_5678,
+        };
+        let mut host = host(ScriptSource::None);
+        let mut sink = RecordingSink::default();
+
+        host.apply_rehydrate_with_attach(&bundle.encode(), |host| {
+            host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH);
+        });
+
+        assert!(host.slot.is_some());
+        assert_attach_offered(&sink);
+    }
+
     // Tripwire: an undecodable state blob boots the script fresh (fail-open)
     // rather than misreading it — the host keeps whatever `init` set.
     #[test]
@@ -571,5 +728,20 @@ mod tests {
         host.apply_rehydrate(b"garbage blob");
         assert!(host.slot.is_none());
         assert!(host.wrapped_child.is_none());
+    }
+
+    // Tripwire: scriptless or undecodable rehydrate offers no ATTACH because
+    // no script slot became resident.
+    #[test]
+    fn scriptless_rehydrate_offers_no_attach() {
+        let mut host = host(ScriptSource::None);
+        let mut sink = RecordingSink::default();
+
+        host.apply_rehydrate_with_attach(b"garbage blob", |host| {
+            host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH);
+        });
+
+        assert!(host.slot.is_none());
+        assert!(sink.events.is_empty());
     }
 }
