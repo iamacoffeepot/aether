@@ -223,14 +223,14 @@ struct ManifestView {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum DistManifestClassification {
+pub enum DistManifestClassification {
     Available { relative_path: String },
     MissingStem,
     Unparseable,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum DistComponentGuardOutcome {
+pub enum DistComponentGuardOutcome {
     Available,
     Skip(String),
     RequireRuntime(String),
@@ -1159,7 +1159,7 @@ fn dist_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist")
 }
 
-pub(crate) fn classify_dist_manifest(raw: &str, stem: &str) -> DistManifestClassification {
+pub fn classify_dist_manifest(raw: &str, stem: &str) -> DistManifestClassification {
     let manifest: ManifestView = match serde_json::from_str(raw) {
         Ok(manifest) => manifest,
         Err(_) => return DistManifestClassification::Unparseable,
@@ -1168,8 +1168,9 @@ pub(crate) fn classify_dist_manifest(raw: &str, stem: &str) -> DistManifestClass
         .components
         .get(stem)
         .cloned()
-        .map(|relative_path| DistManifestClassification::Available { relative_path })
-        .unwrap_or(DistManifestClassification::MissingStem)
+        .map_or(DistManifestClassification::MissingStem, |relative_path| {
+            DistManifestClassification::Available { relative_path }
+        })
 }
 
 fn dist_component_message(stem: &str, manifest_path: &Path, detail: &str) -> String {
@@ -1183,10 +1184,10 @@ fn require_runtime_enabled() -> bool {
     env::var("AETHER_REQUIRE_RUNTIME").is_ok()
 }
 
-pub(crate) fn dist_component_guard_outcome(
+pub fn dist_component_guard_outcome(
     stem: &str,
     manifest_path: &Path,
-    classification: DistManifestClassification,
+    classification: &DistManifestClassification,
     require_runtime: bool,
 ) -> DistComponentGuardOutcome {
     let unavailable = |detail: &str| {
@@ -1248,7 +1249,7 @@ fn dist_component_guard_for_requirement(
         DistComponentRequirement::StemMissing => dist_component_guard_outcome(
             stem,
             manifest_path,
-            DistManifestClassification::MissingStem,
+            &DistManifestClassification::MissingStem,
             require_runtime,
         ),
     }

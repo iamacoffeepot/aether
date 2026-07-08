@@ -40,13 +40,13 @@ mod tests {
         let local = dist_component_guard_outcome(
             "aether_test_fixtures_bundle",
             manifest_path,
-            DistManifestClassification::MissingStem,
+            &DistManifestClassification::MissingStem,
             false,
         );
         let required = dist_component_guard_outcome(
             "aether_test_fixtures_bundle",
             manifest_path,
-            DistManifestClassification::MissingStem,
+            &DistManifestClassification::MissingStem,
             true,
         );
 
