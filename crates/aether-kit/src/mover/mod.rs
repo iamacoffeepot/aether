@@ -8,7 +8,7 @@
 //! [`WorldMover`] — an input-driven body that walks the painted world.
 //!
 //! The first live-gameplay body: one controllable marker on the
-//! [`crate::world`] cell lattice the [`super::world_view::WorldView`] actor
+//! [`crate::world`] cell lattice the [`WorldView`](crate::world::WorldView) actor
 //! paints. Where `WorldView` owns the ground and replays it to
 //! `"aether.render"` each frame, `WorldMover` owns exactly the moving body —
 //! a fixed-point octimeter position, a trailing follow-camera, and a marker
@@ -47,7 +47,10 @@
 //!   to that cell. [`WindowSize`] feeds the camera aspect and picking.
 //! - [`Tick`] — advance the body one step.
 //! - [`Render`] — publish the camera + draw the marker to `"aether.render"`.
-//! - [`crate::mover::MoverTeleport`] — jump the body to a cell center.
+//! - [`MoverTeleport`] — jump the body to a cell center.
+
+mod kinds;
+pub use kinds::*;
 
 use core::f32::consts::{FRAC_PI_2, PI, TAU};
 
@@ -62,7 +65,6 @@ use aether_kinds::{
 use aether_math::{Mat4, Vec3};
 
 use crate::OCTIMETERS_PER_TILE;
-use crate::mover::MoverTeleport;
 use crate::world::CellPos;
 
 /// Ground speed: octimeters/tick the body travels toward its committed cell.

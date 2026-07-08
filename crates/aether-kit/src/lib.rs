@@ -1,28 +1,37 @@
 //! `aether-kit` — the gameplay-systems layer.
 //!
-//! Reusable game-building actors that run on the substrate. This crate
-//! hosts both the trunk types (the mail shapes peers send a system) at
-//! the root and the runtime actors in [`runtime`]. The systems are
-//! [`runtime::Locomotion`] (tile-grid movement on a fixed-point ground
-//! plane — the module entry), [`runtime::camera::CameraComponent`]
-//! (the multi-camera driver, selected by the `aether_kit@aether.camera`
-//! export, ADR-0096), and [`runtime::mesh_viewer::MeshViewer`] (loads a
-//! `.dsl` / `.obj` mesh file and replays it to the render sink,
-//! selected by the `aether_kit@aether.mesh_viewer` export), and
-//! [`runtime::world_view::WorldView`] (meshes the chunked world plane
-//! stack into the keyed-quilt gouache grammar, selected by the
-//! `aether_kit@aether.world` export). The camera's `aether.camera.*`
-//! driver kinds live in [`camera`]; the mesh viewer's `aether.mesh.load`
-//! kind lives in [`mesh`]. The [`world`] module holds the chunked world
-//! plane stack — the `World` / `Chunk` / `Material` data layer and its
-//! `aether.kit.world.{set_chunk,set_region,set_smoothing_profile,set_water_plane,set_material_style,set_view_mode,load}` wire kinds
-//! — that `WorldView` meshes to the render sink. The [`widgets`] module
-//! holds the widget-compositing vocabulary (ADR-0117) — `Collect` /
-//! `WidgetDrawList` and the `WidgetConfig` tree — that
-//! [`runtime::widget::Widget`] composites into one ordered render emit per
-//! cluster. The [`theme`] module holds the widget-tier visual tokens —
-//! the `Theme` struct, `WidgetState`, the `Theme::fill` state-overlay
-//! compositor, and the `aether.kit.widget.set_theme` live-restyle kind.
+//! Reusable game-building actors that run on the substrate. Each system is
+//! one module under the crate root that co-locates the actor with its own
+//! `kinds` submodule (the mail shapes peers send it) and whatever support
+//! files it needs — the crate is guest code all the way down, so there is
+//! no data/runtime split, just one module per actor:
+//!
+//! - [`locomotion::Locomotion`] — tile-grid movement on a fixed-point
+//!   ground plane; the module **entry**, so a bare `load` of `aether_kit.wasm`
+//!   instantiates it. Its wire kinds live in [`locomotion`].
+//! - [`camera::CameraComponent`] — the multi-camera driver, selected by the
+//!   `aether_kit@aether.camera` export (ADR-0096). Its `aether.camera.*`
+//!   driver kinds live in [`camera`].
+//! - [`mesh::MeshViewer`] — loads a `.dsl` / `.obj` mesh file and replays it
+//!   to the render sink, selected by the `aether_kit@aether.mesh_viewer`
+//!   export. Its `aether.mesh.load` kind lives in [`mesh`].
+//! - [`world::WorldView`] — meshes the chunked world plane stack into the
+//!   keyed-quilt gouache grammar, selected by the `aether_kit@aether.world`
+//!   export. The [`world`] module also holds the `World` / `Chunk` /
+//!   `Material` data layer and the `aether.kit.world.*` wire kinds it meshes.
+//! - [`mover::WorldMover`] — the input-driven body that walks the painted
+//!   world, selected by the `aether_kit@aether.kit.mover` export. Its
+//!   `aether.kit.mover.teleport` placement kind lives in [`mover`].
+//! - [`widget::Widget`] — the widget-compositing node (ADR-0117), selected
+//!   by the `aether_kit@aether.kit.widget` export, with the reference
+//!   [`widget::WidgetPanel`] and the concrete [`widget::set`] widgets. The
+//!   widget-compositing vocabulary lives in [`widget`] and the visual tokens
+//!   in [`widget::theme`].
+//!
+//! `export!` (below) packs the actors into one cdylib (ADR-0096 multi-actor
+//! module); the entry type is listed first, and the FFI shims it emits are
+//! wasm32-only and inert in a host rlib, so the integration tests link the
+//! same artifact.
 //!
 //! # Units
 //!
@@ -40,18 +49,17 @@
 
 extern crate alloc;
 
-use serde::{Deserialize, Serialize};
-
 pub mod camera;
+pub mod locomotion;
 pub mod mesh;
 pub mod mover;
-pub mod theme;
-pub mod widgets;
+pub mod widget;
 pub mod world;
 
+pub use locomotion::{Preview, SetGranularity, SetWalkable, Teleport};
 pub use mover::MoverTeleport;
-pub use theme::{SetTheme, Theme, WidgetState};
-pub use widgets::{
+pub use widget::theme::{SetTheme, Theme, WidgetState};
+pub use widget::{
     ButtonClicked, ButtonConfig, ChildrenChanged, Collect, FocusGained, FocusLost, LabelConfig,
     MembershipEntry, PanelConfig, RadioConfig, RadioSelected, SliderChanged, SliderConfig,
     TextCommitted, TextFieldConfig, WidgetChildSpec, WidgetConfig, WidgetDrawItem, WidgetDrawList,
@@ -64,12 +72,6 @@ pub use world::{
     SmoothingProfile, ViewMode, WaterPlane, World, WorldDecodeError, WorldLoad,
 };
 
-#[cfg(feature = "runtime")]
-pub mod runtime;
-
-#[cfg(feature = "runtime")]
-mod arena;
-
 /// Octimeters per tile: `1 tile = 1 meter = 256 octimeters`.
 pub const OCTIMETERS_PER_TILE: i32 = 256;
 
@@ -77,63 +79,49 @@ pub const OCTIMETERS_PER_TILE: i32 = 256;
 /// tile (`2^8 = 256` octimeters per tile).
 pub const TILE_BITS: u32 = 8;
 
-/// `aether.kit.locomotion.teleport` — place the controlled mover at the
-/// center of the named tile. Ignored (warn-log) if the tile is outside
-/// the map.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.locomotion.teleport")]
-pub struct Teleport {
-    pub tile_x: i32,
-    pub tile_z: i32,
-}
+// A cdylib carries one `export!` (the shared init/receive FFI entry). The
+// entry type is listed first; the macro emits the wasm32 FFI shims and the
+// `aether.kinds` custom section for every listed actor. The `behavior`
+// feature (ADR-0137, issue 2687) appends `aether-behavior`'s `BehaviorHost`
+// so the panel's `WidgetKind::BehaviorHost` arm can spawn it by tag; the two
+// invocations are cfg-exclusive, keeping the ordinary kit build's exported
+// set (and its `aether.kinds` section) unchanged.
+#[cfg(not(feature = "behavior"))]
+aether_actor::export!(
+    locomotion::Locomotion,
+    camera::CameraComponent,
+    mesh::MeshViewer,
+    world::WorldView,
+    mover::WorldMover,
+    widget::Widget,
+    widget::set::SliderWidget,
+    widget::set::TextFieldWidget,
+    widget::set::RadioGroupWidget,
+    widget::set::ButtonWidget,
+    widget::set::LabelWidget,
+    widget::WidgetPanel
+);
 
-/// `aether.kit.locomotion.set_walkable` — toggle whether a tile blocks
-/// movement. Out-of-map tiles are ignored (warn-log).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.locomotion.set_walkable")]
-pub struct SetWalkable {
-    pub tile_x: i32,
-    pub tile_z: i32,
-    pub walkable: bool,
-}
-
-/// `aether.kit.locomotion.set_granularity` — set the movement-cell size
-/// in octimeters: the grid the mover snaps to. `256` (a full tile) is
-/// classic tile-to-tile movement; smaller values let it stop on sub-tiles;
-/// `8` is effectively continuous. Clamped to `8..=256`. The `Tab` key
-/// cycles preset sizes live.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.locomotion.set_granularity")]
-pub struct SetGranularity {
-    pub cell_octimeters: i32,
-}
-
-/// `aether.kit.locomotion.preview` — a design aid, not part of play. Freezes
-/// the live hazard game and paints a top-down contact-sheet of one shape's
-/// parameter variations (a 3×3 matrix: thickness down the rows, the shape's
-/// spatial parameter across the columns) so the look of each parameter can be
-/// compared at a glance. `shape` selects which: `0` resumes the game, `1` ring,
-/// `2` wall, `3` wave.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.locomotion.preview")]
-pub struct Preview {
-    pub shape: u32,
-}
+#[cfg(feature = "behavior")]
+aether_actor::export!(
+    locomotion::Locomotion,
+    camera::CameraComponent,
+    mesh::MeshViewer,
+    world::WorldView,
+    mover::WorldMover,
+    widget::Widget,
+    widget::set::SliderWidget,
+    widget::set::TextFieldWidget,
+    widget::set::RadioGroupWidget,
+    widget::set::ButtonWidget,
+    widget::set::LabelWidget,
+    widget::WidgetPanel,
+    aether_behavior::BehaviorHost
+);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_data::Kind;
-
-    #[test]
-    fn kind_names_are_stable() {
-        assert_eq!(Teleport::NAME, "aether.kit.locomotion.teleport");
-        assert_eq!(SetWalkable::NAME, "aether.kit.locomotion.set_walkable");
-        assert_eq!(
-            SetGranularity::NAME,
-            "aether.kit.locomotion.set_granularity"
-        );
-    }
 
     #[test]
     fn coarse_tile_is_a_shift() {

@@ -28,7 +28,7 @@ pub enum WidgetState {
 
 /// Convert one 8-bit sRGB channel to a linear-space float via the same
 /// approximate `channel²` transfer the world mesher uses
-/// (`crates/aether-kit/src/runtime/mesher/style.rs`, `hsl_to_linear_rgb`):
+/// (`crates/aether-kit/src/world/mesher/style.rs`, `hsl_to_linear_rgb`):
 /// `(channel / 255)²`.
 const fn srgb_channel_to_linear(channel: u8) -> f32 {
     let c = channel as f32 / 255.0;

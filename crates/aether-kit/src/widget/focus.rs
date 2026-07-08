@@ -4,7 +4,7 @@
 //! ordered set of child entries (each a hit rect plus whether it can take
 //! keyboard focus), the currently focused child, and the drag-captured child.
 //! It does no mail and holds no capability handle — the root drives it,
-//! mirroring how [`Composite`](crate::runtime::composite::Composite) is the
+//! mirroring how [`Composite`](crate::widget::composite::Composite) is the
 //! bookkeeping half of the draw protocol while the actor owns the sends.
 //!
 //! Widgets never subscribe to input themselves. The root subscribes the

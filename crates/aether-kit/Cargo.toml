@@ -5,26 +5,18 @@ edition.workspace = true
 license.workspace = true
 
 # The gameplay-systems layer: reusable actors built on the engine that
-# any tile game on the substrate can load. Each system is its own
-# actor; `export!(...)` packs the ones a build wants into a single
-# cdylib (ADR-0096 multi-actor module). Trunk types (the mail shapes
-# other actors send these systems) live at the crate root for
-# consumers; the runtime actors live in `runtime` and emit the cdylib
-# FFI exports under wasm32. Host builds compile the runtime into the
-# rlib with the FFI exports inert, so integration tests link the same
-# artifact.
+# any tile game on the substrate can load. Each system is its own module
+# that co-locates the actor with its own `kinds` file (the mail shapes
+# peers send it) and support files; `export!(...)` packs the actors into
+# a single cdylib (ADR-0096 multi-actor module). The crate is guest code
+# throughout, so there is no data/runtime split — the `export!` FFI emits
+# wasm32-only shims that stay inert in a host rlib, so integration tests
+# link the same artifact.
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# The `runtime` feature pulls in the `runtime` module that calls
-# `aether_actor::export!()`. Consumers that only need the trunk mail
-# shapes take `default-features = false` so their wasm builds see the
-# kind types without the FFI exports. On by default so a bare
-# wasm32 build still produces the full component artifact.
-default = ["runtime"]
-runtime = []
 # ADR-0137 / issue 2687: wrap a stock widget slot in a behavior script host.
 # Forwards to `aether-behavior/host` and lights up the `WidgetKind::BehaviorHost`
 # spawn arm + the host's presence in the module's `export!` set. Non-default so

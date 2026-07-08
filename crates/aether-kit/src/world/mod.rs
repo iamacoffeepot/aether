@@ -7,7 +7,7 @@
 //! per-chunk mesh to `"aether.render"` each frame on the `Render`
 //! lifecycle stage.
 //!
-//! The mesher lives in [`super::mesher`] as a pure function
+//! The mesher lives in [`mesher`] as a pure function
 //! ([`mesh_chunk`]); this actor keeps the per-chunk mesh cache, the active
 //! view mode, and the cache invalidation. Each chunk becomes keyed-quilt
 //! underlay cells (flat world-anchored color with pooled rims and a wash
@@ -48,6 +48,12 @@
 //!   `aether.fs`, decode, atomically swap, and remesh all. A decode or
 //!   read failure keeps the prior world (errors go to logs).
 
+mod data;
+pub use data::*;
+mod kinds;
+pub use kinds::*;
+pub mod mesher;
+
 use alloc::collections::BTreeMap;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
@@ -57,12 +63,8 @@ use aether_capabilities::render::DrawTriangle;
 use aether_capabilities::{FsCapability, LifecycleCapability, RenderCapability};
 use aether_kinds::Render;
 
-use super::mesher::mesh_chunk;
-use super::mesher::style::StyleTable;
-use crate::world::{
-    ChunkPos, Material, SetCellHeights, SetCellPoints, SetChunk, SetMaterialStyle, SetRegion,
-    SetSmoothingProfile, SetViewMode, SetWaterPlane, ViewMode, World, WorldLoad,
-};
+use self::mesher::mesh_chunk;
+use self::mesher::style::StyleTable;
 
 /// World-view component: holds the world plane stack and a per-chunk
 /// mesh cache, and replays the cache to the render sink each frame.

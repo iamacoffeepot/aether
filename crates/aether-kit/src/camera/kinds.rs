@@ -1,7 +1,7 @@
-//! Camera trunk types: the `aether.camera.*` driver kinds and their
+//! Camera wire kinds: the `aether.camera.*` driver kinds and their
 //! parameter shapes. Peers that need to *talk to* the camera actor
-//! depend on these wire shapes; the runtime [`CameraComponent`] that
-//! consumes them lives in [`crate::runtime::camera`] and ships in
+//! depend on these wire shapes; the [`CameraComponent`] that
+//! consumes them lives in [`crate::camera`] and ships in
 //! `aether_kit.wasm` as a non-entry export (ADR-0096).
 //!
 //! `aether.camera` (the singular `view_proj` kind consumed by the
@@ -9,7 +9,7 @@
 //! §Decision 7) is *not* here — it's a chassis sink contract and
 //! lives in `aether-kinds` alongside the other substrate primitives.
 //!
-//! [`CameraComponent`]: crate::runtime::camera::CameraComponent
+//! [`CameraComponent`]: crate::camera::CameraComponent
 
 use alloc::string::String;
 use serde::{Deserialize, Serialize};

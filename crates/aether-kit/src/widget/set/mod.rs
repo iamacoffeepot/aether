@@ -10,14 +10,14 @@
 //! - [`ButtonWidget`] — a momentary push button.
 //! - [`LabelWidget`] — static, non-interactive text.
 //!
-//! Each caches its assigned [`WidgetFrame`](crate::widgets::WidgetFrame) rect
-//! and its [`Theme`](crate::theme::Theme), answers every
-//! [`Collect`](crate::widgets::Collect) with a
-//! [`WidgetDrawList`](crate::widgets::WidgetDrawList) drawn in its own local
-//! coordinates (colors resolved through [`Theme::fill`](crate::theme::Theme::fill)),
+//! Each caches its assigned [`WidgetFrame`](crate::widget::WidgetFrame) rect
+//! and its [`Theme`](crate::widget::theme::Theme), answers every
+//! [`Collect`](crate::widget::Collect) with a
+//! [`WidgetDrawList`](crate::widget::WidgetDrawList) drawn in its own local
+//! coordinates (colors resolved through [`Theme::fill`](crate::widget::theme::Theme::fill)),
 //! and reports value changes up to its parent. Widgets never subscribe to
 //! input; the root forwards it — see [`super::focus::Focus`] and
-//! [`super::widget_panel::WidgetPanel`].
+//! [`super::panel::WidgetPanel`].
 //!
 //! An inline child receives only `init` (no `wire`, and `init` cannot mail),
 //! so a widget does nothing at boot beyond building its state; the root's
@@ -38,7 +38,7 @@ pub use text_field::TextFieldWidget;
 
 use alloc::vec::Vec;
 
-use crate::widgets::WidgetDrawItem;
+use crate::widget::WidgetDrawItem;
 
 /// A flat-colored quad in a widget's own local coordinates — the shared
 /// constructor the widgets build their chrome from.
