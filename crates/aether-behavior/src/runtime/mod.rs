@@ -307,7 +307,8 @@ impl PanelHandle<'_, '_> {
 /// call, and the `#[behavior]` macro emits their default serde bodies (over
 /// `state_save_serde` / `state_load_serde`) unless the author overrides them.
 pub trait Behavior: Sized {
-    /// Runs post-restore with mirrors primed and ctx available.
+    /// Runs post-restore with ctx available after mirror priming has been
+    /// requested; replay traffic fills mirrors asynchronously afterward.
     fn on_attach(&mut self, ctx: &mut BehaviorCtx<'_>) {
         let _ = ctx;
     }

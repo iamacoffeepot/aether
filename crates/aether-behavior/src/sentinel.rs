@@ -13,7 +13,8 @@
 
 use aether_data::KindId;
 
-/// Dispatched post-restore, with mirrors primed and ctx available.
+/// Dispatched post-restore with ctx available after mirror priming has been
+/// requested; replay traffic fills mirrors asynchronously afterward.
 pub const ATTACH: KindId = KindId(1);
 
 /// Dispatched best-effort as the script leaves its position.
