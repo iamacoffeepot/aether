@@ -307,6 +307,8 @@ fn build_dispatch_body(handlers: &[Handler]) -> TokenStream2 {
                     <#k as ::aether_behavior::__macro_internals::Kind>::decode_from_bytes(__aether_bytes)
                 {
                     #call
+                } else {
+                    __aether_ctx.__fault();
                 }
                 return;
             }
