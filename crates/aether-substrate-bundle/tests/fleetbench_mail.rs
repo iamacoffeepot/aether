@@ -17,7 +17,7 @@ mod tests {
     use aether_kinds::trace::DispatchTraced;
     use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 
-    use crate::fleetbench::{FleetBench, dist_manifest_present};
+    use crate::fleetbench::{FleetBench, dist_component_available};
 
     /// Ping-pong (verify-first, the #1451 deferral): load
     /// `ProbeWithConfig` from the `probe` bundle with a seeded `ProbeConfig`, send it a
@@ -34,7 +34,7 @@ mod tests {
     /// mail rows.
     #[test]
     fn fleetbench_pingpong_echoes_typed_config() {
-        if !dist_manifest_present() {
+        if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
         let mut bench = FleetBench::start();

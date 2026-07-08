@@ -22,7 +22,7 @@ mod tests {
         INLINE_WHO_PARENT, InlineEcho, InlineProbe,
     };
 
-    use crate::fleetbench::{FleetBench, dist_manifest_present};
+    use crate::fleetbench::{FleetBench, dist_component_available};
 
     /// Load `inline_child`, address its inline child by the rendered
     /// lineage name over the wire, and assert the child replied
@@ -33,7 +33,7 @@ mod tests {
     /// home over the real RPC stack.
     #[test]
     fn fleetbench_inline_child_handles_mail_to_its_lineage_address() {
-        if !dist_manifest_present() {
+        if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
         let mut bench = FleetBench::start();
@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn fleetbench_inline_configured_child_state_survives_replace() {
         const BUMPS: u32 = 3;
-        if !dist_manifest_present() {
+        if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
         let mut bench = FleetBench::start();

@@ -21,7 +21,9 @@ mod tests {
         UploadComponentResult,
     };
 
-    use crate::fleetbench::{FleetBench, component_wasm_path, dist_manifest_present, poll_until};
+    use crate::fleetbench::{
+        FleetBench, component_wasm_path, dist_component_available, poll_until,
+    };
 
     /// The probe fixture's declared `Addressable::NAMESPACE` (distinct from the
     /// `probe` wasm stem).
@@ -136,7 +138,7 @@ mod tests {
     /// identical re-upload, and replaces by hash.
     #[test]
     fn fleetbench_uploads_resolves_loads_and_replaces_a_component() {
-        if !dist_manifest_present() {
+        if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
         let probe_path = component_wasm_path("aether_test_fixtures_bundle")
@@ -222,7 +224,7 @@ mod tests {
     /// resolve hub-local, stage the bytes, and spawn with the manifest.
     #[test]
     fn fleetbench_boots_a_component_set_from_a_selector_manifest() {
-        if !dist_manifest_present() {
+        if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
         let probe_path = component_wasm_path("aether_test_fixtures_bundle")
