@@ -6,7 +6,7 @@
 //! component.
 //!
 //! Turns held keys into camera-pose deltas and mails them to a peer
-//! [`CameraComponent`](crate::camera::CameraComponent), so plain scene
+//! [`CameraComponent`], so plain scene
 //! navigation ("look around with the keyboard") composes without dragging in
 //! a gameplay body the way [`WorldMover`](crate::mover::WorldMover)'s embedded
 //! follow-camera does. The camera stays a pure projection state machine; all
@@ -16,8 +16,8 @@
 //!
 //! The controller keeps a **shadow pose** — its own copy of the camera state
 //! it drives — because the camera's `aether.kit.camera.*` deltas are *absolute*
-//! (`Some` overwrites, `None` keeps; see [`OrbitParams`](crate::camera::OrbitParams))
-//! and the camera exposes no read-back kind. On [`wire`](CameraController::wire)
+//! (`Some` overwrites, `None` keeps; see [`OrbitParams`]) and the camera
+//! exposes no read-back kind. On `wire`
 //! it sends one full seed so the shadow is authoritative from the first frame
 //! (every field `Some`, including `speed: Some(0.0)` to pin the orbit
 //! auto-advance so it never fights the keys), and each tick it emits only the
