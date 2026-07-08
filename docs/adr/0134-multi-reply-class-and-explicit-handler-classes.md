@@ -1,6 +1,6 @@
 # ADR-0134: Multi Reply Class and Explicit Handler Classes
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — multi reply class + explicit `#[handler::{single,multi,manual}]` classes in `aether-actor-derive`; amends ADR-0112)
 - **Date:** 2026-07-05
 
 Amends **ADR-0112** (handler reply classes): the reserved `stream` class is renamed **multi** and goes live on the detached-emission model **ADR-0133** established for the HTTP server data phase, and the bare `#[handler]` default is removed — every mail handler spells its reply class. Builds on the causal-chain model of **ADR-0080** and the settlement discharge of **ADR-0106**.
