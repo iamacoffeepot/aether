@@ -172,13 +172,20 @@ pub(crate) enum ChainMode {
 /// non-capturing tag-match the macro emits over the module's exported type
 /// set — the same set [`crate::export!`]'s `@reconstruct_child` arm walks —
 /// so it coerces cleanly and stores in a `Cell`. Given the module's
-/// registry, a runtime [`ActorTypeTag`], the resolved `(is_counter,
-/// subname)` pair, and the child's config bytes, its matched branch
-/// allocates the alias and runs the shared decode + init core on the
-/// selected type; a tag matching none returns
-/// [`SpawnError::UnknownActorTag`].
+/// registry, the spawning actor's real folded id (`parent`), a runtime
+/// [`ActorTypeTag`], the resolved `(is_counter, subname)` pair, and the
+/// child's config bytes, its matched branch allocates the alias and runs
+/// the shared decode + init core on the selected type; a tag matching none
+/// returns [`SpawnError::UnknownActorTag`].
+///
+/// `parent` is threaded from the caller because a by-tag spawn can be
+/// *nested* — an inline child (e.g. the behavior host) spawning its own
+/// child by tag — and the new child's recorded parent must be that
+/// spawning actor, not the cluster root, so relative addressing
+/// (`ctx.child` / `ctx.parent`) resolves it. The typed
+/// [`WasmCtx::spawn_inline_child`] path passes the same `self.mailbox`.
 pub type SpawnByTagFn =
-    fn(&Registry, ActorTypeTag, bool, &str, &[u8]) -> Result<MailboxId, SpawnError>;
+    fn(&Registry, u64, ActorTypeTag, bool, &str, &[u8]) -> Result<MailboxId, SpawnError>;
 
 /// The per-component inline-child registry (ADR-0114 decision #3), keyed
 /// by each child's alias [`MailboxId`]. The [`crate::export!`] macro emits

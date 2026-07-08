@@ -835,6 +835,7 @@ macro_rules! __export_internal {
     // `UnknownActorTag` *before* any allocation, so no host alias is orphaned.
     (@spawn_inline_child_by_tag $($candidate:ty),+) => {
         |__aether_registry: &$crate::wasm::inline::Registry,
+         __aether_parent: u64,
          __aether_tag: $crate::ActorTypeTag,
          __aether_is_counter: bool,
          __aether_subname: &str,
@@ -848,6 +849,7 @@ macro_rules! __export_internal {
                     );
                     return $crate::wasm::inline::compose::spawn_one_child::<$candidate>(
                         __aether_registry,
+                        __aether_parent,
                         __aether_alias,
                         __aether_tag.0,
                         $crate::__macro_internals::String::from(__aether_subname),
