@@ -278,7 +278,9 @@ fn decode_manifest(module: &Module) -> BTreeSet<KindId> {
 mod tests {
     use super::*;
     use crate::envelope::{Effect, EffectTarget, Verdict};
-    use crate::host::test_support::{fixed_output_wasm, forward_output, trapping_wasm};
+    use crate::host::test_support::{
+        conditional_trap_wasm, fixed_output_wasm, forward_output, stateful_wasm, trapping_wasm,
+    };
     use alloc::vec;
 
     // Tripwire: a trap forwards untransformed and, at exactly
@@ -314,20 +316,28 @@ mod tests {
     // transient trap never accumulates toward disable across good calls.
     #[test]
     fn clean_call_resets_trap_counter() {
-        let kind = KindId(0x2000);
+        let trap_kind = KindId(0x2000);
+        let clean_kind = KindId(0x2001);
         let engine = build_engine();
         let payload = forward_output(b"clean");
         let mut slot = ScriptSlot::instantiate(
             &engine,
-            &fixed_output_wasm(kind, &payload),
+            &conditional_trap_wasm(clean_kind, trap_kind, &payload),
             None,
             1_000_000,
             3,
         )
-        .expect("test setup: fixed-output module instantiates");
+        .expect("test setup: conditional-trap module instantiates");
 
-        // A clean call returns the baked output and holds the counter at 0.
-        match slot.filter(kind, b"in") {
+        assert!(matches!(
+            slot.filter(trap_kind, b"in"),
+            FilterOutcome::Passthrough
+        ));
+        assert_eq!(slot.consecutive_traps(), 1);
+        assert!(!slot.is_disabled());
+
+        // A clean call returns the baked output and resets the counter to 0.
+        match slot.filter(clean_kind, b"in") {
             FilterOutcome::Output(out) => {
                 assert_eq!(out.verdict, Verdict::Forward(b"clean".to_vec()))
             }
@@ -393,5 +403,68 @@ mod tests {
         let engine = build_engine();
         let result = ScriptSlot::instantiate(&engine, b"not wasm at all", None, 1_000_000, 3);
         assert!(result.is_err());
+    }
+
+    // Tripwire: `state_save` reads the packed `(ptr, len)` region the script
+    // returns, falling back to the baked default before any `state_load`.
+    #[test]
+    fn save_state_reads_stateful_fixture_default_blob() {
+        let engine = build_engine();
+        let handled = KindId(0x5000);
+        let default_blob = b"default state";
+        let mut slot = ScriptSlot::instantiate(
+            &engine,
+            &stateful_wasm(handled, default_blob),
+            None,
+            1_000_000,
+            3,
+        )
+        .expect("test setup: stateful module instantiates");
+
+        assert_eq!(slot.save_state(), default_blob);
+    }
+
+    // Tripwire: a missing `state_save` export is fail-open and yields no blob.
+    #[test]
+    fn save_state_without_export_returns_empty_vec() {
+        let engine = build_engine();
+        let handled = KindId(0x5001);
+        let output = forward_output(b"stateless");
+        let mut slot = ScriptSlot::instantiate(
+            &engine,
+            &fixed_output_wasm(handled, &output),
+            None,
+            1_000_000,
+            3,
+        )
+        .expect("test setup: stateless module instantiates");
+
+        assert!(slot.save_state().is_empty());
+    }
+
+    // Tripwire: a missing `state_load` export is a no-op; the fresh script
+    // stays runnable after an offered prior-state blob.
+    #[test]
+    fn offer_state_without_export_is_no_op() {
+        let engine = build_engine();
+        let handled = KindId(0x5002);
+        let output = forward_output(b"still running");
+        let mut slot = ScriptSlot::instantiate(
+            &engine,
+            &fixed_output_wasm(handled, &output),
+            None,
+            1_000_000,
+            3,
+        )
+        .expect("test setup: stateless module instantiates");
+
+        slot.offer_state(b"ignored");
+
+        match slot.filter(handled, b"in") {
+            FilterOutcome::Output(out) => {
+                assert_eq!(out.verdict, Verdict::Forward(b"still running".to_vec()))
+            }
+            FilterOutcome::Passthrough => panic!("missing state_load should stay fail-open"),
+        }
     }
 }
