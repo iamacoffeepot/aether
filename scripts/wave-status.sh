@@ -146,7 +146,7 @@ if [[ $WAIT_MODE -eq 1 ]]; then
     # only re-runs resource-exhaustion flakes in the heavy test jobs). A failure
     # in this set already dooms `CI pass`, so the caller fixes and re-pushes now
     # rather than waiting out the slow jobs — the new push supersedes the run.
-    fast_fail_names='["Format","Clippy","Docs","Marker-only host build","Guardrail hook tests"]'
+    fast_fail_names='["Format","Clippy","Docs","Marker-only host build"]'
     while :; do
         runs=$(gh api "repos/$REPO/commits/$sha/check-runs" --paginate --jq '.check_runs' 2>/dev/null) || { sleep 20; continue; }
         fast_red=$(echo "$runs" | jq -r --argjson ff "$fast_fail_names" \
