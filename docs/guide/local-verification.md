@@ -8,7 +8,7 @@ Before you push, run one command:
 cargo fmt
 ```
 
-A formatting slip is the one CI red worth catching locally — instant to fix and the cheapest failure to avoid. Everything heavier is CI's job.
+A formatting slip is the one CI red worth catching locally — instant to fix and the cheapest failure to avoid. Everything heavier is CI's job unless the user explicitly asks for the full local verification pass. In that case, run `cargo build --workspace --all-features`, `cargo test --workspace --all-features`, and `cargo xtask dist`, then reclaim the resulting `target/` and `dist/` artifacts once they are no longer needed.
 
 Codex sessions may also load project hooks from `.codex/hooks.json` after you
 trust them with `/hooks`. Those hooks are interactive guardrails for the local

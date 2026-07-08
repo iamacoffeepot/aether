@@ -31,7 +31,7 @@ Read relevant guide pages and ADRs before changing a subsystem. Prefer current c
 - Format check: `cargo fmt -- --check`
 - Check only: `cargo check`
 
-For implementation PRs, this repo uses GitHub Actions as the full build engine. Locally run `cargo fmt` before pushing; let CI run the expensive checks unless the issue explicitly asks for local verification.
+For implementation PRs, this repo uses GitHub Actions as the full build engine. Locally run `cargo fmt` before pushing; let CI run the expensive checks unless the issue explicitly asks for local verification. If a user explicitly asks for full local build, test, or dist verification, report the result and then note that `target/` and generated `dist/` artifacts can be large, so clean them up when they are no longer needed or ask before preserving them.
 
 ## Codex Hooks
 
