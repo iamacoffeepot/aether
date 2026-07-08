@@ -32,6 +32,11 @@ struct Limiter {
     hits: u32,
 }
 
+#[derive(Debug, PartialEq, Default, Serialize, Deserialize)]
+struct Gate {
+    sealed: u32,
+}
+
 #[behavior]
 impl Behavior for Limiter {
     #[on]
@@ -53,6 +58,16 @@ impl Behavior for Limiter {
     #[on_attach]
     fn setup(&mut self, _ctx: &mut BehaviorCtx) {
         self.cap = 100;
+    }
+}
+
+#[behavior]
+impl Behavior for Gate {
+    #[on]
+    fn seal(&mut self, ctx: &mut BehaviorCtx, gauge: &mut Gauge) {
+        gauge.value = 0;
+        self.sealed += 1;
+        ctx.consume();
     }
 }
 
@@ -107,6 +122,22 @@ fn consume_drops_the_in_flight_mail() {
         matches!(verdict, Verdict::Consume),
         "a consumed mail must not forward",
     );
+}
+
+#[test]
+fn consume_wins_over_the_intercept_re_encode() {
+    let mut gate = Gate::default();
+    let bytes = Gauge { value: 250 }.encode_into_bytes();
+    let mut ctx = BehaviorCtx::__new_inbound(Gauge::ID, &bytes);
+    gate.__aether_behavior_dispatch(&mut ctx, Gauge::ID, &bytes);
+    let verdict = ctx.__into_output().verdict;
+    // Tripwire: the macro's unconditional __forward_mutated after an
+    // intercept handler must not override a consume() verdict.
+    assert!(
+        matches!(verdict, Verdict::Consume),
+        "consume must win over the intercept re-encode path",
+    );
+    assert_eq!(gate.sealed, 1, "the intercept handler body ran");
 }
 
 /// A kind with no `#[on]` handler passes through as a forward of the
