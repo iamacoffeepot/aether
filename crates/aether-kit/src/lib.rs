@@ -6,9 +6,6 @@
 //! files it needs — the crate is guest code all the way down, so there is
 //! no data/runtime split, just one module per actor:
 //!
-//! - [`locomotion::Locomotion`] — tile-grid movement on a fixed-point
-//!   ground plane; the module **entry**, so a bare `load` of `aether_kit.wasm`
-//!   instantiates it. Its wire kinds live in [`locomotion`].
 //! - [`camera::CameraComponent`] — the multi-camera driver, selected by the
 //!   `aether_kit@aether.camera` export (ADR-0096). Its `aether.camera.*`
 //!   driver kinds live in [`camera`].
@@ -50,13 +47,11 @@
 extern crate alloc;
 
 pub mod camera;
-pub mod locomotion;
 pub mod mesh;
 pub mod mover;
 pub mod widget;
 pub mod world;
 
-pub use locomotion::{Preview, SetGranularity, SetWalkable, Teleport};
 pub use mover::MoverTeleport;
 pub use widget::theme::{SetTheme, Theme, WidgetState};
 pub use widget::{
@@ -94,7 +89,6 @@ pub const TILE_BITS: u32 = 8;
 // build's exported set (and its `aether.kinds` section) unchanged.
 #[cfg(not(feature = "behavior"))]
 aether_actor::export!(
-    locomotion::Locomotion,
     camera::CameraComponent,
     mesh::MeshViewer,
     world::WorldView,
@@ -110,7 +104,6 @@ aether_actor::export!(
 
 #[cfg(feature = "behavior")]
 aether_actor::export!(
-    locomotion::Locomotion,
     camera::CameraComponent,
     mesh::MeshViewer,
     world::WorldView,

@@ -70,8 +70,8 @@ f 1 2 3 4
 const BAD_DSL: &[u8] = b"(box not-a-number 1 1)\n";
 
 /// Load `aether-kit`'s pre-built wasm into the bench, selecting the
-/// non-entry `mesh_viewer` export (ADR-0096; the bare entry is
-/// `Locomotion`), and await `LoadResult`. Panics on load failure so
+/// `mesh_viewer` export (ADR-0096; the kit is defaultless per ADR-0138, so
+/// the export selector is required), and await `LoadResult`. Panics on load failure so
 /// the calling test surfaces the error message rather than wedging on
 /// a missing subscription.
 fn load_viewer(bench: &mut TestBench, wasm_path: &Path) {
