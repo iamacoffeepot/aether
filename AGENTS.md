@@ -49,7 +49,9 @@ hook tests or CI hook jobs unless a scoped issue explicitly asks for them.
 
 ## MCP Harness
 
-The Aether MCP endpoint is configured by `.mcp.json` as `aether-hub` at `http://127.0.0.1:8890/mcp`.
+The Aether MCP endpoint is configured for Codex in `.codex/config.toml` and
+for MCP clients that read `.mcp.json` as `aether-hub` at
+`http://127.0.0.1:8890/mcp`.
 
 Start the local tunnel only when a task needs live engine tools:
 
@@ -57,7 +59,11 @@ Start the local tunnel only when a task needs live engine tools:
 scripts/ensure-tunnel.sh
 ```
 
-Expected MCP tools are the `mcp__aether-hub__*` family, including engine listing, substrate spawn/terminate, component upload/load/replace, mail sending, kind/component description, frame capture, actor logs, and cost inspection. If those tools are missing after starting the tunnel, reconnect MCP in the active Codex surface.
+Expected MCP tools are the `mcp__aether-hub__*` family, including engine
+listing, substrate spawn/terminate, component upload/load/replace, mail
+sending, kind/component description, frame capture, actor logs, and cost
+inspection. If those tools are missing after starting the tunnel, reconnect MCP
+in the active Codex surface with `/mcp`.
 
 ## Coding Rules
 

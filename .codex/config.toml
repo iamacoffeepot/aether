@@ -1,0 +1,4 @@
+[mcp_servers.aether-hub]
+url = "http://127.0.0.1:8890/mcp"
+startup_timeout_sec = 20
+tool_timeout_sec = 600
