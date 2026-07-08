@@ -266,13 +266,19 @@ where
 /// `init` + insert core (issue 2690 made reconstruct decode from the slot's
 /// retained bytes too), differing only in the absence of an `on_rehydrate`
 /// state restore (a fresh spawn has no prior state). The child's logical
-/// parent is recorded as the cluster root (`registry.self_id()`), matching
-/// the flat-alias model reconstruct re-derives.
+/// parent is recorded as `parent` — the id of the actor that issued the
+/// spawn, threaded down from [`WasmCtx::spawn_inline_child_by_tag`] so a
+/// *nested* by-tag spawn (an inline child spawning its own child, e.g. the
+/// behavior host wrapping a widget) parents the new child to that spawning
+/// actor rather than the cluster root, which is what lets the spawner's
+/// `ctx.child` resolve it (issue 2688). A top-level spawn passes the root's
+/// own id, so the flat-alias model is unchanged there.
 ///
 /// Returns [`SpawnError::InitFailed`] when `A::Config` cannot decode from
 /// `config_bytes` or `A::init` returns `Err`.
 pub fn spawn_one_child<A>(
     registry: &Registry,
+    parent: u64,
     alias: MailboxId,
     type_tag: u64,
     full_subname: String,
@@ -299,7 +305,7 @@ where
         type_tag,
         full_subname,
         is_counter,
-        registry.self_id(),
+        parent,
         config_bytes.to_vec(),
         config,
     )

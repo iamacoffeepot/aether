@@ -574,7 +574,14 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         let Some(resolver) = self.inline.spawn_resolver() else {
             return Err(SpawnError::UnknownActorTag(tag));
         };
-        resolver(self.inline, tag, is_counter, &full_subname, config_bytes)
+        resolver(
+            self.inline,
+            self.mailbox,
+            tag,
+            is_counter,
+            &full_subname,
+            config_bytes,
+        )
     }
 
     /// ADR-0114: tear down an **inline child** spawned by
@@ -1587,6 +1594,7 @@ mod tests {
     /// as the generated resolver's tag-match fall-through does.
     fn stub_resolver(
         registry: &Registry,
+        parent: u64,
         tag: ActorTypeTag,
         is_counter: bool,
         full_subname: &str,
@@ -1596,6 +1604,7 @@ mod tests {
             let alias = MailboxId(0xABCD_0001);
             spawn_one_child::<StubChild>(
                 registry,
+                parent,
                 alias,
                 tag.0,
                 String::from(full_subname),
@@ -1611,6 +1620,7 @@ mod tests {
     /// tests install it to prove the guard runs before any resolver call.
     fn panicking_resolver(
         _registry: &Registry,
+        _parent: u64,
         _tag: ActorTypeTag,
         _is_counter: bool,
         _full_subname: &str,
@@ -1647,6 +1657,38 @@ mod tests {
             STUB_INIT_CONFIG.get(),
             Some(0x1234_5678),
             "the config bytes were decoded and threaded into the child's init",
+        );
+    }
+
+    /// Issue 2789: a by-tag inline spawn records the **spawner** as the
+    /// child's parent, not the cluster root — so a nested by-tag spawn (an
+    /// inline child spawning its own child, e.g. the behavior host wrapping
+    /// a widget) is reachable through the spawner's `ctx.child` /
+    /// `ctx.parent`. The spawner's own id (`0x5AFE`) is set distinct from
+    /// the cluster root (`0x1111`) so the assertion fails against the old
+    /// `registry.self_id()` behavior. Owned logic: the by-tag spawn's
+    /// parent recording, mirroring the typed `spawn_inline_child` path.
+    #[test]
+    fn spawn_inline_child_by_tag_parents_to_the_spawner_not_the_root() {
+        let registry = Registry::new();
+        registry.set_self_id(0x1111);
+        registry.set_spawn_resolver(stub_resolver);
+        STUB_INIT_CONFIG.set(None);
+
+        let spawner = 0x5AFE_u64;
+        let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(spawner, &registry, NO_INBOUND_SOURCE);
+        let alias = ctx
+            .spawn_inline_child_by_tag(
+                ActorTypeTag::of::<StubChild>(),
+                Subname::Named("nested"),
+                &StubConfig { value: 1 }.encode_into_bytes(),
+            )
+            .expect("a known tag spawns its exported type");
+
+        assert_eq!(
+            registry.parent_of(alias),
+            Some(MailboxId(spawner)),
+            "the by-tag child's recorded parent is the spawner, not the cluster root",
         );
     }
 
