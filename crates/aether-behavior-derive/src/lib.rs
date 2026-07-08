@@ -189,6 +189,7 @@ fn expand_behavior(item: ItemImpl) -> syn::Result<TokenStream2> {
 
     let dispatch = build_dispatch_body(&handlers);
     let manifest = build_exports_manifest(&handlers);
+    let dup_id_guard = build_dup_id_guard(&handlers);
     let lifecycle_overrides = lifecycle_hooks.iter().map(|h| {
         let method = &h.method;
         let trait_method = h.hook.trait_method();
@@ -225,6 +226,7 @@ fn expand_behavior(item: ItemImpl) -> syn::Result<TokenStream2> {
         }
 
         #exports
+        #dup_id_guard
     })
 }
 
@@ -346,6 +348,35 @@ fn build_exports_manifest(handlers: &[Handler]) -> TokenStream2 {
             #( #copy_blocks )*
             let _ = pos;
             out
+        };
+    }
+}
+
+/// Const-eval guard for same-id handlers that token-level conflict checks
+/// cannot see, such as aliases or alternate paths to the same `Kind`.
+fn build_dup_id_guard(handlers: &[Handler]) -> TokenStream2 {
+    let handler_count = handlers.len();
+    let ids = handlers.iter().map(|h| {
+        let k = &h.kind_ty;
+        quote! {
+            <#k as ::aether_behavior::__macro_internals::Kind>::ID.0
+        }
+    });
+
+    quote! {
+        const _: () = {
+            const __AETHER_HANDLER_IDS: [u64; #handler_count] = [ #( #ids ),* ];
+            let mut i = 0;
+            while i < #handler_count {
+                let mut j = i + 1;
+                while j < #handler_count {
+                    if __AETHER_HANDLER_IDS[i] == __AETHER_HANDLER_IDS[j] {
+                        panic!("two #[on] handlers resolve to the same kind id");
+                    }
+                    j += 1;
+                }
+                i += 1;
+            }
         };
     }
 }

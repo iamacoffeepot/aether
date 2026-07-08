@@ -9,4 +9,5 @@ fn ui() {
     let t = trybuild::TestCases::new();
     t.pass("tests/ui/pass_behavior.rs");
     t.compile_fail("tests/ui/fail_bad_handler_signature.rs");
+    t.compile_fail("tests/ui/fail_duplicate_kind_id.rs");
 }
