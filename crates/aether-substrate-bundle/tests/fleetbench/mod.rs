@@ -1103,7 +1103,7 @@ fn isolate_store_root() -> PathBuf {
         let root = temp_dir.join(format!("aether-fleetbench-{}-{nonce}", process::id()));
         match fs::create_dir(&root) {
             Ok(()) => return root,
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
             Err(e) => {
                 panic!("test setup: creating store root {} ({e})", root.display())
             }
@@ -1111,7 +1111,7 @@ fn isolate_store_root() -> PathBuf {
     }
 }
 
-pub(crate) fn allocate_store_root_for_test() -> PathBuf {
+pub fn allocate_store_root_for_test() -> PathBuf {
     isolate_store_root()
 }
 

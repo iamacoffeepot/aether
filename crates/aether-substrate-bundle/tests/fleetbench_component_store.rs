@@ -135,13 +135,18 @@ mod tests {
         hash
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "infra test spawns same-process allocator threads to force contention"
+    )]
     #[test]
     fn fleetbench_store_roots_are_unique_and_created_before_use() {
         const THREADS: usize = 8;
 
-        let handles: Vec<_> = (0..THREADS)
-            .map(|_| thread::spawn(allocate_store_root_for_test))
-            .collect();
+        let mut handles = Vec::with_capacity(THREADS);
+        for _ in 0..THREADS {
+            handles.push(thread::spawn(allocate_store_root_for_test));
+        }
         let roots: Vec<_> = handles
             .into_iter()
             .map(|handle| {
