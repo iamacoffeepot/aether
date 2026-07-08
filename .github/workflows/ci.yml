@@ -23,18 +23,26 @@ jobs:
           filters: |
             code:
               - 'crates/**'
+              - 'xtask/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
+              - 'clippy.toml'
+              - '.cargo/**'
+              - '.config/**'
               - '.github/workflows/**'
             # Qodana's gate is the code set plus its own config, so a
             # qodana.yaml edit still triggers a scan even though it
             # changes no Rust.
             qodana:
               - 'crates/**'
+              - 'xtask/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
+              - 'clippy.toml'
+              - '.cargo/**'
+              - '.config/**'
               - '.github/workflows/**'
               - 'qodana.yaml'
 
