@@ -1405,7 +1405,13 @@ impl Mcp {
                 manifest,
                 ..
             }) => {
-                let entry_namespace = manifest.actors.into_iter().next().map(|a| a.namespace);
+                // ADR-0138: the bare-load entry is the manifest's opted-in
+                // `default_entry` (the single-actor namespace or the
+                // `export!(entry = …)` designation), NOT "the first actor
+                // by list position". A defaultless multi-actor module
+                // reports `None`, so replica-name derivation falls through
+                // to `name` / `export`.
+                let entry_namespace = manifest.default_entry;
                 Ok(ResolvedComponent {
                     wasm,
                     export,

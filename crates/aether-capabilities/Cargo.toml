@@ -199,6 +199,10 @@ aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # `syn` is already deep in the transitive graph
 # (every derive macro pulls it), so this dev-dep is near-free.
 syn = { workspace = true, features = ["full", "visit", "parsing"] }
+# ADR-0138: the `component_manifest` no-entry unit test assembles minimal
+# wasm fixtures (custom sections only) with `wat`, mirroring the
+# substrate's own `kind_manifest` section-reader tests.
+wat = "1"
 
 [lints]
 workspace = true

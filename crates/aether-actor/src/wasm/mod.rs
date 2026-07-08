@@ -364,11 +364,23 @@ macro_rules! export {
     ($component:ty) => {
         $crate::__export_internal!($component);
     };
-    // ADR-0096: multi-actor module — two or more `WasmActor` types in one
-    // crate. Requires at least a first + one more so it never shadows
-    // the single-actor arm above.
+    // ADR-0138: multi-actor module with an explicit default entry —
+    // `export!(entry = A, B, C)` designates `A` as the bare-load target
+    // (the export a `load` with no selector instantiates) and keeps it at
+    // the head of the exported set. This arm is ordered before the generic
+    // multi arm so the `entry =` opt-in is matched first; it reproduces the
+    // pre-ADR-0138 behavior with the entry named explicitly.
+    (entry = $entry:ty $(, $rest:ty)* $(,)?) => {
+        $crate::__export_multi_internal!(@entry $entry ; @all $entry $(, $rest)*);
+    };
+    // ADR-0096 / ADR-0138: multi-actor module — two or more `WasmActor`
+    // types in one crate. Requires at least a first + one more so it never
+    // shadows the single-actor arm above. Per ADR-0138 this bare form
+    // designates NO default entry: a `load` with no export selector is a
+    // hard error naming the exports, not an instantiation of `$first` by
+    // list position. Opt into a default with the `entry =` arm above.
     ($first:ty $(, $rest:ty)+ $(,)?) => {
-        $crate::__export_multi_internal!(@entry $first ; @all $first $(, $rest)+);
+        $crate::__export_multi_internal!(@no_entry ; @all $first $(, $rest)+);
     };
 }
 
@@ -851,19 +863,22 @@ macro_rules! __export_internal {
     };
 }
 
-/// ADR-0096: FFI shims for a multi-actor module — `export!(A, B, …)`.
+/// ADR-0096 / ADR-0138: FFI shims for a multi-actor module —
+/// `export!(entry = A, B, …)` or `export!(A, B, …)`.
 ///
 /// One module-level `Slot<Box<dyn ErasedWasmActor>>` holds whichever
 /// exported type the instance became. Two construction entry points:
 ///
 /// - `init_with_config_p32` (the existing 3-arg ABI) constructs the
-///   **entry** type (the first in the `export!` list). A host that
-///   knows nothing about multi-actor modules loads the entry type with
-///   no changes.
+///   **entry** type when the module opted into one (`@entry`). A
+///   defaultless module (`@no_entry`, ADR-0138) instead stages a
+///   "module has no default entry" failure here — the guest-side backstop
+///   for a bare load the host should already have rejected.
 /// - `init_typed_p32` (4-arg, carries an actor-type tag) matches the
 ///   tag against each exported type's `mailbox_id_from_name(NAMESPACE)`
-///   and constructs the selected one. The host calls this once it can
-///   resolve an export selector to a tag (the follow-on PR).
+///   and constructs the selected one. This path is unchanged by ADR-0138:
+///   a named load resolves the same way whether or not the module has a
+///   default entry.
 ///
 /// `receive` / `wire` / `unwire` / `on_dehydrate` / `on_rehydrate` all
 /// route through the boxed `ErasedWasmActor`, so a multi-actor instance
@@ -871,13 +886,112 @@ macro_rules! __export_internal {
 /// one does (ADR-0101). The `aether.kinds.inputs` section carries every
 /// exported type's records, each preceded by an `ActorBoundary`
 /// (ADR-0096), so the host can regroup per type and resolve an export
-/// selector to a tag. The `aether.namespace` section names the
-/// **entry** type — the default mailbox name when the load omits both
-/// an explicit name and an export selector.
+/// selector to a tag.
+///
+/// ADR-0138: the two forms share one `@shared_body` rule (slot, inline
+/// registry, inputs section, `init` / `init_typed`, receive, dehydrate /
+/// rehydrate). They differ in exactly three items, emitted by the `@entry`
+/// / `@no_entry` wrapper rules: the entry form emits the `aether.namespace`
+/// custom section naming the entry type and an `init_with_config_p32` that
+/// constructs it; the no-entry form omits `aether.namespace`, emits the
+/// `aether.no_entry` marker section instead, and stages a failure from
+/// `init_with_config_p32`.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __export_multi_internal {
+    // ADR-0138: multi-actor module WITH a default entry. Emits the
+    // `aether.namespace` section (naming `$entry`) and a 3-arg
+    // `init_with_config_p32` that constructs `$entry`, then the shared body.
     (@entry $entry:ty ; @all $($component:ty),+) => {
+        #[cfg(target_family = "wasm")]
+        #[used]
+        #[unsafe(link_section = "aether.namespace")]
+        static __AETHER_NAMESPACE_SECTION: [u8; <$entry as $crate::Addressable>::NAMESPACE.len()] = {
+            let bytes = <$entry as $crate::Addressable>::NAMESPACE.as_bytes();
+            let mut out = [0u8; <$entry as $crate::Addressable>::NAMESPACE.len()];
+            let mut i = 0;
+            while i < bytes.len() {
+                out[i] = bytes[i];
+                i += 1;
+            }
+            out
+        };
+
+        /// # Safety
+        /// Existing 3-arg init ABI; constructs the entry (opted-in) export.
+        #[cfg(target_family = "wasm")]
+        #[unsafe(export_name = "init_with_config_p32")]
+        pub unsafe extern "C" fn init_with_config(
+            mailbox_id: u64,
+            config_ptr: u32,
+            config_len: u32,
+        ) -> u32 {
+            $crate::wasm::install_guest_logging();
+            let config_bytes: &[u8] = if config_len == 0 {
+                &[]
+            } else {
+                // SAFETY: substrate wrote `config_len` bytes at `config_ptr` (ADR-0090).
+                unsafe {
+                    ::core::slice::from_raw_parts(config_ptr as usize as *const u8, config_len as usize)
+                }
+            };
+            // ADR-0114 addressing amendment: capture the real folded id as the
+            // cluster self-identity (correct at any lineage depth).
+            __AETHER_INLINE.set_self_id(mailbox_id);
+            // Issue 2692: install the by-tag inline-spawn resolver over the
+            // module's full exported set (entry + rest), so any exported actor
+            // can `ctx.spawn_inline_child_by_tag(...)`.
+            __AETHER_INLINE.set_spawn_resolver(
+                $crate::__export_internal!(@spawn_inline_child_by_tag $($component),+),
+            );
+            $crate::__export_multi_internal!(@construct $entry, mailbox_id, config_bytes)
+        }
+
+        $crate::__export_multi_internal!(@shared_body $($component),+);
+    };
+
+    // ADR-0138: multi-actor module WITHOUT a default entry. Omits the
+    // `aether.namespace` section, emits the `aether.no_entry` marker
+    // section, and stages a failure from the 3-arg `init_with_config_p32`
+    // (the guest-side backstop — the host rejects a bare, defaultless load
+    // before it ever reaches this shim). A named load still resolves
+    // through `init_typed_p32` in the shared body.
+    (@no_entry ; @all $($component:ty),+) => {
+        // The section-level no-entry marker (ADR-0138): a single version
+        // byte in `aether.no_entry`, wasm-target-gated exactly like the
+        // `aether.namespace` section the entry form emits. Its presence is
+        // what lets the host distinguish a defaultless multi-actor module
+        // from a legacy single-actor module.
+        #[cfg(target_family = "wasm")]
+        #[used]
+        #[unsafe(link_section = "aether.no_entry")]
+        static __AETHER_NO_ENTRY_SECTION: [u8; 1] = [1u8];
+
+        /// # Safety
+        /// 3-arg init ABI on a defaultless module: there is no entry to
+        /// construct, so stage a failure and return non-zero. This is a
+        /// backstop — the host rejects a bare, defaultless load first.
+        #[cfg(target_family = "wasm")]
+        #[unsafe(export_name = "init_with_config_p32")]
+        pub unsafe extern "C" fn init_with_config(
+            _mailbox_id: u64,
+            _config_ptr: u32,
+            _config_len: u32,
+        ) -> u32 {
+            $crate::wasm::install_guest_logging();
+            $crate::wasm::stage_init_failure(
+                "guest init: module has no default entry (ADR-0138) — load a named export",
+            );
+            1
+        }
+
+        $crate::__export_multi_internal!(@shared_body $($component),+);
+    };
+
+    // ADR-0138: the body shared by `@entry` and `@no_entry` — everything
+    // except the `aether.namespace` / `aether.no_entry` sections and the
+    // 3-arg `init_with_config_p32` shim, which the wrapper rules emit.
+    (@shared_body $($component:ty),+) => {
         static __AETHER_MULTI: $crate::Slot<
             $crate::__macro_internals::Box<dyn $crate::ErasedWasmActor>
         > = $crate::Slot::new();
@@ -953,52 +1067,10 @@ macro_rules! __export_multi_internal {
             out
         };
 
-        #[cfg(target_family = "wasm")]
-        #[used]
-        #[unsafe(link_section = "aether.namespace")]
-        static __AETHER_NAMESPACE_SECTION: [u8; <$entry as $crate::Addressable>::NAMESPACE.len()] = {
-            let bytes = <$entry as $crate::Addressable>::NAMESPACE.as_bytes();
-            let mut out = [0u8; <$entry as $crate::Addressable>::NAMESPACE.len()];
-            let mut i = 0;
-            while i < bytes.len() {
-                out[i] = bytes[i];
-                i += 1;
-            }
-            out
-        };
-
         /// # Safety
-        /// Existing 3-arg init ABI; constructs the entry (first) export.
-        #[cfg(target_family = "wasm")]
-        #[unsafe(export_name = "init_with_config_p32")]
-        pub unsafe extern "C" fn init_with_config(
-            mailbox_id: u64,
-            config_ptr: u32,
-            config_len: u32,
-        ) -> u32 {
-            $crate::wasm::install_guest_logging();
-            let config_bytes: &[u8] = if config_len == 0 {
-                &[]
-            } else {
-                // SAFETY: substrate wrote `config_len` bytes at `config_ptr` (ADR-0090).
-                unsafe {
-                    ::core::slice::from_raw_parts(config_ptr as usize as *const u8, config_len as usize)
-                }
-            };
-            // ADR-0114 addressing amendment: capture the real folded id as the
-            // cluster self-identity (correct at any lineage depth).
-            __AETHER_INLINE.set_self_id(mailbox_id);
-            // Issue 2692: install the by-tag inline-spawn resolver over the
-            // module's full exported set (entry + rest), so any exported actor
-            // can `ctx.spawn_inline_child_by_tag(...)`.
-            __AETHER_INLINE.set_spawn_resolver(
-                $crate::__export_internal!(@spawn_inline_child_by_tag $($component),+),
-            );
-            $crate::__export_multi_internal!(@construct $entry, mailbox_id, config_bytes)
-        }
-
-        /// # Safety
-        /// ADR-0090 legacy zero-config init; forwards to the entry type.
+        /// ADR-0090 legacy zero-config init; forwards to the 3-arg
+        /// `init_with_config` the wrapper rule (`@entry` / `@no_entry`)
+        /// emits — construct the entry, or stage the no-default failure.
         #[cfg(target_family = "wasm")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {

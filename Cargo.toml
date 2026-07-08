@@ -19,15 +19,17 @@ members = [
     "crates/aether-capabilities",
     "crates/aether-mcp",
     # Test fixtures — a container dir of single-output crates: one shared
-    # `kinds` rlib plus three component cdylibs (the main bundle and the
-    # typed↔reshaped replace-pair satellites). Listed explicitly (not a
-    # `crates/aether-test-fixtures/*` glob) because Qodana's TOML inspector
-    # can't resolve workspace globs.
+    # `kinds` rlib plus the component cdylibs (the main bundle, the
+    # typed↔reshaped replace-pair satellites, and the ADR-0138 defaultless
+    # multi-actor fixture) and the split-cap native lib. Listed explicitly
+    # (not a `crates/aether-test-fixtures/*` glob) because Qodana's TOML
+    # inspector can't resolve workspace globs.
     "crates/aether-test-fixtures/aether-test-fixtures-kinds",
     "crates/aether-test-fixtures/aether-test-fixtures-bundle",
     "crates/aether-test-fixtures/aether-test-fixtures-stateful-typed",
     "crates/aether-test-fixtures/aether-test-fixtures-stateful-reshaped",
     "crates/aether-test-fixtures/aether-test-fixtures-split-cap",
+    "crates/aether-test-fixtures/aether-test-fixtures-defaultless",
     "xtask",
 ]
 exclude = [

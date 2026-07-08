@@ -38,6 +38,8 @@ fn component_manifest(namespace: &str) -> StoredManifest {
         handled_kinds: vec![Tick::ID, Key::ID],
         fallback: false,
         provenance: String::new(),
+        // A single-actor module has an unambiguous bare-load entry.
+        default_entry: Some(namespace.to_owned()),
     })
 }
 

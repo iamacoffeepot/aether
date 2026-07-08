@@ -1084,6 +1084,10 @@ mod engine {
     /// - `fallback` — whether any exported actor declares a `#[fallback]`.
     /// - `provenance` — the wasm `producers` custom section rendered as a
     ///   short string (`"<tool> <version>; …"`), or empty when absent.
+    /// - `default_entry` — the bare-load entry actor's namespace per
+    ///   ADR-0138; `None` for a defaultless multi-actor module (built with
+    ///   a bare `export!(A, B, …)`), `Some(ns)` for a single-actor module
+    ///   or a multi-actor module that opted in via `export!(entry = A, …)`.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub struct ComponentManifest {
         pub namespaces: Vec<String>,
@@ -1091,6 +1095,8 @@ mod engine {
         pub handled_kinds: Vec<aether_data::KindId>,
         pub fallback: bool,
         pub provenance: String,
+        #[serde(default)]
+        pub default_entry: Option<String>,
     }
 
     /// One exported actor type within a (possibly multi-actor) component
@@ -1262,12 +1268,14 @@ mod control_plane {
         /// MCP encode the config struct to bytes at the edge
         /// (SDK-typed, not wire-typed), matching `wasm`'s `Vec<u8>`.
         pub config: Vec<u8>,
-        /// ADR-0096: which exported actor type to instantiate from a
-        /// multi-actor module, named by its `Addressable::NAMESPACE`. `None`
-        /// loads the **entry** type (the first in the module's
-        /// `export!` list), which is also the only type a single-actor
-        /// module has — so an unset selector preserves the pre-ADR-0096
-        /// load. An export that the module doesn't declare is a clean
+        /// ADR-0096 / ADR-0138: which exported actor type to instantiate
+        /// from a multi-actor module, named by its `Addressable::NAMESPACE`.
+        /// `None` loads the module's **entry** type — the single type a
+        /// single-actor module has, or the `export!(entry = A, …)` opt-in
+        /// on a multi-actor module. A defaultless multi-actor module (a
+        /// bare `export!(A, B, …)`) has no entry, so `None` against it is a
+        /// clean `LoadResult::Err` that names the exports (ADR-0138). An
+        /// export that the module doesn't declare is likewise a clean
         /// `LoadResult::Err`.
         pub export: Option<String>,
     }

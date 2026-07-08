@@ -75,6 +75,14 @@ pub const LABELS_SECTION: &str = "aether.kinds.labels";
 /// evolution.
 pub const NAMESPACE_SECTION: &str = "aether.namespace";
 
+/// The section name of the ADR-0138 no-entry marker. A defaultless
+/// multi-actor module (`export!(A, B, …)` with no `entry =`) omits the
+/// [`NAMESPACE_SECTION`] and emits this section instead — a single
+/// version byte whose mere presence tells the host the module has no
+/// bare-load default entry, so an unselected load is a hard error naming
+/// the exports rather than an instantiation by list position.
+pub const NO_ENTRY_SECTION: &str = "aether.no_entry";
+
 /// Wire versions accepted in `aether.kinds`. The shape record's bytes
 /// are `Kind::ID` hash input, so a change to their layout regenerates
 /// every id — a deliberate clean break, taken loudly via this version
@@ -196,6 +204,23 @@ pub fn read_namespace_from_bytes(wasm: &[u8]) -> Result<Option<String>, String> 
         }
     }
     Ok(None)
+}
+
+/// Return whether the component carries the ADR-0138 [`NO_ENTRY_SECTION`]
+/// marker — `true` for a defaultless multi-actor module, `false`
+/// otherwise. The payload is a single version byte the host does not
+/// interpret; presence of the section is the whole signal.
+#[must_use]
+pub fn read_no_entry_marker(wasm: &[u8]) -> bool {
+    for payload in Parser::new(0).parse_all(wasm) {
+        let Ok(Payload::CustomSection(reader)) = payload else {
+            continue;
+        };
+        if reader.name() == NO_ENTRY_SECTION {
+            return true;
+        }
+    }
+    false
 }
 
 /// Read the wasm tool-conventions `producers` custom section (ADR-0116,
@@ -796,6 +821,20 @@ mod tests {
         let wasm = wat::parse_str(r#"(module (func (export "noop")))"#).unwrap();
         let descs = read_from_bytes(&wasm).unwrap();
         assert!(descs.is_empty());
+    }
+
+    #[test]
+    fn no_entry_marker_read_by_section_presence() {
+        // Tripwire: pins the ADR-0138 no-entry contract — the marker is
+        // section name `aether.no_entry`, presence-only (the single
+        // payload byte is not interpreted). A module carrying the section
+        // reads `true`; one without reads `false`. Drifting the section
+        // name or making the reader payload-sensitive breaks this.
+        let with = wasm_with_section(NO_ENTRY_SECTION, &[1u8]);
+        assert!(read_no_entry_marker(&with));
+
+        let without = wat::parse_str(r#"(module (func (export "noop")))"#).unwrap();
+        assert!(!read_no_entry_marker(&without));
     }
 
     #[test]

@@ -365,6 +365,80 @@ fn multi_actor_unknown_export_errors() {
     }
 }
 
+/// ADR-0138: a defaultless multi-actor module (a bare `export!(Alpha,
+/// Beta)`, no `entry =`) has no bare-load entry. A `load` with no export
+/// selector is a hard `LoadResult::Err` that names the exports — not an
+/// instantiation of whichever type sits first — while a named
+/// `export: Some("test.defaultless.alpha")` load of the same module
+/// resolves `Ok` through the unchanged ADR-0096 typed-init path.
+#[test]
+fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
+    let Some(wasm_path) = require_runtime("aether_test_fixtures_defaultless") else {
+        return;
+    };
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+
+    // Bare load (no selector): a defaultless module rejects it, naming its
+    // exports so the caller can pick one.
+    let bare = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm: wasm.clone(),
+                    name: None,
+                    config: Vec::new(),
+                    export: None,
+                },
+            ),
+        )])
+        .expect("bare load sequence");
+    match bare.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Err { error } => {
+            assert!(
+                error.contains("test.defaultless.alpha") && error.contains("test.defaultless.beta"),
+                "a defaultless bare load must name the module's exports; got {error}",
+            );
+        }
+        LoadResult::Ok { name, .. } => {
+            panic!("a bare load of a defaultless module must error, not instantiate {name}")
+        }
+    }
+
+    // Named load: selecting an export by its NAMESPACE resolves as usual.
+    let named = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    name: None,
+                    config: Vec::new(),
+                    export: Some("test.defaultless.alpha".to_owned()),
+                },
+            ),
+        )])
+        .expect("named load sequence");
+    match named
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        LoadResult::Ok { name, .. } => {
+            assert!(
+                name.ends_with(":test.defaultless.alpha"),
+                "a named load of a defaultless module resolves to the selected \
+                 export's NAMESPACE (test.defaultless.alpha); got {name}",
+            );
+        }
+        LoadResult::Err { error } => {
+            panic!("a named load of a defaultless module must succeed; got err {error}")
+        }
+    }
+}
+
 /// ADR-0097: a loaded `RootManager` spawns a `Panel` sibling at runtime
 /// via `ctx.spawn_child::<Panel>`. Pinging `RootManager` triggers the
 /// spawn; the spawned `Panel` registers at
