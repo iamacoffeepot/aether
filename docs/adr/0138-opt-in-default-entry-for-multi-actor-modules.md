@@ -1,6 +1,6 @@
 # ADR-0138: Opt-in Default Entry for Multi-Actor Modules
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — opt-in default entry for multi-actor modules; `crates/aether-capabilities/src/component/runtime/load.rs`, #2736)
 - **Date:** 2026-07-07
 
 ## Context
