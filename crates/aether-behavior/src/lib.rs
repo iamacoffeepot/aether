@@ -24,8 +24,8 @@
 //!   drain logic, and the `#[behavior]` macro's guest exports (`alloc` /
 //!   `filter` / `state_save` / `state_load`) are emitted only on `wasm`.
 //!
-//! Authoring lives in the sibling `aether-behavior-derive` crate; a script
-//! lists both.
+//! Authoring lives in the sibling `aether-behavior-derive` crate, re-exported
+//! here so a script depends on `aether-behavior` alone.
 
 #![no_std]
 
@@ -39,6 +39,10 @@ pub mod sentinel;
 #[cfg(feature = "runtime")]
 pub mod runtime;
 
+/// The behavior authoring macros, re-exported on the runtime face so guest
+/// crates depend on `aether-behavior` alone.
+#[cfg(feature = "runtime")]
+pub use aether_behavior_derive::{behavior, on, on_attach, on_detach, on_frame};
 #[cfg(feature = "runtime")]
 pub use runtime::{Behavior, BehaviorCtx, ChildHandle, PanelHandle, WidgetHandle};
 

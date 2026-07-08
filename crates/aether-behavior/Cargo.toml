@@ -25,7 +25,7 @@ license.workspace = true
 # so `host` never feature-unifies into a script's build graph.
 [features]
 default = ["runtime"]
-runtime = []
+runtime = ["dep:aether-behavior-derive"]
 # ADR-0137 / issue 2687: the in-cluster behavior script host. Pulls the
 # actor SDK (the host is a wasm `#[actor]`), the `wasmi` interpreter it
 # embeds (no_std, built-in fuel metering), the capability crate for the
@@ -36,6 +36,9 @@ host = ["dep:aether-actor", "dep:wasmi", "dep:aether-capabilities", "dep:tracing
 [dependencies]
 aether-data = { path = "../aether-data", default-features = false, features = ["derive"] }
 serde = { workspace = true, default-features = false, features = ["alloc", "derive"] }
+# Home of the `#[behavior]` authoring macros, re-exported from this crate's
+# runtime face so guests depend on one crate.
+aether-behavior-derive = { path = "../aether-behavior-derive", optional = true }
 
 # `host`-only optional deps. `dep:`-gated so the default face's dependency
 # tree names none of them (the crate-boundary tripwire: `cargo tree -p

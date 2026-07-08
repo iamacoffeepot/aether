@@ -43,7 +43,6 @@ crate-type = ["cdylib"]          # the wasm script artifact
 
 [dependencies]
 aether-behavior = { path = "../aether-behavior" }             # SDK (runtime face, on by default)
-aether-behavior-derive = { path = "../aether-behavior-derive" } # the #[behavior] macro
 aether-data = { path = "../aether-data", default-features = false, features = ["derive"] }
 serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
 ```
@@ -79,7 +78,7 @@ from the method's third parameter, and the parameter's mutability *is* the inten
 
 ```rust
 use aether_behavior::BehaviorCtx;
-use aether_behavior_derive::behavior;
+use aether_behavior::behavior;
 use serde::{Deserialize, Serialize};
 
 // Authored state: the clamp cap and how many commits we've clamped. The
