@@ -118,6 +118,20 @@ impl RelativeMailbox<'_> {
         self.id
     }
 
+    /// Resolve a sendable handle to this relative's inline child whose
+    /// subname is `name`, preserving the original addresser for any send
+    /// through the returned handle. This is the multi-hop continuation of
+    /// [`WasmCtx::child`].
+    #[must_use]
+    pub fn child(&self, name: &str) -> Option<Self> {
+        let id = self.inline.child_of(self.id, name)?;
+        Some(RelativeMailbox {
+            id,
+            sender: self.sender,
+            inline: self.inline,
+        })
+    }
+
     /// Send `payload` to this relative, routed in place through the cluster
     /// membrane (queue + drain) — no scheduler hop. Inherits the handler's
     /// in-flight causal chain (the default, ADR-0080 §7); the local path
@@ -1380,9 +1394,11 @@ mod tests {
         let registry = Registry::new();
         let root = 0x7100_u64;
         registry.set_self_id(root);
-        // Install a child of the root keyed by a synthetic alias; record the
-        // root as its parent (what `spawn_inline_child` would record).
+        // Install a child of the root keyed by a synthetic alias, then a
+        // grandchild under it. Record each parent the way `spawn_inline_child`
+        // would.
         let widget = MailboxId(0x7101);
+        let label = MailboxId(0x7102);
         install_inline_child::<SucceedingChild>(
             &registry,
             widget,
@@ -1394,6 +1410,17 @@ mod tests {
             (),
         )
         .expect("a succeeding init installs the inline child");
+        install_inline_child::<SucceedingChild>(
+            &registry,
+            label,
+            0,
+            String::from("label"),
+            false,
+            widget.0,
+            Vec::new(),
+            (),
+        )
+        .expect("a succeeding init installs the inline grandchild");
 
         let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
 
@@ -1409,6 +1436,18 @@ mod tests {
         assert!(
             ctx.child("missing").is_none(),
             "a missing subname resolves to None",
+        );
+        let grandchild = child
+            .child("label")
+            .expect("the grandchild resolves relative to the child handle");
+        assert_eq!(
+            grandchild.mailbox_id(),
+            label,
+            "handle-relative child walk reaches the grandchild",
+        );
+        assert!(
+            child.child("missing").is_none(),
+            "a missing grandchild segment resolves to None",
         );
 
         // The resolved relative is a cluster member, so a send routes in

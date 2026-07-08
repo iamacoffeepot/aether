@@ -451,7 +451,7 @@ impl DrainSink for LaneSink<'_, '_> {
             } => {
                 let relative = match target {
                     EffectTarget::Widget => self.ctx.child(self.wrapped_subname),
-                    EffectTarget::Child(path) => self.ctx.child(&path),
+                    EffectTarget::Child(path) => resolve_child_path(self.ctx, &path),
                     EffectTarget::Panel => self.ctx.parent(),
                 };
                 (relative, kind_id, bytes)
@@ -467,6 +467,21 @@ impl DrainSink for LaneSink<'_, '_> {
             );
         }
     }
+}
+
+fn resolve_child_path<'a>(
+    ctx: &WasmCtx<'a>,
+    path: &str,
+) -> Option<aether_actor::RelativeMailbox<'a>> {
+    let mut segments = path.split('/');
+    let first = segments.next().filter(|segment| !segment.is_empty())?;
+    segments.try_fold(ctx.child(first)?, |relative, segment| {
+        if segment.is_empty() {
+            None
+        } else {
+            relative.child(segment)
+        }
+    })
 }
 
 #[cfg(test)]
