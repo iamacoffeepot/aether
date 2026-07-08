@@ -1,0 +1,60 @@
+# AGENTS.md
+
+Repository guidance for Codex working in Aether.
+
+## Status
+
+Aether is a pre-1.0 Rust 2024 workspace for a game engine whose native substrate hosts wasm actors and native chassis capabilities. Engine actors communicate by mail. Load-bearing design lives in `docs/adr/NNNN-title.md`; the contributor and agent reference is the mdbook source in `docs/guide/`.
+
+Read relevant guide pages and ADRs before changing a subsystem. Prefer current code over prose when they disagree.
+
+## Workflow
+
+- Planned work lives in GitHub issues. Use the repo skills in `.agents/skills/` for sketch, scope, approve, implement, land, sweep, wish, review, and dogfood flows.
+- Existing Claude workflow files in `CLAUDE.md`, `.claude/skills/`, and `.claude/workflows/` remain source material. Codex skills adapt those workflows for Codex surfaces.
+- Do not implement directly in the primary `main` checkout. For issue work, create a separate worktree under `.claude/worktrees/issue-<N>` from `origin/main` and work there.
+- Branches use `type/short-slug` or the issue branch shape from the implement skill, for example `chore/issue-2742-make-repository-codex-friendly`.
+- PR titles and commits use Conventional Commits.
+- Do not push to `main`, force-push reviewed branches, self-merge, or run destructive git commands without explicit user approval.
+- Keep PRs focused: one concept per PR.
+
+## Commands
+
+- Build: `cargo build`
+- Release build: `cargo build --release`
+- Run a crate: `cargo run -p <crate>`
+- Chassis binaries: `cargo run -p aether-substrate-bundle --bin aether-substrate-hub`, `--bin aether-substrate`, or `--bin aether-substrate-headless`
+- Test: `cargo test`
+- Single test: `cargo test <name>`
+- Clippy: `cargo clippy --all-targets -- -D warnings`
+- Format: `cargo fmt`
+- Format check: `cargo fmt -- --check`
+- Check only: `cargo check`
+
+For implementation PRs, this repo uses GitHub Actions as the full build engine. Locally run `cargo fmt` before pushing; let CI run the expensive checks unless the issue explicitly asks for local verification.
+
+## MCP Harness
+
+The Aether MCP endpoint is configured by `.mcp.json` as `aether-hub` at `http://127.0.0.1:8890/mcp`.
+
+Start the local tunnel only when a task needs live engine tools:
+
+```bash
+scripts/ensure-tunnel.sh
+```
+
+Expected MCP tools are the `mcp__aether-hub__*` family, including engine listing, substrate spawn/terminate, component upload/load/replace, mail sending, kind/component description, frame capture, actor logs, and cost inspection. If those tools are missing after starting the tunnel, reconnect MCP in the active Codex surface.
+
+## Coding Rules
+
+- Preserve user changes. Never revert edits you did not make unless the user explicitly asks.
+- Prefer `rg`/`rg --files` for repository search.
+- Use `apply_patch` for manual edits.
+- Avoid section-divider banner comments in source.
+- In load-bearing code, prefer iterative algorithms over recursion unless depth is structurally bounded or capped.
+- In `aether-capabilities/src`, visibility is either `pub` or private; avoid scoped forms such as `pub(crate)`.
+- Spell units out in identifiers (`millis`, `nanos`, `micros`, `bytes`) and do not encode Rust primitive types in names.
+
+## Review Posture
+
+When asked for a review, lead with findings ordered by severity and cite files/lines. Prioritize correctness, regressions, missing tests, and architecture/convention drift over style.

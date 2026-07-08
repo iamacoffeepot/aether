@@ -1,0 +1,38 @@
+---
+name: review
+description: "Run Aether pre-land review with specialist lenses. Use to audit a change for spec fidelity, correctness, test integrity, economy, and convention before un-drafting."
+---
+
+# Review
+
+Use this Codex skill for the pre-land review workflow described by `.claude/workflows/review.js`.
+
+## Source
+
+- Workflow source: `.claude/workflows/review.js`
+- Translation rules: `../_shared/claude-to-codex.md`
+
+Read both before running the workflow.
+
+## Inputs
+
+Prefer explicit inputs from the caller:
+
+- `files`: absolute paths for code lenses.
+- `testFiles`: absolute paths for test-integrity review.
+- `issue`: optional issue or scope text for spec-fidelity review.
+- `diffs`: optional per-file diff hunks.
+- `lenses`: optional subset of `spec-fidelity`, `correctness`, `test-integrity`, `economy`, and `convention`.
+
+If explicit files are absent and the current branch is a PR branch, derive a candidate file set from the diff against `origin/main`. Otherwise ask for files rather than guessing.
+
+## Workflow
+
+1. Scope: if `issue` and `diffs` are present, run the whole-change spec-fidelity pass first. Prune clearly out-of-scope files from later passes.
+2. Find: run applicable specialist lenses per file. Use subagents for independent file/lens work when the user or skill run calls for parallel review.
+3. Verify: verify correctness findings even when high confidence. Refute low/medium confidence findings before including them. Challenge clean correctness and test-integrity lenses when useful.
+4. Roll up confirmed findings first, ordered by severity, with file/line references. Separate soft holds, advisory findings, lint candidates, uncertain items, and spared/refuted findings.
+
+## Review Bar
+
+Keep findings only when the proposed fix is strictly better, not merely different. Correctness findings must name a concrete bad path or input. Test-integrity findings must identify owned logic that the test fails to exercise. Convention findings must cite `CLAUDE.md`, an ADR, or a repo rule and should feed future lint candidates.
