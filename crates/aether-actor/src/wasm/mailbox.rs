@@ -22,10 +22,11 @@
 
 use core::marker::PhantomData;
 
-use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
+use aether_data::{ActorId, Kind, MailboxId, RequestId, Source, Tag, fold_lineage, with_tag};
 
 use crate::model::{Addressable, HandlesKind};
-use crate::wasm::inline::{ChainMode, Registry};
+use crate::wasm::bridge::mail;
+use crate::wasm::inline::{ChainMode, Registry, RouteDecision};
 
 /// Phantom-typed receiver-actor handle for FFI guests, built by
 /// [`crate::wasm::WasmCtx::actor`] / [`crate::wasm::WasmCtx::resolve_actor`].
@@ -155,6 +156,33 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
             ChainMode::Inherit,
             self.sender,
         );
+    }
+
+    /// Send a request and return the correlation id the host minted for it.
+    ///
+    /// Inline-cluster local sends never leave the guest, so no host correlation
+    /// exists for them. That path warn-logs and returns the no-correlation
+    /// sentinel rather than reading a stale `prev_correlation_p32` value.
+    #[must_use]
+    pub fn send_tracked<K>(&self, payload: &K) -> RequestId
+    where
+        R: HandlesKind<K>,
+        K: Kind,
+    {
+        match self.inline.route_decision(self.mailbox) {
+            RouteDecision::Local { .. } => {
+                tracing::warn!(
+                    kind = <K as Kind>::NAME,
+                    recipient = self.mailbox,
+                    "send_tracked on an inline-cluster local route has no host correlation",
+                );
+                RequestId(Source::NO_CORRELATION)
+            }
+            RouteDecision::Remote => {
+                self.send(payload);
+                RequestId(mail::prev_correlation())
+            }
+        }
     }
 
     /// Send a slice of payloads as a contiguous batch. Cast-only —

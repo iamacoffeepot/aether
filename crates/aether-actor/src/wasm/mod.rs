@@ -667,7 +667,7 @@ macro_rules! __export_internal {
                     // — the slot was present for the top-level dispatch above.
                     let instance = unsafe { __AETHER_COMPONENT.get_mut() }
                         .expect("instance present for the cluster-queue drain");
-                    let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, __aether_source);
+                    let mut ctx = $crate::WasmCtx::__new_local_dispatch(mailbox_id, &__AETHER_INLINE, __aether_source);
                     instance.__aether_dispatch(&mut ctx, __aether_mail)
                 }
             });
@@ -1225,7 +1225,7 @@ macro_rules! __export_multi_internal {
                     // iteration's borrow has dropped (the membrane returned).
                     let instance = unsafe { __AETHER_MULTI.get_mut() }
                         .expect("instance present for the cluster-queue drain");
-                    let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, __aether_source);
+                    let mut ctx = $crate::WasmCtx::__new_local_dispatch(mailbox_id, &__AETHER_INLINE, __aether_source);
                     instance.erased_dispatch(&mut ctx, __aether_mail)
                 }
             });

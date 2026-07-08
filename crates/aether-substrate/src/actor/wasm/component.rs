@@ -145,6 +145,11 @@ pub struct ComponentCtx {
     /// threaded (ADR-0038 actor-per-component), so the counter is
     /// never touched from multiple threads.
     correlation_counter: Cell<u64>,
+    /// Current inbound reply correlation exposed through
+    /// `reply_correlation_p32`. Set only for reply envelopes
+    /// (`SourceAddr::None` plus a non-zero correlation) during
+    /// [`Component::deliver`], then cleared after the guest returns.
+    reply_correlation: Cell<u64>,
     /// ADR-0080 §5 in-flight inbound `MailId`. Set by
     /// [`Component::deliver`] before invoking the guest's
     /// `receive_p32` shim so any [`ComponentCtx::send`] the guest
@@ -236,6 +241,7 @@ impl ComponentCtx {
             init_failure: None,
             binding: None,
             correlation_counter: Cell::new(1),
+            reply_correlation: Cell::new(Source::NO_CORRELATION),
             in_flight_mail_id: Cell::new(MailId::NONE),
             in_flight_root: Cell::new(MailId::NONE),
             reply_lineage_counter: Cell::new(REPLY_LINEAGE_BASE),
@@ -306,6 +312,12 @@ impl ComponentCtx {
         // last one. `.saturating_sub(1)` covers the pre-send case
         // where counter is still `1` (initial) → returns `0`.
         self.correlation_counter.get().saturating_sub(1)
+    }
+
+    /// Correlation id echoed on the reply currently being dispatched,
+    /// or `0` when the inbound is not a reply envelope.
+    pub fn reply_correlation(&self) -> u64 {
+        self.reply_correlation.get()
     }
 
     /// Dispatch mail. If the recipient is a sink, the handler runs inline
@@ -570,11 +582,27 @@ impl ComponentCtx {
         self.in_flight_root.set(root);
     }
 
+    /// Set the current dispatch's reply correlation. Only reply envelopes
+    /// expose their correlation; request mail from a component carries the
+    /// requester's id space and must not be surfaced to the recipient as its
+    /// own pending-key space.
+    pub(crate) fn set_reply_correlation(&self, source: Source) {
+        let correlation = if matches!(source.addr, SourceAddr::None)
+            && source.correlation_id != Source::NO_CORRELATION
+        {
+            source.correlation_id
+        } else {
+            Source::NO_CORRELATION
+        };
+        self.reply_correlation.set(correlation);
+    }
+
     /// Clear the in-flight context after the guest's `receive_p32`
     /// shim returns. Symmetric with [`Self::set_in_flight`].
     pub(crate) fn clear_in_flight(&self) {
         self.in_flight_mail_id.set(MailId::NONE);
         self.in_flight_root.set(MailId::NONE);
+        self.reply_correlation.set(Source::NO_CORRELATION);
     }
 }
 
@@ -1133,6 +1161,7 @@ impl Component {
         // call site that bypasses `deliver` (today: only test
         // fixtures) doesn't accidentally pick up stale lineage.
         self.store.data().set_in_flight(mail.mail_id, mail.root);
+        self.store.data().set_reply_correlation(mail.reply_to);
         // ADR-0114 decision #1: thread the routed recipient through to
         // the guest as a `receive_p32` frame slot so a guest handler (and
         // the inline-child membrane) can read which address the mail was
@@ -2198,6 +2227,26 @@ mod tests {
         )
     }
 
+    /// Issue 2791: fixture whose `receive_p32` reads the additive
+    /// `reply_correlation_p32` import and stores the low 32 bits at offset 500.
+    fn wat_stores_reply_correlation() -> String {
+        format!(
+            r#"
+        (module
+            (import "aether" "reply_correlation_p32"
+                (func $reply_correlation (result i64)))
+            (memory (export "memory") 1)
+            {WAT_REALLOC}
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
+                i32.const 500
+                call $reply_correlation
+                i32.wrap_i64
+                i32.store
+                i32.const 0))
+        "#
+        )
+    }
+
     /// Issue 2001 end-to-end through the dispatch unit path: `deliver`
     /// resolves the inbound `SourceAddr` and threads it as the trailing
     /// `receive_p32` slot. A peer-component origin yields that mailbox's
@@ -2249,6 +2298,32 @@ mod tests {
             component.read_u32(500),
             0,
             "a no-reply-target origin must thread 0 as the source param",
+        );
+    }
+
+    #[test]
+    fn reply_correlation_import_exposes_reply_envelope_only() {
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
+
+        let mut component = instantiate(&wat_stores_reply_correlation());
+
+        let reply = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
+            .with_reply_to(Source::with_correlation(SourceAddr::None, 0x5151));
+        component.deliver(&reply).expect("deliver reply");
+        assert_eq!(
+            component.read_u32(500),
+            0x5151,
+            "reply envelope must expose its echoed correlation",
+        );
+
+        let request = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1).with_reply_to(
+            Source::with_correlation(SourceAddr::Component(M(7)), 0x9999),
+        );
+        component.deliver(&request).expect("deliver request");
+        assert_eq!(
+            component.read_u32(500),
+            0,
+            "request envelope correlation is in the sender's id space and must not surface",
         );
     }
 

@@ -14,7 +14,7 @@
 use core::marker::PhantomData;
 use core::ptr;
 
-use aether_data::{Kind, MailboxId, mailbox_id_from_name};
+use aether_data::{Kind, MailboxId, RequestId, Source, mailbox_id_from_name};
 
 use crate::mail::ReplyHandle;
 use crate::mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
@@ -261,6 +261,10 @@ pub struct WasmCtx<'a, M: ReplyMode = Single> {
     /// [`MailboxId::NONE`] (`0`) means no peer-component origin — a session,
     /// remote-engine, or broadcast mail, or a lifecycle hook with no inbound.
     source: u64,
+    /// Whether this ctx came from a top-level host dispatch. Cluster-drained
+    /// in-place dispatches carry no host correlation, so `in_reply_to` must
+    /// not read the outer dispatch's ambient host scalar.
+    host_dispatch: bool,
     /// ADR-0114: the per-component inline-child registry the
     /// [`Self::spawn_inline_child`] / [`Self::despawn_inline_child`] verbs
     /// drive. The `export!` membrane threads in the component's emitted
@@ -302,6 +306,24 @@ impl<'a> WasmCtx<'a, Manual> {
             mailbox,
             sender: None,
             source,
+            host_dispatch: true,
+            inline,
+            _borrow: PhantomData,
+            _mode: PhantomData,
+        }
+    }
+
+    /// Not part of the public API; inline-cluster drains build ctxs through
+    /// here so `in_reply_to()` does not read the outer host dispatch's stale
+    /// reply-correlation scalar.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __new_local_dispatch(mailbox: u64, inline: &'a Registry, source: u64) -> Self {
+        Self {
+            mailbox,
+            sender: None,
+            source,
+            host_dispatch: false,
             inline,
             _borrow: PhantomData,
             _mode: PhantomData,
@@ -372,6 +394,19 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     #[must_use]
     pub fn source_mailbox(&self) -> Option<MailboxId> {
         (self.source != MailboxId::NONE.0).then_some(MailboxId(self.source))
+    }
+
+    /// Correlation id of the request this inbound reply answers.
+    ///
+    /// Returns `None` for ordinary request mail, uncorrelated replies, and
+    /// inline-cluster drained dispatches.
+    #[must_use]
+    pub fn in_reply_to(&self) -> Option<RequestId> {
+        if !self.host_dispatch {
+            return None;
+        }
+        let correlation = mail::reply_correlation();
+        (correlation != Source::NO_CORRELATION).then_some(RequestId(correlation))
     }
 
     /// The component's own mailbox id — the value the substrate uses to
@@ -1187,7 +1222,6 @@ mod tests {
         ActorTypeTag, Emit, Manual, Multi, NO_INBOUND_SOURCE, Registry, Single, SpawnError,
         WasmCtx, install_inline_child,
     };
-    use crate::Addressable;
     use crate::mail::{Mail, PriorState};
     use crate::model::Subname;
     use crate::wasm::inline::RouteDecision;
@@ -1195,7 +1229,8 @@ mod tests {
         InlineChildToReconstruct, reconstruct_one_child, spawn_one_child,
     };
     use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmDropCtx, WasmInitCtx};
-    use aether_data::{Kind, MailboxId};
+    use crate::{Addressable, HandlesKind, WasmActorMailbox};
+    use aether_data::{Kind, MailboxId, Source};
     use alloc::string::String;
     use alloc::vec::Vec;
     use core::cell::Cell;
@@ -1320,6 +1355,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn local_dispatch_ctx_never_reads_host_reply_correlation() {
+        let registry = Registry::new();
+        let ctx: WasmCtx<'_, Manual> =
+            WasmCtx::__new_local_dispatch(0x10, &registry, NO_INBOUND_SOURCE);
+        assert_eq!(
+            ctx.in_reply_to(),
+            None,
+            "cluster-drained dispatches carry no host correlation",
+        );
+    }
+
     /// ADR-0134: `emit` on a `Multi<K>` ctx routes a detached mail at the
     /// threaded dispatch source, and a sourceless dispatch drops the
     /// emission. The source is set to a cluster member (the self id) so the
@@ -1402,6 +1449,8 @@ mod tests {
             unreachable!("the despawn test never dispatches this child")
         }
     }
+
+    impl HandlesKind<()> for SucceedingChild {}
 
     impl ErasedWasmActor for SucceedingChild {
         fn erased_namespace(&self) -> &'static str {
@@ -1512,6 +1561,33 @@ mod tests {
             registry.queued_len(),
             1,
             "a send to a resolved relative enqueues locally — no scheduler hop",
+        );
+    }
+
+    #[test]
+    fn send_tracked_local_route_returns_no_correlation_sentinel() {
+        let registry = Registry::new();
+        let root = 0x7100_u64;
+        registry.set_self_id(root);
+        let child = MailboxId(0x7101);
+        install_inline_child::<SucceedingChild>(
+            &registry,
+            child,
+            0,
+            String::from("widget"),
+            false,
+            root,
+            Vec::new(),
+            (),
+        )
+        .expect("install inline child");
+
+        let mailbox = WasmActorMailbox::<SucceedingChild>::__new(child.0, root, &registry);
+        let request = mailbox.send_tracked(&());
+        assert_eq!(
+            request.0,
+            Source::NO_CORRELATION,
+            "local inline sends have no host-minted request id",
         );
     }
 

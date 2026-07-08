@@ -62,9 +62,10 @@ shape: **return now, continue later.**
 The idiomatic shape is a small state machine spread across handler invocations:
 send the request, *return* from the handler (freeing the worker), and handle the
 reply when it arrives as a *separate* mail in a later handler call. Correlation
-survives across turns — a handler can stash the correlation id of its send
-(`prev_correlation`) and match it against the inbound reply's id, so multiple
-in-flight requests don't get confused (the surviving half of [ADR-0042](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0042-synchronous-mail-wait.md)). Every
+survives across turns through the envelope request id: a wasm handler calls
+`send_tracked(&request)`, stashes the returned `RequestId`, and later compares
+it with `ctx.in_reply_to()` in the reply handler, so duplicate in-flight
+requests don't get confused (the surviving half of [ADR-0042](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0042-synchronous-mail-wait.md)). Every
 request/reply in the engine works this way: `aether.fs.read` →
 `…read_result`, reply-to-sender, and the rest.
 

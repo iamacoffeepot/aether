@@ -15,6 +15,7 @@
 //! so each lives in its own satellite crate.
 
 mod cube;
+mod fs_demux;
 mod http_handler;
 mod inline_child;
 mod mat4_source;
@@ -26,6 +27,7 @@ mod stateful_replace;
 mod ui_widget;
 
 pub use cube::Cube;
+pub use fs_demux::FsDemux;
 pub use http_handler::{
     HttpHandler, RoutedHttpHandler, RoutedStreamingHttpHandler, StreamingHttpHandler,
     WebSocketHandler,
@@ -52,6 +54,7 @@ aether_actor::export!(
     RootManager,
     Panel,
     Cube,
+    FsDemux,
     MatSource,
     UiWidget,
     HttpHandler,

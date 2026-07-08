@@ -9,7 +9,8 @@
 //! and localizes `unsafe` to one audited site per FFI op. `send_mail`
 //! pushes a typed payload at a recipient mailbox; `reply_mail` routes to
 //! the originator of the mail currently being dispatched; `prev_correlation`
-//! reads the correlation id the host minted for the most-recent `send_mail`.
+//! reads the correlation id the host minted for the most-recent `send_mail`;
+//! `reply_correlation` reads the current inbound reply's echoed correlation.
 //!
 //! Correlation is universal — every send mints a correlation id so a
 //! handler can match the reply to the request it sent. It's a property
@@ -127,6 +128,15 @@ pub fn prev_correlation() -> u64 {
     // the `#[cfg(target_family = "wasm")]` import gate enforces
     // (the host-target stub panics rather than returning garbage).
     unsafe { raw::prev_correlation() }
+}
+
+/// Correlation id echoed on the reply currently being dispatched.
+/// Returns `0` when the inbound mail is not a reply envelope.
+#[must_use]
+pub fn reply_correlation() -> u64 {
+    // SAFETY: `raw::reply_correlation` takes no arguments and reads a
+    // host-side scalar set for the active dispatch.
+    unsafe { raw::reply_correlation() }
 }
 
 /// ADR-0097: stage a sibling-spawn request and return the new

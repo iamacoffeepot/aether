@@ -60,7 +60,7 @@ pub use hash::{
     validate_scope_path,
 };
 pub use ids::{
-    ActorId, DagId, KindId, MailboxId, ThreadId, TransformId, tag_for_type_id,
+    ActorId, DagId, KindId, MailboxId, RequestId, ThreadId, TransformId, tag_for_type_id,
     type_name_for_type_id,
 };
 pub use mail::{MailId, Source, SourceAddr};

@@ -27,7 +27,7 @@ pub use registry::{InboxHandler, InlineHandler, MailboxEntry, OwnedDispatch, Reg
 /// ADR-0065 hoisted the canonical home into `aether_data` (per ADR-0069);
 /// this remains re-exported under the `aether_substrate::mail::MailboxId`
 /// path so existing call sites compile unchanged.
-pub use aether_data::{KindId, MailId, MailboxId};
+pub use aether_data::{KindId, MailId, MailboxId, RequestId};
 /// Reply-routing types. Canonical home is `aether-data` (ADR-0076) —
 /// `aether-actor`'s `Dispatch` trait references them in its signature
 /// without taking an `aether-actor`-internal dep, and the location
