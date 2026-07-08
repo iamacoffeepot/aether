@@ -589,10 +589,15 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// inline registry finds nothing and no-ops, dropping the live box at
     /// end of dispatch.
     ///
-    /// No `unwire` runs on teardown in v1: inline children get only `init`
-    /// today, so an `unwire` here would be asymmetric. The inline-child
-    /// `wire` / `unwire` / subscription lifecycle lands separately, and
-    /// teardown grows its `unwire` call then.
+    /// The teardown mirror of the spawn-time `wire` (issue 2746): a resident
+    /// child runs its `unwire` before it is dropped. A self-despawn
+    /// mid-dispatch has already taken the box onto the stack, so `take`
+    /// finds an empty slot and no `unwire` runs here — the box drops at end
+    /// of dispatch via the `reinsert` no-op, and a child unwiring itself
+    /// synchronously mid-handler would be the wrong semantic anyway.
+    /// Whole-component teardown does not yet cascade `unwire` to resident
+    /// inline children (the entry `unwire` FFI runs only the top-level
+    /// instance); that is separate future work.
     // Despawn is a command; its `bool` ("was a resident child removed")
     // is informational and may be ignored, the same contract as
     // `BTreeMap::remove` / `HashSet::remove` (neither is `#[must_use]`).
@@ -600,6 +605,16 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     // borrowed registry rather than mutating a crate-global static.
     #[allow(clippy::must_use_candidate)]
     pub fn despawn_inline_child(&self, child: MailboxId) -> bool {
+        // Take the resident box onto the stack, run its `unwire` through a
+        // ctx addressed to its alias, then drop it; `remove` clears the
+        // now-empty slot. A self-despawn (box already taken by dispatch)
+        // takes `None`, so `unwire` is skipped and the slot removal stays a
+        // clean no-op-then-`false`/`true` per the existing contract.
+        if let Some(mut taken) = self.inline.take(child) {
+            let mut unwire_ctx: WasmCtx<'_, Manual> =
+                WasmCtx::__new(child.0, self.inline, NO_INBOUND_SOURCE);
+            taken.erased_unwire(&mut unwire_ctx);
+        }
         self.inline.remove(child)
     }
 }
@@ -722,6 +737,16 @@ fn resolve_subname(subname: Subname<'_>) -> Result<(bool, String), SpawnError> {
 /// ([`crate::wasm::inline::compose::spawn_one_child`], issue 2692) shares
 /// this exact `init` + insert step with the typed verb rather than
 /// copying it.
+///
+/// After the insert, the fresh child's `wire` runs (issue 2746): the child
+/// is taken back out of its slot onto the stack, `erased_wire` is driven
+/// through a [`WasmCtx`] addressed to its alias, and it is reinserted — the
+/// same take/reinsert discipline `membrane_dispatch` uses, so a `wire` that
+/// spawns a nested inline child re-enters the registry without aliasing its
+/// interior-mutable map. Only the two fresh-spawn paths funnel here; the
+/// `replace_component` reconstruct path (`reconstruct_one_child`) has its
+/// own insert and runs `init` + `on_rehydrate`, not `wire`, so a reload
+/// never fires `wire`.
 // The parameters are the slot's reconstruct record (ADR-0114 §5) plus the
 // decoded config — a fixed set with no meaningful grouping short of a
 // one-use struct.
@@ -753,6 +778,19 @@ where
         config_bytes,
         Box::new(child),
     );
+    // Run the fresh child's `wire` (issue 2746). Take it back onto the stack
+    // so its slot is empty for the duration — a `wire` that spawns a nested
+    // inline child then re-enters the registry (a different slot) with no
+    // aliasing, and a `wire` that re-addresses its own alias finds the empty
+    // slot, exactly as `membrane_dispatch` handles a resident child. `take`
+    // yields `Some` here (the box was just inserted); the `if let` is a
+    // defensive no-op rather than an `expect`.
+    if let Some(mut fresh) = registry.take(alias) {
+        let mut wire_ctx: WasmCtx<'_, Manual> =
+            WasmCtx::__new(alias.0, registry, NO_INBOUND_SOURCE);
+        fresh.erased_wire(&mut wire_ctx);
+        registry.reinsert(alias, fresh);
+    }
     Ok(alias)
 }
 
@@ -1132,7 +1170,9 @@ mod tests {
     use crate::mail::{Mail, PriorState};
     use crate::model::Subname;
     use crate::wasm::inline::RouteDecision;
-    use crate::wasm::inline::compose::spawn_one_child;
+    use crate::wasm::inline::compose::{
+        InlineChildToReconstruct, reconstruct_one_child, spawn_one_child,
+    };
     use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmDropCtx, WasmInitCtx};
     use aether_data::{Kind, MailboxId};
     use alloc::string::String;
@@ -1470,7 +1510,7 @@ mod tests {
         type Ctx<'a> = WasmCtx<'a>;
 
         fn init(config: StubConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-            STUB_INIT_CONFIG.with(|c| c.set(Some(config.value)));
+            STUB_INIT_CONFIG.set(Some(config.value));
             Ok(Self)
         }
     }
@@ -1548,7 +1588,7 @@ mod tests {
     fn spawn_inline_child_by_tag_spawns_matched_type_and_threads_config() {
         let registry = Registry::new();
         registry.set_spawn_resolver(stub_resolver);
-        STUB_INIT_CONFIG.with(|c| c.set(None));
+        STUB_INIT_CONFIG.set(None);
 
         let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
         let config_bytes = StubConfig { value: 0x1234_5678 }.encode_into_bytes();
@@ -1565,7 +1605,7 @@ mod tests {
             "the tagged child is resident under the resolver's alias",
         );
         assert_eq!(
-            STUB_INIT_CONFIG.with(Cell::get),
+            STUB_INIT_CONFIG.get(),
             Some(0x1234_5678),
             "the config bytes were decoded and threaded into the child's init",
         );
@@ -1610,6 +1650,240 @@ mod tests {
         assert!(
             matches!(result, Err(SpawnError::SubnameInvalid(_))),
             "a separator-bearing subname is rejected before the resolver runs, got {result:?}",
+        );
+    }
+
+    std::thread_local! {
+        /// How many times a [`LifecycleProbe`] has run its `wire`, so the
+        /// spawn-runs-`wire` and reconstruct-does-not-`wire` tripwires can
+        /// observe the lifecycle call (issue 2746).
+        static PROBE_WIRE_COUNT: Cell<u32> = const { Cell::new(0) };
+        /// How many times a [`LifecycleProbe`] has run its `unwire`, so the
+        /// despawn-runs-`unwire` tripwire can observe the teardown call.
+        static PROBE_UNWIRE_COUNT: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// Inline child whose `wire` / `unwire` bump thread-local counters, so
+    /// the composition path's new lifecycle calls (issue 2746) are
+    /// observable. Its dispatch hook is unreachable — the tests only spawn /
+    /// despawn / reconstruct it.
+    struct LifecycleProbe;
+
+    impl Addressable for LifecycleProbe {
+        const NAMESPACE: &'static str = "test.inline.lifecycle_probe";
+        type Resolver = crate::Many;
+    }
+
+    impl crate::Lifecycle<Self> for LifecycleProbe {
+        type Config = ();
+        type InitError = ActorInitError;
+        type InitCtx<'a> = WasmInitCtx<'a>;
+        type Ctx<'a> = WasmCtx<'a>;
+
+        fn init(_config: (), _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+            Ok(Self)
+        }
+    }
+
+    impl WasmActor for LifecycleProbe {
+        type State = Self;
+        type Persist = ();
+    }
+
+    impl crate::WasmDispatch<Self> for LifecycleProbe {
+        fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+            unreachable!("the lifecycle-probe tests never dispatch this child")
+        }
+    }
+
+    impl ErasedWasmActor for LifecycleProbe {
+        fn erased_namespace(&self) -> &'static str {
+            Self::NAMESPACE
+        }
+        fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+            unreachable!("the lifecycle-probe tests never dispatch this child")
+        }
+        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {
+            PROBE_WIRE_COUNT.set(PROBE_WIRE_COUNT.get() + 1);
+        }
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {
+            PROBE_UNWIRE_COUNT.set(PROBE_UNWIRE_COUNT.get() + 1);
+        }
+        fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
+        fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
+    }
+
+    /// Inline child whose `wire` spawns a nested inline child by tag — the
+    /// reentrant shape the take/reinsert composition must support (a `wire`
+    /// that re-enters the registry to install a grandchild). `BehaviorHost`'s
+    /// `wire` spawns its wrapped widget exactly this way in the live engine
+    /// (issue 2746). The nested child is a [`StubChild`], resolved through
+    /// [`stub_resolver`], so its `init` records the threaded config.
+    struct NestingParent;
+
+    impl Addressable for NestingParent {
+        const NAMESPACE: &'static str = "test.inline.nesting_parent";
+        type Resolver = crate::Many;
+    }
+
+    impl crate::Lifecycle<Self> for NestingParent {
+        type Config = ();
+        type InitError = ActorInitError;
+        type InitCtx<'a> = WasmInitCtx<'a>;
+        type Ctx<'a> = WasmCtx<'a>;
+
+        fn init(_config: (), _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+            Ok(Self)
+        }
+    }
+
+    impl WasmActor for NestingParent {
+        type State = Self;
+        type Persist = ();
+    }
+
+    impl crate::WasmDispatch<Self> for NestingParent {
+        fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+            unreachable!("the nesting-parent test never dispatches this child")
+        }
+    }
+
+    impl ErasedWasmActor for NestingParent {
+        fn erased_namespace(&self) -> &'static str {
+            Self::NAMESPACE
+        }
+        fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+            unreachable!("the nesting-parent test never dispatches this child")
+        }
+        fn erased_wire(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
+            let config_bytes = StubConfig { value: 0x0BAD_CAFE }.encode_into_bytes();
+            ctx.spawn_inline_child_by_tag(
+                ActorTypeTag::of::<StubChild>(),
+                Subname::Named("nested"),
+                &config_bytes,
+            )
+            .expect("the nested by-tag spawn during wire succeeds");
+        }
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+        fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
+        fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
+    }
+
+    /// Issue 2746: a fresh inline spawn runs the child's `wire` after `init`,
+    /// and a `wire` that spawns a nested inline child works — the reentrant
+    /// take/reinsert path that would be silent UB under a borrow held across
+    /// the call. Owned logic: the composition path's lifecycle call and its
+    /// reentrancy, not a derive or another crate's machinery.
+    #[test]
+    fn install_inline_child_runs_wire_and_supports_nested_spawn() {
+        let registry = Registry::new();
+        registry.set_self_id(0x9000);
+        registry.set_spawn_resolver(stub_resolver);
+        STUB_INIT_CONFIG.set(None);
+
+        let parent = MailboxId(0x9001);
+        install_inline_child::<NestingParent>(
+            &registry,
+            parent,
+            0,
+            String::from("nesting"),
+            false,
+            0x9000,
+            Vec::new(),
+            (),
+        )
+        .expect("the nesting parent installs");
+
+        // The parent's `wire` ran and it was reinserted into its slot.
+        assert!(
+            registry.take(parent).is_some(),
+            "the parent's wire ran and it was reinserted",
+        );
+        // The `wire` spawned a nested inline child mid-wire (the reentrant
+        // install path) — resolved to the stub resolver's fixed alias.
+        assert!(
+            registry.take(MailboxId(0xABCD_0001)).is_some(),
+            "wire installed a nested inline child (reentrant registry access)",
+        );
+        assert_eq!(
+            STUB_INIT_CONFIG.get(),
+            Some(0x0BAD_CAFE),
+            "the nested child ran init with the config threaded through wire's spawn",
+        );
+    }
+
+    /// Issue 2746: `despawn_inline_child` runs a resident child's `unwire`
+    /// before dropping it (and spawn ran its `wire`). Owned logic: the
+    /// teardown mirror the composition path now makes.
+    #[test]
+    fn despawn_inline_child_runs_unwire() {
+        let registry = Registry::new();
+        registry.set_self_id(0x9200);
+        PROBE_WIRE_COUNT.set(0);
+        PROBE_UNWIRE_COUNT.set(0);
+
+        let probe = MailboxId(0x9201);
+        install_inline_child::<LifecycleProbe>(
+            &registry,
+            probe,
+            0,
+            String::from("probe"),
+            false,
+            0x9200,
+            Vec::new(),
+            (),
+        )
+        .expect("the probe installs");
+        assert_eq!(
+            PROBE_WIRE_COUNT.get(),
+            1,
+            "a fresh inline spawn runs the child's wire exactly once",
+        );
+
+        let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x9200, &registry, NO_INBOUND_SOURCE);
+        let removed = ctx.despawn_inline_child(probe);
+        assert!(removed, "despawning a resident child returns true");
+        assert_eq!(
+            PROBE_UNWIRE_COUNT.get(),
+            1,
+            "despawn runs the child's unwire exactly once",
+        );
+        assert!(
+            registry.take(probe).is_none(),
+            "the despawned child's slot is gone",
+        );
+    }
+
+    /// Issue 2746: a `replace_component` reconstruct runs `init` +
+    /// `on_rehydrate`, never `wire` — the fresh-spawn-vs-reload distinction
+    /// that keeps `wire` a genuine-first-attach signal. Guards against a
+    /// future move of the `wire` call into the shared `insert_child`, which
+    /// would wrongly fire it on every reload.
+    #[test]
+    fn reconstruct_does_not_run_wire() {
+        let registry = Registry::new();
+        PROBE_WIRE_COUNT.set(0);
+
+        let alias = MailboxId(0x9301);
+        let to_reconstruct = InlineChildToReconstruct {
+            alias,
+            type_tag: 0,
+            is_counter: false,
+            full_subname: "probe",
+            state_version: 0,
+            state_bytes: &[],
+            config_bytes: &[],
+        };
+        let ok = reconstruct_one_child::<LifecycleProbe>(&registry, &to_reconstruct);
+        assert!(ok, "a ()-config probe reconstructs from empty bytes");
+        assert_eq!(
+            PROBE_WIRE_COUNT.get(),
+            0,
+            "a reconstruct runs init + on_rehydrate, never wire",
+        );
+        assert!(
+            registry.take(alias).is_some(),
+            "the reconstructed child is resident under its alias",
         );
     }
 }
