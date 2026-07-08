@@ -89,55 +89,59 @@ enum VerdictState {
     Consume,
 }
 
-/// The pure filter-call context handed to every handler. Accumulates
-/// effects and the verdict, and carries the decode-once mirror each handle
-/// reads. The host builds one per `filter` call and drains it after.
-pub struct BehaviorCtx {
-    inbound: Vec<u8>,
-    verdict: VerdictState,
-    effects: Vec<Effect>,
+/// Persistent last-value mirrors for one behavior-script instance.
+#[derive(Default)]
+pub struct MirrorStore {
     widget_mirror: Mirror,
     panel_mirror: Mirror,
     child_mirrors: BTreeMap<String, Mirror>,
 }
 
-impl BehaviorCtx {
+/// The pure filter-call context handed to every handler. Accumulates
+/// effects and the verdict, and borrows the decode-once mirror store each
+/// handle reads. The host builds one per `filter` call and drains it after.
+pub struct BehaviorCtx<'m> {
+    inbound: Vec<u8>,
+    verdict: VerdictState,
+    effects: Vec<Effect>,
+    mirrors: &'m mut MirrorStore,
+}
+
+impl<'m> BehaviorCtx<'m> {
     /// Build a ctx for an inbound `filter` call, seeding the widget mirror
     /// from the inbound kind (the kind flowing through the interposition
     /// updates the mirror before handler dispatch, ADR-0137). A sentinel
     /// kind carries no payload, so it seeds nothing.
     #[doc(hidden)]
     #[must_use]
-    pub fn __new_inbound(kind_id: KindId, bytes: &[u8]) -> Self {
-        let mut ctx = Self {
+    pub fn __new_inbound(mirrors: &'m mut MirrorStore, kind_id: KindId, bytes: &[u8]) -> Self {
+        let ctx = Self {
             inbound: bytes.to_vec(),
             verdict: VerdictState::ForwardOriginal,
             effects: Vec::new(),
-            widget_mirror: Mirror::default(),
-            panel_mirror: Mirror::default(),
-            child_mirrors: BTreeMap::new(),
+            mirrors,
         };
         if !sentinel::is_sentinel(kind_id) {
-            ctx.widget_mirror.update(kind_id, bytes.to_vec());
+            ctx.mirrors.widget_mirror.update(kind_id, bytes.to_vec());
         }
         ctx
     }
 
     /// The wrapped widget the host interposes on.
     #[must_use]
-    pub fn widget(&mut self) -> WidgetHandle<'_> {
+    pub fn widget(&mut self) -> WidgetHandle<'_, 'm> {
         WidgetHandle { ctx: self }
     }
 
     /// The parent lane.
     #[must_use]
-    pub fn panel(&mut self) -> PanelHandle<'_> {
+    pub fn panel(&mut self) -> PanelHandle<'_, 'm> {
         PanelHandle { ctx: self }
     }
 
     /// A named child in the host's subtree, addressed path-relative.
     #[must_use]
-    pub fn child(&mut self, path: &str) -> ChildHandle<'_> {
+    pub fn child(&mut self, path: &str) -> ChildHandle<'_, 'm> {
         ChildHandle {
             ctx: self,
             path: String::from(path),
@@ -178,18 +182,18 @@ impl BehaviorCtx {
 
 /// Handle to the wrapped widget: intercept-time writes (`set`), the mirror
 /// read (`last`), and a replay request (`report`).
-pub struct WidgetHandle<'c> {
-    ctx: &'c mut BehaviorCtx,
+pub struct WidgetHandle<'c, 'm> {
+    ctx: &'c mut BehaviorCtx<'m>,
 }
 
-impl WidgetHandle<'_> {
+impl WidgetHandle<'_, '_> {
     /// Write a kind to the widget. The effect is drained into a real send
     /// after the filter returns; the write also integrates into the mirror
     /// so a later `last::<K>()` reflects the script's own write (echo
     /// suppression, truthful mirror).
     pub fn set<K: Kind + 'static>(&mut self, value: &K) {
         let bytes = value.encode_into_bytes();
-        self.ctx.widget_mirror.update(K::ID, bytes.clone());
+        self.ctx.mirrors.widget_mirror.update(K::ID, bytes.clone());
         self.ctx.effects.push(Effect {
             target: EffectTarget::Widget,
             kind_id: K::ID.0,
@@ -199,7 +203,7 @@ impl WidgetHandle<'_> {
 
     /// The last value the widget emitted for `K`, decoded once.
     pub fn last<K: Kind + 'static>(&mut self) -> Option<&K> {
-        self.ctx.widget_mirror.last::<K>()
+        self.ctx.mirrors.widget_mirror.last::<K>()
     }
 
     /// Ask the widget to re-emit its observable kinds up-lane. The reply is
@@ -215,17 +219,18 @@ impl WidgetHandle<'_> {
 
 /// Handle to a named child: a send (`send`), the mirror read (`last`), and a
 /// replay request (`report`).
-pub struct ChildHandle<'c> {
-    ctx: &'c mut BehaviorCtx,
+pub struct ChildHandle<'c, 'm> {
+    ctx: &'c mut BehaviorCtx<'m>,
     path: String,
 }
 
-impl ChildHandle<'_> {
+impl ChildHandle<'_, '_> {
     /// Send a kind to the child. Drained into a real cluster send after the
     /// filter returns; the write integrates into the child's mirror.
     pub fn send<K: Kind + 'static>(&mut self, value: &K) {
         let bytes = value.encode_into_bytes();
         self.ctx
+            .mirrors
             .child_mirrors
             .entry(self.path.clone())
             .or_default()
@@ -239,7 +244,11 @@ impl ChildHandle<'_> {
 
     /// The last value the child emitted for `K`, decoded once.
     pub fn last<K: Kind + 'static>(&mut self) -> Option<&K> {
-        self.ctx.child_mirrors.get_mut(&self.path)?.last::<K>()
+        self.ctx
+            .mirrors
+            .child_mirrors
+            .get_mut(&self.path)?
+            .last::<K>()
     }
 
     /// Ask the child to re-emit its observable kinds up-lane.
@@ -253,16 +262,16 @@ impl ChildHandle<'_> {
 }
 
 /// Handle to the parent lane: emit up (`emit`) and the mirror read (`last`).
-pub struct PanelHandle<'c> {
-    ctx: &'c mut BehaviorCtx,
+pub struct PanelHandle<'c, 'm> {
+    ctx: &'c mut BehaviorCtx<'m>,
 }
 
-impl PanelHandle<'_> {
+impl PanelHandle<'_, '_> {
     /// Emit a kind up the parent lane. Drained into a real send after the
     /// filter returns; the write integrates into the panel mirror.
     pub fn emit<K: Kind + 'static>(&mut self, value: &K) {
         let bytes = value.encode_into_bytes();
-        self.ctx.panel_mirror.update(K::ID, bytes.clone());
+        self.ctx.mirrors.panel_mirror.update(K::ID, bytes.clone());
         self.ctx.effects.push(Effect {
             target: EffectTarget::Panel,
             kind_id: K::ID.0,
@@ -272,7 +281,7 @@ impl PanelHandle<'_> {
 
     /// The last value seen on the parent lane for `K`, decoded once.
     pub fn last<K: Kind + 'static>(&mut self) -> Option<&K> {
-        self.ctx.panel_mirror.last::<K>()
+        self.ctx.mirrors.panel_mirror.last::<K>()
     }
 }
 
@@ -284,18 +293,18 @@ impl PanelHandle<'_> {
 /// `state_save_serde` / `state_load_serde`) unless the author overrides them.
 pub trait Behavior: Sized {
     /// Runs post-restore with mirrors primed and ctx available.
-    fn on_attach(&mut self, ctx: &mut BehaviorCtx) {
+    fn on_attach(&mut self, ctx: &mut BehaviorCtx<'_>) {
         let _ = ctx;
     }
 
     /// Per-frame work, dispatched on the SDK-owned frame sentinel (no kit
     /// coupling).
-    fn on_frame(&mut self, ctx: &mut BehaviorCtx) {
+    fn on_frame(&mut self, ctx: &mut BehaviorCtx<'_>) {
         let _ = ctx;
     }
 
     /// Best-effort teardown as the script leaves its position.
-    fn on_detach(&mut self, ctx: &mut BehaviorCtx) {
+    fn on_detach(&mut self, ctx: &mut BehaviorCtx<'_>) {
         let _ = ctx;
     }
 
@@ -331,11 +340,12 @@ pub fn state_load_serde<T: DeserializeOwned>(slot: &mut T, bytes: &[u8]) {
 /// `leak_packed`; host tests drive [`BehaviorCtx`] directly.
 #[must_use]
 pub fn run_filter(
+    mirrors: &mut MirrorStore,
     kind_id: KindId,
     inbound: &[u8],
-    dispatch: impl FnOnce(&mut BehaviorCtx),
+    dispatch: impl FnOnce(&mut BehaviorCtx<'_>),
 ) -> Vec<u8> {
-    let mut ctx = BehaviorCtx::__new_inbound(kind_id, inbound);
+    let mut ctx = BehaviorCtx::__new_inbound(mirrors, kind_id, inbound);
     dispatch(&mut ctx);
     encode(&ctx.__into_output())
 }

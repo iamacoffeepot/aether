@@ -3,7 +3,7 @@ use alloc::string::String;
 use aether_data::Kind;
 use serde::{Deserialize, Serialize};
 
-use super::BehaviorCtx;
+use super::{BehaviorCtx, MirrorStore, run_filter};
 use crate::envelope::{EffectTarget, Verdict};
 
 #[derive(
@@ -29,7 +29,8 @@ struct Label {
 #[test]
 fn drain_reports_verdict_then_ordered_effects() {
     let inbound = Slider { value: 5 }.encode_into_bytes();
-    let mut ctx = BehaviorCtx::__new_inbound(Slider::ID, &inbound);
+    let mut mirrors = MirrorStore::default();
+    let mut ctx = BehaviorCtx::__new_inbound(&mut mirrors, Slider::ID, &inbound);
 
     ctx.widget().set(&Slider { value: 8 });
     ctx.child("row/label").send(&Label {
@@ -65,14 +66,16 @@ fn drain_reports_verdict_then_ordered_effects() {
 #[test]
 fn forward_carries_original_then_mutated_bytes() {
     let inbound = Slider { value: 5 }.encode_into_bytes();
+    let mut original_mirrors = MirrorStore::default();
 
-    let original = BehaviorCtx::__new_inbound(Slider::ID, &inbound);
+    let original = BehaviorCtx::__new_inbound(&mut original_mirrors, Slider::ID, &inbound);
     assert_eq!(
         original.__into_output().verdict,
         Verdict::Forward(inbound.clone())
     );
 
-    let mut mutated = BehaviorCtx::__new_inbound(Slider::ID, &inbound);
+    let mut mutated_mirrors = MirrorStore::default();
+    let mut mutated = BehaviorCtx::__new_inbound(&mut mutated_mirrors, Slider::ID, &inbound);
     let reencoded = Slider { value: 9 }.encode_into_bytes();
     mutated.__forward_mutated(reencoded.clone());
     assert_eq!(mutated.__into_output().verdict, Verdict::Forward(reencoded));
@@ -84,11 +87,31 @@ fn forward_carries_original_then_mutated_bytes() {
 #[test]
 fn mirror_decodes_inbound_and_invalidates_on_update() {
     let inbound = Slider { value: 5 }.encode_into_bytes();
-    let mut ctx = BehaviorCtx::__new_inbound(Slider::ID, &inbound);
+    let mut mirrors = MirrorStore::default();
+    let mut ctx = BehaviorCtx::__new_inbound(&mut mirrors, Slider::ID, &inbound);
 
     assert_eq!(ctx.widget().last::<Slider>(), Some(&Slider { value: 5 }));
 
     // Own write updates the mirror; the cached decode must be dropped.
     ctx.widget().set(&Slider { value: 9 });
     assert_eq!(ctx.widget().last::<Slider>(), Some(&Slider { value: 9 }));
+}
+
+#[test]
+fn run_filter_preserves_mirror_across_calls() {
+    let slider = Slider { value: 7 }.encode_into_bytes();
+    let label = Label {
+        text: String::from("later"),
+    }
+    .encode_into_bytes();
+    let mut mirrors = MirrorStore::default();
+
+    let _ = run_filter(&mut mirrors, Slider::ID, &slider, |_| {});
+
+    let mut observed = None;
+    let _ = run_filter(&mut mirrors, Label::ID, &label, |ctx| {
+        observed = ctx.widget().last::<Slider>().cloned();
+    });
+
+    assert_eq!(observed, Some(Slider { value: 7 }));
 }

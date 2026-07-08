@@ -8,6 +8,7 @@
 
 use aether_behavior::envelope::Verdict;
 use aether_behavior::manifest::decode_exports_manifest;
+use aether_behavior::runtime::MirrorStore;
 use aether_behavior::{Behavior, BehaviorCtx};
 use aether_behavior_derive::behavior;
 use aether_data::{Kind, KindId};
@@ -57,7 +58,8 @@ impl Behavior for Limiter {
 
 fn dispatch<K: Kind>(limiter: &mut Limiter, kind: &K) -> Verdict {
     let bytes = kind.encode_into_bytes();
-    let mut ctx = BehaviorCtx::__new_inbound(K::ID, &bytes);
+    let mut mirrors = MirrorStore::default();
+    let mut ctx = BehaviorCtx::__new_inbound(&mut mirrors, K::ID, &bytes);
     limiter.__aether_behavior_dispatch(&mut ctx, K::ID, &bytes);
     ctx.__into_output().verdict
 }

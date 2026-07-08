@@ -71,7 +71,7 @@ pub mod __macro_internals {
 
     #[cfg(feature = "runtime")]
     pub use crate::runtime::{
-        Behavior, BehaviorCtx, Slot, run_filter, state_load_serde, state_save_serde,
+        Behavior, BehaviorCtx, MirrorStore, Slot, run_filter, state_load_serde, state_save_serde,
     };
     #[cfg(all(feature = "runtime", target_family = "wasm"))]
     pub use crate::runtime::{leak_packed, read_guest_slice, realloc_bytes};

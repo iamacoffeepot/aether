@@ -233,11 +233,7 @@ impl WasmActor for BehaviorHost {
             return;
         }
 
-        let declared = self
-            .slot
-            .as_ref()
-            .is_some_and(|slot| !slot.is_disabled() && slot.handles(kind));
-        if !declared {
+        if !self.offers_kind_to_script(kind) {
             self.forward_raw(&*ctx, is_up, kind, bytes);
             return;
         }
@@ -312,6 +308,12 @@ impl BehaviorHost {
     /// source — the parent, or a sourceless dispatch — is down-lane.
     fn lane_is_up(&self, source: Option<MailboxId>) -> bool {
         matches!((source, self.wrapped_child), (Some(s), Some(w)) if s == w)
+    }
+
+    fn offers_kind_to_script(&self, kind: KindId) -> bool {
+        self.slot.as_ref().is_some_and(|slot| {
+            !slot.is_disabled() && (slot.handles(kind) || self.config.is_mirror_kind(kind))
+        })
     }
 
     /// Compile + instantiate `bytes`, carrying the prior script's `state_save`
@@ -542,6 +544,7 @@ mod tests {
     use crate::host::config::ChildSpec;
     use crate::host::test_support::{fixed_output_wasm, forward_output};
     use aether_actor::Lifecycle;
+    use aether_actor::wasm::{NO_INBOUND_SOURCE, inline::Registry};
     use alloc::string::ToString;
     use alloc::vec;
     use alloc::vec::Vec;
@@ -568,6 +571,7 @@ mod tests {
             fuel_per_call: HostConfig::DEFAULT_FUEL_PER_CALL,
             disable_after_traps: HostConfig::DEFAULT_DISABLE_AFTER_TRAPS,
             frame_trigger: 0,
+            mirror_kinds: Vec::new(),
         }
     }
 
@@ -614,6 +618,36 @@ mod tests {
         // With no wrapped child every source reads down-lane.
         host.wrapped_child = None;
         assert!(!host.lane_is_up(Some(MailboxId(0xC0FFEE))));
+    }
+
+    // Tripwire: low-rate mirror kinds are still offered to SDK dispatch even
+    // when the script manifest does not declare a handler for that kind. Once
+    // admitted, the fixture returns a passthrough output for the same bytes.
+    #[test]
+    fn mirror_kind_bypasses_manifest_skip() {
+        let declared = KindId(0x1234);
+        let mirror_kind = KindId(0x5678);
+        let script = fixed_output_wasm(declared, &forward_output(b"mirror"));
+        let mut host = host(ScriptSource::Inline(script));
+        host.config.mirror_kinds = alloc::vec![mirror_kind.0];
+
+        let slot = host.slot.as_ref().expect("test setup: script resident");
+        assert!(slot.handles(declared));
+        assert!(!slot.handles(mirror_kind));
+        assert!(host.offers_kind_to_script(mirror_kind));
+
+        let registry = Registry::new();
+        let mut ctx = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+        assert!(
+            host.run_filter_and_drain(
+                ctx.as_single(),
+                false,
+                Some(mirror_kind),
+                mirror_kind,
+                b"mirror",
+            ),
+            "the undeclared mirror kind should reach guest dispatch"
+        );
     }
 
     // Tripwire: a failed swap (bad bytes) keeps the prior running script and
