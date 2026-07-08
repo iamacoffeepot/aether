@@ -60,6 +60,10 @@ yourself with `scripts/ensure-tunnel.sh`: it's idempotent (a no-op if `:8890` is
 already bound, otherwise it launches the tunnel detached). Ports and the rest are in
 `CLAUDE.md`'s MCP-harness section, which is the operational reference for the stack.
 
+Codex sessions in a trusted checkout pick up the `aether-hub` MCP server from
+`.codex/config.toml`; if the `mcp__aether-hub__*` tools are missing after the
+tunnel starts, run `/mcp` in the active Codex surface to reconnect them.
+
 ## The session loop
 
 Everything is keyed by `engine_id`. A session has a recognizable arc:
