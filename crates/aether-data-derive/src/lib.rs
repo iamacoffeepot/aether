@@ -1109,3 +1109,116 @@ impl<'ast> Visit<'ast> for PurityScanner {
         visit::visit_expr_path(self, node);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::reject_hashmap;
+    use syn::parse_str;
+
+    // Issue #232: pin the HashMap rejection so a future field-walker
+    // refactor can't silently drop the check. Each fixture covers one
+    // shape we expect the rejection to catch.
+    fn err(ty: &str) -> String {
+        let parsed: syn::Type = parse_str(ty).expect("test fixture parses");
+        reject_hashmap(&parsed)
+            .err()
+            .unwrap_or_else(|| panic!("expected reject_hashmap to error on {ty}"))
+            .to_string()
+    }
+
+    #[test]
+    fn rejects_direct_hashmap_field() {
+        let msg = err("HashMap<String, String>");
+        assert!(
+            msg.contains("BTreeMap"),
+            "error must point to BTreeMap fix, got: {msg}"
+        );
+        assert!(
+            msg.contains("232"),
+            "error must reference issue 232, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_fully_qualified_hashmap() {
+        let msg = err("std::collections::HashMap<String, u32>");
+        assert!(msg.contains("BTreeMap"));
+    }
+
+    #[test]
+    fn rejects_hashmap_nested_in_vec() {
+        let msg = err("Vec<HashMap<String, String>>");
+        assert!(msg.contains("BTreeMap"));
+    }
+
+    #[test]
+    fn rejects_hashmap_nested_in_option() {
+        let msg = err("Option<HashMap<String, String>>");
+        assert!(msg.contains("BTreeMap"));
+    }
+
+    #[test]
+    fn rejects_hashmap_in_array() {
+        let msg = err("[HashMap<String, u32>; 4]");
+        assert!(msg.contains("BTreeMap"));
+        assert!(msg.contains("232"));
+    }
+
+    #[test]
+    fn rejects_hashmap_in_tuple() {
+        let msg = err("(u32, HashMap<String, u32>)");
+        assert!(msg.contains("BTreeMap"));
+        assert!(msg.contains("232"));
+    }
+
+    #[test]
+    fn rejects_hashmap_behind_slice_ref() {
+        let msg = err("&[HashMap<String, u32>]");
+        assert!(msg.contains("BTreeMap"));
+        assert!(msg.contains("232"));
+    }
+
+    #[test]
+    fn rejects_hashmap_behind_ref() {
+        let msg = err("&HashMap<String, u32>");
+        assert!(msg.contains("BTreeMap"));
+        assert!(msg.contains("232"));
+    }
+
+    #[test]
+    fn rejects_hashset() {
+        let msg = err("HashSet<u64>");
+        assert!(
+            msg.contains("Vec"),
+            "error must redirect to a sorted Vec, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_btreeset() {
+        let msg = err("BTreeSet<u64>");
+        assert!(
+            msg.contains("Vec"),
+            "error must redirect to a sorted Vec, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn allows_btreemap_field() {
+        let parsed: syn::Type =
+            parse_str("BTreeMap<String, String>").expect("test setup: BTreeMap type parses");
+        assert!(reject_hashmap(&parsed).is_ok());
+    }
+
+    #[test]
+    fn allows_plain_types() {
+        for ty in ["u32", "String", "Vec<u8>", "Option<String>"] {
+            let parsed: syn::Type =
+                parse_str(ty).expect("test setup: candidate type parses as syn::Type");
+            assert!(
+                reject_hashmap(&parsed).is_ok(),
+                "rejected {ty} unexpectedly"
+            );
+        }
+    }
+}
