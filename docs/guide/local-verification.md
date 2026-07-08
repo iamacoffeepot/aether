@@ -10,6 +10,12 @@ cargo fmt
 
 A formatting slip is the one CI red worth catching locally — instant to fix and the cheapest failure to avoid. Everything heavier is CI's job.
 
+Codex sessions may also load project hooks from `.codex/hooks.json` after you
+trust them with `/hooks`. Those hooks are interactive guardrails for the local
+agent loop, including the best-effort `.agents/worktrees/` helper and
+source/text checks; they are not a required local preflight and they do not add
+a separate CI hook-test surface.
+
 ## Watching CI
 
 Open your PR as a draft, then watch the checks and fix a red as soon as it surfaces rather than waiting for the whole run to finish:

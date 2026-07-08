@@ -12,7 +12,7 @@ Read relevant guide pages and ADRs before changing a subsystem. Prefer current c
 
 - Planned work lives in GitHub issues. Use the repo skills in `.agents/skills/` for sketch, scope, approve, implement, land, sweep, wish, review, and dogfood flows.
 - Existing Claude workflow files in `CLAUDE.md`, `.claude/skills/`, and `.claude/workflows/` remain source material. Codex skills adapt those workflows for Codex surfaces.
-- Do not implement directly in the primary `main` checkout. For issue work, create a separate worktree under `.claude/worktrees/issue-<N>` from `origin/main` and work there.
+- Do not implement directly in the primary `main` checkout. For Codex issue work, create a separate worktree under `.agents/worktrees/issue-<N>` from `origin/main` and work there. Legacy Claude workflow files may still reference `.claude/worktrees/`.
 - Branches use `type/short-slug` or the issue branch shape from the implement skill, for example `chore/issue-2742-make-repository-codex-friendly`.
 - PR titles and commits use Conventional Commits.
 - Do not push to `main`, force-push reviewed branches, self-merge, or run destructive git commands without explicit user approval.
@@ -32,6 +32,20 @@ Read relevant guide pages and ADRs before changing a subsystem. Prefer current c
 - Check only: `cargo check`
 
 For implementation PRs, this repo uses GitHub Actions as the full build engine. Locally run `cargo fmt` before pushing; let CI run the expensive checks unless the issue explicitly asks for local verification.
+
+## Codex Hooks
+
+Project-local Codex hooks live in `.codex/hooks.json` and `.codex/hooks/`.
+Because Codex trust-records hook definitions, new or changed hooks may need
+review through `/hooks` before they run.
+
+The SessionStart hook can prepare a per-session worktree under
+`.agents/worktrees/` when Codex exposes a stable session or thread id, but a
+hook subprocess cannot change Codex's cwd. Planned issue work still follows the
+implement skill and edits `.agents/worktrees/issue-<N>`.
+
+Codex hooks are guardrails, not a new local preflight or CI surface. Do not add
+hook tests or CI hook jobs unless a scoped issue explicitly asks for them.
 
 ## MCP Harness
 

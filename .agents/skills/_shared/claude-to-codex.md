@@ -18,7 +18,7 @@ Use this reference when a Codex repo skill points at an existing `.claude` skill
 - Preserve freshness boundaries. If a Claude workflow says a child agent must not see a diff or implementation detail, spawn a fresh Codex subagent without forked context and pass only the allowed prompt.
 - Map Claude `phase(...)` and `log(...)` calls to concise progress updates in the main Codex thread.
 - Map Claude JSON schemas to required structured return shapes in prose. Validate the returned shape before rolling it up.
-- Map Claude worktree isolation to git worktrees under `.claude/worktrees/issue-<N>` unless the skill explicitly says a temp scratch directory is enough.
+- Map Claude worktree isolation to Codex-owned git worktrees under `.agents/worktrees/issue-<N>` unless the skill explicitly says a temp scratch directory is enough.
 - Do not edit `.claude/` artifacts while executing a Codex port unless the user explicitly asks to change the Claude workflow itself.
 - Do not add Codex hooks as part of a skill run unless the issue being implemented explicitly scopes hook work. Hook semantics and trust review differ between Claude and Codex.
 

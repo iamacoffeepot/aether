@@ -21,6 +21,7 @@
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 .claude/worktrees/
+.agents/worktrees/
 .claude/skills/*
 !.claude/skills/adr/
 !.claude/skills/approve/
