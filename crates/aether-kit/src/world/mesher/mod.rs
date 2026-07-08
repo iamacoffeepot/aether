@@ -981,7 +981,10 @@ fn mesh_underlay(
         if !present[m as usize] {
             continue;
         }
-        let region: Vec<bool> = grid.iter().map(|&g| g == m).collect();
+        let region: Vec<u8> = grid
+            .iter()
+            .map(|&g| if g == m { u8::MAX } else { 0 })
+            .collect();
         let rim_width = (styles
             .get(Material::from_u8_or_void(m))
             .rim_inset_octimeters
@@ -990,7 +993,7 @@ fn mesh_underlay(
         let eroded = erode(&region, gw, gw, rim_width);
         for (idx, &g) in grid.iter().enumerate() {
             if g == m {
-                display[idx] = display_label(m, eroded[idx]);
+                display[idx] = display_label(m, eroded[idx] >= 128);
             }
         }
     }
@@ -1937,20 +1940,20 @@ fn emit_water_cell(
     }
 }
 
-/// Is the subcell at chunk-local index `(six, siz)` covered by `material`?
+/// Coverage of the subcell at chunk-local index `(six, siz)` for
+/// `material`.
 /// Indices range over the field plus its apron; an out-of-chunk index
 /// resolves to a neighbor cell through [`World`], reading empty for a
 /// missing chunk.
-fn subcell_covered(world: &World, at: ChunkPos, six: i32, siz: i32, material: Material) -> bool {
+fn subcell_coverage(world: &World, at: ChunkPos, six: i32, siz: i32, material: Material) -> u8 {
     let cell = CellPos {
         x: at.x * EDGE + six.div_euclid(SUB),
         z: at.z * EDGE + siz.div_euclid(SUB),
     };
     if world.overlay(cell) != material {
-        return false;
+        return 0;
     }
-    let bit = (siz.rem_euclid(SUB) * SUB + six.rem_euclid(SUB)) as u32;
-    (world.overlay_mask(cell) >> bit) & 1 == 1
+    world.overlay_coverage(cell, six, siz)
 }
 
 /// Emit the overlay pass: for each distinct overlay material present in
@@ -1972,15 +1975,15 @@ fn mesh_overlay(world: &World, at: ChunkPos, styles: &StyleTable, tris: &mut Vec
     }
 }
 
-/// Sample one overlay material's subcell field (plus its smoothing apron)
-/// into a bounded bool grid.
-fn sample_field(world: &World, at: ChunkPos, material: Material, apron: i32) -> (Vec<bool>, usize) {
+/// Sample one overlay material's subcell coverage field (plus its
+/// smoothing apron) into a bounded byte grid.
+fn sample_field(world: &World, at: ChunkPos, material: Material, apron: i32) -> (Vec<u8>, usize) {
     let n = (SUBCELLS_PER_CHUNK_EDGE + 2 * apron) as usize;
-    let mut field = vec![false; n * n];
+    let mut field = vec![0; n * n];
     for sj in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
         for si in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
             let idx = (sj + apron) as usize * n + (si + apron) as usize;
-            field[idx] = subcell_covered(world, at, si, sj, material);
+            field[idx] = subcell_coverage(world, at, si, sj, material);
         }
     }
     (field, n)
@@ -2849,6 +2852,20 @@ mod tests {
         }
     }
 
+    fn set_overlay_cell_coverage(
+        chunk: &mut Chunk,
+        lx: i32,
+        lz: i32,
+        coverage: [u8; SUBCELLS_PER_CELL],
+    ) {
+        let base = (lz * EDGE + lx) as usize * SUBCELLS_PER_CELL;
+        chunk.overlay_mask[base..base + SUBCELLS_PER_CELL].copy_from_slice(&coverage);
+    }
+
+    fn set_overlay_cell_full(chunk: &mut Chunk, lx: i32, lz: i32) {
+        set_overlay_cell_coverage(chunk, lx, lz, [u8::MAX; SUBCELLS_PER_CELL]);
+    }
+
     /// A level surface patch for cell `(cx, cz)` — the flat-world case.
     fn flat_lift(cx: i32, cz: i32) -> CellLift {
         CellLift {
@@ -3068,7 +3085,7 @@ mod tests {
                     let global = cx * EDGE + lx;
                     if (12..20).contains(&global) {
                         chunk.overlay[(lz * EDGE + lx) as usize] = Material::Stone;
-                        chunk.overlay_mask[(lz * EDGE + lx) as usize] = 0xFFFF;
+                        set_overlay_cell_full(&mut chunk, lx, lz);
                     }
                 }
             }
@@ -3110,18 +3127,18 @@ mod tests {
             let mut chunk = Chunk::empty();
             for lz in 0..EDGE {
                 for lx in 0..EDGE {
-                    let mut mask = 0u16;
+                    let mut coverage = [0; SUBCELLS_PER_CELL];
                     for sz in 0..SUB {
                         for sx in 0..SUB {
                             let global_sub_x = (cx * EDGE + lx) * SUB + sx;
                             if global_sub_x < 70 {
-                                mask |= 1 << (sz * SUB + sx);
+                                coverage[(sz * SUB + sx) as usize] = u8::MAX;
                             }
                         }
                     }
-                    if mask != 0 {
+                    if coverage.iter().any(|sample| *sample != 0) {
                         chunk.overlay[(lz * EDGE + lx) as usize] = Material::Stone;
-                        chunk.overlay_mask[(lz * EDGE + lx) as usize] = mask;
+                        set_overlay_cell_coverage(&mut chunk, lx, lz, coverage);
                     }
                 }
             }
@@ -3545,7 +3562,7 @@ mod tests {
         for lz in 5..9 {
             for lx in 2..6 {
                 chunk.overlay[(lz * EDGE + lx) as usize] = Material::Stone;
-                chunk.overlay_mask[(lz * EDGE + lx) as usize] = 0xFFFF;
+                set_overlay_cell_full(&mut chunk, lx, lz);
             }
         }
         world.insert_chunk(at, chunk);
