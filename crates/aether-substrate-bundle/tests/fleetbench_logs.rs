@@ -9,7 +9,7 @@ mod fleetbench;
 mod tests {
     use aether_kinds::LogTailResult;
 
-    use crate::fleetbench::{FleetBench, dist_manifest_present, poll_until};
+    use crate::fleetbench::{FleetBench, dist_component_available, poll_until};
 
     /// `info` in the `0 = trace .. 4 = error` level mapping shared
     /// across `aether.log.*`.
@@ -22,7 +22,7 @@ mod tests {
     /// walk.
     #[test]
     fn fleetbench_actor_logs_surface_the_probe_first_tick_entry() {
-        if !dist_manifest_present() {
+        if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
         let mut bench = FleetBench::start();

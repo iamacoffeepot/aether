@@ -222,6 +222,27 @@ struct ManifestView {
     components: BTreeMap<String, String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum DistManifestClassification {
+    Available { relative_path: String },
+    MissingStem,
+    Unparseable,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DistComponentGuardOutcome {
+    Available,
+    Skip(String),
+    RequireRuntime(String),
+}
+
+enum DistComponentRequirement {
+    Available(PathBuf),
+    ManifestAbsent,
+    ManifestUnreadable(String),
+    StemMissing,
+}
+
 /// The three `LoadResult::Ok` fields a loaded component exposes:
 /// the assigned trampoline `mailbox_id` (the [`replace`](FleetBench::replace)
 /// target), the rendered ADR-0099 lineage `addr`, and the advertised
@@ -1138,45 +1159,151 @@ fn dist_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist")
 }
 
-/// Manifest-presence guard for the `FleetBench` tests that load component
-/// wasm. Returns `true` when `dist/manifest.json` is present (the test
-/// proceeds); returns `false` when it's absent so the caller can
-/// early-return as a skip — except under `AETHER_REQUIRE_RUNTIME` (which
-/// CI sets), where a missing manifest panics so a missing
-/// `cargo xtask dist` pre-build can't pass silently. Mirrors
-/// `headless_autoload.rs`'s pre-built-wasm skip/require convention (issue
-/// 891): a bare `cargo nextest run` in a worktree that hasn't run
-/// `cargo xtask dist` skips instead of reporting hard failures that read
-/// as regressions.
-///
-/// [`read_component_wasm`] itself keeps its panic: past this guard the
-/// manifest is present, and a manifest that exists but is missing a
-/// requested stem (a stale dist, not an unbuilt one) is a real test bug.
-#[must_use]
-pub fn dist_manifest_present() -> bool {
-    let manifest_path = dist_dir().join("manifest.json");
-    if manifest_path.exists() {
-        return true;
+pub fn classify_dist_manifest(raw: &str, stem: &str) -> DistManifestClassification {
+    let manifest: ManifestView = match serde_json::from_str(raw) {
+        Ok(manifest) => manifest,
+        Err(_) => return DistManifestClassification::Unparseable,
+    };
+    manifest
+        .components
+        .get(stem)
+        .cloned()
+        .map_or(DistManifestClassification::MissingStem, |relative_path| {
+            DistManifestClassification::Available { relative_path }
+        })
+}
+
+fn dist_component_message(stem: &str, manifest_path: &Path, detail: &str) -> String {
+    format!(
+        "component stem {stem:?} unavailable via {}; {detail}; run `cargo xtask dist` to build the component wasm + manifest, then remove generated `dist/` once it is no longer needed",
+        manifest_path.display(),
+    )
+}
+
+fn require_runtime_enabled() -> bool {
+    env::var("AETHER_REQUIRE_RUNTIME").is_ok()
+}
+
+pub fn dist_component_guard_outcome(
+    stem: &str,
+    manifest_path: &Path,
+    classification: &DistManifestClassification,
+    require_runtime: bool,
+) -> DistComponentGuardOutcome {
+    let unavailable = |detail: &str| {
+        let message = dist_component_message(stem, manifest_path, detail);
+        if require_runtime {
+            DistComponentGuardOutcome::RequireRuntime(message)
+        } else {
+            DistComponentGuardOutcome::Skip(message)
+        }
+    };
+    match classification {
+        DistManifestClassification::Available { .. } => DistComponentGuardOutcome::Available,
+        DistManifestClassification::MissingStem => unavailable("stem is missing from the manifest"),
+        DistManifestClassification::Unparseable => {
+            unavailable("manifest is unreadable or does not parse as dist metadata")
+        }
     }
-    assert!(
-        env::var("AETHER_REQUIRE_RUNTIME").is_err(),
-        "AETHER_REQUIRE_RUNTIME set but {} is absent; \
-         run `cargo xtask dist` to build the component wasm + manifest",
-        manifest_path.display(),
-    );
-    eprintln!(
-        "skipping: {} absent; \
-         run `cargo xtask dist` first to build the component wasm + manifest",
-        manifest_path.display(),
-    );
-    false
+}
+
+fn dist_component_requirement(stem: &str) -> DistComponentRequirement {
+    let dist = dist_dir();
+    let manifest_path = dist.join("manifest.json");
+    let raw = match fs::read_to_string(&manifest_path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            return DistComponentRequirement::ManifestAbsent;
+        }
+        Err(e) => return DistComponentRequirement::ManifestUnreadable(e.to_string()),
+    };
+    match classify_dist_manifest(&raw, stem) {
+        DistManifestClassification::Available { relative_path } => {
+            DistComponentRequirement::Available(dist.join(relative_path))
+        }
+        DistManifestClassification::MissingStem => DistComponentRequirement::StemMissing,
+        DistManifestClassification::Unparseable => DistComponentRequirement::ManifestUnreadable(
+            "manifest does not parse as dist metadata".to_owned(),
+        ),
+    }
+}
+
+fn dist_component_guard_for_requirement(
+    stem: &str,
+    manifest_path: &Path,
+    requirement: DistComponentRequirement,
+    require_runtime: bool,
+) -> DistComponentGuardOutcome {
+    let unavailable = |detail: &str| {
+        let message = dist_component_message(stem, manifest_path, detail);
+        if require_runtime {
+            DistComponentGuardOutcome::RequireRuntime(message)
+        } else {
+            DistComponentGuardOutcome::Skip(message)
+        }
+    };
+    match requirement {
+        DistComponentRequirement::Available(_) => DistComponentGuardOutcome::Available,
+        DistComponentRequirement::ManifestAbsent => unavailable("manifest is absent"),
+        DistComponentRequirement::ManifestUnreadable(detail) => unavailable(&detail),
+        DistComponentRequirement::StemMissing => dist_component_guard_outcome(
+            stem,
+            manifest_path,
+            &DistManifestClassification::MissingStem,
+            require_runtime,
+        ),
+    }
+}
+
+fn component_wasm_path_result(stem: &str) -> Result<PathBuf, String> {
+    let manifest_path = dist_dir().join("manifest.json");
+    match dist_component_requirement(stem) {
+        DistComponentRequirement::Available(path) => Ok(path),
+        DistComponentRequirement::ManifestAbsent => Err(dist_component_message(
+            stem,
+            &manifest_path,
+            "manifest is absent",
+        )),
+        DistComponentRequirement::ManifestUnreadable(detail) => {
+            Err(dist_component_message(stem, &manifest_path, &detail))
+        }
+        DistComponentRequirement::StemMissing => Err(dist_component_message(
+            stem,
+            &manifest_path,
+            "stem is missing from the manifest",
+        )),
+    }
+}
+
+/// Stem-aware dist precondition guard for `FleetBench` tests that load
+/// component wasm. Returns `true` when the manifest exists, parses, and
+/// contains `stem`; returns `false` after printing a `skipping:` line
+/// locally when the precondition is not met. Under
+/// `AETHER_REQUIRE_RUNTIME`, the same actionable message panics so a
+/// missing or stale `cargo xtask dist` pre-build can't pass silently.
+#[must_use]
+pub fn dist_component_available(stem: &str) -> bool {
+    let manifest_path = dist_dir().join("manifest.json");
+    match dist_component_guard_for_requirement(
+        stem,
+        &manifest_path,
+        dist_component_requirement(stem),
+        require_runtime_enabled(),
+    ) {
+        DistComponentGuardOutcome::Available => true,
+        DistComponentGuardOutcome::Skip(message) => {
+            eprintln!("skipping: {message}");
+            false
+        }
+        DistComponentGuardOutcome::RequireRuntime(message) => panic!("{message}"),
+    }
 }
 
 /// Read a component wasm by stem through `dist/manifest.json` (the
 /// #1445 dist tree). Panics with a `cargo xtask dist` hint if the
 /// manifest is absent — the harness can't locate component wasm without
-/// it. Tests guard their load path with [`dist_manifest_present`] so a
-/// missing manifest skips rather than reaching this panic.
+/// it. Tests guard their load path with [`dist_component_available`] so a
+/// missing manifest or stale stem skips rather than reaching this panic.
 pub fn read_component_wasm(stem: &str) -> Vec<u8> {
     let wasm_path = component_wasm_path(stem);
     fs::read(&wasm_path)
@@ -1186,22 +1313,9 @@ pub fn read_component_wasm(stem: &str) -> Vec<u8> {
 /// The absolute on-disk path of a component wasm by stem, resolved through
 /// `dist/manifest.json` (the #1445 dist tree) — the staged path the
 /// ADR-0116 `upload_component` reads. Tests guard with
-/// [`dist_manifest_present`] before reaching this. Panics with a
-/// `cargo xtask dist` hint if the manifest is absent or the stem is
+/// [`dist_component_available`] before reaching this. Panics with a
+/// `cargo xtask dist` hint if the manifest is absent, unreadable, or the stem is
 /// missing.
 pub fn component_wasm_path(stem: &str) -> PathBuf {
-    let dist = dist_dir();
-    let manifest_path = dist.join("manifest.json");
-    let raw = fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
-        panic!(
-            "reading {} ({e}); run `cargo xtask dist` first to build the component wasm + manifest",
-            manifest_path.display(),
-        )
-    });
-    let manifest: ManifestView =
-        serde_json::from_str(&raw).expect("test setup: dist/manifest.json parses");
-    let rel = manifest.components.get(stem).unwrap_or_else(|| {
-        panic!("component stem {stem:?} is not in dist/manifest.json; run `cargo xtask dist`")
-    });
-    dist.join(rel)
+    component_wasm_path_result(stem).unwrap_or_else(|message| panic!("{message}"))
 }

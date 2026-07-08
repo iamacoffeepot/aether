@@ -11,7 +11,7 @@ mod tests {
     use aether_data::Kind;
     use aether_kinds::{DescribeComponent, DescribeComponentResult, Key, Tick};
 
-    use crate::fleetbench::{FleetBench, dist_manifest_present};
+    use crate::fleetbench::{FleetBench, dist_component_available};
 
     /// Load the `probe` component, then send `aether.component.describe`
     /// addressed by the lineage name `load` hands back and assert the reply
@@ -21,7 +21,7 @@ mod tests {
     /// `ComponentCapabilities` it retained at load, not the lossy projection.
     #[test]
     fn fleetbench_describe_resolves_caps_by_lineage_name() {
-        if !dist_manifest_present() {
+        if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
         let mut bench = FleetBench::start();
@@ -73,7 +73,7 @@ mod tests {
     /// fail-fast negative path.
     #[test]
     fn fleetbench_describe_unknown_name_errs() {
-        if !dist_manifest_present() {
+        if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
         let mut bench = FleetBench::start();

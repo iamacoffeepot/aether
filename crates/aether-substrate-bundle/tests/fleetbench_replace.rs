@@ -15,7 +15,7 @@ mod tests {
     use aether_kit::camera::CameraCreate;
     use aether_test_fixtures_kinds::SetRender;
 
-    use crate::fleetbench::{FleetBench, dist_manifest_present};
+    use crate::fleetbench::{FleetBench, dist_component_available};
 
     /// Load `probe` (handlers `SetRender` + `Tick`), then `replace`
     /// it with `aether-kit`'s non-entry `aether.camera` export (selector
@@ -30,7 +30,7 @@ mod tests {
     /// the live mailbox afterward.
     #[test]
     fn fleetbench_replaces_probe_with_camera_at_a_stable_address() {
-        if !dist_manifest_present() {
+        if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
         let mut bench = FleetBench::start();
@@ -104,7 +104,7 @@ mod tests {
     /// wire, not just the in-process path.
     #[test]
     fn fleetbench_replace_targets_a_non_entry_export() {
-        if !dist_manifest_present() {
+        if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
         let mut bench = FleetBench::start();

@@ -11,7 +11,7 @@ mod tests {
     use aether_data::Kind;
     use aether_kinds::{LoadComponent, LoadResult};
 
-    use crate::fleetbench::{FleetBench, dist_manifest_present};
+    use crate::fleetbench::{FleetBench, dist_component_available};
 
     /// Load the `probe` component and assert `LoadResult.name` is the
     /// `/`-rendered lineage
@@ -24,7 +24,7 @@ mod tests {
     /// round-trip, exercising the benchmark-ready trace object.
     #[test]
     fn fleetbench_loads_probe_at_its_lineage_address() {
-        if !dist_manifest_present() {
+        if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
         let mut bench = FleetBench::start();

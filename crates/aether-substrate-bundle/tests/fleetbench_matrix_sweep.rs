@@ -34,7 +34,7 @@ mod tests {
     use aether_kinds::{LogEntry, LogTailResult};
     use aether_test_fixtures_kinds::{CollectMatrix, MatrixReport, RunMatrix};
 
-    use crate::fleetbench::{FleetBench, dist_manifest_present};
+    use crate::fleetbench::{FleetBench, dist_component_available};
 
     /// Drive the full cluster-addressing matrix over the wire and assert
     /// every cell: in-cluster delivery + the source each recipient read,
@@ -42,7 +42,7 @@ mod tests {
     /// log.
     #[test]
     fn fleetbench_matrix_sweep_covers_every_addressing_cell() {
-        if !dist_manifest_present() {
+        if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
         let mut bench = FleetBench::start();
