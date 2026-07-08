@@ -1,0 +1,49 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/bind-session-worktree.sh\"",
+            "timeout": 30,
+            "statusMessage": "Preparing session worktree"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/check-pr-body.sh\"",
+            "timeout": 30,
+            "statusMessage": "Checking PR and issue text"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|apply_patch|Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/check-main-worktree-clean.sh\"",
+            "timeout": 30,
+            "statusMessage": "Checking main checkout"
+          },
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/check-source-guardrails.sh\"",
+            "timeout": 30,
+            "statusMessage": "Checking source guardrails"
+          }
+        ]
+      }
+    ]
+  }
+}
