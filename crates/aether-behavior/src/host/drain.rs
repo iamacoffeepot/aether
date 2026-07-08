@@ -10,10 +10,10 @@
 //!
 //! **Echo suppression.** An effect the script sends down to its widget/child
 //! provokes an up-lane echo (the widget re-emitting the value it just took).
-//! The host records those kinds in an [`EchoGuard`] at drain time and, when
-//! the matching up-lane mail arrives, forwards it raw instead of re-offering
-//! it to the same script — so a script's own write does not loop back through
-//! its filter.
+//! The host records those kind/byte pairs in an [`EchoGuard`] at drain time
+//! and, when the matching up-lane mail arrives, forwards it raw instead of
+//! re-offering it to the same script — so a script's own write does not loop
+//! back through its filter.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -75,45 +75,45 @@ pub fn run_drain(output: FilterOutput, forward_kind: Option<KindId>, sink: &mut 
     }
 }
 
-/// The kinds a drain sends toward the wrapped widget or a named child — the
+/// The effects a drain sends toward the wrapped widget or a named child — the
 /// echoes to suppress when they return up-lane. A `Panel` effect goes up, so
 /// it provokes no down-then-up echo and is not suppressed.
 #[must_use]
-pub fn echo_kinds(output: &FilterOutput) -> Vec<KindId> {
+pub fn echo_effects(output: &FilterOutput) -> Vec<(KindId, Vec<u8>)> {
     output
         .effects
         .iter()
         .filter(|e| matches!(e.target, EffectTarget::Widget | EffectTarget::Child(_)))
-        .map(|e| KindId(e.kind_id))
+        .map(|e| (KindId(e.kind_id), e.bytes.clone()))
         .collect()
 }
 
-/// A one-shot multiset of up-lane echoes to suppress. Arming a kind after a
-/// down-lane effect means the next up-lane mail of that kind (the widget's
-/// re-emit) is forwarded raw rather than re-offered to the script; the entry
-/// is consumed as it fires so a later genuine value of the same kind is
-/// offered normally.
+/// A one-shot multiset of up-lane echoes to suppress. Arming a kind/byte pair
+/// after a down-lane effect means the next matching up-lane mail (the widget's
+/// re-emit) is forwarded raw rather than re-offered to the script; the entry is
+/// consumed as it fires so a later genuine value is offered normally.
 #[derive(Default)]
 pub struct EchoGuard {
-    pending: BTreeMap<KindId, u32>,
+    pending: BTreeMap<(KindId, Vec<u8>), u32>,
 }
 
 impl EchoGuard {
-    /// Arm one expected up-lane echo per kind in `kinds`.
-    pub fn arm(&mut self, kinds: impl IntoIterator<Item = KindId>) {
-        for kind in kinds {
-            *self.pending.entry(kind).or_insert(0) += 1;
+    /// Arm one expected up-lane echo per `(kind, bytes)` pair in `effects`.
+    pub fn arm(&mut self, effects: impl IntoIterator<Item = (KindId, Vec<u8>)>) {
+        for effect in effects {
+            *self.pending.entry(effect).or_insert(0) += 1;
         }
     }
 
-    /// If an echo of `kind` is pending, consume one and return `true` (the
-    /// caller forwards raw, skipping the filter). Otherwise `false`.
-    pub fn take(&mut self, kind: KindId) -> bool {
-        match self.pending.get_mut(&kind) {
+    /// If an echo of `(kind, bytes)` is pending, consume one and return `true`
+    /// (the caller forwards raw, skipping the filter). Otherwise `false`.
+    pub fn take(&mut self, kind: KindId, bytes: &[u8]) -> bool {
+        let key = (kind, bytes.to_vec());
+        match self.pending.get_mut(&key) {
             Some(count) => {
                 *count -= 1;
                 if *count == 0 {
-                    self.pending.remove(&kind);
+                    self.pending.remove(&key);
                 }
                 true
             }
@@ -231,33 +231,43 @@ mod tests {
     }
 
     // Tripwire: a script whose effect targets its own widget/child arms that
-    // kind for suppression, and the one-shot guard skips exactly one up-lane
-    // echo of it — so the script's own write is not re-offered to its filter,
-    // while a later genuine value of the same kind still is. A Panel effect is
-    // not suppressed (it goes up, no echo).
+    // exact kind/bytes pair for suppression, and the one-shot guard skips only
+    // the matching up-lane echo — so a real same-kind value that arrives first
+    // still reaches the filter. A Panel effect is not suppressed (it goes up,
+    // no echo).
     #[test]
-    fn echo_of_own_write_is_suppressed_once() {
+    fn echo_of_own_write_is_value_correlated() {
         let output = FilterOutput {
             verdict: Verdict::Forward(vec![0]),
             effects: vec![
-                effect(EffectTarget::Widget, 42),
+                Effect {
+                    target: EffectTarget::Widget,
+                    kind_id: 42,
+                    bytes: vec![1, 2, 3],
+                },
                 effect(EffectTarget::Child("slider".into()), 7),
-                effect(EffectTarget::Widget, 42),
+                Effect {
+                    target: EffectTarget::Widget,
+                    kind_id: 42,
+                    bytes: vec![1, 2, 3],
+                },
                 effect(EffectTarget::Panel, 99),
             ],
         };
         let mut guard = EchoGuard::default();
-        guard.arm(echo_kinds(&output));
+        guard.arm(echo_effects(&output));
 
         // The panel effect provoked no armed echo.
-        assert!(!guard.take(KindId(99)));
+        assert!(!guard.take(KindId(99), &[99]));
         // Child-targeted effects arm an echo just like widget-targeted ones.
-        assert!(guard.take(KindId(7)));
-        assert!(!guard.take(KindId(7)));
-        // A kind armed twice suppresses twice, then clears.
-        assert!(guard.take(KindId(42)));
-        assert!(guard.take(KindId(42)));
-        assert!(!guard.take(KindId(42)));
+        assert!(guard.take(KindId(7), &[7]));
+        assert!(!guard.take(KindId(7), &[7]));
+        // A genuine same-kind value with different bytes is not consumed.
+        assert!(!guard.take(KindId(42), &[7, 8, 9]));
+        // The exact own-write echo is suppressed twice, then no longer armed.
+        assert!(guard.take(KindId(42), &[1, 2, 3]));
+        assert!(guard.take(KindId(42), &[1, 2, 3]));
+        assert!(!guard.take(KindId(42), &[1, 2, 3]));
         assert!(guard.is_empty());
     }
 }
