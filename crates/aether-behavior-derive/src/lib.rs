@@ -387,6 +387,11 @@ fn build_guest_exports(self_ty: &Type) -> TokenStream2 {
             static __AETHER_BEHAVIOR_SLOT:
                 ::aether_behavior::__macro_internals::Slot<#self_ty> =
                 ::aether_behavior::__macro_internals::Slot::new();
+            static __AETHER_BEHAVIOR_MIRRORS:
+                ::aether_behavior::__macro_internals::Slot<
+                    ::aether_behavior::__macro_internals::MirrorStore
+                > =
+                ::aether_behavior::__macro_internals::Slot::new();
 
             #[used]
             #[unsafe(link_section = "aether.behavior.exports")]
@@ -423,7 +428,9 @@ fn build_guest_exports(self_ty: &Type) -> TokenStream2 {
                 let __aether_bytes =
                     unsafe { ::aether_behavior::__macro_internals::read_guest_slice(ptr, len) };
                 let __aether_instance = __AETHER_BEHAVIOR_SLOT.get_or_default();
+                let __aether_mirrors = __AETHER_BEHAVIOR_MIRRORS.get_or_default();
                 let __aether_encoded = ::aether_behavior::__macro_internals::run_filter(
+                    __aether_mirrors,
                     __aether_kind,
                     __aether_bytes,
                     |__aether_ctx| {

@@ -75,6 +75,9 @@ pub struct HostConfig {
     /// keeps no `aether-kit` dependency — the kit arm sets this to its own
     /// `Collect` id.
     pub frame_trigger: u64,
+    /// Low-rate mirror-kind ids always offered to SDK dispatch even when the
+    /// script manifest does not declare a handler for them.
+    pub mirror_kinds: Vec<u64>,
 }
 
 impl HostConfig {
@@ -89,6 +92,12 @@ impl HostConfig {
     #[must_use]
     pub fn frame_trigger_kind(&self) -> Option<KindId> {
         (self.frame_trigger != 0).then_some(KindId(self.frame_trigger))
+    }
+
+    /// Whether `kind` belongs to the configured always-offer mirror set.
+    #[must_use]
+    pub fn is_mirror_kind(&self, kind: KindId) -> bool {
+        self.mirror_kinds.contains(&kind.0)
     }
 }
 

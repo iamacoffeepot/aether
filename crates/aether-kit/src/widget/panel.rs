@@ -417,6 +417,20 @@ fn spawn_behavior_host(
         // The panel drives the wrapped slot with `Collect` each frame; hand the
         // host that kind as its FRAME sentinel trigger.
         frame_trigger: Collect::ID.0,
+        mirror_kinds: vec![
+            LabelConfig::ID.0,
+            SliderConfig::ID.0,
+            TextFieldConfig::ID.0,
+            ButtonConfig::ID.0,
+            RadioConfig::ID.0,
+            SliderChanged::ID.0,
+            TextCommitted::ID.0,
+            ButtonClicked::ID.0,
+            RadioSelected::ID.0,
+            FocusGained::ID.0,
+            FocusLost::ID.0,
+            crate::widget::ChildrenChanged::ID.0,
+        ],
     };
     let bytes = config.encode_into_bytes();
     match ctx.spawn_inline_child_by_tag(
