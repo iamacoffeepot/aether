@@ -9,6 +9,11 @@
 //! - [`camera::CameraComponent`] — the multi-camera driver, selected by the
 //!   `aether_kit@aether.kit.camera` export (ADR-0096). Its `aether.kit.camera.*`
 //!   driver kinds live in [`camera`].
+//! - [`camera_controller::CameraController`] — a keyboard driver that steers a
+//!   peer [`camera::CameraComponent`] (WASD / arrows / zoom), selected by the
+//!   `aether_kit@aether.kit.camera_controller` export. Its
+//!   `aether.kit.camera_controller.config` init-config lives in
+//!   [`camera_controller`].
 //! - [`mesh::MeshViewer`] — loads a `.dsl` / `.obj` mesh file and replays it
 //!   to the render sink, selected by the `aether_kit@aether.kit.mesh`
 //!   export. Its `aether.kit.mesh.load` kind lives in [`mesh`].
@@ -47,6 +52,7 @@
 extern crate alloc;
 
 pub mod camera;
+pub mod camera_controller;
 pub mod mesh;
 pub mod mover;
 pub mod widget;
@@ -90,6 +96,7 @@ pub const TILE_BITS: u32 = 8;
 #[cfg(not(feature = "behavior"))]
 aether_actor::export!(
     camera::CameraComponent,
+    camera_controller::CameraController,
     mesh::MeshViewer,
     world::WorldView,
     mover::WorldMover,
@@ -105,6 +112,7 @@ aether_actor::export!(
 #[cfg(feature = "behavior")]
 aether_actor::export!(
     camera::CameraComponent,
+    camera_controller::CameraController,
     mesh::MeshViewer,
     world::WorldView,
     mover::WorldMover,
