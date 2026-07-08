@@ -81,8 +81,6 @@ pub mod test_bench;
 pub mod text;
 pub mod trace;
 pub mod trampoline;
-#[cfg(feature = "ui")]
-pub mod ui;
 pub mod window;
 
 #[cfg(feature = "audio")]
@@ -156,6 +154,4 @@ pub use text::TextCapability;
 pub use trampoline::WasmTrampoline;
 #[cfg(feature = "runtime")]
 pub use trampoline::WasmTrampolineConfig;
-#[cfg(feature = "ui")]
-pub use ui::{UiBar, UiButton, UiCapability, UiClicked, UiLabel, UiPanel};
 pub use window::HeadlessWindowCapability;

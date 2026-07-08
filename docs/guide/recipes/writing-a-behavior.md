@@ -200,7 +200,7 @@ the slot — mail addressed to it is offered to your `#[on]` handlers before it
 forwards to the wrapped child.
 
 In a widget panel you rarely build a `HostConfig` by hand: the panel's declarative
-child specs (see [Drawing your first UI](drawing-ui.md)) carry a
+child specs carry a
 `WidgetKind::BehaviorHost` slot whose config is a `BehaviorHostSpec` (the wrapped
 widget kind, its config, and the script), and the panel builds the `HostConfig`
 for you. The direct load above is the mechanism under that convenience.
@@ -235,7 +235,6 @@ let that traffic straight through. Gate-shaped logic belongs in a component — 
 
 - When to write a behavior versus a component, and the graduation path between
   them — [Writing guest code](../writing-guest-code.md).
-- The panel side of attaching a behavior to a widget — [Drawing your first UI](drawing-ui.md).
 - The mechanism: interposition as tree position, the mirror-and-effects model, the
   fail-open firewall, and the vocabulary boundary —
   [ADR-0137](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0137-in-cluster-behavior-script-host.md).

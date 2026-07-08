@@ -171,8 +171,8 @@ pub(crate) fn accept_child_list(
 /// one `DrawSolidQuads` for all the flat fills (in depth-first order, so
 /// chrome draws under children), then one `DrawText` per glyph run. Text's
 /// extra hop through the text cap lands its glyphs after the direct quad
-/// batch the same frame — the fills-under-labels layering the shipped
-/// `aether.ui` cap already relies on.
+/// batch the same frame — the fills-under-labels layering a composited UI
+/// surface needs.
 pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
     let quads: Vec<SolidQuad> = list
         .items
