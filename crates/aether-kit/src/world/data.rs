@@ -45,15 +45,15 @@
 //! - [`Chunk::overlay`] — an optional crisp placed surface (path, floor).
 //!   `Void` means no overlay. Never cascade-resolved
 //!   ([`World::overlay`] is a raw plane read).
-//! - [`Chunk::overlay_mask`] — a subcell coverage bitmask per cell. Each
-//!   cell holds a [`SUBCELLS_PER_CELL_EDGE`]² bit grid (bit `z*SUB + x`,
-//!   `1` = the overlay covers that subcell); `0xFFFF` at `SUB = 4` is
-//!   full coverage. The subcell is the finest semantic resolution —
-//!   paint must not out-resolve movement / blocking, which resolve at the
-//!   subcell. Masks OR-compose (bitwise) within the overlay layer;
-//!   painter's order applies across layers. Reserved here — the wire
-//!   layout is final, but mask meshing is a follow-up; nothing in this
-//!   module interprets the bits.
+//! - [`Chunk::overlay_mask`] — a scalar overlay coverage byte per subcell
+//!   (`z*SUB + x` inside each cell, row-major cells). `255` is full
+//!   coverage and `0` is none; meshing thresholds at half coverage, so
+//!   legacy binary data keeps its exact midpoint crossings while soft
+//!   authored edges can place crossings between subcells. The subcell is
+//!   the finest semantic resolution — paint must not out-resolve movement
+//!   / blocking, which resolve at the subcell. Binary 0/255 samples
+//!   OR-compose within the overlay layer; scalar blends are authored
+//!   coverage values. Painter's order applies across layers.
 //! - [`Chunk::underlay_points`] — an optional per-subcell material plane
 //!   that shapes the ground fabric below cell scale. Each point is a
 //!   [`Material`] byte or the [`UNDERLAY_POINT_INHERIT`] sentinel; an
@@ -112,20 +112,21 @@ pub const CHUNK_BITS: u32 = 4;
 pub const CELLS_PER_CHUNK_AREA: usize = 256;
 
 /// Subcells along one edge of a cell — the overlay coverage resolution.
-/// A cell's [`Chunk::overlay_mask`] is a `SUB × SUB` bit grid. Raising
-/// this is a single-constant change; the wire mask-plane length is
-/// derived from it ([`OVERLAY_MASK_WIRE_BYTES`]), never hard-coded, so
-/// no wire migration is needed. The in-memory mask is a `u16`, which
-/// holds `SUB = 4` (16 bits).
+/// A cell's [`Chunk::overlay_mask`] stores one scalar coverage byte for
+/// each `SUB × SUB` subcell sample. Raising this is a single-constant
+/// change; the wire plane length is derived from it
+/// ([`OVERLAY_MASK_WIRE_BYTES`]), never hard-coded.
 pub const SUBCELLS_PER_CELL_EDGE: u32 = 4;
 
-/// Bits in one cell's overlay coverage mask: `SUB²`.
+/// Coverage samples in one cell's overlay plane: `SUB²`.
 pub const SUBCELLS_PER_CELL: usize = (SUBCELLS_PER_CELL_EDGE * SUBCELLS_PER_CELL_EDGE) as usize;
 
 /// Wire length in bytes of a chunk's overlay-mask plane:
-/// `CELLS_PER_CHUNK_AREA * SUB² / 8` (= 512 at `SUB = 4`). The plane
-/// travels as little-endian mask words per cell, row-major cell order.
-pub const OVERLAY_MASK_WIRE_BYTES: usize = CELLS_PER_CHUNK_AREA * SUBCELLS_PER_CELL / 8;
+/// `CELLS_PER_CHUNK_AREA * SUB²` (= 4096 at `SUB = 4`). Version 7 and
+/// newer store one coverage byte per subcell, row-major cell order and
+/// `z*SUB + x` within each cell. Older save versions stored little-endian
+/// bitmasks and expand on decode to `0` / `255`.
+pub const OVERLAY_MASK_WIRE_BYTES: usize = CELLS_PER_CHUNK_AREA * SUBCELLS_PER_CELL;
 
 /// Points in one chunk's underlay-point plane: `CELLS_PER_CHUNK_AREA *
 /// SUB²` (= 4096 at `SUB = 4`) — one material point per subcell, row-major
@@ -345,11 +346,10 @@ pub struct Chunk {
     pub height_points: [i16; HEIGHT_POINTS_PER_CHUNK],
     /// Placed surface — raw, never cascade-resolved. `Void` = none.
     pub overlay: [Material; CELLS_PER_CHUNK_AREA],
-    /// Overlay subcell coverage bitmask per cell — a `SUB × SUB` bit grid
-    /// (bit `z*SUB + x`). `0xFFFF` at `SUB = 4` is full coverage; `0` is
-    /// none. Meaningless where `overlay` is `Void`. Reserved; not
-    /// interpreted here.
-    pub overlay_mask: [u16; CELLS_PER_CHUNK_AREA],
+    /// Overlay subcell coverage bytes — `SUB × SUB` samples per cell
+    /// (row-major cell order, `z*SUB + x` within a cell). `255` is full
+    /// coverage; `0` is none. Meaningless where `overlay` is `Void`.
+    pub overlay_mask: [u8; OVERLAY_MASK_WIRE_BYTES],
     /// Elevation in octimeters (`0` = flat).
     pub height: [i32; CELLS_PER_CHUNK_AREA],
     /// Region id per cell (`0` = no region).
@@ -373,7 +373,7 @@ impl Chunk {
             underlay_points: [UNDERLAY_POINT_INHERIT; UNDERLAY_POINTS_PER_CHUNK],
             height_points: [HEIGHT_POINT_INHERIT; HEIGHT_POINTS_PER_CHUNK],
             overlay: [Material::Void; CELLS_PER_CHUNK_AREA],
-            overlay_mask: [0; CELLS_PER_CHUNK_AREA],
+            overlay_mask: [0; OVERLAY_MASK_WIRE_BYTES],
             height: [0; CELLS_PER_CHUNK_AREA],
             region: [0; CELLS_PER_CHUNK_AREA],
             water_plane: [0; CELLS_PER_CHUNK_AREA],
@@ -507,17 +507,20 @@ impl World {
             .map_or(Material::Void, |chunk| chunk.overlay[cell.chunk_index()])
     }
 
-    /// The raw overlay subcell coverage mask at `cell` — never
-    /// cascade-resolved. A missing chunk reads `0` (no coverage), which is
-    /// the apron read the mesher relies on: a chunk-border window can
-    /// sample one subcell into an absent neighbor and see empty space
-    /// rather than panicking. The bits are meaningless where
-    /// [`World::overlay`] is `Void`.
+    /// The raw overlay coverage byte at subcell point `(sub_x, sub_z)` of
+    /// `cell` — never cascade-resolved. A missing chunk reads `0` (no
+    /// coverage), which is the apron read the mesher relies on: a
+    /// chunk-border window can sample one subcell into an absent neighbor
+    /// and see empty space rather than panicking. The value is meaningless
+    /// where [`World::overlay`] is `Void`.
     #[must_use]
-    pub fn overlay_mask(&self, cell: CellPos) -> u16 {
-        self.chunks
-            .get(&cell.chunk())
-            .map_or(0, |chunk| chunk.overlay_mask[cell.chunk_index()])
+    pub fn overlay_coverage(&self, cell: CellPos, sub_x: i32, sub_z: i32) -> u8 {
+        let Some(chunk) = self.chunks.get(&cell.chunk()) else {
+            return 0;
+        };
+        let sub = SUBCELLS_PER_CELL_EDGE.cast_signed();
+        let within = (sub_z.rem_euclid(sub) * sub + sub_x.rem_euclid(sub)) as usize;
+        chunk.overlay_mask[cell.chunk_index() * SUBCELLS_PER_CELL + within]
     }
 
     /// Elevation at `cell` in octimeters — the raw lakebed read. Unset
@@ -994,21 +997,25 @@ pub enum WorldDecodeError {
     BadName,
 }
 
-/// The current write version. Version 6 appends the per-chunk height-delta
-/// plane ([`HEIGHT_POINTS_PER_CHUNK`] `i16` octimeter deltas) to the end of
-/// each chunk record, after the underlay-point plane. Version 5 appends the
-/// per-chunk underlay-point plane ([`UNDERLAY_POINTS_PER_CHUNK`] bytes) to
-/// the end of each chunk record. Version 4 adds the water-plane table (after
-/// the smoothing-profile table) and the per-chunk water-plane plane (after
-/// the height plane); version 3 adds a cliff-material byte to each region
-/// record; version 2 adds the smoothing-profile table (after the region
-/// table) and the per-chunk smoothing plane (after the region plane).
-/// Older buffers still decode: a pre-6 buffer reads an all-zero height-delta
-/// plane, a pre-5 buffer reads an all-inherit underlay-point plane, a pre-4
-/// buffer reads an empty water-plane table and an all-zero water plane, a
-/// pre-3 region reads Stone cliffs, a version-1 buffer reads an empty profile
-/// table and an all-zero smoothing plane.
-const WORLD_FORMAT_VERSION: u8 = 6;
+/// The current write version. Version 7 expands the per-cell packed
+/// overlay mask words into one scalar coverage byte per subcell; older
+/// packed bits decode as `0` / `255`. Version 6 appends the per-chunk
+/// height-delta plane ([`HEIGHT_POINTS_PER_CHUNK`] `i16` octimeter deltas)
+/// to the end of each chunk record, after the underlay-point plane.
+/// Version 5 appends the per-chunk underlay-point plane
+/// ([`UNDERLAY_POINTS_PER_CHUNK`] bytes) to the end of each chunk record.
+/// Version 4 adds the water-plane table (after the smoothing-profile table)
+/// and the per-chunk water-plane plane (after the height plane); version 3
+/// adds a cliff-material byte to each region record; version 2 adds the
+/// smoothing-profile table (after the region table) and the per-chunk
+/// smoothing plane (after the region plane). Older buffers still decode: a
+/// pre-7 buffer expands packed overlay bits to binary coverage, a pre-6
+/// buffer reads an all-zero height-delta plane, a pre-5 buffer reads an
+/// all-inherit underlay-point plane, a pre-4 buffer reads an empty
+/// water-plane table and an all-zero water plane, a pre-3 region reads
+/// Stone cliffs, a version-1 buffer reads an empty profile table and an
+/// all-zero smoothing plane.
+const WORLD_FORMAT_VERSION: u8 = 7;
 
 /// The oldest version [`World::from_bytes`] still decodes.
 const WORLD_FORMAT_VERSION_MIN: u8 = 1;
@@ -1050,9 +1057,7 @@ impl World {
             for m in &chunk.overlay {
                 out.push(m.to_u8());
             }
-            for mask in &chunk.overlay_mask {
-                out.extend_from_slice(&mask.to_le_bytes());
-            }
+            out.extend_from_slice(&chunk.overlay_mask);
             for h in &chunk.height {
                 out.extend_from_slice(&h.to_le_bytes());
             }
@@ -1139,9 +1144,7 @@ impl World {
             for slot in &mut chunk.overlay {
                 *slot = Material::from_u8_or_void(reader.u8()?);
             }
-            for slot in &mut chunk.overlay_mask {
-                *slot = reader.u16()?;
-            }
+            read_overlay_mask(&mut reader, version, &mut chunk)?;
             for slot in &mut chunk.height {
                 *slot = reader.i32()?;
             }
@@ -1177,6 +1180,27 @@ impl World {
             water_planes,
         })
     }
+}
+
+fn read_overlay_mask(
+    reader: &mut Reader<'_>,
+    version: u8,
+    chunk: &mut Chunk,
+) -> Result<(), WorldDecodeError> {
+    if version >= 7 {
+        for slot in &mut chunk.overlay_mask {
+            *slot = reader.u8()?;
+        }
+        return Ok(());
+    }
+    for cell in 0..CELLS_PER_CHUNK_AREA {
+        let mask = reader.u16()?;
+        let base = cell * SUBCELLS_PER_CELL;
+        for bit in 0..SUBCELLS_PER_CELL {
+            chunk.overlay_mask[base + bit] = if (mask >> bit) & 1 == 1 { 255 } else { 0 };
+        }
+    }
+    Ok(())
 }
 
 /// A bounds-checked little-endian byte cursor for [`World::from_bytes`].
@@ -1414,7 +1438,7 @@ mod tests {
         let world = World::new();
         assert_eq!(world.underlay(cell(100, -50)), Material::Void);
         assert_eq!(world.overlay(cell(100, -50)), Material::Void);
-        assert_eq!(world.overlay_mask(cell(100, -50)), 0);
+        assert_eq!(world.overlay_coverage(cell(100, -50), 0, 0), 0);
         assert_eq!(world.height(cell(100, -50)), 0);
         assert!(world.chunk(ChunkPos { x: 3, z: 3 }).is_none());
     }
@@ -1451,11 +1475,12 @@ mod tests {
     }
 
     #[test]
-    fn set_chunk_decodes_overlay_mask_as_le_words() {
-        // 512-byte mask plane; cell 1's word set to 0xBEEF (LE bytes EF BE).
+    fn set_chunk_copies_overlay_coverage_bytes() {
+        // 4096-byte coverage plane; cell 1's first two subcells get direct
+        // scalar coverage bytes.
         let mut overlay_mask = vec![0u8; OVERLAY_MASK_WIRE_BYTES];
-        overlay_mask[2] = 0xEF;
-        overlay_mask[3] = 0xBE;
+        overlay_mask[SUBCELLS_PER_CELL] = 17;
+        overlay_mask[SUBCELLS_PER_CELL + 1] = 239;
         let set = SetChunk {
             chunk_x: 0,
             chunk_z: 0,
@@ -1471,8 +1496,9 @@ mod tests {
         };
         let chunk = set.into_chunk();
         assert_eq!(chunk.overlay_mask[0], 0);
-        assert_eq!(chunk.overlay_mask[1], 0xBEEF);
-        assert_eq!(OVERLAY_MASK_WIRE_BYTES, 512, "SUB=4 → 256*16/8 bytes");
+        assert_eq!(chunk.overlay_mask[SUBCELLS_PER_CELL], 17);
+        assert_eq!(chunk.overlay_mask[SUBCELLS_PER_CELL + 1], 239);
+        assert_eq!(OVERLAY_MASK_WIRE_BYTES, 4096, "SUB=4 -> 256*16 bytes");
     }
 
     #[test]
@@ -1549,7 +1575,9 @@ mod tests {
         let mut a = Chunk::empty();
         a.underlay[0] = Material::Stone;
         a.overlay[5] = Material::Water;
-        a.overlay_mask[5] = 0x0F0F;
+        let overlay_base = 5 * SUBCELLS_PER_CELL;
+        a.overlay_mask[overlay_base] = 9;
+        a.overlay_mask[overlay_base + 1] = 255;
         a.height[10] = -42;
         a.region[20] = 2;
         a.water_plane[40] = 2;
@@ -2077,6 +2105,39 @@ mod tests {
             128,
             "a zero-relief point resolves the cell's own height",
         );
+    }
+
+    #[test]
+    fn pre_v7_buffer_expands_overlay_bits_to_coverage_bytes() {
+        // Tripwire: a version-6 buffer stores two packed mask bytes per
+        // cell. Decoding expands each bit to the v7 scalar plane: set bits
+        // become 255, clear bits become 0, preserving binary midpoint
+        // crossings under the scalar mesher.
+        let mut buf = vec![6u8];
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no regions
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no profiles
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no water planes
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one chunk
+        buf.extend_from_slice(&0i32.to_le_bytes()); // chunk x
+        buf.extend_from_slice(&0i32.to_le_bytes()); // chunk z
+        buf.extend_from_slice(&[0u8; CELLS_PER_CHUNK_AREA]); // underlay
+        buf.extend_from_slice(&[0u8; CELLS_PER_CHUNK_AREA]); // overlay
+        let mut masks = [0u8; 2 * CELLS_PER_CHUNK_AREA];
+        masks[0..2].copy_from_slice(&0b0000_0000_0000_0101u16.to_le_bytes());
+        buf.extend_from_slice(&masks);
+        buf.extend_from_slice(&[0u8; 4 * CELLS_PER_CHUNK_AREA]); // heights
+        buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // water planes
+        buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // regions
+        buf.extend_from_slice(&[0u8; CELLS_PER_CHUNK_AREA]); // smoothing
+        buf.extend_from_slice(&[UNDERLAY_POINT_INHERIT; UNDERLAY_POINTS_PER_CHUNK]); // points
+        buf.extend_from_slice(&[0u8; 2 * HEIGHT_POINTS_PER_CHUNK]); // height deltas
+
+        let world = World::from_bytes(&buf).expect("a v6 buffer still decodes");
+        let chunk = world.chunk(ChunkPos { x: 0, z: 0 }).expect("chunk");
+        assert_eq!(chunk.overlay_mask[0], 255);
+        assert_eq!(chunk.overlay_mask[1], 0);
+        assert_eq!(chunk.overlay_mask[2], 255);
+        assert_eq!(chunk.overlay_mask[3], 0);
     }
 
     #[test]

@@ -21,8 +21,8 @@ use super::*;
 
 /// `aether.kit.world.set_chunk` — write one chunk's planes. The ground
 /// planes ride as raw `Bytes` (256 material/shape bytes each);
-/// `underlay_points` rides as up to [`UNDERLAY_POINTS_PER_CHUNK`] bytes and
-/// `height_points` as up to [`HEIGHT_POINTS_PER_CHUNK`] `i16` deltas;
+/// `overlay_mask` and `underlay_points` ride as up to one byte per subcell,
+/// and `height_points` as up to [`HEIGHT_POINTS_PER_CHUNK`] `i16` deltas;
 /// `height` / `region` / `water_plane` ride as length-256 vectors. Shorter
 /// vectors pad with `Void` / `0` (and a short `underlay_points` /
 /// `height_points` leaves the tail inheriting); longer ones truncate.
@@ -48,9 +48,11 @@ pub struct SetChunk {
     pub height_points: Vec<i16>,
     /// Overlay plane — 256 raw material bytes. `0` = no overlay.
     pub overlay: Vec<u8>,
-    /// Overlay subcell-mask plane — [`OVERLAY_MASK_WIRE_BYTES`] bytes
-    /// (`256 * SUB² / 8`; 512 at `SUB = 4`), one little-endian mask word
-    /// per cell in row-major cell order.
+    /// Overlay subcell coverage plane — [`OVERLAY_MASK_WIRE_BYTES`] bytes
+    /// (`256 * SUB²`; 4096 at `SUB = 4`), one coverage byte per subcell in
+    /// row-major cell order (`z*SUB + x` within a cell). A short vector
+    /// leaves the remaining samples uncovered, so an empty vector is the
+    /// no-coverage default.
     pub overlay_mask: Vec<u8>,
     /// Elevation plane — 256 octimeter values.
     pub height: Vec<i32>,
@@ -95,14 +97,10 @@ impl SetChunk {
         for (dst, byte) in chunk.overlay.iter_mut().zip(&self.overlay) {
             *dst = Material::from_u8_or_void(*byte);
         }
-        // Mask plane: two little-endian bytes per cell (u16 at SUB=4). A
-        // short plane pads with 0 (no coverage); trailing bytes truncate.
-        for (dst, pair) in chunk
-            .overlay_mask
-            .iter_mut()
-            .zip(self.overlay_mask.chunks_exact(2))
-        {
-            *dst = u16::from_le_bytes([pair[0], pair[1]]);
+        // Coverage plane: a short vector leaves the tail uncovered
+        // (Chunk::empty seeds every sample to 0); trailing bytes truncate.
+        for (dst, byte) in chunk.overlay_mask.iter_mut().zip(&self.overlay_mask) {
+            *dst = *byte;
         }
         for (dst, value) in chunk.height.iter_mut().zip(&self.height) {
             *dst = *value;
