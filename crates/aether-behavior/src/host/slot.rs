@@ -160,8 +160,9 @@ impl ScriptSlot {
     }
 
     /// Save the script's migration blob via its `state_save` export. Returns
-    /// an empty vec when the script exports no `state_save` (stateless) or the
-    /// call traps (fail-open — a dehydrate never brings the host down).
+    /// an empty vec when the script exports no `state_save` (stateless), the
+    /// fuel budget cannot be set, or the call traps (fail-open — a dehydrate
+    /// never brings the host down).
     #[must_use]
     pub fn save_state(&mut self) -> Vec<u8> {
         let Some(save) = self.state_save_fn else {
@@ -171,9 +172,17 @@ impl ScriptSlot {
         // dehydrate is not a filter call — but a generous budget still bounds
         // a pathological serializer.
         if self.store.set_fuel(self.fuel_per_call).is_err() {
+            tracing::warn!(
+                target: "aether_behavior",
+                "state_save fuel budget could not be set; dropping migration state blob (fail-open)"
+            );
             return Vec::new();
         }
         let Ok(packed) = save.call(&mut self.store, ()) else {
+            tracing::warn!(
+                target: "aether_behavior",
+                "state_save export trapped; dropping migration state blob (fail-open)"
+            );
             return Vec::new();
         };
         self.read_packed(packed).unwrap_or_default()
