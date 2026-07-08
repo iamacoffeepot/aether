@@ -138,6 +138,15 @@ pub fn component_manifest(wasm: &[u8]) -> Result<ComponentManifest, String> {
     let groups = kind_manifest::read_actor_inputs_from_bytes(wasm)?;
     let module_namespace = kind_manifest::read_namespace_from_bytes(wasm)?;
     let provenance = kind_manifest::read_producers_from_bytes(wasm);
+    // ADR-0138: a defaultless multi-actor module carries the no-entry
+    // marker and omits `aether.namespace`, so it has no bare-load entry.
+    // Otherwise the entry is the module's `aether.namespace` value (the
+    // single-actor namespace or the `export!(entry = …)` opt-in).
+    let default_entry = if kind_manifest::read_no_entry_marker(wasm) {
+        None
+    } else {
+        module_namespace.clone()
+    };
 
     let mut actors: Vec<ComponentActor> = Vec::with_capacity(groups.len());
     for group in groups {
@@ -177,5 +186,50 @@ pub fn component_manifest(wasm: &[u8]) -> Result<ComponentManifest, String> {
         handled_kinds,
         fallback,
         provenance,
+        default_entry,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Assemble a minimal wasm carrying one custom section (the section
+    /// reader only needs the sections; no functions), mirroring the
+    /// substrate's own `kind_manifest` section-reader test fixtures.
+    fn wasm_with_section(section_name: &str, section: &[u8]) -> Vec<u8> {
+        use core::fmt::Write as _;
+        let mut escaped = String::with_capacity(section.len() * 3);
+        for b in section {
+            write!(&mut escaped, "\\{b:02x}").expect("write to String");
+        }
+        let wat =
+            format!(r#"(module (@custom "{section_name}" "{escaped}") (func (export "noop")))"#);
+        wat::parse_str(wat).expect("valid wat")
+    }
+
+    #[test]
+    fn default_entry_tracks_the_no_entry_marker() {
+        // ADR-0138: a single-actor / opted-in module carries its
+        // `aether.namespace` and no marker, so its bare-load entry is that
+        // namespace. A defaultless multi-actor module carries the
+        // `aether.no_entry` marker (and omits `aether.namespace`), so it
+        // has no bare-load entry.
+        let entry = wasm_with_section("aether.namespace", b"aether.probe");
+        assert_eq!(
+            component_manifest(&entry)
+                .expect("manifest reads")
+                .default_entry
+                .as_deref(),
+            Some("aether.probe"),
+        );
+
+        let defaultless = wasm_with_section("aether.no_entry", &[1u8]);
+        assert_eq!(
+            component_manifest(&defaultless)
+                .expect("manifest reads")
+                .default_entry,
+            None,
+        );
+    }
 }

@@ -79,13 +79,19 @@ pub const OCTIMETERS_PER_TILE: i32 = 256;
 /// tile (`2^8 = 256` octimeters per tile).
 pub const TILE_BITS: u32 = 8;
 
-// A cdylib carries one `export!` (the shared init/receive FFI entry). The
-// entry type is listed first; the macro emits the wasm32 FFI shims and the
-// `aether.kinds` custom section for every listed actor. The `behavior`
-// feature (ADR-0137, issue 2687) appends `aether-behavior`'s `BehaviorHost`
-// so the panel's `WidgetKind::BehaviorHost` arm can spawn it by tag; the two
-// invocations are cfg-exclusive, keeping the ordinary kit build's exported
-// set (and its `aether.kinds` section) unchanged.
+// A cdylib carries one `export!` (the shared init/receive FFI entry); the
+// macro emits the wasm32 FFI shims and the `aether.kinds` custom section for
+// every listed actor. The kit is a subsystem library — a grab-bag of
+// unrelated actors (camera, mesh viewer, world mesher, mover, widget set)
+// each loaded independently — so it is deliberately DEFAULTLESS per ADR-0138:
+// the bare `export!(…)` (no `entry =`) designates no bare-load entry, and
+// every consumer loads a specific actor by its `module@actor` selector. A
+// `load` with no export selector against the kit is a hard error naming the
+// exports, not an instantiation of whichever actor happens to sit first. The
+// `behavior` feature (ADR-0137, issue 2687) appends `aether-behavior`'s
+// `BehaviorHost` so the panel's `WidgetKind::BehaviorHost` arm can spawn it
+// by tag; the two invocations are cfg-exclusive, keeping the ordinary kit
+// build's exported set (and its `aether.kinds` section) unchanged.
 #[cfg(not(feature = "behavior"))]
 aether_actor::export!(
     locomotion::Locomotion,

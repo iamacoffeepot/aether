@@ -118,6 +118,7 @@ dependencies = [
  "url",
  "uuid",
  "wasmtime",
+ "wat",
  "wgpu",
 ]
 
@@ -329,6 +330,14 @@ dependencies = [
  "bytemuck",
  "serde",
  "tracing",
+]
+
+[[package]]
+name = "aether-test-fixtures-defaultless"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-kinds",
 ]
 
 [[package]]
