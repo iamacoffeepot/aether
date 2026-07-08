@@ -262,65 +262,7 @@ impl HttpSupervisorState {
         mailbox: MailboxId,
         shared: bool,
     ) -> RegisterRouteResult {
-        let prefix = match normalize_prefix(prefix) {
-            Ok(prefix) => prefix,
-            Err(error) => return RegisterRouteResult::Err { error },
-        };
-        let mut routes = self.routes.write().expect("route table lock poisoned");
-        if let Some(existing) = routes
-            .iter_mut()
-            .find(|r| r.prefix == prefix && r.method == method)
-        {
-            // Exclusive re-claim by the sole holder stays the idempotent
-            // kind-updating Ok it always was.
-            if !shared && !existing.shared && existing.members == [mailbox] {
-                existing.kind = kind;
-                return RegisterRouteResult::Ok;
-            }
-            if shared != existing.shared {
-                return RegisterRouteResult::Err {
-                    error: format!(
-                        "route ({prefix:?}, {method:?}) is {}; a {} registration cannot \
-                         join it (ADR-0136: spreading is a joint opt-in)",
-                        if existing.shared {
-                            "a shared member set"
-                        } else {
-                            "exclusively claimed"
-                        },
-                        if shared { "shared" } else { "exclusive" },
-                    ),
-                };
-            }
-            if !shared {
-                return RegisterRouteResult::Err {
-                    error: format!(
-                        "route ({prefix:?}, {method:?}) already claimed by mailbox {:?}",
-                        existing.members[0],
-                    ),
-                };
-            }
-            if existing.kind != kind {
-                return RegisterRouteResult::Err {
-                    error: format!(
-                        "route ({prefix:?}, {method:?}) member set dispatches kind {:?}; a \
-                         member registering kind {kind:?} cannot join (ADR-0136)",
-                        existing.kind,
-                    ),
-                };
-            }
-            if !existing.members.contains(&mailbox) {
-                existing.members.push(mailbox);
-            }
-            return RegisterRouteResult::Ok;
-        }
-        routes.push(Route {
-            prefix,
-            method,
-            kind,
-            shared,
-            members: vec![mailbox],
-        });
-        RegisterRouteResult::Ok
+        register_route(&self.routes, prefix, method, kind, mailbox, shared)
     }
 
     /// Release `mailbox`'s membership in the `(prefix, method)` route
@@ -338,18 +280,7 @@ impl HttpSupervisorState {
         method: Option<HttpMethod>,
         mailbox: MailboxId,
     ) -> RegisterRouteResult {
-        let prefix = match normalize_prefix(prefix) {
-            Ok(prefix) => prefix,
-            Err(error) => return RegisterRouteResult::Err { error },
-        };
-        let mut routes = self.routes.write().expect("route table lock poisoned");
-        for route in routes.iter_mut() {
-            if route.prefix == prefix && route.method == method {
-                route.members.retain(|m| *m != mailbox);
-            }
-        }
-        routes.retain(|r| !r.members.is_empty());
-        RegisterRouteResult::Ok
+        unregister_route(&self.routes, prefix, method, mailbox)
     }
 
     /// Release every route membership held by `mailbox` (ADR-0130's
@@ -360,11 +291,7 @@ impl HttpSupervisorState {
     /// Panics if the route-table `RwLock` is poisoned — fail-fast per
     /// ADR-0063.
     pub fn unregister_routes_all(&mut self, mailbox: MailboxId) {
-        let mut routes = self.routes.write().expect("route table lock poisoned");
-        for route in routes.iter_mut() {
-            route.members.retain(|m| *m != mailbox);
-        }
-        routes.retain(|r| !r.members.is_empty());
+        unregister_routes_all(&self.routes, mailbox);
     }
 }
 

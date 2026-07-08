@@ -6,6 +6,7 @@ use aether_data::Kind as KindTrait;
 use aether_data::KindId;
 use aether_substrate::Mail;
 use aether_substrate::Subname;
+use aether_substrate::actor::native::NativeActor;
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::testing::{TestChassis, fresh_substrate};
 use std::io::{self, Read, Write};
@@ -15,13 +16,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use test_handlers::{
-    ApiRouteHandler, ApiV2Handler, DupFirstHandler, DupSecondHandler, EchoHttpHandler,
-    ExclusiveMacroFirstHandler, ExclusiveMacroSecondHandler, ExclusivePoolHandler,
-    ExtractRouteHandler, FixedBodyHttpHandler, FloodHttpHandler, MethodAnyHandler,
-    MethodPostHandler, STREAM_CHUNK_COUNT, SharedAlphaHandler, SharedBetaHandler,
-    SharedDupJoinHandler, SharedMacroPoolHandler, SharedWrongKindHandler, SilentHttpHandler,
-    StreamHttpHandler, StreamingUploadHandler, TmpRouteHandler, WiredRouteHandler,
-    stream_chunk_body,
+    ApiRouteHandler, ApiV2Handler, EchoHttpHandler, ExclusiveMacroFirstHandler,
+    ExclusiveMacroSecondHandler, ExtractRouteHandler, FixedBodyHttpHandler, FloodHttpHandler,
+    MethodAnyHandler, MethodPostHandler, STREAM_CHUNK_COUNT, SharedAlphaHandler, SharedBetaHandler,
+    SharedMacroPoolHandler, SilentHttpHandler, StreamHttpHandler, StreamingUploadHandler,
+    TmpRouteHandler, WiredRouteHandler, stream_chunk_body,
 };
 
 mod test_handlers {
@@ -300,74 +299,10 @@ mod test_handlers {
         "/m"
     );
 
-    /// A raw-surface routed handler that hand-writes its `wire`
-    /// registration with the generic request kind and replies `200` with
-    /// a fixed tag body. The conflict-`Err` and idempotent double-claim
-    /// tests key on the protocol directly, so they stay on this raw
-    /// surface rather than the macro's — a macro regression cannot then
-    /// mask a registration-semantics regression.
-    macro_rules! raw_routed_handler {
-        ($ty:ident, $state:ident, $namespace:literal, $tag:literal,
-         [$(($method:expr, $prefix:literal)),+ $(,)?]) => {
-            pub struct $ty;
-            pub struct $state;
-
-            #[actor(singleton)]
-            impl NativeActor for $ty {
-                type State = $state;
-                type Config = ();
-                const NAMESPACE: &'static str = $namespace;
-
-                fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<$state, BootError> {
-                    Ok($state)
-                }
-
-                fn wire(_state: &mut $state, ctx: &mut NativeCtx<'_>) {
-                    $(ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
-                        prefix: $prefix.to_string(),
-                        method: $method,
-                        kind: <HttpServerRequest as Kind>::ID,
-                        shared: false,
-                    });)+
-                }
-
-                #[handler::single]
-                fn on_request(
-                    _state: &mut Self::State,
-                    _ctx: &mut NativeCtx<'_>,
-                    _request: HttpServerRequest,
-                ) -> HttpServerResponse {
-                    HttpServerResponse {
-                        status: 200,
-                        headers: Vec::new(),
-                        body: $tag.to_vec(),
-                    }
-                }
-            }
-        };
-    }
-
-    // The first claimant sends its `/dup` claim twice, pinning the
-    // idempotent same-mailbox re-claim (both `Ok`) alongside the
-    // cross-mailbox conflict the second claimant loses.
-    raw_routed_handler!(
-        DupFirstHandler,
-        DupFirstHandlerState,
-        "aether.http.test_route_dup_first",
-        b"first",
-        [(None, "/dup"), (None, "/dup")]
-    );
-    raw_routed_handler!(
-        DupSecondHandler,
-        DupSecondHandlerState,
-        "aether.http.test_route_dup_second",
-        b"second",
-        [(None, "/dup"), (None, "/second")]
-    );
-
-    /// Like [`raw_routed_handler!`] but every claim registers
-    /// `shared: true` with the given dispatch kind (ADR-0136) — the
-    /// member-set opt-in the shared-route tests exercise.
+    /// A routed handler whose `wire` registers each claim `shared: true`
+    /// with the given dispatch kind (ADR-0136) — the member-set opt-in
+    /// the shared-route tests exercise. Replies `200` with a fixed tag
+    /// body.
     macro_rules! shared_routed_handler {
         ($ty:ident, $state:ident, $namespace:literal, $tag:literal, $kind:ty,
          [$(($method:expr, $prefix:literal)),+ $(,)?]) => {
@@ -410,9 +345,10 @@ mod test_handlers {
     }
 
     // The /pool member set (ADR-0136): two shared claimants that both
-    // serve, one kind-mismatched shared claimant and one exclusive
-    // claimant that are both rejected without touching their other
-    // routes.
+    // serve, exercised over the wire by
+    // `shared_route_spreads_across_members`. The shared/exclusive
+    // conflict matrix these once paired with is now covered
+    // deterministically in `runtime::unit_tests::route_registration`.
     shared_routed_handler!(
         SharedAlphaHandler,
         SharedAlphaHandlerState,
@@ -428,29 +364,6 @@ mod test_handlers {
         b"beta",
         HttpServerRequest,
         [(None, "/pool")]
-    );
-    shared_routed_handler!(
-        SharedWrongKindHandler,
-        SharedWrongKindHandlerState,
-        "aether.http.test_route_shared_wrong_kind",
-        b"wrong-kind",
-        HttpRequestChunk,
-        [(None, "/pool")]
-    );
-    shared_routed_handler!(
-        SharedDupJoinHandler,
-        SharedDupJoinHandlerState,
-        "aether.http.test_route_shared_dup_join",
-        b"shared-dup",
-        HttpServerRequest,
-        [(None, "/dup"), (None, "/shared-ok")]
-    );
-    raw_routed_handler!(
-        ExclusivePoolHandler,
-        ExclusivePoolHandlerState,
-        "aether.http.test_route_excl_pool",
-        b"excl-pool",
-        [(None, "/pool"), (None, "/excl-ok")]
     );
 
     /// A `#[http::router(shared)]` handler (issue 2625) — the typed
@@ -933,6 +846,52 @@ fn config_for(handler: &str, max_request_bytes: usize) -> HttpServerConfig {
     }
 }
 
+/// Boot a passive chassis holding one handler actor `H` plus the HTTP
+/// server cap under `config` — the single-handler shape most server
+/// tests share. Multi-handler and cap-only boots stay explicit at their
+/// call sites.
+fn boot_chassis<H>(config: HttpServerConfig) -> PassiveChassis<TestChassis>
+where
+    H: NativeActor<Config = ()>,
+{
+    let (registry, mailer) = fresh_substrate();
+    Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<H>(())
+        .with_actor::<HttpServerCapability>(config)
+        .build_passive()
+        .expect("caps boot")
+}
+
+/// [`boot_chassis`] with `H` as its own `handler_mailbox` under a
+/// buffered [`config_for`] config (`max_request_bytes`).
+fn boot_buffered<H>(max_request_bytes: usize) -> PassiveChassis<TestChassis>
+where
+    H: NativeActor<Config = ()>,
+{
+    boot_chassis::<H>(config_for(<H as Addressable>::NAMESPACE, max_request_bytes))
+}
+
+/// [`boot_chassis`] with `H` under a response-streaming [`stream_config_for`]
+/// config (credit `window`).
+fn boot_response_stream<H>(window: u32) -> PassiveChassis<TestChassis>
+where
+    H: NativeActor<Config = ()>,
+{
+    boot_chassis::<H>(stream_config_for(<H as Addressable>::NAMESPACE, window))
+}
+
+/// [`boot_chassis`] with `H` under a request-streaming
+/// [`request_stream_config_for`] config (credit `window`).
+fn boot_request_stream<H>(window: u32) -> PassiveChassis<TestChassis>
+where
+    H: NativeActor<Config = ()>,
+{
+    boot_chassis::<H>(request_stream_config_for(
+        <H as Addressable>::NAMESPACE,
+        window,
+    ))
+}
+
 /// Server config for the streaming tests (ADR-0128): a small credit window
 /// so a multi-chunk response must replenish credit repeatedly, and a flood
 /// overruns it fast.
@@ -1056,15 +1015,7 @@ fn body_of(response: &str) -> &str {
 /// well-formed HTTP/1.1, carrying the parsed path / query / method.
 #[test]
 fn get_round_trips_to_handler() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EchoHttpHandler>(())
-        .with_actor::<HttpServerCapability>(config_for(
-            <EchoHttpHandler as Addressable>::NAMESPACE,
-            1024,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
     let response = round_trip(
         port_of(&chassis),
@@ -1103,15 +1054,7 @@ fn get_round_trips_to_handler() {
 /// A POST round-trips the body verbatim to the handler.
 #[test]
 fn post_round_trips_body() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EchoHttpHandler>(())
-        .with_actor::<HttpServerCapability>(config_for(
-            <EchoHttpHandler as Addressable>::NAMESPACE,
-            1024,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
     let response = round_trip(
         port_of(&chassis),
@@ -1132,15 +1075,7 @@ fn post_round_trips_body() {
 /// `413` before any dispatch.
 #[test]
 fn oversize_body_is_413() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EchoHttpHandler>(())
-        .with_actor::<HttpServerCapability>(config_for(
-            <EchoHttpHandler as Addressable>::NAMESPACE,
-            8,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_buffered::<EchoHttpHandler>(8);
 
     let response = round_trip(
         port_of(&chassis),
@@ -1159,15 +1094,7 @@ fn oversize_body_is_413() {
 /// request rather than being skipped because `ws_key.is_some()`.
 #[test]
 fn oversize_body_on_ws_upgrade_is_413() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EchoHttpHandler>(())
-        .with_actor::<HttpServerCapability>(config_for(
-            <EchoHttpHandler as Addressable>::NAMESPACE,
-            8,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_buffered::<EchoHttpHandler>(8);
 
     let response = round_trip(
         port_of(&chassis),
@@ -1195,15 +1122,7 @@ fn oversize_body_on_ws_upgrade_is_413() {
 /// upgrade handshake.
 #[test]
 fn smuggling_on_ws_upgrade_is_411() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EchoHttpHandler>(())
-        .with_actor::<HttpServerCapability>(config_for(
-            <EchoHttpHandler as Addressable>::NAMESPACE,
-            1024,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
     let response = round_trip(
         port_of(&chassis),
@@ -1225,15 +1144,7 @@ fn smuggling_on_ws_upgrade_is_411() {
 /// A non-enumerated method is answered `501` before any dispatch.
 #[test]
 fn unknown_method_is_501() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EchoHttpHandler>(())
-        .with_actor::<HttpServerCapability>(config_for(
-            <EchoHttpHandler as Addressable>::NAMESPACE,
-            1024,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
     let response = round_trip(
         port_of(&chassis),
@@ -1299,15 +1210,7 @@ fn response_less_chain_is_502() {
 /// raw.
 #[test]
 fn percent_encoded_path_is_decoded() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EchoHttpHandler>(())
-        .with_actor::<HttpServerCapability>(config_for(
-            <EchoHttpHandler as Addressable>::NAMESPACE,
-            1024,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
     let response = round_trip(
         port_of(&chassis),
@@ -1330,15 +1233,7 @@ fn percent_encoded_path_is_decoded() {
 /// incremental path — see `chunked_upload_streams_to_streaming_handler`).
 #[test]
 fn transfer_encoding_is_411() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EchoHttpHandler>(())
-        .with_actor::<HttpServerCapability>(config_for(
-            <EchoHttpHandler as Addressable>::NAMESPACE,
-            1024,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
     let response = round_trip(
         port_of(&chassis),
@@ -1354,15 +1249,7 @@ fn transfer_encoding_is_411() {
 /// Continue` before the final response.
 #[test]
 fn expect_continue_gets_100_continue() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EchoHttpHandler>(())
-        .with_actor::<HttpServerCapability>(config_for(
-            <EchoHttpHandler as Addressable>::NAMESPACE,
-            1024,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
     let response = round_trip(
         port_of(&chassis),
@@ -1383,15 +1270,7 @@ fn expect_continue_gets_100_continue() {
 /// to the same handler still returns the body.
 #[test]
 fn head_response_suppresses_body() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<FixedBodyHttpHandler>(())
-        .with_actor::<HttpServerCapability>(config_for(
-            <FixedBodyHttpHandler as Addressable>::NAMESPACE,
-            1024,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_buffered::<FixedBodyHttpHandler>(1024);
     let port = port_of(&chassis);
 
     let head_response = round_trip(port, b"HEAD /x HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -1427,20 +1306,15 @@ fn head_response_suppresses_body() {
 /// because no single shard is at the ceiling.
 #[test]
 fn over_capacity_connection_is_503() {
-    let (registry, mailer) = fresh_substrate();
     let max_connections = 2;
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EchoHttpHandler>(())
-        .with_actor::<HttpServerCapability>(HttpServerConfig {
-            bind_addr: "127.0.0.1:0".to_string(),
-            handler_mailbox: <EchoHttpHandler as Addressable>::NAMESPACE.to_string(),
-            request_timeout_millis: 5_000,
-            max_connections,
-            dispatch_shards: 2,
-            ..HttpServerConfig::default()
-        })
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_chassis::<EchoHttpHandler>(HttpServerConfig {
+        bind_addr: "127.0.0.1:0".to_string(),
+        handler_mailbox: <EchoHttpHandler as Addressable>::NAMESPACE.to_string(),
+        request_timeout_millis: 5_000,
+        max_connections,
+        dispatch_shards: 2,
+        ..HttpServerConfig::default()
+    });
 
     let port = port_of(&chassis);
 
@@ -1485,18 +1359,13 @@ fn over_capacity_connection_is_503() {
 /// connections.
 #[test]
 fn connections_distribute_across_shards() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EchoHttpHandler>(())
-        .with_actor::<HttpServerCapability>(HttpServerConfig {
-            bind_addr: "127.0.0.1:0".to_string(),
-            handler_mailbox: <EchoHttpHandler as Addressable>::NAMESPACE.to_string(),
-            request_timeout_millis: 5_000,
-            dispatch_shards: 2,
-            ..HttpServerConfig::default()
-        })
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_chassis::<EchoHttpHandler>(HttpServerConfig {
+        bind_addr: "127.0.0.1:0".to_string(),
+        handler_mailbox: <EchoHttpHandler as Addressable>::NAMESPACE.to_string(),
+        request_timeout_millis: 5_000,
+        dispatch_shards: 2,
+        ..HttpServerConfig::default()
+    });
 
     let port = port_of(&chassis);
 
@@ -1541,16 +1410,8 @@ fn connections_distribute_across_shards() {
 /// many refills, not just the initial grant.
 #[test]
 fn streamed_response_reassembles_across_credit_window() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<StreamHttpHandler>(())
-        .with_actor::<HttpServerCapability>(stream_config_for(
-            <StreamHttpHandler as Addressable>::NAMESPACE,
-            // Window well below the chunk count so credit must replenish.
-            8,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    // Window well below the chunk count so credit must replenish.
+    let chassis = boot_response_stream::<StreamHttpHandler>(8);
 
     let response = round_trip(
         port_of(&chassis),
@@ -1583,16 +1444,8 @@ fn streamed_response_reassembles_across_credit_window() {
 /// the window unbounded.
 #[test]
 fn over_window_flood_tears_the_stream_down() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<FloodHttpHandler>(())
-        .with_actor::<HttpServerCapability>(stream_config_for(
-            <FloodHttpHandler as Addressable>::NAMESPACE,
-            // Tiny window so the flood overruns credit within a few chunks.
-            2,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    // Tiny window so the flood overruns credit within a few chunks.
+    let chassis = boot_response_stream::<FloodHttpHandler>(2);
 
     let response = round_trip(
         port_of(&chassis),
@@ -1630,15 +1483,7 @@ fn request_stream_config_for(handler: &str, window: u32) -> HttpServerConfig {
 /// window forces credit to replenish across hundreds of chunks.
 #[test]
 fn large_upload_streams_past_the_buffered_cap() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<StreamingUploadHandler>(())
-        .with_actor::<HttpServerCapability>(request_stream_config_for(
-            <StreamingUploadHandler as Addressable>::NAMESPACE,
-            4,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_request_stream::<StreamingUploadHandler>(4);
     let port = port_of(&chassis);
 
     // Well past DEFAULT_MAX_REQUEST_BYTES (1 MiB) — a buffered handler would
@@ -1663,15 +1508,7 @@ fn large_upload_streams_past_the_buffered_cap() {
 /// reassembling the body across frames (ADR-0128).
 #[test]
 fn chunked_upload_streams_to_streaming_handler() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<StreamingUploadHandler>(())
-        .with_actor::<HttpServerCapability>(request_stream_config_for(
-            <StreamingUploadHandler as Addressable>::NAMESPACE,
-            4,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_request_stream::<StreamingUploadHandler>(4);
     let port = port_of(&chassis);
 
     // "hello" (5) + " world" (6) = 11 body bytes across two chunks.
@@ -1697,15 +1534,7 @@ fn chunked_upload_streams_to_streaming_handler() {
 /// ambiguous pair.
 #[test]
 fn content_length_with_transfer_encoding_is_411() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<StreamingUploadHandler>(())
-        .with_actor::<HttpServerCapability>(request_stream_config_for(
-            <StreamingUploadHandler as Addressable>::NAMESPACE,
-            4,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_request_stream::<StreamingUploadHandler>(4);
     let port = port_of(&chassis);
 
     let response = round_trip(
@@ -1730,15 +1559,7 @@ fn content_length_with_transfer_encoding_is_411() {
 /// upgrade handshake.
 #[test]
 fn chunked_on_ws_upgrade_is_411() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<StreamingUploadHandler>(())
-        .with_actor::<HttpServerCapability>(request_stream_config_for(
-            <StreamingUploadHandler as Addressable>::NAMESPACE,
-            4,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_request_stream::<StreamingUploadHandler>(4);
     let port = port_of(&chassis);
 
     let response = round_trip(
@@ -1765,15 +1586,7 @@ fn chunked_on_ws_upgrade_is_411() {
 /// take a chunked body.
 #[test]
 fn buffered_handler_keeps_the_unstreamed_path() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EchoHttpHandler>(())
-        .with_actor::<HttpServerCapability>(request_stream_config_for(
-            <EchoHttpHandler as Addressable>::NAMESPACE,
-            4,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_request_stream::<EchoHttpHandler>(4);
     let port = port_of(&chassis);
 
     let response = round_trip(
@@ -1934,29 +1747,6 @@ fn method_specific_route_beats_agnostic() {
     );
 }
 
-/// A `(prefix, method)` key already claimed by another mailbox is
-/// rejected: the first claimant keeps the route, and the rejected
-/// claimant's other registrations are unaffected (ADR-0130). Boot
-/// order makes the winner deterministic — `DupFirstHandler` wires
-/// before `DupSecondHandler`.
-#[test]
-fn conflicting_claim_is_rejected_first_claimant_keeps_route() {
-    let chassis = routed_chassis!(DupFirstHandler, DupSecondHandler);
-    let port = port_of(&chassis);
-
-    // `/second` live proves DupSecondHandler's registrations (sent
-    // after DupFirstHandler's, in boot order) have been processed —
-    // including its rejected `/dup` claim.
-    poll_body(
-        port,
-        b"GET /second HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        "second",
-    );
-
-    let dup = round_trip(port, b"GET /dup HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert_eq!(body_of(&dup), "first", "first claimant keeps the route");
-}
-
 /// A bare `#[http::router]` impl still registers exclusive (issue 2625
 /// regression guard on the default): `ExclusiveMacroFirstHandler` and
 /// `ExclusiveMacroSecondHandler` both claim `/macro-excl` through the
@@ -2071,21 +1861,16 @@ fn macro_router_shared_opt_in_joins_a_member_set() {
 /// and B times out empty.
 #[test]
 fn stalled_peer_does_not_block_sibling_connections() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EchoHttpHandler>(())
-        .with_actor::<HttpServerCapability>(HttpServerConfig {
-            bind_addr: "127.0.0.1:0".to_string(),
-            handler_mailbox: <EchoHttpHandler as Addressable>::NAMESPACE.to_string(),
-            // Short: the stalled write parks within milliseconds, and
-            // teardown waits out at most one response deadline.
-            request_timeout_millis: 2_000,
-            max_request_bytes: 32 * 1024 * 1024,
-            dispatch_shards: 1,
-            ..HttpServerConfig::default()
-        })
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_chassis::<EchoHttpHandler>(HttpServerConfig {
+        bind_addr: "127.0.0.1:0".to_string(),
+        handler_mailbox: <EchoHttpHandler as Addressable>::NAMESPACE.to_string(),
+        // Short: the stalled write parks within milliseconds, and
+        // teardown waits out at most one response deadline.
+        request_timeout_millis: 2_000,
+        max_request_bytes: 32 * 1024 * 1024,
+        dispatch_shards: 1,
+        ..HttpServerConfig::default()
+    });
     let port = port_of(&chassis);
 
     // Connection A: a 16 MiB echo whose response the client never
@@ -2258,66 +2043,6 @@ fn shared_route_spreads_across_members() {
     );
 }
 
-/// The ADR-0136 conflict matrix: a shared claim cannot join an
-/// exclusively-held key, an exclusive claim cannot take a shared set,
-/// and a kind-mismatched shared claim cannot join — each rejection
-/// leaves the loser's other routes serving and the contested route
-/// unchanged.
-#[test]
-fn mixed_and_mismatched_claims_are_rejected() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<HttpServerCapability>(HttpServerConfig {
-            bind_addr: "127.0.0.1:0".to_string(),
-            handler_mailbox: <FixedBodyHttpHandler as Addressable>::NAMESPACE.to_string(),
-            request_timeout_millis: 5_000,
-            dispatch_shards: 1,
-            ..HttpServerConfig::default()
-        })
-        .with_actor::<FixedBodyHttpHandler>(())
-        // Boot order fixes who holds what: /dup exclusive first; the
-        // /pool shared pair before the wrong-kind and exclusive
-        // challengers.
-        .with_actor::<DupFirstHandler>(())
-        .with_actor::<SharedAlphaHandler>(())
-        .with_actor::<SharedBetaHandler>(())
-        .with_actor::<SharedWrongKindHandler>(())
-        .with_actor::<SharedDupJoinHandler>(())
-        .with_actor::<ExclusivePoolHandler>(())
-        .build_passive()
-        .expect("caps boot");
-    let port = port_of(&chassis);
-
-    // The last-booted challenger's accepted route being live proves
-    // every earlier registration (including the rejected ones) has
-    // been processed.
-    poll_body(
-        port,
-        b"GET /excl-ok HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        "excl-pool",
-    );
-    poll_body(
-        port,
-        b"GET /shared-ok HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        "shared-dup",
-    );
-
-    // Shared join on the exclusive /dup: rejected, holder keeps it.
-    let dup = round_trip(port, b"GET /dup HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert_eq!(body_of(&dup), "first", "exclusive holder keeps /dup");
-
-    // Wrong-kind shared join and exclusive take of /pool: rejected —
-    // only alpha/beta ever serve it.
-    for _ in 0..6 {
-        let response = round_trip(port, b"GET /pool HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        let body = body_of(&response);
-        assert!(
-            body == "alpha" || body == "beta",
-            "/pool must stay with the shared pair; got {body:?}",
-        );
-    }
-}
-
 /// A macro route composes with a hand-written `wire`: the macro appends
 /// its `/wired` registration to the author's `wire` without displacing
 /// the raw `/wired-extra` claim already there, so both dispatch (ADR-0131
@@ -2382,20 +2107,27 @@ fn keep_alive_config_for(handler: &str, keep_alive_timeout_millis: u64) -> HttpS
 /// it (a pipelined next response) in `carry` for the following call. Panics
 /// on EOF mid-response, so a test that expects the connection to close reads
 /// one response and then asserts EOF separately.
-fn read_one_response(stream: &mut TcpStream, carry: &mut Vec<u8>) -> String {
-    let mut chunk = [0u8; 4096];
-    let head_end = loop {
+/// Read from `stream` into `carry` until the blank line terminating the
+/// HTTP response head is buffered; return the byte index just past it.
+/// Shared by the buffered and chunked response readers.
+fn read_response_head(stream: &mut TcpStream, carry: &mut Vec<u8>, chunk: &mut [u8]) -> usize {
+    loop {
         if let Some(pos) = carry.windows(4).position(|window| window == b"\r\n\r\n") {
-            break pos + 4;
+            return pos + 4;
         }
-        let n = stream.read(&mut chunk).expect("read response head");
+        let n = stream.read(chunk).expect("read response head");
         assert!(
             n > 0,
             "eof before response head; buffered: {:?}",
             String::from_utf8_lossy(carry),
         );
         carry.extend_from_slice(&chunk[..n]);
-    };
+    }
+}
+
+fn read_one_response(stream: &mut TcpStream, carry: &mut Vec<u8>) -> String {
+    let mut chunk = [0u8; 4096];
+    let head_end = read_response_head(stream, carry, &mut chunk);
     let content_length = content_length_of(&carry[..head_end]);
     while carry.len() < head_end + content_length {
         let n = stream.read(&mut chunk).expect("read response body");
@@ -2430,18 +2162,7 @@ fn content_length_of(head: &[u8]) -> usize {
 /// case.
 fn read_one_chunked_response(stream: &mut TcpStream, carry: &mut Vec<u8>) -> String {
     let mut chunk = [0u8; 4096];
-    let head_end = loop {
-        if let Some(pos) = carry.windows(4).position(|window| window == b"\r\n\r\n") {
-            break pos + 4;
-        }
-        let n = stream.read(&mut chunk).expect("read response head");
-        assert!(
-            n > 0,
-            "eof before response head; buffered: {:?}",
-            String::from_utf8_lossy(carry),
-        );
-        carry.extend_from_slice(&chunk[..n]);
-    };
+    let head_end = read_response_head(stream, carry, &mut chunk);
     let terminator = b"0\r\n\r\n";
     let body_end = loop {
         if let Some(pos) = carry[head_end..]
@@ -2479,15 +2200,7 @@ fn assert_closed(stream: &mut TcpStream) {
 /// over-read bytes across the resume signal.
 #[test]
 fn keep_alive_serves_sequential_requests_on_one_socket() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EchoHttpHandler>(())
-        .with_actor::<HttpServerCapability>(config_for(
-            <EchoHttpHandler as Addressable>::NAMESPACE,
-            1024,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_buffered::<EchoHttpHandler>(1024);
     let port = port_of(&chassis);
 
     let mut stream =
@@ -2556,15 +2269,7 @@ fn keep_alive_serves_sequential_requests_on_one_socket() {
 /// fail against the pre-fix behavior.
 #[test]
 fn keep_alive_reuses_socket_after_streamed_response() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<StreamHttpHandler>(())
-        .with_actor::<HttpServerCapability>(stream_config_for(
-            <StreamHttpHandler as Addressable>::NAMESPACE,
-            8,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_response_stream::<StreamHttpHandler>(8);
     let port = port_of(&chassis);
 
     let mut stream =
@@ -2619,15 +2324,7 @@ fn keep_alive_reuses_socket_after_streamed_response() {
 /// ends, exactly like the buffered path.
 #[test]
 fn streamed_response_honors_explicit_connection_close() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<StreamHttpHandler>(())
-        .with_actor::<HttpServerCapability>(stream_config_for(
-            <StreamHttpHandler as Addressable>::NAMESPACE,
-            8,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_response_stream::<StreamHttpHandler>(8);
     let port = port_of(&chassis);
 
     let mut stream =
@@ -2654,15 +2351,7 @@ fn streamed_response_honors_explicit_connection_close() {
 /// response carries `Connection: close` and the server closes the socket.
 #[test]
 fn http_1_0_defaults_to_close() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EchoHttpHandler>(())
-        .with_actor::<HttpServerCapability>(config_for(
-            <EchoHttpHandler as Addressable>::NAMESPACE,
-            1024,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_buffered::<EchoHttpHandler>(1024);
     let port = port_of(&chassis);
 
     let mut stream =
@@ -2693,15 +2382,10 @@ fn http_1_0_defaults_to_close() {
 /// pinning the reader thread for the full request timeout.
 #[test]
 fn idle_kept_alive_connection_closes_after_timeout() {
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EchoHttpHandler>(())
-        .with_actor::<HttpServerCapability>(keep_alive_config_for(
-            <EchoHttpHandler as Addressable>::NAMESPACE,
-            300,
-        ))
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_chassis::<EchoHttpHandler>(keep_alive_config_for(
+        <EchoHttpHandler as Addressable>::NAMESPACE,
+        300,
+    ));
     let port = port_of(&chassis);
 
     let mut stream =
