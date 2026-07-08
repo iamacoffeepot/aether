@@ -7,8 +7,8 @@
 //! manifest (the skip-set), and the consecutive-trap counter that drives the
 //! fail-open state machine. Only fuel resets per call.
 //!
-//! **Fail-open.** A trap — fuel exhaustion, a memory fault, a missing export,
-//! a malformed filter output — never propagates: the in-flight mail forwards
+//! **Fail-open.** A trap — fuel exhaustion, a memory fault, or a malformed
+//! filter output — never propagates: the in-flight mail forwards
 //! untransformed, the failure logs, and a consecutive-trap counter climbs. A
 //! clean call resets it to zero; reaching the threshold disables the script
 //! (pure passthrough) until the next `load_script` / `set_script` replaces it.
@@ -18,7 +18,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use aether_data::KindId;
-use wasmi::{Config, Engine, Instance, Linker, Memory, Module, Store, TypedFunc};
+use wasmi::{Config, Engine, Instance, Linker, Memory, Module, Store, TrapCode, TypedFunc};
 
 use crate::abi::unpack_ptr_len;
 use crate::envelope::{self, FilterOutput};
@@ -41,6 +41,16 @@ pub enum FilterOutcome {
     /// in-flight mail untransformed. (Also the value for a call on a disabled
     /// script, though the host normally short-circuits before calling.)
     Passthrough,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FaultReason {
+    FuelSetFailed,
+    GuestWrite,
+    FuelExhausted,
+    Trap { detail: String },
+    MalformedReturn,
+    DecodeFailed { kind: KindId },
 }
 
 /// Whether a script is running or has been disabled by the trap threshold.
@@ -203,35 +213,43 @@ impl ScriptSlot {
         if self.state == RunState::Disabled {
             return FilterOutcome::Passthrough;
         }
-        if let Some(output) = self.filter_inner(kind, bytes) {
-            self.consecutive_traps = 0;
-            FilterOutcome::Output(output)
-        } else {
-            self.record_trap();
-            FilterOutcome::Passthrough
+        match self.filter_inner(kind, bytes) {
+            Ok(output) => {
+                self.consecutive_traps = 0;
+                FilterOutcome::Output(output)
+            }
+            Err(reason) => {
+                self.record_trap(reason);
+                FilterOutcome::Passthrough
+            }
         }
     }
 
-    /// The wasmi call path, returning `None` on any failure (trap, missing
-    /// region, malformed output) so [`Self::filter`] can fail open uniformly.
-    fn filter_inner(&mut self, kind: KindId, bytes: &[u8]) -> Option<FilterOutput> {
+    /// The wasmi call path, returning a typed reason on failure so
+    /// [`Self::filter`] can fail open uniformly while logging the cause.
+    fn filter_inner(&mut self, kind: KindId, bytes: &[u8]) -> Result<FilterOutput, FaultReason> {
         // Fuel resets per call — a runaway script traps at the budget rather
         // than wedging the host.
-        self.store.set_fuel(self.fuel_per_call).ok()?;
-        let (ptr, len) = self.write_guest(bytes)?;
+        self.store
+            .set_fuel(self.fuel_per_call)
+            .map_err(|_| FaultReason::FuelSetFailed)?;
+        let (ptr, len) = self.write_guest(bytes).ok_or(FaultReason::GuestWrite)?;
         let packed = self
             .filter_fn
             .call(&mut self.store, (kind.0, ptr, len))
-            .ok()?;
-        let out = self.read_packed(packed)?;
-        envelope::decode(&out)
+            .map_err(classify_trap)?;
+        let out = self
+            .read_packed(packed)
+            .ok_or(FaultReason::MalformedReturn)?;
+        envelope::decode(&out).ok_or(FaultReason::DecodeFailed { kind })
     }
 
     /// Record a trap: bump the counter and disable at the threshold.
-    fn record_trap(&mut self) {
+    fn record_trap(&mut self, reason: FaultReason) {
         self.consecutive_traps = self.consecutive_traps.saturating_add(1);
         tracing::warn!(
             target: "aether_behavior",
+            ?reason,
             consecutive = self.consecutive_traps,
             "behavior filter failed open — forwarding untransformed"
         );
@@ -265,6 +283,16 @@ impl ScriptSlot {
     }
 }
 
+fn classify_trap(error: wasmi::Error) -> FaultReason {
+    if error.as_trap_code() == Some(TrapCode::OutOfFuel) {
+        FaultReason::FuelExhausted
+    } else {
+        FaultReason::Trap {
+            detail: error.to_string(),
+        }
+    }
+}
+
 /// Read the `aether.behavior.exports` custom section out of a compiled module
 /// and decode it into the handled-kind manifest. A module with no such
 /// section (or an unrecognized version) yields an empty manifest — every kind
@@ -286,8 +314,8 @@ mod tests {
     use super::*;
     use crate::envelope::{Effect, EffectTarget, Verdict};
     use crate::host::test_support::{
-        conditional_trap_wasm, empty_return_wasm, fixed_output_wasm, forward_output, stateful_wasm,
-        trapping_wasm,
+        conditional_trap_wasm, empty_return_wasm, fixed_output_wasm, forward_output,
+        fuel_exhausting_wasm, out_of_bounds_return_wasm, stateful_wasm, trapping_wasm,
     };
     use alloc::vec;
 
@@ -343,6 +371,81 @@ mod tests {
         ));
         assert_eq!(slot.consecutive_traps(), 2);
         assert!(slot.is_disabled());
+    }
+
+    // Tripwire: an explicit guest trap is classified separately from fuel
+    // exhaustion, so logs can point at script bugs rather than budget pressure.
+    #[test]
+    fn trap_classifies_as_trap_reason() {
+        let kind = KindId(0x1002);
+        let engine = build_engine();
+        let mut slot = ScriptSlot::instantiate(&engine, &trapping_wasm(kind), None, 1_000_000, 3)
+            .expect("test setup: trapping module instantiates");
+
+        let reason = slot
+            .filter_inner(kind, b"abc")
+            .expect_err("trapping module should fail");
+
+        assert!(matches!(reason, FaultReason::Trap { .. }));
+    }
+
+    // Tripwire: a runaway script is classified as fuel exhaustion, which is
+    // operationally different from an `unreachable` or memory trap.
+    #[test]
+    fn out_of_fuel_classifies_as_fuel_exhausted() {
+        let kind = KindId(0x1003);
+        let engine = build_engine();
+        let mut slot =
+            ScriptSlot::instantiate(&engine, &fuel_exhausting_wasm(kind), None, 10_000, 3)
+                .expect("test setup: fuel-exhausting module instantiates");
+
+        let reason = slot
+            .filter_inner(kind, b"abc")
+            .expect_err("spinning module should exhaust fuel");
+
+        assert!(
+            matches!(reason, FaultReason::FuelExhausted),
+            "unexpected reason: {reason:?}"
+        );
+    }
+
+    // Tripwire: a packed return outside linear memory is a malformed return,
+    // not a guest decode failure of the offered kind.
+    #[test]
+    fn out_of_bounds_return_classifies_as_malformed_return() {
+        let kind = KindId(0x1004);
+        let engine = build_engine();
+        let mut slot = ScriptSlot::instantiate(
+            &engine,
+            &out_of_bounds_return_wasm(kind),
+            None,
+            1_000_000,
+            3,
+        )
+        .expect("test setup: malformed-return module instantiates");
+
+        let reason = slot
+            .filter_inner(kind, b"abc")
+            .expect_err("out-of-bounds packed return should fail");
+
+        assert!(matches!(reason, FaultReason::MalformedReturn));
+    }
+
+    // Tripwire: an undecodable output names the kind the host offered, which
+    // is the actionable mismatch for a behavior author/operator.
+    #[test]
+    fn empty_return_classifies_as_decode_failed_for_kind() {
+        let kind = KindId(0x1005);
+        let engine = build_engine();
+        let mut slot =
+            ScriptSlot::instantiate(&engine, &empty_return_wasm(kind), None, 1_000_000, 3)
+                .expect("test setup: empty-return module instantiates");
+
+        let reason = slot
+            .filter_inner(kind, b"abc")
+            .expect_err("empty packed return should not decode");
+
+        assert!(matches!(reason, FaultReason::DecodeFailed { kind: k } if k == kind));
     }
 
     // Tripwire: a clean call resets the consecutive-trap counter, so a
