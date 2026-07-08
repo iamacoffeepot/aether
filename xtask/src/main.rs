@@ -26,7 +26,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::inventory::{
-    BuildPlan, CHASSIS_BINS, CHASSIS_PACKAGE, Component, build_plans, discover_components,
+    BuildPlan, CHASSIS_BINS, CHASSIS_PACKAGE, Component, behavior_build_plans, build_plans,
+    discover_behavior_variants, discover_behaviors, discover_components,
 };
 
 /// Wasm triple the components cross-build to.
@@ -189,15 +190,42 @@ fn run_dist(args: &DistArgs) -> Result<()> {
     if components.is_empty() {
         bail!("no wasm component crates discovered (cdylib target + aether-actor dep)");
     }
+    // Behavior-script fixtures (ADR-0137, issue 2688): cross-built alongside
+    // the components so the in-process scenario tests locate their wasm under
+    // `target/.../examples/`. They are not components (no `aether-actor`), so
+    // they ride their own discovery pass and are not copied into the dist
+    // component manifest — only built.
+    let behaviors = discover_behaviors(&metadata);
 
     let workspace_root = metadata.workspace_root.as_std_path();
     let target_dir = metadata.target_directory.as_std_path();
     let wasm_profile_dir = target_dir.join(WASM_TARGET).join(args.profile.as_str());
     let dist = workspace_root.join("dist");
 
+    // Build host-carrying variants FIRST (issue 2688): the feature build
+    // clobbers `<stem>.wasm`, so we copy it to `<stem>_behavior.wasm` and then
+    // let the stock component loop below rebuild `<stem>.wasm` lean. Only the
+    // behavior-host scenario loads the `_behavior` stem; every other kit
+    // consumer keeps the small stock wasm.
+    for variant in discover_behavior_variants(&metadata) {
+        let plan = BuildPlan {
+            package: variant.package.clone(),
+            examples: false,
+            features: variant.features.clone(),
+        };
+        build_component(&plan, args.profile)?;
+        let built = wasm_profile_dir.join(format!("{}.wasm", variant.stem));
+        let variant_stem = wasm_profile_dir.join(format!("{}_behavior.wasm", variant.stem));
+        fs::copy(&built, &variant_stem)
+            .with_context(|| format!("copy {} -> {}", built.display(), variant_stem.display()))?;
+    }
+
     // Build each component package in its own cargo invocation — never
     // batch multiple `-p`. See `inventory::build_plans`.
     for plan in build_plans(&components) {
+        build_component(&plan, args.profile)?;
+    }
+    for plan in behavior_build_plans(&behaviors) {
         build_component(&plan, args.profile)?;
     }
     if !args.no_bins {
@@ -249,6 +277,14 @@ fn run_dist(args: &DistArgs) -> Result<()> {
         manifest.chassis.len(),
         manifest_path.display(),
     );
+    if !behaviors.is_empty() {
+        let stems: Vec<&str> = behaviors.iter().map(|b| b.stem.as_str()).collect();
+        println!(
+            "dist: {} behavior script(s) built into target/: {}",
+            stems.len(),
+            stems.join(", "),
+        );
+    }
     Ok(())
 }
 
@@ -552,6 +588,9 @@ fn build_component(plan: &BuildPlan, profile: Profile) -> Result<()> {
     if plan.examples {
         cmd.arg("--examples");
     }
+    if !plan.features.is_empty() {
+        cmd.args(["--features", &plan.features.join(",")]);
+    }
     if let Some(flag) = profile.cargo_flag() {
         cmd.arg(flag);
     }
@@ -599,7 +638,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
-    use super::inventory::discover_components;
+    use super::inventory::{discover_behaviors, discover_components};
     use super::{
         BundleChassis, BundlePlan, ComponentSource, PlannedComponent, bundle_manifest_json,
     };
@@ -693,6 +732,46 @@ mod tests {
             assert!(
                 !stems.contains(excluded),
                 "discovery wrongly included aether-actor example {excluded}",
+            );
+        }
+    }
+
+    #[test]
+    fn discovers_behavior_fixtures_and_excludes_components() {
+        let metadata = cargo_metadata::MetadataCommand::new()
+            .no_deps()
+            .exec()
+            .expect("run cargo metadata");
+        let behaviors = discover_behaviors(&metadata);
+        let stems: BTreeSet<&str> = behaviors.iter().map(|b| b.stem.as_str()).collect();
+
+        // The #2688 fixture crate's example cdylibs depend on `aether-behavior`
+        // and never `aether-actor`, so the behavior pass discovers each.
+        for expected in ["intercept_slider", "intercept_slider_v2", "trap_script"] {
+            assert!(
+                stems.contains(expected),
+                "behavior discovery dropped {expected}; found {stems:?}",
+            );
+        }
+
+        // The disjointness guard: `aether-kit` declares an optional
+        // `aether-behavior` dep (its `behavior` feature) AND an unconditional
+        // `aether-actor` dep, and `cargo metadata` lists optional deps — so a
+        // rule keyed on `aether-behavior` alone would sweep kit in. The
+        // `aether-actor`-absence guard keeps it a component, not a behavior.
+        assert!(
+            !stems.contains("aether_kit"),
+            "the actor-absence guard must exclude aether-kit (a component) from behaviors; \
+             found {stems:?}",
+        );
+
+        // Every discovered behavior is an `[[example]]` cdylib, so no lib-cdylib
+        // special-casing on the build side.
+        for behavior in &behaviors {
+            assert!(
+                behavior.from_example,
+                "behavior {} is an [[example]] cdylib",
+                behavior.stem,
             );
         }
     }

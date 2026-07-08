@@ -319,6 +319,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-test-fixtures-behavior"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-behavior",
+ "aether-behavior-derive",
+ "aether-data",
+ "inventory",
+ "serde",
+]
+
+[[package]]
 name = "aether-test-fixtures-bundle"
 version = "0.3.0-alpha"
 dependencies = [
