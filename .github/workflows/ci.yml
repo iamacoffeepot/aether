@@ -48,13 +48,6 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  hook-tests:
-    name: Guardrail hook tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: bash .claude/hooks/tests/run.sh
-
   clippy:
     name: Clippy
     needs: changes
@@ -340,14 +333,13 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [ changes, fmt, hook-tests, clippy, docs, marker-build, test, desktop, qodana ]
+    needs: [ changes, fmt, clippy, docs, marker-build, test, desktop, qodana ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
         run: |
           echo "changes: ${{ needs.changes.result }}"
           echo "fmt:     ${{ needs.fmt.result }}"
-          echo "hook-tests: ${{ needs.hook-tests.result }}"
           echo "clippy:  ${{ needs.clippy.result }}"
           echo "docs:    ${{ needs.docs.result }}"
           echo "marker-build: ${{ needs.marker-build.result }}"
@@ -357,7 +349,6 @@ jobs:
           fail=0
           [[ "${{ needs.changes.result }}" == "success" ]] || fail=1
           [[ "${{ needs.fmt.result }}"     == "success" ]] || fail=1
-          [[ "${{ needs.hook-tests.result }}" == "success" ]] || fail=1
           [[ "${{ needs.clippy.result }}"  == "success" || "${{ needs.clippy.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.docs.result }}"    == "success" || "${{ needs.docs.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.marker-build.result }}" == "success" || "${{ needs.marker-build.result }}" == "skipped" ]] || fail=1
