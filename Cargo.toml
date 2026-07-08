@@ -88,6 +88,20 @@ tracing = { version = "0.1", default-features = false }
 wasmtime = "44"
 wgpu = "29.0.1"
 
+# Optimize the cranelift compiler even in dev/test builds. Every wasm
+# component load runs a full cranelift compile of the module, and
+# unoptimized cranelift is ~10-30x slower — ~15s per module in CI, which
+# put the substrate-bundle integration suite at ~44 minutes of CPU time
+# (iamacoffeepot/aether#2803). Test-target dependencies build under the
+# dev profile, so this covers `cargo test` / nextest locally and in CI.
+# The one-time optimized rebuild of these two crates is held by the CI
+# rust-cache and only recurs on a wasmtime version bump.
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+
+[profile.dev.package.regalloc2]
+opt-level = 3
+
 [workspace.lints.rust]
 # Phase 5 of iamacoffeepot/aether#913 swept ~244 RsUnnecessaryQualifications
 # findings across the workspace. Enabling rustc's matching lint here at
