@@ -21,7 +21,8 @@ pub use aether_substrate::chassis::error::BootError;
 
 pub use crate::fs::{FsCapability, Read, ReadResult};
 pub use crate::render::{
-    CreateTexture, CreateTextureResult, RenderCapability, TexturedQuad, UpdateTexture,
+    CreateTexture, CreateTextureResult, RenderCapability, TextureFormat, TexturedQuad,
+    UpdateTexture,
 };
 
 // ADR-0105 shelf-packed RGBA8 glyph atlas (`atlas`) and the pure layout /
@@ -187,6 +188,7 @@ impl TextCapabilityState {
         let create = CreateTexture {
             width: ATLAS_SIZE,
             height: ATLAS_SIZE,
+            format: TextureFormat::Rgba8,
             pixels: self.atlas.pixels().to_vec(),
         };
         // Address the render cap through the lineage-correct resolver

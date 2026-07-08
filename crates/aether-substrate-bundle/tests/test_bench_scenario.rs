@@ -37,7 +37,7 @@ use aether_capabilities::fs::{
 };
 use aether_capabilities::render::{
     Camera, CreateTexture, CreateTextureResult, DrawSolidQuads, DrawTexturedQuads, SolidQuad,
-    TexturedQuad,
+    TextureFormat, TexturedQuad, UpdateTexture,
 };
 use aether_capabilities::text::{
     DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult,
@@ -880,6 +880,7 @@ fn textured_quad_draws_screen_space_rect() {
                 &CreateTexture {
                     width: texture_width,
                     height: texture_height,
+                    format: TextureFormat::Rgba8,
                     pixels,
                 },
             ),
@@ -961,6 +962,110 @@ fn textured_quad_draws_screen_space_rect() {
         cleared_coverage < 0.01,
         "after the quad stopped being sent the frame should be uniform clear color, \
          but coverage was {cleared_coverage} (immediate-mode clear did not run)",
+    );
+}
+
+/// ADR-0140 texture-format half: an R8 texture stages one byte per
+/// pixel, accepts one-byte sub-rect updates, realizes as a sampleable
+/// `R8Unorm` texture, and renders through the existing textured-quad
+/// shader as red-channel-only (`vec4(r, 0, 0, 1)`).
+#[test]
+fn r8_texture_updates_and_draws_red_channel_only() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let (frame_width, frame_height) = (64u32, 48u32);
+    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+
+    let texture_width = 8u32;
+    let texture_height = 4u32;
+    let mut pixels = vec![32u8; (texture_width * texture_height) as usize];
+    let created = bench
+        .execute(vec![(
+            "create",
+            BenchOp::send_and_await(
+                "aether.render",
+                &CreateTexture {
+                    width: texture_width,
+                    height: texture_height,
+                    format: TextureFormat::R8,
+                    pixels: pixels.clone(),
+                },
+            ),
+        )])
+        .expect("create r8 texture");
+    let texture_id = match created
+        .reply::<CreateTextureResult>("create")
+        .expect("decode CreateTextureResult")
+    {
+        CreateTextureResult::Ok { texture_id } => texture_id,
+        CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
+    };
+
+    let update_width = texture_width / 2;
+    let update_height = texture_height;
+    pixels.clear();
+    pixels.resize((update_width * update_height) as usize, 224);
+
+    let pre = vec![
+        envelope(
+            "aether.render",
+            &UpdateTexture {
+                texture_id,
+                x: update_width,
+                y: 0,
+                width: update_width,
+                height: update_height,
+                pixels,
+            },
+        ),
+        envelope(
+            "aether.render",
+            &DrawTexturedQuads {
+                texture_id,
+                space: QuadSpace::Screen,
+                quads: vec![TexturedQuad {
+                    x: 16.0,
+                    y: 16.0,
+                    width: 32.0,
+                    height: 16.0,
+                    u0: 0.0,
+                    v0: 0.0,
+                    u1: 1.0,
+                    v1: 1.0,
+                    tint: [1.0, 1.0, 1.0, 1.0],
+                }],
+            },
+        ),
+    ];
+
+    let captured = bench
+        .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
+        .expect("capture r8 texture");
+    let png = captured.captured("snap").expect("snap step ran");
+    let img = decode_png(png).expect("decode capture png");
+    assert_eq!((img.width, img.height), (frame_width, frame_height));
+
+    let sample = |x: u32, y: u32| -> [u8; 4] {
+        let start = ((y * img.width + x) * 4) as usize;
+        [
+            img.rgba[start],
+            img.rgba[start + 1],
+            img.rgba[start + 2],
+            img.rgba[start + 3],
+        ]
+    };
+    let left = sample(20, 24);
+    let right = sample(44, 24);
+
+    assert!(
+        right[0] > left[0].saturating_add(80),
+        "right-half R8 update should visibly raise only red; left={left:?} right={right:?}",
+    );
+    assert!(
+        left[1] <= 10 && left[2] <= 10 && right[1] <= 10 && right[2] <= 10,
+        "R8 texture sampled through quad shader should not contribute green/blue; \
+         left={left:?} right={right:?}",
     );
 }
 

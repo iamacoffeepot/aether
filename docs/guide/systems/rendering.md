@@ -49,7 +49,7 @@ the `RenderCapability` actor. It handles these payload kinds:
 |---|---|---|
 | `aether.draw_triangle` | `{ verts: [Vertex; 3] }`, cast-shaped | per-tick geometry; accumulates into the frame |
 | `aether.camera` | `{ view_proj: [f32; 16] }`, cast-shaped | the world→clip matrix; latest value wins |
-| `aether.render.create_texture` | `{ width, height, pixels }` → `create_texture_result` | register an RGBA8 texture; reply carries the `texture_id` |
+| `aether.render.create_texture` | `{ width, height, format, pixels }` → `create_texture_result` | register an `Rgba8` or `R8` texture; reply carries the `texture_id` |
 | `aether.render.update_texture` | `{ texture_id, x, y, width, height, pixels }` | overwrite a sub-rect of a texture (atlas growth) |
 | `aether.render.draw_textured_quads` | `{ texture_id, space, quads }` | per-tick textured alpha-blended quads; accumulates into the frame |
 | `aether.render.capture_frame` | `{ mails, after_mails }` | atomic "set state, read back a PNG, clean up" |
@@ -59,9 +59,12 @@ color. One `DrawTriangle` is three of them; a component batches many per envelop
 via `send_many` (each triangle is `DRAW_TRIANGLE_BYTES` on the wire).
 
 **Textured quads are the generic image surface** ([ADR-0105](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0105-text-rendering.md)).
-`create_texture` stages RGBA8 pixels under a session-scoped `texture_id` (the
-reply hands it back); `draw_textured_quads` then draws a batch of quads sampling
-that texture, each carrying a pixel-unit rect, a uv sub-rect, and an RGBA tint.
+`create_texture` stages `Rgba8` or `R8` pixels under a session-scoped
+`texture_id` (the reply hands it back); `draw_textured_quads` then draws a batch
+of quads sampling that texture, each carrying a pixel-unit rect, a uv sub-rect,
+and an RGBA tint. `R8` samples contribute their scalar value in the red channel
+(`vec4(r, 0, 0, 1)`), which is mainly a substrate for material passes; ordinary
+sprite/text atlas callers use `Rgba8`.
 Quads draw through a second alpha-blended pipeline in an overlay pass recorded
 after the world pass, so they always land on top. The accumulate-per-frame
 contract matches `draw_triangle`: resend the batch every frame it should appear.
