@@ -46,6 +46,9 @@ pub struct BehaviorHost {
     /// The wrapped child's alias id, recorded from the spawn `Ok` (or the
     /// persisted bundle on reload). `None` ⇒ the host runs wrapper-less.
     wrapped_child: Option<MailboxId>,
+    /// A fresh script slot needs one widget `REPORT` replay as soon as the
+    /// wrapped child is resident, so its mirror fills from ordinary lane mail.
+    prime_pending: bool,
     /// One-shot suppression of the up-lane echoes of the script's own writes.
     echo: EchoGuard,
     /// The current script source (may diverge from `config.script` after a
@@ -87,6 +90,7 @@ impl WasmActor for BehaviorHost {
             engine,
             slot,
             wrapped_child: None,
+            prime_pending: false,
             echo: EchoGuard::default(),
             script_source,
             pending_loads: VecDeque::new(),
@@ -134,12 +138,10 @@ impl WasmActor for BehaviorHost {
             ctx.actor::<FsCapability>().read(&namespace, &path);
         }
 
-        // Ask the wrapped widget to re-emit its observable kinds up-lane so the
-        // script's mirror is primed (the reply arrives as ordinary up-lane
-        // traffic through the fallback).
-        if let Some(child) = ctx.child(&self.config.child.subname) {
-            child.send_bytes(sentinel::REPORT, &[]);
+        if self.slot.is_some() {
+            self.prime_pending = true;
         }
+        self.try_prime(&*ctx);
         self.offer_sentinel(&*ctx, sentinel::ATTACH);
     }
 
@@ -209,6 +211,7 @@ impl WasmActor for BehaviorHost {
     #[handler::manual]
     fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Manual>, reply: ReadResult) {
         let Some((result, reply)) = self.apply_read_result(reply, |host| {
+            host.try_prime(&*ctx.as_single());
             host.offer_sentinel(&*ctx.as_single(), sentinel::ATTACH);
         }) else {
             return;
@@ -223,6 +226,7 @@ impl WasmActor for BehaviorHost {
     #[handler::single]
     fn on_set_script(&mut self, ctx: &mut WasmCtx<'_>, msg: SetScript) -> LoadScriptResult {
         self.apply_set_script(msg, |host| {
+            host.try_prime(&*ctx);
             host.offer_sentinel(&*ctx, sentinel::ATTACH);
         })
     }
@@ -236,6 +240,7 @@ impl WasmActor for BehaviorHost {
     #[allow(clippy::needless_pass_by_value)]
     #[fallback]
     fn on_lane(&mut self, ctx: &mut WasmCtx<'_>, mail: Mail<'_>) {
+        self.try_prime(&*ctx);
         let kind = mail.kind();
         let is_up = self.lane_is_up(ctx.source_mailbox());
         let bytes = mail.bytes();
@@ -266,6 +271,21 @@ impl WasmActor for BehaviorHost {
 }
 
 impl BehaviorHost {
+    fn try_prime(&mut self, ctx: &WasmCtx<'_>) {
+        let Some(child) = ctx.child(&self.config.child.subname) else {
+            return;
+        };
+        self.prime_if_ready(true, || child.send_bytes(sentinel::REPORT, &[]));
+    }
+
+    fn prime_if_ready(&mut self, child_resident: bool, send_report: impl FnOnce()) {
+        if !self.prime_pending || self.wrapped_child.is_none() || !child_resident {
+            return;
+        }
+        send_report();
+        self.prime_pending = false;
+    }
+
     fn enqueue_pending_load(
         &mut self,
         reply: Option<ReplyHandle>,
@@ -396,6 +416,7 @@ impl BehaviorHost {
         )?;
         let resident = slot.bytes().len() as u64;
         self.slot = Some(slot);
+        self.prime_pending = true;
         Ok(resident)
     }
 
@@ -423,7 +444,10 @@ impl BehaviorHost {
                 self.config.fuel_per_call,
                 self.config.disable_after_traps,
             ) {
-                Ok(slot) => self.slot = Some(slot),
+                Ok(slot) => {
+                    self.slot = Some(slot);
+                    self.prime_pending = true;
+                }
                 Err(detail) => tracing::warn!(
                     target: "aether_behavior",
                     error = %detail,
@@ -440,6 +464,7 @@ impl BehaviorHost {
         self.run_filter_and_drain(ctx, false, None, sentinel, &[]);
     }
 
+    #[cfg(test)]
     fn offer_sentinel_to_sink(&mut self, sink: &mut impl DrainSink, sentinel: KindId) {
         self.run_filter_and_drain_to_sink(sink, None, sentinel, &[]);
     }
@@ -671,6 +696,10 @@ mod tests {
         );
     }
 
+    fn drain_prime(host: &mut BehaviorHost, reports: &mut u32) {
+        host.prime_if_ready(true, || *reports += 1);
+    }
+
     fn fs_ref(namespace: &str, path: &str) -> ScriptSource {
         ScriptSource::FsRef {
             namespace: namespace.to_string(),
@@ -743,11 +772,12 @@ mod tests {
         assert_eq!(before, after, "the prior script must survive a failed swap");
     }
 
-    // Tripwire: a script installed by the deferred fs/load_script path still
-    // receives exactly one ATTACH after the slot becomes resident.
+    // Tripwire: a script installed by the deferred fs/load_script path primes
+    // its mirror exactly once before ATTACH.
     #[test]
-    fn read_result_success_offers_attach_after_install() {
+    fn read_result_success_primes_then_offers_attach_after_install() {
         let mut host = host(ScriptSource::None);
+        host.wrapped_child = Some(MailboxId(0xC0FFEE));
         host.enqueue_pending_load(
             None,
             "assets".to_string(),
@@ -755,6 +785,7 @@ mod tests {
             fs_ref("assets", "behavior.wasm"),
         );
         let mut sink = RecordingSink::default();
+        let mut reports = 0;
 
         let (result, reply) = host
             .apply_read_result(
@@ -763,7 +794,10 @@ mod tests {
                     path: "behavior.wasm".to_string(),
                     bytes: attach_script(),
                 },
-                |host| host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH),
+                |host| {
+                    drain_prime(host, &mut reports);
+                    host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH);
+                },
             )
             .expect("matching pending load should discharge");
 
@@ -771,6 +805,8 @@ mod tests {
         assert!(reply.is_none());
         assert!(host.slot.is_some());
         assert!(matches!(host.script_source, ScriptSource::FsRef { .. }));
+        assert_eq!(reports, 1);
+        assert!(!host.prime_pending);
         assert_attach_offered(&sink);
     }
 
@@ -796,23 +832,30 @@ mod tests {
         assert!(sink.events.is_empty());
     }
 
-    // Tripwire: a runtime inline swap receives exactly one ATTACH after the
-    // new slot becomes resident.
+    // Tripwire: a runtime inline swap primes its mirror exactly once before
+    // ATTACH after the new slot becomes resident.
     #[test]
-    fn set_script_success_offers_attach_after_install() {
+    fn set_script_success_primes_then_offers_attach_after_install() {
         let mut host = host(ScriptSource::None);
+        host.wrapped_child = Some(MailboxId(0xC0FFEE));
         let mut sink = RecordingSink::default();
+        let mut reports = 0;
 
         let result = host.apply_set_script(
             SetScript {
                 bytes: attach_script(),
             },
-            |host| host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH),
+            |host| {
+                drain_prime(host, &mut reports);
+                host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH);
+            },
         );
 
         assert!(matches!(result, LoadScriptResult::Ok { .. }));
         assert!(host.slot.is_some());
         assert!(matches!(host.script_source, ScriptSource::Inline(_)));
+        assert_eq!(reports, 1);
+        assert!(!host.prime_pending);
         assert_attach_offered(&sink);
     }
 
@@ -845,12 +888,16 @@ mod tests {
             "the resident script re-instantiates on reload"
         );
         assert!(matches!(host.script_source, ScriptSource::Inline(_)));
+        assert!(
+            host.prime_pending,
+            "rehydrate arms mirror priming for the first resident lane frame"
+        );
     }
 
-    // Tripwire: a rehydrate that restores a resident script receives exactly
-    // one ATTACH after the restored slot becomes resident.
+    // Tripwire: a rehydrate that restores a resident script offers ATTACH
+    // immediately but defers mirror priming until the wrapped child is resident.
     #[test]
-    fn rehydrate_restored_script_offers_attach() {
+    fn rehydrate_restored_script_offers_attach_and_defers_prime_until_child_resident() {
         let script = attach_script();
         let bundle = HostPersist {
             script_source: ScriptSource::Inline(script.clone()),
@@ -860,13 +907,29 @@ mod tests {
         };
         let mut host = host(ScriptSource::None);
         let mut sink = RecordingSink::default();
+        let mut reports = 0;
 
         host.apply_rehydrate_with_attach(&bundle.encode(), |host| {
             host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH);
         });
 
         assert!(host.slot.is_some());
+        assert!(host.prime_pending);
         assert_attach_offered(&sink);
+
+        host.prime_if_ready(false, || reports += 1);
+        assert_eq!(
+            reports, 0,
+            "rehydrate waits until the wrapped child is resident"
+        );
+        assert!(host.prime_pending);
+
+        host.prime_if_ready(true, || reports += 1);
+        assert_eq!(reports, 1, "first resident opportunity sends the replay");
+        assert!(!host.prime_pending);
+
+        host.prime_if_ready(true, || reports += 1);
+        assert_eq!(reports, 1, "priming is exactly-once per restored slot");
     }
 
     // Tripwire: an undecodable state blob boots the script fresh (fail-open)
@@ -910,6 +973,7 @@ mod tests {
         });
 
         assert!(host.slot.is_none());
+        assert!(!host.prime_pending);
         assert!(sink.events.is_empty());
     }
 
