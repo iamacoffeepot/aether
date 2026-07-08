@@ -19,9 +19,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use aether_kinds::{QuadScale, QuadSpace};
 use aether_substrate::render::{
     CaptureMeta, OverlayDraw, Pipeline, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD, QuadPipeline,
-    RenderError, Targets, build_main_pipeline, build_quad_pipeline, finish_capture,
-    map_capture_rgba, prepare_capture_copy, push_screen_quad_vertices, push_world_quad_vertices,
-    record_main_pass, record_quad_overlay_pass,
+    RenderError, Targets, TextureBindings, build_main_pipeline, build_quad_pipeline,
+    build_texture_bindings, finish_capture, map_capture_rgba, prepare_capture_copy,
+    push_screen_quad_vertices, push_world_quad_vertices, record_main_pass,
+    record_quad_overlay_pass,
 };
 
 use super::quad::QuadBatch;
@@ -285,7 +286,7 @@ impl RenderHandles {
         // mutably borrowing the registry.
         for batch in &batches {
             if let Some(entry) = registry.entries.get_mut(&batch.texture_id) {
-                entry.ensure_realized(&gpu.device, &gpu.queue, &gpu.quad_pipeline);
+                entry.ensure_realized(&gpu.device, &gpu.queue, &gpu.texture_bindings);
             } else {
                 tracing::warn!(
                     target: "aether_capabilities::render",
@@ -507,6 +508,10 @@ pub struct RenderGpu {
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
     pub pipeline: Pipeline,
+    /// Shared texture+sampler bindings used by every texture-sampling
+    /// pipeline. The quad overlay owns the first consumer; material
+    /// pipelines added by ADR-0140 use the same layout object.
+    pub texture_bindings: TextureBindings,
     /// Textured-quad overlay pipeline (ADR-0105). Built alongside the
     /// main pipeline so `record_overlay_pass` can draw the
     /// accumulated quads into the same offscreen target after the
@@ -543,12 +548,14 @@ impl RenderGpu {
             polygon_mode,
             vertex_buffer_bytes,
         );
-        let quad_pipeline = build_quad_pipeline(&device, color_format);
+        let texture_bindings = build_texture_bindings(&device);
+        let quad_pipeline = build_quad_pipeline(&device, color_format, &texture_bindings);
         let targets = Targets::new(&device, color_format, width, height);
         Self {
             device,
             queue,
             pipeline,
+            texture_bindings,
             quad_pipeline,
             targets: Mutex::new(targets),
             color_format,

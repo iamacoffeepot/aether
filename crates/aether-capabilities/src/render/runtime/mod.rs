@@ -62,7 +62,8 @@ use aether_substrate::chassis::error::BootError;
 
 use super::{
     Camera, CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DrawSolidQuads,
-    DrawTexturedQuads, DrawTriangle, RenderCapability, SolidQuad, TexturedQuad, UpdateTexture,
+    DrawTexturedQuads, DrawTriangle, RenderCapability, SolidQuad, TextureFormat, TexturedQuad,
+    UpdateTexture,
 };
 
 // These seam items are `pub` (visible in `render`) in their
@@ -383,15 +384,15 @@ impl NativeActor for RenderCapability {
     }
 
     /// `CreateTexture` handler (ADR-0105). Validates the dimensions
-    /// and pixel length, stages the RGBA8 pixels CPU-side under the
+    /// and pixel length, stages the pixels CPU-side under the
     /// next session-scoped `texture_id`, and replies immediately —
     /// the wgpu texture is realized lazily at the next frame record
     /// (the GPU bundle isn't installed until the chassis driver
     /// boots). A zero dimension or a `pixels` length that doesn't
-    /// match `width * height * 4` replies `Err` without registering.
+    /// match the texture format replies `Err` without registering.
     ///
     /// # Agent
-    /// Mail `aether.render.create_texture { width, height, pixels }`;
+    /// Mail `aether.render.create_texture { width, height, format, pixels }`;
     /// the reply `aether.render.create_texture_result` carries the
     /// `texture_id` to thread into `draw_textured_quads`.
     #[handler::single]
@@ -405,7 +406,7 @@ impl NativeActor for RenderCapability {
                 .expect("mutex poisoned; fail-fast per ADR-0063")
                 .push(<CreateTexture as Kind>::NAME.into());
         }
-        let expected = expected_pixel_bytes(mail.width, mail.height);
+        let expected = expected_pixel_bytes(mail.width, mail.height, mail.format);
         let Some(expected) = expected else {
             return CreateTextureResult::Err {
                 error: format!(
@@ -417,8 +418,11 @@ impl NativeActor for RenderCapability {
         if mail.pixels.len() != expected {
             return CreateTextureResult::Err {
                 error: format!(
-                    "pixels length {} does not match width*height*4 = {expected}",
-                    mail.pixels.len()
+                    "pixels length {} does not match {}x{} {:?} = {expected}",
+                    mail.pixels.len(),
+                    mail.width,
+                    mail.height,
+                    mail.format
                 ),
             };
         }
@@ -434,6 +438,7 @@ impl NativeActor for RenderCapability {
             StagedTexture {
                 width: mail.width,
                 height: mail.height,
+                format: mail.format,
                 pixels: mail.pixels,
                 realized: None,
                 dirty: true,
@@ -548,6 +553,7 @@ impl NativeActor for RenderCapability {
             .or_insert_with(|| StagedTexture {
                 width: 1,
                 height: 1,
+                format: TextureFormat::Rgba8,
                 pixels: vec![255, 255, 255, 255],
                 realized: None,
                 dirty: true,

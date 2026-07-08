@@ -254,15 +254,18 @@ mod tests {
         );
         assert_eq!(batches[0].quads[0].width, 30.0);
 
-        let tex_present = handles
+        let textures = handles
             .textures
             .lock()
-            .expect("textures mutex is not poisoned")
+            .expect("textures mutex is not poisoned");
+        let white = textures
             .entries
-            .contains_key(&WHITE_TEXTURE_ID);
-        assert!(
-            tex_present,
-            "white texture must be lazily inserted on first send"
+            .get(&WHITE_TEXTURE_ID)
+            .expect("white texture must be lazily inserted on first send");
+        assert_eq!(
+            white.format,
+            TextureFormat::Rgba8,
+            "white texture must remain RGBA8",
         );
 
         drop(chassis);

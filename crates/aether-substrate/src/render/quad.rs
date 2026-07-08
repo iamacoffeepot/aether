@@ -10,11 +10,11 @@
 //! texture + sampler bind group, and alpha blending. So it is a sibling
 //! pass with its own vertex buffer ([`record_quad_overlay_pass`]).
 //!
-//! Texture realization is lazy: the render capability stages RGBA8
-//! pixels CPU-side at `create_texture` time and calls [`realize_texture`]
+//! Texture realization is lazy: the render capability stages pixels
+//! CPU-side at `create_texture` time and calls [`realize_texture`]
 //! / [`upload_texture_full`] at record time, when a device + queue are
 //! available. The realized [`RealizedTexture`] carries the wgpu texture
-//! plus the group-1 bind group built against this pipeline's layout.
+//! plus the group-1 bind group built against shared texture bindings.
 
 use super::targets::Targets;
 use std::slice;
@@ -42,27 +42,28 @@ pub const QUAD_UNIFORM_BYTES: u64 = 80;
 /// Source for the quad overlay shader.
 pub const QUAD_SHADER_WGSL: &str = include_str!("quad.wgsl");
 
+/// Shared GPU texture binding state for every pipeline that samples a
+/// registered render texture.
+pub struct TextureBindings {
+    /// Layout for texture view at binding 0 plus sampler at binding 1.
+    pub layout: wgpu::BindGroupLayout,
+    pub sampler: wgpu::Sampler,
+}
+
 /// Owned GPU state for the quad overlay pipeline: the render pipeline,
-/// the per-frame vertex buffer, the viewport uniform + its bind group
-/// (group 0), the shared sampler, and the group-1 (texture + sampler)
-/// bind group layout that [`realize_texture`] builds per-texture bind
-/// groups against. Built once at chassis boot via
-/// [`build_quad_pipeline`].
+/// the per-frame vertex buffer, and the viewport uniform + its bind
+/// group (group 0). Texture group-1 state is supplied by
+/// [`TextureBindings`].
 #[allow(clippy::struct_field_names)]
 pub struct QuadPipeline {
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     viewport_buffer: wgpu::Buffer,
     viewport_bind_group: wgpu::BindGroup,
-    sampler: wgpu::Sampler,
-    /// Layout for group 1 (texture view at binding 0, sampler at
-    /// binding 1). Retained so the render cap can build a bind group per
-    /// realized texture without re-deriving the layout.
-    texture_bind_group_layout: wgpu::BindGroupLayout,
 }
 
 /// A texture realized on the GPU plus its group-1 bind group, built
-/// against a [`QuadPipeline`]'s `texture_bind_group_layout` + sampler.
+/// against shared [`TextureBindings`].
 /// The render cap caches one of these per registered texture and
 /// re-uploads its pixels via [`upload_texture_full`] when the staged
 /// CPU pixels change.
@@ -71,6 +72,7 @@ pub struct RealizedTexture {
     bind_group: wgpu::BindGroup,
     width: u32,
     height: u32,
+    format: wgpu::TextureFormat,
 }
 
 impl RealizedTexture {
@@ -91,6 +93,44 @@ pub struct OverlayDraw<'a> {
     pub vertex_count: u32,
 }
 
+/// Build the shared texture + sampler bindings used by texture-sampling
+/// pipelines.
+#[must_use]
+pub fn build_texture_bindings(device: &wgpu::Device) -> TextureBindings {
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("shared texture bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("shared texture sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    });
+    TextureBindings { layout, sampler }
+}
+
 /// Build the quad overlay pipeline. `color_format` matches the
 /// [`Targets`] color target the overlay pass attaches to (the same
 /// format the main pipeline draws into).
@@ -102,6 +142,7 @@ pub struct OverlayDraw<'a> {
 pub fn build_quad_pipeline(
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
+    texture_bindings: &TextureBindings,
 ) -> QuadPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("aether quad shader"),
@@ -123,29 +164,6 @@ pub fn build_quad_pipeline(
             }],
         });
 
-    let texture_bind_group_layout =
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("quad texture bind group layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-
     let viewport_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("quad viewport uniform"),
         size: QUAD_UNIFORM_BYTES,
@@ -162,22 +180,11 @@ pub fn build_quad_pipeline(
         }],
     });
 
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("quad sampler"),
-        address_mode_u: wgpu::AddressMode::ClampToEdge,
-        address_mode_v: wgpu::AddressMode::ClampToEdge,
-        address_mode_w: wgpu::AddressMode::ClampToEdge,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-        ..Default::default()
-    });
-
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("aether quad pipeline layout"),
         bind_group_layouts: &[
             Some(&viewport_bind_group_layout),
-            Some(&texture_bind_group_layout),
+            Some(&texture_bindings.layout),
         ],
         immediate_size: 0,
     });
@@ -275,23 +282,23 @@ pub fn build_quad_pipeline(
         vertex_buffer,
         viewport_buffer,
         viewport_bind_group,
-        sampler,
-        texture_bind_group_layout,
     }
 }
 
-/// Create a GPU texture from staged RGBA8 `pixels` and build its group-1
-/// bind group against `pipeline`'s texture layout + sampler. `pixels`
-/// must be exactly `width * height * 4` bytes (the render cap validates
-/// this at `create_texture` time). Pair with [`upload_texture_full`] to
-/// refresh the pixels later without rebuilding the bind group.
+/// Create a GPU texture from staged `pixels` and build its group-1 bind
+/// group against shared texture bindings. `pixels` must be exactly
+/// `width * height * bytes_per_pixel(format)` bytes (the render cap
+/// validates this at `create_texture` time). Pair with
+/// [`upload_texture_full`] to refresh the pixels later without rebuilding
+/// the bind group.
 #[must_use]
 pub fn realize_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    pipeline: &QuadPipeline,
+    texture_bindings: &TextureBindings,
     width: u32,
     height: u32,
+    format: wgpu::TextureFormat,
     pixels: &[u8],
 ) -> RealizedTexture {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -304,14 +311,14 @@ pub fn realize_texture(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("aether quad texture bind group"),
-        layout: &pipeline.texture_bind_group_layout,
+        label: Some("aether texture bind group"),
+        layout: &texture_bindings.layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -319,7 +326,7 @@ pub fn realize_texture(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::Sampler(&pipeline.sampler),
+                resource: wgpu::BindingResource::Sampler(&texture_bindings.sampler),
             },
         ],
     });
@@ -328,6 +335,7 @@ pub fn realize_texture(
         bind_group,
         width,
         height,
+        format,
     };
     upload_texture_full(queue, &realized, pixels);
     realized
@@ -336,8 +344,8 @@ pub fn realize_texture(
 /// Re-upload the full staged `pixels` into an already-realized texture.
 /// Used when an `update_texture` mail changed the staged CPU pixels: the
 /// render cap re-uploads the whole texture at the next record rather
-/// than tracking dirty sub-rects on the GPU. `pixels` must be
-/// `width * height * 4` bytes.
+/// than tracking dirty sub-rects on the GPU. `pixels` must match the
+/// realized texture format's byte count.
 pub fn upload_texture_full(queue: &wgpu::Queue, realized: &RealizedTexture, pixels: &[u8]) {
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
@@ -349,7 +357,7 @@ pub fn upload_texture_full(queue: &wgpu::Queue, realized: &RealizedTexture, pixe
         pixels,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(realized.width.max(1) * 4),
+            bytes_per_row: Some(realized.width.max(1) * texture_bytes_per_pixel(realized.format)),
             rows_per_image: Some(realized.height.max(1)),
         },
         wgpu::Extent3d {
@@ -358,6 +366,14 @@ pub fn upload_texture_full(queue: &wgpu::Queue, realized: &RealizedTexture, pixe
             depth_or_array_layers: 1,
         },
     );
+}
+
+fn texture_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
+    match format {
+        wgpu::TextureFormat::Rgba8Unorm => 4,
+        wgpu::TextureFormat::R8Unorm => 1,
+        _ => panic!("unsupported render texture format: {format:?}"),
+    }
 }
 
 /// Push the six vertices (two triangles) for one screen-space quad into

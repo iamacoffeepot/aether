@@ -71,28 +71,50 @@ pub struct Camera {
     pub view_proj: [f32; 16],
 }
 
-/// `aether.render.create_texture` — register an RGBA8 texture in the
-/// render cap's session-scoped texture registry. `pixels` is exactly
-/// `width * height * 4` bytes (RGBA8, row-major, top-down). The cap
-/// validates the dimensions, assigns the next `texture_id` past any
-/// previously created texture (the same id-assignment shape ADR-0103
-/// uses for instrument ids), stages the pixels CPU-side, and replies
-/// as soon as the id is assigned — the wgpu texture is realized lazily
-/// at the next frame record. Reply: `CreateTextureResult`. Desktop-
-/// only — the headless chassis replies `Err` (fail-fast, ADR-0105).
+/// Pixel storage format for a registered render texture.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum TextureFormat {
+    /// Four bytes per pixel, row-major RGBA, top-down.
+    Rgba8,
+    /// One unsigned normalized byte per pixel. Sampling in WGSL yields
+    /// `vec4(r, 0.0, 0.0, 1.0)`.
+    R8,
+}
+
+impl TextureFormat {
+    #[must_use]
+    pub const fn bytes_per_pixel(self) -> usize {
+        match self {
+            Self::Rgba8 => 4,
+            Self::R8 => 1,
+        }
+    }
+}
+
+/// `aether.render.create_texture` — register a texture in the render
+/// cap's session-scoped texture registry. `pixels` is exactly
+/// `width * height * format.bytes_per_pixel()` bytes, row-major and
+/// top-down. The cap validates the dimensions, assigns the next
+/// `texture_id` past any previously created texture (the same
+/// id-assignment shape ADR-0103 uses for instrument ids), stages the
+/// pixels CPU-side, and replies as soon as the id is assigned — the
+/// wgpu texture is realized lazily at the next frame record. Reply:
+/// `CreateTextureResult`. Desktop-only — the headless chassis replies
+/// `Err` (fail-fast, ADR-0105).
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.render.create_texture")]
 pub struct CreateTexture {
     pub width: u32,
     pub height: u32,
+    pub format: TextureFormat,
     pub pixels: Vec<u8>,
 }
 
 /// Reply to `CreateTexture`. `Ok` carries the assigned `texture_id` —
 /// thread it into `DrawTexturedQuads.texture_id` and
 /// `UpdateTexture.texture_id`. `Err` carries a human-readable reason —
-/// a zero dimension, or a `pixels` length that doesn't match
-/// `width * height * 4`.
+/// a zero dimension, or a `pixels` length that doesn't match the
+/// texture format's byte count.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.render.create_texture_result")]
 pub enum CreateTextureResult {
@@ -103,10 +125,11 @@ pub enum CreateTextureResult {
 /// `aether.render.update_texture` — overwrite a sub-rectangle of a
 /// previously-created texture's pixels (atlas growth — e.g. the text
 /// cap rasterizing a new glyph into its atlas). `pixels` is exactly
-/// `width * height * 4` bytes covering the `(x, y, width, height)`
-/// sub-rect. Fire-and-forget; a bad `texture_id` or an out-of-bounds
-/// rect logs and drops. The staged pixels update immediately; the GPU
-/// texture re-uploads at the next frame record.
+/// `width * height * texture_format.bytes_per_pixel()` bytes covering
+/// the `(x, y, width, height)` sub-rect. Fire-and-forget; a bad
+/// `texture_id` or an out-of-bounds rect logs and drops. The staged
+/// pixels update immediately; the GPU texture re-uploads at the next
+/// frame record.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.render.update_texture")]
 pub struct UpdateTexture {
