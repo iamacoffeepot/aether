@@ -926,7 +926,7 @@ impl Mcp {
         // clean invalid-params error and never touches the wire.
         // ADR-0091: descriptors come from the per-engine merged view
         // so a `capture_frame` referencing a component-defined kind
-        // (e.g. an `aether.mesh.load` pre-mail) encodes correctly
+        // (e.g. an `aether.kit.mesh.load` pre-mail) encodes correctly
         // after `load_component`.
         let mails = self
             .encode_capture_bundle(engine, &args.mails)
@@ -4806,7 +4806,7 @@ mod tests {
 
     /// ADR-0091 issue 1232 (end-to-end): a kind registered in the
     /// substrate's `Registry` — emulating the post-`load_component`
-    /// state for a component-defined kind like `aether.mesh.load` —
+    /// state for a component-defined kind like `aether.kit.mesh.load` —
     /// flows through `InventoryCapability`'s `ListKinds` projection
     /// onto the wire, lands in the harness's per-engine encode cache,
     /// and the next `send_mail` encodes correctly. This is the

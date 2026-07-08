@@ -16,13 +16,13 @@
 //!
 //! This runtime supersedes the old `aether-mesh-editor-component`
 //! (its inline `set_text` path is gone — write the DSL to a file via
-//! `aether.fs.write` and call `aether.mesh.load` instead) and the
+//! `aether.fs.write` and call `aether.kit.mesh.load` instead) and the
 //! `aether-static-mesh-component` (its `aether.static_mesh.load` kind
-//! was renamed to `aether.mesh.load`).
+//! was renamed to `aether.kit.mesh.load`).
 //!
 //! # Lifecycle
 //!
-//! 1. Send `aether.mesh.load { namespace, path }` pointing at a `.dsl`
+//! 1. Send `aether.kit.mesh.load { namespace, path }` pointing at a `.dsl`
 //!    or `.obj` file inside one of the substrate's I/O namespaces
 //!    (`save`, `assets`, `config`).
 //! 2. The component fires `aether.fs.read` and waits for the reply.
@@ -67,7 +67,7 @@ const OBJ_DEFAULT_COLOR: (f32, f32, f32) = PALETTE[0];
 
 pub struct MeshViewer {
     triangles: Vec<DrawTriangle>,
-    /// Reply target of the most recent `aether.mesh.load` request, parked
+    /// Reply target of the most recent `aether.kit.mesh.load` request, parked
     /// across the async `aether.fs.read` round-trip (issue 964). `on_load`
     /// runs in the requester's reply context; the actual parse + cache
     /// replace happens later in `on_read_result`, whose reply context
@@ -84,15 +84,15 @@ pub struct MeshViewer {
 ///
 /// # Agent
 /// Workflow: `load_component` this binary, then send
-/// `aether.mesh.load { namespace, path }` pointing at a `.dsl` or
+/// `aether.kit.mesh.load { namespace, path }` pointing at a `.dsl` or
 /// `.obj` file. After the substrate's read reply comes back the mesh
 /// renders every frame; `capture_frame` verifies. Send another `load`
 /// to swap the cached mesh. Iterate on a DSL by writing the new source
-/// via `aether.fs.write` and re-sending `aether.mesh.load` against the
+/// via `aether.fs.write` and re-sending `aether.kit.mesh.load` against the
 /// same path.
 #[actor]
 impl WasmActor for MeshViewer {
-    const NAMESPACE: &'static str = "aether.mesh_viewer";
+    const NAMESPACE: &'static str = "aether.kit.mesh";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(MeshViewer {
@@ -170,7 +170,7 @@ impl WasmActor for MeshViewer {
     /// unknown extension) leaves the previous cache intact, with a
     /// warn log explaining the failure. Issue 964: after computing the
     /// outcome, replies `aether.mesh.load_result` to the originator of
-    /// the `aether.mesh.load` request (parked in `on_load`), echoing
+    /// the `aether.kit.mesh.load` request (parked in `on_load`), echoing
     /// the request's `namespace` + `path` and carrying the structured
     /// `ok` / `error` verdict so a scenario harness or MCP `send_mail`
     /// caller has a wire signal instead of having to scrape

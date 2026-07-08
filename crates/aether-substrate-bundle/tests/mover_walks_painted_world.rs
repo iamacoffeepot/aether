@@ -153,7 +153,7 @@ fn held_key_walks_the_body_across_the_painted_world() {
 
     let world = component_address("world");
     let mover = component_address("mover");
-    load_kit_export(&mut bench, &wasm, "aether.world", "world");
+    load_kit_export(&mut bench, &wasm, "aether.kit.world", "world");
     load_kit_export(&mut bench, &wasm, "aether.kit.mover", "mover");
 
     // Paint the split chunk, feed the mover a real window aspect, and place the

@@ -1,4 +1,4 @@
-//! Camera wire kinds: the `aether.camera.*` driver kinds and their
+//! Camera wire kinds: the `aether.kit.camera.*` driver kinds and their
 //! parameter shapes. Peers that need to *talk to* the camera actor
 //! depend on these wire shapes; the [`CameraComponent`] that
 //! consumes them lives in [`crate::camera`] and ships in
@@ -65,67 +65,67 @@ pub enum ModeInit {
     Topdown(TopdownParams),
 }
 
-/// `aether.camera.create` — create a new named camera in the given
+/// `aether.kit.camera.create` — create a new named camera in the given
 /// mode. Errors if `name` is already taken; use `CameraSetMode` to
 /// swap an existing camera's mode in place. Newly-created cameras
 /// are not made active automatically; pair with `CameraSetActive`
 /// or rely on the bootstrap `"main"` camera.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.camera.create")]
+#[kind(name = "aether.kit.camera.create")]
 pub struct CameraCreate {
     pub name: String,
     pub mode: ModeInit,
 }
 
-/// `aether.camera.destroy` — drop a camera by name. No-op if the
+/// `aether.kit.camera.destroy` — drop a camera by name. No-op if the
 /// name isn't bound. If the destroyed camera was the active one
 /// the publish stream pauses (no `aether.camera` mail goes out)
 /// until another camera is made active.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.camera.destroy")]
+#[kind(name = "aether.kit.camera.destroy")]
 pub struct CameraDestroy {
     pub name: String,
 }
 
-/// `aether.camera.set_active` — promote the named camera to be the
+/// `aether.kit.camera.set_active` — promote the named camera to be the
 /// one whose `view_proj` publishes to `"aether.render"` each
 /// tick. Errors if the name isn't bound. Inactive cameras still
 /// tick (orbit yaw keeps accumulating, etc.) so re-activating
 /// later doesn't snap.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.camera.set_active")]
+#[kind(name = "aether.kit.camera.set_active")]
 pub struct CameraSetActive {
     pub name: String,
 }
 
-/// `aether.camera.set_mode` — swap an existing camera's mode in
+/// `aether.kit.camera.set_mode` — swap an existing camera's mode in
 /// place. State for the prior mode is discarded; the new mode is
 /// seeded from the supplied params + per-mode compiled defaults.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.camera.set_mode")]
+#[kind(name = "aether.kit.camera.set_mode")]
 pub struct CameraSetMode {
     pub name: String,
     pub mode: ModeInit,
 }
 
-/// `aether.camera.orbit.set` — apply orbit-mode field deltas to
+/// `aether.kit.camera.orbit.set` — apply orbit-mode field deltas to
 /// the named camera. Errors silently (warn-log) if the camera is
 /// in a non-orbit mode; switch with `CameraSetMode` first. Every
 /// `Some` field overwrites; `None` leaves the current value
 /// alone, so partial pokes (e.g. just `distance`) ride a single
 /// kind without restating the rest.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.camera.orbit.set")]
+#[kind(name = "aether.kit.camera.orbit.set")]
 pub struct CameraOrbitSet {
     pub name: String,
     pub params: OrbitParams,
 }
 
-/// `aether.camera.topdown.set` — apply topdown-mode field deltas
+/// `aether.kit.camera.topdown.set` — apply topdown-mode field deltas
 /// to the named camera. Same semantics as `CameraOrbitSet` but for
 /// the orthographic mode's `center` / `extent`.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.camera.topdown.set")]
+#[kind(name = "aether.kit.camera.topdown.set")]
 pub struct CameraTopdownSet {
     pub name: String,
     pub params: TopdownParams,
@@ -138,11 +138,11 @@ mod tests {
 
     #[test]
     fn kind_names_are_stable() {
-        assert_eq!(CameraCreate::NAME, "aether.camera.create");
-        assert_eq!(CameraDestroy::NAME, "aether.camera.destroy");
-        assert_eq!(CameraSetActive::NAME, "aether.camera.set_active");
-        assert_eq!(CameraSetMode::NAME, "aether.camera.set_mode");
-        assert_eq!(CameraOrbitSet::NAME, "aether.camera.orbit.set");
-        assert_eq!(CameraTopdownSet::NAME, "aether.camera.topdown.set");
+        assert_eq!(CameraCreate::NAME, "aether.kit.camera.create");
+        assert_eq!(CameraDestroy::NAME, "aether.kit.camera.destroy");
+        assert_eq!(CameraSetActive::NAME, "aether.kit.camera.set_active");
+        assert_eq!(CameraSetMode::NAME, "aether.kit.camera.set_mode");
+        assert_eq!(CameraOrbitSet::NAME, "aether.kit.camera.orbit.set");
+        assert_eq!(CameraTopdownSet::NAME, "aether.kit.camera.topdown.set");
     }
 }

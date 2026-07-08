@@ -70,7 +70,7 @@ use self::mesher::style::StyleTable;
 /// mesh cache, and replays the cache to the render sink each frame.
 ///
 /// # Agent
-/// Load with the `aether_kit@aether.world` export. Paint the world by
+/// Load with the `aether_kit@aether.kit.world` export. Paint the world by
 /// sending `aether.kit.world.set_chunk` (one chunk's planes) and
 /// `aether.kit.world.set_region` (a region default for the underlay
 /// cascade); each send remeshes and the meadow renders every frame under
@@ -124,7 +124,7 @@ impl WorldView {
 
 #[actor]
 impl WasmActor for WorldView {
-    const NAMESPACE: &'static str = "aether.world";
+    const NAMESPACE: &'static str = "aether.kit.world";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(WorldView {

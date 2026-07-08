@@ -17,22 +17,22 @@
 //! distance `3.0`, target origin — and marked active, so loading the
 //! component produces a visible 3D camera with a fixed eye point and no
 //! further mail. Create / destroy / activate / mode-switch via the
-//! `aether.camera.*` mail family.
+//! `aether.kit.camera.*` mail family.
 //!
 //! # Mail surface
 //!
-//! - `aether.camera.create { name, mode }` — add a new camera. Errors
+//! - `aether.kit.camera.create { name, mode }` — add a new camera. Errors
 //!   (warn-log) if `name` already exists.
-//! - `aether.camera.destroy { name }` — drop a camera. If the active
+//! - `aether.kit.camera.destroy { name }` — drop a camera. If the active
 //!   one is destroyed, publishing pauses until another is activated.
-//! - `aether.camera.set_active { name }` — promote a camera to be the
+//! - `aether.kit.camera.set_active { name }` — promote a camera to be the
 //!   one whose `view_proj` publishes each tick.
-//! - `aether.camera.set_mode { name, mode }` — replace an existing
+//! - `aether.kit.camera.set_mode { name, mode }` — replace an existing
 //!   camera's mode in place. Prior-mode state is discarded.
-//! - `aether.camera.orbit.set { name, params }` — apply orbit-mode
+//! - `aether.kit.camera.orbit.set { name, params }` — apply orbit-mode
 //!   field deltas (Option per field). No-op (warn-log) if the camera
 //!   is in a different mode.
-//! - `aether.camera.topdown.set { name, params }` — same for topdown
+//! - `aether.kit.camera.topdown.set { name, params }` — same for topdown
 //!   mode.
 //!
 //! Inactive cameras still tick — orbit yaw keeps accumulating — so
@@ -242,20 +242,20 @@ pub struct CameraComponent {
 /// origin), marked active. The eye is pinned — no auto-rotation on
 /// load. Iterate from there:
 ///
-/// - `aether.camera.create { name, mode: Orbit(OrbitParams { … }) }`
+/// - `aether.kit.camera.create { name, mode: Orbit(OrbitParams { … }) }`
 ///   to add another camera (e.g. a topdown overview).
-/// - `aether.camera.set_active { name }` to switch which camera's
+/// - `aether.kit.camera.set_active { name }` to switch which camera's
 ///   `view_proj` reaches the GPU.
-/// - `aether.camera.orbit.set { name, params: { distance: Some(5.0) } }`
+/// - `aether.kit.camera.orbit.set { name, params: { distance: Some(5.0) } }`
 ///   for live deltas — every `Some` field overwrites, `None` leaves
 ///   the camera's current value alone.
-/// - `aether.camera.set_mode { name, mode }` to re-shape an existing
+/// - `aether.kit.camera.set_mode { name, mode }` to re-shape an existing
 ///   camera in place.
 ///
 /// Use `capture_frame` between sends to verify each change.
 #[actor]
 impl WasmActor for CameraComponent {
-    const NAMESPACE: &'static str = "aether.camera";
+    const NAMESPACE: &'static str = "aether.kit.camera";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         let mut cameras = HashMap::new();

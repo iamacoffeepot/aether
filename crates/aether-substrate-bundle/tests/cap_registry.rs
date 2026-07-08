@@ -174,7 +174,7 @@ fn cap_registry_updates_on_replace() {
                     // ADR-0096 / #2027: select the non-entry `aether.camera`
                     // export from the multi-actor kit module; a bare
                     // replace would reuse the trampoline's probe tag.
-                    export: Some("aether.camera".to_owned()),
+                    export: Some("aether.kit.camera".to_owned()),
                 },
             ),
         )])

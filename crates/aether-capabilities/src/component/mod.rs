@@ -136,12 +136,12 @@ mod tests {
             0,
             &registry,
         );
-        let camera = host.loaded::<ComponentHostCapability>("aether.camera");
+        let camera = host.loaded::<ComponentHostCapability>("aether.kit.camera");
 
         // The component host is root-pinned (depth-1), so its carry is
         // its own id; fold the trampoline node onto it.
         let host_carry = mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0;
-        let node = ActorId::instanced(WasmTrampoline::NAMESPACE, "aether.camera");
+        let node = ActorId::instanced(WasmTrampoline::NAMESPACE, "aether.kit.camera");
         let canonical = MailboxId(with_tag(Tag::Mailbox, fold_lineage(host_carry, node)));
         assert_eq!(camera.mailbox_id(), canonical);
 

@@ -623,7 +623,7 @@ pub struct Modifiers {
 // verification kinds stay below: `aether-mcp` and the substrate core
 // consume them, so moving them would close a dependency cycle.
 
-// `aether.camera.*` control kinds (CameraCreate / CameraDestroy /
+// `aether.kit.camera.*` control kinds (CameraCreate / CameraDestroy /
 // CameraSetActive / CameraSetMode / CameraOrbitSet / CameraTopdownSet)
 // live in `mod control_plane` below — they're structured because
 // every one carries a `String` name and `Option<...>` per-field
@@ -2134,7 +2134,7 @@ mod control_plane {
     }
 
     // Mesh-viewer structured load replies (issue 964). The mesh-viewer
-    // component's `aether.mesh.load` was fire-and-forget — failures
+    // component's `aether.kit.mesh.load` was fire-and-forget — failures
     // warn-logged and the prior cache stayed, with no wire signal a
     // scenario harness or MCP `send_mail` caller could read. These two
     // reply kinds give the load path the same structured Ok/Err shape
@@ -2150,7 +2150,7 @@ mod control_plane {
     // forcing a third variant. The diagnostic *content* of `error` /
     // `warnings` is a sibling issue — this kind ships only the shape.
 
-    /// `aether.mesh.load_result` — reply to `aether.mesh.load`
+    /// `aether.mesh.load_result` — reply to `aether.kit.mesh.load`
     /// (`aether_kit::mesh::LoadMesh`). Echoes the request's
     /// `namespace` + `path` so the caller correlates the reply to its
     /// source without a pending-op queue — operation identity comes
@@ -2342,7 +2342,7 @@ mod control_plane {
         Err { error: String },
     }
 
-    // ADR-0066: camera control kinds (`aether.camera.{create, destroy,
+    // ADR-0066: camera control kinds (`aether.kit.camera.{create, destroy,
     // set_active, set_mode, orbit.set, topdown.set}` + `OrbitParams` /
     // `TopdownParams` / `ModeInit`) live in the `aether-kit::camera`
     // trunk module. The `aether.camera` view_proj sink contract above stays
@@ -2352,7 +2352,7 @@ mod control_plane {
     // The migrated kinds are still wire-compatible (kind names +
     // schemas unchanged); only the source-side home moved.
 
-    // ADR-0066: `aether.mesh.load` moved to the `aether-mesh-viewer`
+    // ADR-0066: `aether.kit.mesh.load` moved to the `aether-mesh-viewer`
     // trunk crate; that crate was later folded into `aether-kit`
     // (`aether-kit::mesh`), which is its home now.
 

@@ -7,13 +7,13 @@
 //! no data/runtime split, just one module per actor:
 //!
 //! - [`camera::CameraComponent`] — the multi-camera driver, selected by the
-//!   `aether_kit@aether.camera` export (ADR-0096). Its `aether.camera.*`
+//!   `aether_kit@aether.kit.camera` export (ADR-0096). Its `aether.kit.camera.*`
 //!   driver kinds live in [`camera`].
 //! - [`mesh::MeshViewer`] — loads a `.dsl` / `.obj` mesh file and replays it
-//!   to the render sink, selected by the `aether_kit@aether.mesh_viewer`
-//!   export. Its `aether.mesh.load` kind lives in [`mesh`].
+//!   to the render sink, selected by the `aether_kit@aether.kit.mesh`
+//!   export. Its `aether.kit.mesh.load` kind lives in [`mesh`].
 //! - [`world::WorldView`] — meshes the chunked world plane stack into the
-//!   keyed-quilt gouache grammar, selected by the `aether_kit@aether.world`
+//!   keyed-quilt gouache grammar, selected by the `aether_kit@aether.kit.world`
 //!   export. The [`world`] module also holds the `World` / `Chunk` /
 //!   `Material` data layer and the `aether.kit.world.*` wire kinds it meshes.
 //! - [`mover::WorldMover`] — the input-driven body that walks the painted

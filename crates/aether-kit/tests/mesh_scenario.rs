@@ -3,7 +3,7 @@
 //! `wasm32-unknown-unknown`) selecting the non-entry `mesh_viewer`
 //! export (ADR-0096), seeds a fixture `.dsl` / `.obj` file into the
 //! substrate's `save://` namespace, and drives the component through
-//! `aether.mesh.load` to verify the load → parse → render pipeline
+//! `aether.kit.mesh.load` to verify the load → parse → render pipeline
 //! end-to-end.
 //!
 //! Skipped when:
@@ -85,7 +85,7 @@ fn load_viewer(bench: &mut TestBench, wasm_path: &Path) {
                     wasm,
                     name: Some(COMPONENT_NAME.to_owned()),
                     config: Vec::new(),
-                    export: Some("aether.mesh_viewer".to_owned()),
+                    export: Some("aether.kit.mesh".to_owned()),
                 },
             ),
         )])
