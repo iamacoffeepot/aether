@@ -89,6 +89,14 @@ requires an R8 texture, thresholds at iso 127.5, and renders a body/rim band
 from the rect parameters. Both are immediate-mode: resend the batch every frame
 or it disappears on the next commit-current frame.
 
+`aether.kit.world` uses the coverage material for painted overlay surfaces. It
+prepares the same smoothed scalar material mask plane the CPU contour oracle
+marches, uploads that plane as an R8 texture per chunk/material, and redraws a
+depth-tested coverage material rect for each ready plane on `Render`. Repainting
+the overlay plane updates the existing texture instead of sending replacement
+overlay triangles; terrain underlay, relief, walls, and raw calibration geometry
+remain ordinary `DrawTriangle` meshes.
+
 **The `view_proj` uniform, latest wins.** The substrate holds one column-major
 4×4 matrix and uploads it verbatim to the shader each frame (column-major matches
 wgpu's uniform layout, so the 64 bytes upload with no transpose). Each

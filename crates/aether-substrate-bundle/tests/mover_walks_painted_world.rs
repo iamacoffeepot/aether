@@ -24,6 +24,7 @@
 use std::fs;
 
 use aether_actor::Addressable;
+use aether_capabilities::render::{CreateTexture, DrawMaterialCoverage, UpdateTexture};
 use aether_data::Kind;
 use aether_kinds::keycode::KEY_W;
 use aether_kinds::{Key, LoadComponent, LoadResult, NamedMail, Render, WindowSize};
@@ -42,6 +43,9 @@ const WINDOW_HEIGHT: u32 = 96;
 /// Chunk edge in cells (`CELLS_PER_CHUNK`), mirrored here so the split-paint
 /// plane below is the right length.
 const CHUNK_EDGE: usize = 16;
+const SUBCELL_EDGE: usize = 16;
+const SUBCELLS_PER_CELL: usize = SUBCELL_EDGE * SUBCELL_EDGE;
+const OVERLAY_MASK_BYTES: usize = CHUNK_EDGE * CHUNK_EDGE * SUBCELLS_PER_CELL;
 
 /// The full trampoline address a loaded component registers at (ADR-0099 §4):
 /// the component host `/`-joined to the trampoline node under `name`.
@@ -98,6 +102,8 @@ fn load_kit_export(bench: &mut TestBench, wasm: &[u8], export: &str, name: &str)
 /// scrolls over as the body walks, guaranteeing the two captures differ.
 fn split_chunk() -> SetChunk {
     let mut underlay = vec![0u8; CHUNK_EDGE * CHUNK_EDGE];
+    let mut overlay = vec![0u8; CHUNK_EDGE * CHUNK_EDGE];
+    let mut overlay_mask = vec![0u8; OVERLAY_MASK_BYTES];
     for z in 0..CHUNK_EDGE {
         for x in 0..CHUNK_EDGE {
             let material = if x < CHUNK_EDGE / 2 {
@@ -106,6 +112,11 @@ fn split_chunk() -> SetChunk {
                 Material::Stone
             };
             underlay[z * CHUNK_EDGE + x] = material.to_u8();
+            if (5..11).contains(&x) && (4..12).contains(&z) {
+                overlay[z * CHUNK_EDGE + x] = Material::Sand.to_u8();
+                let base = (z * CHUNK_EDGE + x) * SUBCELLS_PER_CELL;
+                overlay_mask[base..base + SUBCELLS_PER_CELL].fill(u8::MAX);
+            }
         }
     }
     SetChunk {
@@ -114,8 +125,8 @@ fn split_chunk() -> SetChunk {
         underlay,
         underlay_points: Vec::new(),
         height_points: Vec::new(),
-        overlay: Vec::new(),
-        overlay_mask: Vec::new(),
+        overlay,
+        overlay_mask,
         height: Vec::new(),
         region: Vec::new(),
         water_plane: Vec::new(),
@@ -187,6 +198,17 @@ fn held_key_walks_the_body_across_the_painted_world() {
         .expect("paint + place + settle");
 
     let before = capture_scene(&mut bench, &mover, &world, "before");
+    assert!(
+        bench.count_observed(CreateTexture::NAME) > 0,
+        "painted overlay should upload an R8 coverage texture; observed kinds: {:?}",
+        bench.observed_kinds(),
+    );
+    assert!(
+        bench.count_observed(DrawMaterialCoverage::NAME) > 0,
+        "painted overlay should render through a coverage material, not overlay triangles; \
+         observed kinds: {:?}",
+        bench.observed_kinds(),
+    );
 
     // Hold W (no release) and advance four cells' worth of travel: at 8
     // octimeters/tick a 256-octimeter cell takes 32 ticks, so 128 ticks walks
@@ -229,5 +251,52 @@ fn held_key_walks_the_body_across_the_painted_world() {
         "walking the body should scroll the painted world under the camera; the frame \
          mean-absolute-error was {mae:.3} (expected 0.02..0.9) — the body did not move \
          across the painted ground",
+    );
+}
+
+#[test]
+fn painted_overlay_repaint_updates_the_coverage_texture() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = TestBench::start_with_size(WINDOW_WIDTH, WINDOW_HEIGHT).expect("boot");
+
+    let world = component_address("world");
+    load_kit_export(&mut bench, &wasm, "aether.kit.world", "world");
+
+    let mut repainted = split_chunk();
+    let cell = 7 * CHUNK_EDGE + 7;
+    repainted.overlay[cell] = Material::Void.to_u8();
+    let base = cell * SUBCELLS_PER_CELL;
+    repainted.overlay_mask[base..base + SUBCELLS_PER_CELL].fill(0);
+
+    bench
+        .execute(vec![
+            ("paint", BenchOp::send_mail(world.as_str(), &split_chunk())),
+            ("settle_create", BenchOp::advance(2)),
+            ("repaint", BenchOp::send_mail(world.as_str(), &repainted)),
+            ("settle_update", BenchOp::advance(1)),
+            (
+                "draw",
+                BenchOp::capture_with_mails(vec![envelope(&world, &Render)], Vec::new()),
+            ),
+        ])
+        .expect("paint + repaint + capture");
+
+    assert!(
+        bench.count_observed(CreateTexture::NAME) > 0,
+        "initial overlay paint should create an R8 texture; observed kinds: {:?}",
+        bench.observed_kinds(),
+    );
+    assert!(
+        bench.count_observed(UpdateTexture::NAME) > 0,
+        "overlay repaint should update the existing coverage texture; observed kinds: {:?}",
+        bench.observed_kinds(),
+    );
+    assert!(
+        bench.count_observed(DrawMaterialCoverage::NAME) > 0,
+        "updated overlay should still draw through coverage material; observed kinds: {:?}",
+        bench.observed_kinds(),
     );
 }
