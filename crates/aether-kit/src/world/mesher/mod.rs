@@ -153,11 +153,18 @@ const EDGE: i32 = CELLS_PER_CHUNK;
 /// Subcells along one cell edge, as `i32`.
 const SUB: i32 = SUBCELLS_PER_CELL_EDGE as i32;
 
-/// Subcells along one chunk edge (`16 * 4 = 64`).
+/// Subcells along one chunk edge (`16 * 16 = 256`).
 const SUBCELLS_PER_CHUNK_EDGE: i32 = EDGE * SUB;
 
-/// Octimeters per subcell (`256 / SUB = 64`).
+/// Octimeters per subcell (`256 / SUB = 16`).
 const OCTIMETERS_PER_SUBCELL: i32 = 256 / SUB;
+
+/// The authored smoothing unit: one v2.5 quarter-cell grain. Profile
+/// iteration counts are stored in this world-space unit and expanded to the
+/// current subcell samples when the mesher consumes them.
+const SMOOTHING_UNIT_OCTIMETERS: i32 = 64;
+
+const SMOOTHING_SAMPLES_PER_UNIT: u32 = (SMOOTHING_UNIT_OCTIMETERS / OCTIMETERS_PER_SUBCELL) as u32;
 
 /// Octimeters per meter, for the octimeter-to-meter conversion at vertex
 /// emit.
@@ -225,12 +232,19 @@ const ENCROACH_NOISE_OCTAVES: u32 = 2;
 /// Per-octave amplitude falloff for the raggedness noise.
 const ENCROACH_NOISE_PERSISTENCE: f32 = 0.5;
 
-/// Upsample factor for a non-water material's smoothed contour grid.
-const CONTOUR_UPSAMPLE: usize = 2;
+/// Upsample factor for a non-water material's smoothed contour grid. At
+/// `SUB = 16`, the base subcell lattice is already finer than the old
+/// upsampled grid, and keeping the extra pass makes dense remesh tests miss
+/// CI time budgets.
+const CONTOUR_UPSAMPLE: usize = 1;
 
 /// Apron cap in subcells (two cells) so a chunk's smoothing reads stay
 /// within the eight-neighbor remesh the `R = 1` invalidation covers.
-const MAX_APRON_SUBCELLS: i32 = 8;
+const MAX_APRON_SUBCELLS: i32 = 2 * SUB;
+
+fn smoothing_iterations_to_samples(iterations: u32) -> u32 {
+    iterations.saturating_mul(SMOOTHING_SAMPLES_PER_UNIT)
+}
 
 /// Water depth in octimeters at which the depth grading reaches full
 /// darkening — one meter of water below the surface. Shallower water grades
@@ -890,12 +904,12 @@ fn partition_inputs(
                 || {
                     let s = styles.get(material);
                     SmoothParams {
-                        iterations: s.smoothing_iterations,
+                        iterations: smoothing_iterations_to_samples(s.smoothing_iterations),
                         smoothing_degrees: s.smoothing_degrees,
                     }
                 },
                 |profile| SmoothParams {
-                    iterations: profile.iterations,
+                    iterations: smoothing_iterations_to_samples(profile.iterations),
                     smoothing_degrees: profile.degrees,
                 },
             );
@@ -2004,7 +2018,7 @@ fn sample_params(
 ) -> Vec<SmoothParams> {
     let s = styles.get(material);
     let default = SmoothParams {
-        iterations: s.smoothing_iterations,
+        iterations: smoothing_iterations_to_samples(s.smoothing_iterations),
         smoothing_degrees: s.smoothing_degrees,
     };
     let mut params = vec![default; n * n];
@@ -2017,7 +2031,7 @@ fn sample_params(
             if let Some(profile) = world.smoothing_override(cell) {
                 let idx = (sj + apron) as usize * n + (si + apron) as usize;
                 params[idx] = SmoothParams {
-                    iterations: profile.iterations,
+                    iterations: smoothing_iterations_to_samples(profile.iterations),
                     smoothing_degrees: profile.degrees,
                 };
             }
@@ -2838,8 +2852,8 @@ mod tests {
 
     use super::*;
     use crate::world::{
-        CELLS_PER_CHUNK_AREA, Chunk, Region, STEP_MAX_OCTIMETERS, SUBCELLS_PER_CELL,
-        SetMaterialStyle, SmoothingProfile, UNDERLAY_POINT_INHERIT,
+        CELLS_PER_CHUNK_AREA, Chunk, OVERLAY_MASK_WIRE_BYTES, Region, STEP_MAX_OCTIMETERS,
+        SUBCELLS_PER_CELL, SetChunk, SetMaterialStyle, SmoothingProfile, UNDERLAY_POINT_INHERIT,
     };
     use style::ResolvedCell;
 
@@ -2864,6 +2878,21 @@ mod tests {
 
     fn set_overlay_cell_full(chunk: &mut Chunk, lx: i32, lz: i32) {
         set_overlay_cell_coverage(chunk, lx, lz, [u8::MAX; SUBCELLS_PER_CELL]);
+    }
+
+    fn sub4(n: i32) -> i32 {
+        n * SUB / 4
+    }
+
+    #[test]
+    fn smoothing_iterations_are_world_anchored() {
+        // One authored smoothing unit is the v2.5 quarter-cell grain. Raising
+        // the subcell density increases samples consumed, not the world-space
+        // chamfer reach.
+        assert_eq!(
+            smoothing_iterations_to_samples(1) as i32 * OCTIMETERS_PER_SUBCELL,
+            SMOOTHING_UNIT_OCTIMETERS,
+        );
     }
 
     /// A level surface patch for cell `(cx, cz)` — the flat-world case.
@@ -3000,12 +3029,12 @@ mod tests {
     #[test]
     fn full_water_chunk_budget_is_pinned() {
         // Tripwire: water is underlay fabric, so a fully-water chunk is all
-        // interior body — each of its 256 cells tiles the flat water patch
-        // with one depth-graded quad per subcell (16 subcells x 2 tris), and
+        // interior body — each cell tiles the flat water patch with one
+        // depth-graded quad per subcell (two triangles per subcell), and
         // nothing else draws (no partition windows inside a uniform body, no
-        // overlay, no walls on flat water). 256 * 32 = 8192. A change to the
-        // per-subcell water resolution or the interior body path moves this
-        // and must be deliberate.
+        // overlay, no walls on flat water). A change to the per-subcell water
+        // resolution or the interior body path moves this and must be
+        // deliberate.
         let mut world = World::new();
         for dz in -1..=1 {
             for dx in -1..=1 {
@@ -3020,7 +3049,11 @@ mod tests {
             ViewMode::Painted,
             &StyleTable::default(),
         );
-        assert_eq!(tris.len(), 8192, "256 cells x 16 subcells x 2 tris");
+        assert_eq!(
+            tris.len(),
+            CELLS_PER_CHUNK_AREA * SUBCELLS_PER_CELL * 2,
+            "one water quad per subcell",
+        );
     }
 
     #[test]
@@ -3064,33 +3097,45 @@ mod tests {
         // default) covers a band across the border; every cell in both
         // chunks points at a zero-iteration profile, so both chunks must
         // emit exactly the raw blocky contour — and agree with each other.
-        // If either side dropped the override (or read it only inside its
-        // own chunk, not through the apron), its smoothed rim contour would
-        // put vertices on the half-subcell grid. Only the rim layer is
-        // checked: the body layer's eroded boundary legitimately sits
-        // mid-window (half-subcell positions) even when raw.
-        let mut world = World::new();
-        world.insert_smoothing_profile(
-            1,
-            SmoothingProfile {
-                iterations: 0,
-                degrees: 90,
-            },
-        );
-        for cx in 0..2 {
-            let mut chunk = Chunk::empty();
-            chunk.smoothing = [1; CELLS_PER_CHUNK_AREA];
-            for lz in 6..10 {
-                for lx in 0..EDGE {
-                    let global = cx * EDGE + lx;
-                    if (12..20).contains(&global) {
-                        chunk.overlay[(lz * EDGE + lx) as usize] = Material::Stone;
-                        set_overlay_cell_full(&mut chunk, lx, lz);
+        // Compare against the same world with no field override, rendered
+        // under an explicitly raw Stone style. If either side drops the
+        // override (or reads it only inside its own chunk, not through the
+        // apron), the default Stone smoothing changes the mesh.
+        let band_world = |field_override: bool| {
+            let mut world = World::new();
+            if field_override {
+                world.insert_smoothing_profile(
+                    1,
+                    SmoothingProfile {
+                        iterations: 0,
+                        degrees: 90,
+                    },
+                );
+            }
+            for cx in 0..2 {
+                let mut chunk = Chunk::empty();
+                if field_override {
+                    chunk.smoothing = [1; CELLS_PER_CHUNK_AREA];
+                }
+                for lz in 6..10 {
+                    for lx in 0..EDGE {
+                        let global = cx * EDGE + lx;
+                        if (12..20).contains(&global) {
+                            chunk.overlay[(lz * EDGE + lx) as usize] = Material::Stone;
+                            set_overlay_cell_full(&mut chunk, lx, lz);
+                        }
                     }
                 }
+                world.insert_chunk(ChunkPos { x: cx, z: 0 }, chunk);
             }
-            world.insert_chunk(ChunkPos { x: cx, z: 0 }, chunk);
-        }
+            world
+        };
+        let world = band_world(true);
+        let raw_world = band_world(false);
+        let mut raw_styles = StyleTable::default();
+        let mut stone = style_msg(Material::Stone, raw_styles.get(Material::Stone));
+        stone.smoothing_iterations = 0;
+        raw_styles.apply(&stone);
         for cx in 0..2 {
             let tris = mesh_chunk(
                 &world,
@@ -3098,20 +3143,16 @@ mod tests {
                 ViewMode::Painted,
                 &StyleTable::default(),
             );
-            for v in tris
-                .iter()
-                .filter(|t| t.verts.iter().all(|v| v.y > 0.0 && v.y < OVERLAY_BODY_LIFT))
-                .flat_map(|t| t.verts.iter())
-            {
-                let eighths = v.x * 8.0;
-                let is_half_subcell =
-                    (eighths - eighths.round()).abs() < 1e-4 && (eighths.round() as i64) % 2 != 0;
-                assert!(
-                    !is_half_subcell,
-                    "chunk {cx}: a zero-iteration field zone stays raw, vertex x = {}",
-                    v.x,
-                );
-            }
+            let raw_tris = mesh_chunk(
+                &raw_world,
+                ChunkPos { x: cx, z: 0 },
+                ViewMode::Painted,
+                &raw_styles,
+            );
+            assert_eq!(
+                tris, raw_tris,
+                "chunk {cx}: a zero-iteration field zone renders as raw Stone",
+            );
         }
     }
 
@@ -3120,9 +3161,10 @@ mod tests {
         // A straight overlay edge that crosses a chunk boundary must land at
         // one x whether meshed from either chunk — the apron read makes the
         // two independently-meshed chunks agree on the border. Stone covers
-        // every subcell with global subcell-x < 70 (chunk 0 fully, chunk 1's
-        // first six subcells), a straight vertical edge past the border.
+        // every subcell with global subcell-x less than chunk 1 plus 1.5
+        // cells, a straight vertical edge past the border.
         let mut world = World::new();
+        let edge_sub_x = SUBCELLS_PER_CHUNK_EDGE + SUB + SUB / 2;
         for cx in 0..2 {
             let mut chunk = Chunk::empty();
             for lz in 0..EDGE {
@@ -3131,7 +3173,7 @@ mod tests {
                     for sz in 0..SUB {
                         for sx in 0..SUB {
                             let global_sub_x = (cx * EDGE + lx) * SUB + sx;
-                            if global_sub_x < 70 {
+                            if global_sub_x < edge_sub_x {
                                 coverage[(sz * SUB + sx) as usize] = u8::MAX;
                             }
                         }
@@ -3163,8 +3205,8 @@ mod tests {
                 .map(|v| v.x)
                 .fold(f32::MIN, f32::max)
         };
-        // The straight edge sits at global subcell 70 = 70/4 = 17.5 m; the
-        // chunk that carries it (chunk 1) marches its crossings there.
+        // The straight edge sits at 17.5 m; the chunk that carries it
+        // (chunk 1) marches its crossings there.
         let edge1 = max_x(&mesh1);
         assert!((edge1 - 17.5).abs() < 1e-4, "edge at 17.5 m, got {edge1}");
         // Chunk 0 is fully covered and its apron reads into chunk 1, so its
@@ -3174,6 +3216,79 @@ mod tests {
         assert!(
             edge0 >= 16.0,
             "chunk 0 overlay reaches its border, got {edge0}"
+        );
+    }
+
+    #[test]
+    fn painted_overlay_keeps_a_ten_centimeter_gap_after_set_chunk() {
+        // Two stone stamps in one cell are separated by two SUB=16 samples
+        // (12.5 cm). The SetChunk path must preserve the scalar coverage
+        // plane, and the painted mesher must keep the uncovered probe between
+        // the stamps uncovered instead of fusing the contours.
+        let lx = 4;
+        let lz = 4;
+        let mut overlay = vec![0u8; CELLS_PER_CHUNK_AREA];
+        overlay[(lz * EDGE + lx) as usize] = Material::Stone.to_u8();
+        let mut overlay_mask = vec![0u8; OVERLAY_MASK_WIRE_BYTES];
+        let base = (lz * EDGE + lx) as usize * SUBCELLS_PER_CELL;
+        for sz in 4..12 {
+            for sx in 2..6 {
+                overlay_mask[base + (sz * SUB + sx) as usize] = u8::MAX;
+            }
+            for sx in 8..12 {
+                overlay_mask[base + (sz * SUB + sx) as usize] = u8::MAX;
+            }
+        }
+        let mut world = World::new();
+        world.insert_smoothing_profile(
+            1,
+            SmoothingProfile {
+                iterations: 0,
+                degrees: 90,
+            },
+        );
+        world.insert_chunk(
+            ChunkPos { x: 0, z: 0 },
+            SetChunk {
+                chunk_x: 0,
+                chunk_z: 0,
+                underlay: Vec::new(),
+                underlay_points: Vec::new(),
+                height_points: Vec::new(),
+                overlay,
+                overlay_mask,
+                height: Vec::new(),
+                region: Vec::new(),
+                water_plane: Vec::new(),
+                smoothing: vec![1; CELLS_PER_CHUNK_AREA],
+            }
+            .into_chunk(),
+        );
+
+        let mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
+        let overlay_covers = |px: f32, pz: f32| {
+            mesh.iter()
+                .filter(|t| t.verts.iter().any(|v| v.y > 0.0))
+                .any(|t| covers(t, px, pz))
+        };
+        let cell_x = lx as f32;
+        let cell_z = lz as f32;
+        assert!(
+            overlay_covers(cell_x + 4.0 / 16.0, cell_z + 8.0 / 16.0),
+            "left subcell stamp survives SetChunk and meshes",
+        );
+        assert!(
+            !overlay_covers(cell_x + 7.0 / 16.0, cell_z + 8.0 / 16.0),
+            "the 12.5 cm gap remains uncovered",
+        );
+        assert!(
+            overlay_covers(cell_x + 10.0 / 16.0, cell_z + 8.0 / 16.0),
+            "right subcell stamp survives SetChunk and meshes",
         );
     }
 
@@ -3213,12 +3328,12 @@ mod tests {
     }
 
     /// Does the underlay geometry carry a smoothed-crossing vertex? A
-    /// marched crossing sits at a window midpoint (x on the 32-oct
-    /// lattice); crisp cell-mask crossings land only on cell lines (0 mod
-    /// 256) and the nine-slice insets only at ±32 mod 256, so an x-residue
-    /// in {64, 96, 128, 160, 192} exists exactly when smoothing moved a
-    /// boundary off the cell lattice.
+    /// marched crossing sits on the active contour lattice; crisp cell-mask
+    /// crossings land only on cell lines (0 mod 256) and the nine-slice
+    /// insets only at ±32 mod 256. Any other residue on that lattice is a
+    /// smoothing-displaced boundary.
     fn has_smoothed_crossing(mesh: &[DrawTriangle]) -> bool {
+        let contour_step = OCTIMETERS_PER_SUBCELL / CONTOUR_UPSAMPLE as i32;
         mesh.iter()
             .filter(|t| t.verts.iter().all(|v| v.y == 0.0))
             .flat_map(|t| t.verts.iter())
@@ -3229,7 +3344,8 @@ mod tests {
                     return false;
                 }
                 let oct = rounded as i64;
-                oct % 32 == 0 && matches!(oct.rem_euclid(256), 64 | 96 | 128 | 160 | 192)
+                let residue = oct.rem_euclid(256);
+                oct % i64::from(contour_step) == 0 && !matches!(residue, 0 | 32 | 224)
             })
     }
 
@@ -3749,17 +3865,17 @@ mod tests {
 
     #[test]
     fn a_point_shaped_cell_marches_inside_its_cell_span() {
-        // A cell whose only authored material is a 2x2 block of interior
-        // subcells (the rest inherit Void) marches a silhouette that departs
-        // the cell-edge lines: the Grass/Void contour lands between subcell
-        // centers, strictly inside the cell span, where a whole-cell material
-        // would only bound at the integer cell edges.
+        // A cell whose only authored material is the middle half-cell of
+        // interior subcells (the rest inherit Void) marches a silhouette that
+        // departs the cell-edge lines: the Grass/Void contour lands between
+        // subcell centers, strictly inside the cell span, where a whole-cell
+        // material would only bound at the integer cell edges.
         let at = ChunkPos { x: 0, z: 0 };
         let cell = CellPos { x: 8, z: 8 };
         let sub = SUB as usize;
         let mut points = [UNDERLAY_POINT_INHERIT; SUBCELLS_PER_CELL];
-        for sub_z in 1..3 {
-            for sub_x in 1..3 {
+        for sub_z in sub / 4..3 * sub / 4 {
+            for sub_x in sub / 4..3 * sub / 4 {
                 points[sub_z * sub + sub_x] = Material::Grass.to_u8();
             }
         }
@@ -4174,19 +4290,19 @@ mod tests {
     #[test]
     fn a_raised_point_cell_wears_marched_walls() {
         // A point-authored blob raised to a plateau wears walls that follow
-        // its marched silhouette, not the cell edge: a 2x2 grass point block
-        // in one grass cell (the rest Void points) lifted 2 m stands a
+        // its marched silhouette, not the cell edge: a half-cell grass point
+        // block in one grass cell (the rest Void points) lifted 2 m stands a
         // Void-drop wall whose top vertices sit strictly inside the cell
         // span, where its Grass/Void contour marches — the cap-detaches-
         // from-the-cell-edge case the cell-edge skirt could not close.
         let at = ChunkPos { x: 0, z: 0 };
         let cell = CellPos { x: 8, z: 8 };
         let sub = SUB as usize;
-        // Explicit Void points around a 2x2 grass core, so the raised cell's
-        // grass silhouette pulls inside its own edges.
+        // Explicit Void points around a half-cell grass core, so the raised
+        // cell's grass silhouette pulls inside its own edges.
         let mut points = [Material::Void.to_u8(); SUBCELLS_PER_CELL];
-        for sub_z in 1..3 {
-            for sub_x in 1..3 {
+        for sub_z in sub / 4..3 * sub / 4 {
+            for sub_x in sub / 4..3 * sub / 4 {
                 points[sub_z * sub + sub_x] = Material::Grass.to_u8();
             }
         }
@@ -4229,7 +4345,8 @@ mod tests {
         // A pyramid: 12 octimeters per subcell up to the middle and back down
         // on both axes, flat (zero) by every chunk edge so the grass never
         // stands above the Void surround and nothing cliffs anywhere.
-        let ramp = |g: i32| (12 * g.min(60 - g).max(0)) as i16;
+        let density_scale = SUB / 4;
+        let ramp = |g: i32| (12 * g.min(sub4(60) - g).max(0) / density_scale) as i16;
         for lz in 0..EDGE {
             for lx in 0..EDGE {
                 let mut deltas = [0i16; SUBCELLS_PER_CELL];
@@ -4280,7 +4397,7 @@ mod tests {
                     for sx in 0..sub {
                         let gx = lx * SUB + sx as i32;
                         let gz = lz * SUB + sz as i32;
-                        if (gx - 34).abs() + (gz - 34).abs() <= r {
+                        if (gx - sub4(34)).abs() + (gz - sub4(34)).abs() <= sub4(r) {
                             points[sz * sub + sx] = Material::Stone.to_u8();
                             deltas[sz * sub + sx] = lift;
                         }
@@ -4470,7 +4587,10 @@ mod tests {
                 world.insert_chunk(ChunkPos { x: dx, z: dz }, c);
             }
         }
-        // Raise global subcells [30, 38) x [30, 38) by 300 octimeters.
+        // Raise the v2.5 global subcell span [30, 38) x [30, 38), scaled to
+        // the current density, by 300 octimeters.
+        let lo_sub = sub4(30);
+        let hi_sub = sub4(38);
         let sub = SUB as usize;
         for lz in 6..10 {
             for lx in 6..10 {
@@ -4479,7 +4599,7 @@ mod tests {
                     for sx in 0..sub {
                         let gx = lx * SUB + sx as i32;
                         let gz = lz * SUB + sz as i32;
-                        if (30..38).contains(&gx) && (30..38).contains(&gz) {
+                        if (lo_sub..hi_sub).contains(&gx) && (lo_sub..hi_sub).contains(&gz) {
                             deltas[sz * sub + sx] = 300;
                         }
                     }
@@ -4599,6 +4719,8 @@ mod tests {
             }
         }
         let sub = SUB as usize;
+        let lo_sub = sub4(30);
+        let hi_sub = sub4(38);
         for lz in 6..10 {
             for lx in 6..10 {
                 let mut points = [UNDERLAY_POINT_INHERIT; SUBCELLS_PER_CELL];
@@ -4607,7 +4729,7 @@ mod tests {
                     for sx in 0..sub {
                         let gx = lx * SUB + sx as i32;
                         let gz = lz * SUB + sz as i32;
-                        if (30..38).contains(&gx) && (30..38).contains(&gz) {
+                        if (lo_sub..hi_sub).contains(&gx) && (lo_sub..hi_sub).contains(&gz) {
                             points[sz * sub + sx] = Material::Stone.to_u8();
                             deltas[sz * sub + sx] = 300;
                         }
@@ -4791,7 +4913,7 @@ mod tests {
                     for sx in 0..sub {
                         let gx = lx * SUB + sx as i32;
                         let gz = lz * SUB + sz as i32;
-                        if (gx - 34).abs() + (gz - 34).abs() <= 10 {
+                        if (gx - sub4(34)).abs() + (gz - sub4(34)).abs() <= sub4(10) {
                             points[sz * sub + sx] = Material::Stone.to_u8();
                             deltas[sz * sub + sx] = 300;
                             any = true;
@@ -4922,6 +5044,9 @@ mod tests {
             }
         }
         let sub = SUB as usize;
+        let body_lo = sub4(28);
+        let body_hi = sub4(44);
+        let split = sub4(36);
         for lz in 0..EDGE {
             for lx in 0..EDGE {
                 let mut points = [UNDERLAY_POINT_INHERIT; SUBCELLS_PER_CELL];
@@ -4931,13 +5056,13 @@ mod tests {
                     for sx in 0..sub {
                         let gx = lx * SUB + sx as i32;
                         let gz = lz * SUB + sz as i32;
-                        if (28..44).contains(&gx) && (28..44).contains(&gz) {
+                        if (body_lo..body_hi).contains(&gx) && (body_lo..body_hi).contains(&gz) {
                             points[sz * sub + sx] = Material::Stone.to_u8();
                             // Zone lines x = 9 m and z = 9 m meet at the
                             // junction and run out through the perimeter.
-                            deltas[sz * sub + sx] = if gx < 36 {
+                            deltas[sz * sub + sx] = if gx < split {
                                 0
-                            } else if gz < 36 {
+                            } else if gz < split {
                                 128
                             } else {
                                 256
@@ -4981,6 +5106,10 @@ mod tests {
             }
         }
         let sub = SUB as usize;
+        let arm_x = sub4(30)..sub4(36);
+        let arm_z = sub4(26)..sub4(42);
+        let foot_x = sub4(36)..sub4(42);
+        let foot_z = sub4(34)..sub4(42);
         for lz in 0..EDGE {
             for lx in 0..EDGE {
                 let mut points = [UNDERLAY_POINT_INHERIT; SUBCELLS_PER_CELL];
@@ -4991,8 +5120,8 @@ mod tests {
                         let gx = lx * SUB + sx as i32;
                         let gz = lz * SUB + sz as i32;
                         // Vertical arm at +128; the foot at +256.
-                        let arm = (30..36).contains(&gx) && (26..42).contains(&gz);
-                        let foot = (36..42).contains(&gx) && (34..42).contains(&gz);
+                        let arm = arm_x.contains(&gx) && arm_z.contains(&gz);
+                        let foot = foot_x.contains(&gx) && foot_z.contains(&gz);
                         if arm || foot {
                             points[sz * sub + sx] = Material::Stone.to_u8();
                             deltas[sz * sub + sx] = if arm { 128 } else { 256 };

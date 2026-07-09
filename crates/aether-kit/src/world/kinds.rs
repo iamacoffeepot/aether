@@ -11,6 +11,7 @@
 //! register regions / smoothing profiles / water planes, restyle a material,
 //! switch the view mode, or load a serialized world.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -34,7 +35,7 @@ pub struct SetChunk {
     /// Underlay plane — 256 raw material bytes (`Material as u8`).
     pub underlay: Vec<u8>,
     /// Underlay material-point plane — up to [`UNDERLAY_POINTS_PER_CHUNK`]
-    /// bytes (`256 * SUB²`; 4096 at `SUB = 4`), one point per subcell in
+    /// bytes (`256 * SUB²`; 65536 at `SUB = 16`), one point per subcell in
     /// row-major cell order (`z*SUB + x` within a cell). Each byte is a
     /// [`Material`] or the [`UNDERLAY_POINT_INHERIT`] sentinel; a short
     /// vector leaves the remaining points inheriting, so an empty vector is
@@ -49,7 +50,7 @@ pub struct SetChunk {
     /// Overlay plane — 256 raw material bytes. `0` = no overlay.
     pub overlay: Vec<u8>,
     /// Overlay subcell coverage plane — [`OVERLAY_MASK_WIRE_BYTES`] bytes
-    /// (`256 * SUB²`; 4096 at `SUB = 4`), one coverage byte per subcell in
+    /// (`256 * SUB²`; 65536 at `SUB = 16`), one coverage byte per subcell in
     /// row-major cell order (`z*SUB + x` within a cell). A short vector
     /// leaves the remaining samples uncovered, so an empty vector is the
     /// no-coverage default.
@@ -79,8 +80,8 @@ impl SetChunk {
     /// `Void` on an unknown value; every plane pads to 256 / truncates
     /// past it; `region` casts `u32` down to `u16`.
     #[must_use]
-    pub fn into_chunk(self) -> Chunk {
-        let mut chunk = Chunk::empty();
+    pub fn into_chunk(self) -> Box<Chunk> {
+        let mut chunk = Chunk::empty_boxed();
         for (dst, byte) in chunk.underlay.iter_mut().zip(&self.underlay) {
             *dst = Material::from_u8_or_void(*byte);
         }
