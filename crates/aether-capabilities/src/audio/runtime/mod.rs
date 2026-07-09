@@ -14,7 +14,6 @@
 //! shape the already-split heavy `EngineProxyState` uses to reap its child +
 //! sidecar thread.
 
-use std::collections::VecDeque;
 use std::str::from_utf8;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
@@ -76,9 +75,9 @@ pub use aether_substrate::chassis::error::BootError;
 
 pub use self::event::AudioEvent;
 pub use self::instrument::builtin_id_ceiling;
-pub use self::sample::{BankAssemblyContext, BankAssemblyOutput, PendingInstrument};
+pub use self::sample::{BankAssemblyContext, BankAssemblyOutput};
 pub use self::schedule::{SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS};
-pub use self::track::{DecodeOutput, PendingTrack, TrackDecodeContext};
+pub use self::track::{DecodeOutput, TrackDecodeContext};
 pub use crate::fs::{FsCapability, Read, ReadResult};
 
 /// Extract the sender's mailbox id for voice-table keying. Component
@@ -99,6 +98,27 @@ pub fn sender_mailbox_id(sender: Source) -> MailboxId {
     }
 }
 
+/// Context stored under each `aether.fs.read` request correlation while an
+/// audio load is in flight. One enum covers the shared `ReadResult` handler's
+/// track, instrument, and per-sample paths.
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize)]
+#[kind(name = "aether.audio.load_context")]
+pub enum AudioLoadContext {
+    /// A `play_track` WAV read; carries the original reply route plus the
+    /// synth-side track key and playback parameters.
+    Track {
+        source: Source,
+        sender_mailbox: MailboxId,
+        lane: Option<String>,
+        gain: f32,
+        looping: bool,
+    },
+    /// A `load_instrument` `.sfz` read; carries the original reply route.
+    Instrument { source: Source },
+    /// One sample read in a bank assembly; carries the assembly and exact slot.
+    Sample { assembly_id: u64, slot: u64 },
+}
+
 /// `aether.audio` runtime state (ADR-0039 / ADR-0103 identity/runtime split).
 /// Owns the producer side of the synth event queue plus the cpal worker
 /// thread + its shutdown sender, and the in-flight bookkeeping for the
@@ -113,21 +133,9 @@ pub struct AudioCapabilityState {
     /// Device output rate, captured at boot — the resample target for
     /// track decode (ADR-0103 §1). `None` in nop mode (no pipeline).
     pub sample_rate: Option<f32>,
-    /// `play_track` requests awaiting their `aether.fs.read` reply,
-    /// keyed by the echoed `(namespace, path)`. A `VecDeque` per key so
-    /// two concurrent plays of the same path correlate FIFO rather than
-    /// clobbering each other.
-    pub pending_tracks: HashMap<(String, String), VecDeque<PendingTrack>>,
-    /// `load_instrument` requests awaiting their `.sfz` read, keyed by
-    /// the echoed `(namespace, path)` of the `.sfz` (ADR-0103 §5).
-    pub pending_instruments: HashMap<(String, String), VecDeque<PendingInstrument>>,
     /// Bank loads whose `.sfz` has parsed and whose sample reads are in
     /// flight, keyed by a minted assembly id.
     pub assemblies: HashMap<u64, BankAssembly>,
-    /// Sample reads in flight, keyed by the echoed `(namespace, fs_path)`
-    /// to the assembly id(s) awaiting that sample (FIFO across banks
-    /// that happen to share a sample path).
-    pub pending_samples: HashMap<(String, String), VecDeque<u64>>,
     /// Monotonic source of [`BankAssembly`] keys.
     pub next_assembly_id: u64,
     /// Next instrument id to assign a loaded bank — starts at
@@ -143,56 +151,12 @@ impl AudioCapabilityState {
         Self {
             sender: None,
             sample_rate: None,
-            pending_tracks: HashMap::new(),
-            pending_instruments: HashMap::new(),
             assemblies: HashMap::new(),
-            pending_samples: HashMap::new(),
             next_assembly_id: 0,
             next_instrument_id: builtin_id_ceiling(),
             thread: None,
             shutdown: None,
         }
-    }
-
-    /// Pop the oldest `play_track` parked under `(namespace, path)` —
-    /// the FIFO correlation for the `aether.fs.read` reply. Removes the
-    /// key's queue when it empties.
-    pub fn take_pending_track(&mut self, namespace: &str, path: &str) -> Option<PendingTrack> {
-        let key = (namespace.to_owned(), path.to_owned());
-        let queue = self.pending_tracks.get_mut(&key)?;
-        let pending = queue.pop_front();
-        if queue.is_empty() {
-            self.pending_tracks.remove(&key);
-        }
-        pending
-    }
-
-    /// Pop the oldest `load_instrument` parked under the `.sfz`'s
-    /// `(namespace, path)`. Sibling of [`Self::take_pending_track`].
-    pub fn take_pending_instrument(
-        &mut self,
-        namespace: &str,
-        path: &str,
-    ) -> Option<PendingInstrument> {
-        let key = (namespace.to_owned(), path.to_owned());
-        let queue = self.pending_instruments.get_mut(&key)?;
-        let pending = queue.pop_front();
-        if queue.is_empty() {
-            self.pending_instruments.remove(&key);
-        }
-        pending
-    }
-
-    /// Pop the oldest assembly awaiting a sample read at
-    /// `(namespace, fs_path)`.
-    pub fn take_pending_sample(&mut self, namespace: &str, path: &str) -> Option<u64> {
-        let key = (namespace.to_owned(), path.to_owned());
-        let queue = self.pending_samples.get_mut(&key)?;
-        let id = queue.pop_front();
-        if queue.is_empty() {
-            self.pending_samples.remove(&key);
-        }
-        id
     }
 
     /// Dispatch a track's decode off the realtime path (ADR-0093),
@@ -202,18 +166,28 @@ impl AudioCapabilityState {
     pub fn start_track_decode(
         &mut self,
         ctx: &mut NativeCtx<'_, Manual>,
-        pending: &PendingTrack,
+        context: AudioLoadContext,
         namespace: String,
         path: String,
         bytes: Vec<u8>,
     ) {
+        let AudioLoadContext::Track {
+            source,
+            sender_mailbox,
+            lane,
+            gain,
+            looping,
+        } = context
+        else {
+            return;
+        };
         let Some(device_rate) = self.sample_rate else {
             ctx.reply_to(
-                pending.source,
+                source,
                 &PlayTrackResult::Err {
                     namespace,
                     path,
-                    lane: pending.lane.clone(),
+                    lane,
                     error: "audio pipeline not initialised on this desktop substrate".to_owned(),
                 },
             );
@@ -225,19 +199,19 @@ impl AudioCapabilityState {
         let target_rate = device_rate as u32;
 
         let context = TrackDecodeContext {
-            sender_mailbox: pending.sender_mailbox,
-            lane: pending.lane.clone(),
+            sender_mailbox,
+            lane,
             namespace,
             path,
-            gain: pending.gain,
-            looping: pending.looping,
+            gain,
+            looping,
         };
         // Bridge the hold from this (fs-reply) turn into the decode
         // dispatch, pinning the reply to the original `play_track` caller.
         let hold = ctx.acquire_settlement_hold();
         ctx.dispatch_blocking_resumed_with::<DecodeOutput, _, _>(
             hold,
-            pending.source,
+            source,
             context,
             move || decode_wav_to_mono(&bytes, target_rate),
         );
@@ -250,14 +224,14 @@ impl AudioCapabilityState {
     pub fn on_sfz_loaded(
         &mut self,
         ctx: &mut NativeCtx<'_, Manual>,
-        pending: &PendingInstrument,
+        source: Source,
         namespace: String,
         path: String,
         bytes: &[u8],
     ) {
         let Ok(text) = from_utf8(bytes) else {
             ctx.reply_to(
-                pending.source,
+                source,
                 &LoadInstrumentResult::Err {
                     namespace,
                     path,
@@ -270,7 +244,7 @@ impl AudioCapabilityState {
             Ok(spec) => spec,
             Err(e) => {
                 ctx.reply_to(
-                    pending.source,
+                    source,
                     &LoadInstrumentResult::Err {
                         namespace,
                         path,
@@ -298,11 +272,20 @@ impl AudioCapabilityState {
         let assembly_id = self.next_assembly_id;
         self.next_assembly_id += 1;
 
-        let fs_paths: Vec<String> = samples.iter().map(|s| s.fs_path.clone()).collect();
+        let fs_paths: Vec<(u64, String)> = samples
+            .iter()
+            .enumerate()
+            .map(|(slot, sample)| {
+                (
+                    u64::try_from(slot).expect("sample slot index fits in u64"),
+                    sample.fs_path.clone(),
+                )
+            })
+            .collect();
         self.assemblies.insert(
             assembly_id,
             BankAssembly {
-                source: pending.source,
+                source,
                 namespace: namespace.clone(),
                 sfz_path: path,
                 name,
@@ -316,16 +299,13 @@ impl AudioCapabilityState {
         // (ADR-0099); `send` propagates this handler's chain by default
         // so each `ReadResult` settles back into it.
         let fs = ctx.actor::<FsCapability>();
-        for fs_path in fs_paths {
-            self.pending_samples
-                .entry((namespace.clone(), fs_path.clone()))
-                .or_default()
-                .push_back(assembly_id);
+        for (slot, fs_path) in fs_paths {
             let read = Read {
                 namespace: namespace.clone(),
                 path: fs_path,
             };
-            fs.send(&read);
+            let context = AudioLoadContext::Sample { assembly_id, slot };
+            let _ = fs.send_with_context(&read, &context);
         }
     }
 
@@ -337,21 +317,24 @@ impl AudioCapabilityState {
         &mut self,
         ctx: &mut NativeCtx<'_, Manual>,
         assembly_id: u64,
-        fs_path: &str,
+        slot: u64,
         bytes: Vec<u8>,
     ) {
+        let Ok(slot) = usize::try_from(slot) else {
+            return;
+        };
         let ready = {
             let Some(assembly) = self.assemblies.get_mut(&assembly_id) else {
                 return;
             };
-            if let Some(slot) = assembly
-                .samples
-                .iter_mut()
-                .find(|s| s.fs_path == fs_path && s.bytes.is_none())
-            {
-                slot.bytes = Some(bytes);
-                assembly.remaining = assembly.remaining.saturating_sub(1);
+            let Some(slot) = assembly.samples.get_mut(slot) else {
+                return;
+            };
+            if slot.bytes.is_some() {
+                return;
             }
+            slot.bytes = Some(bytes);
+            assembly.remaining = assembly.remaining.saturating_sub(1);
             assembly.remaining == 0
         };
         if !ready {
@@ -404,8 +387,8 @@ impl AudioCapabilityState {
 
     /// Abandon a bank load whose sample read failed: reply `Err` to the
     /// original requester and discard the partial assembly (ADR-0103
-    /// §2). Sibling sample reads still in flight prune from the pending
-    /// table; their replies will find no assembly and drop.
+    /// §2). Sibling sample reads still in flight will find no assembly
+    /// when their context arrives and drop.
     pub fn fail_assembly(
         &mut self,
         ctx: &mut NativeCtx<'_, Manual>,
@@ -423,10 +406,6 @@ impl AudioCapabilityState {
                 error,
             },
         );
-        for queue in self.pending_samples.values_mut() {
-            queue.retain(|id| *id != assembly_id);
-        }
-        self.pending_samples.retain(|_, queue| !queue.is_empty());
     }
 }
 
@@ -527,10 +506,7 @@ impl NativeActor for AudioCapability {
                 // exact in f32, matching the synth's own conversion.
                 #[allow(clippy::cast_precision_loss)]
                 sample_rate: Some(sample_rate as f32),
-                pending_tracks: HashMap::new(),
-                pending_instruments: HashMap::new(),
                 assemblies: HashMap::new(),
-                pending_samples: HashMap::new(),
                 next_assembly_id: 0,
                 next_instrument_id: builtin_id_ceiling(),
                 thread: Some(thread),
@@ -776,84 +752,84 @@ impl NativeActor for AudioCapability {
 
         let source = ctx.reply_target();
         let sender_mailbox = sender_mailbox_id(source);
-        let key = (mail.namespace.clone(), mail.path.clone());
-        state
-            .pending_tracks
-            .entry(key)
-            .or_default()
-            .push_back(PendingTrack {
-                source,
-                sender_mailbox,
-                lane: mail.lane,
-                gain: mail.gain,
-                looping: mail.looping,
-            });
+        let context = AudioLoadContext::Track {
+            source,
+            sender_mailbox,
+            lane: mail.lane,
+            gain: mail.gain,
+            looping: mail.looping,
+        };
 
         // Forward the read to the single fs resolver (ADR-0041) — the
         // reply (`ReadResult`) routes back to this cap's own mailbox,
-        // where `on_read_result` correlates it. Keeping the read on the
-        // fs cap means the audio cap never grows a second namespace
-        // registry (ADR-0103 §2).
+        // where `on_read_result` recovers this request context. Keeping
+        // the read on the fs cap means the audio cap never grows a second
+        // namespace registry (ADR-0103 §2).
         let read = Read {
             namespace: mail.namespace,
             path: mail.path,
         };
-        ctx.actor::<FsCapability>().send(&read);
+        let _ = ctx
+            .actor::<FsCapability>()
+            .send_with_context(&read, &context);
     }
 
     /// Correlate a forwarded `aether.fs.read` reply (ADR-0103 §2).
     ///
-    /// One handler serves three fetch paths keyed by which pending
-    /// table the echoed `(namespace, path)` matches: a `play_track`
-    /// track, a `load_instrument` `.sfz`, or one of a bank's sample
-    /// WAVs. `Ok` routes the bytes onward (decode dispatch / parse /
-    /// accumulate); `Err` relays the fs error to whichever original
-    /// requester is waiting. The deferred reply lands on that caller —
-    /// not the fs mailbox the read reply came from.
+    /// One handler serves three fetch paths keyed by the stored request
+    /// context: a `play_track` track, a `load_instrument` `.sfz`, or one
+    /// of a bank's sample WAVs. `Ok` routes the bytes onward (decode
+    /// dispatch / parse / accumulate); `Err` relays the fs error to
+    /// whichever original requester is waiting. The deferred reply lands
+    /// on that caller — not the fs mailbox the read reply came from.
     #[handler::manual]
     fn on_read_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: ReadResult) {
+        let Some(context) = ctx.take_context::<AudioLoadContext>() else {
+            return;
+        };
         match mail {
             ReadResult::Ok {
                 namespace,
                 path,
                 bytes,
-            } => {
-                if let Some(pending) = state.take_pending_track(&namespace, &path) {
-                    state.start_track_decode(ctx, &pending, namespace, path, bytes);
-                } else if let Some(pending) = state.take_pending_instrument(&namespace, &path) {
-                    state.on_sfz_loaded(ctx, &pending, namespace, path, &bytes);
-                } else if let Some(assembly_id) = state.take_pending_sample(&namespace, &path) {
-                    state.on_sample_loaded(ctx, assembly_id, &path, bytes);
+            } => match context {
+                track @ AudioLoadContext::Track { .. } => {
+                    state.start_track_decode(ctx, track, namespace, path, bytes);
                 }
-                // else: a stray / late reply with no parked request.
-            }
+                AudioLoadContext::Instrument { source } => {
+                    state.on_sfz_loaded(ctx, source, namespace, path, &bytes);
+                }
+                AudioLoadContext::Sample { assembly_id, slot } => {
+                    state.on_sample_loaded(ctx, assembly_id, slot, bytes);
+                }
+            },
             ReadResult::Err {
                 namespace,
                 path,
                 error,
             } => {
                 let reason = format!("file read failed: {error:?}");
-                if let Some(pending) = state.take_pending_track(&namespace, &path) {
-                    ctx.reply_to(
-                        pending.source,
+                match context {
+                    AudioLoadContext::Track { source, lane, .. } => ctx.reply_to(
+                        source,
                         &PlayTrackResult::Err {
                             namespace,
                             path,
-                            lane: pending.lane,
+                            lane,
                             error: reason,
                         },
-                    );
-                } else if let Some(pending) = state.take_pending_instrument(&namespace, &path) {
-                    ctx.reply_to(
-                        pending.source,
+                    ),
+                    AudioLoadContext::Instrument { source } => ctx.reply_to(
+                        source,
                         &LoadInstrumentResult::Err {
                             namespace,
                             path,
                             error: reason,
                         },
-                    );
-                } else if let Some(assembly_id) = state.take_pending_sample(&namespace, &path) {
-                    state.fail_assembly(ctx, assembly_id, reason);
+                    ),
+                    AudioLoadContext::Sample { assembly_id, .. } => {
+                        state.fail_assembly(ctx, assembly_id, reason);
+                    }
                 }
             }
         }
@@ -966,12 +942,7 @@ impl NativeActor for AudioCapability {
         }
 
         let source = ctx.reply_target();
-        let key = (mail.namespace.clone(), mail.path.clone());
-        state
-            .pending_instruments
-            .entry(key)
-            .or_default()
-            .push_back(PendingInstrument { source });
+        let context = AudioLoadContext::Instrument { source };
 
         // Forward the `.sfz` read to the single fs resolver (ADR-0041);
         // the `ReadResult` routes back to `on_read_result`, which parses
@@ -980,7 +951,9 @@ impl NativeActor for AudioCapability {
             namespace: mail.namespace,
             path: mail.path,
         };
-        ctx.actor::<FsCapability>().send(&read);
+        let _ = ctx
+            .actor::<FsCapability>()
+            .send_with_context(&read, &context);
     }
 
     /// Bank-assembly completion (ADR-0093 §3 / ADR-0103 §4). On success
@@ -1075,7 +1048,7 @@ mod tests {
     };
     use super::*;
     use crate::fs::FsError;
-    use aether_data::{MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
+    use aether_data::{Kind, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::testing::{
         decode_session_reply, drive_task_completion, test_mailer_and_rx,
@@ -2250,7 +2223,72 @@ mod tests {
     }
 
     fn session_sender() -> Source {
-        Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))
+        session_sender_with(0)
+    }
+
+    fn session_sender_with(id: u128) -> Source {
+        Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(id))))
+    }
+
+    fn decode_session_reply_with_session<K>(rx: &mpsc::Receiver<EgressEvent>) -> (SessionToken, K)
+    where
+        K: Kind,
+    {
+        loop {
+            let event = rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("test: egress event arrives within deadline");
+            if let EgressEvent::ToSession {
+                session,
+                kind_name,
+                payload,
+                ..
+            } = event
+                && kind_name == K::NAME
+            {
+                return (
+                    session,
+                    K::decode_from_bytes(&payload).expect("test: reply payload decodes"),
+                );
+            }
+        }
+    }
+
+    fn fs_reply_source(correlation_id: u64) -> Source {
+        Source::with_correlation(SourceAddr::None, correlation_id)
+    }
+
+    fn assert_next_send_kind<K: Kind>(
+        binding: &NativeBinding,
+        rx: &mpsc::Receiver<EgressEvent>,
+    ) -> u64 {
+        binding.flush_outbound();
+        loop {
+            let event = rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("test: egress event arrives within deadline");
+            if let EgressEvent::UnresolvedMail {
+                kind_id,
+                correlation_id,
+                ..
+            } = event
+            {
+                assert_eq!(kind_id, K::ID, "unexpected bubbled kind");
+                return correlation_id;
+            }
+        }
+    }
+
+    fn read_result_ctx(
+        transport: &Arc<NativeBinding>,
+        correlation_id: u64,
+    ) -> NativeCtx<'_, Manual> {
+        NativeCtx::new_dispatching(
+            transport,
+            fs_reply_source(correlation_id),
+            MailId::NONE,
+            MailId::NONE,
+        )
     }
 
     /// Build a cap with a live event queue but no cpal worker — the
@@ -2261,10 +2299,7 @@ mod tests {
         let cap = AudioCapabilityState {
             sender: Some(event_sender),
             sample_rate: Some(TEST_RATE),
-            pending_tracks: HashMap::new(),
-            pending_instruments: HashMap::new(),
             assemblies: HashMap::new(),
-            pending_samples: HashMap::new(),
             next_assembly_id: 0,
             next_instrument_id: builtin_id_ceiling(),
             thread: None,
@@ -2324,13 +2359,14 @@ mod tests {
                 lane: None,
             },
         );
-        // The cap forwarded an fs.read and parked the request.
-        assert_eq!(cap.pending_tracks.len(), 1, "request not parked");
+        // The cap forwarded an fs.read with a request context.
+        let track_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
         // Synthesize the fs reply with a real WAV asset (at half the
         // device rate, so decode also resamples).
         let wav = decode::wav_int16_mono(&ramp(512), 24_000);
-        let mut read_ctx = NativeCtx::new_dispatching(&transport, session_sender(), root, root);
+        let mut read_ctx =
+            NativeCtx::new_dispatching(&transport, fs_reply_source(track_correlation), root, root);
         AudioCapability::on_read_result(
             &mut cap,
             &mut read_ctx,
@@ -2356,7 +2392,6 @@ mod tests {
             }
             PlayTrackResult::Err { error, .. } => panic!("expected Ok, got Err({error})"),
         }
-        assert!(cap.pending_tracks.is_empty(), "pending entry never cleared");
         // The decoded track reached the synth queue as a TrackStart.
         let event = queue.pop().expect("a track-start event was queued");
         assert!(
@@ -2387,9 +2422,9 @@ mod tests {
                 lane: Some("bgm".to_owned()),
             },
         );
+        let track_correlation = assert_next_send_kind::<Read>(&transport, &rx);
         let wav = decode::wav_int16_mono(&ramp(512), 24_000);
-        let mut read_ctx =
-            NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
+        let mut read_ctx = read_result_ctx(&transport, track_correlation);
         AudioCapability::on_read_result(
             &mut cap,
             &mut read_ctx,
@@ -2436,9 +2471,11 @@ mod tests {
                 lane: None,
             },
         );
+        let track_correlation = assert_next_send_kind::<Read>(&transport, &rx);
+        let mut read_ctx = read_result_ctx(&transport, track_correlation);
         AudioCapability::on_read_result(
             &mut cap,
-            &mut ctx,
+            &mut read_ctx,
             ReadResult::Err {
                 namespace: "assets".to_owned(),
                 path: "missing.wav".to_owned(),
@@ -2453,7 +2490,6 @@ mod tests {
             }
             PlayTrackResult::Ok { .. } => panic!("expected Err for a missing file"),
         }
-        assert!(cap.pending_tracks.is_empty(), "pending entry never cleared");
         assert!(
             queue.pop().is_none(),
             "a failed read must not start a track"
@@ -2486,8 +2522,8 @@ mod tests {
             PlayTrackResult::Ok { .. } => panic!("nop chassis must reply Err"),
         }
         assert!(
-            cap.pending_tracks.is_empty(),
-            "nop chassis must not park a read"
+            rx.try_recv().is_err(),
+            "nop chassis must not forward a read"
         );
         // stop_track on a nop chassis is a silent no-op (no panic).
         AudioCapability::on_stop_track(
@@ -3201,7 +3237,7 @@ mod tests {
                 path: "piano/bank.sfz".to_owned(),
             },
         );
-        assert_eq!(cap.pending_instruments.len(), 1, "sfz read not parked");
+        let sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
         // The .sfz parses into two regions referencing two samples.
         let sfz = "\
@@ -3210,7 +3246,7 @@ sample=c4.wav lokey=60 hikey=71 pitch_keycenter=60
 <region>
 sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
 ";
-        let mut read_ctx = manual_ctx(&transport);
+        let mut read_ctx = read_result_ctx(&transport, sfz_correlation);
         AudioCapability::on_read_result(
             &mut cap,
             &mut read_ctx,
@@ -3221,17 +3257,15 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
             },
         );
         assert_eq!(cap.assemblies.len(), 1, "assembly not parked");
-        assert_eq!(
-            cap.pending_samples.len(),
-            2,
-            "both sample reads not fanned out"
-        );
+        let c4_correlation = assert_next_send_kind::<Read>(&transport, &rx);
+        let c5_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
         // Half the device rate, so decode also resamples each sample.
         let wav = decode::wav_int16_mono(&ramp(256), 24_000);
+        let mut c4_ctx = read_result_ctx(&transport, c4_correlation);
         AudioCapability::on_read_result(
             &mut cap,
-            &mut read_ctx,
+            &mut c4_ctx,
             ReadResult::Ok {
                 namespace: "assets".to_owned(),
                 path: "piano/c4.wav".to_owned(),
@@ -3240,9 +3274,10 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
         );
         // One sample still missing — no dispatch yet.
         assert_eq!(cap.assemblies.len(), 1, "assembly dispatched too early");
+        let mut c5_ctx = read_result_ctx(&transport, c5_correlation);
         AudioCapability::on_read_result(
             &mut cap,
-            &mut read_ctx,
+            &mut c5_ctx,
             ReadResult::Ok {
                 namespace: "assets".to_owned(),
                 path: "piano/c5.wav".to_owned(),
@@ -3265,14 +3300,221 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
             LoadInstrumentResult::Err { error, .. } => panic!("expected Ok, got Err({error})"),
         }
         assert!(cap.assemblies.is_empty(), "assembly never cleared");
-        assert!(
-            cap.pending_samples.is_empty(),
-            "sample pending never cleared"
-        );
         let event = queue.pop().expect("a register-instrument event was queued");
         assert!(
             matches!(event, AudioEvent::RegisterInstrument { id, .. } if id == builtin_id_ceiling()),
             "expected RegisterInstrument, got {event:?}",
+        );
+    }
+
+    #[test]
+    fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
+        let (mut cap, _queue) = live_cap();
+        let (mailer, rx) = test_mailer_and_rx();
+        let transport = Arc::new(NativeBinding::new_for_test(
+            Arc::clone(&mailer),
+            MailboxId(0),
+        ));
+        let first_session = SessionToken(Uuid::from_u128(1));
+        let second_session = SessionToken(Uuid::from_u128(2));
+
+        let mut first_ctx = NativeCtx::new_dispatching(
+            &transport,
+            Source::to(SourceAddr::Session(first_session)),
+            MailId::NONE,
+            MailId::NONE,
+        );
+        AudioCapability::on_load_instrument(
+            &mut cap,
+            &mut first_ctx,
+            LoadInstrument {
+                namespace: "assets".to_owned(),
+                path: "piano/bank_a.sfz".to_owned(),
+            },
+        );
+        let first_sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
+
+        let mut second_ctx = NativeCtx::new_dispatching(
+            &transport,
+            Source::to(SourceAddr::Session(second_session)),
+            MailId::NONE,
+            MailId::NONE,
+        );
+        AudioCapability::on_load_instrument(
+            &mut cap,
+            &mut second_ctx,
+            LoadInstrument {
+                namespace: "assets".to_owned(),
+                path: "piano/bank_b.sfz".to_owned(),
+            },
+        );
+        let second_sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
+
+        let sfz = b"<region>\nsample=shared.wav pitch_keycenter=60\n";
+        let mut first_sfz_ctx = read_result_ctx(&transport, first_sfz_correlation);
+        AudioCapability::on_read_result(
+            &mut cap,
+            &mut first_sfz_ctx,
+            ReadResult::Ok {
+                namespace: "assets".to_owned(),
+                path: "piano/bank_a.sfz".to_owned(),
+                bytes: sfz.to_vec(),
+            },
+        );
+        let first_sample_correlation = assert_next_send_kind::<Read>(&transport, &rx);
+
+        let mut second_sfz_ctx = read_result_ctx(&transport, second_sfz_correlation);
+        AudioCapability::on_read_result(
+            &mut cap,
+            &mut second_sfz_ctx,
+            ReadResult::Ok {
+                namespace: "assets".to_owned(),
+                path: "piano/bank_b.sfz".to_owned(),
+                bytes: sfz.to_vec(),
+            },
+        );
+        let second_sample_correlation = assert_next_send_kind::<Read>(&transport, &rx);
+
+        let wav = decode::wav_int16_mono(&ramp(256), 24_000);
+        let mut second_sample_ctx = read_result_ctx(&transport, second_sample_correlation);
+        AudioCapability::on_read_result(
+            &mut cap,
+            &mut second_sample_ctx,
+            ReadResult::Ok {
+                namespace: "assets".to_owned(),
+                path: "piano/shared.wav".to_owned(),
+                bytes: wav.clone(),
+            },
+        );
+        drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
+        let (session, reply) = decode_session_reply_with_session::<LoadInstrumentResult>(&rx);
+        assert_eq!(session, second_session);
+        match reply {
+            LoadInstrumentResult::Ok { name, .. } => assert_eq!(name, "bank_b"),
+            LoadInstrumentResult::Err { error, .. } => panic!("expected Ok: {error}"),
+        }
+
+        let mut first_sample_ctx = read_result_ctx(&transport, first_sample_correlation);
+        AudioCapability::on_read_result(
+            &mut cap,
+            &mut first_sample_ctx,
+            ReadResult::Ok {
+                namespace: "assets".to_owned(),
+                path: "piano/shared.wav".to_owned(),
+                bytes: wav,
+            },
+        );
+        drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
+        let (session, reply) = decode_session_reply_with_session::<LoadInstrumentResult>(&rx);
+        assert_eq!(session, first_session);
+        match reply {
+            LoadInstrumentResult::Ok { name, .. } => assert_eq!(name, "bank_a"),
+            LoadInstrumentResult::Err { error, .. } => panic!("expected Ok: {error}"),
+        }
+    }
+
+    #[test]
+    fn interleaved_track_and_instrument_reads_demux_by_request_context() {
+        let (mut cap, queue) = live_cap();
+        let (mailer, rx) = test_mailer_and_rx();
+        let transport = Arc::new(NativeBinding::new_for_test(
+            Arc::clone(&mailer),
+            MailboxId(0),
+        ));
+        let track_session = SessionToken(Uuid::from_u128(3));
+        let instrument_session = SessionToken(Uuid::from_u128(4));
+
+        let mut track_ctx = NativeCtx::new_dispatching(
+            &transport,
+            Source::to(SourceAddr::Session(track_session)),
+            MailId::NONE,
+            MailId::NONE,
+        );
+        AudioCapability::on_play_track(
+            &mut cap,
+            &mut track_ctx,
+            PlayTrack {
+                namespace: "assets".to_owned(),
+                path: "piano/shared.wav".to_owned(),
+                gain: 1.0,
+                looping: false,
+                lane: Some("intro".to_owned()),
+            },
+        );
+        let track_correlation = assert_next_send_kind::<Read>(&transport, &rx);
+
+        let mut instrument_ctx = NativeCtx::new_dispatching(
+            &transport,
+            Source::to(SourceAddr::Session(instrument_session)),
+            MailId::NONE,
+            MailId::NONE,
+        );
+        AudioCapability::on_load_instrument(
+            &mut cap,
+            &mut instrument_ctx,
+            LoadInstrument {
+                namespace: "assets".to_owned(),
+                path: "piano/bank.sfz".to_owned(),
+            },
+        );
+        let sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
+
+        let mut sfz_ctx = read_result_ctx(&transport, sfz_correlation);
+        AudioCapability::on_read_result(
+            &mut cap,
+            &mut sfz_ctx,
+            ReadResult::Ok {
+                namespace: "assets".to_owned(),
+                path: "piano/bank.sfz".to_owned(),
+                bytes: b"<region>\nsample=shared.wav pitch_keycenter=60\n".to_vec(),
+            },
+        );
+        let sample_correlation = assert_next_send_kind::<Read>(&transport, &rx);
+
+        let wav = decode::wav_int16_mono(&ramp(256), 24_000);
+        let mut sample_ctx = read_result_ctx(&transport, sample_correlation);
+        AudioCapability::on_read_result(
+            &mut cap,
+            &mut sample_ctx,
+            ReadResult::Ok {
+                namespace: "assets".to_owned(),
+                path: "piano/shared.wav".to_owned(),
+                bytes: wav.clone(),
+            },
+        );
+        drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
+        let (session, reply) = decode_session_reply_with_session::<LoadInstrumentResult>(&rx);
+        assert_eq!(session, instrument_session);
+        assert!(
+            matches!(reply, LoadInstrumentResult::Ok { .. }),
+            "sample reply should complete the instrument load"
+        );
+
+        let mut track_read_ctx = read_result_ctx(&transport, track_correlation);
+        AudioCapability::on_read_result(
+            &mut cap,
+            &mut track_read_ctx,
+            ReadResult::Ok {
+                namespace: "assets".to_owned(),
+                path: "piano/shared.wav".to_owned(),
+                bytes: wav,
+            },
+        );
+        drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
+        let (session, reply) = decode_session_reply_with_session::<PlayTrackResult>(&rx);
+        assert_eq!(session, track_session);
+        match reply {
+            PlayTrackResult::Ok { lane, .. } => assert_eq!(lane.as_deref(), Some("intro")),
+            PlayTrackResult::Err { error, .. } => panic!("expected Ok: {error}"),
+        }
+
+        assert!(
+            matches!(queue.pop(), Some(AudioEvent::RegisterInstrument { .. })),
+            "instrument load should register a bank"
+        );
+        assert!(
+            matches!(queue.pop(), Some(AudioEvent::TrackStart { .. })),
+            "track load should start a track"
         );
     }
 
@@ -3293,19 +3535,23 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
                 path: "bank.sfz".to_owned(),
             },
         );
+        let sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
+        let mut sfz_ctx = read_result_ctx(&transport, sfz_correlation);
         AudioCapability::on_read_result(
             &mut cap,
-            &mut ctx,
+            &mut sfz_ctx,
             ReadResult::Ok {
                 namespace: "assets".to_owned(),
                 path: "bank.sfz".to_owned(),
                 bytes: b"<region>\nsample=c4.wav\n".to_vec(),
             },
         );
+        let sample_correlation = assert_next_send_kind::<Read>(&transport, &rx);
         // The bank's only sample fails to read — the whole load fails.
+        let mut sample_ctx = read_result_ctx(&transport, sample_correlation);
         AudioCapability::on_read_result(
             &mut cap,
-            &mut ctx,
+            &mut sample_ctx,
             ReadResult::Err {
                 namespace: "assets".to_owned(),
                 path: "c4.wav".to_owned(),
@@ -3319,10 +3565,6 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
             LoadInstrumentResult::Ok { .. } => panic!("expected Err for a missing sample"),
         }
         assert!(cap.assemblies.is_empty(), "assembly never discarded");
-        assert!(
-            cap.pending_samples.is_empty(),
-            "sample pending never cleared"
-        );
         assert!(queue.pop().is_none(), "a failed bank must not register");
     }
 
@@ -3343,10 +3585,12 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
                 path: "bank.sfz".to_owned(),
             },
         );
+        let sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
+        let mut sfz_ctx = read_result_ctx(&transport, sfz_correlation);
         // A control block with no regions: the parser rejects it.
         AudioCapability::on_read_result(
             &mut cap,
-            &mut ctx,
+            &mut sfz_ctx,
             ReadResult::Ok {
                 namespace: "assets".to_owned(),
                 path: "bank.sfz".to_owned(),
@@ -3385,8 +3629,8 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
             LoadInstrumentResult::Ok { .. } => panic!("nop chassis must reply Err"),
         }
         assert!(
-            cap.pending_instruments.is_empty(),
-            "nop chassis must not park a read",
+            rx.try_recv().is_err(),
+            "nop chassis must not forward a read"
         );
     }
 
@@ -3425,9 +3669,15 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
             );
         }
 
+        let track_correlation = assert_next_send_kind::<Read>(&transport, &rx);
         let wav = decode::wav_int16_mono(&ramp(512), 24_000);
         {
-            let mut read_ctx = NativeCtx::new_dispatching(&transport, caller_source, root, root);
+            let mut read_ctx = NativeCtx::new_dispatching(
+                &transport,
+                fs_reply_source(track_correlation),
+                root,
+                root,
+            );
             AudioCapability::on_read_result(
                 &mut cap,
                 &mut read_ctx,
@@ -3490,15 +3740,21 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
             );
         }
 
+        let sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
         let sfz = "\
 <region>
 sample=c4.wav lokey=60 hikey=71 pitch_keycenter=60
 <region>
 sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
-";
+        ";
         let wav = decode::wav_int16_mono(&ramp(256), 24_000);
         {
-            let mut read_ctx = NativeCtx::new_dispatching(&transport, caller_source, root, root);
+            let mut read_ctx = NativeCtx::new_dispatching(
+                &transport,
+                fs_reply_source(sfz_correlation),
+                root,
+                root,
+            );
             AudioCapability::on_read_result(
                 &mut cap,
                 &mut read_ctx,
@@ -3508,6 +3764,12 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
                     bytes: sfz.as_bytes().to_vec(),
                 },
             );
+        }
+        let c4_correlation = assert_next_send_kind::<Read>(&transport, &rx);
+        let c5_correlation = assert_next_send_kind::<Read>(&transport, &rx);
+        {
+            let mut read_ctx =
+                NativeCtx::new_dispatching(&transport, fs_reply_source(c4_correlation), root, root);
             AudioCapability::on_read_result(
                 &mut cap,
                 &mut read_ctx,
@@ -3517,7 +3779,11 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
                     bytes: wav.clone(),
                 },
             );
+        }
+        {
             // Last sample — triggers assembly dispatch and hold acquisition.
+            let mut read_ctx =
+                NativeCtx::new_dispatching(&transport, fs_reply_source(c5_correlation), root, root);
             AudioCapability::on_read_result(
                 &mut cap,
                 &mut read_ctx,
