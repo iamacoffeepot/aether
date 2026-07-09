@@ -119,10 +119,13 @@ field consumes that directly on three streams:
   how a component caches `WindowSize`; a late subscriber holds the all-false
   default until the first change arrives.
 
-Editing commands — backspace, arrows, enter, home, end — compose from the
-`aether.key` scancodes paired with the cached modifiers; there's no separate kind
-for them. These three streams come from the desktop chassis only; the headless and
-hub chassis have no window and publish none of them, the same as `Key`.
+Editing commands compose from the `aether.key` scancodes paired with the cached
+modifiers; there's no separate kind for them. The stable
+`aether_kinds::keycode` constants a text-editing field matches on are
+`KEY_BACKSPACE`, `KEY_DELETE`, `KEY_LEFT` / `KEY_RIGHT` / `KEY_UP` / `KEY_DOWN`,
+`KEY_HOME`, `KEY_END`, `KEY_PAGE_UP`, `KEY_PAGE_DOWN`, and `KEY_ENTER`. These
+three streams come from the desktop chassis only; the headless and hub chassis
+have no window and publish none of them, the same as `Key`.
 
 ## How to use it
 
