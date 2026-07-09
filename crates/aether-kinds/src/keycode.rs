@@ -57,6 +57,9 @@ pub const KEY_7: u32 = b'7' as u32;
 pub const KEY_8: u32 = b'8' as u32;
 pub const KEY_9: u32 = b'9' as u32;
 
+/// Printable punctuation — ASCII codepoint.
+pub const KEY_BACKQUOTE: u32 = b'`' as u32;
+
 /// Control keys — above the ASCII range so printable codepoints stay
 /// free. Values are arbitrary-but-stable; additions go at the end.
 pub const KEY_SPACE: u32 = 0x0100;

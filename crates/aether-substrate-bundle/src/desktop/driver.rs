@@ -278,6 +278,7 @@ fn map_winit_keycode(k: KeyCode) -> Option<u32> {
         KeyCode::Digit7 => keycode::KEY_7,
         KeyCode::Digit8 => keycode::KEY_8,
         KeyCode::Digit9 => keycode::KEY_9,
+        KeyCode::Backquote => keycode::KEY_BACKQUOTE,
         KeyCode::Space => keycode::KEY_SPACE,
         KeyCode::Escape => keycode::KEY_ESCAPE,
         KeyCode::Enter => keycode::KEY_ENTER,
@@ -1941,6 +1942,14 @@ mod tests {
     #[test]
     fn map_mouse_button_other_produces_no_mail() {
         assert_eq!(map_mouse_button(WinitMouseButton::Other(9)), None);
+    }
+
+    #[test]
+    fn map_winit_keycode_covers_backquote() {
+        assert_eq!(
+            map_winit_keycode(KeyCode::Backquote),
+            Some(keycode::KEY_BACKQUOTE)
+        );
     }
 
     #[test]
