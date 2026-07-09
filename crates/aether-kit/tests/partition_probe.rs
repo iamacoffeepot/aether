@@ -11,7 +11,7 @@
 
 use aether_capabilities::render::DrawTriangle;
 use aether_kit::{
-    CELLS_PER_CHUNK_AREA, Chunk, ChunkPos, Material, Region, ViewMode, WaterPlane, World,
+    CELLS_PER_CHUNK_AREA, Chunk, ChunkPos, Material, Region, WaterPlane, World,
     world::{
         SUBCELLS_PER_CELL,
         mesher::{mesh_chunk, style::StyleTable},
@@ -74,14 +74,7 @@ fn demo_world_ground_has_no_holes() {
     let world = lake_world();
     let styles = StyleTable::default();
     let meshes: Vec<_> = (0..4)
-        .map(|k| {
-            mesh_chunk(
-                &world,
-                ChunkPos { x: k % 2, z: k / 2 },
-                ViewMode::Painted,
-                &styles,
-            )
-        })
+        .map(|k| mesh_chunk(&world, ChunkPos { x: k % 2, z: k / 2 }, &styles))
         .collect();
     let covers = |t: &DrawTriangle, px: f32, pz: f32| {
         let sign =
@@ -125,15 +118,7 @@ fn demo_world_fits_the_frame_vertex_budget() {
     let world = lake_world();
     let styles = StyleTable::default();
     let total: usize = (0..4)
-        .map(|k| {
-            mesh_chunk(
-                &world,
-                ChunkPos { x: k % 2, z: k / 2 },
-                ViewMode::Painted,
-                &styles,
-            )
-            .len()
-        })
+        .map(|k| mesh_chunk(&world, ChunkPos { x: k % 2, z: k / 2 }, &styles).len())
         .sum();
     let budget = CELLS_PER_CHUNK_AREA * SUBCELLS_PER_CELL * 2;
     assert!(
