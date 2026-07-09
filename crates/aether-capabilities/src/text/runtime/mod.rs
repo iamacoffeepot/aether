@@ -8,7 +8,6 @@
 //! the parent reads this module off disk to lift the always-on identity.
 
 use std::collections::HashMap;
-use std::collections::VecDeque;
 
 pub use std::sync::Arc;
 
@@ -38,11 +37,11 @@ mod layout;
 // layout symbols straight from `self::atlas` / `self::layout`.
 use self::atlas::{ATLAS_SIZE, Atlas, AtlasEntry, GlyphKey, GlyphSlot};
 
-/// Which reply shape a parked font request is owed once its font is
+/// Which reply shape a font request is owed once its font is
 /// resident. `load_font` and the `font_metrics` grab share the
 /// `aether.fs` fetch + parse path; this rides along so the completion
 /// arm replies in the caller's shape.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize, aether_data::Schema)]
 pub enum PendingReply {
     /// Reply `LoadFontResult` — the original `load_font` caller.
     LoadFont,
@@ -51,17 +50,20 @@ pub enum PendingReply {
     FontMetrics,
 }
 
-/// A font request parked while its `aether.fs.read` is in flight,
-/// keyed in [`TextCapabilityState::pending_fonts`] by the echoed
-/// `(namespace, path)`. Carries the original requester so the deferred
+/// Context stored under the `aether.fs.read` request correlation while a
+/// font load is in flight. Carries the original requester so the deferred
 /// reply lands on the caller, plus the shape that reply takes.
-pub struct PendingFont {
+#[derive(
+    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Clone, Copy,
+)]
+#[kind(name = "aether.text.font_load_context")]
+pub struct FontLoadContext {
     pub source: Source,
     pub reply: PendingReply,
 }
 
 /// Context carried through the font-parse task so the completion arm
-/// can shape the reply the parked request is owed.
+/// can shape the reply the original request is owed.
 pub struct FontParseContext {
     pub namespace: String,
     pub path: String,
@@ -81,8 +83,8 @@ pub struct ParsedFont {
 pub type FontParseOutput = Result<ParsedFont, String>;
 
 /// `aether.text` runtime state (ADR-0105). CPU-only — no GPU handles,
-/// just the font registry, the glyph atlas, and the parked `load_font`
-/// requests. The dispatcher holds this as the cap's state and routes
+/// just the font registry and the glyph atlas. The dispatcher holds this
+/// as the cap's state and routes
 /// envelopes through the macro-emitted `Dispatch` impl; the addressing
 /// identity is the distinct ZST [`super::TextCapability`]. Living in this
 /// private module keeps it `pub`-enough to satisfy the
@@ -98,10 +100,6 @@ pub struct TextCapabilityState {
     pub font_ids: HashMap<(String, String), u32>,
     /// Next `font_id` to assign — monotonic, session-scoped.
     pub next_font_id: u32,
-    /// `load_font` requests awaiting their `aether.fs.read` reply,
-    /// keyed by the echoed `(namespace, path)`. A `VecDeque` so
-    /// concurrent loads of the same path correlate FIFO.
-    pub pending_fonts: HashMap<(String, String), VecDeque<PendingFont>>,
     /// The shelf-packed glyph atlas (CPU-side source of truth).
     pub atlas: Atlas,
     /// The render-cap `texture_id` backing [`Self::atlas`], once
@@ -118,22 +116,10 @@ impl TextCapabilityState {
             fonts: HashMap::new(),
             font_ids: HashMap::new(),
             next_font_id: 0,
-            pending_fonts: HashMap::new(),
             atlas: Atlas::new(),
             atlas_texture_id: None,
             atlas_create_inflight: false,
         }
-    }
-
-    /// Pop the oldest `load_font` parked under `(namespace, path)`.
-    pub fn take_pending(&mut self, namespace: &str, path: &str) -> Option<PendingFont> {
-        let key = (namespace.to_owned(), path.to_owned());
-        let queue = self.pending_fonts.get_mut(&key)?;
-        let pending = queue.pop_front();
-        if queue.is_empty() {
-            self.pending_fonts.remove(&key);
-        }
-        pending
     }
 
     /// Register a parsed font under a session-scoped `font_id`,
@@ -153,28 +139,26 @@ impl TextCapabilityState {
         font_id
     }
 
-    /// Park a font request keyed `(namespace, path)` and forward its
-    /// `aether.fs.read`. The `ReadResult` routes back to
-    /// `on_read_result`, which parses the bytes and replies in the
-    /// shape `reply` selects.
+    /// Forward an `aether.fs.read`, carrying the original requester as a
+    /// request context. The `ReadResult` routes back to `on_read_result`,
+    /// which recovers the context, parses the bytes, and replies in the shape
+    /// `reply` selects.
     pub fn forward_font_read(
-        &mut self,
         ctx: &mut NativeCtx<'_, Manual>,
         namespace: String,
         path: String,
         reply: PendingReply,
     ) {
         let source = ctx.reply_target();
-        self.pending_fonts
-            .entry((namespace.clone(), path.clone()))
-            .or_default()
-            .push_back(PendingFont { source, reply });
+        let context = FontLoadContext { source, reply };
 
         // Forward the read to the single fs resolver (ADR-0041); the
         // `ReadResult` routes back to `on_read_result`, which parses
         // it.
         let read = Read { namespace, path };
-        ctx.actor::<FsCapability>().send(&read);
+        let _ = ctx
+            .actor::<FsCapability>()
+            .send_with_context(&read, &context);
     }
 
     /// Send `create_texture` for the zeroed atlas, unless a creation is
@@ -243,7 +227,7 @@ use aether_actor::runtime;
 #[runtime]
 impl NativeActor for TextCapability {
     /// The runtime state this identity boots into (ADR-0122 split): the
-    /// font registry, glyph atlas, and parked `load_font` requests.
+    /// font registry and glyph atlas.
     type State = TextCapabilityState;
 
     type Config = ();
@@ -265,8 +249,13 @@ impl NativeActor for TextCapability {
     /// or `Err` with the failure reason (bad path, or an unparseable
     /// file). The `font_id` is session-scoped — thread it into `draw`.
     #[handler::manual]
-    fn on_load_font(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: LoadFont) {
-        state.forward_font_read(ctx, mail.namespace, mail.path, PendingReply::LoadFont);
+    fn on_load_font(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: LoadFont) {
+        TextCapabilityState::forward_font_read(
+            ctx,
+            mail.namespace,
+            mail.path,
+            PendingReply::LoadFont,
+        );
     }
 
     /// Grab a font's size-independent metric table.
@@ -307,7 +296,12 @@ impl NativeActor for TextCapability {
                 } else {
                     // Load on the miss; `on_font_parsed` replies once
                     // the font is parsed and registered.
-                    state.forward_font_read(ctx, namespace, path, PendingReply::FontMetrics);
+                    TextCapabilityState::forward_font_read(
+                        ctx,
+                        namespace,
+                        path,
+                        PendingReply::FontMetrics,
+                    );
                 }
             }
         }
@@ -318,29 +312,28 @@ impl NativeActor for TextCapability {
     /// original `load_font` caller; `Err` relays the fs error to that
     /// caller as `LoadFontResult::Err`.
     #[handler::manual]
-    fn on_read_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: ReadResult) {
+    fn on_read_result(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: ReadResult) {
+        let Some(context) = ctx.take_context::<FontLoadContext>() else {
+            return;
+        };
         match mail {
             ReadResult::Ok {
                 namespace,
                 path,
                 bytes,
             } => {
-                let Some(pending) = state.take_pending(&namespace, &path) else {
-                    // A stray / late reply with no parked request.
-                    return;
-                };
                 let name = font_name_from_path(&path);
-                let context = FontParseContext {
+                let parse_context = FontParseContext {
                     namespace,
                     path,
                     name,
-                    reply: pending.reply,
+                    reply: context.reply,
                 };
                 let hold = ctx.acquire_settlement_hold();
                 ctx.dispatch_blocking_resumed_with::<FontParseOutput, _, _>(
                     hold,
-                    pending.source,
-                    context,
+                    context.source,
+                    parse_context,
                     move || match fontdue::Font::from_bytes(
                         bytes.as_slice(),
                         fontdue::FontSettings::default(),
@@ -358,20 +351,18 @@ impl NativeActor for TextCapability {
                 path,
                 error,
             } => {
-                if let Some(pending) = state.take_pending(&namespace, &path) {
-                    let reason = format!("file read failed: {error:?}");
-                    match pending.reply {
-                        PendingReply::LoadFont => ctx.reply_to(
-                            pending.source,
-                            &LoadFontResult::Err {
-                                namespace,
-                                path,
-                                error: reason,
-                            },
-                        ),
-                        PendingReply::FontMetrics => {
-                            ctx.reply_to(pending.source, &FontMetricsResult::Err { error: reason });
-                        }
+                let reason = format!("file read failed: {error:?}");
+                match context.reply {
+                    PendingReply::LoadFont => ctx.reply_to(
+                        context.source,
+                        &LoadFontResult::Err {
+                            namespace,
+                            path,
+                            error: reason,
+                        },
+                    ),
+                    PendingReply::FontMetrics => {
+                        ctx.reply_to(context.source, &FontMetricsResult::Err { error: reason });
                     }
                 }
             }
@@ -379,7 +370,7 @@ impl NativeActor for TextCapability {
     }
 
     /// Font-parse completion (ADR-0093 §3). On success register the
-    /// parsed font (deduped by path) and reply in the shape the parked
+    /// parsed font (deduped by path) and reply in the shape the original
     /// request is owed — `LoadFontResult::Ok` for a `load_font`,
     /// `FontMetricsResult::Ok` for a `font_metrics` grab; on a parse
     /// failure reply the matching `Err`. Either way `resolve_value`
@@ -622,7 +613,35 @@ mod tests {
     use std::time::Duration;
 
     fn session_sender() -> Source {
-        Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))
+        session_sender_with(0)
+    }
+
+    fn session_sender_with(id: u128) -> Source {
+        Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(id))))
+    }
+
+    fn decode_session_reply_with_session<K>(rx: &Receiver<EgressEvent>) -> (SessionToken, K)
+    where
+        K: Kind,
+    {
+        loop {
+            let event = rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("test: egress event arrives within deadline");
+            if let EgressEvent::ToSession {
+                session,
+                kind_name,
+                payload,
+                ..
+            } = event
+                && kind_name == K::NAME
+            {
+                return (
+                    session,
+                    K::decode_from_bytes(&payload).expect("test: reply payload decodes"),
+                );
+            }
+        }
     }
 
     /// Flush the cap's buffered sends, then drain egress asserting the
@@ -630,17 +649,26 @@ mod tests {
     /// `aether.render` / `aether.fs`, so a forwarded send bubbles to the
     /// loopback outbound; `flush_outbound` is what `NativeCtx::Drop`
     /// would otherwise do at the end of a real dispatch turn.
-    fn assert_next_send_kind<K: Kind>(binding: &NativeBinding, rx: &Receiver<EgressEvent>) {
+    fn assert_next_send_kind<K: Kind>(binding: &NativeBinding, rx: &Receiver<EgressEvent>) -> u64 {
         binding.flush_outbound();
         loop {
             let event = rx
                 .recv_timeout(Duration::from_secs(2))
                 .expect("test: egress event arrives within deadline");
-            if let EgressEvent::UnresolvedMail { kind_id, .. } = event {
+            if let EgressEvent::UnresolvedMail {
+                kind_id,
+                correlation_id,
+                ..
+            } = event
+            {
                 assert_eq!(kind_id, K::ID, "unexpected bubbled kind");
-                return;
+                return correlation_id;
             }
         }
+    }
+
+    fn fs_reply_source(correlation_id: u64) -> Source {
+        Source::with_correlation(SourceAddr::None, correlation_id)
     }
 
     fn ctx_binding() -> (Arc<NativeBinding>, Receiver<EgressEvent>) {
@@ -680,7 +708,7 @@ mod tests {
     }
 
     #[test]
-    fn load_font_parks_request_and_forwards_read() {
+    fn load_font_forwards_read_with_context() {
         let mut state = TextCapabilityState::new();
         let (binding, rx) = ctx_binding();
         let mut ctx =
@@ -693,12 +721,12 @@ mod tests {
                 path: "fonts/RobotoMono.ttf".to_owned(),
             },
         );
-        assert_eq!(state.pending_fonts.len(), 1, "request not parked");
-        assert_next_send_kind::<Read>(&binding, &rx);
+        let correlation_id = assert_next_send_kind::<Read>(&binding, &rx);
+        assert_ne!(correlation_id, Source::NO_CORRELATION);
     }
 
     #[test]
-    fn read_err_replies_load_font_err_and_clears_pending() {
+    fn read_err_replies_load_font_err_via_request_context() {
         let mut state = TextCapabilityState::new();
         let (binding, rx) = ctx_binding();
         let mut ctx =
@@ -712,10 +740,14 @@ mod tests {
             },
         );
         // Skip the forwarded read.
-        assert_next_send_kind::<Read>(&binding, &rx);
+        let correlation_id = assert_next_send_kind::<Read>(&binding, &rx);
 
-        let mut read_ctx =
-            NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut read_ctx = NativeCtx::new_dispatching(
+            &binding,
+            fs_reply_source(correlation_id),
+            MailId::NONE,
+            MailId::NONE,
+        );
         TextCapability::on_read_result(
             &mut state,
             &mut read_ctx,
@@ -729,7 +761,90 @@ mod tests {
             LoadFontResult::Err { path, .. } => assert_eq!(path, "missing.ttf"),
             LoadFontResult::Ok { .. } => panic!("expected Err for a missing file"),
         }
-        assert!(state.pending_fonts.is_empty(), "pending never cleared");
+    }
+
+    #[test]
+    fn same_path_loads_reply_to_their_own_request_contexts() {
+        let mut state = TextCapabilityState::new();
+        let (binding, rx) = ctx_binding();
+        let first_session = SessionToken(Uuid::from_u128(1));
+        let second_session = SessionToken(Uuid::from_u128(2));
+
+        let mut first_ctx = NativeCtx::new_dispatching(
+            &binding,
+            Source::to(SourceAddr::Session(first_session)),
+            MailId::NONE,
+            MailId::NONE,
+        );
+        TextCapability::on_load_font(
+            &mut state,
+            &mut first_ctx,
+            LoadFont {
+                namespace: "assets".to_owned(),
+                path: "same.ttf".to_owned(),
+            },
+        );
+        let first_correlation = assert_next_send_kind::<Read>(&binding, &rx);
+
+        let mut second_ctx = NativeCtx::new_dispatching(
+            &binding,
+            Source::to(SourceAddr::Session(second_session)),
+            MailId::NONE,
+            MailId::NONE,
+        );
+        TextCapability::on_load_font(
+            &mut state,
+            &mut second_ctx,
+            LoadFont {
+                namespace: "assets".to_owned(),
+                path: "same.ttf".to_owned(),
+            },
+        );
+        let second_correlation = assert_next_send_kind::<Read>(&binding, &rx);
+
+        let mut second_reply_ctx = NativeCtx::new_dispatching(
+            &binding,
+            fs_reply_source(second_correlation),
+            MailId::NONE,
+            MailId::NONE,
+        );
+        TextCapability::on_read_result(
+            &mut state,
+            &mut second_reply_ctx,
+            ReadResult::Err {
+                namespace: "assets".to_owned(),
+                path: "same.ttf".to_owned(),
+                error: FsError::NotFound,
+            },
+        );
+        let (session, reply) = decode_session_reply_with_session::<LoadFontResult>(&rx);
+        assert_eq!(session, second_session);
+        assert!(
+            matches!(reply, LoadFontResult::Err { .. }),
+            "second reply should be the fs error"
+        );
+
+        let mut first_reply_ctx = NativeCtx::new_dispatching(
+            &binding,
+            fs_reply_source(first_correlation),
+            MailId::NONE,
+            MailId::NONE,
+        );
+        TextCapability::on_read_result(
+            &mut state,
+            &mut first_reply_ctx,
+            ReadResult::Err {
+                namespace: "assets".to_owned(),
+                path: "same.ttf".to_owned(),
+                error: FsError::NotFound,
+            },
+        );
+        let (session, reply) = decode_session_reply_with_session::<LoadFontResult>(&rx);
+        assert_eq!(session, first_session);
+        assert!(
+            matches!(reply, LoadFontResult::Err { .. }),
+            "first reply should be the fs error"
+        );
     }
 
     #[test]
@@ -746,10 +861,14 @@ mod tests {
                 path: "junk.ttf".to_owned(),
             },
         );
-        assert_next_send_kind::<Read>(&binding, &rx);
+        let correlation_id = assert_next_send_kind::<Read>(&binding, &rx);
 
-        let mut read_ctx =
-            NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut read_ctx = NativeCtx::new_dispatching(
+            &binding,
+            fs_reply_source(correlation_id),
+            MailId::NONE,
+            MailId::NONE,
+        );
         TextCapability::on_read_result(
             &mut state,
             &mut read_ctx,
@@ -1072,7 +1191,7 @@ mod tests {
     }
 
     /// A `font_metrics` grab by a path with no resident font loads on
-    /// the miss: it parks the request, forwards an `aether.fs.read`,
+    /// the miss: it forwards an `aether.fs.read` with a request context
     /// and — once the bytes come back and parse — registers the font
     /// (indexed by path) and replies `FontMetricsResult::Ok`.
     #[test]
@@ -1091,11 +1210,14 @@ mod tests {
                 },
             },
         );
-        assert_eq!(state.pending_fonts.len(), 1, "a miss must park the request");
-        assert_next_send_kind::<Read>(&binding, &rx);
+        let correlation_id = assert_next_send_kind::<Read>(&binding, &rx);
 
-        let mut read_ctx =
-            NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut read_ctx = NativeCtx::new_dispatching(
+            &binding,
+            fs_reply_source(correlation_id),
+            MailId::NONE,
+            MailId::NONE,
+        );
         TextCapability::on_read_result(
             &mut state,
             &mut read_ctx,

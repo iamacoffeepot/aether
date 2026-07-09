@@ -32,8 +32,8 @@ pub struct LoadFont {
 /// Reply to `LoadFont`. `Ok` carries the assigned `font_id` — thread
 /// it into `DrawText.font_id` — the derived `name` (the file stem),
 /// and `resident_bytes` (the parsed TTF's byte length). `Err` echoes
-/// the `namespace` / `path` for correlation plus a human-readable
-/// reason — a bad path, or a file fontdue could not parse as a font.
+/// the `namespace` / `path` for diagnostics plus a human-readable reason
+/// — a bad path, or a file fontdue could not parse as a font.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.text.load_font_result")]
 pub enum LoadFontResult {

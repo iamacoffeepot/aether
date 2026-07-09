@@ -6,10 +6,10 @@
 //! Two flows:
 //!
 //! - **`load_font`** mirrors `aether.audio.load_instrument` (ADR-0103):
-//!   park the request keyed `(namespace, path)`, forward `aether.fs.read`,
-//!   correlate on `aether.fs.read_result`, parse the font off the hot path
-//!   in a `#[handler(task)]` arm, and register it under a session-scoped
-//!   `font_id`. The reply is `load_font_result`.
+//!   forward `aether.fs.read` with a request context for the original
+//!   caller, recover it on `aether.fs.read_result`, parse the font off the
+//!   hot path in a `#[handler(task)]` arm, and register it under a
+//!   session-scoped `font_id`. The reply is `load_font_result`.
 //! - **`draw`** is fire-and-forget immediate mode: lay the string out with
 //!   fontdue's horizontal metrics, rasterize any unseen glyph into the
 //!   shelf-packed atlas, emit one `update_texture` per new glyph plus the
@@ -53,7 +53,7 @@ pub use kinds::*;
 /// the per-handler `HandlesKind` markers, and the name-inventory entry, all
 /// emitted always-on by `#[actor]`. The state-bearing runtime
 /// (`TextCapabilityState`, which holds the `fontdue` font registry, the
-/// glyph atlas, and the parked `load_font` requests) lives behind the one
+/// glyph atlas, and the request-context relay logic) lives behind the one
 /// `feature = "text-runtime"` gate, so a transport-only build never names
 /// `TextCapabilityState` nor pulls `fontdue` / `aether_substrate` through
 /// this cap.
