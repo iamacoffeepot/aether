@@ -236,6 +236,21 @@ jobs:
           --partition 'hash:${{ matrix.partition }}/2'
         env:
           AETHER_REQUIRE_RUNTIME: "1"
+      # iamacoffeepot/aether#2914: a failing direct TestBench visual
+      # assertion that armed `test_bench::artifacts::ArtifactGuard`
+      # leaves its actual/mask/measurements set under
+      # `target/test-bench-artifacts/`; a passing shard writes nothing
+      # there. Upload is shard-qualified (each partition gets its own
+      # artifact name) and ignores the tree being absent, matching the
+      # fuzz-crash-artifact upload pattern in fuzz-nightly.yml.
+      - name: Upload test-bench failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-bench-artifacts-shard-${{ matrix.partition }}
+          path: target/test-bench-artifacts/**
+          if-no-files-found: ignore
+          retention-days: 7
 
   # Qodana scan folded in from .github/workflows/qodana.yml so the
   # ci-pass aggregator can needs: it directly (iamacoffeepot/aether#941).

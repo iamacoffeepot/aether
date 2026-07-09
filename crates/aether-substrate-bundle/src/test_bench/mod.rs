@@ -13,6 +13,7 @@
 //!   component crates') link this directly via
 //!   `aether_substrate_bundle::test_bench::TestBench`.
 
+pub mod artifacts;
 mod bench;
 pub mod cap;
 pub mod chassis;
@@ -24,6 +25,7 @@ mod mail_latency;
 pub mod render;
 pub mod test_helpers;
 
+pub use artifacts::ArtifactGuard;
 pub use bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH, TestBench, TestBenchBuilder, TestBenchError};
 pub use cap::{TestBenchCapConfig, TestBenchCapability};
 pub use chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};

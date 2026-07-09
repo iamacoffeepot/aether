@@ -529,6 +529,47 @@ pub fn run_checks(rgba: Vec<u8>, width: u32, height: u32, checks: &[FrameCheck])
     }
 }
 
+/// RGBA8 diagnostic mask for one `FrameCheck`, at the same dimensions
+/// as `image`: a pixel inside the check's frame-clamped region is
+/// opaque white when lit and opaque black when unlit — the exact
+/// lit/unlit partition `run_checks` scores that reduction against — and
+/// a pixel outside the region is fully transparent, so a rendered mask
+/// visually separates "not scored" from "scored but background."
+/// Mirrors `run_checks`'s per-reduction background resolution exactly,
+/// including `FrameReduction::DiffersFromBackground`'s established
+/// top-left-only behavior (`check.background` is ignored for that
+/// reduction, matching `run_checks`), so a diagnostic artifact can
+/// never visualize a different partition than the verdict it explains.
+/// Crate-internal: consumed only by `test_bench::artifacts` (issue
+/// 2914).
+#[must_use]
+pub(crate) fn diagnostic_mask(image: &Image, check: &FrameCheck) -> Vec<u8> {
+    let region: Option<Rect> = check.region.map(Rect::from);
+    let (bg, tolerance) = match check.reduction {
+        FrameReduction::NotAllBlack => ([0, 0, 0], 0u8),
+        FrameReduction::DiffersFromBackground => (background_top_left(image), check.tolerance),
+        FrameReduction::Coverage | FrameReduction::Centroid | FrameReduction::BoundingBox => (
+            check
+                .background
+                .unwrap_or_else(|| background_top_left(image)),
+            check.tolerance,
+        ),
+    };
+    let mut mask = vec![0u8; image.rgba.len()];
+    if let Some(rect) = clamp_region(region, image.width, image.height) {
+        for (x, y, rgb) in region_pixels(image, rect) {
+            let start = ((y * image.width + x) * 4) as usize;
+            let pixel = if is_lit(rgb, bg, tolerance) {
+                [255, 255, 255, 255]
+            } else {
+                [0, 0, 0, 255]
+            };
+            mask[start..start + 4].copy_from_slice(&pixel);
+        }
+    }
+    mask
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -910,5 +951,173 @@ mod tests {
         let err = differs_from_background(&img, 5)
             .expect_err("test setup: empty image must fail with \"too small\"");
         assert!(err.contains("too small"));
+    }
+
+    fn pixel_at(rgba: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
+        let start = ((y * width + x) * 4) as usize;
+        [
+            rgba[start],
+            rgba[start + 1],
+            rgba[start + 2],
+            rgba[start + 3],
+        ]
+    }
+
+    #[test]
+    fn diagnostic_mask_marks_lit_white_and_unlit_black() {
+        let bg = [69, 79, 105];
+        let rect = Rect {
+            min_x: 4,
+            min_y: 6,
+            max_x: 7,
+            max_y: 9,
+        };
+        let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [200, 32, 32, 255], rect);
+        let check = FrameCheck {
+            reduction: FrameReduction::Coverage,
+            tolerance: 5,
+            background: Some(bg),
+            region: None,
+        };
+        let mask = diagnostic_mask(&img, &check);
+        assert_eq!(
+            pixel_at(&mask, 16, 5, 7),
+            [255, 255, 255, 255],
+            "a lit pixel should render opaque white",
+        );
+        assert_eq!(
+            pixel_at(&mask, 16, 0, 0),
+            [0, 0, 0, 255],
+            "an in-frame unlit pixel should render opaque black",
+        );
+    }
+
+    #[test]
+    fn diagnostic_mask_clips_out_of_region_pixels_to_transparent() {
+        let bg = [69, 79, 105];
+        let rect = Rect {
+            min_x: 4,
+            min_y: 6,
+            max_x: 7,
+            max_y: 9,
+        };
+        let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [200, 32, 32, 255], rect);
+        let region = FrameRect {
+            min_x: 4,
+            min_y: 6,
+            max_x: 7,
+            max_y: 9,
+        };
+        let check = FrameCheck {
+            reduction: FrameReduction::Coverage,
+            tolerance: 5,
+            background: Some(bg),
+            region: Some(region),
+        };
+        let mask = diagnostic_mask(&img, &check);
+        assert_eq!(
+            pixel_at(&mask, 16, 0, 0),
+            [0, 0, 0, 0],
+            "a pixel outside the requested region should be fully transparent, \
+             not just background-colored",
+        );
+        assert_eq!(
+            pixel_at(&mask, 16, 5, 7),
+            [255, 255, 255, 255],
+            "a lit pixel inside the requested region should still render opaque white",
+        );
+    }
+
+    #[test]
+    fn diagnostic_mask_is_fully_transparent_on_empty_region() {
+        let bg = [69, 79, 105];
+        let img = solid(8, 8, [bg[0], bg[1], bg[2], 255]);
+        let out_of_bounds = FrameRect {
+            min_x: 20,
+            min_y: 20,
+            max_x: 25,
+            max_y: 25,
+        };
+        let check = FrameCheck {
+            reduction: FrameReduction::Coverage,
+            tolerance: 5,
+            background: Some(bg),
+            region: Some(out_of_bounds),
+        };
+        let mask = diagnostic_mask(&img, &check);
+        assert!(
+            mask.iter().all(|&byte| byte == 0),
+            "a region that clamps to zero pixels should produce an all-transparent mask",
+        );
+    }
+
+    #[test]
+    fn diagnostic_mask_lit_count_agrees_with_run_checks_coverage() {
+        let bg = [69, 79, 105];
+        let rect = Rect {
+            min_x: 4,
+            min_y: 6,
+            max_x: 7,
+            max_y: 9,
+        };
+        let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [200, 32, 32, 255], rect);
+        let check = FrameCheck {
+            reduction: FrameReduction::Coverage,
+            tolerance: 5,
+            background: Some(bg),
+            region: None,
+        };
+        let mask = diagnostic_mask(&img, &check);
+        let lit_count = mask
+            .chunks_exact(4)
+            .filter(|pixel| *pixel == [255, 255, 255, 255])
+            .count();
+        let verdict = run_checks(img.rgba.clone(), img.width, img.height, &[check]);
+        let FrameCheckResult::Coverage { fraction, .. } = &verdict.results[0] else {
+            panic!("expected a Coverage result");
+        };
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
+        let expected_lit = (fraction * (16 * 16) as f32).round() as usize;
+        assert_eq!(
+            lit_count, expected_lit,
+            "the mask's lit-pixel count should agree with run_checks' scored coverage fraction \
+             so the artifact can never visualize a different partition than the verdict",
+        );
+    }
+
+    #[test]
+    fn diagnostic_mask_differs_from_background_ignores_explicit_background_like_run_checks() {
+        // `run_checks` always partitions `DiffersFromBackground` against
+        // the frame's actual top-left pixel, never `check.background`
+        // (a known contract mismatch tracked separately, issue 2914 side
+        // findings). The diagnostic mask must reproduce that exact
+        // behavior rather than the documented-but-unimplemented
+        // "explicit background is respected" contract, or the artifact
+        // would show a different partition than the verdict it explains.
+        let top_left = [10, 10, 10];
+        let pinned_background = [200, 200, 200];
+        let mut img = solid(4, 4, [top_left[0], top_left[1], top_left[2], 255]);
+        // Pixel index 1's R channel moves far from top_left (lit against
+        // top_left) but happens to land near pinned_background — if the
+        // mask wrongly partitioned against pinned_background this pixel
+        // would read unlit.
+        img.rgba[4] = pinned_background[0];
+        let check = FrameCheck {
+            reduction: FrameReduction::DiffersFromBackground,
+            tolerance: 5,
+            background: Some(pinned_background),
+            region: None,
+        };
+        let mask = diagnostic_mask(&img, &check);
+        assert_eq!(
+            pixel_at(&mask, 4, 1, 0),
+            [255, 255, 255, 255],
+            "mask should read lit against the top-left reference, not the ignored explicit \
+             background — matching run_checks",
+        );
     }
 }
