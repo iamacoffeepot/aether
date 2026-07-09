@@ -1,6 +1,6 @@
 # ADR-0140: Render material pass
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — world-space material pass; crates/aether-substrate/src/render/material.rs)
 - **Date:** 2026-07-08
 
 ## Context

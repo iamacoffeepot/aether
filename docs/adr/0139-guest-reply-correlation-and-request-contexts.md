@@ -1,6 +1,6 @@
 # ADR-0139: Guest Reply Correlation and Request Contexts
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — kind-typed request contexts + reply correlation ids in aether-actor; consumers migrated across fs/audio/text/behavior/kit)
 - **Date:** 2026-07-08
 
 Amends **ADR-0134** (multi reply class): one-shot request/reply flows correlate on the envelope, not the payload; `multi`-class emissions keep the payload-level keying ADR-0133 established. Builds on the correlation machinery **ADR-0042** left in place at its retirement, the `MailId` / causal-chain model of **ADR-0080**, the reply classes of **ADR-0109** / **ADR-0112**, and the inline-cluster addressing of **ADR-0114**.
