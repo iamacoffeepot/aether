@@ -38,7 +38,6 @@ use aether_substrate_bundle::visual::{decode_png, differs_from_background};
 use aether_kit as _;
 use std::fs;
 use std::path::Path;
-use std::time::Duration;
 
 /// User-facing component name passed to `LoadComponent`.
 const COMPONENT_NAME: &str = "mv";
@@ -373,7 +372,6 @@ fn overlapping_loads_reply_to_their_own_requesters() {
     let mut bench = TestBench::builder()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
-        .settlement_cap(Some(Duration::from_secs(10)))
         .build()
         .expect("boot");
     load_viewer(&mut bench, &wasm_path);
