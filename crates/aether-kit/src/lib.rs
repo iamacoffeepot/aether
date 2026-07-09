@@ -35,9 +35,9 @@
 //!   in [`widget::theme`].
 //!
 //! `export!` (below) packs the actors into one cdylib (ADR-0096 multi-actor
-//! module); the entry type is listed first, and the FFI shims it emits are
-//! wasm32-only and inert in a host rlib, so the integration tests link the
-//! same artifact.
+//! module); the explicit entry type is the bare-load target, and the FFI
+//! shims it emits are wasm32-only and inert in a host rlib, so the integration
+//! tests link the same artifact.
 //!
 //! # Units
 //!
@@ -92,20 +92,19 @@ pub const TILE_BITS: u32 = 8;
 // macro emits the wasm32 FFI shims and the `aether.kinds` custom section for
 // every listed actor. The kit is a subsystem library — a grab-bag of
 // unrelated actors (camera, mesh viewer, world mesher, mover, widget set)
-// each loaded independently — so it is deliberately DEFAULTLESS per ADR-0138:
-// the bare `export!(…)` (no `entry =`) designates no bare-load entry, and
-// every consumer loads a specific actor by its `module@actor` selector. A
-// `load` with no export selector against the kit is a hard error naming the
-// exports, not an instantiation of whichever actor happens to sit first. The
-// `behavior` feature (ADR-0137, issue 2687) appends `aether-behavior`'s
-// `BehaviorHost` so the panel's `WidgetKind::BehaviorHost` arm can spawn it
-// by tag; the two invocations are cfg-exclusive, keeping the ordinary kit
-// build's exported set (and its `aether.kinds` section) unchanged.
+// each loaded independently — so ADR-0138's defaultless policy still governs
+// every actor except the one explicitly named entry. `console::ConsoleOverlay`
+// is the kit's narrow bare-load target; all other actors stay selector-only by
+// `module@actor` selector, never by list position. The `behavior` feature
+// (ADR-0137, issue 2687) appends `aether-behavior`'s `BehaviorHost` so the
+// panel's `WidgetKind::BehaviorHost` arm can spawn it by tag; the two
+// invocations are cfg-exclusive, keeping the ordinary kit build's exported set
+// (and its `aether.kinds` section) unchanged.
 #[cfg(not(feature = "behavior"))]
 aether_actor::export!(
+    entry = console::ConsoleOverlay,
     camera::CameraComponent,
     camera_controller::CameraController,
-    console::ConsoleOverlay,
     mesh::MeshViewer,
     world::WorldView,
     mover::WorldMover,
@@ -120,9 +119,9 @@ aether_actor::export!(
 
 #[cfg(feature = "behavior")]
 aether_actor::export!(
+    entry = console::ConsoleOverlay,
     camera::CameraComponent,
     camera_controller::CameraController,
-    console::ConsoleOverlay,
     mesh::MeshViewer,
     world::WorldView,
     mover::WorldMover,
