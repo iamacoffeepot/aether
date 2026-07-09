@@ -44,23 +44,23 @@
 //! Material boundaries smooth identically whether the materials differ by
 //! explicit paint or by region default.
 //!
-//! # Overlay pass — corner-minimized contours
+//! # Overlay reference — corner-minimized contours
 //!
 //! Per distinct overlay material present, the material's binary subcell
-//! field runs through [`minimize_corners`] (upsample, one analytic
-//! 45-degree chamfer, angle-gated cellular passes) and then
-//! [`march_grid`] into crisp contour polygons plus greedy-merged
-//! interior. Smoothing params are spatial: each subcell reads its owning
-//! cell's smoothing-field override ([`World::smoothing_override`]) with
-//! the material's style row as the fallback, so where an edge reads soft
-//! versus crisp is authored on the map. The pooled rim is a second marched
-//! layer over an eroded mask: the smoothed shape draws in a darkened rim
-//! color, and the body draws one octimeter above it inset by the rim
-//! width. Every overlay material contours identically — water is underlay
-//! ground fabric (below), so an overlay-painted water body draws as a
-//! generic marched surface with no special treatment. Overlay geometry
-//! lifts a hair above the underlay surface so the coplanar passes never
-//! z-fight, and it carries its own vertices so the seam stays hard.
+//! field runs through [`prepare_material_mask_plane`], which applies
+//! [`minimize_corners`] (upsample, one analytic 45-degree chamfer,
+//! angle-gated cellular passes) to produce the smoothed scalar plane the
+//! runtime uploads as R8. The retained CPU oracle then feeds that plane to
+//! [`march_grid`] into crisp contour polygons plus greedy-merged interior
+//! for host tests. Smoothing params are spatial: each subcell reads its
+//! owning cell's smoothing-field override ([`World::smoothing_override`])
+//! with the material's style row as the fallback, so where an edge reads
+//! soft versus crisp is authored on the map. The pooled rim oracle is a
+//! second marched layer over an eroded mask: the smoothed shape draws in a
+//! darkened rim color, and the body draws one octimeter above it inset by
+//! the rim width. Runtime painted overlays no longer add these triangles
+//! to [`mesh_chunk`]; [`super::WorldView`] draws the prepared plane through
+//! `aether.render.material.coverage` instead.
 //!
 //! # Water — a flat underlay plane
 //!
@@ -204,10 +204,12 @@ const WALL_VOID_SKIRT_OCTIMETERS: i32 = 512;
 /// The overlay rim layer lift — two octimeters over the underlay, one
 /// above the encroachment flap so an overlay contour always draws over a
 /// material margin that grew across the same seam.
+#[allow(dead_code)]
 const OVERLAY_RIM_LIFT: f32 = 2.0 / OCTIMETERS_PER_METER;
 
 /// The overlay body layer lift — one octimeter over the rim, so the body
 /// sits on top of the rim it insets from.
+#[allow(dead_code)]
 const OVERLAY_BODY_LIFT: f32 = 3.0 / OCTIMETERS_PER_METER;
 
 /// The encroachment flap layer lift — one octimeter over the underlay.
@@ -272,11 +274,26 @@ pub fn mesh_chunk(
         }
         ViewMode::Painted => {
             let partition = mesh_underlay(world, at, styles, &mut tris);
-            mesh_overlay(world, at, styles, &mut tris);
             emit_walls(world, at, mode, styles, partition.as_ref(), &mut tris);
         }
     }
     tris
+}
+
+/// Smoothed material mask plane for one chunk/material overlay.
+///
+/// The plane includes the fixed smoothing apron. Runtime rendering uploads
+/// `samples` as an R8 texture and draws it as a coverage material rect;
+/// the CPU march consumes the same structure as the reference oracle.
+#[derive(Clone)]
+pub struct MaterialMaskPlane {
+    pub material: Material,
+    pub samples: Vec<u8>,
+    pub width: usize,
+    pub height: usize,
+    pub placement: GridPlacement,
+    pub apron_samples: i32,
+    pub step_octimeters: i32,
 }
 
 /// The repartitioned material grid the underlay pass marches its caps from,
@@ -397,6 +414,7 @@ impl SubPatch {
 /// lift through, continuous wherever no cliff intervenes. Where the cell
 /// carries authored relief the point patch resolves the subcell height;
 /// otherwise the whole-cell patch is the fast path.
+#[allow(dead_code)]
 fn point_lift(world: &World, wx: f32, wz: f32) -> (f32, f32) {
     let cell = CellPos {
         x: floor_to_i32(wx),
@@ -1972,9 +1990,19 @@ fn subcell_coverage(world: &World, at: ChunkPos, six: i32, siz: i32, material: M
 
 /// Emit the overlay pass: for each distinct overlay material present in
 /// the chunk, contour its subcell field.
+#[allow(dead_code)]
 fn mesh_overlay(world: &World, at: ChunkPos, styles: &StyleTable, tris: &mut Vec<DrawTriangle>) {
+    for material in overlay_materials(world, at) {
+        mesh_overlay_material(world, at, material, styles, tris);
+    }
+}
+
+/// Distinct non-void overlay materials present in the chunk, in stable
+/// material-id order.
+#[must_use]
+pub fn overlay_materials(world: &World, at: ChunkPos) -> Vec<Material> {
     let Some(chunk) = world.chunk(at) else {
-        return;
+        return Vec::new();
     };
     let mut present = [false; 6];
     for material in &chunk.overlay {
@@ -1982,11 +2010,12 @@ fn mesh_overlay(world: &World, at: ChunkPos, styles: &StyleTable, tris: &mut Vec
             present[*material as usize] = true;
         }
     }
-    for (id, seen) in present.iter().enumerate() {
-        if *seen {
-            mesh_overlay_material(world, at, Material::from_u8_or_void(id as u8), styles, tris);
-        }
-    }
+    present
+        .iter()
+        .enumerate()
+        .filter(|(_, seen)| **seen)
+        .map(|(id, _)| Material::from_u8_or_void(id.try_into().unwrap_or(0)))
+        .collect()
 }
 
 /// Sample one overlay material's subcell coverage field (plus its
@@ -2047,6 +2076,7 @@ fn sample_params(
 /// generic marched surface with no special treatment. The apron is fixed at
 /// the maximum a profile can demand ([`MAX_APRON_SUBCELLS`]), so field
 /// content never changes a chunk's read reach.
+#[allow(dead_code)]
 fn mesh_overlay_material(
     world: &World,
     at: ChunkPos,
@@ -2055,6 +2085,42 @@ fn mesh_overlay_material(
     tris: &mut Vec<DrawTriangle>,
 ) {
     let s = styles.get(material);
+    let plane = prepare_material_mask_plane(world, at, material, styles);
+    let rim_color = hsl_to_linear_rgb(s.base_hue, s.base_sat, s.base_light * (1.0 - s.rim_darken));
+    let rim_vertex = surface_vertex(world, OVERLAY_RIM_LIFT, rim_color);
+    march_grid(
+        &plane.samples,
+        plane.width,
+        plane.height,
+        &plane.placement,
+        &rim_vertex,
+        tris,
+    );
+    let rim_width = (s.rim_inset_octimeters / plane.step_octimeters).max(1);
+    let eroded = erode(&plane.samples, plane.width, plane.height, rim_width);
+
+    let body_color = hsl_to_linear_rgb(s.base_hue, s.base_sat, s.base_light);
+    let body_vertex = surface_vertex(world, OVERLAY_BODY_LIFT, body_color);
+    march_grid(
+        &eroded,
+        plane.width,
+        plane.height,
+        &plane.placement,
+        &body_vertex,
+        tris,
+    );
+}
+
+/// Prepare one overlay material's scalar material mask plane using the same
+/// sample-domain field, smoothing params, and corner minimization as the
+/// CPU marching oracle.
+#[must_use]
+pub fn prepare_material_mask_plane(
+    world: &World,
+    at: ChunkPos,
+    material: Material,
+    styles: &StyleTable,
+) -> MaterialMaskPlane {
     let apron = MAX_APRON_SUBCELLS;
     let (field, n) = sample_field(world, at, material, apron);
     let params = sample_params(world, at, material, apron, n, styles);
@@ -2064,31 +2130,31 @@ fn mesh_overlay_material(
     ];
 
     let upsample = CONTOUR_UPSAMPLE;
-    let (smoothed, gw, gh) = minimize_corners(&field, n, n, upsample, &params);
-    let step_oct = OCTIMETERS_PER_SUBCELL / upsample as i32;
+    let (samples, width, height) = minimize_corners(&field, n, n, upsample, &params);
+    let step_octimeters = OCTIMETERS_PER_SUBCELL / upsample as i32;
     let origin_oct = [
-        base_oct[0] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
-        base_oct[1] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
+        base_oct[0] - apron * OCTIMETERS_PER_SUBCELL + step_octimeters / 2,
+        base_oct[1] - apron * OCTIMETERS_PER_SUBCELL + step_octimeters / 2,
     ];
-    let rim_color = hsl_to_linear_rgb(s.base_hue, s.base_sat, s.base_light * (1.0 - s.rim_darken));
-    let place = GridPlacement {
-        origin_oct,
-        step_oct,
-    };
-    let rim_vertex = surface_vertex(world, OVERLAY_RIM_LIFT, rim_color);
-    march_grid(&smoothed, gw, gh, &place, &rim_vertex, tris);
-    let rim_width = (s.rim_inset_octimeters / step_oct).max(1);
-    let eroded = erode(&smoothed, gw, gh, rim_width);
-
-    let body_color = hsl_to_linear_rgb(s.base_hue, s.base_sat, s.base_light);
-    let body_vertex = surface_vertex(world, OVERLAY_BODY_LIFT, body_color);
-    march_grid(&eroded, gw, gh, &place, &body_vertex, tris);
+    MaterialMaskPlane {
+        material,
+        samples,
+        width,
+        height,
+        placement: GridPlacement {
+            origin_oct,
+            step_oct: step_octimeters,
+        },
+        apron_samples: apron * upsample as i32,
+        step_octimeters,
+    }
 }
 
 /// A vertex builder for overlay geometry: one flat color, lifted `lift`
 /// above the surface at the vertex's own (floor) cell — overlay contours
 /// drape the terrain; a contour crossing a cliff line stretches down the
 /// face rather than floating.
+#[allow(dead_code)]
 fn surface_vertex(world: &World, lift: f32, color: [f32; 3]) -> impl Fn(f32, f32) -> Vertex + '_ {
     move |wx: f32, wz: f32| Vertex {
         x: wx,
@@ -3186,18 +3252,11 @@ mod tests {
             }
             world.insert_chunk(ChunkPos { x: cx, z: 0 }, chunk);
         }
-        let mesh0 = mesh_chunk(
-            &world,
-            ChunkPos { x: 0, z: 0 },
-            ViewMode::Painted,
-            &StyleTable::default(),
-        );
-        let mesh1 = mesh_chunk(
-            &world,
-            ChunkPos { x: 1, z: 0 },
-            ViewMode::Painted,
-            &StyleTable::default(),
-        );
+        let styles = StyleTable::default();
+        let mut mesh0 = Vec::new();
+        mesh_overlay(&world, ChunkPos { x: 0, z: 0 }, &styles, &mut mesh0);
+        let mut mesh1 = Vec::new();
+        mesh_overlay(&world, ChunkPos { x: 1, z: 0 }, &styles, &mut mesh1);
         let max_x = |mesh: &[DrawTriangle]| {
             mesh.iter()
                 .flat_map(|t| t.verts.iter())
@@ -3265,11 +3324,12 @@ mod tests {
             .into_chunk(),
         );
 
-        let mesh = mesh_chunk(
+        let mut mesh = Vec::new();
+        mesh_overlay(
             &world,
             ChunkPos { x: 0, z: 0 },
-            ViewMode::Painted,
             &StyleTable::default(),
+            &mut mesh,
         );
         let overlay_covers = |px: f32, pz: f32| {
             mesh.iter()
@@ -3682,7 +3742,8 @@ mod tests {
             }
         }
         world.insert_chunk(at, chunk);
-        let mesh = mesh_chunk(&world, at, ViewMode::Painted, &StyleTable::default());
+        let mut mesh = Vec::new();
+        mesh_overlay(&world, at, &StyleTable::default(), &mut mesh);
         let mut overlay_verts = 0;
         for v in mesh.iter().flat_map(|t| t.verts.iter()) {
             let lift = v.y - world.surface_height(v.x, v.z);
