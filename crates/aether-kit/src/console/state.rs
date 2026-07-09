@@ -71,6 +71,7 @@ pub struct ConsoleState {
 }
 
 impl ConsoleState {
+    #[must_use]
     pub fn new(config: &ConsoleConfig) -> Self {
         let mut state = Self {
             open: false,
@@ -79,7 +80,7 @@ impl ConsoleState {
             scroll_offset: 0,
             cursor_visible: true,
             blink_ticks: 0,
-            scrollback_limit: config.scrollback_limit.max(1) as usize,
+            scrollback_limit: usize::try_from(config.scrollback_limit.max(1)).unwrap_or(usize::MAX),
             history_cursor: None,
             submitted: Vec::new(),
             lines: VecDeque::new(),
@@ -89,6 +90,7 @@ impl ConsoleState {
         state
     }
 
+    #[must_use]
     pub fn theme_color(theme: &ConsoleTheme, style: LineStyle) -> [f32; 4] {
         match style {
             LineStyle::Input => theme.input_color,
@@ -97,10 +99,12 @@ impl ConsoleState {
         }
     }
 
+    #[must_use]
     pub fn lines(&self) -> &VecDeque<ConsoleLine> {
         &self.lines
     }
 
+    #[must_use]
     pub fn commands(&self) -> &BTreeMap<String, CommandEntry> {
         &self.commands
     }
@@ -159,7 +163,7 @@ impl ConsoleState {
         if rows < 0 {
             self.scroll_offset = self.scroll_offset.saturating_sub(rows.unsigned_abs());
         } else {
-            self.scroll_offset = self.scroll_offset.saturating_add(rows as usize);
+            self.scroll_offset = self.scroll_offset.saturating_add(rows.unsigned_abs());
         }
         self.clamp_scroll(visible_rows);
     }
@@ -168,10 +172,12 @@ impl ConsoleState {
         self.scroll_offset = self.max_scroll_offset(visible_rows).min(self.scroll_offset);
     }
 
+    #[must_use]
     pub fn max_scroll_offset(&self, visible_rows: usize) -> usize {
         self.lines.len().saturating_sub(visible_rows)
     }
 
+    #[must_use]
     pub fn visible_history(&self, visible_rows: usize) -> Vec<ConsoleLine> {
         if visible_rows == 0 {
             return Vec::new();
@@ -385,6 +391,7 @@ impl ConsoleState {
     }
 }
 
+#[must_use]
 pub fn parse_command(input: &str) -> Option<ParsedCommand> {
     let mut parts = input.split_whitespace();
     let name = normalize_command_name(parts.next()?)?;

@@ -46,7 +46,7 @@ impl Default for ConsoleConfig {
     fn default() -> Self {
         Self {
             panel_height: 280.0,
-            activation_key_code: b'`' as u32,
+            activation_key_code: u32::from(b'`'),
             font_namespace: String::from("assets"),
             font_path: String::from("fonts/RobotoMono.ttf"),
             font_size: 16.0,

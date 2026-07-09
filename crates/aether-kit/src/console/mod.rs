@@ -41,7 +41,7 @@ impl ConsoleOverlay {
     fn visible_rows(&self) -> usize {
         let available =
             (self.config.panel_height - self.input_band_height() - TOP_PADDING).max(0.0);
-        (available / self.row_height()).floor().max(0.0) as usize
+        f32_floor_to_usize(available / self.row_height())
     }
 
     fn row_height(&self) -> f32 {
@@ -57,14 +57,17 @@ impl ConsoleOverlay {
             return;
         }
 
-        let width = self.window_size[0] as f32;
+        let width = bounded_u32_to_f32(self.window_size[0]);
         if width <= 0.0 || self.config.panel_height <= 0.0 {
             return;
         }
 
         let visible_rows = self.visible_rows();
         self.state.clamp_scroll(visible_rows);
-        let panel_height = self.config.panel_height.min(self.window_size[1] as f32);
+        let panel_height = self
+            .config
+            .panel_height
+            .min(bounded_u32_to_f32(self.window_size[1]));
         let mut quads = vec![
             SolidQuad {
                 x: 0.0,
@@ -140,14 +143,14 @@ impl ConsoleOverlay {
 
     fn measure(&self, text: &str) -> f32 {
         self.metrics.as_ref().map_or_else(
-            || text.chars().count() as f32 * self.cursor_width(),
+            || bounded_usize_to_f32(text.chars().count()) * self.cursor_width(),
             |metrics| metrics.measure(text, self.config.font_size),
         )
     }
 
     fn measure_prefix(&self, text: &str, caret: usize) -> f32 {
         self.metrics.as_ref().map_or_else(
-            || caret as f32 * self.cursor_width(),
+            || bounded_usize_to_f32(caret) * self.cursor_width(),
             |metrics| metrics.caret_x(text, caret, self.config.font_size),
         )
     }
@@ -161,15 +164,15 @@ impl ConsoleOverlay {
             .max(2.0)
     }
 
-    fn is_activation_text(&self, text: &str) -> bool {
+    fn is_activation_text(text: &str, activation_key_code: u32) -> bool {
         let mut chars = text.chars();
         let Some(ch) = chars.next() else {
             return false;
         };
-        chars.next().is_none() && ch as u32 == self.config.activation_key_code
+        chars.next().is_none() && u32::from(ch) == activation_key_code
     }
 
-    fn dispatch_actions(&mut self, ctx: &mut WasmCtx<'_, Manual>, actions: Vec<ConsoleAction>) {
+    fn dispatch_actions(ctx: &mut WasmCtx<'_, Manual>, actions: Vec<ConsoleAction>) {
         for action in actions {
             match action {
                 ConsoleAction::InvokeExternal { mailbox, payload } => {
@@ -255,7 +258,7 @@ impl WasmActor for ConsoleOverlay {
         match key.code {
             KEY_ENTER => {
                 let actions = self.state.submit(&self.config.prompt);
-                self.dispatch_actions(ctx, actions);
+                Self::dispatch_actions(ctx, actions);
             }
             KEY_BACKSPACE => self.state.backspace(),
             KEY_LEFT => self.state.move_left(),
@@ -269,7 +272,7 @@ impl WasmActor for ConsoleOverlay {
     #[handler::manual]
     fn on_text_input(&mut self, _ctx: &mut WasmCtx<'_, Manual>, input: TextInput) {
         if self.state.open {
-            if self.is_activation_text(&input.text) {
+            if Self::is_activation_text(&input.text, self.config.activation_key_code) {
                 return;
             }
             self.state.insert_text(&input.text);
@@ -343,6 +346,26 @@ impl WasmActor for ConsoleOverlay {
     }
 }
 
+fn bounded_u32_to_f32(value: u32) -> f32 {
+    let bounded = u16::try_from(value).unwrap_or(u16::MAX);
+    f32::from(bounded)
+}
+
+fn bounded_usize_to_f32(value: usize) -> f32 {
+    let bounded = u16::try_from(value).unwrap_or(u16::MAX);
+    f32::from(bounded)
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn f32_floor_to_usize(value: f32) -> usize {
+    if !value.is_finite() || value <= 0.0 {
+        return 0;
+    }
+
+    // Row counts come from bounded panel pixel geometry and are small in practice.
+    value.floor() as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,7 +389,10 @@ mod tests {
 
     #[test]
     fn default_activation_key_is_backquote_codepoint() {
-        assert_eq!(ConsoleConfig::default().activation_key_code, b'`' as u32);
+        assert_eq!(
+            ConsoleConfig::default().activation_key_code,
+            u32::from(b'`')
+        );
     }
 
     #[test]
@@ -379,8 +405,17 @@ mod tests {
             metrics: None,
         };
 
-        assert!(overlay.is_activation_text("`"));
-        assert!(!overlay.is_activation_text("``"));
-        assert!(!overlay.is_activation_text("a"));
+        assert!(ConsoleOverlay::is_activation_text(
+            "`",
+            overlay.config.activation_key_code
+        ));
+        assert!(!ConsoleOverlay::is_activation_text(
+            "``",
+            overlay.config.activation_key_code
+        ));
+        assert!(!ConsoleOverlay::is_activation_text(
+            "a",
+            overlay.config.activation_key_code
+        ));
     }
 }
