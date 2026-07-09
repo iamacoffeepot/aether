@@ -175,8 +175,8 @@ impl ConsoleOverlay {
         if line.thematic_break {
             quads.push(SolidQuad {
                 x: HORIZONTAL_PADDING,
-                y: y + (self.config.font_size * 0.55),
-                width: (width - (HORIZONTAL_PADDING * 2.0)).max(0.0),
+                y: self.config.font_size.mul_add(0.55, y),
+                width: HORIZONTAL_PADDING.mul_add(-2.0, width).max(0.0),
                 height: 1.0,
                 color: self.config.theme.markdown.thematic_break_color,
             });
@@ -186,7 +186,7 @@ impl ConsoleOverlay {
             quads.push(SolidQuad {
                 x: HORIZONTAL_PADDING - padding,
                 y: y - padding,
-                width: (width - (HORIZONTAL_PADDING * 2.0)) + (padding * 2.0),
+                width: padding.mul_add(2.0, HORIZONTAL_PADDING.mul_add(-2.0, width)),
                 height: self.config.font_size + (padding * 2.0),
                 color: self.config.theme.markdown.fenced_code_background_color,
             });
