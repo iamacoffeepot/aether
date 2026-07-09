@@ -15,7 +15,6 @@
 //! and persistence defers the wrapped child's reconstruction to the composite
 //! reload walk (#2694), re-instantiating only the host's own script.
 
-use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -24,7 +23,7 @@ use aether_actor::{
     SpawnError, Subname, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
 };
 use aether_capabilities::FsCapability;
-use aether_capabilities::fs::{FsMailboxExt, ReadResult};
+use aether_capabilities::fs::{Read, ReadResult};
 use aether_data::KindId;
 use wasmi::Engine;
 
@@ -54,16 +53,25 @@ pub struct BehaviorHost {
     /// The current script source (may diverge from `config.script` after a
     /// swap); persisted so a reload records where the script came from.
     script_source: ScriptSource,
-    /// The pending `FsRef` loads this host has fired, including the reply-less
-    /// boot fetch. `on_read_result` correlates replies by echoed
-    /// `(namespace, path)` and discharges the oldest matching entry.
-    pending_loads: VecDeque<PendingLoad>,
 }
 
-struct PendingLoad {
+/// Whether an in-flight script fetch originated from boot wiring or a runtime
+/// `load_script` control message.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, aether_data::Schema,
+)]
+enum ScriptLoadOrigin {
+    Boot,
+    Runtime,
+}
+
+/// Context stored under an `aether.fs.read` correlation while the behavior host
+/// waits for script bytes.
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize)]
+#[kind(name = "aether.behavior.script_load_context")]
+struct ScriptLoadContext {
     reply: Option<ReplyHandle>,
-    namespace: String,
-    path: String,
+    origin: ScriptLoadOrigin,
     source: ScriptSource,
 }
 
@@ -93,7 +101,6 @@ impl WasmActor for BehaviorHost {
             prime_pending: false,
             echo: EchoGuard::default(),
             script_source,
-            pending_loads: VecDeque::new(),
         })
     }
 
@@ -126,16 +133,18 @@ impl WasmActor for BehaviorHost {
         }
 
         if let ScriptSource::FsRef { namespace, path } = self.script_source.clone() {
-            self.enqueue_pending_load(
-                None,
-                namespace.clone(),
-                path.clone(),
-                ScriptSource::FsRef {
-                    namespace: namespace.clone(),
-                    path: path.clone(),
-                },
-            );
-            ctx.actor::<FsCapability>().read(&namespace, &path);
+            let read = Read {
+                namespace: namespace.clone(),
+                path: path.clone(),
+            };
+            let context = ScriptLoadContext {
+                reply: None,
+                origin: ScriptLoadOrigin::Boot,
+                source: ScriptSource::FsRef { namespace, path },
+            };
+            let _ = ctx
+                .actor::<FsCapability>()
+                .send_with_context(&read, &context);
         }
 
         if self.slot.is_some() {
@@ -188,34 +197,40 @@ impl WasmActor for BehaviorHost {
         });
     }
 
-    /// Load a script from an `aether.fs` namespace. Parks the requester's
-    /// reply target across the async read; `on_read_result` discharges it.
+    /// Load a script from an `aether.fs` namespace. Carries the requester's
+    /// reply target through the async read as a request context.
     #[allow(clippy::needless_pass_by_value)]
     #[handler::manual]
     fn on_load_script(&mut self, ctx: &mut WasmCtx<'_, Manual>, msg: LoadScript) {
-        self.enqueue_pending_load(
-            ctx.reply_target(),
-            msg.namespace.clone(),
-            msg.path.clone(),
-            ScriptSource::FsRef {
-                namespace: msg.namespace.clone(),
-                path: msg.path.clone(),
+        let read = Read {
+            namespace: msg.namespace.clone(),
+            path: msg.path.clone(),
+        };
+        let context = ScriptLoadContext {
+            reply: ctx.reply_target(),
+            origin: ScriptLoadOrigin::Runtime,
+            source: ScriptSource::FsRef {
+                namespace: msg.namespace,
+                path: msg.path,
             },
-        );
-        ctx.actor::<FsCapability>().read(&msg.namespace, &msg.path);
+        };
+        let _ = ctx
+            .actor::<FsCapability>()
+            .send_with_context(&read, &context);
     }
 
     /// The fs read reply for a `load_script` (or the boot `FsRef` fetch). Swaps
-    /// the script on `Ok`, keeps the prior on `Err`, and discharges the parked
-    /// `load_script_result` reply if one is pending.
+    /// the script on `Ok`, keeps the prior on `Err`, and recovers the parked
+    /// `load_script_result` reply from the request context when one is pending.
     #[handler::manual]
     fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Manual>, reply: ReadResult) {
-        let Some((result, reply)) = self.apply_read_result(reply, |host| {
-            host.try_prime(&*ctx.as_single());
-            host.offer_sentinel(&*ctx.as_single(), sentinel::ATTACH);
-        }) else {
+        let Some(context) = ctx.take_context::<ScriptLoadContext>() else {
             return;
         };
+        let (result, reply) = self.apply_read_result(reply, context, |host| {
+            host.try_prime(&*ctx.as_single());
+            host.offer_sentinel(&*ctx.as_single(), sentinel::ATTACH);
+        });
         if let Some(handle) = reply {
             ctx.reply_to(handle, &load_result(result));
         }
@@ -286,60 +301,21 @@ impl BehaviorHost {
         self.prime_pending = false;
     }
 
-    fn enqueue_pending_load(
-        &mut self,
-        reply: Option<ReplyHandle>,
-        namespace: String,
-        path: String,
-        source: ScriptSource,
-    ) {
-        self.pending_loads.push_back(PendingLoad {
-            reply,
-            namespace,
-            path,
-            source,
-        });
-    }
-
-    fn discharge_pending_load(&mut self, namespace: &str, path: &str) -> Option<PendingLoad> {
-        let position = self
-            .pending_loads
-            .iter()
-            .position(|pending| pending.namespace == namespace && pending.path == path)?;
-        self.pending_loads.remove(position)
-    }
-
     fn apply_read_result(
         &mut self,
         reply: ReadResult,
+        context: ScriptLoadContext,
         mut offer_attach: impl FnMut(&mut Self),
-    ) -> Option<(Result<u64, String>, Option<ReplyHandle>)> {
-        let (namespace, path, read) = match reply {
-            ReadResult::Ok {
-                namespace,
-                path,
-                bytes,
-            } => (namespace, path, Ok(bytes)),
-            ReadResult::Err {
-                namespace,
-                path,
-                error,
-            } => (
-                namespace,
-                path,
-                Err(alloc::format!("read failed: {error:?}")),
-            ),
+    ) -> (Result<u64, String>, Option<ReplyHandle>) {
+        let read = match reply {
+            ReadResult::Ok { bytes, .. } => Ok(bytes),
+            ReadResult::Err { error, .. } => Err(alloc::format!("read failed: {error:?}")),
         };
-        let Some(pending) = self.discharge_pending_load(&namespace, &path) else {
-            tracing::warn!(
-                target: "aether_behavior",
-                namespace,
-                path,
-                "load_script read reply did not match a pending load; dropping it",
-            );
-            return None;
-        };
-        let PendingLoad { reply, source, .. } = pending;
+        let ScriptLoadContext {
+            reply,
+            origin: _origin,
+            source,
+        } = context;
         let result = match read {
             Ok(bytes) => self.swap_script(&bytes),
             Err(error) => Err(error),
@@ -357,7 +333,7 @@ impl BehaviorHost {
                 );
             }
         }
-        Some((result, reply))
+        (result, reply)
     }
 
     fn apply_set_script(
@@ -671,6 +647,19 @@ mod tests {
         BehaviorHost::init(config(script), &mut init_ctx).expect("test setup: host inits")
     }
 
+    fn load_context(origin: ScriptLoadOrigin, namespace: &str, path: &str) -> ScriptLoadContext {
+        ScriptLoadContext {
+            reply: None,
+            origin,
+            source: fs_ref(namespace, path),
+        }
+    }
+
+    fn reply_handle(raw: u32) -> ReplyHandle {
+        aether_data::wire::from_bytes(&raw.to_le_bytes())
+            .expect("reply handle should decode from its scalar wire shape")
+    }
+
     fn attach_script() -> Vec<u8> {
         fixed_output_wasm(
             sentinel::ATTACH,
@@ -778,28 +767,21 @@ mod tests {
     fn read_result_success_primes_then_offers_attach_after_install() {
         let mut host = host(ScriptSource::None);
         host.wrapped_child = Some(MailboxId(0xC0FFEE));
-        host.enqueue_pending_load(
-            None,
-            "assets".to_string(),
-            "behavior.wasm".to_string(),
-            fs_ref("assets", "behavior.wasm"),
-        );
         let mut sink = RecordingSink::default();
         let mut reports = 0;
 
-        let (result, reply) = host
-            .apply_read_result(
-                ReadResult::Ok {
-                    namespace: "assets".to_string(),
-                    path: "behavior.wasm".to_string(),
-                    bytes: attach_script(),
-                },
-                |host| {
-                    drain_prime(host, &mut reports);
-                    host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH);
-                },
-            )
-            .expect("matching pending load should discharge");
+        let (result, reply) = host.apply_read_result(
+            ReadResult::Ok {
+                namespace: "assets".to_string(),
+                path: "behavior.wasm".to_string(),
+                bytes: attach_script(),
+            },
+            load_context(ScriptLoadOrigin::Boot, "assets", "behavior.wasm"),
+            |host| {
+                drain_prime(host, &mut reports);
+                host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH);
+            },
+        );
 
         assert!(matches!(result, Ok(_)));
         assert!(reply.is_none());
@@ -810,26 +792,28 @@ mod tests {
         assert_attach_offered(&sink);
     }
 
-    // Tripwire: an uncorrelated fs reply must not install its bytes. Otherwise
-    // a stale or foreign read_result can silently replace the running script.
+    // Tripwire: a runtime fs reply installs the script only through its explicit
+    // request context, not by matching echoed namespace/path fields.
     #[test]
-    fn unmatched_read_result_is_dropped_without_installing_script() {
+    fn read_result_uses_request_context_for_script_source() {
         let mut host = host(ScriptSource::None);
         let mut sink = RecordingSink::default();
 
-        let result = host.apply_read_result(
+        let (result, reply) = host.apply_read_result(
             ReadResult::Ok {
                 namespace: "assets".to_string(),
-                path: "orphan.wasm".to_string(),
+                path: "echoed.wasm".to_string(),
                 bytes: attach_script(),
             },
+            load_context(ScriptLoadOrigin::Runtime, "scripts", "actual.wasm"),
             |host| host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH),
         );
 
-        assert!(result.is_none());
-        assert!(host.slot.is_none());
-        assert!(matches!(host.script_source, ScriptSource::None));
-        assert!(sink.events.is_empty());
+        assert!(matches!(result, Ok(_)));
+        assert!(reply.is_none());
+        assert!(host.slot.is_some());
+        assert_eq!(host.script_source, fs_ref("scripts", "actual.wasm"));
+        assert_attach_offered(&sink);
     }
 
     // Tripwire: a runtime inline swap primes its mirror exactly once before
@@ -977,71 +961,39 @@ mod tests {
         assert!(sink.events.is_empty());
     }
 
-    // Tripwire: overlapping `load_script` requests correlate by the echoed
-    // `(namespace, path)`, so A's reply discharges A even if B was queued
-    // later. Otherwise B would receive A's bytes and A would be orphaned.
+    // Tripwire: a boot `FsRef` fetch and runtime `load_script` can target the
+    // same file while in flight; each reply must resolve by its request context,
+    // not by queue order or echoed fields.
     #[test]
-    fn discharge_pending_load_matches_oldest_entry_for_key() {
-        let mut host = host(ScriptSource::None);
-        host.enqueue_pending_load(
-            None,
-            "ns-a".to_string(),
-            "path-a".to_string(),
-            fs_ref("ns-a", "path-a"),
+    fn boot_and_runtime_same_path_loads_resolve_to_their_own_contexts() {
+        let mut host = host(fs_ref("assets", "behavior.wasm"));
+        let mut runtime_context =
+            load_context(ScriptLoadOrigin::Runtime, "assets", "behavior.wasm");
+        runtime_context.reply = Some(reply_handle(77));
+        let boot_context = load_context(ScriptLoadOrigin::Boot, "assets", "behavior.wasm");
+
+        let (runtime_result, runtime_reply) = host.apply_read_result(
+            ReadResult::Ok {
+                namespace: "assets".to_string(),
+                path: "behavior.wasm".to_string(),
+                bytes: attach_script(),
+            },
+            runtime_context,
+            |_| {},
         );
-        host.enqueue_pending_load(
-            None,
-            "ns-b".to_string(),
-            "path-b".to_string(),
-            fs_ref("ns-b", "path-b"),
+        assert!(matches!(runtime_result, Ok(_)));
+        assert_eq!(runtime_reply.map(ReplyHandle::raw), Some(77));
+
+        let (boot_result, boot_reply) = host.apply_read_result(
+            ReadResult::Ok {
+                namespace: "assets".to_string(),
+                path: "behavior.wasm".to_string(),
+                bytes: attach_script(),
+            },
+            boot_context,
+            |_| {},
         );
-
-        let discharged = host
-            .discharge_pending_load("ns-a", "path-a")
-            .expect("entry A should discharge");
-
-        assert_eq!(discharged.namespace, "ns-a");
-        assert_eq!(discharged.path, "path-a");
-        assert_eq!(host.pending_loads.len(), 1);
-        let remaining = host
-            .pending_loads
-            .front()
-            .expect("entry B should remain queued");
-        assert_eq!(remaining.namespace, "ns-b");
-        assert_eq!(remaining.path, "path-b");
-    }
-
-    // Tripwire: a boot `FsRef` fetch shares the same pending queue, so its
-    // reply discharges only the boot entry and leaves an unrelated runtime
-    // `load_script` reply target parked.
-    #[test]
-    fn discharge_pending_load_keeps_runtime_load_parked_on_boot_reply() {
-        let mut host = host(fs_ref("boot", "boot.wasm"));
-        host.enqueue_pending_load(
-            None,
-            "boot".to_string(),
-            "boot.wasm".to_string(),
-            fs_ref("boot", "boot.wasm"),
-        );
-        host.enqueue_pending_load(
-            None,
-            "runtime".to_string(),
-            "next.wasm".to_string(),
-            fs_ref("runtime", "next.wasm"),
-        );
-
-        let discharged = host
-            .discharge_pending_load("boot", "boot.wasm")
-            .expect("boot entry should discharge");
-
-        assert_eq!(discharged.namespace, "boot");
-        assert_eq!(discharged.path, "boot.wasm");
-        assert_eq!(host.pending_loads.len(), 1);
-        let remaining = host
-            .pending_loads
-            .front()
-            .expect("runtime load should stay queued");
-        assert_eq!(remaining.namespace, "runtime");
-        assert_eq!(remaining.path, "next.wasm");
+        assert!(matches!(boot_result, Ok(_)));
+        assert!(boot_reply.is_none());
     }
 }

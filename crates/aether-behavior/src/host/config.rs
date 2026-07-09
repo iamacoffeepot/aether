@@ -103,7 +103,7 @@ impl HostConfig {
 
 /// `aether.behavior.load_script` — swap the running script for one fetched
 /// from an `aether.fs` namespace. Replies `LoadScriptResult` once the read
-/// settles (parked reply, ADR-0041 correlation by echoed namespace/path).
+/// settles through the behavior host's request context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Kind, Schema)]
 #[kind(name = "aether.behavior.load_script")]
 pub struct LoadScript {
