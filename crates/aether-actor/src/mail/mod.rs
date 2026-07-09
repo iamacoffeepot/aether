@@ -22,7 +22,11 @@ pub mod mailbox;
 
 use core::marker::PhantomData;
 
-use aether_data::{Kind, KindId, MailboxId, Schema, wire};
+use aether_data::{
+    Kind, KindId, MailboxId, Schema,
+    schema::{LabelNode, SchemaType},
+    wire,
+};
 
 /// Sentinel the substrate passes as the reply-handle parameter on
 /// the `receive` shim when there is no reply target — for
@@ -67,6 +71,26 @@ impl ReplyHandle {
     pub fn raw(self) -> u32 {
         self.raw
     }
+}
+
+impl serde::Serialize for ReplyHandle {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.raw)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ReplyHandle {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self {
+            raw: <u32 as serde::Deserialize>::deserialize(deserializer)?,
+        })
+    }
+}
+
+impl Schema for ReplyHandle {
+    const SCHEMA: SchemaType = <u32 as Schema>::SCHEMA;
+    const LABEL: Option<&'static str> = <u32 as Schema>::LABEL;
+    const LABEL_NODE: LabelNode = <u32 as Schema>::LABEL_NODE;
 }
 
 /// Inbound mail, as received by the `#[actor]`-synthesized
@@ -419,6 +443,25 @@ mod tests {
             .reply_handle()
             .expect("non-sentinel handle yields Some");
         assert_eq!(s.raw(), 42);
+    }
+
+    #[test]
+    fn reply_handle_wire_shape_is_raw_u32() {
+        // SAFETY: no pointer is dereferenced; we only inspect `sender`.
+        let handle = unsafe { Mail::__from_ptr(0, 0, 0, 0, 42, 0) }
+            .reply_handle()
+            .expect("non-sentinel handle yields Some");
+
+        assert_eq!(
+            <ReplyHandle as Schema>::SCHEMA,
+            <u32 as Schema>::SCHEMA,
+            "request-context schemas should see ReplyHandle as its opaque scalar handle"
+        );
+
+        let bytes = wire::to_vec(&handle).expect("reply handle wire-encodes");
+        assert_eq!(bytes, 42u32.to_le_bytes());
+        let decoded: ReplyHandle = wire::from_bytes(&bytes).expect("reply handle wire-decodes");
+        assert_eq!(decoded.raw(), 42);
     }
 
     #[test]
