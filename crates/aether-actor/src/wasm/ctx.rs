@@ -1681,7 +1681,12 @@ mod tests {
     /// spawn test proves `config_bytes` were decoded and handed to `init`
     /// (rather than dropped or replaced with an empty default).
     #[derive(
-        ::aether_data::Kind, ::aether_data::Schema, serde::Serialize, serde::Deserialize, Debug,
+        ::aether_data::Kind,
+        ::aether_data::Schema,
+        serde::Serialize,
+        serde::Deserialize,
+        Debug,
+        Default,
     )]
     #[kind(name = "test.inline.stub_config")]
     struct StubConfig {

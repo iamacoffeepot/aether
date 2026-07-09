@@ -31,8 +31,8 @@
 //!
 //! [`ControllerConfig`] (init-config, ADR-0090) selects the target camera
 //! name, the mode, and the per-tick rates and clamps — control-scheme
-//! variation is config, not code. The controller must be loaded *with* config
-//! bytes; there is no bare-load default instance.
+//! variation is config, not code. A bare load boots
+//! [`ControllerConfig::default()`].
 //!
 //! # Mail surface
 //!

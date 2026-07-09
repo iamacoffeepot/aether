@@ -1,19 +1,11 @@
 //! ADR-0090 c1 (issue 1256) integration coverage for the typed
 //! `WasmActor::Config` path. Loads the `ProbeWithConfig` actor from the
 //! `probe` bundle (issue 1994, ADR-0096) via `export: Some("test.probe_with_config")`
-//! through a [`TestBench`] and asserts the wasm guest's
-//! `init_with_config_p32` decode-error surfaces in `LoadResult::Err` when the
-//! load mail carries no config bytes — c1 wires the host probe and
-//! the guest shim but does not yet thread real config bytes through
-//! the load mail (that is c2). The negative path is the load-bearing
-//! evidence here: a typed-config guest reaching a substrate that
-//! still passes `&[]` MUST fail loudly with a decode error, not load
-//! silently with garbage state.
-//!
-//! c2 (issue 1257) lands the delivery seam: the load mail now carries
-//! `config` bytes threaded through `Component::instantiate`, so the
-//! companion positive test (`..._with_config_bytes_round_trips`) runs
-//! unconditionally — the parked `AETHER_CONFIG_C2` gate is retired.
+//! through a [`TestBench`] and asserts the wasm guest's config init path
+//! handles both empty and explicit config bytes. Issue 2878 changed the empty
+//! path from "decode error" to "boot from `Config::default()`"; the encoded
+//! config path still proves the load mail's `config` bytes reach
+//! `Component::instantiate` and the guest's init shim.
 
 #![allow(clippy::print_stderr)]
 
@@ -32,49 +24,65 @@ use std::fs;
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
-/// Until c2 threads config bytes through the load mail, a load against
-/// a typed-config fixture (`Config = ProbeConfig`) MUST surface a
-/// decode error rather than booting with default-initialised state.
-/// This test pins that contract — a regression here means a host
-/// running a typed-config guest could silently run with corrupt
-/// config.
+/// Issue 2878: an empty config byte slice resolves guest-side to
+/// `ProbeConfig::default()` instead of failing decode.
 #[test]
-fn typed_config_guest_without_config_bytes_surfaces_decode_error() {
+fn typed_config_guest_without_config_bytes_uses_default() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read::<&Path>(wasm_path.as_ref()).expect("read fixture wasm");
 
-    let loaded = bench
-        .execute(vec![(
-            "load",
-            BenchOp::send_and_await(
-                ComponentHostCapability::NAMESPACE,
-                &LoadComponent {
-                    wasm,
-                    name: Some("probe_with_config".to_owned()),
-                    config: Vec::new(),
-                    export: Some("test.probe_with_config".to_owned()),
-                },
+    let report = bench
+        .execute(vec![
+            (
+                "load",
+                BenchOp::send_and_await(
+                    ComponentHostCapability::NAMESPACE,
+                    &LoadComponent {
+                        wasm,
+                        name: Some("probe_with_config".to_owned()),
+                        config: Vec::new(),
+                        export: Some("test.probe_with_config".to_owned()),
+                    },
+                ),
             ),
-        )])
+            (
+                "echo",
+                BenchOp::send_and_await(
+                    format!(
+                        "aether.component/{}:probe_with_config",
+                        aether_capabilities::WasmTrampoline::NAMESPACE
+                    ),
+                    &ConfigQuery,
+                ),
+            ),
+        ])
         .expect("load sequence");
-    let result = loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult");
 
-    match result {
-        LoadResult::Err { error } => {
-            assert!(
-                error.contains("Config") || error.contains("decode") || error.contains("init"),
-                "expected the LoadResult::Err message to mention the config decode failure; got: {error}",
-            );
+    match report
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        LoadResult::Ok { capabilities, .. } => {
+            let cfg = capabilities
+                .config
+                .expect("typed-config component advertises its config kind");
+            assert_eq!(cfg.id, <ProbeConfig as Kind>::ID);
+            assert_eq!(cfg.name, <ProbeConfig as Kind>::NAME);
         }
-        LoadResult::Ok { .. } => {
-            panic!("typed-config guest loaded with no config bytes; expected a decode-error path")
+        LoadResult::Err { error } => {
+            panic!("typed-config guest without config bytes failed to load: {error}")
         }
     }
+
+    let echo = report
+        .reply::<ConfigEcho>("echo")
+        .expect("decode ConfigEcho");
+    let expected = ProbeConfig::default();
+    assert_eq!(echo.seed, expected.seed, "default seed reaches init");
+    assert_eq!(echo.label, expected.label, "default label reaches init");
 }
 
 /// ADR-0090 c2 (issue 1257) positive path: load the typed-config
