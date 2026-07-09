@@ -41,12 +41,13 @@ use aether_data::{EnumVariant, Primitive, SchemaType};
 use aether_kinds::{
     BinarySelector, CaptureFrame, CaptureFrameResult, ComponentCapabilities, ComponentSelector,
     CostTail, CostTailResult, DeathReason, DescribeComponent, DescribeComponentResult, FrameCheck,
-    FrameRect, FrameReduction, ListComponentBinaries, ListComponentBinariesResult, ListComponents,
-    ListComponentsResult, ListEngineBinaries, ListEngineBinariesResult, ListEngines,
-    ListEnginesResult, ListKinds, ListKindsResult, LoadComponent, LoadResult, NamedMail,
-    ReplaceComponent, ReplaceResult, ResolveComponent, ResolveComponentResult, SimilarityCheck,
-    SpawnEngine, SpawnEngineResult, TerminateEngine, TerminateEngineResult, UploadBinary,
-    UploadBinaryResult, UploadComponent, UploadComponentResult,
+    FrameRect, FrameReduction, KindDescriptorWire, ListComponentBinaries,
+    ListComponentBinariesResult, ListComponents, ListComponentsResult, ListEngineBinaries,
+    ListEngineBinariesResult, ListEngines, ListEnginesResult, ListKinds, ListKindsResult,
+    LoadComponent, LoadResult, NamedMail, ReplaceComponent, ReplaceResult, ResolveComponent,
+    ResolveComponentResult, SimilarityCheck, SpawnEngine, SpawnEngineResult, TerminateEngine,
+    TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent,
+    UploadComponentResult,
     trace::{
         DescribeTreeResult, DispatchTraced, DispatchTracedAck, MailNodeWire, TRACE_MAILBOX_NAME,
         TraceTail, TraceTailResult,
@@ -234,7 +235,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Fork+exec a substrate binary as a child of the hub, resolved from the hub's content-addressed binary store (ADR-0115) — not a host path. Pass `selector` to pick the binary: a content `hash`, a `name@version`, or a `name` (upload_binary first if it isn't stored). Omit `selector` for `default` — the headless chassis — so a bare spawn_substrate with no arguments returns a working engine. When `selector` is omitted you may instead attribute-query with `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (linked-cap superset), and `target` (build triple). The hub resolves the selector to the stored bytes, materializes them to an executable temp file, assigns a free localhost RPC port (injected as AETHER_RPC_PORT), forks it, and connects a proxy. Returns the engine_id and rpc_port on success; errors if the selector resolves to no stored binary or the substrate fails to come up. A spawn that fails after the hub allocated an engine_id carries that id in the error (and records a matching spawn_failed entry in list_engines.recently_died), so you can correlate and reap rather than guess. Pass `components` (each {selector, name?, config_path?, export?, replicas?}) to bring the engine up with those components already loaded in one call — each selector is a content hash, name, or module@actor resolved against the hub's component registry (ADR-0116; upload_component first). aether-mcp pre-resolves each selector to its wasm bytes, stages a temp boot-manifest the hub injects as AETHER_BOOT_MANIFEST, and the spawned substrate reads the staged wasm itself (single-host), so no follow-up load_component is needed. Set replicas: N on an entry (issue 2626) to fan it out into N instances at boot from one spec, one shared config — each named {base}-{index} for index in 0..N (base = name > export > entry actor namespace) — and the readiness wait gates on every instance; pairs with #[router(shared)] (ADR-0136) to scale an HTTP handler to N instances with no hand-named entries. replicas: 0 is a tool error."
+        description = "Fork+exec a substrate binary as a child of the hub, resolved from the hub's content-addressed binary store (ADR-0115) — not a host path. Pass `selector` to pick the binary: a content `hash`, a `name@version`, or a `name` (upload_binary first if it isn't stored). Omit `selector` for `default` — the headless chassis — so a bare spawn_substrate with no arguments returns a working engine. When `selector` is omitted you may instead attribute-query with `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (linked-cap superset), and `target` (build triple). The hub resolves the selector to the stored bytes, materializes them to an executable temp file, assigns a free localhost RPC port (injected as AETHER_RPC_PORT), forks it, and connects a proxy. Returns the engine_id and rpc_port on success; errors if the selector resolves to no stored binary or the substrate fails to come up. A spawn that fails after the hub allocated an engine_id carries that id in the error (and records a matching spawn_failed entry in list_engines.recently_died), so you can correlate and reap rather than guess. Pass `components` (each {selector, name?, config?, config_path?, export?, replicas?}) to bring the engine up with those components already loaded in one call — each selector is a content hash, name, or module@actor resolved against the hub's component registry (ADR-0116; upload_component first). `config` is inline JSON and `config_path` is a JSON file path; aether-mcp schema-encodes either one to the component's Config kind, stages the resulting bytes next to the staged wasm, and writes a boot-manifest the hub injects as AETHER_BOOT_MANIFEST. The spawned substrate reads the staged wasm/config byte files itself (single-host), so no follow-up load_component is needed. Set replicas: N on an entry (issue 2626) to fan it out into N instances at boot from one spec, one shared config — each named {base}-{index} for index in 0..N (base = name > export > entry actor namespace) — and the readiness wait gates on every instance; pairs with #[router(shared)] (ADR-0136) to scale an HTTP handler to N instances with no hand-named entries. replicas: 0 is a tool error."
     )]
     pub async fn spawn_substrate(
         &self,
@@ -730,28 +731,26 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Load a WASM component into a substrate by registry selector (ADR-0116) — upload_component first if it isn't stored. Pass `selector`: a content hash, a name (latest upload under it), or a module@actor (the @actor half picks an exported actor type from a multi-actor module). The host wasm path is gone — the only path anywhere is the upload_component input. aether-mcp resolves the selector hub-local to the wasm bytes, forwards aether.component.load to the engine's aether.component mailbox, and awaits the LoadResult — returning {mailbox_id, name, capabilities} or an error. The component's kind vocabulary rides in the wasm's aether.kinds custom section. Pass config_path to deliver init-config bytes to a typed-config component (ADR-0090): the file must already hold the component's Config kind wire bytes — describe_component reports the expected config kind. Pass export to pick which exported actor type to instantiate from a multi-actor module (ADR-0096), named by its Actor::NAMESPACE; a module@actor selector populates it from its @actor half; omit both to load the module's entry type (the first in its export! list, and the only type a single-actor module has). The returned name + capabilities describe the selected type. Pass replicas: N (issue 2626) to load N instances of this selector in one call — each named {base}-{index} (base = name > export > entry actor namespace) — returning {\"components\": [{mailbox_id, name, capabilities}, ...]} instead of the single-load shape; pairs with #[router(shared)] (ADR-0136) to scale an HTTP handler to N instances with no hand-written registration. A mid-loop failure reports which replica failed and how many loaded before it — already-loaded replicas stay live, the same as N manual calls. replicas: 0 is a tool error. Very large wasm payloads (debug builds at 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
+        description = "Load a WASM component into a substrate by registry selector (ADR-0116) — upload_component first if it isn't stored. Pass `selector`: a content hash, a name (latest upload under it), or a module@actor (the @actor half picks an exported actor type from a multi-actor module). The host wasm path is gone — the only path anywhere is the upload_component input. aether-mcp resolves the selector hub-local to the wasm bytes, forwards aether.component.load to the engine's aether.component mailbox, and awaits the LoadResult — returning {mailbox_id, name, capabilities} or an error. The component's kind vocabulary rides in the wasm's aether.kinds custom section. Pass config (inline JSON) or config_path (path to a JSON file) to deliver init-config to a typed-config component (ADR-0090): aether-mcp schema-encodes the JSON to the component's Config kind before forwarding bytes — describe_component reports the expected config kind. Pass export to pick which exported actor type to instantiate from a multi-actor module (ADR-0096), named by its Actor::NAMESPACE; a module@actor selector populates it from its @actor half; omit both to load the module's entry type (the first in its export! list, and the only type a single-actor module has). The returned name + capabilities describe the selected type. Pass replicas: N (issue 2626) to load N instances of this selector in one call — each named {base}-{index} (base = name > export > entry actor namespace) — returning {\"components\": [{mailbox_id, name, capabilities}, ...]} instead of the single-load shape; pairs with #[router(shared)] (ADR-0136) to scale an HTTP handler to N instances with no hand-written registration. A mid-loop failure reports which replica failed and how many loaded before it — already-loaded replicas stay live, the same as N manual calls. replicas: 0 is a tool error. Very large wasm payloads (debug builds at 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
     )]
     pub async fn load_component(
         &self,
         Parameters(args): Parameters<LoadComponentArgs>,
     ) -> Result<String, McpError> {
         let engine = parse_engine_id(&args.engine_id)?;
-        let selector = args.selector.clone();
+        let selector = selector_with_explicit_export(&args.selector, args.export.as_deref());
         reject_zero_replicas(args.replicas, &selector)?;
         // ADR-0116: resolve the selector hub-local to the wasm bytes; a
         // `module@actor` selector's `@actor` half rides back as `export`.
         let resolved = self.resolve_component(&selector).await?;
-        // ADR-0090 (issue 1257): read optional init-config bytes from a
-        // file path (already encoded to the component's `Config` kind
-        // wire shape). Absent → empty vec → the substrate hands `&[]` to
-        // a `Config = ()` guest's `init`.
-        let config = match args.config_path {
-            Some(ref path) => fs::read(path).await.map_err(|e| {
-                McpError::invalid_params(format!("reading config_path {path:?}: {e}"), None)
-            })?,
-            None => Vec::new(),
-        };
+        let config = component_config_bytes(
+            resolved.config_kind.as_ref(),
+            args.config,
+            args.config_path.as_deref(),
+            &format!("load_component {selector:?}"),
+        )
+        .await?
+        .unwrap_or_default();
         // An explicit `export` arg wins over the selector's `@actor` half.
         let export = args.export.or(resolved.export);
 
@@ -862,7 +861,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Atomically replace a live component's WASM with a build resolved from a registry selector (ADR-0022 structural splice; ADR-0116 selector). Pass `selector` (hash-primary — a hash pins or rolls the component to an exact build; a name or module@actor resolves too); the host wasm path is gone, surviving only as the upload_component input. aether-mcp resolves the selector hub-local to the wasm bytes and forwards aether.component.replace to the engine's aether.component mailbox. drain_timeout_ms is accepted for wire compatibility but currently ignored. Pass export to instantiate a specific exported actor type from a multi-actor replacement module (ADR-0096), named by its Actor::NAMESPACE; a module@actor selector populates it from its @actor half. Omit export to reuse the actor type the trampoline currently hosts — not necessarily the module entry — preserving today's replace behaviour; an export the replacement module doesn't declare comes back as an error. Returns the replaced component's advertised capabilities. Very large wasm payloads (debug builds at 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
+        description = "Atomically replace a live component's WASM with a build resolved from a registry selector (ADR-0022 structural splice; ADR-0116 selector). Pass `selector` (hash-primary — a hash pins or rolls a component to an exact build; a name or module@actor resolves too); the host wasm path is gone, surviving only as the upload_component input. aether-mcp resolves the selector hub-local to the wasm bytes and forwards aether.component.replace to the engine's aether.component mailbox. drain_timeout_ms is accepted for wire compatibility but currently ignored. Pass config (inline JSON) or config_path (path to a JSON file) to deliver init-config to a typed-config replacement; aether-mcp schema-encodes the JSON to the replacement component's Config kind before forwarding bytes. Pass export to instantiate a specific exported actor type from a multi-actor replacement module (ADR-0096), named by its Actor::NAMESPACE; a module@actor selector populates it from its @actor half. Omit export to reuse the actor type the trampoline currently hosts — not necessarily the module entry — preserving today's replace behaviour; an export the replacement module doesn't declare comes back as an error. Returns the replaced component's advertised capabilities. Very large wasm payloads (debug builds at 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
     )]
     pub async fn replace_component(
         &self,
@@ -870,18 +869,18 @@ impl Mcp {
     ) -> Result<String, McpError> {
         let engine = parse_engine_id(&args.engine_id)?;
         let mailbox_id = parse_mailbox_id(&args.mailbox_id)?;
-        let selector = args.selector.clone();
+        let selector = selector_with_explicit_export(&args.selector, args.export.as_deref());
         // ADR-0116: resolve the selector hub-local to the replacement wasm
         // bytes (hash-primary, so a hash pins/rolls to an exact build).
         let resolved = self.resolve_component(&selector).await?;
-        // ADR-0090 (issue 1257): optional init-config bytes for the
-        // replacement instance, read from a file path like the load path.
-        let config = match args.config_path {
-            Some(ref path) => fs::read(path).await.map_err(|e| {
-                McpError::invalid_params(format!("reading config_path {path:?}: {e}"), None)
-            })?,
-            None => Vec::new(),
-        };
+        let config = component_config_bytes(
+            resolved.config_kind.as_ref(),
+            args.config,
+            args.config_path.as_deref(),
+            &format!("replace_component {selector:?}"),
+        )
+        .await?
+        .unwrap_or_default();
         // ADR-0096: an explicit `export` arg wins over the selector's
         // `@actor` half; `None` reuses the actor type the trampoline
         // currently hosts.
@@ -1403,6 +1402,7 @@ impl Mcp {
                 wasm,
                 export,
                 manifest,
+                config_kind,
                 ..
             }) => {
                 // ADR-0138: the bare-load entry is the manifest's opted-in
@@ -1416,6 +1416,7 @@ impl Mcp {
                     wasm,
                     export,
                     entry_namespace,
+                    config_kind,
                 })
             }
             Some(ResolveComponentResult::Err { error }) => Err(internal_msg(&error)),
@@ -1444,26 +1445,44 @@ impl Mcp {
         static SEQ: AtomicU64 = AtomicU64::new(0);
 
         let mut wasm_paths: Vec<PathBuf> = Vec::with_capacity(components.len());
+        let mut config_paths: Vec<PathBuf> = Vec::new();
         let mut entries: Vec<serde_json::Value> = Vec::with_capacity(components.len());
         let mut expected_names: Vec<String> = Vec::with_capacity(components.len());
         for spec in components {
             reject_zero_replicas(spec.replicas, &spec.selector)?;
-            let resolved = self.resolve_component(&spec.selector).await?;
+            let resolve_selector =
+                selector_with_explicit_export(&spec.selector, spec.export.as_deref());
+            let resolved = self.resolve_component(&resolve_selector).await?;
             let seq = SEQ.fetch_add(1, Ordering::Relaxed);
             let wasm_path =
                 env::temp_dir().join(format!("aether-boot-wasm-{}-{seq}.wasm", process::id()));
             fs::write(&wasm_path, &resolved.wasm).await.map_err(|e| {
                 internal_msg(&format!(
-                    "staging boot wasm for selector {:?}: {e}",
-                    spec.selector
+                    "staging boot wasm for selector {resolve_selector:?}: {e}"
                 ))
             })?;
             let mut entry = serde_json::json!({ "wasm": wasm_path.to_string_lossy() });
             if let Some(name) = &spec.name {
                 entry["name"] = serde_json::json!(name);
             }
-            if let Some(config) = &spec.config_path {
-                entry["config"] = serde_json::json!(config);
+            if let Some(config) = component_config_bytes(
+                resolved.config_kind.as_ref(),
+                spec.config.clone(),
+                spec.config_path.as_deref(),
+                &format!("spawn_substrate component {resolve_selector:?}"),
+            )
+            .await?
+            {
+                let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+                let config_path =
+                    env::temp_dir().join(format!("aether-boot-config-{}-{seq}.bin", process::id()));
+                fs::write(&config_path, config).await.map_err(|e| {
+                    internal_msg(&format!(
+                        "staging boot config for selector {resolve_selector:?}: {e}"
+                    ))
+                })?;
+                entry["config"] = serde_json::json!(config_path.to_string_lossy());
+                config_paths.push(config_path);
             }
             // An explicit `export` wins over the selector's `@actor` half.
             let export = spec.export.clone().or_else(|| resolved.export.clone());
@@ -1516,6 +1535,7 @@ impl Mcp {
         Ok(StagedBootManifest {
             manifest_path,
             wasm_paths,
+            config_paths,
             expected_names,
         })
     }
@@ -2059,6 +2079,7 @@ struct ResolvedComponent {
     wasm: Vec<u8>,
     export: Option<String>,
     entry_namespace: Option<String>,
+    config_kind: Option<KindDescriptorWire>,
 }
 
 /// The temp files a `stage_boot_manifest` wrote (ADR-0116): the
@@ -2072,6 +2093,7 @@ struct ResolvedComponent {
 struct StagedBootManifest {
     manifest_path: PathBuf,
     wasm_paths: Vec<PathBuf>,
+    config_paths: Vec<PathBuf>,
     expected_names: Vec<String>,
 }
 
@@ -2084,7 +2106,79 @@ impl StagedBootManifest {
         for path in &self.wasm_paths {
             let _ = fs::remove_file(path).await;
         }
+        for path in &self.config_paths {
+            let _ = fs::remove_file(path).await;
+        }
     }
+}
+
+/// Resolve an optional component init-config source (`config` inline JSON or
+/// `config_path` JSON file) and schema-encode it to the component's declared
+/// Config kind. No source returns `None`; a source for a no-config component is
+/// a tool error.
+async fn component_config_bytes(
+    config_kind: Option<&KindDescriptorWire>,
+    config: Option<serde_json::Value>,
+    config_path: Option<&str>,
+    context: &str,
+) -> Result<Option<Vec<u8>>, McpError> {
+    let value = match (config, config_path) {
+        (None, None) => return Ok(None),
+        (Some(_), Some(_)) => {
+            return Err(McpError::invalid_params(
+                format!("{context}: set only one of `config` or `config_path`"),
+                None,
+            ));
+        }
+        (Some(value), None) => value,
+        (None, Some(path)) => {
+            let bytes = fs::read(path).await.map_err(|e| {
+                McpError::invalid_params(
+                    format!("{context}: reading config_path {path:?}: {e}"),
+                    None,
+                )
+            })?;
+            serde_json::from_slice(&bytes).map_err(|e| {
+                McpError::invalid_params(
+                    format!("{context}: parsing config_path {path:?} as JSON: {e}"),
+                    None,
+                )
+            })?
+        }
+    };
+
+    let Some(config_kind) = config_kind else {
+        return Err(McpError::invalid_params(
+            format!(
+                "{context}: config JSON was provided but the component declares no Config kind"
+            ),
+            None,
+        ));
+    };
+    let schema = wire::from_bytes::<SchemaType>(&config_kind.schema_wire).map_err(|e| {
+        internal_msg(&format!(
+            "{context}: decoding config schema for {}: {e}",
+            config_kind.name
+        ))
+    })?;
+    let resolved = resolve_bytes_params(value, &schema, max_frame_size())
+        .await
+        .map_err(|e| {
+            McpError::invalid_params(
+                format!(
+                    "{context}: resolving config blob params for {}: {e}",
+                    config_kind.name
+                ),
+                None,
+            )
+        })?;
+    let bytes = aether_codec::encode_schema(&resolved, &schema).map_err(|e| {
+        McpError::invalid_params(
+            format!("{context}: config does not match {}: {e}", config_kind.name),
+            None,
+        )
+    })?;
+    Ok(Some(bytes))
 }
 
 /// Return `true` once every name in `want` is present in `actual`.
@@ -2094,6 +2188,20 @@ impl StagedBootManifest {
 /// count while a requested component is still absent.
 fn components_all_loaded(want: &[String], actual: &[String]) -> bool {
     want.iter().all(|w| actual.iter().any(|a| a == w))
+}
+
+/// Fold an explicit `export` argument into the hub-local component resolve
+/// selector so the resolve reply's config descriptor matches the actor type
+/// that will instantiate. If the selector already carries `module@actor`, the
+/// explicit export wins by replacing the actor half.
+fn selector_with_explicit_export(selector: &str, export: Option<&str>) -> String {
+    let Some(export) = export else {
+        return selector.to_owned();
+    };
+    let module = selector
+        .split_once('@')
+        .map_or(selector, |(module, _)| module);
+    format!("{module}@{export}")
 }
 
 /// Resolve the base name a `replicas` fan-out derives its `{base}-{index}`
@@ -3198,6 +3306,33 @@ mod tests {
         }
     }
 
+    /// Small typed-config-shaped schema for component config encoding tests.
+    fn config_struct_schema() -> SchemaType {
+        use aether_data::NamedField;
+        SchemaType::Struct {
+            fields: vec![
+                NamedField {
+                    name: "seed".into(),
+                    ty: SchemaType::Scalar(Primitive::U32),
+                },
+                NamedField {
+                    name: "label".into(),
+                    ty: SchemaType::String,
+                },
+            ]
+            .into(),
+            repr_c: false,
+        }
+    }
+
+    fn config_kind(schema: &SchemaType) -> KindDescriptorWire {
+        KindDescriptorWire {
+            id: KindId(kind_id_from_parts("test.config", schema)),
+            name: "test.config".to_owned(),
+            schema_wire: wire::to_vec(schema).expect("SchemaType wire-encodes"),
+        }
+    }
+
     /// Write `bytes` to a unique temp file for the `$file` embed tests.
     /// The `std_env` / `std_fs` aliases avoid shadowing the module's
     /// `tokio::fs`.
@@ -3310,6 +3445,97 @@ mod tests {
         .await
         .expect("nested Bytes resolves");
         assert_eq!(out, serde_json::json!({"blob": [104, 105]}));
+    }
+
+    #[tokio::test]
+    async fn component_config_inline_json_encodes_to_schema_bytes() {
+        let schema = config_struct_schema();
+        let kind = config_kind(&schema);
+        let bytes = component_config_bytes(
+            Some(&kind),
+            Some(serde_json::json!({"seed": 7, "label": "demo"})),
+            None,
+            "test",
+        )
+        .await
+        .expect("config encodes")
+        .expect("source present");
+        let decoded = aether_codec::decode_schema(&bytes, &schema).expect("config decodes");
+        assert_eq!(decoded, serde_json::json!({"seed": 7, "label": "demo"}));
+    }
+
+    #[tokio::test]
+    async fn component_config_path_is_json_and_encodes() {
+        let path = stage_blob_file("config-json", br#"{"seed":9,"label":"from-file"}"#);
+        let schema = config_struct_schema();
+        let kind = config_kind(&schema);
+        let bytes = component_config_bytes(
+            Some(&kind),
+            None,
+            Some(path.to_str().expect("utf-8 temp path")),
+            "test",
+        )
+        .await
+        .expect("config_path JSON encodes")
+        .expect("source present");
+        let decoded = aether_codec::decode_schema(&bytes, &schema).expect("config decodes");
+        assert_eq!(
+            decoded,
+            serde_json::json!({"seed": 9, "label": "from-file"})
+        );
+        std_fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn component_config_rejects_both_sources() {
+        let schema = config_struct_schema();
+        let kind = config_kind(&schema);
+        let err = component_config_bytes(
+            Some(&kind),
+            Some(serde_json::json!({"seed": 7, "label": "demo"})),
+            Some("/tmp/ignored.json"),
+            "test",
+        )
+        .await
+        .expect_err("both config sources must be rejected");
+        assert!(
+            err.to_string().contains("set only one"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn component_config_rejects_no_config_component() {
+        let err = component_config_bytes(
+            None,
+            Some(serde_json::json!({"seed": 7, "label": "demo"})),
+            None,
+            "test",
+        )
+        .await
+        .expect_err("config for no-config component must be rejected");
+        assert!(
+            err.to_string().contains("declares no Config kind"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn component_config_field_mismatch_is_invalid_params() {
+        let schema = config_struct_schema();
+        let kind = config_kind(&schema);
+        let err = component_config_bytes(
+            Some(&kind),
+            Some(serde_json::json!({"seed": 7, "label": "demo", "extra": true})),
+            None,
+            "test",
+        )
+        .await
+        .expect_err("field mismatch must be rejected");
+        assert!(
+            err.to_string().contains("does not match"),
+            "unexpected error: {err}"
+        );
     }
 
     /// A spill threshold so high nothing in these projection tests trips it —
@@ -3856,6 +4082,7 @@ mod tests {
                 components: vec![ComponentSpec {
                     selector: "no-such-component".to_owned(),
                     name: None,
+                    config: None,
                     config_path: None,
                     export: None,
                     replicas: None,
@@ -3886,6 +4113,7 @@ mod tests {
                 components: vec![ComponentSpec {
                     selector: "irrelevant".to_owned(),
                     name: None,
+                    config: None,
                     config_path: None,
                     export: None,
                     replicas: Some(0),
@@ -4263,6 +4491,7 @@ mod tests {
                 engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
                 selector: "no-such-component".to_owned(),
                 name: None,
+                config: None,
                 config_path: None,
                 export: None,
                 replicas: None,
@@ -4286,6 +4515,7 @@ mod tests {
                 engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
                 selector: "irrelevant".to_owned(),
                 name: None,
+                config: None,
                 config_path: None,
                 export: None,
                 replicas: Some(0),
@@ -4309,6 +4539,7 @@ mod tests {
                 mailbox_id: "not-a-tagged-id".to_owned(),
                 selector: "any-selector".to_owned(),
                 drain_timeout_ms: None,
+                config: None,
                 config_path: None,
                 export: None,
             }))

@@ -17,11 +17,12 @@ mod tests {
 
     use aether_actor::Addressable;
     use aether_capabilities::WasmTrampoline;
-    use aether_data::Kind;
+    use aether_data::{Kind, Schema, SchemaType, wire};
     use aether_kinds::{
         ComponentSelector, ListComponentBinaries, LogTailResult, ResolveComponentResult, Tick,
         UploadComponentResult,
     };
+    use aether_test_fixtures_kinds::ProbeConfig;
 
     use crate::fleetbench::{
         FleetBench, allocate_store_root_for_test, component_wasm_path, dist_component_available,
@@ -233,6 +234,39 @@ mod tests {
             hash,
             "the handled-kind attribute selector resolves to the probe hash",
         );
+
+        let default_resolve = bench.resolve_component(ComponentSelector {
+            query: Some("probe".to_owned()),
+            namespace: None,
+            handled_kind: None,
+        });
+        match default_resolve {
+            ResolveComponentResult::Ok { config_kind, .. } => {
+                assert!(
+                    config_kind.is_none(),
+                    "the default probe export has no typed config"
+                );
+            }
+            ResolveComponentResult::Err { error } => panic!("resolve failed: {error}"),
+        }
+
+        let typed_resolve = bench.resolve_component(ComponentSelector {
+            query: Some("probe@test.probe_with_config".to_owned()),
+            namespace: None,
+            handled_kind: None,
+        });
+        match typed_resolve {
+            ResolveComponentResult::Ok { config_kind, .. } => {
+                let config_kind =
+                    config_kind.expect("typed-config export should carry a config descriptor");
+                assert_eq!(config_kind.id, ProbeConfig::ID);
+                assert_eq!(config_kind.name, ProbeConfig::NAME);
+                let schema: SchemaType = wire::from_bytes(&config_kind.schema_wire)
+                    .expect("config schema descriptor should decode");
+                assert_eq!(schema, ProbeConfig::SCHEMA);
+            }
+            ResolveComponentResult::Err { error } => panic!("typed resolve failed: {error}"),
+        }
 
         // Fork a headless engine, load by selector (resolve-and-forward),
         // and assert it registers at the lineage address and answers

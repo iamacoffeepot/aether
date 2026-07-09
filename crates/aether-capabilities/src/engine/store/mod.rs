@@ -55,7 +55,9 @@ use aether_substrate::atomic_write::atomic_write;
 use aether_substrate::pid_lock::LockGuard;
 use serde::{Deserialize, Serialize};
 
-pub use manifest::{ArtifactKind, Selector, StoredArtifact, StoredManifest, component_manifest};
+pub use manifest::{
+    ArtifactKind, Selector, StoredArtifact, StoredManifest, component_manifest, config_descriptor,
+};
 use manifest::{matches_binary_filter, matches_component_filter};
 use persistence::{RestoredIndex, acquire_lock, ensure_root, hash_hex, restore, write_sidecar};
 
