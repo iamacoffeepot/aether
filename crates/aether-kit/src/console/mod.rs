@@ -20,14 +20,17 @@ use aether_capabilities::{LifecycleCapability, RenderCapability, TextCapability}
 use aether_data::MailboxId;
 use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP};
 use aether_kinds::{
-    CachedFontMetrics, Key, MouseWheel, QuadSpace, Quit, TextInput, Tick, WindowSize,
+    CachedFontMetrics, Key, KeyRelease, MouseWheel, QuadSpace, Quit, TextInput, Tick, WindowSize,
 };
 
 const HORIZONTAL_PADDING: f32 = 12.0;
 const TOP_PADDING: f32 = 10.0;
 const BOTTOM_PADDING: f32 = 10.0;
+const HISTORY_INPUT_GAP: f32 = 8.0;
 const SEPARATOR_HEIGHT: f32 = 1.0;
 const CURSOR_WIDTH: f32 = 8.0;
+const BACKSPACE_INITIAL_DELAY_TICKS: u32 = 18;
+const BACKSPACE_REPEAT_INTERVAL_TICKS: u32 = 3;
 
 pub struct ConsoleOverlay {
     config: ConsoleConfig,
@@ -35,21 +38,32 @@ pub struct ConsoleOverlay {
     window_size: [u32; 2],
     font_id: Option<u32>,
     metrics: Option<CachedFontMetrics>,
+    backspace_held: bool,
+    backspace_ticks: u32,
 }
 
 impl ConsoleOverlay {
     fn visible_rows(&self) -> usize {
         let available =
-            (self.config.panel_height - self.input_band_height() - TOP_PADDING).max(0.0);
-        f32_floor_to_usize(available / self.row_height())
+            (self.input_y() - HISTORY_INPUT_GAP - self.history_top_y() - self.config.font_size)
+                .max(0.0);
+        f32_floor_to_usize(available / self.row_height()) + usize::from(available > 0.0)
     }
 
     fn row_height(&self) -> f32 {
         (self.config.font_size * 1.25).max(1.0)
     }
 
-    fn input_band_height(&self) -> f32 {
-        self.row_height() + BOTTOM_PADDING
+    fn history_top_y(&self) -> f32 {
+        TOP_PADDING + self.config.font_size
+    }
+
+    fn input_y(&self) -> f32 {
+        let panel_height = self
+            .config
+            .panel_height
+            .min(bounded_u32_to_f32(self.window_size[1]));
+        (panel_height - BOTTOM_PADDING - self.config.font_size).max(TOP_PADDING)
     }
 
     fn render(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
@@ -85,7 +99,7 @@ impl ConsoleOverlay {
             },
         ];
 
-        let input_y = (panel_height - BOTTOM_PADDING - self.config.font_size).max(TOP_PADDING);
+        let input_y = self.input_y();
         if self.state.cursor_visible {
             let prompt_width = self.measure(&self.config.prompt);
             let caret_text_width = self.measure_prefix(&self.state.input, self.state.caret);
@@ -107,8 +121,11 @@ impl ConsoleOverlay {
             return;
         };
 
-        let mut y = TOP_PADDING + self.config.font_size;
+        let mut y = self.history_top_y();
         for line in self.state.visible_history(visible_rows) {
+            if y + self.config.font_size > input_y - HISTORY_INPUT_GAP {
+                break;
+            }
             ctx.actor::<TextCapability>().send(&DrawText {
                 font_id,
                 text: line.text,
@@ -201,6 +218,33 @@ impl ConsoleOverlay {
         self.state
             .register_external(mail.name, mail.description, mailbox);
     }
+
+    fn press_backspace(&mut self) {
+        self.state.backspace();
+        self.backspace_held = true;
+        self.backspace_ticks = 0;
+    }
+
+    fn release_backspace(&mut self) {
+        self.backspace_held = false;
+        self.backspace_ticks = 0;
+    }
+
+    fn tick_backspace_repeat(&mut self) {
+        if !self.state.open || !self.backspace_held {
+            return;
+        }
+
+        self.backspace_ticks = self.backspace_ticks.saturating_add(1);
+        if self.backspace_ticks < BACKSPACE_INITIAL_DELAY_TICKS {
+            return;
+        }
+        if (self.backspace_ticks - BACKSPACE_INITIAL_DELAY_TICKS)
+            .is_multiple_of(BACKSPACE_REPEAT_INTERVAL_TICKS)
+        {
+            self.state.backspace();
+        }
+    }
 }
 
 #[actor(instanced)]
@@ -215,6 +259,8 @@ impl WasmActor for ConsoleOverlay {
             window_size: [1280, 720],
             font_id: None,
             metrics: None,
+            backspace_held: false,
+            backspace_ticks: 0,
         })
     }
 
@@ -222,6 +268,7 @@ impl WasmActor for ConsoleOverlay {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
         let input = ctx.actor::<InputCapability>();
         input.subscribe::<Key>();
+        input.subscribe::<KeyRelease>();
         input.subscribe::<TextInput>();
         input.subscribe::<MouseWheel>();
         input.subscribe::<WindowSize>();
@@ -241,6 +288,7 @@ impl WasmActor for ConsoleOverlay {
     #[handler::manual]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Manual>, _tick: Tick) {
         self.state.tick_cursor();
+        self.tick_backspace_repeat();
         self.render(ctx);
     }
 
@@ -249,6 +297,9 @@ impl WasmActor for ConsoleOverlay {
         if key.code == self.config.activation_key_code {
             self.state.open = !self.state.open;
             self.state.cursor_visible = true;
+            if !self.state.open {
+                self.release_backspace();
+            }
             return;
         }
         if !self.state.open {
@@ -260,12 +311,19 @@ impl WasmActor for ConsoleOverlay {
                 let actions = self.state.submit(&self.config.prompt);
                 Self::dispatch_actions(ctx, actions);
             }
-            KEY_BACKSPACE => self.state.backspace(),
+            KEY_BACKSPACE => self.press_backspace(),
             KEY_LEFT => self.state.move_left(),
             KEY_RIGHT => self.state.move_right(),
             KEY_UP => self.state.history_prev(),
             KEY_DOWN => self.state.history_next(),
             _ => {}
+        }
+    }
+
+    #[handler::manual]
+    fn on_key_release(&mut self, _ctx: &mut WasmCtx<'_, Manual>, key: KeyRelease) {
+        if key.code == KEY_BACKSPACE {
+            self.release_backspace();
         }
     }
 
@@ -382,9 +440,16 @@ mod tests {
             window_size: [100, 100],
             font_id: None,
             metrics: None,
+            backspace_held: false,
+            backspace_ticks: 0,
         };
 
-        assert_eq!(overlay.visible_rows(), 5);
+        assert_eq!(overlay.visible_rows(), 4);
+    }
+
+    #[test]
+    fn default_font_size_is_larger_than_initial_sketch() {
+        assert_eq!(ConsoleConfig::default().font_size, 18.0);
     }
 
     #[test]
@@ -403,6 +468,8 @@ mod tests {
             window_size: [100, 100],
             font_id: None,
             metrics: None,
+            backspace_held: false,
+            backspace_ticks: 0,
         };
 
         assert!(ConsoleOverlay::is_activation_text(
@@ -417,5 +484,32 @@ mod tests {
             "a",
             overlay.config.activation_key_code
         ));
+    }
+
+    #[test]
+    fn held_backspace_repeats_after_initial_delay() {
+        let mut overlay = ConsoleOverlay {
+            config: ConsoleConfig::default(),
+            state: ConsoleState::new(&ConsoleConfig::default()),
+            window_size: [100, 100],
+            font_id: None,
+            metrics: None,
+            backspace_held: false,
+            backspace_ticks: 0,
+        };
+        overlay.state.open = true;
+        overlay.state.insert_text("abcd");
+
+        overlay.press_backspace();
+        for _ in 0..BACKSPACE_INITIAL_DELAY_TICKS {
+            overlay.tick_backspace_repeat();
+        }
+
+        assert_eq!(overlay.state.input, "ab");
+        overlay.release_backspace();
+        for _ in 0..BACKSPACE_REPEAT_INTERVAL_TICKS {
+            overlay.tick_backspace_repeat();
+        }
+        assert_eq!(overlay.state.input, "ab");
     }
 }

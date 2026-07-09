@@ -49,7 +49,7 @@ impl Default for ConsoleConfig {
             activation_key_code: u32::from(b'`'),
             font_namespace: String::from("assets"),
             font_path: String::from("fonts/RobotoMono.ttf"),
-            font_size: 16.0,
+            font_size: 18.0,
             scrollback_limit: 256,
             prompt: String::from("> "),
             theme: ConsoleTheme::default(),
