@@ -160,7 +160,7 @@ fn backquote_key_opens_console_overlay() {
         .execute(vec![(
             "size",
             BenchOp::send_mail(
-                &console_address(),
+                console_address(),
                 &WindowSize {
                     width: WINDOW_WIDTH,
                     height: WINDOW_HEIGHT,
@@ -179,7 +179,7 @@ fn backquote_key_opens_console_overlay() {
         .execute(vec![(
             "toggle",
             BenchOp::send_mail(
-                &console_address(),
+                console_address(),
                 &Key {
                     code: KEY_BACKQUOTE,
                 },
