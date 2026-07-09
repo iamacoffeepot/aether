@@ -5,7 +5,7 @@
 //! The single-line text field (issue 2660, reworked in issue 2924).
 //!
 //! The field is a thin actor over the reusable
-//! [`TextEditState`](crate::widget::text_edit::TextEditState): committed
+//! [`TextEditState`]: committed
 //! `TextInput` replaces the active selection at the caret; the editing keys the
 //! substrate emits scancodes for (Backspace, Left, Right, Enter) delete, move —
 //! extending the selection while Shift is held — or commit; a pointer press
@@ -17,7 +17,7 @@
 //! Caret placement and pointer hit-testing are exact once the font's metrics
 //! settle: the field drives a single-flight [`FontMetricsRequest`] for its
 //! theme's font and measures against the resolved
-//! [`CachedFontMetrics`](aether_kinds::CachedFontMetrics). Until then it falls
+//! [`CachedFontMetrics`]. Until then it falls
 //! back to the proportional approximation as a bounded font-warm-up placement.
 
 use alloc::string::String;
