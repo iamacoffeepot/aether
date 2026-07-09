@@ -42,6 +42,7 @@ pub mod composite;
 pub mod focus;
 mod panel;
 pub mod set;
+pub mod text_edit;
 pub mod theme;
 
 pub use panel::WidgetPanel;

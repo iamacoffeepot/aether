@@ -46,14 +46,16 @@ use std::path::{Path, PathBuf};
 use aether_actor::Addressable;
 use aether_capabilities::RenderCapability;
 use aether_capabilities::fs::NamespaceRoots;
-use aether_capabilities::text::{LoadFont, LoadFontResult};
+use aether_capabilities::text::{
+    FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult,
+};
 use aether_data::Kind;
-use aether_kinds::keycode::{KEY_BACKSPACE, KEY_ENTER, KEY_TAB};
+use aether_kinds::keycode::{KEY_BACKSPACE, KEY_ENTER, KEY_RIGHT, KEY_TAB};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
-    CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction,
-    FrameVerdict, Key, LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease,
-    MouseMove, NamedMail, TextInput, Tick,
+    CachedFontMetrics, CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect,
+    FrameReduction, FrameVerdict, ImePreedit, Key, LoadComponent, LoadResult, LogTailResult,
+    Modifiers, MouseButton, MouseButtonRelease, MouseMove, NamedMail, TextInput, Tick,
 };
 use aether_kit::{PanelConfig, Theme};
 use aether_substrate_bundle::test_bench::{
@@ -166,6 +168,30 @@ fn load_font(bench: &mut TestBench) -> u32 {
     {
         LoadFontResult::Ok { font_id, .. } => font_id,
         LoadFontResult::Err { error, .. } => panic!("load RobotoMono: {error}"),
+    }
+}
+
+/// Grab `RobotoMono`'s resolved metric table (the same one the field measures
+/// against) so the test can compute expected pixel boundaries for pointer
+/// placement and caret geometry.
+fn load_metrics(bench: &mut TestBench, font_id: u32) -> CachedFontMetrics {
+    let got = bench
+        .execute(vec![(
+            "metrics",
+            BenchOp::send_and_await(
+                "aether.text",
+                &FontMetricsRequest {
+                    font: FontRef::Id(font_id),
+                },
+            ),
+        )])
+        .expect("font_metrics sequence");
+    match got
+        .reply::<FontMetricsResult>("metrics")
+        .expect("decode FontMetricsResult")
+    {
+        FontMetricsResult::Ok { metrics } => CachedFontMetrics::new(&metrics),
+        FontMetricsResult::Err { error } => panic!("grab RobotoMono metrics: {error}"),
     }
 }
 
@@ -962,5 +988,248 @@ fn focus_ring_follows_tab() {
         slider_after < 0.1,
         "the ring must leave the slider when focus advances; coverage over its top edge stayed \
          {slider_after:.3} — the ring-follows-focus class",
+    );
+}
+
+/// **Bug class: the reusable editing state's measured pointer placement,
+/// selection, and IME composition not reaching the pixels.** The other text
+/// scenario (`text_field_backspace_...`) proves an editing key round-trips; this
+/// drives the issue-2924 rework end-to-end — a *measured* pointer click that
+/// places the caret at a known character boundary, a Shift-extended selection
+/// that must render an accent band, an `ImePreedit` with a nontrivial cursor
+/// span that must render a composition mark below the glyph baseline, then a
+/// committed `TextInput` replacing the selection and Enter — and asserts each
+/// rendered band plus the final committed UTF-8 value off the log ring. It reads
+/// the field's own resolved font metrics for its expected boundaries, so a
+/// regression in measured placement (not the approximate warm-up) fails here.
+#[test]
+#[allow(clippy::too_many_lines)] // one cohesive place → select → compose → commit acceptance run
+fn text_field_selection_and_ime_render_measured_bands_and_commit() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = build_bench();
+
+    let font_id = load_font(&mut bench);
+    let metrics = load_metrics(&mut bench, font_id);
+    load_panel(&mut bench, &wasm, font_id);
+    let panel = panel_address();
+    // Warm up: spawn + prime the atlas, and give the field's own single-flight
+    // metrics request the extra ticks it needs to round-trip and install before
+    // the measured interactions.
+    bench
+        .execute(vec![
+            ("spawn", BenchOp::send_mail(&panel, &Tick)),
+            ("prime", BenchOp::send_mail(&panel, &Tick)),
+            ("settle", BenchOp::advance(4)),
+        ])
+        .expect("warm-up");
+
+    let size = Theme::DEFAULT.value_size_pixels;
+    let (text_top, _) = row_band(TEXT_ROW, 1.0);
+    // The field's interior, inset past the focus-ring border, scored against its
+    // raised-surface fill so glyph + selection + caret ink form the mask.
+    let interior = rect(
+        PANEL_X + BORDER + 1.0,
+        text_top + BORDER + 1.0,
+        PANEL_X + PANEL_WIDTH - BORDER,
+        text_top + ROW_HEIGHT - BORDER,
+    );
+    let interior_coverage = || {
+        vec![check(
+            FrameReduction::Coverage,
+            interior,
+            SURFACE_RAISED_SRGB,
+            PARTITION_TOLERANCE,
+        )]
+    };
+    // A thin band straddling the composition underline (`text_origin_y + size`
+    // local, below the lowercase glyph run) — where only the underline and the
+    // full-height composition cursor light up, not the resting glyph ink.
+    let underline_local = (ROW_HEIGHT - size) * 0.5 + size;
+    let underline_band = rect(
+        PANEL_X + BORDER + 1.0,
+        text_top + underline_local - 1.0,
+        PANEL_X + PANEL_WIDTH - BORDER,
+        text_top + underline_local + 2.0,
+    );
+    let underline_coverage = || {
+        vec![check(
+            FrameReduction::Coverage,
+            underline_band,
+            SURFACE_RAISED_SRGB,
+            PARTITION_TOLERANCE,
+        )]
+    };
+
+    // Focus the field with a click, type "abcd", and rasterize the glyphs.
+    bench
+        .execute(vec![
+            (
+                "focus",
+                BenchOp::send_mail(&panel, &press(50.0, text_top + 10.0)),
+            ),
+            (
+                "focus_up",
+                BenchOp::send_mail(&panel, &release(50.0, text_top + 10.0)),
+            ),
+            (
+                "type",
+                BenchOp::send_mail(
+                    &panel,
+                    &TextInput {
+                        text: "abcd".to_owned(),
+                    },
+                ),
+            ),
+            ("rasterize", BenchOp::send_mail(&panel, &Tick)),
+            ("settle", BenchOp::advance(2)),
+        ])
+        .expect("focus + type");
+
+    let typed_interior = coverage(&capture(&mut bench, interior_coverage()).results[0]);
+    let typed_underline = coverage(&capture(&mut bench, underline_coverage()).results[0]);
+
+    // A *measured* click at the boundary after "ab" (char index 2): the field
+    // resolves the pointer to byte 2 via its metric table, placing the caret
+    // between "ab" and "cd".
+    let boundary_x = PANEL_X + PAD + metrics.caret_x("abcd", 2, size);
+    let click_y = text_top + 10.0;
+    // Shift-extend two characters right to select "cd".
+    bench
+        .execute(vec![
+            (
+                "place",
+                BenchOp::send_mail(&panel, &press(boundary_x, click_y)),
+            ),
+            (
+                "place_up",
+                BenchOp::send_mail(&panel, &release(boundary_x, click_y)),
+            ),
+            (
+                "shift",
+                BenchOp::send_mail(
+                    &panel,
+                    &Modifiers {
+                        shift: true,
+                        ..Modifiers::default()
+                    },
+                ),
+            ),
+            (
+                "extend1",
+                BenchOp::send_mail(&panel, &Key { code: KEY_RIGHT }),
+            ),
+            (
+                "extend2",
+                BenchOp::send_mail(&panel, &Key { code: KEY_RIGHT }),
+            ),
+        ])
+        .expect("measured place + Shift-extend");
+
+    let selected_interior = coverage(&capture(&mut bench, interior_coverage()).results[0]);
+    eprintln!(
+        "field interior coverage: typed {typed_interior:.3} → selected {selected_interior:.3}",
+    );
+    assert!(
+        selected_interior > typed_interior + 0.05,
+        "a Shift-extended selection must render an accent band over \"cd\", raising interior \
+         coverage above the resting glyphs ({typed_interior:.3}); it was {selected_interior:.3} \
+         — the selection-band-not-rendered class",
+    );
+
+    // An IME composition with a nontrivial cursor span: it renders inserted at
+    // the selection with an underline + composition cursor below the baseline.
+    bench
+        .execute(vec![
+            (
+                "preedit",
+                BenchOp::send_mail(
+                    &panel,
+                    &ImePreedit {
+                        text: "xy".to_owned(),
+                        cursor_begin: Some(1),
+                        cursor_end: Some(2),
+                    },
+                ),
+            ),
+            ("rasterize", BenchOp::send_mail(&panel, &Tick)),
+            ("settle", BenchOp::advance(2)),
+        ])
+        .expect("ime preedit");
+
+    let preedit_underline = coverage(&capture(&mut bench, underline_coverage()).results[0]);
+    eprintln!(
+        "composition underline-band coverage: resting {typed_underline:.3} → composing \
+         {preedit_underline:.3}",
+    );
+    assert!(
+        preedit_underline > typed_underline + 0.02,
+        "an IME composition must render its underline / cursor in the measured band below the \
+         baseline, above the resting {typed_underline:.3}; it was {preedit_underline:.3} — the \
+         composition-mark-not-rendered class",
+    );
+
+    // Commit replacement text (clears the composition and replaces the "cd"
+    // selection), then Enter to commit the field. The result is "abZ".
+    bench
+        .execute(vec![
+            (
+                "commit_text",
+                BenchOp::send_mail(
+                    &panel,
+                    &TextInput {
+                        text: "Z".to_owned(),
+                    },
+                ),
+            ),
+            ("rasterize", BenchOp::send_mail(&panel, &Tick)),
+            ("settle", BenchOp::advance(2)),
+        ])
+        .expect("commit replacement text");
+
+    // The final caret + glyphs still occupy the field interior (a non-empty
+    // mask bounded to the interior band).
+    let final_verdict = capture(
+        &mut bench,
+        vec![check(
+            FrameReduction::BoundingBox,
+            interior,
+            SURFACE_RAISED_SRGB,
+            PARTITION_TOLERANCE,
+        )],
+    );
+    let final_box =
+        bounding_box(&final_verdict.results[0]).expect("the committed field still renders glyphs");
+    eprintln!(
+        "final field glyph bbox x[{}..{}] y[{}..{}]",
+        final_box.min_x, final_box.max_x, final_box.min_y, final_box.max_y,
+    );
+    assert!(
+        final_box.max_x < (PANEL_X + PANEL_WIDTH) as u32
+            && final_box.max_y < (text_top + ROW_HEIGHT) as u32,
+        "the final caret and glyphs must sit inside the field interior; bbox was \
+         x[{}..{}] y[{}..{}]",
+        final_box.min_x,
+        final_box.max_x,
+        final_box.min_y,
+        final_box.max_y,
+    );
+
+    bench
+        .execute(vec![(
+            "commit",
+            BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }),
+        )])
+        .expect("commit");
+
+    let log = panel_log_messages(&mut bench);
+    let joined = log.join("\n");
+    assert!(
+        log.iter()
+            .any(|m| m.contains("widget text committed") && m.contains("text=abZ")),
+        "clicking at the measured boundary after \"ab\", extending over \"cd\", and committing \
+         \"Z\" must leave \"abZ\"; log was:\n{joined}",
     );
 }
