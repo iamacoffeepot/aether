@@ -29,10 +29,12 @@ If explicit files are absent and the current branch is a PR branch, derive a can
 ## Workflow
 
 1. Scope: if `issue` and `diffs` are present, run the whole-change spec-fidelity pass first. Prune clearly out-of-scope files from later passes.
-2. Find: run applicable specialist lenses per file. Use subagents for independent file/lens work when the user or skill run calls for parallel review.
+2. Find: run applicable specialist lenses per file. Use subagents for independent file/lens work when the user or skill run calls for parallel review. In the economy lens, actively check large-file pressure: files around or above 1,000 lines, or diffs adding to already-large coordination files, should get an `economy:file-split` finding when there is a concrete responsibility seam and a named child-module extraction that reduces review burden without moving behavior.
 3. Verify: verify correctness findings even when high confidence. Refute low/medium confidence findings before including them. Challenge clean correctness and test-integrity lenses when useful.
 4. Roll up confirmed findings first, ordered by severity, with file/line references. Separate soft holds, advisory findings, lint candidates, uncertain items, and spared/refuted findings.
 
 ## Review Bar
 
 Keep findings only when the proposed fix is strictly better, not merely different. Correctness findings must name a concrete bad path or input. Test-integrity findings must identify owned logic that the test fails to exercise. Convention findings must cite `CLAUDE.md`, an ADR, or a repo rule and should feed future lint candidates.
+
+Large file size alone is not a finding. A file-split finding must name the responsibility cohorts, identify what stays in the parent, and propose specific module/file names. Do not flag cohesive large files, generated-like tables, or deliberately broad scenario tests unless the tangled responsibilities are concrete.
