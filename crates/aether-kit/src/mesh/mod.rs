@@ -3,7 +3,7 @@
 //! cached list to the `"aether.render"` sink each frame on the `Render`
 //! lifecycle stage.
 //!
-//! Dispatches on the file extension echoed back on `aether.fs.read_result`:
+//! Dispatches on the file extension stashed in the fs request context:
 //!
 //! - `.dsl` → `aether-mesh`'s parser + mesher (ADR-0026 + ADR-0051).
 //!   Filled triangles use the DSL's `:color N` palette indices; the
@@ -38,13 +38,14 @@ pub use kinds::*;
 use aether_actor::{
     ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
-use aether_capabilities::fs::{FsMailboxExt, ReadResult};
+use aether_capabilities::fs::{Read, ReadResult};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::{DrawTriangle, Vertex};
 use aether_capabilities::{FsCapability, LifecycleCapability, RenderCapability};
 use aether_kinds::{MeshLoadResult, Render};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
+use serde::{Deserialize, Serialize};
 
 use core::str;
 
@@ -67,17 +68,14 @@ const OBJ_DEFAULT_COLOR: (f32, f32, f32) = PALETTE[0];
 
 pub struct MeshViewer {
     triangles: Vec<DrawTriangle>,
-    /// Reply target of the most recent `aether.kit.mesh.load` request, parked
-    /// across the async `aether.fs.read` round-trip (issue 964). `on_load`
-    /// runs in the requester's reply context; the actual parse + cache
-    /// replace happens later in `on_read_result`, whose reply context
-    /// points at `FsCapability`, not the original requester. Stashing the
-    /// handle here lets the load-result reply route back to whoever sent
-    /// the request (the parked-sender pattern; the handle stays valid for
-    /// the instance lifetime per the SDK `ReplyHandle` contract). `None`
-    /// when the load was fire-and-forget (no reply target) or when no load
-    /// is in flight.
-    pending_reply: Option<ReplyHandle>,
+}
+
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.mesh.load_context")]
+struct MeshLoadContext {
+    reply: Option<ReplyHandle>,
+    namespace: String,
+    path: String,
 }
 
 /// Mesh viewer component.
@@ -97,7 +95,6 @@ impl WasmActor for MeshViewer {
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(MeshViewer {
             triangles: Vec::new(),
-            pending_reply: None,
         })
     }
 
@@ -146,32 +143,37 @@ impl WasmActor for MeshViewer {
     /// succeeded (`ok`) and why it didn't (`error`).
     // `msg: LoadMesh` matches the dispatch ABI (ADR-0033 / ADR-0038);
     // the load body delegates straight to `FsCapability` via `ctx`.
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::needless_pass_by_value, clippy::unused_self)]
     #[handler::single]
     fn on_load(&mut self, ctx: &mut WasmCtx<'_>, msg: LoadMesh) {
-        // Park the requester's reply target across the async read.
-        // `on_read_result` answers it with the structured outcome.
-        // Overwriting any prior pending handle is intentional —
-        // loads are serialized through one read round-trip, and a
-        // fresh load supersedes an unanswered prior one.
-        self.pending_reply = ctx.reply_target();
+        let read = Read {
+            namespace: msg.namespace.clone(),
+            path: msg.path.clone(),
+        };
+        let context = MeshLoadContext {
+            reply: ctx.reply_target(),
+            namespace: msg.namespace,
+            path: msg.path,
+        };
         tracing::info!(
             target: "aether_kit",
-            namespace = %msg.namespace,
-            path = %msg.path,
+            namespace = %read.namespace,
+            path = %read.path,
             "load requested; issuing read",
         );
-        ctx.actor::<FsCapability>().read(&msg.namespace, &msg.path);
+        let _ = ctx
+            .actor::<FsCapability>()
+            .send_with_context(&read, &context);
     }
 
-    /// Consumes the substrate's I/O reply. Dispatches on the echoed
-    /// `path`'s extension and replaces the cached triangle list on
+    /// Consumes the substrate's I/O reply. Dispatches on the request
+    /// context path's extension and replaces the cached triangle list on
     /// success. Any failure (read error, non-utf8, parse error,
     /// unknown extension) leaves the previous cache intact, with a
     /// warn log explaining the failure. Issue 964: after computing the
     /// outcome, replies `aether.mesh.load_result` to the originator of
-    /// the `aether.kit.mesh.load` request (parked in `on_load`), echoing
-    /// the request's `namespace` + `path` and carrying the structured
+    /// the `aether.kit.mesh.load` request (carried in the request context),
+    /// echoing the request's `namespace` + `path` and carrying the structured
     /// `ok` / `error` verdict so a scenario harness or MCP `send_mail`
     /// caller has a wire signal instead of having to scrape
     /// `engine_logs`.
@@ -180,32 +182,23 @@ impl WasmActor for MeshViewer {
     /// Substrate-driven; do not send manually.
     #[handler::manual]
     fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Manual>, r: ReadResult) {
-        let (namespace, path, outcome) = match r {
-            ReadResult::Ok {
-                namespace,
-                path,
-                bytes,
-            } => {
-                let outcome = self.load_bytes(&path, &bytes);
-                (namespace, path, outcome)
-            }
-            ReadResult::Err {
-                namespace,
-                path,
-                error,
-            } => {
+        let Some(context) = ctx.take_context::<MeshLoadContext>() else {
+            return;
+        };
+        let outcome = match r {
+            ReadResult::Ok { bytes, .. } => self.load_bytes(&context.path, &bytes),
+            ReadResult::Err { error, .. } => {
                 tracing::warn!(
                     target: "aether_kit",
-                    namespace = %namespace,
-                    path = %path,
+                    namespace = %context.namespace,
+                    path = %context.path,
                     error = ?error,
                     "read failed; keeping prior datum",
                 );
-                let outcome = LoadOutcome::failed(format!("read failed: {error:?}"));
-                (namespace, path, outcome)
+                LoadOutcome::failed(format!("read failed: {error:?}"))
             }
         };
-        self.reply_load_result(ctx, namespace, path, outcome);
+        self.reply_load_result(ctx, context.reply, context.namespace, context.path, outcome);
     }
 }
 
@@ -266,17 +259,18 @@ impl MeshViewer {
     }
 
     /// Build and dispatch the `aether.mesh.load_result` reply to the
-    /// parked requester. No-op when no reply target was parked (the
-    /// load was fire-and-forget). Clears the parked handle either way
-    /// so a stale target can't leak into a later load's reply.
+    /// requester carried in the fs request context. No-op when no reply
+    /// target was carried (the load was fire-and-forget).
+    #[allow(clippy::unused_self)]
     fn reply_load_result(
-        &mut self,
+        &self,
         ctx: &mut WasmCtx<'_, Manual>,
+        sender: Option<ReplyHandle>,
         namespace: String,
         path: String,
         outcome: LoadOutcome,
     ) {
-        let Some(sender) = self.pending_reply.take() else {
+        let Some(sender) = sender else {
             return;
         };
         let ok = outcome.error.is_none();
