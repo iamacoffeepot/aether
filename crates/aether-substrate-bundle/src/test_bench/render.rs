@@ -119,7 +119,11 @@ impl Gpu {
             Ok(()) => {}
             Err(RenderError::VertexBufferOverflow { .. }) => return,
         }
-        // ADR-0105 textured-quad overlay, recorded after the world pass.
+        // ADR-0140 material pass, recorded after the world pass and
+        // before the screen overlay.
+        self.render_handles
+            .record_material_pass(&mut encoder, false);
+        // ADR-0105 textured-quad overlay, recorded after world/material.
         self.render_handles.record_overlay_pass(&mut encoder, false);
         queue.submit(iter::once(encoder.finish()));
     }
@@ -157,6 +161,9 @@ impl Gpu {
                 return Err("vertex buffer overflow — capture skipped".to_owned());
             }
         }
+        // ADR-0140 material pass, same replay-cache semantics so an idle
+        // capture replays the last committed material draws.
+        self.render_handles.record_material_pass(&mut encoder, true);
         // ADR-0105 textured-quad overlay, same replay-cache semantics so
         // an idle capture replays the last committed quads.
         self.render_handles.record_overlay_pass(&mut encoder, true);

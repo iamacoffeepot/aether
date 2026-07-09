@@ -18,13 +18,17 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use aether_kinds::{QuadScale, QuadSpace};
 use aether_substrate::render::{
-    CaptureMeta, OverlayDraw, Pipeline, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD, QuadPipeline,
-    RenderError, Targets, TextureBindings, build_main_pipeline, build_quad_pipeline,
+    CaptureMeta, MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw,
+    MaterialPassDraw, MaterialPassRecord, MaterialPipelines, OverlayDraw, Pipeline,
+    QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD, QuadPipeline, RenderError, Targets,
+    TextureBindings, build_main_pipeline, build_material_pipelines, build_quad_pipeline,
     build_texture_bindings, finish_capture, map_capture_rgba, prepare_capture_copy,
-    push_screen_quad_vertices, push_world_quad_vertices, record_main_pass,
+    push_coverage_params, push_material_rect_vertices, push_screen_quad_vertices,
+    push_textured_params, push_world_quad_vertices, record_main_pass, record_material_pass,
     record_quad_overlay_pass,
 };
 
+use super::material::{MaterialBatch, accepts_coverage_texture};
 use super::quad::QuadBatch;
 use super::texture::TextureRegistry;
 
@@ -62,6 +66,12 @@ pub struct RenderHandles {
     /// idle `capture` (no producer this frame) replays them, matching
     /// `last_submitted`'s role for triangles.
     pub quad_last_submitted: Arc<Mutex<Vec<QuadBatch>>>,
+    /// Per-frame material accumulator (ADR-0140), holding both typed
+    /// material kinds in receive order so mixed material submissions
+    /// preserve painter's order among overlapping surfaces.
+    pub material_frame: Arc<Mutex<Vec<MaterialBatch>>>,
+    /// Most-recently-rendered material batches for idle capture replay.
+    pub material_last_submitted: Arc<Mutex<Vec<MaterialBatch>>>,
     /// Session-scoped texture registry: staged CPU pixels + lazily-
     /// realized GPU textures. Written by the cap dispatcher thread
     /// (`create_texture` / `update_texture`), realized + read by the
@@ -365,6 +375,178 @@ impl RenderHandles {
         );
     }
 
+    /// Record the depth-tested world-space material pass (ADR-0140)
+    /// between the main world pass and the screen overlay. Textures are
+    /// realized lazily from the shared registry. Coverage draws require
+    /// R8 textures and warn-drop otherwise.
+    ///
+    /// # Panics
+    /// Panics if `install_gpu` hasn't been called, or if any internal
+    /// mutex is poisoned — fail-fast per ADR-0063.
+    #[allow(clippy::too_many_lines)]
+    pub fn record_material_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        replay_cache_when_idle: bool,
+    ) {
+        let gpu = self.expect_gpu();
+        commit_or_replay(
+            &self.material_frame,
+            &self.material_last_submitted,
+            replay_cache_when_idle,
+        );
+        let batches = self
+            .material_last_submitted
+            .lock()
+            .expect("mutex poisoned; fail-fast per ADR-0063")
+            .clone();
+        if batches.is_empty() {
+            return;
+        }
+
+        let targets = gpu
+            .targets
+            .lock()
+            .expect("mutex poisoned; fail-fast per ADR-0063");
+        let mut registry = self
+            .textures
+            .lock()
+            .expect("mutex poisoned; fail-fast per ADR-0063");
+
+        for batch in &batches {
+            let texture_id = match batch {
+                MaterialBatch::Textured { texture_id, .. }
+                | MaterialBatch::Coverage { texture_id, .. } => *texture_id,
+            };
+            if let Some(entry) = registry.entries.get_mut(&texture_id) {
+                entry.ensure_realized(&gpu.device, &gpu.queue, &gpu.texture_bindings);
+            } else {
+                tracing::warn!(
+                    target: "aether_capabilities::render",
+                    texture_id,
+                    "material draw for unknown texture id; dropping the batch",
+                );
+            }
+        }
+
+        let mut vertex_bytes = Vec::new();
+        let mut textured_params = Vec::new();
+        let mut coverage_params = Vec::new();
+        let mut draws = Vec::new();
+        let vertex_count =
+            u32::try_from(MATERIAL_VERTICES_PER_RECT).expect("material rect vertex count fits u32");
+        for batch in &batches {
+            match batch {
+                MaterialBatch::Textured { texture_id, rects } => {
+                    let Some(entry) = registry.entries.get(texture_id) else {
+                        continue;
+                    };
+                    let Some(realized) = entry.realized.as_ref() else {
+                        continue;
+                    };
+                    for rect in rects {
+                        let Some(params_offset) =
+                            push_textured_params(&mut textured_params, rect.tint)
+                        else {
+                            tracing::warn!(
+                                target: "aether_capabilities::render",
+                                texture_id,
+                                "textured material params overflow; dropping rect",
+                            );
+                            continue;
+                        };
+                        #[allow(clippy::cast_possible_truncation)]
+                        let first_vertex =
+                            (vertex_bytes.len() / MATERIAL_VERTEX_STRIDE as usize) as u32;
+                        push_material_rect_vertices(
+                            &mut vertex_bytes,
+                            [
+                                rect.rect.x,
+                                rect.rect.y,
+                                rect.rect.width,
+                                rect.rect.height,
+                                rect.rect.z,
+                            ],
+                            [rect.u0, rect.v0, rect.u1, rect.v1],
+                        );
+                        draws.push(MaterialPassDraw::Textured(MaterialDraw {
+                            bind_group: realized.bind_group(),
+                            first_vertex,
+                            vertex_count,
+                            params_offset,
+                        }));
+                    }
+                }
+                MaterialBatch::Coverage { texture_id, rects } => {
+                    let Some(entry) = registry.entries.get(texture_id) else {
+                        continue;
+                    };
+                    if !accepts_coverage_texture(entry.format) {
+                        tracing::warn!(
+                            target: "aether_capabilities::render",
+                            texture_id,
+                            ?entry.format,
+                            "coverage material requires an R8 texture; dropping the batch",
+                        );
+                        continue;
+                    }
+                    let Some(realized) = entry.realized.as_ref() else {
+                        continue;
+                    };
+                    for rect in rects {
+                        let Some(params_offset) = push_coverage_params(
+                            &mut coverage_params,
+                            rect.body_color,
+                            rect.rim_color,
+                            rect.rim_width,
+                        ) else {
+                            tracing::warn!(
+                                target: "aether_capabilities::render",
+                                texture_id,
+                                "coverage material params overflow; dropping rect",
+                            );
+                            continue;
+                        };
+                        #[allow(clippy::cast_possible_truncation)]
+                        let first_vertex =
+                            (vertex_bytes.len() / MATERIAL_VERTEX_STRIDE as usize) as u32;
+                        push_material_rect_vertices(
+                            &mut vertex_bytes,
+                            [
+                                rect.rect.x,
+                                rect.rect.y,
+                                rect.rect.width,
+                                rect.rect.height,
+                                rect.rect.z,
+                            ],
+                            [0.0, 0.0, 1.0, 1.0],
+                        );
+                        draws.push(MaterialPassDraw::Coverage(MaterialDraw {
+                            bind_group: realized.bind_group(),
+                            first_vertex,
+                            vertex_count,
+                            params_offset,
+                        }));
+                    }
+                }
+            }
+        }
+
+        record_material_pass(
+            encoder,
+            MaterialPassRecord {
+                queue: &gpu.queue,
+                pipeline: &gpu.material_pipelines,
+                main_pipeline: &gpu.pipeline,
+                targets: &targets,
+                vertex_bytes: &vertex_bytes,
+                draws: &draws,
+                textured_params: &textured_params,
+                coverage_params: &coverage_params,
+            },
+        );
+    }
+
     /// Encode a copy of the offscreen color target into a readback
     /// buffer. Pair with [`Self::finish_capture`] after submit. The
     /// readback buffer is reallocated on size mismatch with the
@@ -517,6 +699,9 @@ pub struct RenderGpu {
     /// accumulated quads into the same offscreen target after the
     /// world pass.
     pub quad_pipeline: QuadPipeline,
+    /// Depth-tested material pipelines (ADR-0140), recorded after the
+    /// main pass and before the quad overlay.
+    pub material_pipelines: MaterialPipelines,
     pub targets: Mutex<Targets>,
     pub color_format: wgpu::TextureFormat,
 }
@@ -550,6 +735,12 @@ impl RenderGpu {
         );
         let texture_bindings = build_texture_bindings(&device);
         let quad_pipeline = build_quad_pipeline(&device, color_format, &texture_bindings);
+        let material_pipelines = build_material_pipelines(
+            &device,
+            color_format,
+            &pipeline.camera_bind_group_layout,
+            &texture_bindings,
+        );
         let targets = Targets::new(&device, color_format, width, height);
         Self {
             device,
@@ -557,6 +748,7 @@ impl RenderGpu {
             pipeline,
             texture_bindings,
             quad_pipeline,
+            material_pipelines,
             targets: Mutex::new(targets),
             color_format,
         }

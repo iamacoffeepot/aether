@@ -53,6 +53,8 @@ the `RenderCapability` actor. It handles these payload kinds:
 | `aether.render.update_texture` | `{ texture_id, x, y, width, height, pixels }` | overwrite a sub-rect of a texture (atlas growth) |
 | `aether.render.destroy_texture` | `{ texture_id }` | release a registered texture; fire-and-forget |
 | `aether.render.draw_textured_quads` | `{ texture_id, space, quads }` | per-tick textured alpha-blended quads; accumulates into the frame |
+| `aether.render.material.textured` | `{ texture_id, rects }` | per-tick depth-tested world-space textured rects |
+| `aether.render.material.coverage` | `{ texture_id, rects }` | per-tick depth-tested world-space coverage bands from an R8 texture |
 | `aether.render.capture_frame` | `{ mails, after_mails }` | atomic "set state, read back a PNG, clean up" |
 
 A `Vertex` is `{ x, y, z, r, g, b }` — a world-space position plus a per-vertex
@@ -78,6 +80,15 @@ the scene through the camera's `view_proj`. `Screen`-space quads draw today; the
 path. Sprites, HUD images, and the `aether.text` capability all compose this
 surface.
 
+**World-space materials are textured and depth-tested** ([ADR-0140](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0140-render-material-pass.md)).
+The material pass records after the triangle pass and before the screen overlay,
+loading the main pass depth buffer with writes disabled. Components send typed
+material draw kinds rather than shader source. `aether.render.material.textured`
+draws sampled rects in the world plane with a tint. `aether.render.material.coverage`
+requires an R8 texture, thresholds at iso 127.5, and renders a body/rim band
+from the rect parameters. Both are immediate-mode: resend the batch every frame
+or it disappears on the next commit-current frame.
+
 **The `view_proj` uniform, latest wins.** The substrate holds one column-major
 4×4 matrix and uploads it verbatim to the shader each frame (column-major matches
 wgpu's uniform layout, so the 64 bytes upload with no transpose). Each
@@ -100,10 +111,11 @@ last live frame drew.
 
 **Headless absorbs draw and camera mail.** The headless and hub chassis have no
 GPU, so they compose `HeadlessRenderCapability` on the same `aether.render`
-mailbox: `DrawTriangle`, `aether.view_projection`, `update_texture`, and
-`destroy_texture`, and `draw_textured_quads` no-op (a desktop-built component
-mailing them every frame doesn't warn-storm), and `aether.render.capture_frame`
-and `create_texture` reply `Err` so an MCP call fails fast instead of hanging.
+mailbox: `DrawTriangle`, `aether.view_projection`, `update_texture`,
+`destroy_texture`, `draw_textured_quads`, and `aether.render.material.*` no-op
+(a desktop-built component mailing them every frame doesn't warn-storm), and
+`aether.render.capture_frame` and `create_texture` reply `Err` so an MCP call
+fails fast instead of hanging.
 
 ## How to use it
 
