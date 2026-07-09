@@ -81,9 +81,10 @@ use crate::world::{
     World,
 };
 use contour::{
-    GridPlacement, SmoothParams, label_case, label_window_polys, push_quad, repartition,
+    GridPlacement, SmoothParams, label_case, label_window_polys, march_grid, minimize_corners,
+    push_quad, repartition,
 };
-use style::{StyleTable, flat_color};
+use style::{StyleTable, flat_color, hsl_to_linear_rgb};
 
 /// Cells along one chunk edge, as a plain `i32` for loop bounds.
 const EDGE: i32 = CELLS_PER_CHUNK;
@@ -118,6 +119,10 @@ const CONTOUR_UPSAMPLE: usize = 1;
 /// eight-neighbor remesh the `R = 1` invalidation covers.
 const MAX_APRON_SUBCELLS: i32 = 2 * SUB;
 
+/// The coverage layer lift: two octimeters over the underlay datum, matching
+/// the retired overlay rim lift without restoring the old rim/body stack.
+const COVERAGE_LIFT: f32 = 2.0 / OCTIMETERS_PER_METER;
+
 /// Mesh one chunk into its flat-color base triangle list. Pure — no wgpu,
 /// no ctx — so it is unit-testable host-side. Reads neighbor cells through
 /// [`World`] (a bounded apron); a missing neighbor reads as empty. `styles`
@@ -126,6 +131,7 @@ const MAX_APRON_SUBCELLS: i32 = 2 * SUB;
 pub fn mesh_chunk(world: &World, at: ChunkPos, styles: &StyleTable) -> Vec<DrawTriangle> {
     let mut tris = Vec::new();
     let partition = mesh_underlay(world, at, styles, &mut tris);
+    mesh_coverage(world, at, styles, &mut tris);
     emit_walls(world, at, styles, partition.as_ref(), &mut tris);
     tris
 }
@@ -806,6 +812,79 @@ fn chunk_placement(at: ChunkPos, apron: i32, step_oct: i32) -> GridPlacement {
             base_oct[1] - apron * OCTIMETERS_PER_SUBCELL + step_oct / 2,
         ],
         step_oct,
+    }
+}
+
+/// Distinct non-void overlay materials present in the chunk, in stable
+/// material-id order.
+fn overlay_materials(world: &World, at: ChunkPos) -> Vec<Material> {
+    let Some(chunk) = world.chunk(at) else {
+        return Vec::new();
+    };
+    let mut present = [false; 6];
+    for material in &chunk.overlay {
+        if *material != Material::Void {
+            present[*material as usize] = true;
+        }
+    }
+    present
+        .iter()
+        .enumerate()
+        .filter(|(_, seen)| **seen)
+        .map(|(id, _)| Material::from_u8_or_void(id.try_into().unwrap_or(0)))
+        .collect()
+}
+
+/// Coverage of the subcell at chunk-local index `(six, siz)` for `material`.
+/// Off-material samples read uncovered, while out-of-chunk indices resolve
+/// through [`World`] so neighboring chunks supply the apron.
+fn subcell_coverage(world: &World, at: ChunkPos, six: i32, siz: i32, material: Material) -> u8 {
+    let cell = CellPos {
+        x: at.x * EDGE + six.div_euclid(SUB),
+        z: at.z * EDGE + siz.div_euclid(SUB),
+    };
+    if world.overlay(cell) != material {
+        return 0;
+    }
+    world.overlay_coverage(cell, six, siz)
+}
+
+/// Emit a flat scalar-coverage pass for authored overlays. Each distinct
+/// overlay material gets its own scalar mask, marched through the contour
+/// library so authored `1..254` samples keep interpolated crossings.
+fn mesh_coverage(world: &World, at: ChunkPos, styles: &StyleTable, tris: &mut Vec<DrawTriangle>) {
+    let apron = MAX_APRON_SUBCELLS;
+    let n = (SUBCELLS_PER_CHUNK_EDGE + 2 * apron) as usize;
+    let params = vec![
+        SmoothParams {
+            iterations: 0,
+            smoothing_degrees: 90,
+        };
+        n * n
+    ];
+    let upsample = CONTOUR_UPSAMPLE;
+    let step_oct = OCTIMETERS_PER_SUBCELL / upsample as i32;
+    let placement = chunk_placement(at, apron, step_oct);
+    for material in overlay_materials(world, at) {
+        let mut field = vec![0; n * n];
+        for sj in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
+            for si in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
+                let idx = (sj + apron) as usize * n + (si + apron) as usize;
+                field[idx] = subcell_coverage(world, at, si, sj, material);
+            }
+        }
+        let (samples, width, height) = minimize_corners(&field, n, n, upsample, &params);
+        let style = styles.get(material);
+        let color = hsl_to_linear_rgb(style.base_hue, style.base_sat, style.base_light);
+        let vertex = |wx: f32, wz: f32| Vertex {
+            x: wx,
+            y: COVERAGE_LIFT,
+            z: wz,
+            r: color[0],
+            g: color[1],
+            b: color[2],
+        };
+        march_grid(&samples, width, height, &placement, &vertex, tris);
     }
 }
 
@@ -1772,7 +1851,7 @@ mod tests {
 
     use super::*;
     use crate::world::{
-        CELLS_PER_CHUNK_AREA, Chunk, Region, STEP_MAX_OCTIMETERS, SUBCELLS_PER_CELL,
+        CELLS_PER_CHUNK_AREA, Chunk, Region, STEP_MAX_OCTIMETERS, SUBCELLS_PER_CELL, SetChunk,
         SmoothingProfile, UNDERLAY_POINT_INHERIT,
     };
 
@@ -2031,6 +2110,101 @@ mod tests {
         world.insert_chunk(ChunkPos { x: 0, z: 0 }, Chunk::empty());
         let tris = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, &StyleTable::default());
         assert!(tris.is_empty(), "an all-Void chunk emits no geometry");
+    }
+
+    #[test]
+    fn overlay_helpers_collect_materials_and_gate_coverage() {
+        let at = ChunkPos { x: 0, z: 0 };
+        let mut chunk = Chunk::empty();
+        let stone_cell = (8 * EDGE + 8) as usize;
+        let grass_cell = (2 * EDGE + 2) as usize;
+        chunk.overlay[stone_cell] = Material::Stone;
+        chunk.overlay[grass_cell] = Material::Grass;
+        chunk.overlay_mask[stone_cell * SUBCELLS_PER_CELL + 3] = 77;
+        let mut world = World::new();
+        world.insert_chunk(at, chunk);
+
+        assert_eq!(
+            overlay_materials(&world, at),
+            vec![Material::Grass, Material::Stone],
+            "overlay materials are distinct and stable by material id",
+        );
+        assert_eq!(
+            subcell_coverage(&world, at, 8 * SUB + 3, 8 * SUB, Material::Stone),
+            77,
+            "matching overlay material exposes its scalar mask sample",
+        );
+        assert_eq!(
+            subcell_coverage(&world, at, 8 * SUB + 3, 8 * SUB, Material::Grass),
+            0,
+            "off-material coverage is treated as uncovered",
+        );
+    }
+
+    #[test]
+    fn scalar_overlay_mask_marches_at_authored_fraction() {
+        // One authored overlay cell carries a scalar vertical edge. The
+        // contour pass first reconstructs scalar zones bilinearly, then
+        // marches the 127.5 crossing through that reconstructed grid. A
+        // nearest/blocky path would land at the half-cell edge instead.
+        let at = ChunkPos { x: 0, z: 0 };
+        let cell = CellPos { x: 8, z: 8 };
+        let cell_idx = (cell.z * EDGE + cell.x) as usize;
+        let sub = SUB as usize;
+        let mut overlay = vec![Material::Void.to_u8(); CELLS_PER_CHUNK_AREA];
+        overlay[cell_idx] = Material::Stone.to_u8();
+        let mut overlay_mask = vec![0u8; CELLS_PER_CHUNK_AREA * SUBCELLS_PER_CELL];
+        for sz in 0..sub {
+            for sx in 0..sub {
+                overlay_mask[cell_idx * SUBCELLS_PER_CELL + sz * sub + sx] =
+                    if sx < sub / 2 { 96 } else { 192 };
+            }
+        }
+        let mut world = World::new();
+        world.insert_chunk(
+            at,
+            SetChunk {
+                chunk_x: 0,
+                chunk_z: 0,
+                underlay: vec![Material::Grass.to_u8(); CELLS_PER_CHUNK_AREA],
+                underlay_points: Vec::new(),
+                height_points: Vec::new(),
+                overlay,
+                overlay_mask,
+                height: Vec::new(),
+                region: Vec::new(),
+                water_plane: Vec::new(),
+                smoothing: Vec::new(),
+            }
+            .into_chunk(),
+        );
+
+        let mesh = mesh_chunk(&world, at, &StyleTable::default());
+        let coverage_verts: Vec<&Vertex> = mesh
+            .iter()
+            .filter(|t| t.verts.iter().all(|v| (v.y - COVERAGE_LIFT).abs() < 1e-6))
+            .flat_map(|t| t.verts.iter())
+            .collect();
+        assert!(
+            !coverage_verts.is_empty(),
+            "the overlay coverage pass emits lifted contour geometry",
+        );
+
+        let low_sample_x = cell.x as f32 + (sub / 2 - 2) as f32 / SUB as f32 + 0.5 / SUB as f32;
+        let high_sample_x = cell.x as f32 + (sub / 2 - 1) as f32 / SUB as f32 + 0.5 / SUB as f32;
+        let low_reconstructed = 96.0;
+        let high_reconstructed = (96.0 + 192.0) * 0.5;
+        let crossing_t = (127.5 - low_reconstructed) / (high_reconstructed - low_reconstructed);
+        let expected_x = low_sample_x + (high_sample_x - low_sample_x) * crossing_t;
+        let min_x = coverage_verts.iter().map(|v| v.x).fold(f32::MAX, f32::min);
+        assert!(
+            (min_x - expected_x).abs() < 1e-4,
+            "scalar contour crosses at {expected_x}, got {min_x}",
+        );
+        assert!(
+            (min_x - (cell.x as f32 + 0.5)).abs() > 1e-3,
+            "the contour did not collapse to the blocky half-cell edge",
+        );
     }
 
     #[test]
