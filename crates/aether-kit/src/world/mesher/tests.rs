@@ -3,9 +3,15 @@ use core::ops::Range;
 
 use aether_capabilities::render::{DrawTriangle, Vertex};
 
-use super::constants::{COVERAGE_LIFT, EDGE, OCTIMETERS_PER_METER, SUB};
+use super::constants::{
+    COVERAGE_LIFT, EDGE, MAX_APRON_SUBCELLS, OCTIMETERS_PER_METER, SUB, SUBCELLS_PER_CHUNK_EDGE,
+};
 use super::coverage::{overlay_materials, subcell_coverage};
+use super::partition::partition_inputs;
 use super::style::StyleTable;
+use super::surface::{
+    CliffStep, cliff_steps, level_coverage_plane, project_level_coverage, sample_level_plane,
+};
 use super::*;
 use crate::world::{
     CELLS_PER_CHUNK_AREA, CellPos, Chunk, ChunkPos, Material, Region, STEP_MAX_OCTIMETERS,
@@ -426,6 +432,137 @@ mod coverage {
     }
 }
 
+mod level_contours {
+    use super::*;
+
+    fn level_world(level: impl Fn(i32, i32) -> i32) -> World {
+        let mut world = World::new();
+        for chunk_z in -1..=1 {
+            for chunk_x in -1..=1 {
+                let mut chunk = Chunk::empty();
+                chunk.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+                for local_z in 0..EDGE {
+                    for local_x in 0..EDGE {
+                        let world_x = chunk_x * EDGE + local_x;
+                        let world_z = chunk_z * EDGE + local_z;
+                        chunk.height[(local_z * EDGE + local_x) as usize] = level(world_x, world_z);
+                    }
+                }
+                world.insert_chunk(
+                    ChunkPos {
+                        x: chunk_x,
+                        z: chunk_z,
+                    },
+                    chunk,
+                );
+            }
+        }
+        world
+    }
+
+    #[test]
+    fn uniform_level_field_projects_to_a_uniform_plane_without_a_step() {
+        let world = level_world(|_, _| 100);
+        let plane = sample_level_plane(&world, ChunkPos { x: 0, z: 0 }, MAX_APRON_SUBCELLS);
+        assert!(plane.solid.iter().all(|solid| *solid));
+        assert!(plane.levels.iter().all(|level| *level == 100));
+        assert!(
+            cliff_steps(&plane).is_empty(),
+            "a uniform field has no isoline to loft",
+        );
+        let projected = level_coverage_plane(&plane, CliffStep { low: 0, high: 200 });
+        assert!(
+            projected.iter().all(|sample| *sample == 128),
+            "a uniform scalar field stays one uniform coverage value",
+        );
+    }
+
+    #[test]
+    fn one_step_projects_a_monotone_crossing_band() {
+        let step = CliffStep { low: 0, high: 256 };
+        assert_eq!(
+            [0, 64, 128, 192, 256].map(|level| project_level_coverage(level, step)),
+            [0, 64, 128, 191, 255],
+            "intermediate levels retain their linear scalar fraction",
+        );
+
+        let world = level_world(|x, _| if x < 8 { 0 } else { 256 });
+        let plane = sample_level_plane(&world, ChunkPos { x: 0, z: 0 }, MAX_APRON_SUBCELLS);
+        assert_eq!(cliff_steps(&plane), vec![step]);
+        let coverage = level_coverage_plane(&plane, step);
+        for row in coverage.chunks_exact(plane.width) {
+            assert!(
+                row.windows(2).all(|pair| pair[0] <= pair[1]),
+                "the west-to-east step projects monotonically",
+            );
+            assert!(row.contains(&0) && row.contains(&u8::MAX));
+        }
+    }
+
+    #[test]
+    fn material_freeze_stays_crisp_while_the_level_contour_rounds() {
+        // The material and level fields deliberately diverge at this stone
+        // plateau: the partition freezes its authored label samples on the
+        // physical break, while the separate scalar level marcher is free to
+        // round the convex corner. Reusing `frozen` for both would remove the
+        // diagonal wall segment; deleting it would let paint cross the step.
+        let mut world = level_world(|_, _| 0);
+        let at = ChunkPos { x: 0, z: 0 };
+        let mut chunk = world.chunk(at).expect("center chunk").clone();
+        for z in 6..10 {
+            for x in 6..10 {
+                let index = (z * EDGE + x) as usize;
+                chunk.underlay[index] = Material::Stone;
+                chunk.height[index] = 512;
+            }
+        }
+        world.insert_chunk(at, chunk);
+
+        let apron = MAX_APRON_SUBCELLS;
+        let width = (SUBCELLS_PER_CHUNK_EDGE + 2 * apron) as usize;
+        let (ids, params, frozen) =
+            partition_inputs(&world, at, apron, width).expect("solid partition");
+        assert!(
+            frozen.iter().any(|sample| *sample),
+            "material samples flanking the physical cliff remain frozen",
+        );
+        let (display, _, _) = contour::repartition(&ids, width, width, 1, &params, &frozen);
+        assert_eq!(
+            display, ids,
+            "the material partition preserves the crisp authored edge",
+        );
+
+        let mesh = mesh_chunk(&world, at, &StyleTable::default());
+        assert!(
+            mesh.iter()
+                .filter(|triangle| {
+                    let max = triangle
+                        .verts
+                        .iter()
+                        .map(|vertex| vertex.y)
+                        .fold(f32::MIN, f32::max);
+                    let min = triangle
+                        .verts
+                        .iter()
+                        .map(|vertex| vertex.y)
+                        .fold(f32::MAX, f32::min);
+                    max - min > 1.0
+                })
+                .any(|triangle| {
+                    let top: Vec<&Vertex> = triangle
+                        .verts
+                        .iter()
+                        .filter(|vertex| vertex.y > 1.0)
+                        .collect();
+                    top.len() == 2
+                        && top[0].x.to_bits() != top[1].x.to_bits()
+                        && top[0].z.to_bits() != top[1].z.to_bits()
+                }),
+            "the unfrozen level contour rounds the convex step corner",
+        );
+    }
+}
+
 mod partition_inputs {
     use super::*;
 
@@ -543,15 +680,94 @@ mod walls {
     }
 
     #[test]
+    fn loft_wall_top_ring_is_the_cap_contour_bit_for_bit() {
+        // Tripwire: a convex same-material plateau has no material contour
+        // the wall could borrow. The level marcher must produce both its cap
+        // and its wall; every wall-top position is one of the cap positions
+        // by exact float bits, and the rounded corner includes a diagonal
+        // segment rather than falling back to lattice closure quads.
+        let mut world = World::new();
+        for chunk_z in -1..=1 {
+            for chunk_x in -1..=1 {
+                let mut chunk = Chunk::empty();
+                chunk.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+                if chunk_x == 0 && chunk_z == 0 {
+                    for z in 6..10 {
+                        for x in 6..10 {
+                            chunk.height[(z * EDGE + x) as usize] = 512;
+                        }
+                    }
+                }
+                world.insert_chunk(
+                    ChunkPos {
+                        x: chunk_x,
+                        z: chunk_z,
+                    },
+                    chunk,
+                );
+            }
+        }
+
+        let mut loft = Vec::new();
+        emit_lofts(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            &StyleTable::default(),
+            &mut loft,
+        );
+        let high = 2.0f32;
+        let cap_vertices: Vec<Vertex> = loft
+            .iter()
+            .filter(|triangle| y_span(triangle) < f32::EPSILON)
+            .flat_map(|triangle| triangle.verts)
+            .filter(|vertex| vertex.y.to_bits() == high.to_bits())
+            .collect();
+        assert!(!cap_vertices.is_empty(), "the level step emits a high cap");
+
+        let walls: Vec<&DrawTriangle> = loft
+            .iter()
+            .filter(|triangle| y_span(triangle) > 1.0)
+            .collect();
+        assert!(!walls.is_empty(), "the same level step emits a wall ribbon");
+        for top in walls
+            .iter()
+            .flat_map(|triangle| triangle.verts)
+            .filter(|vertex| vertex.y.to_bits() == high.to_bits())
+        {
+            assert!(
+                cap_vertices.contains(&top),
+                "wall top ({}, {}, {}) is not a bit-identical cap-contour vertex",
+                top.x,
+                top.y,
+                top.z,
+            );
+        }
+        assert!(
+            walls.iter().any(|triangle| {
+                let top: Vec<&Vertex> = triangle
+                    .verts
+                    .iter()
+                    .filter(|vertex| vertex.y.to_bits() == high.to_bits())
+                    .collect();
+                top.len() == 2
+                    && top[0].x.to_bits() != top[1].x.to_bits()
+                    && top[0].z.to_bits() != top[1].z.to_bits()
+            }),
+            "the convex corner contains a smooth diagonal wall segment",
+        );
+    }
+
+    #[test]
     fn marched_wall_tops_land_on_the_cap_contour() {
-        // The watertight pin: a material-boundary cliff lofts marched walls
-        // whose top vertices are the cap contour's own vertices. Sand plateau
+        // A material-boundary cliff uses the same level-field path as a
+        // same-material step. Sand plateau
         // (1 m up, east) against grass ground: mesh the high chunk, split its
         // triangles into walls (a tall vertical span) and caps (near-flat),
         // and assert every wall-top vertex coincides exactly with a cap
         // vertex — no gap and no overlap between the cliff face and the
-        // surfaces it joins. The wall lofts its top through the same
-        // owner-clamped patch the cap drew, so the match is bit-exact.
+        // surfaces it joins. The dedicated identity tripwire above pins exact
+        // vertex equality; this fixture keeps the material-boundary route on
+        // the same invariant.
         let mut world = World::new();
         let mut low = Chunk::empty();
         low.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
@@ -598,7 +814,7 @@ mod walls {
         let at = ChunkPos { x: 0, z: 0 };
         let styles = StyleTable::default();
         let mut expected = Vec::new();
-        let _ = mesh_underlay(&world, at, &styles, &mut expected);
+        mesh_underlay(&world, at, &styles, &mut expected);
         let full = mesh_chunk(&world, at, &styles);
         assert_eq!(full, expected, "the wall pass adds nothing to a flat world");
     }
@@ -607,10 +823,9 @@ mod walls {
     fn adjacent_chunks_agree_on_a_wall_across_their_seam() {
         // A grass cliff running in x across the vertical chunk seam at
         // x = 16: cells at z < 8 sit 1 m up, z >= 8 at the datum, same
-        // material so the face is a cell-edge lattice wall. Each chunk owns
-        // its half of the line; at the shared seam the two halves must meet
-        // on identical vertices, or the wall would gap or double where the
-        // chunks join.
+        // material, so the independent level contour owns the whole face.
+        // Each chunk owns its half of the line; at the shared seam the two
+        // halves must meet on at least one identical interpolated vertex.
         let mut world = World::new();
         for cx in 0..2 {
             let mut chunk = Chunk::empty();
@@ -628,7 +843,7 @@ mod walls {
                 .iter()
                 .filter(|t| y_span(t) > 0.5)
                 .flat_map(|t| t.verts.iter())
-                .filter(|v| (v.x - 16.0).abs() < 1e-4)
+                .filter(|v| (v.x - 16.0).abs() < 0.05)
                 .map(quantized_xyz)
                 .collect();
             verts.sort_unstable();
@@ -638,9 +853,9 @@ mod walls {
         let west = seam_verts(ChunkPos { x: 0, z: 0 });
         let east = seam_verts(ChunkPos { x: 1, z: 0 });
         assert!(!west.is_empty(), "the seam carries a wall");
-        assert_eq!(
-            west, east,
-            "both chunks place the seam wall on identical vertices",
+        assert!(
+            west.iter().any(|vertex| east.contains(vertex)),
+            "both chunks place a shared seam wall vertex identically",
         );
     }
 
@@ -923,12 +1138,9 @@ mod walls {
     #[test]
     fn a_pure_delta_plateau_stands_walls_on_its_break_lines() {
         // The same-material height-break class: a stone field at uniform cell
-        // height wears a plateau authored purely with point deltas — no
-        // material boundary anywhere (nothing for the marched pass) and no
-        // cell-height cliff (nothing for the cell-edge walk) — so every wall
-        // must come from the subcell relief walk, standing exactly on the
-        // plateau's break lines. Those lines run through cell interiors
-        // (x and z = 7.5 / 9.5 m), where a cell-edge wall cannot stand.
+        // height wears a plateau authored purely with point deltas. Its level
+        // contour stays on the straight authored sides while rounding the
+        // four convex corners — no material boundary participates.
         let at = ChunkPos { x: 0, z: 0 };
         let mut world = World::new();
         insert_material_chunks(&mut world, Material::Stone, None);
@@ -954,22 +1166,27 @@ mod walls {
         let mesh = mesh_chunk(&world, at, &StyleTable::default());
         let walls: Vec<&DrawTriangle> = mesh.iter().filter(|t| y_span(t) > 0.5).collect();
         assert!(!walls.is_empty(), "the delta plateau wears walls");
-        // Every wall vertex lies on the block's perimeter lines — the
-        // authored break, nowhere else (no fused-interior or cell-edge wall).
+        // The smoothed contour stays within one output sample of the authored
+        // square, and at least one corner segment moves in both axes.
         let lo = 7.5f32;
         let hi = 9.5f32;
         for v in walls.iter().flat_map(|t| t.verts.iter()) {
-            let on_x = ((v.x - lo).abs() < 1e-4 || (v.x - hi).abs() < 1e-4)
-                && (lo - 1e-4..=hi + 1e-4).contains(&v.z);
-            let on_z = ((v.z - lo).abs() < 1e-4 || (v.z - hi).abs() < 1e-4)
-                && (lo - 1e-4..=hi + 1e-4).contains(&v.x);
             assert!(
-                on_x || on_z,
-                "wall vertex ({}, {}) stands off the authored break lines",
+                (lo - 0.05..=hi + 0.05).contains(&v.x) && (lo - 0.05..=hi + 0.05).contains(&v.z),
+                "wall vertex ({}, {}) escaped the smoothed break band",
                 v.x,
                 v.z,
             );
         }
+        assert!(
+            walls.iter().any(|triangle| {
+                let top: Vec<&Vertex> = triangle.verts.iter().filter(|v| v.y > 0.5).collect();
+                top.len() == 2
+                    && top[0].x.to_bits() != top[1].x.to_bits()
+                    && top[0].z.to_bits() != top[1].z.to_bits()
+            }),
+            "the level contour rounds a convex corner with a diagonal segment",
+        );
         // And all four perimeter sides are closed.
         for (side, pick) in [
             (
@@ -990,11 +1207,10 @@ mod walls {
     #[test]
     fn a_relief_cell_on_a_cell_cliff_lofts_its_wall_exactly_once() {
         // A relief cell standing a plain cell-height cliff above a
-        // same-material neighbor: the cell-edge walk skips relief cells and
-        // the subcell relief walk owns the face, so the shared edge must be
-        // covered exactly once — the wall segments' top edges sum to the one
-        // cell-edge meter. Double emission (both walks firing) would sum to
-        // two; a routing hole would sum to zero.
+        // same-material neighbor: the one level contour owns the face. Its
+        // straight west run is slightly shorter than one meter because the
+        // two convex ends round into diagonal segments, but it must remain a
+        // single near-meter run — double emission would exceed one meter.
         let at = ChunkPos { x: 0, z: 0 };
         let mut world = World::new();
         let mut chunk = Chunk::empty();
@@ -1034,8 +1250,8 @@ mod walls {
             })
             .sum();
         assert!(
-            (top_length - 1.0).abs() < 1e-3,
-            "the shared edge is covered exactly once, got {top_length} m of top edge",
+            (0.85..1.0).contains(&top_length),
+            "the rounded west run is emitted once, got {top_length} m of top edge",
         );
     }
 
@@ -1220,13 +1436,12 @@ mod walls {
     }
 
     #[test]
-    fn delta_break_walls_seal_both_caps() {
-        // Watertightness across the delta break: every wall top vertex
-        // coincides with a high-cap vertex, and every wall bottom vertex
-        // coincides with a low-cap vertex at the same position — under
-        // closure the base is the low cap's committed edge exactly, so the
-        // wall spans precisely the vertical gap the split caps open, no
-        // pinholes, no overlap.
+    fn delta_break_wall_drops_the_shared_cap_ring_to_the_low_level() {
+        // Watertightness across the delta break: every wall top vertex is a
+        // bit-identical high-cap contour vertex, and every top footprint has
+        // a bottom-ring vertex at the same bit-identical `(x, z)` dropped to
+        // the low level. The low surface is a continuous plane under that
+        // ring; it need not duplicate the ring as tessellation vertices.
         let world = delta_column_world();
         let mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, &StyleTable::default());
         let cap_verts: Vec<&Vertex> = mesh
@@ -1234,31 +1449,31 @@ mod walls {
             .filter(|t| xz_area_doubled(t) > 1e-6)
             .flat_map(|t| t.verts.iter())
             .collect();
-        let seals = |x: f32, z: f32, y: f32| {
-            cap_verts
-                .iter()
-                .any(|c| (c.x - x).abs() < 1e-5 && (c.z - z).abs() < 1e-5 && (c.y - y).abs() < 1e-4)
-        };
         let walls: Vec<&DrawTriangle> = mesh.iter().filter(|t| y_span(t) > 0.5).collect();
         assert!(!walls.is_empty(), "the break carries walls");
-        for v in walls.iter().flat_map(|t| t.verts.iter()) {
-            if v.y > 1.0 {
-                assert!(
-                    seals(v.x, v.z, v.y),
-                    "wall top ({}, {}, {}) misses the high cap",
-                    v.x,
-                    v.z,
-                    v.y,
-                );
-            } else {
-                assert!(
-                    seals(v.x, v.z, v.y),
-                    "wall base ({}, {}, {}) misses the low cap",
-                    v.x,
-                    v.z,
-                    v.y,
-                );
-            }
+        let wall_verts: Vec<&Vertex> = walls.iter().flat_map(|t| t.verts.iter()).collect();
+        for top in wall_verts.iter().copied().filter(|v| v.y > 1.0) {
+            assert!(
+                cap_verts.iter().any(|cap| {
+                    cap.x.to_bits() == top.x.to_bits()
+                        && cap.y.to_bits() == top.y.to_bits()
+                        && cap.z.to_bits() == top.z.to_bits()
+                }),
+                "wall top ({}, {}, {}) misses the shared high cap",
+                top.x,
+                top.y,
+                top.z,
+            );
+            assert!(
+                wall_verts.iter().any(|bottom| {
+                    bottom.x.to_bits() == top.x.to_bits()
+                        && bottom.z.to_bits() == top.z.to_bits()
+                        && bottom.y.abs() < f32::EPSILON
+                }),
+                "wall top ({}, {}) has no vertically dropped low-ring vertex",
+                top.x,
+                top.z,
+            );
         }
     }
 

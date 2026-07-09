@@ -6,12 +6,12 @@ use aether_math::Rgb;
 
 use crate::world::{CellPos, ChunkPos, Material, STEP_MAX_OCTIMETERS, World};
 
-use super::constants::{EDGE, OCTIMETERS_PER_METER, OCTIMETERS_PER_SUBCELL, SUB};
+use super::constants::{EDGE, OCTIMETERS_PER_METER};
 use super::contour::{GridPlacement, label_case, label_window_polys};
-use super::geometry::{emit_flat_quad, push_wall_quad};
+use super::geometry::emit_flat_quad;
 use super::partition::chunk_placement;
 use super::style::{StyleTable, flat_color};
-use super::surface::{floor_to_i32, fragment_lift, label_lift, point_surface_level_at};
+use super::surface::{fragment_lift, label_lift, point_surface_level_at};
 
 /// The break lines crossing a window's interior, per axis, in octimeters:
 /// `Some(midline)` when the window's corner-sample point levels split past
@@ -19,15 +19,15 @@ use super::surface::{floor_to_i32, fragment_lift, label_lift, point_surface_leve
 /// when the two sample columns (rows) sit in different subcells, so a
 /// returned midline is always a subcell lattice line — the line the break
 /// stands on and the relief walls loft from. A flap polygon spanning a
-/// returned line must be clipped there ([`emit_clipped_flap`]): a cap fan
+/// returned line must be clipped there ([`clip_window_poly`]): a cap fan
 /// must never connect vertices whose plates split.
 ///
 /// Reads the point-surface levels directly rather than gating on
 /// [`World::cell_has_height_relief`], so a **whole-cell** height cliff — a
 /// plate break at a cell boundary with no subcell relief — also returns a
-/// break line. That is what lets a chamfered relief-free material boundary
-/// clip its overhang flap so the sliver closer ([`emit_clip_gap_walls`]) can
-/// seal it; a flat cell splits nothing (equal levels) and stays break-free.
+/// break line. This keeps a material flap from draping across split plates;
+/// the separate level-contour loft owns the cap ribbon and wall at the cut.
+/// A flat cell splits nothing (equal levels) and stays break-free.
 fn window_break_lines(
     world: &World,
     x_lo: i32,
@@ -81,7 +81,7 @@ fn split_poly_at(poly: &[[f32; 2]], axis: usize, line: f32) -> (Vec<[f32; 2]>, V
 }
 
 /// Twice the area of a polygon (shoelace, absolute) — the degenerate-
-/// fragment filter for [`emit_clipped_flap`].
+/// fragment filter for [`clip_window_poly`].
 fn poly_area_doubled(poly: &[[f32; 2]]) -> f32 {
     let mut sum = 0.0f32;
     for (i, &a) in poly.iter().enumerate() {
@@ -125,131 +125,6 @@ fn clip_window_poly(
     }
     fragments.retain(|(frag, _)| frag.len() >= 3 && poly_area_doubled(frag) >= 1.0);
     fragments
-}
-
-/// Close the vertical gaps a clipped flap opens **inside itself**: where
-/// two fragments of one flap meet across a clipped break line at split
-/// plates, no other wall class stands — the display is uniform there (one
-/// flap, so no marched boundary), and where the flanking authored
-/// materials differ the relief walk skips the edge as marched territory.
-/// The regime is the marching chamfer at a silhouette corner: the cut
-/// leaves a sliver of this label's display over the far side's raised (or
-/// dropped) fabric, honestly lifted to that fabric's plate, and its
-/// lattice-line edges would otherwise be open cracks. The shared chord of
-/// each adjacent fragment pair is walled from the higher side's lift down to
-/// the lower's committed edge — gated to authored-material-differing lines so
-/// a same-material break stays the closure walk's (and only its) face.
-#[allow(clippy::too_many_lines)] // one pass: pair fragments, gate, loft
-fn emit_clip_gap_walls(
-    world: &World,
-    owner: CellPos,
-    fragments: &[FlapFragment],
-    styles: &StyleTable,
-    tris: &mut Vec<DrawTriangle>,
-) {
-    let mut color: Option<[f32; 3]> = None;
-    for axis in 0..2 {
-        for (fa, sa) in fragments {
-            let Some((line, false)) = sa[axis] else {
-                continue;
-            };
-            for (fb, sb) in fragments {
-                if sb[axis] != Some((line, true)) || sb[1 - axis] != sa[1 - axis] {
-                    continue;
-                }
-                // The shared chord: each side's on-line vertex extent along
-                // the other axis, overlapped.
-                let extent = |frag: &[[f32; 2]]| -> Option<(f32, f32)> {
-                    let mut lo = f32::MAX;
-                    let mut hi = f32::MIN;
-                    for v in frag {
-                        if (v[axis] - line as f32).abs() < 0.5 {
-                            lo = lo.min(v[1 - axis]);
-                            hi = hi.max(v[1 - axis]);
-                        }
-                    }
-                    (hi > lo).then_some((lo, hi))
-                };
-                let (Some((a_lo, a_hi)), Some((b_lo, b_hi))) = (extent(fa), extent(fb)) else {
-                    continue;
-                };
-                let lo = a_lo.max(b_lo);
-                let hi = a_hi.min(b_hi);
-                if hi - lo < 0.5 {
-                    continue;
-                }
-                // Authored materials across the line at the chord: a
-                // same-material break is the relief walk's face, not ours.
-                let lattice = line / OCTIMETERS_PER_SUBCELL;
-                let sub_other = floor_to_i32((lo + hi) * 0.5 / OCTIMETERS_PER_SUBCELL as f32);
-                let material_of = |sub_axis: i32| {
-                    let (sx, sz) = if axis == 0 {
-                        (sub_axis, sub_other)
-                    } else {
-                        (sub_other, sub_axis)
-                    };
-                    world.underlay_point(
-                        CellPos {
-                            x: sx.div_euclid(SUB),
-                            z: sz.div_euclid(SUB),
-                        },
-                        sx.rem_euclid(SUB),
-                        sz.rem_euclid(SUB),
-                    )
-                };
-                if material_of(lattice - 1) == material_of(lattice) {
-                    continue;
-                }
-                // Lift the chord endpoints through both fragments' sides.
-                let endpoint = |other: f32| -> [f32; 2] {
-                    let mut p = [0.0f32; 2];
-                    p[axis] = line as f32;
-                    p[1 - axis] = other;
-                    p
-                };
-                let lift = |p: [f32; 2], sides: [Option<(i32, bool)>; 2]| {
-                    fragment_lift(
-                        world,
-                        owner,
-                        sides,
-                        p[0] / OCTIMETERS_PER_METER,
-                        p[1] / OCTIMETERS_PER_METER,
-                    )
-                };
-                let (c0, c1) = (endpoint(lo), endpoint(hi));
-                let below = [lift(c0, *sa), lift(c1, *sa)];
-                let above = [lift(c0, *sb), lift(c1, *sb)];
-                if (below[0] - above[0]).abs() < f32::EPSILON
-                    && (below[1] - above[1]).abs() < f32::EPSILON
-                {
-                    continue; // the plates agree — no gap to close
-                }
-                let (top, base) = if below[0] + below[1] > above[0] + above[1] {
-                    (below, above)
-                } else {
-                    (above, below)
-                };
-                let face = *color
-                    .get_or_insert_with(|| flat_color(styles.get(world.cliff_material(owner))));
-                push_wall_quad(
-                    tris,
-                    [
-                        c0[0] / OCTIMETERS_PER_METER,
-                        c0[1] / OCTIMETERS_PER_METER,
-                        top[0],
-                    ],
-                    [
-                        c1[0] / OCTIMETERS_PER_METER,
-                        c1[1] / OCTIMETERS_PER_METER,
-                        top[1],
-                    ],
-                    base[0],
-                    base[1],
-                    face,
-                );
-            }
-        }
-    }
 }
 
 /// Emit the marching-squares windows of the partition's boundary zone.
@@ -481,9 +356,6 @@ fn emit_mixed_window(
                         ],
                     });
                 }
-            }
-            if clip_x.is_some() || clip_z.is_some() {
-                emit_clip_gap_walls(world, owner, &fragments, styles, tris);
             }
         }
     }

@@ -24,6 +24,7 @@
 //! three are pure functions of the grid, so a detail-prop mesher can drive
 //! the same machinery at its own resolution.
 
+use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -794,15 +795,76 @@ pub fn march_grid(
     vertex: &impl Fn(f32, f32) -> Vertex,
     tris: &mut Vec<DrawTriangle>,
 ) {
+    let _ = march_grid_region(
+        grid,
+        gw,
+        gh,
+        place,
+        MarchRegion {
+            window_rect: [0, 0, gw.saturating_sub(1), gh.saturating_sub(1)],
+            collect_contours: false,
+        },
+        vertex,
+        tris,
+    );
+}
+
+/// March a chunk-owned rectangle of windows and return the boundary as
+/// stitched polylines. The returned vertices are the same `Vertex` values
+/// copied into the cap triangles, so a caller can loft a wall from them
+/// without recomputing any contour coordinates.
+pub(super) fn march_grid_with_contours(
+    grid: &[u8],
+    gw: usize,
+    gh: usize,
+    place: &GridPlacement,
+    window_rect: [usize; 4],
+    vertex: &impl Fn(f32, f32) -> Vertex,
+    tris: &mut Vec<DrawTriangle>,
+) -> Vec<Vec<Vertex>> {
+    march_grid_region(
+        grid,
+        gw,
+        gh,
+        place,
+        MarchRegion {
+            window_rect,
+            collect_contours: true,
+        },
+        vertex,
+        tris,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct MarchRegion {
+    window_rect: [usize; 4],
+    collect_contours: bool,
+}
+
+fn march_grid_region(
+    grid: &[u8],
+    gw: usize,
+    gh: usize,
+    place: &GridPlacement,
+    region: MarchRegion,
+    vertex: &impl Fn(f32, f32) -> Vertex,
+    tris: &mut Vec<DrawTriangle>,
+) -> Vec<Vec<Vertex>> {
     if gw < 2 || gh < 2 {
-        return;
+        return Vec::new();
     }
     let windows_x = gw - 1;
     let windows_z = gh - 1;
+    let [x0, z0, x1, z1] = region.window_rect;
+    let x0 = x0.min(windows_x);
+    let z0 = z0.min(windows_z);
+    let x1 = x1.min(windows_x).max(x0);
+    let z1 = z1.min(windows_z).max(z0);
     let mut case_grid = vec![0u8; windows_x * windows_z];
     let mut full = vec![false; windows_x * windows_z];
-    for wj in 0..windows_z {
-        for wi in 0..windows_x {
+    for wj in z0..z1 {
+        for wi in x0..x1 {
             let bl = covered(grid[wj * gw + wi]);
             let br = covered(grid[wj * gw + wi + 1]);
             let tl = covered(grid[(wj + 1) * gw + wi]);
@@ -812,17 +874,27 @@ pub fn march_grid(
             full[wj * windows_x + wi] = case == 15;
         }
     }
-    merge_interior(&full, windows_x, windows_z, place, vertex, tris);
-    for wj in 0..windows_z {
-        for wi in 0..windows_x {
+    merge_interior(&full, windows_x, [x0, z0, x1, z1], place, vertex, tris);
+    let mut segments = region.collect_contours.then(Vec::new);
+    for wj in z0..z1 {
+        for wi in x0..x1 {
             let case = case_grid[wj * windows_x + wi];
             if case == 0 || case == 15 {
                 continue;
             }
             let window = MarchWindow { grid, gw, place };
-            emit_window_contour(wi as i32, wj as i32, &window, case, vertex, tris);
+            emit_window_contour(
+                wi as i32,
+                wj as i32,
+                &window,
+                case,
+                vertex,
+                tris,
+                segments.as_mut(),
+            );
         }
     }
+    segments.map_or_else(Vec::new, |segments| stitch_segments(&segments))
 }
 
 /// Greedy-merge fully-covered windows into maximal rectangles — the
@@ -831,27 +903,26 @@ pub fn march_grid(
 fn merge_interior(
     full: &[bool],
     windows_x: usize,
-    windows_z: usize,
+    window_rect: [usize; 4],
     place: &GridPlacement,
     vertex: &impl Fn(f32, f32) -> Vertex,
     tris: &mut Vec<DrawTriangle>,
 ) {
     let mut consumed = vec![false; full.len()];
-    for wj in 0..windows_z {
-        for wi in 0..windows_x {
+    let [x0, z0, x1, z1] = window_rect;
+    for wj in z0..z1 {
+        for wi in x0..x1 {
             let idx = wj * windows_x + wi;
             if consumed[idx] || !full[idx] {
                 continue;
             }
             let mut w = 1;
-            while wi + w < windows_x
-                && full[wj * windows_x + wi + w]
-                && !consumed[wj * windows_x + wi + w]
+            while wi + w < x1 && full[wj * windows_x + wi + w] && !consumed[wj * windows_x + wi + w]
             {
                 w += 1;
             }
             let mut h = 1;
-            'rows: while wj + h < windows_z {
+            'rows: while wj + h < z1 {
                 for dx in 0..w {
                     let cell = (wj + h) * windows_x + wi + dx;
                     if !full[cell] || consumed[cell] {
@@ -882,8 +953,17 @@ fn emit_window_contour(
     case: u8,
     vertex: &impl Fn(f32, f32) -> Vertex,
     tris: &mut Vec<DrawTriangle>,
+    segments: Option<&mut Vec<[Vertex; 2]>>,
 ) {
-    emit_window_poly(wi, wj, window, CASE_POLYS[case as usize], vertex, tris);
+    emit_window_poly(
+        wi,
+        wj,
+        window,
+        CASE_POLYS[case as usize],
+        vertex,
+        tris,
+        segments,
+    );
 }
 
 /// Fan-triangulate one window polygon given by its boundary-point indices
@@ -943,6 +1023,7 @@ fn emit_window_poly(
     poly: &[u8],
     vertex: &impl Fn(f32, f32) -> Vertex,
     tris: &mut Vec<DrawTriangle>,
+    segments: Option<&mut Vec<[Vertex; 2]>>,
 ) {
     let step_oct = window.place.step_oct;
     let edge_t = |a: u8, b: u8| -> f32 {
@@ -976,16 +1057,84 @@ fn emit_window_poly(
         [interp(x_lo, x_hi, top), z_hi as f32],
         [x_lo as f32, interp(z_lo, z_hi, left)],
     ];
-    let vert = |p: [f32; 2]| vertex(p[0] / OCTIMETERS_PER_METER, p[1] / OCTIMETERS_PER_METER);
+    let verts = points.map(|p| vertex(p[0] / OCTIMETERS_PER_METER, p[1] / OCTIMETERS_PER_METER));
     for k in 1..poly.len() - 1 {
         tris.push(DrawTriangle {
             verts: [
-                vert(points[poly[0] as usize]),
-                vert(points[poly[k] as usize]),
-                vert(points[poly[k + 1] as usize]),
+                verts[poly[0] as usize],
+                verts[poly[k] as usize],
+                verts[poly[k + 1] as usize],
             ],
         });
     }
+    if let Some(segments) = segments {
+        for k in 0..poly.len() {
+            let a = poly[k];
+            let b = poly[(k + 1) % poly.len()];
+            if a >= 4 && b >= 4 {
+                segments.push([verts[a as usize], verts[b as usize]]);
+            }
+        }
+    }
+}
+
+fn vertex_key(vertex: Vertex) -> (u32, u32, u32) {
+    (vertex.x.to_bits(), vertex.y.to_bits(), vertex.z.to_bits())
+}
+
+/// Stitch the at-most-degree-two marching segments into open chunk-edge
+/// polylines and closed rings. Endpoint matching is bitwise: adjacent
+/// windows must have produced the exact same contour vertex, which is also
+/// the identity guarantee the loft relies on.
+fn stitch_segments(segments: &[[Vertex; 2]]) -> Vec<Vec<Vertex>> {
+    let mut adjacent: BTreeMap<(u32, u32, u32), Vec<(usize, usize)>> = BTreeMap::new();
+    for (segment, endpoints) in segments.iter().enumerate() {
+        for (endpoint, vertex) in endpoints.iter().enumerate() {
+            adjacent
+                .entry(vertex_key(*vertex))
+                .or_default()
+                .push((segment, endpoint));
+        }
+    }
+
+    let mut starts = Vec::new();
+    for connections in adjacent.values() {
+        if connections.len() == 1 {
+            starts.push(connections[0]);
+        }
+    }
+    starts.extend((0..segments.len()).map(|segment| (segment, 0)));
+
+    let mut used = vec![false; segments.len()];
+    let mut polylines = Vec::new();
+    for (mut segment, mut endpoint) in starts {
+        if used[segment] {
+            continue;
+        }
+        let first = segments[segment][endpoint];
+        let first_key = vertex_key(first);
+        let mut polyline = vec![first];
+        loop {
+            used[segment] = true;
+            let next_vertex = segments[segment][1 - endpoint];
+            polyline.push(next_vertex);
+            let next_key = vertex_key(next_vertex);
+            if next_key == first_key {
+                break;
+            }
+            let Some(&(next_segment, next_endpoint)) =
+                adjacent.get(&next_key).and_then(|connections| {
+                    connections.iter().find(|(candidate, _)| !used[*candidate])
+                })
+            else {
+                break;
+            };
+            segment = next_segment;
+            endpoint = next_endpoint;
+        }
+        polylines.push(polyline);
+    }
+    polylines
 }
 
 /// Push the two triangles of a quad spanning `[x0, x1] × [z0, z1]`
@@ -1141,6 +1290,114 @@ mod tests {
                 .filter(|&&x| x > 0.5)
                 .all(|&x| (x - 0.625).abs() < 1e-6),
             "no crossing kinks short of the straight edge",
+        );
+    }
+
+    #[test]
+    fn scalar_straight_step_stitches_one_collinear_polyline() {
+        // Every row carries the same monotone scalar step, so marching the
+        // cap and extracting its boundary must return one straight line.
+        // Reconstructing segments independently with binary midpoints would
+        // kink this at the authored scalar fractions.
+        let (source_width, source_height) = (6usize, 6usize);
+        let row = [255, 220, 170, 90, 20, 0];
+        let source: Vec<u8> = (0..source_height).flat_map(|_| row).collect();
+        let (grid, gw, gh) = minimize_corners(
+            &source,
+            source_width,
+            source_height,
+            2,
+            &uniform(2, 90, source.len()),
+        );
+        let place = GridPlacement {
+            origin_oct: [16, 16],
+            step_oct: 32,
+        };
+        let mut tris = Vec::new();
+        let polylines = march_grid_with_contours(
+            &grid,
+            gw,
+            gh,
+            &place,
+            [0, 2, gw - 1, gh - 3],
+            &flat_vertex,
+            &mut tris,
+        );
+        assert_eq!(polylines.len(), 1, "one straight crossing line");
+        let x = polylines[0][0].x;
+        assert!(
+            polylines[0]
+                .iter()
+                .all(|point| point.x.to_bits() == x.to_bits()),
+            "every stitched crossing is bit-collinear at x={x}",
+        );
+        assert_eq!(
+            polylines[0].len(),
+            gh - 4,
+            "one vertex at every marched row edge",
+        );
+    }
+
+    #[test]
+    fn scalar_curved_step_stitches_a_smooth_closed_ring() {
+        // A radial monotone level proxy projects to scalar coverage. Its
+        // half-coverage isoline must be a closed, many-segment ring with
+        // interpolated (non-midpoint) crossings and near-constant radius.
+        let (source_width, source_height) = (9usize, 9usize);
+        let mut source = vec![0u8; source_width * source_height];
+        for z in 0..source_height {
+            for x in 0..source_width {
+                let dx = x as i32 - 4;
+                let dz = z as i32 - 4;
+                source[z * source_width + x] = (255 - (dx * dx + dz * dz) * 12).clamp(0, 255) as u8;
+            }
+        }
+        let (grid, gw, gh) = minimize_corners(
+            &source,
+            source_width,
+            source_height,
+            2,
+            &uniform(2, 90, source.len()),
+        );
+        let place = GridPlacement {
+            origin_oct: [16, 16],
+            step_oct: 32,
+        };
+        let mut tris = Vec::new();
+        let polylines = march_grid_with_contours(
+            &grid,
+            gw,
+            gh,
+            &place,
+            [0, 0, gw - 1, gh - 1],
+            &flat_vertex,
+            &mut tris,
+        );
+        assert_eq!(polylines.len(), 1, "the radial step has one contour ring");
+        let ring = &polylines[0];
+        assert!(ring.len() >= 13, "the curved ring has many segments");
+        assert_eq!(
+            vertex_key(ring[0]),
+            vertex_key(*ring.last().expect("closed ring")),
+            "the stitched radial contour closes bit-exactly",
+        );
+        assert!(
+            ring.windows(2)
+                .filter(|edge| {
+                    edge[0].x.to_bits() != edge[1].x.to_bits()
+                        && edge[0].z.to_bits() != edge[1].z.to_bits()
+                })
+                .count()
+                >= 8,
+            "the curved isoline contains many non-axis-aligned segments",
+        );
+        assert!(
+            ring.iter().any(|point| {
+                let x_oct = point.x * OCTIMETERS_PER_METER;
+                let z_oct = point.z * OCTIMETERS_PER_METER;
+                x_oct.rem_euclid(16.0) > 1e-3 || z_oct.rem_euclid(16.0) > 1e-3
+            }),
+            "the curved contour keeps scalar interpolation, not binary midpoints",
         );
     }
 

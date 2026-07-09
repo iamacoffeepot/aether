@@ -37,36 +37,32 @@
 //! at the owning cell, saddles resolved by label order so every window
 //! tiles.
 //!
-//! # Height pass — plates and walls
+//! # Height pass — one lofted level ribbon
 //!
 //! Every vertex lifts onto the plate-resolved height surface
 //! ([`World::surface_height_in`]): cell heights blend into continuous
 //! slopes where neighbors sit within the step ceiling
-//! ([`crate::world::STEP_MAX_OCTIMETERS`]) and break where they exceed it. Where a cell
-//! carries authored per-point relief (`World::cell_has_height_relief`) the
-//! pass resolves one stride down: the interior cap tessellates to
-//! `SUB × SUB` subcell quads over point patches (`SubPatch`) so a subcell
-//! break shows, the marched wall split reads point (not cell) levels so a
-//! silhouette raised by deltas alone closes its wall on the authored line,
-//! and same-material breaks close as subcell-lattice walls
-//! (`emit_lattice_closure`) standing exactly on the authored break lines. A
-//! relief-free cell keeps the whole-cell fast path, byte-identical to a
-//! world with no height points.
+//! ([`crate::world::STEP_MAX_OCTIMETERS`]) and form a cliff when they exceed
+//! it. The height pass samples `point_surface_level_at` over the chunk plus
+//! apron, discovers each distinct low/high cliff step, and projects that
+//! scalar interval to `0..=255`: low floors to zero, high saturates, and any
+//! intermediate authored levels retain their fraction. `minimize_corners`
+//! bilinearly reconstructs and smooths this separate level plane, then the
+//! scalar `127.5` isoline is marched as the cliff contour. Unlike the
+//! material partition, the level plane deliberately does not consume the
+//! partition's frozen mask — the isoline is the boundary being smoothed.
 //!
-//! On the cell lattice the corner plates split exactly on cliff edges, and
-//! the wall pass closes that gap with a vertical face wearing the high
-//! cell's region cliff material as a flat color. The walls stitch from the
-//! same repartitioned sample grid the caps march, as the union of two
-//! segment classes over one pass: a material or Void boundary standing past
-//! the step ceiling lofts its marched contour down as a curtain — the
-//! wall's top vertices are the cap contour's own vertices lifted through
-//! the same owner-clamped patch, so the seam is watertight by construction
-//! — while a same-material cliff, which the material partition leaves no
-//! boundary to follow, lofts the cell-edge lattice line the owner-pinned
-//! patches already break on. Where the low side is a Void hole with no
-//! ground the curtain drops a fixed depth so the hole reads as thick ground
-//! rather than a paper lip. Boundary windows lift each vertex through its
-//! own (floor) cell — continuous wherever no cliff intervenes.
+//! One march emits the high cap and records its exact contour vertices.
+//! Those same vertex values become the wall's top ring; the bottom ring
+//! copies their `(x, z)` bits and drops only `y` to the low level. Cap and
+//! wall therefore share a seam by identity, not by a second edge prediction.
+//! High boundary patches in the ordinary material cap are omitted so this
+//! smooth cap ribbon owns convex corners; material caps draw afterward and
+//! retain the crisp frozen partition over the loft interior. Same-material,
+//! material-boundary, and solid/Void cliffs all follow this one level-field
+//! path — there are no lattice, contour-closure, or sliver-repair wall
+//! classes to reconcile. Relief-free interiors keep the whole-cell fast
+//! path; authored point relief resolves through `SubPatch` at subcell stride.
 
 pub mod contour;
 pub mod style;
@@ -92,7 +88,7 @@ use crate::world::{ChunkPos, World};
 use coverage::mesh_coverage;
 use style::StyleTable;
 use underlay::mesh_underlay;
-use walls::emit_walls;
+use walls::emit_lofts;
 
 /// Mesh one chunk into its flat-color base triangle list. Pure — no wgpu,
 /// no ctx — so it is unit-testable host-side. Reads neighbor cells through
@@ -101,8 +97,11 @@ use walls::emit_walls;
 #[must_use]
 pub fn mesh_chunk(world: &World, at: ChunkPos, styles: &StyleTable) -> Vec<DrawTriangle> {
     let mut tris = Vec::new();
-    let partition = mesh_underlay(world, at, styles, &mut tris);
+    // The loft cap lands first. Material caps then overdraw its interior at
+    // equal depth while deliberately omitted high-boundary patches leave the
+    // smooth contour ribbon exposed.
+    emit_lofts(world, at, styles, &mut tris);
+    mesh_underlay(world, at, styles, &mut tris);
     mesh_coverage(world, at, styles, &mut tris);
-    emit_walls(world, at, styles, partition.as_ref(), &mut tris);
     tris
 }

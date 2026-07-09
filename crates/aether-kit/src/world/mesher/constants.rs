@@ -16,14 +16,6 @@ pub(super) const OCTIMETERS_PER_SUBCELL: i32 = 256 / SUB;
 /// emit.
 pub(super) const OCTIMETERS_PER_METER: f32 = 256.0;
 
-/// How far in octimeters an unbounded-void wall drops below its top edge —
-/// the border-skirt fallback for the one void case with no far rim within
-/// the fill-over march bound (a void that reaches the world border). A
-/// bounded void joint closes instead as a real groove: wall down to the void
-/// floor, floor across, wall back up (see [`emit_void_floors`]). The skirt
-/// reads as thick ground rather than a paper-thin lip.
-pub(super) const WALL_VOID_SKIRT_OCTIMETERS: i32 = 512;
-
 /// Upsample factor for the partition contour grid. At `SUB = 16`, the base
 /// subcell lattice is already finer than the old upsampled grid, and keeping
 /// the extra pass makes dense remesh tests miss CI time budgets.

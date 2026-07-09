@@ -1,6 +1,28 @@
-use crate::world::{CellPos, World};
+use alloc::collections::BTreeSet;
+use alloc::vec::Vec;
 
-use super::constants::{OCTIMETERS_PER_METER, OCTIMETERS_PER_SUBCELL, SUB};
+use crate::world::{CellPos, ChunkPos, Material, STEP_MAX_OCTIMETERS, World};
+
+use super::constants::{
+    OCTIMETERS_PER_METER, OCTIMETERS_PER_SUBCELL, SUB, SUBCELLS_PER_CHUNK_EDGE,
+};
+
+/// One discrete cliff transition found between adjacent surface-level
+/// samples. The scalar coverage projection maps `low` to zero and `high`
+/// to full coverage; any authored levels between them retain their fraction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct CliffStep {
+    pub(super) low: i32,
+    pub(super) high: i32,
+}
+
+/// The point-surface samples for one chunk plus its contour apron. `levels`
+/// and `solid` are parallel `width × width` planes at subcell stride.
+pub(super) struct LevelPlane {
+    pub(super) levels: Vec<i32>,
+    pub(super) solid: Vec<bool>,
+    pub(super) width: usize,
+}
 
 fn cell_at(wx: f32, wz: f32) -> CellPos {
     CellPos {
@@ -128,10 +150,8 @@ impl SubPatch {
 /// through the vertex's own (floor) cell, unless that cell stands a cliff
 /// apart from the owner — then the owner's clamped patch wins, so a
 /// boundary polygon at a cliff stays on its own side of the break instead
-/// of stretching down the face (the wall draws the face). On continuous
-/// ground the two forms agree and the rule is invisible. A material-break
-/// crossing does not come here — it carries its side as data and lifts
-/// through [`anchored_lift`].
+/// of stretching down the face (the level loft draws the face). On
+/// continuous ground the two forms agree and the rule is invisible.
 pub(super) fn label_lift(world: &World, owner: CellPos, wx: f32, wz: f32) -> f32 {
     let cell = cell_at(wx, wz);
     if cell != owner && world.edge_is_cliff(cell, owner) {
@@ -140,63 +160,12 @@ pub(super) fn label_lift(world: &World, owner: CellPos, wx: f32, wz: f32) -> f32
     cell_or_relief_lift(world, cell, wx, wz)
 }
 
-/// The lift for a material-break crossing whose side is known as **data**:
-/// `anchor_oct` is the display-grid sample (a window corner) on the
-/// vertex's own side of the crossed edge, and over authored relief the
-/// vertex lifts through that sample's subcell patch — so the high flap
-/// holds its plate, the low flap holds the ground, and the marched wall
-/// closes the gap on the same anchors. The side is never inferred from the
-/// vertex position: a smoothing-displaced crossing sits off the subcell
-/// lattice, where positional inference reads whichever subcell the vertex
-/// floors into and collapses both flaps onto one plate. A crossing lies
-/// within half a sample of its anchor, so the anchored patch never
-/// extrapolates. The whole-cell lift resolves through the anchor sample's
-/// cell too — so a marched wall top or base on a material boundary with no
-/// subcell relief lands on the anchored side's committed plate, rather than
-/// collapsing onto the window-center `owner` wherever that owner falls on
-/// the low side of the boundary (the bug that left relief-free
-/// material-boundary cliffs with see-through faces). The relief owner-clamp
-/// branch is unchanged.
-pub(super) fn anchored_lift(
-    world: &World,
-    owner: CellPos,
-    anchor_oct: [i32; 2],
-    wx: f32,
-    wz: f32,
-) -> f32 {
-    let cell = cell_at(wx, wz);
-    // The cell owning the anchor sample — the vertex's own side of the
-    // crossed edge. The whole-cell lift resolves through it (not the
-    // window-center `owner`, nor the on-boundary midpoint `cell`), so a
-    // marched wall top/base lands on the anchored side's plate even with no
-    // subcell relief. A window-center-owned lift collapses the wall wherever
-    // the owner falls on the low side of the boundary.
-    let anchor_cell = CellPos {
-        x: anchor_oct[0].div_euclid(256),
-        z: anchor_oct[1].div_euclid(256),
-    };
-    let sub_x = anchor_oct[0].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
-    let sub_z = anchor_oct[1].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
-    side_resolved_lift(
-        world,
-        cell,
-        owner,
-        SideLiftSample {
-            cell: anchor_cell,
-            sub_x,
-            sub_z,
-        },
-        wx,
-        wz,
-    )
-}
-
 /// The lift for a vertex of a clipped flap fragment: position-pure through
 /// the vertex's own (floor) subcell, except that a vertex lying exactly on
 /// a clipped break line reads the subcell on the **fragment's** side of it
-/// (`sides` per axis, from [`emit_clipped_flap`]) — the high fragment holds
-/// its plate, the low fragment holds the ground, and the wall classes close
-/// the vertical gap on the same subcells. Off the break lines the two forms
+/// (`sides` per axis, from the partition-window clip) — the high fragment holds
+/// its plate and the low fragment holds the ground while the level loft owns
+/// the vertical gap. Off the break lines the two forms
 /// agree wherever the plates connect, so continuous relief stays seamless.
 /// The whole-cell (relief-free) lift resolves through the fragment's own
 /// side cell as well, so a clipped relief-free material-boundary fragment
@@ -231,8 +200,7 @@ pub(super) fn fragment_lift(
     // clipped break sides, not the window-center owner. This is what a
     // relief-free clipped material-boundary fragment must read so its lift
     // lands on the correct plate rather than collapsing both sides to one
-    // height (the twin of the `anchored_lift` bug, which left chamfered
-    // relief-free corners with unclosed overhang slivers).
+    // height.
     let side_cell = CellPos {
         x: sx.div_euclid(SUB),
         z: sz.div_euclid(SUB),
@@ -260,8 +228,8 @@ pub(super) fn floor_to_i32(v: f32) -> i32 {
 
 /// The effective point surface level in octimeters at octimeter position
 /// `(px, pz)` — the cell and subcell it floors into, resolved through
-/// [`World::point_surface_level`]. The marched wall gate samples this so its
-/// break reads the same authored relief the cap drew.
+/// [`World::point_surface_level`]. The scalar level plane samples this so its
+/// contour reads the same authored relief the cap drew.
 pub(super) fn point_surface_level_at(world: &World, px: i32, pz: i32) -> i32 {
     let cell = CellPos {
         x: px.div_euclid(256),
@@ -270,4 +238,136 @@ pub(super) fn point_surface_level_at(world: &World, px: i32, pz: i32) -> i32 {
     let sub_x = px.rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
     let sub_z = pz.rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
     world.point_surface_level(cell, sub_x, sub_z)
+}
+
+/// Sample the scalar surface-level field over one chunk plus `apron`
+/// subcells on every side. Samples sit at the same subcell centers as the
+/// material partition's source plane; the placement code adds the half-step
+/// offset when the plane is marched.
+pub(super) fn sample_level_plane(world: &World, at: ChunkPos, apron: i32) -> LevelPlane {
+    let width = (SUBCELLS_PER_CHUNK_EDGE + 2 * apron) as usize;
+    let mut levels = Vec::with_capacity(width * width);
+    let mut solid = Vec::with_capacity(width * width);
+    for sj in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
+        for si in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
+            let gx = at.x * SUBCELLS_PER_CHUNK_EDGE + si;
+            let gz = at.z * SUBCELLS_PER_CHUNK_EDGE + sj;
+            let cell = CellPos {
+                x: gx.div_euclid(SUB),
+                z: gz.div_euclid(SUB),
+            };
+            let sub_x = gx.rem_euclid(SUB);
+            let sub_z = gz.rem_euclid(SUB);
+            levels.push(point_surface_level_at(
+                world,
+                gx * OCTIMETERS_PER_SUBCELL,
+                gz * OCTIMETERS_PER_SUBCELL,
+            ));
+            solid.push(world.underlay_point(cell, sub_x, sub_z) != Material::Void);
+        }
+    }
+    LevelPlane {
+        levels,
+        solid,
+        width,
+    }
+}
+
+/// Distinct high/low cliff transitions in `plane`, in stable level order.
+/// Step discovery reads the level field independently of material solidity:
+/// a high Void sample can carry the cell level that reveals the threshold,
+/// while [`level_coverage_plane`] still excludes that sample from the cap.
+/// This lets a solid island inside a cut-away high cell loft its own outline.
+/// Legal slopes at or below the step ceiling remain one plate and do not
+/// produce a contour.
+pub(super) fn cliff_steps(plane: &LevelPlane) -> Vec<CliffStep> {
+    let mut steps = BTreeSet::new();
+    for z in 0..plane.width {
+        for x in 0..plane.width {
+            let i = z * plane.width + x;
+            for (nx, nz) in [(x + 1, z), (x, z + 1)] {
+                if nx >= plane.width || nz >= plane.width {
+                    continue;
+                }
+                let j = nz * plane.width + nx;
+                let (low_i, high_i) = if plane.levels[i] <= plane.levels[j] {
+                    (i, j)
+                } else {
+                    (j, i)
+                };
+                let low = plane.levels[low_i];
+                let high = plane.levels[high_i];
+                if i64::from(high) - i64::from(low) > i64::from(STEP_MAX_OCTIMETERS) {
+                    steps.insert(CliffStep { low, high });
+                }
+            }
+        }
+    }
+    steps.into_iter().collect()
+}
+
+/// Project one scalar surface level into a cliff step's `0..=255` coverage
+/// interval. The low side floors, the high side saturates, and intermediate
+/// authored levels preserve their linear fraction so the `127.5` march
+/// crosses the actual level isoline instead of a binary midpoint.
+pub(super) fn project_level_coverage(level: i32, step: CliffStep) -> u8 {
+    if level <= step.low {
+        return 0;
+    }
+    if level >= step.high {
+        return u8::MAX;
+    }
+    let span = i64::from(step.high) - i64::from(step.low);
+    let above_low = i64::from(level) - i64::from(step.low);
+    ((above_low * i64::from(u8::MAX) + span / 2) / span) as u8
+}
+
+/// Project a sampled level plane for one cliff step. Void samples stay
+/// uncovered even if their stored lakebed height is numerically high: there
+/// is no solid top surface to cap on that side.
+pub(super) fn level_coverage_plane(plane: &LevelPlane, step: CliffStep) -> Vec<u8> {
+    plane
+        .levels
+        .iter()
+        .zip(&plane.solid)
+        .map(|(&level, &solid)| {
+            if solid {
+                project_level_coverage(level, step)
+            } else {
+                0
+            }
+        })
+        .collect()
+}
+
+/// Whether this subcell is the high side of any physical cliff. The underlay
+/// omits these boundary patches so the level-contour cap owns the whole top
+/// ribbon at a convex corner instead of leaving a square lattice sliver over
+/// a rounded contour.
+pub(super) fn subcell_is_high_cliff(world: &World, cell: CellPos, sub_x: i32, sub_z: i32) -> bool {
+    let gx = cell.x * SUB + sub_x;
+    let gz = cell.z * SUB + sub_z;
+    let own = world.point_surface_level(cell, sub_x, sub_z);
+    [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .into_iter()
+        .any(|(dx, dz)| {
+            let nx = gx + dx;
+            let nz = gz + dz;
+            let neighbor = CellPos {
+                x: nx.div_euclid(SUB),
+                z: nz.div_euclid(SUB),
+            };
+            i64::from(own)
+                - i64::from(world.point_surface_level(
+                    neighbor,
+                    nx.rem_euclid(SUB),
+                    nz.rem_euclid(SUB),
+                ))
+                > i64::from(STEP_MAX_OCTIMETERS)
+        })
+}
+
+/// Whether any point of `cell` contributes a high cliff boundary.
+pub(super) fn cell_has_high_cliff(world: &World, cell: CellPos) -> bool {
+    (0..SUB).any(|sub_z| (0..SUB).any(|sub_x| subcell_is_high_cliff(world, cell, sub_x, sub_z)))
 }

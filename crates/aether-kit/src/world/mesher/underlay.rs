@@ -11,9 +11,9 @@ use super::constants::{
 };
 use super::contour::repartition;
 use super::geometry::emit_flat_quad;
-use super::partition::{DisplayPartition, partition_inputs};
+use super::partition::partition_inputs;
 use super::style::{StyleTable, flat_color};
-use super::surface::{CellLift, SubPatch};
+use super::surface::{CellLift, SubPatch, cell_has_high_cliff, subcell_is_high_cliff};
 use super::voids::emit_void_floors;
 use super::windows::emit_partition_windows;
 
@@ -24,19 +24,21 @@ use super::windows::emit_partition_windows;
 /// material, and per-window marching polygons everywhere else, all at
 /// `y = 0` with no lifts. Every decision is a pure function of world
 /// coordinates, so two chunks emit identical geometry over their shared
-/// apron and the overlap is invisible. Returns the display grid (the plain
-/// material grid) so the wall pass lofts from the same samples; `None` when
-/// the whole chunk plus apron is Void (nothing to mesh).
+/// apron and the overlap is invisible. A high cliff-boundary patch is left
+/// to the separate scalar level loft, whose cap owns the smooth top contour.
+/// An all-Void area returns without emitting anything.
 #[allow(clippy::too_many_lines)] // one underlay pass: partition, tile interiors, march windows
 pub(super) fn mesh_underlay(
     world: &World,
     at: ChunkPos,
     styles: &StyleTable,
     tris: &mut Vec<DrawTriangle>,
-) -> Option<DisplayPartition> {
+) {
     let apron = MAX_APRON_SUBCELLS;
     let n = (SUBCELLS_PER_CHUNK_EDGE + 2 * apron) as usize;
-    let (ids, params, frozen) = partition_inputs(world, at, apron, n)?;
+    let Some((ids, params, frozen)) = partition_inputs(world, at, apron, n) else {
+        return;
+    };
 
     let upsample = CONTOUR_UPSAMPLE;
     let (grid, gw, _gh) = repartition(&ids, n, n, upsample, &params, &frozen);
@@ -96,7 +98,7 @@ pub(super) fn mesh_underlay(
             // Authored relief tessellates the cap to subcell resolution so
             // its per-point heights and breaks show; a flat cell keeps the
             // whole-cell fast path (byte-identical to a world with no relief).
-            if world.cell_has_height_relief(cell) {
+            if world.cell_has_height_relief(cell) || cell_has_high_cliff(world, cell) {
                 emit_underlay_cell_subdivided(world, material, cell, styles, tris);
                 continue;
             }
@@ -110,15 +112,8 @@ pub(super) fn mesh_underlay(
     );
 
     // The fill-over floor caps for enclosed Void joints — the flat groove
-    // bottoms the marched closure's Void walls drop to.
+    // bottoms the level-contour loft drops to.
     emit_void_floors(world, at, styles, tris);
-
-    Some(DisplayPartition {
-        display,
-        gw,
-        apron,
-        step_oct,
-    })
 }
 
 /// Emit one flat keyed cell: a single flat-colored quad spanning the cell
@@ -158,6 +153,9 @@ fn emit_underlay_cell_subdivided(
     let color = flat_color(styles.get(material));
     for sj in 0..SUB {
         for si in 0..SUB {
+            if subcell_is_high_cliff(world, cell, si, sj) {
+                continue; // the smooth level-contour cap owns this top ribbon
+            }
             let patch = SubPatch::of(world, cell, si, sj);
             let surface = |wx: f32, wz: f32| patch.y(wx, wz);
             let x0 = cell.x * 256 + si * OCTIMETERS_PER_SUBCELL;

@@ -32,28 +32,3 @@ pub(super) fn emit_flat_quad(
     tris.push(DrawTriangle { verts: [a, b, c] });
     tris.push(DrawTriangle { verts: [a, c, d] });
 }
-
-/// Push the two triangles of one vertical wall quad: a top edge from
-/// `top_a` to `top_b` (`[wx, wz, y]` meters) dropped to `y_bottom_a` /
-/// `y_bottom_b` at the same footprint, every vertex in the flat `color`.
-pub(super) fn push_wall_quad(
-    tris: &mut Vec<DrawTriangle>,
-    top_a: [f32; 3],
-    top_b: [f32; 3],
-    y_bottom_a: f32,
-    y_bottom_b: f32,
-    color: [f32; 3],
-) {
-    let vert = |x: f32, z: f32, y: f32| Vertex {
-        x,
-        y,
-        z,
-        color: Rgb::new(color[0], color[1], color[2]),
-    };
-    let a = vert(top_a[0], top_a[1], top_a[2]);
-    let b = vert(top_b[0], top_b[1], top_b[2]);
-    let c = vert(top_b[0], top_b[1], y_bottom_b);
-    let d = vert(top_a[0], top_a[1], y_bottom_a);
-    tris.push(DrawTriangle { verts: [a, b, c] });
-    tris.push(DrawTriangle { verts: [a, c, d] });
-}

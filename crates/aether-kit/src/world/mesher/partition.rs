@@ -7,19 +7,6 @@ use super::constants::{EDGE, OCTIMETERS_PER_SUBCELL, SUB, SUBCELLS_PER_CHUNK_EDG
 use super::contour::{GridPlacement, SmoothParams};
 use super::surface::point_surface_level_at;
 
-/// The repartitioned material grid the underlay pass marches its caps from,
-/// handed to the wall pass so it lofts its curtains from the same samples —
-/// the shared grid is what makes a wall top land exactly on a cap contour
-/// vertex. Carries the display labels, the grid width, and the octimeter
-/// placement (apron offset and sample step) the boundary walk reconstructs
-/// window positions from.
-pub(super) struct DisplayPartition {
-    pub(super) display: Vec<u8>,
-    pub(super) gw: usize,
-    pub(super) apron: i32,
-    pub(super) step_oct: i32,
-}
-
 /// The partition's inputs at subcell expression: the cascade-resolved
 /// material id for every sample of the chunk plus its apron, the
 /// smoothing-disabled params (zero iterations — the base render is crisp,
