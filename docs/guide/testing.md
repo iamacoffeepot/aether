@@ -138,6 +138,15 @@ wire — recipient-name resolution, fleet lifecycle, the RPC boundary — goes t
 **FleetBench** (`crates/aether-substrate-bundle/tests/fleetbench/`). FleetBench is
 headless, so any rendered-output assertion has to be TestBench, and any
 externally-addressable-over-the-wire assertion has to be FleetBench.
+
+For overlay rendering, split structural and raster proof deliberately. Assert exact
+rectangle geometry, clips, texture coordinates, tint, texture identity, projection
+space, and submission order through `TestBench::committed_overlay_snapshot`; then use
+`CaptureFrame` reductions for the smaller set of outcomes that need end-to-end proof
+through projection, blending, rasterization, and GPU readback. The typed snapshot
+localizes a malformed submission, while the rendered capture proves the pipeline
+actually produced the intended pixels.
+
 A test that drives neither harness and exercises none of our own pure logic is the
 case to look at hardest, because there may be no engine behavior under it at all. Our
 pure logic — the codec, `aether-math`, schema encode/decode, id and lineage hashing —

@@ -325,6 +325,157 @@ fn textured_quad_draws_screen_space_rect() {
     );
 }
 
+fn create_observation_texture(bench: &mut TestBench) -> u32 {
+    let created = bench
+        .execute(vec![(
+            "create",
+            BenchOp::send_and_await(
+                "aether.render",
+                &CreateTexture {
+                    width: 1,
+                    height: 1,
+                    format: TextureFormat::Rgba8,
+                    pixels: vec![255, 255, 255, 255],
+                },
+            ),
+        )])
+        .expect("create observation texture");
+    match created
+        .reply::<CreateTextureResult>("create")
+        .expect("decode CreateTextureResult")
+    {
+        CreateTextureResult::Ok { texture_id } => texture_id,
+        CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
+    }
+}
+
+fn assert_committed_overlay_snapshot(
+    snapshot: &[DrawTexturedQuads],
+    texture_id: u32,
+    solid_clip: ClipRect,
+    solid_quad: &SolidQuad,
+    textured_space: &QuadSpace,
+    textured_clip: ClipRect,
+    textured_quad: TexturedQuad,
+) {
+    assert_eq!(snapshot.len(), 2);
+    assert_eq!(snapshot[0].texture_id, u32::MAX);
+    assert_eq!(snapshot[0].space, QuadSpace::Screen);
+    assert_eq!(snapshot[0].clip, Some(solid_clip));
+    assert_eq!(snapshot[0].quads.len(), 1);
+    assert_eq!(snapshot[0].quads[0].x, solid_quad.x);
+    assert_eq!(snapshot[0].quads[0].y, solid_quad.y);
+    assert_eq!(snapshot[0].quads[0].width, solid_quad.width);
+    assert_eq!(snapshot[0].quads[0].height, solid_quad.height);
+    assert_eq!(snapshot[0].quads[0].u0, 0.0);
+    assert_eq!(snapshot[0].quads[0].v0, 0.0);
+    assert_eq!(snapshot[0].quads[0].u1, 1.0);
+    assert_eq!(snapshot[0].quads[0].v1, 1.0);
+    assert_eq!(snapshot[0].quads[0].tint, solid_quad.color);
+
+    assert_eq!(snapshot[1].texture_id, texture_id);
+    assert_eq!(&snapshot[1].space, textured_space);
+    assert_eq!(snapshot[1].clip, Some(textured_clip));
+    assert_eq!(snapshot[1].quads, vec![textured_quad]);
+}
+
+/// Typed overlay observations expose the exact normalized batches the
+/// committed frame draws: a solid batch becomes a textured batch over the
+/// reserved white texture, a following textured batch keeps its own texture,
+/// and order, spaces, clips, geometry, UVs, and tints all survive. An idle
+/// capture replays that cache, while the next empty advance clears it.
+#[test]
+fn committed_overlay_snapshot_is_typed_ordered_and_latest_frame_bounded() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let texture_id = create_observation_texture(&mut bench);
+
+    let solid_clip = ClipRect {
+        x: 2.0,
+        y: 3.0,
+        width: 20.0,
+        height: 15.0,
+    };
+    let solid_quad = SolidQuad {
+        x: 4.0,
+        y: 5.0,
+        width: 6.0,
+        height: 7.0,
+        color: Rgba::new(0.9, 0.2, 0.3, 0.8),
+    };
+    let textured_space = QuadSpace::World {
+        anchor: [0.25, -0.5, 0.75],
+        scale: QuadScale::Distance {
+            reference_distance: 4.0,
+        },
+    };
+    let textured_clip = ClipRect {
+        x: 10.0,
+        y: 11.0,
+        width: 30.0,
+        height: 25.0,
+    };
+    let textured_quad = TexturedQuad {
+        x: -8.0,
+        y: -9.0,
+        width: 12.0,
+        height: 13.0,
+        u0: 0.1,
+        v0: 0.2,
+        u1: 0.7,
+        v1: 0.8,
+        tint: Rgba::new(0.1, 0.4, 0.7, 0.6),
+    };
+    let submissions = vec![
+        envelope(
+            "aether.render",
+            &DrawSolidQuads {
+                space: QuadSpace::Screen,
+                clip: Some(solid_clip.clone()),
+                quads: vec![solid_quad.clone()],
+            },
+        ),
+        envelope(
+            "aether.render",
+            &DrawTexturedQuads {
+                texture_id,
+                space: textured_space.clone(),
+                clip: Some(textured_clip.clone()),
+                quads: vec![textured_quad.clone()],
+            },
+        ),
+    ];
+
+    bench
+        .execute(vec![(
+            "commit",
+            BenchOp::capture_with_mails(submissions, vec![]),
+        )])
+        .expect("commit overlay submissions through capture");
+    let snapshot = bench.committed_overlay_snapshot();
+    assert_committed_overlay_snapshot(
+        &snapshot,
+        texture_id,
+        solid_clip,
+        &solid_quad,
+        &textured_space,
+        textured_clip,
+        textured_quad,
+    );
+
+    bench
+        .execute(vec![("replay", BenchOp::capture())])
+        .expect("idle capture replays committed overlays");
+    assert_eq!(bench.committed_overlay_snapshot().len(), 2);
+
+    bench
+        .execute(vec![("clear", BenchOp::advance(1))])
+        .expect("commit subsequent empty frame");
+    assert!(bench.committed_overlay_snapshot().is_empty());
+}
+
 /// Issue #2831: a destroyed texture is removed from the registry, so a
 /// later draw using the old id warn-drops during frame record and the
 /// captured frame returns to clear color.

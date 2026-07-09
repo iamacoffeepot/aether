@@ -31,6 +31,7 @@ use aether_substrate::render::{
 use super::material::{MaterialBatch, accepts_coverage_texture};
 use super::quad::QuadBatch;
 use super::texture::TextureRegistry;
+use crate::render::DrawTexturedQuads;
 
 /// Bundle of accumulator state plus GPU resources, shared between
 /// the cap's dispatcher thread (write side for accumulators) and the
@@ -143,6 +144,34 @@ impl RenderHandles {
     #[must_use]
     pub fn gpu(&self) -> Option<&RenderGpu> {
         self.gpu.get()
+    }
+
+    /// Snapshot the ordered overlay batches from the most recently
+    /// committed frame as their public [`DrawTexturedQuads`] shape.
+    /// Solid submissions are already normalized over the reserved white
+    /// texture before entering this cache, so callers see the exact
+    /// texture, projection space, clip, geometry, UV, tint, and painter's
+    /// order that [`Self::record_overlay_pass`] draws.
+    ///
+    /// The returned values own their data. Mutating the live or committed
+    /// accumulators after this call cannot change an existing snapshot.
+    ///
+    /// # Panics
+    /// Panics if the committed-overlay mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    #[must_use]
+    pub fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
+        self.quad_last_submitted
+            .lock()
+            .expect("mutex poisoned; fail-fast per ADR-0063")
+            .iter()
+            .map(|batch| DrawTexturedQuads {
+                texture_id: batch.texture_id,
+                space: batch.space.clone(),
+                clip: batch.clip.clone(),
+                quads: batch.quads.clone(),
+            })
+            .collect()
     }
 
     fn expect_gpu(&self) -> &RenderGpu {
@@ -756,5 +785,131 @@ impl RenderGpu {
             targets: Mutex::new(targets),
             color_format,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aether_kinds::ClipRect;
+    use aether_math::Rgba;
+
+    use crate::render::TexturedQuad;
+
+    fn handles_with_committed_overlays(batches: Vec<QuadBatch>) -> RenderHandles {
+        RenderHandles {
+            frame_vertices: Arc::new(Mutex::new(Vec::new())),
+            last_submitted: Arc::new(Mutex::new(Vec::new())),
+            triangles_rendered: Arc::new(AtomicU64::new(0)),
+            camera_state: Arc::new(Mutex::new([0.0; 16])),
+            quad_frame: Arc::new(Mutex::new(Vec::new())),
+            quad_last_submitted: Arc::new(Mutex::new(batches)),
+            material_frame: Arc::new(Mutex::new(Vec::new())),
+            material_last_submitted: Arc::new(Mutex::new(Vec::new())),
+            textures: Arc::new(Mutex::new(TextureRegistry::new())),
+            gpu: Arc::new(OnceLock::new()),
+            vertex_buffer_bytes: 0,
+        }
+    }
+
+    fn textured_quad(x: f32, tint: Rgba) -> TexturedQuad {
+        TexturedQuad {
+            x,
+            y: x + 1.0,
+            width: x + 2.0,
+            height: x + 3.0,
+            u0: 0.1,
+            v0: 0.2,
+            u1: 0.7,
+            v1: 0.8,
+            tint,
+        }
+    }
+
+    /// An uncommitted render starts with no overlay observations rather
+    /// than manufacturing a sentinel batch.
+    #[test]
+    fn committed_overlay_snapshot_is_empty_without_a_committed_frame() {
+        let handles = handles_with_committed_overlays(Vec::new());
+
+        assert!(handles.committed_overlay_snapshot().is_empty());
+    }
+
+    /// Converting the private cache to public draw values preserves every
+    /// field and the mixed-space painter's order consumed by the GPU pass.
+    #[test]
+    fn committed_overlay_snapshot_preserves_order_and_fields() {
+        let screen_clip = ClipRect {
+            x: 2.0,
+            y: 3.0,
+            width: 40.0,
+            height: 30.0,
+        };
+        let world_space = QuadSpace::World {
+            anchor: [1.0, 2.0, 3.0],
+            scale: QuadScale::Distance {
+                reference_distance: 9.0,
+            },
+        };
+        let handles = handles_with_committed_overlays(vec![
+            QuadBatch {
+                texture_id: 17,
+                space: QuadSpace::Screen,
+                clip: Some(screen_clip.clone()),
+                quads: vec![textured_quad(4.0, Rgba::new(1.0, 0.5, 0.25, 0.75))],
+            },
+            QuadBatch {
+                texture_id: 23,
+                space: world_space.clone(),
+                clip: None,
+                quads: vec![textured_quad(8.0, Rgba::new(0.2, 0.4, 0.6, 0.8))],
+            },
+        ]);
+
+        let snapshot = handles.committed_overlay_snapshot();
+
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot[0].texture_id, 17);
+        assert_eq!(snapshot[0].space, QuadSpace::Screen);
+        assert_eq!(snapshot[0].clip, Some(screen_clip));
+        assert_eq!(
+            snapshot[0].quads,
+            vec![textured_quad(4.0, Rgba::new(1.0, 0.5, 0.25, 0.75))]
+        );
+        assert_eq!(snapshot[1].texture_id, 23);
+        assert_eq!(snapshot[1].space, world_space);
+        assert_eq!(snapshot[1].clip, None);
+        assert_eq!(
+            snapshot[1].quads,
+            vec![textured_quad(8.0, Rgba::new(0.2, 0.4, 0.6, 0.8))]
+        );
+    }
+
+    /// A snapshot owns its values, so a later commit can reuse and mutate
+    /// the cache without rewriting observations a test already retained.
+    #[test]
+    fn committed_overlay_snapshot_isolated_from_later_cache_mutation() {
+        let handles = handles_with_committed_overlays(vec![QuadBatch {
+            texture_id: 7,
+            space: QuadSpace::Screen,
+            clip: None,
+            quads: vec![textured_quad(3.0, Rgba::new(1.0, 0.0, 0.0, 1.0))],
+        }]);
+        let snapshot = handles.committed_overlay_snapshot();
+
+        {
+            let mut cache = handles
+                .quad_last_submitted
+                .lock()
+                .expect("test: quad cache mutex is not poisoned");
+            cache[0].texture_id = 99;
+            cache[0].quads[0].x = 100.0;
+        }
+
+        assert_eq!(snapshot[0].texture_id, 7);
+        assert_eq!(snapshot[0].quads[0].x, 3.0);
+        let later = handles.committed_overlay_snapshot();
+        assert_eq!(later[0].texture_id, 99);
+        assert_eq!(later[0].quads[0].x, 100.0);
     }
 }
