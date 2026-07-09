@@ -51,6 +51,8 @@ use crate::mail::ring::{MailLoc, MailRing, RingFull};
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source, SourceAddr};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::runtime::trace::SettlementHold;
+use aether_actor::RequestContextTable;
+use aether_data::{Kind, RequestId};
 
 /// Per-actor outbound ring capacity (ADR-0087). Sized to hold a typical
 /// handler's small-mail fan-out as one blob; a mail that doesn't fit (a
@@ -233,6 +235,8 @@ pub struct NativeBinding {
     /// mutability — the same single-logical-writer discipline as
     /// `outbound` / `blob_producer`.
     inflight: super::dispatch_blocking::InflightLedger,
+    /// ADR-0139: typed request contexts keyed by reply correlation id.
+    request_contexts: Mutex<RequestContextTable>,
 }
 
 impl NativeBinding {
@@ -271,6 +275,7 @@ impl NativeBinding {
             outbound: Mutex::new(OutboundBuffer::new()),
             blob_producer: Mutex::new(None),
             inflight: Mutex::new(super::dispatch_blocking::InflightTable::new()),
+            request_contexts: Mutex::new(RequestContextTable::new()),
         }
     }
 
@@ -482,12 +487,34 @@ impl NativeBinding {
         root: MailId,
         parent: Option<MailId>,
     ) where
-        K: aether_data::Kind,
+        K: Kind,
     {
         let correlation = self.reply_lineage.mint();
         let reply_id = MailId::new(self.self_mailbox, correlation);
         self.mailer
             .send_reply(sender, payload, reply_id, root, parent);
+    }
+
+    /// Store request context for a just-minted outbound request.
+    ///
+    /// # Panics
+    /// Panics if the request-context mutex is poisoned.
+    pub fn store_request_context<C: Kind>(&self, request: RequestId, context: &C) {
+        self.request_contexts
+            .lock()
+            .expect("request context table poisoned; fail-fast per ADR-0063")
+            .insert(request, context);
+    }
+
+    /// Remove and decode request context for an inbound reply.
+    ///
+    /// # Panics
+    /// Panics if the request-context mutex is poisoned.
+    pub fn take_request_context<C: Kind>(&self, request: RequestId) -> Option<C> {
+        self.request_contexts
+            .lock()
+            .expect("request context table poisoned; fail-fast per ADR-0063")
+            .take(request)
     }
 }
 

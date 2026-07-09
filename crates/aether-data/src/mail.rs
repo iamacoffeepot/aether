@@ -13,7 +13,7 @@ use alloc::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{LabelNode, NamedField, Primitive, SchemaType};
+use crate::schema::{EnumVariant, LabelNode, NamedField, Primitive, SchemaType};
 use crate::{EngineId, MailboxId, Schema, SessionToken};
 
 /// ADR-0080 §1: the unique identity of a mail. A 128-bit composite of
@@ -103,7 +103,7 @@ impl MailId {
 /// reply paths (ADR-0041's io capability is the motivating case) can
 /// route the `*Result` back to the component via the mailer rather
 /// than the hub.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceAddr {
     None,
     Session(SessionToken),
@@ -112,6 +112,43 @@ pub enum SourceAddr {
         mailbox_id: MailboxId,
     },
     Component(MailboxId),
+}
+
+impl Schema for SourceAddr {
+    const SCHEMA: SchemaType = SchemaType::Enum {
+        variants: Cow::Borrowed(&[
+            EnumVariant::Unit {
+                name: Cow::Borrowed("None"),
+                discriminant: 0,
+            },
+            EnumVariant::Tuple {
+                name: Cow::Borrowed("Session"),
+                discriminant: 1,
+                fields: Cow::Borrowed(&[SessionToken::SCHEMA]),
+            },
+            EnumVariant::Struct {
+                name: Cow::Borrowed("EngineMailbox"),
+                discriminant: 2,
+                fields: Cow::Borrowed(&[
+                    NamedField {
+                        name: Cow::Borrowed("engine_id"),
+                        ty: EngineId::SCHEMA,
+                    },
+                    NamedField {
+                        name: Cow::Borrowed("mailbox_id"),
+                        ty: SchemaType::TypeId(MailboxId::TYPE_ID),
+                    },
+                ]),
+            },
+            EnumVariant::Tuple {
+                name: Cow::Borrowed("Component"),
+                discriminant: 3,
+                fields: Cow::Borrowed(&[SchemaType::TypeId(MailboxId::TYPE_ID)]),
+            },
+        ]),
+    };
+    const LABEL: Option<&'static str> = Some("aether.source_addr");
+    const LABEL_NODE: LabelNode = LabelNode::Anonymous;
 }
 
 /// The immediate sender of a substrate-side `Mail` — the addressing
@@ -131,10 +168,28 @@ pub enum SourceAddr {
 /// the origin, and it does persist, in the tracing layer (`root` /
 /// `parent_mail`, ADR-0080), not here. Addressing is deliberately
 /// one-hop; the chain origin is observable, not addressable.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
     pub addr: SourceAddr,
     pub correlation_id: u64,
+}
+
+impl Schema for Source {
+    const SCHEMA: SchemaType = SchemaType::Struct {
+        fields: Cow::Borrowed(&[
+            NamedField {
+                name: Cow::Borrowed("addr"),
+                ty: SourceAddr::SCHEMA,
+            },
+            NamedField {
+                name: Cow::Borrowed("correlation_id"),
+                ty: SchemaType::Scalar(Primitive::U64),
+            },
+        ]),
+        repr_c: false,
+    };
+    const LABEL: Option<&'static str> = Some("aether.source");
+    const LABEL_NODE: LabelNode = LabelNode::Anonymous;
 }
 
 impl Source {

@@ -185,6 +185,27 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
         }
     }
 
+    /// Send a request and store a typed context under the minted correlation
+    /// id for the eventual reply handler to recover with
+    /// [`WasmCtx::take_context`](crate::wasm::WasmCtx::take_context).
+    #[must_use]
+    pub fn send_with_context<K, C>(&self, payload: &K, context: &C) -> RequestId
+    where
+        R: HandlesKind<K>,
+        K: Kind,
+        C: Kind,
+    {
+        let request = self.send_tracked(payload);
+        if request.0 != Source::NO_CORRELATION {
+            // SAFETY: the macro-emitted registry is accessed only under the
+            // serialized wasm guest entrypoint.
+            unsafe {
+                self.inline.request_contexts_mut().insert(request, context);
+            }
+        }
+        request
+    }
+
     /// Send a slice of payloads as a contiguous batch. Cast-only —
     /// see [`crate::model::ctx::MailSender::send_many`] for the
     /// wire-shape rationale. Inherits the handler's causal chain like

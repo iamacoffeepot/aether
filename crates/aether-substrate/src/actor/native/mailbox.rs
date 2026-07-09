@@ -17,7 +17,7 @@
 use core::marker::PhantomData;
 
 use aether_actor::{Addressable, HandlesKind};
-use aether_data::{ActorId, Kind, MailId, Tag, fold_lineage, with_tag};
+use aether_data::{ActorId, Kind, MailId, RequestId, Tag, fold_lineage, with_tag};
 
 use crate::actor::native::binding::NativeBinding;
 
@@ -238,5 +238,21 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
             self.parent,
             self.root,
         )
+    }
+
+    /// Send a request and store a typed context under the minted correlation
+    /// id for the eventual reply handler to recover with
+    /// [`NativeCtx::take_context`](crate::actor::native::ctx::NativeCtx::take_context).
+    #[must_use]
+    pub fn send_with_context<K, C>(&self, payload: &K, context: &C) -> MailId
+    where
+        R: HandlesKind<K>,
+        K: Kind,
+        C: Kind,
+    {
+        let mail_id = self.send_tracked(payload);
+        self.binding
+            .store_request_context(RequestId(mail_id.correlation_id), context);
+        mail_id
     }
 }
