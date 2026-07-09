@@ -265,15 +265,17 @@ impl Registry {
     /// The caller must be running under the serialized wasm guest entrypoint,
     /// the same invariant required by the rest of `Registry`'s interior
     /// mutable state.
+    #[doc(hidden)]
     #[allow(clippy::mut_from_ref)]
-    pub(crate) unsafe fn request_contexts_mut(&self) -> &mut RequestContextTable {
+    pub unsafe fn request_contexts_mut(&self) -> &mut RequestContextTable {
         // SAFETY: caller upholds the serialized-dispatch invariant.
         unsafe { &mut *self.request_contexts.get() }
     }
 
     /// Replace the per-component request-context table during rehydrate.
+    #[doc(hidden)]
     #[allow(dead_code)]
-    pub(crate) fn restore_request_contexts(&self, table: RequestContextTable) {
+    pub fn restore_request_contexts(&self, table: RequestContextTable) {
         // SAFETY: see [`Self::request_contexts_mut`].
         unsafe {
             *self.request_contexts.get() = table;
