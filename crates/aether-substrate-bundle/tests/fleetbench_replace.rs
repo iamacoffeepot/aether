@@ -1,6 +1,6 @@
 //! `FleetBench` `replace_component` proof (issue 1459, Tier-A): load the
 //! `probe` fixture into a forked substrate, then atomically swap it for
-//! `aether-kit`'s `aether.camera` export (selector `aether_kit@aether.camera`) at the
+//! `aether-kit`'s `aether.kit.camera` export (selector `aether_kit@aether.kit.camera`) at the
 //! same trampoline mailbox id (ADR-0022) and assert the returned
 //! capability set reflects the new binary while the lineage address
 //! stays put.
@@ -19,7 +19,7 @@ mod tests {
 
     /// Load `probe` (handlers `SetRender` + `Tick`), then `replace`
     /// it with `aether-kit`'s non-entry `aether.camera` export (selector
-    /// `aether_kit@aether.camera`; handlers `CameraCreate` + `Tick` + the
+    /// `aether_kit@aether.kit.camera`; handlers `CameraCreate` + `Tick` + the
     /// camera-driver kinds) targeting the captured trampoline
     /// `mailbox_id` — exercising `ReplaceComponent.export` (#2027)
     /// end-to-end over the wire. The returned
@@ -58,7 +58,8 @@ mod tests {
             "probe should load at its ADR-0099 lineage address",
         );
 
-        let caps = bench.replace_export(engine, loaded.mailbox_id, "aether_kit", "aether.camera");
+        let caps =
+            bench.replace_export(engine, loaded.mailbox_id, "aether_kit", "aether.kit.camera");
 
         // Post-replace: the camera handler set is active, the probe's
         // is gone, and Tick (declared by both) survives the swap.

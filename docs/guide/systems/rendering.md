@@ -137,7 +137,7 @@ anyway.
 **From an agent over MCP — stage, then capture.** Use `capture_frame`: its
 `mails` bundle dispatches before the readback (the state that should appear) and
 `after_mails` after (cleanup), all around one synchronous PNG read. So to see a
-camera change, stage the `aether.camera.*` driver mail (or a `DrawTriangle`
+camera change, stage the `aether.kit.camera.*` driver mail (or a `DrawTriangle`
 directly) in `mails` and read the frame back inline. The renderer's retained
 geometry means a capture that doesn't advance a tick still shows the last live
 frame.
@@ -148,11 +148,11 @@ frame.
   `camera` export is the worked example: it hosts N named cameras, advances each
   on `Tick`, and publishes the active one's `view_proj` on `Render`. It boots a
   default `"main"` camera in orbit mode and exposes driver kinds —
-  `aether.camera.{create, destroy, set_active, set_mode, orbit.set, topdown.set}`
+  `aether.kit.camera.{create, destroy, set_active, set_mode, orbit.set, topdown.set}`
   — for adding cameras and poking their parameters live. A new mode (follow,
   cinematic, free-fly) is a new `view_proj` computation in a camera component;
   the renderer needs no change because it only ever applies the matrix it's
-  handed. Loaded by the `aether_kit@aether.camera` selector, the camera answers at
+  handed. Loaded by the `aether_kit@aether.kit.camera` selector, the camera answers at
   `aether.component/aether.embedded:aether.camera` — the address `LoadResult.name` hands
   back.
 - **A new drawing component** subscribes the `Render` stage and emits

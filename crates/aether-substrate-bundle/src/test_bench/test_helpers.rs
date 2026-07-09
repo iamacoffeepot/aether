@@ -217,7 +217,7 @@ pub fn test_namespace_roots(save_dir: &Path) -> NamespaceRoots {
 /// Write `bytes` into the sandbox at filename `name`, returning the
 /// bare filename — the substrate resolves it relative to the
 /// namespace root, so callers pass this as the `path` field of
-/// `aether.fs.read` / `aether.mesh.load` / etc.
+/// `aether.fs.read` / `aether.kit.mesh.load` / etc.
 ///
 /// # Panics
 /// Panics if [`init_save_sandbox`] was never called in this process,

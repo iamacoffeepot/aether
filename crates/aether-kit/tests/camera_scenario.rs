@@ -2,7 +2,7 @@
 //! `aether-kit`'s wasm artifact (built separately for
 //! `wasm32-unknown-unknown`) selecting the non-entry `camera` export
 //! (ADR-0096), drives the `CameraComponent` through its
-//! `aether.camera.*` mail surface, and asserts mail-flow / render
+//! `aether.kit.camera.*` mail surface, and asserts mail-flow / render
 //! survivability via direct `TestBench` assertions (post-issue-821:
 //! the `aether-scenario` Script/Step vocabulary retired in favour of
 //! calling the bench methods directly).
@@ -19,6 +19,8 @@
 //! gate) live in `aether_substrate_bundle::test_bench::test_helpers`
 //! (issues 460 + 821).
 
+use aether_capabilities::render::Camera;
+use aether_data::Kind;
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_kit::camera::CameraDestroy;
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
@@ -72,7 +74,7 @@ fn load_camera(bench: &mut TestBench, wasm_path: &Path) {
                     wasm,
                     name: Some(COMPONENT_NAME.to_owned()),
                     config: Vec::new(),
-                    export: Some("aether.camera".to_owned()),
+                    export: Some("aether.kit.camera".to_owned()),
                 },
             ),
         )])
@@ -131,7 +133,7 @@ fn camera_default_static_publishes_view_proj() {
         .execute(vec![("advance", BenchOp::advance(5))])
         .expect("advance");
 
-    let observed = bench.count_observed("aether.camera");
+    let observed = bench.count_observed(Camera::NAME);
     assert!(
         observed >= 1,
         "expected ≥1 aether.camera observed; got {observed}; observed kinds: {:?}",
@@ -160,7 +162,7 @@ fn camera_destroy_main_keeps_substrate_alive() {
         .execute(vec![("pre", BenchOp::advance(2))])
         .expect("pre-destroy advance");
     // Baseline: default orbit was publishing before destroy.
-    let pre_destroy = bench.count_observed("aether.camera");
+    let pre_destroy = bench.count_observed(Camera::NAME);
     assert!(
         pre_destroy >= 1,
         "expected ≥1 aether.camera before destroy; got {pre_destroy}; observed kinds: {:?}",

@@ -10,14 +10,14 @@
 use alloc::string::String;
 use serde::{Deserialize, Serialize};
 
-/// `aether.mesh.load` — instruct the mesh viewer to load and display
+/// `aether.kit.mesh.load` — instruct the mesh viewer to load and display
 /// the file at `namespace://path`. The viewer dispatches on the
 /// file extension: `.dsl` runs through `aether-mesh`'s parser +
 /// mesher; `.obj` runs through the OBJ parser. Subsequent `Load`
 /// mails replace the cached mesh. Fire-and-forget; errors surface
 /// in `engine_logs`.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.mesh.load")]
+#[kind(name = "aether.kit.mesh.load")]
 pub struct LoadMesh {
     /// Short namespace prefix (no `://`), e.g. `"save"`, `"assets"`.
     pub namespace: String,
