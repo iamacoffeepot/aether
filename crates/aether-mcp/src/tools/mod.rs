@@ -1,0 +1,457 @@
+//! The `aether-mcp` tool surface: the per-session [`Mcp`] service, its
+//! `#[tool_router]` impl, and the `ServerHandler` (issue 763 P5b/P5c).
+//!
+//! Each tool translates to RPC `Call`s over the shared [`RpcSession`].
+//! Engine-management tools (`list_engines`, `spawn_substrate`,
+//! `terminate_substrate`) address the hub's own `aether.engine` cap
+//! (`engine = None`, dispatched locally on the hub); the per-engine
+//! tools (`send_mail`, `load_component`, `replace_component`,
+//! `capture_frame`) address a specific substrate (`engine = Some`),
+//! which the hub routes through to the matching proxy. `describe_kinds`
+//! queries the live engine's `aether.inventory.kinds` mailbox so it
+//! surfaces capability-owned and component-defined kinds, falling back to
+//! the static substrate baseline only when no engine is reachable.
+//! `describe_component` answers locally from a component-capability cache
+//! populated by `load_component` / `replace_component`.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+// `tokio::sync::Mutex` (the async one used by the per-engine refresh-
+// collapse guard) imported under an alias so the struct-field path
+// stays short — `std::sync::Mutex` is the bare `Mutex`.
+use tokio::sync::Mutex as AsyncMutex;
+
+use aether_capabilities::rpc::{MailEnvelope, MailboxAddress};
+use aether_codec::frame::max_frame_size;
+use aether_data::MailId;
+use aether_data::canonical::kind_id_from_parts;
+use aether_data::wire;
+use aether_data::{
+    EngineId, Kind, KindDescriptor, KindId, MailboxId, ScopePathError, Tag, Uuid,
+    mailbox_id_from_path, tagged_id, validate_scope_path,
+};
+use aether_data::{EnumVariant, Primitive, SchemaType};
+#[cfg(test)]
+use aether_kinds::KindDescriptorWire;
+use aether_kinds::{
+    ComponentCapabilities, ComponentSelector, DeathReason, ListKinds, ListKindsResult, NamedMail,
+    ResolveComponent, ResolveComponentResult, trace::MailNodeWire,
+};
+#[cfg(test)]
+use base64::Engine as _;
+use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo};
+use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
+
+use crate::args::ActorCostArgs;
+use crate::args::ActorLogsArgs;
+use crate::args::{
+    CaptureFrameArgs, CaptureMailSpec, ComponentSpec, DescribeComponentArgs, DescribeHandlersArgs,
+    DescribeKindsArgs, ListBinariesArgs, ListComponentsArgs, LoadComponentArgs, MailIdJson,
+    MailNodeJson, MailSpec, ReplaceComponentArgs, ReplyEventJson, SendMailArgs, SendMailTracedArgs,
+    SpawnSubstrateArgs, TerminateSubstrateArgs, TracedMailSpec, UploadBinaryArgs,
+    UploadComponentArgs,
+};
+use crate::reverse::EngineNames;
+use crate::rpc::RpcSession;
+use aether_kinds::descriptors;
+use aether_kinds::{Manifest, ManifestResult, Resolve, ResolveResult};
+#[cfg(test)]
+use base64::engine::general_purpose::STANDARD;
+#[cfg(test)]
+use std::time::Duration;
+
+mod bytes;
+mod capture;
+mod components;
+mod describe;
+mod engine;
+mod envelope;
+mod ids;
+mod logs_cost;
+mod mail;
+mod render;
+mod reply;
+mod state;
+
+trait NamedMailSpec: Sync {
+    fn recipient_name(&self) -> &str;
+    fn kind_name(&self) -> &str;
+    fn params(&self) -> Option<&serde_json::Value>;
+}
+
+impl NamedMailSpec for CaptureMailSpec {
+    fn recipient_name(&self) -> &str {
+        &self.recipient_name
+    }
+
+    fn kind_name(&self) -> &str {
+        &self.kind_name
+    }
+
+    fn params(&self) -> Option<&serde_json::Value> {
+        self.params.as_ref()
+    }
+}
+
+impl NamedMailSpec for TracedMailSpec {
+    fn recipient_name(&self) -> &str {
+        &self.recipient_name
+    }
+
+    fn kind_name(&self) -> &str {
+        &self.kind_name
+    }
+
+    fn params(&self) -> Option<&serde_json::Value> {
+        self.params.as_ref()
+    }
+}
+
+#[cfg(test)]
+use self::bytes::{render_bytes_leaf_in, render_bytes_reply, resolve_bytes_params};
+#[cfg(test)]
+use self::components::components_all_loaded;
+use self::components::{
+    component_config_bytes, reject_zero_replicas, replica_base_name, replica_names,
+    selector_with_explicit_export,
+};
+use self::envelope::{engine_envelope, local_envelope, validate_recipient_scope};
+#[cfg(test)]
+use self::ids::{parse_kind_id, static_kind_name};
+#[cfg(test)]
+use self::logs_cost::{actor_logs_err_message, level_to_str, parse_level};
+#[cfg(test)]
+use self::render::render_shape;
+use self::render::{frame_size_aware_error, internal_msg};
+#[cfg(test)]
+use self::reply::decode_reply_events;
+/// Default wall-clock cap on `send_mail` / `send_mail_traced` awaiting a
+/// chain to settle (issue 1242). 300s — clears a provider cap's API
+/// timeout (the gemini cap's 180s, anthropic's 120s) with margin for
+/// queue / dispatch / staging overhead.
+const AWAIT_TIMEOUT_DEFAULT_MS: u32 = 300_000;
+/// Hard ceiling on the caller-supplied await timeout (issue 1242). A
+/// `settlement_timeout_ms` above this is clamped down. 600s — twice the
+/// default, the locked upper bound for a legitimately-long provider call.
+const AWAIT_TIMEOUT_CAP_MS: u32 = 600_000;
+
+/// Mailbox name of the hub's engines cap — the `engine = None` target
+/// for the engine-management tools.
+const ENGINE_CAP: &str = "aether.engine";
+/// Mailbox name of a substrate's component-host cap.
+const COMPONENT_CAP: &str = "aether.component";
+/// Mailbox name of a substrate's render cap.
+const RENDER_CAP: &str = "aether.render";
+/// Mailbox name of a substrate's reverse-lookup inventory cap
+/// (ADR-0088 §6) — the `aether.inventory.manifest` / `resolve` target.
+const INVENTORY_CAP: &str = "aether.inventory";
+
+/// Component receive-side capabilities, keyed by `(engine, mailbox)`.
+/// Populated from `load_component` / `replace_component` replies and
+/// read by `describe_component` — the forward-model stand-in for the
+/// embedded hub's component registry.
+pub type ComponentCache = Mutex<HashMap<(EngineId, MailboxId), ComponentCapabilities>>;
+
+/// Per-engine reverse-lookup state, keyed by [`EngineId`] (ADR-0088 §8).
+/// Each [`EngineNames`] folds that engine's served `aether.inventory`
+/// manifest into a `hash → name` map plus a dynamic-resolve cache. Built
+/// lazily on first need (the first id render for an engine), cached for
+/// the engine's lifetime, and shared across cloned [`Mcp`] sessions —
+/// statics are build-identical but dynamic instances are per-engine, so
+/// the map can't be process-global. An engine that doesn't answer the
+/// manifest gets an empty map (every lookup falls back to hex) rather
+/// than erroring the tool.
+pub type ReverseNameCache = Mutex<HashMap<EngineId, EngineNames>>;
+
+/// Per-engine kind-encode cache (ADR-0091): a `kind_name → KindDescriptor`
+/// map per engine, plus the per-engine async mutex that collapses
+/// concurrent refreshes. Built lazily on first send for an engine
+/// (prefilled from the substrate's static vocabulary via
+/// `descriptors::all`); refreshed on encode miss via
+/// `aether.inventory.kinds`. Component-defined kinds enter on the
+/// first miss after `load_component`.
+///
+/// Two halves so the cache can be read under the synchronous `Mutex`
+/// without holding the lock across the async refresh RPC: the outer
+/// `descriptors` map is the read path, and `refresh_guards` holds the
+/// per-engine `AsyncMutex<()>` two concurrent misses on
+/// different unknown names collapse on (the second waiter awaits the
+/// first's result, then retries the lookup against the freshly-
+/// populated map without re-fetching).
+#[derive(Default)]
+pub struct KindsCache {
+    /// `engine → kind_name → descriptor`. Read with the std `Mutex`
+    /// uncontended on cache hits (no await inside the critical
+    /// section).
+    descriptors: Mutex<HashMap<EngineId, HashMap<String, KindDescriptor>>>,
+    /// `engine → refresh-collapse mutex`. Looked up under
+    /// `descriptors`'s lock to fetch-or-insert, then acquired
+    /// out-of-band via `tokio::sync::Mutex::lock().await` so the
+    /// refresh RPC doesn't pin the cache lock.
+    refresh_guards: Mutex<HashMap<EngineId, Arc<AsyncMutex<()>>>>,
+}
+
+/// Per-session MCP service. `rmcp` calls the factory once per session
+/// and may clone the result for concurrent tool dispatch — `session`
+/// and `components` are `Arc`s, so clones share the one hub connection
+/// and one component cache.
+#[derive(Clone)]
+pub struct Mcp {
+    session: Arc<RpcSession>,
+    components: Arc<ComponentCache>,
+    /// Per-engine reverse-lookup maps (ADR-0088 §8), shared across cloned
+    /// sessions so a manifest fetched for one tool call serves the next.
+    names: Arc<ReverseNameCache>,
+    /// Per-engine kind-encode cache (ADR-0091), shared across cloned
+    /// sessions so a `ListKinds` refresh fetched for one tool call
+    /// serves the next.
+    kinds: Arc<KindsCache>,
+    // The `#[tool_router]` macro stores the router instance here; it's
+    // consumed by `#[tool_handler]` codegen rather than read by name, so
+    // the dead-code lint fires under `-D warnings` despite the field
+    // being load-bearing. (rmcp 1.7 stopped tagging the field as used.)
+    #[allow(dead_code)]
+    tool_router: ToolRouter<Self>,
+}
+
+impl Mcp {
+    /// Construct a per-session service over an established hub
+    /// connection + the process-wide component, reverse-name, and
+    /// kind-encode caches.
+    pub fn new(
+        session: Arc<RpcSession>,
+        components: Arc<ComponentCache>,
+        names: Arc<ReverseNameCache>,
+        kinds: Arc<KindsCache>,
+    ) -> Self {
+        Self {
+            session,
+            components,
+            names,
+            kinds,
+            tool_router: Self::tool_router(),
+        }
+    }
+}
+
+#[tool_router]
+impl Mcp {
+    #[tool(
+        description = "List every engine the hub currently supervises, plus a recently-died sidecar. Returns an object {engines, recently_died}: each `engines` item reports the engine_id (pass it to send_mail / terminate_substrate) and the localhost RPC port the hub assigned its substrate; each `recently_died` item reports a departed engine with why it left — reason \"terminated\" (a deliberate terminate_substrate), \"crashed\" (the substrate closed its connection), \"evicted\" (a missed-heartbeat eviction), or \"spawn_failed\" (a spawn that never connected — the substrate failed to come up) — plus a detail string and how long ago it left, so a clean shutdown is distinguishable from a failure."
+    )]
+    pub async fn list_engines(&self) -> Result<String, McpError> {
+        engine::list_engines(self).await
+    }
+
+    #[tool(
+        description = "Fork+exec a substrate binary as a child of the hub, resolved from the hub's content-addressed binary store (ADR-0115) — not a host path. Pass `selector` to pick the binary: a content `hash`, a `name@version`, or a `name` (upload_binary first if it isn't stored). Omit `selector` for `default` — the headless chassis — so a bare spawn_substrate with no arguments returns a working engine. When `selector` is omitted you may instead attribute-query with `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (linked-cap superset), and `target` (build triple). The hub resolves the selector to the stored bytes, materializes them to an executable temp file, assigns a free localhost RPC port (injected as AETHER_RPC_PORT), forks it, and connects a proxy. Returns the engine_id and rpc_port on success; errors if the selector resolves to no stored binary or the substrate fails to come up. A spawn that fails after the hub allocated an engine_id carries that id in the error (and records a matching spawn_failed entry in list_engines.recently_died), so you can correlate and reap rather than guess. Pass `components` (each {selector, name?, config?, config_path?, export?, replicas?}) to bring the engine up with those components already loaded in one call — each selector is a content hash, name, or module@actor resolved against the hub's component registry (ADR-0116; upload_component first). `config` is inline JSON and `config_path` is a JSON file path; aether-mcp schema-encodes either one to the component's Config kind, stages the resulting bytes next to the staged wasm, and writes a boot-manifest the hub injects as AETHER_BOOT_MANIFEST. The spawned substrate reads the staged wasm/config byte files itself (single-host), so no follow-up load_component is needed. Set replicas: N on an entry (issue 2626) to fan it out into N instances at boot from one spec, one shared config — each named {base}-{index} for index in 0..N (base = name > export > entry actor namespace) — and the readiness wait gates on every instance; pairs with #[router(shared)] (ADR-0136) to scale an HTTP handler to N instances with no hand-named entries. replicas: 0 is a tool error."
+    )]
+    pub async fn spawn_substrate(
+        &self,
+        Parameters(args): Parameters<SpawnSubstrateArgs>,
+    ) -> Result<String, McpError> {
+        engine::spawn_substrate(self, args).await
+    }
+
+    #[tool(
+        description = "Terminate a substrate the hub supervises. The hub forwards the request to the engine's proxy, which SIGKILLs the child process and self-shuts-down."
+    )]
+    pub async fn terminate_substrate(
+        &self,
+        Parameters(args): Parameters<TerminateSubstrateArgs>,
+    ) -> Result<String, McpError> {
+        engine::terminate_substrate(self, args).await
+    }
+
+    #[tool(
+        description = "Upload a binary into the hub's content-addressed store (ADR-0115). Pass `staged_path` — an absolute path to the binary on the fleet host — and an optional `name`. The hub reads the path itself (aether-mcp never reads the bytes — a binary is too large for the tool channel), sha256-hashes it, dedups against the store (a re-upload of identical bytes returns the same hash), forks `<binary> --describe` to capture its manifest (chassis kind, linked caps, build provenance), stores both, and points `name` (when given) at the hash. The store persists across a restart-hub. Returns {hash, name}."
+    )]
+    pub async fn upload_binary(
+        &self,
+        Parameters(args): Parameters<UploadBinaryArgs>,
+    ) -> Result<String, McpError> {
+        components::upload_binary(self, args).await
+    }
+
+    #[tool(
+        description = "Enumerate the hub's stored binaries (ADR-0115). Optional AND-combined filters: `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (keep only binaries whose linked caps are a superset of every listed cap), `target` (the build target triple). Omit all to list the whole store. Returns an array of {hash, name, manifest: {chassis, caps, git_sha, profile, target}} — the manifest each binary reported via a one-time --describe at upload time."
+    )]
+    pub async fn list_binaries(
+        &self,
+        Parameters(args): Parameters<ListBinariesArgs>,
+    ) -> Result<String, McpError> {
+        components::list_binaries(self, args).await
+    }
+
+    #[tool(
+        description = "Upload a WASM component into the hub's content-addressed store (ADR-0116). Pass `staged_path` — an absolute path to the component .wasm on the fleet host — and an optional `name` (the component's Actor::NAMESPACE is the natural one). The hub reads the path itself (aether-mcp never reads the bytes — too large for the tool channel), sha256-hashes it, dedups against the store (a re-upload of identical bytes returns the same hash), reads its manifest straight from the wasm (no execution step — exported actor namespaces, handled kind ids, #[fallback] presence, build provenance), stores both, and points `name` (when given) at the hash. The store persists across a restart-hub. Then load it by selector with load_component — the host wasm path is gone from load_component / replace_component / boot manifests, surviving only here as the upload input. Returns {hash, name}."
+    )]
+    pub async fn upload_component(
+        &self,
+        Parameters(args): Parameters<UploadComponentArgs>,
+    ) -> Result<String, McpError> {
+        components::upload_component(self, args).await
+    }
+
+    #[tool(
+        description = "Enumerate the hub's stored components (ADR-0116). Optional AND-combined filters: `namespace` (keep only components exporting an actor with that Actor::NAMESPACE) and `handled_kind` (keep only components handling that kind, by tagged knd-… id or kind name). Omit both to list every stored component. Returns an array of {hash, name, manifest} — the manifest read straight from each wasm at upload: {namespaces, actors: [{namespace, handled_kinds, fallback}], handled_kinds, fallback, provenance}."
+    )]
+    pub async fn list_components(
+        &self,
+        Parameters(args): Parameters<ListComponentsArgs>,
+    ) -> Result<String, McpError> {
+        components::list_components(self, args).await
+    }
+
+    #[tool(
+        description = "Send one or more mail items to substrate mailboxes. Each item carries structured `params`, schema-encoded against the substrate kind vocabulary. Best-effort batch: per-item status is returned and one failure doesn't abort siblings. By default each item BLOCKS until its dispatch chain settles and the item's correlated reply payloads are returned in `replies` (status 'delivered'); each reply is {kind_id, kind_name, params (best-effort decode, null on miss), payload_bytes (base64 string, present only on a decode miss)}. The await cap is 600s (gated by the batch-level settlement against a slow provider cap); on timeout the item reports status 'timeout' with timed_out:true and any replies collected so far. Set fire_and_forget:true to restore non-blocking dispatch (status 'dispatched', empty replies) — use it for a fire-and-poke (e.g. a DrawTriangle before a capture_frame) or a cap that never replies. For `Bytes`-typed fields in `params`, pass a byte array (`[…]`, canonical) or one `$`-sigil embed: `$file` (reads a file on the harness host), `$base64` (decodes), or `$text` (UTF-8-encodes)."
+    )]
+    pub async fn send_mail(
+        &self,
+        Parameters(args): Parameters<SendMailArgs>,
+    ) -> Result<String, McpError> {
+        mail::send_mail(self, args).await
+    }
+
+    #[tool(
+        description = "Atomic batched dispatch with combined trace tree. Like send_mail but every spec lands on the engine's aether.trace mailbox under one shared chassis root, and the response returns the full trace subtree once the chain settles — no window guessing, no separate describe_tree call. By default it BLOCKS until settlement and also returns the batch's correlated reply payloads as a flat arrival-ordered `replies` list (the batch is one wire Call, so replies aren't per-item) alongside the tree; each reply is {kind_id, kind_name, params (best-effort decode, null on miss), payload_bytes (base64 string, present only on a decode miss)}. Two-call protocol behind the scenes: the substrate emits a synchronous ack with the root id, the caller waits for chain settlement on the wire collecting reply events, then issues a describe_tree against the captured root. Bad specs abort the whole batch before any mail moves (mirrors capture_frame). settlement_timeout_ms caps wall-clock wait (default 300000, max 600000); on timeout the response carries status:timeout with no root, tree, or replies. Set fire_and_forget:true to return the ack only (status:dispatched with root populated, mails/replies null) without awaiting settlement."
+    )]
+    pub async fn send_mail_traced(
+        &self,
+        Parameters(args): Parameters<SendMailTracedArgs>,
+    ) -> Result<String, McpError> {
+        mail::send_mail_traced(self, args).await
+    }
+
+    #[tool(
+        description = "Load a WASM component into a substrate by registry selector (ADR-0116) — upload_component first if it isn't stored. Pass `selector`: a content hash, a name (latest upload under it), or a module@actor (the @actor half picks an exported actor type from a multi-actor module). The host wasm path is gone — the only path anywhere is the upload_component input. aether-mcp resolves the selector hub-local to the wasm bytes, forwards aether.component.load to the engine's aether.component mailbox, and awaits the LoadResult — returning {mailbox_id, name, capabilities} or an error. The component's kind vocabulary rides in the wasm's aether.kinds custom section. Pass config (inline JSON) or config_path (path to a JSON file) to deliver init-config to a typed-config component (ADR-0090): aether-mcp schema-encodes the JSON to the component's Config kind before forwarding bytes — describe_component reports the expected config kind. Pass export to pick which exported actor type to instantiate from a multi-actor module (ADR-0096), named by its Actor::NAMESPACE; a module@actor selector populates it from its @actor half; omit both to load the module's entry type (the first in its export! list, and the only type a single-actor module has). The returned name + capabilities describe the selected type. Pass replicas: N (issue 2626) to load N instances of this selector in one call — each named {base}-{index} (base = name > export > entry actor namespace) — returning {\"components\": [{mailbox_id, name, capabilities}, ...]} instead of the single-load shape; pairs with #[router(shared)] (ADR-0136) to scale an HTTP handler to N instances with no hand-written registration. A mid-loop failure reports which replica failed and how many loaded before it — already-loaded replicas stay live, the same as N manual calls. replicas: 0 is a tool error. Very large wasm payloads (debug builds at 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
+    )]
+    pub async fn load_component(
+        &self,
+        Parameters(args): Parameters<LoadComponentArgs>,
+    ) -> Result<String, McpError> {
+        components::load_component(self, args).await
+    }
+
+    #[tool(
+        description = "Atomically replace a live component's WASM with a build resolved from a registry selector (ADR-0022 structural splice; ADR-0116 selector). Pass `selector` (hash-primary — a hash pins or rolls a component to an exact build; a name or module@actor resolves too); the host wasm path is gone, surviving only as the upload_component input. aether-mcp resolves the selector hub-local to the wasm bytes and forwards aether.component.replace to the engine's aether.component mailbox. drain_timeout_ms is accepted for wire compatibility but currently ignored. Pass config (inline JSON) or config_path (path to a JSON file) to deliver init-config to a typed-config replacement; aether-mcp schema-encodes the JSON to the replacement component's Config kind before forwarding bytes. Pass export to instantiate a specific exported actor type from a multi-actor replacement module (ADR-0096), named by its Actor::NAMESPACE; a module@actor selector populates it from its @actor half. Omit export to reuse the actor type the trampoline currently hosts — not necessarily the module entry — preserving today's replace behaviour; an export the replacement module doesn't declare comes back as an error. Returns the replaced component's advertised capabilities. Very large wasm payloads (debug builds at 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
+    )]
+    pub async fn replace_component(
+        &self,
+        Parameters(args): Parameters<ReplaceComponentArgs>,
+    ) -> Result<String, McpError> {
+        components::replace_component(self, args).await
+    }
+
+    #[tool(
+        description = "Capture an engine's current frame as a PNG, returned inline as image content. Optionally carries two mail bundles dispatched atomically around the capture: `mails` fires before readback (state changes that should appear in the image), `after_mails` fires after (cleanup). A bad bundle entry aborts the whole capture before any mail moves. Optionally carries `checks`: substrate-side reductions (not_all_black, differs_from_background, coverage, centroid, bounding_box) scored on the exact RGBA the PNG is built from and returned as a `verdict` text block alongside the image — a one-call spawn -> drive -> assert with no caller-side PNG decode. Each check entry optionally carries `region` ({min_x, min_y, max_x, max_y}) to restrict the reduction to the frame-clamped intersection of that rect instead of the whole frame — e.g. asserting a widget's fill lands inside its own screen rect rather than folding the whole scene into one number; coverage then divides by the clamped region's pixel count, and centroid/bounding_box still report absolute frame coordinates. Omit `region` to score the whole frame (the prior behavior). Optionally carries `similarity`: a reference-image check (`namespace` + `reference_path` + `threshold`) the render thread scores as a normalised mean-absolute-error against the captured RGBA, returned as `similarity_score` / `similarity_pass` text blocks alongside the image."
+    )]
+    pub async fn capture_frame(
+        &self,
+        Parameters(args): Parameters<CaptureFrameArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        capture::capture_frame(self, args).await
+    }
+
+    #[tool(
+        description = "List the substrate kind vocabulary — both the static aether.* kinds and the engine's live capability + component kinds. engine_id selects which engine to query; omit it and the tool auto-resolves the sole supervised engine (the common single-substrate harness); with zero or many engines and no engine_id it returns the static substrate baseline. Default (no args) returns a compact [{name, shape}] JSON array where shape is a one-line field rendering — small and chunk-readable. prefix (case-sensitive starts_with) filters the listing to a kind family (e.g. \"aether.fs\" for just the fs kinds). full:true returns the full [{name, schema}] with the authoritative nested SchemaType; combine with prefix to bound the payload to the kinds a task needs."
+    )]
+    pub async fn describe_kinds(
+        &self,
+        Parameters(args): Parameters<DescribeKindsArgs>,
+    ) -> Result<String, McpError> {
+        describe::describe_kinds(self, args).await
+    }
+
+    #[tool(
+        description = "List the native transforms collected at link time (ADR-0048): every #[transform] fn with its global transform_id, fully-qualified name, declared input kind ids (slot order), and output kind id. These are pure Kind -> Kind functions a DAG Transform node dispatches; this is the static inventory aether-mcp ships with (a transform set is a build-time property). Empty when no first-party transforms are linked."
+    )]
+    pub async fn describe_transforms(&self) -> Result<String, McpError> {
+        describe::describe_transforms()
+    }
+
+    #[tool(
+        description = "Describe a loaded component's receive-side capabilities (ADR-0033): the kinds it typed-handles with per-handler docs, whether it has a fallback catchall, its top-level doc, and (ADR-0090) its boot-config kind id+name when it declared a typed Config. Address the component by its lineage name (the aether.component/aether.embedded:NAME address spawn_substrate / list_components / load_component hand back) — a name resolves live against the substrate, so a boot-manifest-loaded component is fully introspectable without a prior load_component and survives an aether-mcp restart or an in-place replace_component. A tagged mbx- id is also accepted as a local cache fast-path."
+    )]
+    pub async fn describe_component(
+        &self,
+        Parameters(args): Parameters<DescribeComponentArgs>,
+    ) -> Result<String, McpError> {
+        describe::describe_component(self, args).await
+    }
+
+    #[tool(
+        description = "Describe a substrate's NATIVE chassis caps' reply contracts (ADR-0109 §5): the native analogue of describe_component. Sends aether.inventory.handlers to the engine's aether.inventory mailbox and decodes aether.inventory.handlers_result — the link-time handler manifest the #[actor] macro populates. Returns the handlers folded per mailbox namespace; each handler carries its input kind (id + name) and its reply kind id+name, so you read a native cap's In -> Out (e.g. aether.fs.read -> aether.fs.read_result) before issuing the call. reply is null for a fire-and-forget handler. Reply kind names resolve best-effort from the static substrate vocabulary; a component-defined reply kind stays null. Use describe_component for a loaded wasm component, describe_kinds for the full schema of any kind."
+    )]
+    pub async fn describe_handlers(
+        &self,
+        Parameters(args): Parameters<DescribeHandlersArgs>,
+    ) -> Result<String, McpError> {
+        describe::describe_handlers(self, args).await
+    }
+
+    #[tool(
+        description = "Pull recent log entries from one actor's per-actor log ring (ADR-0081). \
+                       Sends aether.log.tail to the named mailbox and decodes aether.log.tail_result. \
+                       Every actor — native or wasm trampoline — serves this kind via the substrate's \
+                       framework dispatch arm, so any mailbox is queryable (e.g. \"aether.audio\", \
+                       \"aether.component/aether.embedded:aether.camera\"). `max` defaults to 100 and clamps to 1000; \
+                       pass `level` (`trace|debug|info|warn|error`) for server-side filtering; pass \
+                       `since` (the prior call's `next_since`) to walk past already-seen entries without \
+                       double-reading. `truncated_before` in the reply is `Some(seq)` when the ring \
+                       evicted entries the caller hadn't seen yet (the lowest sequence still held). \
+                       Aggregate across actors by calling this tool once per mailbox client-side."
+    )]
+    pub async fn actor_logs(
+        &self,
+        Parameters(args): Parameters<ActorLogsArgs>,
+    ) -> Result<String, McpError> {
+        logs_cost::actor_logs(self, args).await
+    }
+
+    #[tool(
+        description = "Dump one actor's per-handler execution-cost EWMA table \
+                       (iamacoffeepot/aether#1128, Phase 0 dark instrumentation). Sends \
+                       aether.cost.tail to the named mailbox and decodes aether.cost.tail_result. \
+                       The substrate folds (Finished − Received) from each dispatch's trace \
+                       bracket into a per-handler EWMA; this reads it back — MEASURE-ONLY, the \
+                       table has no scheduling effect. Every actor — native or wasm trampoline — \
+                       serves this kind via the substrate's framework dispatch arm, so any mailbox \
+                       is queryable. Each row carries the handler kind (id + resolved name when \
+                       known), `mean_nanos` / `mad_nanos` (the EWMA mean + mean-absolute-deviation \
+                       of execution time in nanos), and `samples` (folded-sample count; `0` is the \
+                       neutral seed — a handler the actor declares but hasn't run yet). Pass \
+                       `kind_id` (tagged `knd-…` or decimal) to filter to one handler. Use it to \
+                       check whether handler costs are heterogeneous enough to warrant the \
+                       cost-aware recruiter (iamacoffeepot/aether#1127)."
+    )]
+    pub async fn actor_cost(
+        &self,
+        Parameters(args): Parameters<ActorCostArgs>,
+    ) -> Result<String, McpError> {
+        logs_cost::actor_cost(self, args).await
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for Mcp {
+    fn get_info(&self) -> ServerInfo {
+        let mut server_info = Implementation::default();
+        server_info.name = "aether-mcp".into();
+        server_info.version = env!("CARGO_PKG_VERSION").into();
+        let mut info = ServerInfo::default();
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.server_info = server_info;
+        info
+    }
+}
+
+#[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::unwrap_used)]
+mod tests;
