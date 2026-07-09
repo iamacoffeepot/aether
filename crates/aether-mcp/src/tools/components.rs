@@ -1,6 +1,20 @@
 use super::bytes::resolve_bytes_params;
-use super::{KindDescriptorWire, McpError, SchemaType, internal_msg, wire};
+use super::envelope::{engine_envelope, local_envelope};
+use super::ids::{parse_engine_id, parse_mailbox_id, resolve_handled_kind};
+use super::render::{frame_size_aware_error, internal, internal_msg, json};
+use super::{COMPONENT_CAP, ENGINE_CAP, Mcp};
+use crate::args::{
+    ListBinariesArgs, ListComponentsArgs, LoadComponentArgs, ReplaceComponentArgs,
+    UploadBinaryArgs, UploadComponentArgs,
+};
 use aether_codec::frame::max_frame_size;
+use aether_data::{EngineId, Kind, SchemaType, wire};
+use aether_kinds::{
+    KindDescriptorWire, ListComponentBinaries, ListComponentBinariesResult, ListEngineBinaries,
+    ListEngineBinariesResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult,
+    UploadBinary, UploadBinaryResult, UploadComponent, UploadComponentResult,
+};
+use rmcp::ErrorData as McpError;
 use std::path::PathBuf;
 use tokio::fs;
 
@@ -175,4 +189,291 @@ pub(super) fn reject_zero_replicas(replicas: Option<u32>, selector: &str) -> Res
         ));
     }
     Ok(())
+}
+
+pub(super) async fn upload_binary(mcp: &Mcp, args: UploadBinaryArgs) -> Result<String, McpError> {
+    // The hub reads the staged path; aether-mcp forwards it, never
+    // reading the bytes (unlike load_component).
+    let reply = mcp
+        .session
+        .call_one(local_envelope(
+            ENGINE_CAP,
+            &UploadBinary {
+                staged_path: args.staged_path,
+                name: args.name,
+            },
+        ))
+        .await
+        .map_err(internal)?;
+    match UploadBinaryResult::decode_from_bytes(&reply.payload) {
+        Some(UploadBinaryResult::Ok { hash, name }) => {
+            json(&serde_json::json!({ "hash": hash, "name": name }))
+        }
+        Some(UploadBinaryResult::Err { error }) => Err(internal_msg(&error)),
+        None => Err(internal_msg("undecodable UploadBinaryResult")),
+    }
+}
+
+pub(super) async fn list_binaries(mcp: &Mcp, args: ListBinariesArgs) -> Result<String, McpError> {
+    let reply = mcp
+        .session
+        .call_one(local_envelope(
+            ENGINE_CAP,
+            &ListEngineBinaries {
+                chassis: args.chassis,
+                caps: args.caps,
+                target: args.target,
+            },
+        ))
+        .await
+        .map_err(internal)?;
+    match ListEngineBinariesResult::decode_from_bytes(&reply.payload) {
+        Some(result) => json(&result.binaries),
+        None => Err(internal_msg("undecodable ListEngineBinariesResult")),
+    }
+}
+
+pub(super) async fn upload_component(
+    mcp: &Mcp,
+    args: UploadComponentArgs,
+) -> Result<String, McpError> {
+    // The hub reads the staged path; aether-mcp forwards it, never
+    // reading the bytes (unlike the load_component resolve hop, which
+    // pulls the bytes back from the store).
+    let reply = mcp
+        .session
+        .call_one(local_envelope(
+            ENGINE_CAP,
+            &UploadComponent {
+                staged_path: args.staged_path,
+                name: args.name,
+            },
+        ))
+        .await
+        .map_err(internal)?;
+    match UploadComponentResult::decode_from_bytes(&reply.payload) {
+        Some(UploadComponentResult::Ok { hash, name }) => {
+            json(&serde_json::json!({ "hash": hash, "name": name }))
+        }
+        Some(UploadComponentResult::Err { error }) => Err(internal_msg(&error)),
+        None => Err(internal_msg("undecodable UploadComponentResult")),
+    }
+}
+
+pub(super) async fn list_components(
+    mcp: &Mcp,
+    args: ListComponentsArgs,
+) -> Result<String, McpError> {
+    let handled_kind = match args.handled_kind.as_deref() {
+        Some(s) => Some(resolve_handled_kind(s)?),
+        None => None,
+    };
+    let reply = mcp
+        .session
+        .call_one(local_envelope(
+            ENGINE_CAP,
+            &ListComponentBinaries {
+                namespace: args.namespace,
+                handled_kind,
+            },
+        ))
+        .await
+        .map_err(internal)?;
+    match ListComponentBinariesResult::decode_from_bytes(&reply.payload) {
+        Some(result) => json(&result.components),
+        None => Err(internal_msg("undecodable ListComponentBinariesResult")),
+    }
+}
+
+pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result<String, McpError> {
+    let engine = parse_engine_id(&args.engine_id)?;
+    let selector = selector_with_explicit_export(&args.selector, args.export.as_deref());
+    reject_zero_replicas(args.replicas, &selector)?;
+    // ADR-0116: resolve the selector hub-local to the wasm bytes; a
+    // `module@actor` selector's `@actor` half rides back as `export`.
+    let resolved = mcp.resolve_component(&selector).await?;
+    let config = component_config_bytes(
+        resolved.config_kind.as_ref(),
+        args.config,
+        args.config_path.as_deref(),
+        &format!("load_component {selector:?}"),
+    )
+    .await?
+    .unwrap_or_default();
+    // An explicit `export` arg wins over the selector's `@actor` half.
+    let export = args.export.or(resolved.export);
+
+    let Some(replicas) = args.replicas else {
+        return load_single_component(
+            mcp,
+            engine,
+            &selector,
+            resolved.wasm,
+            args.name,
+            config,
+            export,
+        )
+        .await;
+    };
+
+    // issue 2626: loop the single-load dispatch N times, one shared
+    // wasm/config, naming each instance in the same precedence order
+    // `stage_boot_manifest` derives `expected_names` in.
+    let base = replica_base_name(
+        args.name.as_deref(),
+        export.as_deref(),
+        resolved.entry_namespace.as_deref(),
+    )
+    .ok_or_else(|| {
+        McpError::invalid_params(
+            format!(
+                "component {selector:?}: cannot determine a base name for `replicas` \
+                     (no `name`, `export`, or entry actor namespace in the wasm manifest); \
+                     set `name` or `export`"
+            ),
+            None,
+        )
+    })?;
+
+    let mut loaded = Vec::with_capacity(replicas as usize);
+    for (index, name) in replica_names(&base, replicas).into_iter().enumerate() {
+        let reply = mcp
+            .session
+            .call_one(engine_envelope(
+                engine,
+                COMPONENT_CAP,
+                &LoadComponent {
+                    wasm: resolved.wasm.clone(),
+                    name: Some(name),
+                    config: config.clone(),
+                    export: export.clone(),
+                },
+            ))
+            .await
+            .map_err(|e| {
+                frame_size_aware_error(&format!("load_component {selector:?} replica {index}"), e)
+            })?;
+        match LoadResult::decode_from_bytes(&reply.payload) {
+            Some(LoadResult::Ok {
+                mailbox_id,
+                name,
+                capabilities,
+            }) => {
+                mcp.components
+                    .lock()
+                    .expect("component cache mutex is never poisoned")
+                    .insert((engine, mailbox_id), capabilities.clone());
+                loaded.push(serde_json::json!({
+                    "mailbox_id": mailbox_id,
+                    "name": name,
+                    "capabilities": capabilities,
+                }));
+            }
+            Some(LoadResult::Err { error }) => {
+                return Err(internal_msg(&format!(
+                    "load_component {selector:?} replica {index} of {replicas} failed: {error} \
+                         ({index} of {replicas} replicas loaded before this failure; already-loaded \
+                         replicas stay live, the same as N manual load_component calls)"
+                )));
+            }
+            None => return Err(internal_msg("undecodable LoadResult")),
+        }
+    }
+    json(&serde_json::json!({ "components": loaded }))
+}
+
+/// Preserve the original single-instance response shape while keeping the
+/// replica orchestration in [`load_component`] focused on fan-out.
+async fn load_single_component(
+    mcp: &Mcp,
+    engine: EngineId,
+    selector: &str,
+    wasm: Vec<u8>,
+    name: Option<String>,
+    config: Vec<u8>,
+    export: Option<String>,
+) -> Result<String, McpError> {
+    let reply = mcp
+        .session
+        .call_one(engine_envelope(
+            engine,
+            COMPONENT_CAP,
+            &LoadComponent {
+                wasm,
+                name,
+                config,
+                export,
+            },
+        ))
+        .await
+        .map_err(|e| frame_size_aware_error(&format!("load_component {selector:?}"), e))?;
+    match LoadResult::decode_from_bytes(&reply.payload) {
+        Some(LoadResult::Ok {
+            mailbox_id,
+            name,
+            capabilities,
+        }) => {
+            mcp.components
+                .lock()
+                .expect("component cache mutex is never poisoned")
+                .insert((engine, mailbox_id), capabilities.clone());
+            json(&serde_json::json!({
+                "mailbox_id": mailbox_id,
+                "name": name,
+                "capabilities": capabilities,
+            }))
+        }
+        Some(LoadResult::Err { error }) => Err(internal_msg(&error)),
+        None => Err(internal_msg("undecodable LoadResult")),
+    }
+}
+
+pub(super) async fn replace_component(
+    mcp: &Mcp,
+    args: ReplaceComponentArgs,
+) -> Result<String, McpError> {
+    let engine = parse_engine_id(&args.engine_id)?;
+    let mailbox_id = parse_mailbox_id(&args.mailbox_id)?;
+    let selector = selector_with_explicit_export(&args.selector, args.export.as_deref());
+    // ADR-0116: resolve the selector hub-local to the replacement wasm
+    // bytes (hash-primary, so a hash pins/rolls to an exact build).
+    let resolved = mcp.resolve_component(&selector).await?;
+    let config = component_config_bytes(
+        resolved.config_kind.as_ref(),
+        args.config,
+        args.config_path.as_deref(),
+        &format!("replace_component {selector:?}"),
+    )
+    .await?
+    .unwrap_or_default();
+    // ADR-0096: an explicit `export` arg wins over the selector's
+    // `@actor` half; `None` reuses the actor type the trampoline
+    // currently hosts.
+    let export = args.export.or(resolved.export);
+    let reply = mcp
+        .session
+        .call_one(engine_envelope(
+            engine,
+            COMPONENT_CAP,
+            &ReplaceComponent {
+                mailbox_id,
+                wasm: resolved.wasm,
+                drain_timeout_ms: args.drain_timeout_ms,
+                config,
+                export,
+            },
+        ))
+        .await
+        .map_err(|e| frame_size_aware_error(&format!("replace_component {selector:?}"), e))?;
+    match ReplaceResult::decode_from_bytes(&reply.payload) {
+        Some(ReplaceResult::Ok { capabilities }) => {
+            mcp.components
+                .lock()
+                .expect("component cache mutex is never poisoned")
+                .insert((engine, mailbox_id), capabilities.clone());
+            json(&capabilities)
+        }
+        Some(ReplaceResult::Err { error }) => Err(internal_msg(&error)),
+        None => Err(internal_msg("undecodable ReplaceResult")),
+    }
 }

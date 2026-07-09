@@ -1,0 +1,262 @@
+#[allow(clippy::wildcard_imports)]
+use super::super::test_support::*;
+#[allow(clippy::wildcard_imports)]
+use super::super::*;
+
+/// `describe_kinds` with no `engine_id` and an empty hub returns the
+/// substrate static inventory.  The default (compact) result is a
+/// non-empty JSON array of `{name,shape}` objects.
+#[tokio::test]
+async fn describe_kinds_returns_the_substrate_inventory() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let out = mcp
+        .describe_kinds(Parameters(DescribeKindsArgs {
+            engine_id: None,
+            prefix: None,
+            full: false,
+        }))
+        .await
+        .expect("describe_kinds ok");
+    let kinds: serde_json::Value = serde_json::from_str(&out).expect("json array");
+    let arr = kinds.as_array().expect("result is a JSON array");
+    assert!(
+        !arr.is_empty(),
+        "describe_kinds should list the substrate vocabulary"
+    );
+    let first = &arr[0];
+    assert!(
+        first.get("name").is_some() && first.get("shape").is_some(),
+        "compact entry must carry name and shape, got: {first}",
+    );
+    assert!(
+        first.get("schema").is_none(),
+        "compact entry must not carry schema, got: {first}",
+    );
+}
+
+/// `describe_kinds(prefix="aether.fs")` narrows the array to only the
+/// fs kinds — every returned name starts with the prefix.
+#[tokio::test]
+async fn describe_kinds_prefix_narrows_results() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let out = mcp
+        .describe_kinds(Parameters(DescribeKindsArgs {
+            engine_id: None,
+            prefix: Some("aether.fs".to_owned()),
+            full: false,
+        }))
+        .await
+        .expect("describe_kinds ok");
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+    assert!(
+        !arr.is_empty(),
+        "aether.fs prefix should match at least one kind"
+    );
+    for entry in &arr {
+        let name = entry["name"].as_str().expect("name is a string");
+        assert!(
+            name.starts_with("aether.fs"),
+            "entry name {name:?} should start with \"aether.fs\"",
+        );
+    }
+}
+
+/// `describe_kinds(full=true)` returns objects with a `schema` key
+/// (the full nested `SchemaType`) and no `shape` key.
+#[tokio::test]
+async fn describe_kinds_full_returns_schema_key() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let out = mcp
+        .describe_kinds(Parameters(DescribeKindsArgs {
+            engine_id: None,
+            prefix: Some("aether.fs".to_owned()),
+            full: true,
+        }))
+        .await
+        .expect("describe_kinds ok");
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+    assert!(
+        !arr.is_empty(),
+        "aether.fs prefix should match at least one kind"
+    );
+    for entry in &arr {
+        assert!(
+            entry.get("schema").is_some(),
+            "full entry must carry schema, got: {entry}",
+        );
+        assert!(
+            entry.get("shape").is_none(),
+            "full entry must not carry shape, got: {entry}",
+        );
+    }
+}
+
+/// `describe_kinds(prefix="zzz.does.not.exist")` returns an empty
+/// array — not an error.
+#[tokio::test]
+async fn describe_kinds_nonmatching_prefix_returns_empty() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let out = mcp
+        .describe_kinds(Parameters(DescribeKindsArgs {
+            engine_id: None,
+            prefix: Some("zzz.does.not.exist".to_owned()),
+            full: false,
+        }))
+        .await
+        .expect("describe_kinds returns ok even with no matches");
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+    assert!(
+        arr.is_empty(),
+        "non-matching prefix should return empty array, got {arr:?}"
+    );
+}
+
+#[tokio::test]
+async fn describe_kinds_live_path_surfaces_component_defined_kind() {
+    use aether_data::{KindDescriptor, SchemaType};
+
+    let component_kind = KindDescriptor {
+        name: "test.issue_2420.uniquely_named_kind".to_owned(),
+        schema: SchemaType::String,
+    };
+
+    // Pre-condition: absent from the static vocabulary in both the
+    // production and the test binary — ensures the assertion below
+    // can only pass if describe_kinds reads the engine cache.
+    assert!(
+        !descriptors::all()
+            .iter()
+            .any(|d| d.name == component_kind.name),
+        "test invariant: the component kind must not be in descriptors::all()",
+    );
+
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+
+    // Use a synthetic but well-formed engine UUID so parse_engine_id
+    // accepts it; the hub doesn't supervise it, so refresh_engine_kinds
+    // fails silently (ok().and_then() path), leaving the pre-seeded
+    // entry intact.
+    let engine = EngineId(Uuid::from_u128(0x2420_dead_beef));
+    let engine_id_str = engine.0.to_string();
+
+    // Pre-seed the per-engine cache as load_component / refresh_engine_kinds
+    // would after a component with this kind is loaded.
+    mcp.merge_into_engine_cache(engine, vec![component_kind.clone()]);
+
+    let out = mcp
+        .describe_kinds(Parameters(DescribeKindsArgs {
+            engine_id: Some(engine_id_str),
+            prefix: None,
+            full: false,
+        }))
+        .await
+        .expect("describe_kinds ok with engine_id");
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+    assert!(
+        arr.iter()
+            .any(|e| e["name"].as_str() == Some(&component_kind.name)),
+        "describe_kinds must surface the component-defined kind from the engine cache; \
+         got names: {:?}",
+        arr.iter()
+            .filter_map(|e| e["name"].as_str())
+            .collect::<Vec<_>>(),
+    );
+}
+
+/// `describe_component` reads the component cache: an empty cache
+/// errors, a seeded entry round-trips.
+#[tokio::test]
+async fn describe_component_reads_the_cache() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let engine_id = "00000000-0000-0000-0000-000000000001";
+    // A real, taggable mailbox id (arbitrary u64s don't carry the
+    // mailbox-domain bits `tagged_id::encode` needs).
+    let mailbox = mailbox_id_from_name("aether.test.fake_component");
+    let tagged = tagged_id::encode(mailbox.0).expect("mailbox id is taggable");
+
+    // Empty cache, addressed by `mbx-` id → error (no name to forward
+    // live, so the cache is the only source).
+    let miss = mcp
+        .describe_component(Parameters(DescribeComponentArgs {
+            engine_id: engine_id.to_owned(),
+            component: tagged.clone(),
+        }))
+        .await;
+    assert!(
+        miss.is_err(),
+        "an uncached component addressed by id should be a tool error"
+    );
+
+    // Seed the cache with a handler that declares a `-> R` reply
+    // contract (ADR-0109). `describe_component` surfaces the `reply`
+    // kind id verbatim through serde, so a caller reads `In -> Out`
+    // before issuing the call.
+    let engine =
+        EngineId(Uuid::parse_str(engine_id).expect("test setup: engine_id is a valid uuid"));
+    let seeded = ComponentCapabilities {
+        handlers: vec![aether_kinds::HandlerCapability {
+            id: KindId(0x11),
+            name: "test.request".to_owned(),
+            doc: None,
+            reply: aether_data::ReplyContract::One(KindId(0x22)),
+        }],
+        ..ComponentCapabilities::default()
+    };
+    mcp.components
+        .lock()
+        .expect("test setup: component cache mutex is never poisoned")
+        .insert((engine, mailbox), seeded);
+    let hit = mcp
+        .describe_component(Parameters(DescribeComponentArgs {
+            engine_id: engine_id.to_owned(),
+            component: tagged,
+        }))
+        .await
+        .expect("cached component describes");
+    let caps: serde_json::Value = serde_json::from_str(&hit).expect("json");
+    assert!(caps.get("handlers").is_some(), "capabilities shape: {hit}");
+    assert!(
+        !caps["handlers"][0]["reply"].is_null(),
+        "the handler's ADR-0109 reply contract is surfaced: {hit}"
+    );
+
+    // Name-addressed describe resolves the lineage name to the SAME
+    // cache key the substrate registers under (`mailbox_id_from_path`,
+    // the fold `registry.lookup` uses), so a cache seeded under that key
+    // is found by name without a `mbx-` id. This is the MCP half of the
+    // boot-manifest path; the live substrate forward-on-miss is covered
+    // end-to-end by FleetBench (it needs a real loaded component).
+    let lineage = "aether.component/aether.embedded:fake_component";
+    let by_name_key = mailbox_id_from_path(lineage);
+    let named_caps = ComponentCapabilities {
+        handlers: vec![aether_kinds::HandlerCapability {
+            id: KindId(0x33),
+            name: "test.by_name".to_owned(),
+            doc: None,
+            reply: aether_data::ReplyContract::None,
+        }],
+        ..ComponentCapabilities::default()
+    };
+    mcp.components
+        .lock()
+        .expect("test setup: component cache mutex is never poisoned")
+        .insert((engine, by_name_key), named_caps);
+    let by_name = mcp
+        .describe_component(Parameters(DescribeComponentArgs {
+            engine_id: engine_id.to_owned(),
+            component: lineage.to_owned(),
+        }))
+        .await
+        .expect("name-addressed describe resolves to the cached caps");
+    let by_name_json: serde_json::Value = serde_json::from_str(&by_name).expect("json");
+    assert_eq!(
+        by_name_json["handlers"][0]["name"], "test.by_name",
+        "a lineage name resolves to the substrate-consistent cache key: {by_name}"
+    );
+}

@@ -1,7 +1,19 @@
-use super::{
-    CaptureCheckSpec, CaptureMailSpec, EngineId, FrameCheck, FrameRect, FrameReduction, Mcp,
-    McpError, NamedMail, NamedMailSpec,
+use aether_data::{EngineId, Kind};
+use aether_kinds::{
+    CaptureFrame, CaptureFrameResult, FrameCheck, FrameRect, FrameReduction, NamedMail,
+    SimilarityCheck,
 };
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use rmcp::ErrorData as McpError;
+use rmcp::model::{CallToolResult, Content};
+
+use crate::args::{CaptureCheckSpec, CaptureFrameArgs, CaptureMailSpec};
+
+use super::envelope::engine_envelope;
+use super::ids::parse_engine_id;
+use super::render::{internal, internal_msg};
+use super::{Mcp, NamedMailSpec, RENDER_CAP};
 
 /// Map a `capture_frame` check spec onto a wire [`FrameCheck`],
 /// resolving the reduction name. An unknown name is an invalid-params
@@ -72,5 +84,90 @@ impl Mcp {
         specs: &[CaptureMailSpec],
     ) -> anyhow::Result<Vec<NamedMail>> {
         self.encode_named_mail_bundle(engine, specs).await
+    }
+}
+
+pub(super) async fn capture_frame(
+    mcp: &Mcp,
+    args: CaptureFrameArgs,
+) -> Result<CallToolResult, McpError> {
+    let engine = parse_engine_id(&args.engine_id)?;
+    // Encode both bundles before sending — a bad entry produces a
+    // clean invalid-params error and never touches the wire.
+    // ADR-0091: descriptors come from the per-engine merged view
+    // so a `capture_frame` referencing a component-defined kind
+    // (e.g. an `aether.kit.mesh.load` pre-mail) encodes correctly
+    // after `load_component`.
+    let mails = mcp
+        .encode_capture_bundle(engine, &args.mails)
+        .await
+        .map_err(|e| McpError::invalid_params(format!("capture_frame mails bundle: {e}"), None))?;
+    let after_mails = mcp
+        .encode_capture_bundle(engine, &args.after_mails)
+        .await
+        .map_err(|e| {
+            McpError::invalid_params(format!("capture_frame after_mails bundle: {e}"), None)
+        })?;
+    // Map the verdict request: an unknown reduction name is a clean
+    // invalid-params error before the capture touches the wire.
+    let checks = args
+        .checks
+        .iter()
+        .map(capture_check)
+        .collect::<Result<Vec<FrameCheck>, McpError>>()?;
+    // Map the optional reference-image similarity check
+    // (iamacoffeepot/aether#1780); the render thread loads the
+    // reference and scores the captured RGBA against it.
+    let similarity = args.similarity.as_ref().map(|s| SimilarityCheck {
+        namespace: s.namespace.clone(),
+        reference_path: s.reference_path.clone(),
+        threshold: s.threshold,
+    });
+    let reply = mcp
+        .session
+        .call_one(engine_envelope(
+            engine,
+            RENDER_CAP,
+            &CaptureFrame {
+                mails,
+                after_mails,
+                checks,
+                similarity,
+            },
+        ))
+        .await
+        .map_err(internal)?;
+    match CaptureFrameResult::decode_from_bytes(&reply.payload) {
+        Some(CaptureFrameResult::Ok {
+            png,
+            verdict,
+            similarity_score,
+            similarity_pass,
+        }) => {
+            let encoded = STANDARD.encode(&png);
+            let mut content = vec![Content::image(encoded, "image/png")];
+            // Surface the verdict as a JSON text block so the caller
+            // reads the reductions' results without decoding the PNG
+            // (iamacoffeepot/aether#1777). Absent when no `checks`
+            // were requested.
+            if let Some(verdict) = verdict {
+                let json = serde_json::to_string(&verdict)
+                    .map_err(|e| internal_msg(&format!("verdict serialize: {e}")))?;
+                content.push(Content::text(json));
+            }
+            // Surface the similarity verdict as its own JSON block
+            // when a `similarity` check ran (iamacoffeepot/aether#1780).
+            if similarity_score.is_some() || similarity_pass.is_some() {
+                let json = serde_json::to_string(&serde_json::json!({
+                    "similarity_score": similarity_score,
+                    "similarity_pass": similarity_pass,
+                }))
+                .map_err(|e| internal_msg(&format!("similarity serialize: {e}")))?;
+                content.push(Content::text(json));
+            }
+            Ok(CallToolResult::success(content))
+        }
+        Some(CaptureFrameResult::Err { error }) => Err(internal_msg(&error)),
+        None => Err(internal_msg("undecodable CaptureFrameResult")),
     }
 }
