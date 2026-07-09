@@ -161,10 +161,10 @@ For each sub-phase: read inputs, write the corresponding body section, and recon
     && gh api -X POST "repos/iamacoffeepot/aether/issues/<n>/labels" -f "labels[]=size:<x>"
   ```
 - **Model routing (required)** — every issue leaves Plan with exactly one `model:*` label; `/approve` refuses an unlabelled issue. The label names the tier the dispatched agent runs — there is no inherit-the-dispatcher fallback. Each tag names a tier, not one vendor's model: a Claude agent reads the Claude column, a Codex agent reads the GPT column, and the label stays the same either way. Stamp it over the same REST `…/labels` endpoints as the size mirror, in the same step. Pick by the work, defaulting cheap:
-  - `model:haiku` — trivial text-only work: doc links, label fixes, one-line config tweaks. GPT equivalent: `gpt-5-mini`.
-  - `model:sonnet` — the default for mechanical work fully specified by the plan (typically S, and an M whose plan reads as executable verbatim). GPT equivalent: `gpt-5`.
-  - `model:opus` — the implementation itself requires non-obvious judgment: cross-crate L work, design-adjacent changes, plans with open exploration. GPT equivalent: `gpt-5-codex`.
-  - `model:fable` — never stamped by `/scope`; reserved for a human pinning the top tier explicitly. GPT equivalent: `gpt-5-pro`.
+  - `model:haiku` — trivial text-only work: doc links, label fixes, one-line config tweaks. GPT equivalent: `gpt-5.6-luna`.
+  - `model:sonnet` — the default for mechanical work fully specified by the plan (typically S, and an M whose plan reads as executable verbatim). GPT equivalent: `gpt-5.6-terra`.
+  - `model:opus` — the implementation itself requires non-obvious judgment: cross-crate L work, design-adjacent changes, plans with open exploration. GPT equivalent: `gpt-5.6-sol`.
+  - `model:fable` — never stamped by `/scope`; reserved for a human pinning the top tier explicitly. GPT equivalent: `gpt-5.6-sol`.
 
   The gate encodes a size-asymmetry: a downward misjudgment costs more as size grows, so an M/L `model:sonnet` demands a plan that reads as executable verbatim — when in doubt at M or L, stamp `model:opus`. Note the choice and a one-clause reason inline in the `## Implementation plan` section.
 - **Phase label**: leave at `phase:plan`. This is the resting state awaiting `/approve`.
