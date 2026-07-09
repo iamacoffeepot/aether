@@ -57,7 +57,7 @@ use core::f32::consts::{FRAC_PI_2, PI, TAU};
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::render::{Camera, DrawTriangle, Vertex};
+use aether_capabilities::render::{DrawTriangle, Vertex, ViewProjection};
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
 use aether_kinds::{
     Key, KeyRelease, MouseButton, MouseMove, Render, Tick, WindowSize, keycode, mouse_button,
@@ -223,7 +223,7 @@ impl WasmActor for WorldMover {
         // This actor owns the follow camera: publish the view each frame
         // (latest-wins, so it drives the ground projection too), then the
         // marker geometry over the ground.
-        render.send(&Camera {
+        render.send(&ViewProjection {
             view_proj: self.view_proj(),
         });
         render.send_many(&self.render_triangles());

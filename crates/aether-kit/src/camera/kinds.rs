@@ -4,10 +4,10 @@
 //! consumes them lives in [`crate::camera`] and ships in
 //! `aether_kit.wasm` as a non-entry export (ADR-0096).
 //!
-//! `aether.camera` (the singular `view_proj` kind consumed by the
+//! `aether.view_projection` (the singular `view_proj` kind consumed by the
 //! desktop chassis's `aether.render` mailbox per ADR-0074
 //! §Decision 7) is *not* here — it's a chassis sink contract and
-//! lives in `aether-kinds` alongside the other substrate primitives.
+//! lives in `aether-capabilities` alongside the render cap.
 //!
 //! [`CameraComponent`]: crate::camera::CameraComponent
 
@@ -79,7 +79,7 @@ pub struct CameraCreate {
 
 /// `aether.kit.camera.destroy` — drop a camera by name. No-op if the
 /// name isn't bound. If the destroyed camera was the active one
-/// the publish stream pauses (no `aether.camera` mail goes out)
+/// the publish stream pauses (no `aether.view_projection` mail goes out)
 /// until another camera is made active.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.camera.destroy")]

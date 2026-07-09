@@ -8,7 +8,7 @@
 //! the substrate's identity uniform passes `(x, y)` straight through
 //! to clip space, so visually this behaves exactly like the old
 //! clip-space-only version until a camera component starts driving
-//! `aether.camera`.
+//! `aether.view_projection`.
 //!
 //! ADR-0033 shape: `#[actor]` on the `impl Component` block emits
 //! both the dispatcher and the `aether.kinds.inputs` section entries.

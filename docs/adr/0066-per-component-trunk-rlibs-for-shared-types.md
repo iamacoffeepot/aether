@@ -80,7 +80,7 @@ The chassis-shared `aether-kinds` keeps its name; it is now scoped to substrate 
 **Neutral**
 
 - Wire-format kind names (`aether.camera`, `aether.camera.create`, `aether.mesh.load`) are unchanged. The split is purely about source-code ownership; the schema-hashed kind ids on the wire (ADR-0030) round-trip identically.
-- The `aether.camera*` kind-name namespace ends up split across two crates: `aether.camera` (the singular sink-contract kind, in `aether-kinds`) and `aether.camera.<verb>` (the component control surface, in `aether-camera`). This is acceptable — `aether.camera` and `aether.camera.create` are distinct strings dispatched to different mailboxes (`aether.sink.camera` vs the component's own mailbox). Future cleanup (e.g., renaming the sink contract kind to `aether.view_proj`) can address the visual ambiguity without disturbing this ADR.
+- The `aether.camera*` kind-name namespace ends up split across two crates: `aether.camera` (the singular sink-contract kind, in `aether-kinds`) and `aether.camera.<verb>` (the component control surface, in `aether-camera`). This is acceptable — `aether.camera` and `aether.camera.create` are distinct strings dispatched to different mailboxes (`aether.sink.camera` vs the component's own mailbox). Future cleanup (e.g., renaming the sink contract kind to `aether.view_proj`) can address the visual ambiguity without disturbing this ADR. Resolution: issue #2833 landed that sink cleanup as the fully spelled `aether.view_projection`.
 
 **Follow-on work**
 

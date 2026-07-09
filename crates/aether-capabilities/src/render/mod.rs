@@ -2,7 +2,7 @@
 //! driver-facing accumulator state ([`RenderHandles`]) and GPU bundle
 //! ([`RenderGpu`]). Post-ADR-0082 the chassis gates frame submit on
 //! settlement of the `LifecycleAdvance` chain root — render's
-//! `DrawTriangle` / `aether.camera` mail are descendants of that root,
+//! `DrawTriangle` / `aether.view_projection` mail are descendants of that root,
 //! so they're integrated before submit without a per-mailbox drain
 //! counter.
 //!
@@ -28,7 +28,7 @@
 //! (the cross-thread readback machinery).
 //!
 //! [`HeadlessRenderCapability`] is the chassis-without-GPU companion:
-//! same `aether.render` mailbox, no-op `DrawTriangle` / `Camera`
+//! same `aether.render` mailbox, no-op `DrawTriangle` / `ViewProjection`
 //! handlers (so desktop-designed components don't warn-storm),
 //! `Err`-replying `CaptureFrame` handler. Headless chassis composes it
 //! in place of [`RenderCapability`] (issue 603 Phase 2 § Resolved
@@ -115,9 +115,9 @@ pub struct RenderCapability;
 /// `HeadlessRenderCapability` **identity** (ADR-0122 identity/runtime
 /// split). The chassis-without-GPU companion to [`RenderCapability`],
 /// claiming the same `aether.render` mailbox so desktop-designed
-/// components loaded on headless can mail `DrawTriangle` / `aether.camera`
+/// components loaded on headless can mail `DrawTriangle` / `aether.view_projection`
 /// / `aether.render.capture_frame` against a known recipient —
-/// `DrawTriangle` and `Camera` no-op (the warn-storm sink-replacement role
+/// `DrawTriangle` and `ViewProjection` no-op (the warn-storm sink-replacement role
 /// pre-issue-603 Phase 2), `CaptureFrame` replies `Err` so MCP
 /// `capture_frame` fails fast instead of timing out.
 ///

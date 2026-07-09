@@ -48,7 +48,7 @@ the `RenderCapability` actor. It handles these payload kinds:
 | Kind | Shape | Semantics |
 |---|---|---|
 | `aether.draw_triangle` | `{ verts: [Vertex; 3] }`, cast-shaped | per-tick geometry; accumulates into the frame |
-| `aether.camera` | `{ view_proj: [f32; 16] }`, cast-shaped | the world→clip matrix; latest value wins |
+| `aether.view_projection` | `{ view_proj: [f32; 16] }`, cast-shaped | the world→clip matrix; latest value wins |
 | `aether.render.create_texture` | `{ width, height, format, pixels }` → `create_texture_result` | register an `Rgba8` or `R8` texture; reply carries the `texture_id` |
 | `aether.render.update_texture` | `{ texture_id, x, y, width, height, pixels }` | overwrite a sub-rect of a texture (atlas growth) |
 | `aether.render.destroy_texture` | `{ texture_id }` | release a registered texture; fire-and-forget |
@@ -81,7 +81,7 @@ surface.
 **The `view_proj` uniform, latest wins.** The substrate holds one column-major
 4×4 matrix and uploads it verbatim to the shader each frame (column-major matches
 wgpu's uniform layout, so the 64 bytes upload with no transpose). Each
-`aether.camera` mail overwrites it wholesale; nothing blends or stacks. Before
+`aether.view_projection` mail overwrites it wholesale; nothing blends or stacks. Before
 any camera publishes, the matrix is identity, so vertices render in clip space
 1:1.
 
@@ -100,7 +100,7 @@ last live frame drew.
 
 **Headless absorbs draw and camera mail.** The headless and hub chassis have no
 GPU, so they compose `HeadlessRenderCapability` on the same `aether.render`
-mailbox: `DrawTriangle`, `aether.camera`, `update_texture`, and
+mailbox: `DrawTriangle`, `aether.view_projection`, `update_texture`, and
 `destroy_texture`, and `draw_textured_quads` no-op (a desktop-built component
 mailing them every frame doesn't warn-storm), and `aether.render.capture_frame`
 and `create_texture` reply `Err` so an MCP call fails fast instead of hanging.
@@ -132,7 +132,7 @@ fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
 ```
 
 Address the cap by type — `ctx.actor::<RenderCapability>()` — and send
-`DrawTriangle`s (and, if you're a camera, an `aether.camera`). On a chassis whose
+`DrawTriangle`s (and, if you're a camera, an `aether.view_projection`). On a chassis whose
 lifecycle graph omits `Render` (headless), subscribing to it rejects fail-fast at
 wire time, and the actor simply never submits — a no-op where there's no GPU
 anyway.

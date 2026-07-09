@@ -19,7 +19,7 @@
 //! gate) live in `aether_substrate_bundle::test_bench::test_helpers`
 //! (issues 460 + 821).
 
-use aether_capabilities::render::Camera;
+use aether_capabilities::render::ViewProjection;
 use aether_data::Kind;
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_kit::camera::CameraDestroy;
@@ -111,7 +111,7 @@ fn camera_component_lifecycle() {
 }
 
 /// Smoke test: the default camera (a frozen orbit, `speed: 0.0`) still
-/// publishes `aether.camera` to the chassis render mailbox every tick
+/// publishes `aether.view_projection` to the chassis render mailbox every tick
 /// even though the eye does not move. This is the load-bearing flow for
 /// camera matrices reaching the GPU; if it regresses, every scene goes
 /// back to identity-projection until someone notices visually.
@@ -133,10 +133,10 @@ fn camera_default_static_publishes_view_proj() {
         .execute(vec![("advance", BenchOp::advance(5))])
         .expect("advance");
 
-    let observed = bench.count_observed(Camera::NAME);
+    let observed = bench.count_observed(ViewProjection::NAME);
     assert!(
         observed >= 1,
-        "expected ≥1 aether.camera observed; got {observed}; observed kinds: {:?}",
+        "expected ≥1 aether.view_projection observed; got {observed}; observed kinds: {:?}",
         bench.observed_kinds(),
     );
 }
@@ -144,7 +144,7 @@ fn camera_default_static_publishes_view_proj() {
 /// Destroy the active default camera ("main") and confirm the
 /// substrate stays alive — frame still draws the chassis clear, no
 /// panic, no `fatal_abort`. The component pauses publishing (no further
-/// `aether.camera` mail) per its docstring; `count_observed` is
+/// `aether.view_projection` mail) per its docstring; `count_observed` is
 /// cumulative since boot so we can't assert "no further publishes"
 /// directly with the current vocabulary, but the survivability half
 /// is the load-bearing assertion: a destroy of the active camera
@@ -162,10 +162,10 @@ fn camera_destroy_main_keeps_substrate_alive() {
         .execute(vec![("pre", BenchOp::advance(2))])
         .expect("pre-destroy advance");
     // Baseline: default orbit was publishing before destroy.
-    let pre_destroy = bench.count_observed(Camera::NAME);
+    let pre_destroy = bench.count_observed(ViewProjection::NAME);
     assert!(
         pre_destroy >= 1,
-        "expected ≥1 aether.camera before destroy; got {pre_destroy}; observed kinds: {:?}",
+        "expected ≥1 aether.view_projection before destroy; got {pre_destroy}; observed kinds: {:?}",
         bench.observed_kinds(),
     );
 

@@ -108,7 +108,7 @@ projected screen position and glyphs extending upward.
 - `"Pixels"` — the label keeps a fixed on-screen pixel size regardless of
   distance. Useful for HUD-style labels that must stay readable at any range.
 
-Both modes use the current `aether.camera` view-projection matrix, so the label
+Both modes use the current `aether.view_projection` view-projection matrix, so the label
 always faces the camera and never skews as the camera orbits. Send the draw
 every frame the label should appear, the same as `Screen` text.
 

@@ -61,9 +61,9 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use super::{
-    Camera, CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyTexture,
-    DrawSolidQuads, DrawTexturedQuads, DrawTriangle, RenderCapability, SolidQuad, TextureFormat,
-    TexturedQuad, UpdateTexture,
+    CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyTexture, DrawSolidQuads,
+    DrawTexturedQuads, DrawTriangle, RenderCapability, SolidQuad, TextureFormat, TexturedQuad,
+    UpdateTexture, ViewProjection,
 };
 
 // These seam items are `pub` (visible in `render`) in their
@@ -104,7 +104,7 @@ impl NativeActor for RenderCapability {
 
     type Config = RenderConfig;
 
-    /// Components mail `aether.draw_triangle` and `aether.camera`
+    /// Components mail `aether.draw_triangle` and `aether.view_projection`
     /// (kind ids) to this mailbox; the GPU recorder pulls from here.
     /// The `aether.<name>` form is the post-ADR-0074 Phase 5
     /// convention for chassis-owned mailboxes; ADR-0074 §Decision 7
@@ -206,21 +206,21 @@ impl NativeActor for RenderCapability {
         }
     }
 
-    /// `Camera` handler. Latest-value-wins semantics: each successful
+    /// `ViewProjection` handler. Latest-value-wins semantics: each successful
     /// mail overwrites; the prior value is replaced wholesale.
     /// Initialised in `init` to [`IDENTITY_VIEW_PROJ`] so the first
     /// frame draws unchanged until a camera component starts
     /// publishing.
     ///
     /// # Agent
-    /// Camera components mail `aether.camera { view_proj: [f32; 16] }`
+    /// Camera components mail `aether.view_projection { view_proj: [f32; 16] }`
     /// to this mailbox. Fire-and-forget; latest value wins.
     #[handler::single]
-    fn on_camera(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Camera) {
+    fn on_camera(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ViewProjection) {
         if let Some(obs) = &state.config.observed_kinds {
             obs.lock()
                 .expect("mutex poisoned; fail-fast per ADR-0063")
-                .push(<Camera as Kind>::NAME.into());
+                .push(<ViewProjection as Kind>::NAME.into());
         }
         *state
             .handles

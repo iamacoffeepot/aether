@@ -62,7 +62,7 @@ runtime = [
 # `Singleton` / `HandlesKind` impls + wasm-stub `pub struct` are
 # reachable, without dragging the GPU / audio native deps in.
 # Empty body: the render cap's cast-shaped kinds (`DrawTriangle` /
-# `Vertex` / `Camera`) derive `bytemuck::Pod` + `Zeroable`, but `bytemuck`
+# `Vertex` / `ViewProjection`) derive `bytemuck::Pod` + `Zeroable`, but `bytemuck`
 # is already an unconditional dependency (the always-on `aether.input`
 # cast kinds pull it), so a marker-only guest sees the kind types with no
 # extra feature wiring.

@@ -36,8 +36,8 @@ use aether_capabilities::fs::{
     Delete, DeleteResult, FsError, List, ListResult, Read, ReadResult, Write, WriteResult,
 };
 use aether_capabilities::render::{
-    Camera, CreateTexture, CreateTextureResult, DestroyTexture, DrawSolidQuads, DrawTexturedQuads,
-    SolidQuad, TextureFormat, TexturedQuad, UpdateTexture,
+    CreateTexture, CreateTextureResult, DestroyTexture, DrawSolidQuads, DrawTexturedQuads,
+    SolidQuad, TextureFormat, TexturedQuad, UpdateTexture, ViewProjection,
 };
 use aether_capabilities::text::{
     DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult,
@@ -752,7 +752,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
 }
 
 /// Render-pipeline proof: load the `cube` fixture, drive one tick, and
-/// capture. The fixture publishes a fixed `Camera { view_proj }` and a
+/// capture. The fixture publishes a fixed `ViewProjection { view_proj }` and a
 /// twelve-triangle world-space unit cube, so the captured frame puts
 /// every stage on the line at once — camera, `view_proj`, world-space
 /// geometry, the depth test that orders the cube's faces, and GPU
@@ -2549,7 +2549,10 @@ fn text_draws_world_space_label() {
         .execute(vec![
             (
                 "cam",
-                BenchOp::send_mail::<Camera>("aether.render", &Camera { view_proj: vp_near }),
+                BenchOp::send_mail::<ViewProjection>(
+                    "aether.render",
+                    &ViewProjection { view_proj: vp_near },
+                ),
             ),
             (
                 "prime",
@@ -2567,7 +2570,7 @@ fn text_draws_world_space_label() {
             "s",
             BenchOp::capture_with_mails(
                 vec![
-                    envelope("aether.render", &Camera { view_proj: vp_near }),
+                    envelope("aether.render", &ViewProjection { view_proj: vp_near }),
                     envelope("aether.text", &draw_dist),
                 ],
                 vec![],
@@ -2583,7 +2586,7 @@ fn text_draws_world_space_label() {
             "s",
             BenchOp::capture_with_mails(
                 vec![
-                    envelope("aether.render", &Camera { view_proj: vp_far }),
+                    envelope("aether.render", &ViewProjection { view_proj: vp_far }),
                     envelope("aether.text", &draw_dist),
                 ],
                 vec![],
@@ -2612,7 +2615,7 @@ fn text_draws_world_space_label() {
             "s",
             BenchOp::capture_with_mails(
                 vec![
-                    envelope("aether.render", &Camera { view_proj: vp_near }),
+                    envelope("aether.render", &ViewProjection { view_proj: vp_near }),
                     envelope("aether.text", &draw_px),
                 ],
                 vec![],
@@ -2629,7 +2632,7 @@ fn text_draws_world_space_label() {
             "s",
             BenchOp::capture_with_mails(
                 vec![
-                    envelope("aether.render", &Camera { view_proj: vp_far }),
+                    envelope("aether.render", &ViewProjection { view_proj: vp_far }),
                     envelope("aether.text", &draw_px),
                 ],
                 vec![],
@@ -2660,7 +2663,7 @@ fn text_draws_world_space_label() {
                 vec![
                     envelope(
                         "aether.render",
-                        &Camera {
+                        &ViewProjection {
                             view_proj: vp_orbit,
                         },
                     ),

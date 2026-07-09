@@ -10,7 +10,7 @@
 //! modes — orbit or orthographic top-down), advances every camera each
 //! tick, and publishes the active camera's `view_proj` to
 //! `"aether.render"` (the camera mailbox folded into render per
-//! ADR-0074 §Decision 7; the kind name `aether.camera` is unchanged).
+//! ADR-0074 §Decision 7 as `aether.view_projection`).
 //!
 //! Boots with one default camera, `name = "main"`, in orbit mode at a
 //! static (frozen) pose — `speed: 0.0`, yaw `0.0`, pitch `0.3`,
@@ -51,7 +51,7 @@ use std::collections::HashMap;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::render::Camera;
+use aether_capabilities::render::ViewProjection;
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
 use aether_kinds::{Render, Tick, WindowSize};
 use aether_math::{Mat4, PI, Quat, TAU, Vec2, Vec3};
@@ -325,7 +325,8 @@ impl WasmActor for CameraComponent {
             && let Some(cam) = self.cameras.get(name)
         {
             let view_proj = cam.mode.view_proj(self.aspect);
-            ctx.actor::<RenderCapability>().send(&Camera { view_proj });
+            ctx.actor::<RenderCapability>()
+                .send(&ViewProjection { view_proj });
         }
     }
 
@@ -366,7 +367,7 @@ impl WasmActor for CameraComponent {
 
     /// Drop a camera by name. Idempotent — silently no-ops if the
     /// camera doesn't exist. If the active camera is destroyed,
-    /// publishing pauses (no `aether.camera` mail goes out) until
+    /// publishing pauses (no `aether.view_projection` mail goes out) until
     /// `set_active` picks a survivor.
     #[handler::single]
     fn on_destroy(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraDestroy) {

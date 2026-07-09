@@ -29,7 +29,7 @@ use crate::actor::native::binding::NativeBinding;
 /// Multi-kind by construction: `send::<K>` is gated on
 /// `R: HandlesKind<K>`, so the same
 /// `NativeActorMailbox<'_, RenderCapability>` accepts both
-/// `&DrawTriangle` and `&Camera`. Wrong-kind sends are compile errors.
+/// `&DrawTriangle` and `&ViewProjection`. Wrong-kind sends are compile errors.
 pub struct NativeActorMailbox<'a, R> {
     mailbox: u64,
     binding: &'a NativeBinding,
