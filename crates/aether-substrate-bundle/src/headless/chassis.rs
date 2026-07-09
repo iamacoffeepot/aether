@@ -37,8 +37,9 @@ use super::driver::{HeadlessTimerDriverCapability, TickConfig};
 use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use crate::chassis_common::{
     ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys,
-    maybe_with_http_server, maybe_with_rpc_server, resolve_teardown_cap,
-    tick_only_lifecycle_config, with_common_caps,
+    load_chassis_config, maybe_with_http_server, maybe_with_rpc_server, resolve_env_with_file,
+    resolve_teardown_cap_with_file, resolve_with_file, tick_only_lifecycle_config,
+    with_common_caps,
 };
 use crate::cli::{CommonOverlay, HeadlessCli};
 use crate::hub;
@@ -126,6 +127,10 @@ pub struct HeadlessEnv {
     /// `AETHER_LOCAL_STICKY_MAX` / …). Default is
     /// [`SchedulerTuning::default`] (the built-in scheduler literals).
     pub scheduler_tuning: SchedulerTuning,
+    /// Issue #2509: cumulative patience for the instanced-actor teardown
+    /// close-done gate, resolved from `AETHER_SETTLEMENT_CAP_SECS` /
+    /// `[settlement]`.
+    pub teardown_cap: Duration,
     /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS` — timeout for one lifecycle
     /// advance step (Tick) before the scheduler logs a slow-frame warning.
     /// Resolved through `ChassisBootConfig`; default is 1000 ms.
@@ -169,11 +174,14 @@ impl HeadlessEnv {
         let HeadlessCli {
             common,
             tick: tick_overlay,
-            // The bin handles `--config` / `--describe` (print + exit)
-            // before this resolver runs; ignore them here.
-            config: _,
+            // The bin handles `--print-config` / `--describe` (print + exit)
+            // before this resolver runs.
+            config,
+            print_config: _,
             describe: _,
         } = cli;
+        let config_file = load_chassis_config(config)?;
+        let config_file = config_file.as_ref();
         let CommonOverlay {
             http,
             http_server: http_server_overlay,
@@ -185,9 +193,13 @@ impl HeadlessEnv {
             rpc_port: cli_rpc_port,
         } = common;
 
-        let chassis_boot =
-            ChassisBootConfig::try_from_argv_then_env(chassis_boot_overlay.into_layer())?;
-        let tick_config = TickConfig::try_from_argv_then_env(tick_overlay.into_layer())?;
+        let chassis_boot = resolve_with_file::<ChassisBootConfig>(
+            chassis_boot_overlay.into_layer(),
+            config_file,
+            "chassis",
+        )?;
+        let tick_config =
+            resolve_with_file::<TickConfig>(tick_overlay.into_layer(), config_file, "tick")?;
 
         // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST` (resolved
         // through `ChassisBootConfig`). When set, the listed components'
@@ -198,16 +210,25 @@ impl HeadlessEnv {
             Some(path) => boot_manifest_autoload(Path::new(&path))?,
             None => Vec::new(),
         };
-        let http = HttpConf::try_from_argv_then_env(http.into_layer())?;
-        let anthropic = AnthropicConfig::try_from_argv_then_env(anthropic.into_layer())?;
-        let gemini = GeminiConfig::try_from_argv_then_env(gemini.into_layer())?;
-        let contentgen = ContentGenConfig::try_from_argv_then_env(contentgen.into_layer())?;
-        let namespace_roots = NamespaceRoots::from_argv_then_env(fs.into_layer());
+        let http = resolve_with_file::<HttpConf>(http.into_layer(), config_file, "http")?;
+        let anthropic =
+            resolve_with_file::<AnthropicConfig>(anthropic.into_layer(), config_file, "anthropic")?;
+        let gemini = resolve_with_file::<GeminiConfig>(gemini.into_layer(), config_file, "gemini")?;
+        let contentgen = resolve_with_file::<ContentGenConfig>(
+            contentgen.into_layer(),
+            config_file,
+            "contentgen",
+        )?;
+        let namespace_roots =
+            resolve_with_file::<NamespaceRoots>(fs.into_layer(), config_file, "fs")?;
         // The HTTP server is opt-in: resolve its config and boot the cap
         // only when `enabled` is set (ADR-0108 / issue 1761). Default-off,
         // so an unconfigured chassis binds no HTTP port.
-        let http_server_config =
-            HttpServerConfig::try_from_argv_then_env(http_server_overlay.into_layer())?;
+        let http_server_config = resolve_with_file::<HttpServerConfig>(
+            http_server_overlay.into_layer(),
+            config_file,
+            "http-server",
+        )?;
         let http_server = http_server_config.enabled.then_some(http_server_config);
         // Tick cadence: resolved through `TickConfig` (argv > env > default).
         // `nonzero` maps 0 to the default (60 Hz); a garbage value hard-errors.
@@ -220,11 +241,15 @@ impl HeadlessEnv {
         // Issue 1990: resolve the per-actor ring capacities from
         // `AETHER_ACTOR_{LOG,TRACE}_RING_SIZE` (ADR-0090 §4 hard-error on
         // an unparseable known value, surfaced as `ConfigError`).
-        let ring_caps = ActorRingConfig::try_from_env()?.to_ring_capacities();
+        let ring_caps =
+            resolve_env_with_file::<ActorRingConfig>(config_file, "actor")?.to_ring_capacities();
         // Issue 2485: resolve the scheduler hot-path tuning (ADR-0090 §4
         // hard-error on an unparseable known value, surfaced as
         // `ConfigError`).
-        let scheduler_tuning = SchedulerTuningConfig::try_from_env()?.to_scheduler_tuning();
+        let scheduler_tuning =
+            resolve_env_with_file::<SchedulerTuningConfig>(config_file, "scheduler")?
+                .to_scheduler_tuning();
+        let teardown_cap = resolve_teardown_cap_with_file(config_file)?;
         Ok(Self {
             namespace_roots,
             http,
@@ -237,6 +262,7 @@ impl HeadlessEnv {
             workers,
             ring_caps,
             scheduler_tuning,
+            teardown_cap,
             lifecycle_advance_timeout_millis,
             autoload,
         })
@@ -264,6 +290,7 @@ impl HeadlessChassis {
             workers,
             ring_caps,
             scheduler_tuning,
+            teardown_cap,
             lifecycle_advance_timeout_millis,
             autoload,
         } = env;
@@ -349,7 +376,7 @@ impl HeadlessChassis {
             // Issue #2509: the instanced-actor teardown gate honors the
             // same `AETHER_SETTLEMENT_CAP_SECS` knob (including its
             // `0 → wait forever` sentinel) as the settlement gates.
-            teardown_cap: resolve_teardown_cap(),
+            teardown_cap,
             input_config,
             component_host_config,
             namespace_roots,

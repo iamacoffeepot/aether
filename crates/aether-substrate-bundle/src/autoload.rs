@@ -235,6 +235,7 @@ mod tests {
         // no-op that loads nothing.
         match expand_replicas(packed(Some(0))) {
             Err(ConfigError::UnparseableKnown { .. }) => {}
+            Err(e) => panic!("0 replicas returned the wrong config error: {e}"),
             Ok(_) => panic!("0 replicas must be an error, not a silent no-op"),
         }
     }

@@ -5,7 +5,7 @@
 //! `--rpc-port` shadows `AETHER_RPC_PORT`.
 
 // CLI diagnostic before tracing subscriber is installed (issue 891).
-// `--config` prints the discovery dump to stdout before boot
+// `--print-config` prints the discovery dump to stdout before boot
 // (ADR-0090 §4 / e2).
 #![allow(clippy::print_stderr)]
 #![allow(clippy::print_stdout)]
@@ -17,7 +17,7 @@ use clap::Parser as _;
 
 fn main() -> anyhow::Result<()> {
     let cli = HubCli::parse();
-    if cli.config {
+    if cli.print_config {
         print!("{}", hub_config_dump());
         return Ok(());
     }

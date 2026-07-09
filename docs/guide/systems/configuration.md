@@ -3,10 +3,9 @@
 > **Governing ADR:** [ADR-0090](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0090-application-configuration.md)
 > (application configuration). The **model** — the layered source-stack, one
 > typed struct per subsystem, validation, and discovery — is **stable** and
-> mostly shipped; the rollout is still **settling** at the edges (a config-*file*
-> layer is planned but not yet in, and a handful of chassis-wide knobs are still
-> read inline). This page documents the contract and defers the rollout's
-> internals to the ADR.
+> mostly shipped; the rollout is still **settling** at the edges (a handful of
+> chassis-wide knobs are still read inline). This page documents the contract
+> and defers the rollout's internals to the ADR.
 
 Configuration is how a knob's value gets decided before the engine runs — the
 worker-pool size, an HTTP allowlist, a provider's API key, the tick rate. Values
@@ -52,10 +51,9 @@ typed defaults   <   config file   <   environment   <   argv
 ```
 
 Argv overrides the environment, the environment overrides a file, a file
-overrides the declared default. (The file layer is the one piece still to land —
-today the live stack is `defaults < environment < argv`, and a missing argument
-simply falls through to env-then-default, so an engine launched with no arguments
-boots exactly as the environment alone dictates.)
+overrides the declared default. The file is a sectioned TOML source supplied with
+`--config <PATH>` or the `AETHER_CONFIG_FILE` fallback; if neither is set, an
+engine boots exactly as env-then-argv configuration dictates.
 
 Each subsystem owns its own config struct, in its own crate, declaring its own
 knobs — there is no central registry that every subsystem has to register into.
@@ -75,7 +73,7 @@ that's set but fails to parse, rather than falling through to the default. A bad
 value stops the boot with the key named, instead of a subsystem quietly running
 on a default you didn't ask for.
 
-Discovery is the `--config` flag on any chassis binary: it walks the same
+Discovery is the `--print-config` flag on any chassis binary: it walks the same
 declarations and prints every knob — its environment key, the value it resolves
 to and which source that value came from, its default, and its doc — then exits
 without booting. That listing is generated from the field annotations, so it
@@ -91,6 +89,13 @@ Over MCP there are three ways to set configuration, from coarsest to finest:
   `AETHER_ACTOR_TRACE_RING_SIZE`, and the rest). It's fleet-wide and fixed at
   launch: set it before bringing the tunnel up, and every engine the hub forks
   inherits it.
+- **A chassis config file** is the persistent per-deployment layer. Pass
+  `--config path/to/chassis.toml` on the chassis command line, or set
+  `AETHER_CONFIG_FILE` as a fallback for the file path. The file is sectioned by
+  subsystem, for example `[http]`, `[http-server]`, `[fs]`, `[anthropic]`,
+  `[gemini]`, `[contentgen]`, `[actor]`, `[scheduler]`, `[settlement]`,
+  `[chassis]`, plus chassis-specific sections such as `[window]`, `[tick]`, and
+  hub `[engine]`. Environment variables still override file values.
 - **Per-spawn arguments** are the per-engine override. `spawn_substrate` forwards
   its `args` to the substrate as command-line arguments, layered *above* the
   inherited environment — so you can spawn one engine with `--gemini-api-key …`

@@ -287,6 +287,7 @@ mod tests {
             workers: None,
             ring_caps: aether_substrate_bundle::RingCapacities::default(),
             scheduler_tuning: aether_substrate_bundle::SchedulerTuning::default(),
+            teardown_cap: Duration::from_millis(100),
             lifecycle_advance_timeout_millis: 1_000,
             autoload: vec![AutoloadComponent {
                 wasm,
@@ -409,6 +410,7 @@ mod tests {
             workers: None,
             ring_caps: aether_substrate_bundle::RingCapacities::default(),
             scheduler_tuning: aether_substrate_bundle::SchedulerTuning::default(),
+            teardown_cap: Duration::from_millis(100),
             lifecycle_advance_timeout_millis: 1_000,
             autoload: vec![AutoloadComponent {
                 wasm,
@@ -533,6 +535,7 @@ mod tests {
             workers: None,
             ring_caps: aether_substrate_bundle::RingCapacities::default(),
             scheduler_tuning: aether_substrate_bundle::SchedulerTuning::default(),
+            teardown_cap: Duration::from_millis(100),
             lifecycle_advance_timeout_millis: 1_000,
             autoload: vec![AutoloadComponent {
                 wasm,
@@ -653,6 +656,7 @@ mod tests {
             workers: None,
             ring_caps: aether_substrate_bundle::RingCapacities::default(),
             scheduler_tuning: aether_substrate_bundle::SchedulerTuning::default(),
+            teardown_cap: Duration::from_millis(100),
             lifecycle_advance_timeout_millis: 1_000,
             autoload: vec![AutoloadComponent {
                 wasm,
@@ -947,6 +951,7 @@ mod tests {
             workers: None,
             ring_caps: aether_substrate_bundle::RingCapacities::default(),
             scheduler_tuning: aether_substrate_bundle::SchedulerTuning::default(),
+            teardown_cap: Duration::from_millis(100),
             lifecycle_advance_timeout_millis: 1_000,
             autoload: vec![
                 AutoloadComponent {

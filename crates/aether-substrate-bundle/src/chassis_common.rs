@@ -11,7 +11,11 @@
 //! minimal RPC-only chassis, test-bench drives a loopback), so the
 //! helper module stays scoped to the two full-stack chassis.
 
+use std::env;
+use std::fs;
+use std::io;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,7 +45,8 @@ use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::config::{
-    KnobKind, KnobRecord, KnownKeys, RingCapacities, SchedulerTuning, dump_config, known_keys,
+    ConfigError, FromArgvThenEnv, KnobKind, KnobRecord, KnownKeys, RingCapacities, SchedulerTuning,
+    dump_config, known_keys,
 };
 use aether_substrate::runtime::RUNTIME_KNOBS;
 use aether_substrate::runtime::lifecycle::FatalAborter;
@@ -51,18 +56,29 @@ use confique::meta::Meta;
 use crate::desktop::driver::WindowConfigLayer;
 use crate::headless::driver::TickConfigLayer;
 
+/// Env fallback for the chassis config-file path. The path is
+/// meta-config: it selects the file source and does not change the file
+/// layer's lower precedence relative to ordinary `AETHER_*` env knobs.
+pub const CONFIG_FILE_ENV: &str = "AETHER_CONFIG_FILE";
+
 /// Chassis-direct env knobs that aren't `#[derive(Config)]` fields —
 /// the hand-registered knobs the chassis bins read inline
 /// (`AETHER_RPC_PORT`) plus the one orphaned codec knob that can't
 /// live substrate-side (`AETHER_MAX_FRAME_SIZE` — `aether-codec`
 /// cannot depend on `aether-substrate`, where `KnobRecord`/`KnobKind`
 /// live). Registered as [`KnobRecord`]s so e1's unknown-`AETHER_*`
-/// sweep doesn't flag them and e2's `--config` dump lists them.
+/// sweep doesn't flag them and e2's `--print-config` dump lists them.
 /// ADR-0090 §1/§4. The runtime (log / panic-hook) knobs are registered
 /// by `aether_substrate::runtime::RUNTIME_KNOBS`; the scheduler
 /// hot-path, chassis boot, window, and tick knobs are covered by the
 /// derive-emitted `*Layer::META`s in [`chassis_registry`].
 pub const CHASSIS_KNOBS: &[KnobRecord] = &[
+    KnobRecord {
+        env_key: CONFIG_FILE_ENV,
+        doc: "Path to a sectioned TOML chassis config file; overridden by --config <PATH>.",
+        default: None,
+        kind: KnobKind::HandRegistered,
+    },
     KnobRecord {
         env_key: "AETHER_RPC_PORT",
         doc: "aether.rpc.server bind port; desktop/headless skip the server when unset, hub always \
@@ -79,6 +95,112 @@ pub const CHASSIS_KNOBS: &[KnobRecord] = &[
         kind: KnobKind::HandRegistered,
     },
 ];
+
+/// Resolve the optional chassis config-file path from argv first, then
+/// `AETHER_CONFIG_FILE`. Empty values are treated as absent.
+#[must_use]
+pub fn chassis_config_path(argv: Option<String>) -> Option<PathBuf> {
+    argv.filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            // This is the central meta-config read for selecting the config
+            // file source, not a subsystem reading its own knob.
+            #[allow(clippy::disallowed_methods)]
+            env::var_os(CONFIG_FILE_ENV)
+                .filter(|path| !path.as_os_str().is_empty())
+                .map(PathBuf::from)
+        })
+}
+
+/// Read and parse an explicitly supplied sectioned TOML chassis config
+/// file. Missing or malformed files are hard boot errors because the
+/// operator asked for this source.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] when the file cannot be read or parsed as TOML.
+pub fn load_config_file(path: &Path) -> Result<toml::Table, ConfigError> {
+    let text = fs::read_to_string(path).map_err(|source| ConfigError::config_file(path, source))?;
+    text.parse::<toml::Table>()
+        .map_err(|source| ConfigError::config_file(path, source))
+}
+
+/// Load the chassis config file selected by argv or
+/// `AETHER_CONFIG_FILE`, returning `None` when neither is set.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] when an explicitly supplied file cannot be
+/// read or parsed.
+pub fn load_chassis_config(argv: Option<String>) -> Result<Option<toml::Table>, ConfigError> {
+    chassis_config_path(argv)
+        .map(|path| load_config_file(&path))
+        .transpose()
+}
+
+/// Extract one `[section]` from the parsed chassis config file and
+/// deserialize it into the target config's partial confique layer. An
+/// absent section is `None`; a present but malformed section is a hard
+/// boot error.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] when a present section is not a table or
+/// cannot deserialize into the target layer.
+pub fn file_section<C: FromArgvThenEnv>(
+    table: &toml::Table,
+    section: &str,
+) -> Result<Option<<C::Layer as confique::Config>::Layer>, ConfigError> {
+    let Some(value) = table.get(section) else {
+        return Ok(None);
+    };
+    if !matches!(value, toml::Value::Table(_)) {
+        let source = io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("expected [{section}] to be a TOML table"),
+        );
+        return Err(ConfigError::config_section(section, source));
+    }
+    value
+        .clone()
+        .try_into()
+        .map(Some)
+        .map_err(|source| ConfigError::config_section(section, source))
+}
+
+/// Resolve a config from argv/env plus the optional file section named
+/// by `section`, preserving source priority argv > env > file > defaults.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] from section deserialization or config
+/// resolution.
+pub fn resolve_with_file<C: FromArgvThenEnv>(
+    argv: <C::Layer as confique::Config>::Layer,
+    file: Option<&toml::Table>,
+    section: &str,
+) -> Result<C, ConfigError> {
+    let file = file
+        .map(|table| file_section::<C>(table, section))
+        .transpose()?
+        .flatten();
+    C::try_resolve(argv, file)
+}
+
+/// Resolve a config with no argv overlay, but with the optional file
+/// section below env.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] from section deserialization or config
+/// resolution.
+pub fn resolve_env_with_file<C: FromArgvThenEnv>(
+    file: Option<&toml::Table>,
+    section: &str,
+) -> Result<C, ConfigError> {
+    let argv = <<C::Layer as confique::Config>::Layer as confique::Layer>::empty();
+    resolve_with_file::<C>(argv, file, section)
+}
 
 /// Per-actor ring-capacity knob (issue 1990, ADR-0081 / ADR-0086). The
 /// `#[derive(aether_substrate::Config)]` emits the env-shaped
@@ -313,6 +435,17 @@ pub fn resolve_teardown_cap() -> Duration {
     SettlementConfig::from_env().to_cap()
 }
 
+/// Resolve the teardown cap from argv/env plus the optional
+/// `[settlement]` config-file section.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] when the file section or env value is
+/// malformed.
+pub fn resolve_teardown_cap_with_file(file: Option<&toml::Table>) -> Result<Duration, ConfigError> {
+    Ok(resolve_env_with_file::<SettlementConfig>(file, "settlement")?.to_cap())
+}
+
 /// Default lifecycle advance timeout in milliseconds. The literal
 /// `default = 1000` on [`ChassisBootConfig`] must equal this;
 /// `chassis_boot_config_defaults_match` guards the pair.
@@ -397,7 +530,7 @@ impl ChassisBootConfig {
 /// and the orphaned frame-size knob) and the runtime log-filter /
 /// panic-hook knobs (`aether_substrate::runtime::RUNTIME_KNOBS`). e1's
 /// [`validate_env`](aether_substrate::config::validate_env) sweeps the
-/// process env against this; e2's `--config` dump walks the same
+/// process env against this; e2's `--print-config` dump walks the same
 /// metas + records.
 ///
 /// Lives bundle-side rather than in `aether-substrate::config` because
@@ -415,7 +548,7 @@ pub fn chassis_known_keys() -> KnownKeys {
 /// plus the hand-registered knob records (`CHASSIS_KNOBS` +
 /// `aether_substrate::runtime::RUNTIME_KNOBS`). Shared by
 /// [`chassis_known_keys`] (e1's sweep) and [`chassis_config_dump`] (e2's
-/// `--config`) so both read one source of truth.
+/// `--print-config`) so both read one source of truth.
 fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
     const METAS: &[&Meta] = &[
         &HttpConfigLayer::META,
@@ -438,10 +571,10 @@ fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
     (METAS, records)
 }
 
-/// Render the `--config` discovery dump for the full-stack chassis
+/// Render the `--print-config` discovery dump for the full-stack chassis
 /// (ADR-0090 §4): every cap layer knob + hand-registered knob with its
 /// live source-resolved value, default, and doc. The chassis bins call
-/// this when `--config` is passed and exit before boot.
+/// this when `--print-config` is passed and exit before boot.
 #[must_use]
 pub fn chassis_config_dump() -> String {
     let (metas, records) = chassis_registry();
@@ -457,7 +590,7 @@ pub fn chassis_config_dump() -> String {
 /// inherits the hub's process environment, so fleet-wide cap knobs
 /// legitimately sit in the hub's env destined for the spawned engine.
 /// Shared by [`hub_known_keys`] (e1's sweep) and [`hub_config_dump`]
-/// (e2's `--config`) so both read one source of truth (ADR-0090 §4).
+/// (e2's `--print-config`) so both read one source of truth (ADR-0090 §4).
 fn hub_chassis_registry() -> (Vec<&'static Meta>, Vec<KnobRecord>) {
     let (metas, mut records) = chassis_registry();
     let mut metas: Vec<&'static Meta> = metas.to_vec();
@@ -482,7 +615,7 @@ pub fn hub_known_keys() -> KnownKeys {
     known_keys(&metas, &records)
 }
 
-/// Render the `--config` discovery dump for the hub chassis
+/// Render the `--print-config` discovery dump for the hub chassis
 /// (ADR-0090 §4): the full fleet registry plus the hub-only engine
 /// knobs, so an operator sees every knob that will take effect on the
 /// hub and the substrates it spawns.
@@ -739,18 +872,30 @@ mod tests {
     use super::SchedulerTuningConfigLayer;
     use super::SettlementConfig;
     use super::chassis_known_keys;
+    use super::file_section;
     use aether_actor::log::DEFAULT_RING_CAP;
     use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
     use aether_capabilities::LifecycleConfig;
     use aether_substrate::SchedulerTuning;
+    use aether_substrate::config::ConfigError;
     use std::env;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process;
     use std::sync::Mutex;
     use std::sync::PoisonError;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     /// Process-wide guard around the `AETHER_ACTOR_*` ring env mutation,
     /// so ring tests serialise their set/remove pairs.
     static RING_ENV_LOCK: Mutex<()> = Mutex::new(());
+    static CONFIG_FILE_TEST_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn config_test_path(stem: &str) -> PathBuf {
+        let id = CONFIG_FILE_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        env::temp_dir().join(format!("aether-{stem}-{}-{id}.toml", process::id()))
+    }
 
     #[test]
     fn actor_ring_config_defaults_match() {
@@ -860,7 +1005,7 @@ mod tests {
         // The nine scheduler hot-path env keys join the chassis known-key
         // set via `SchedulerTuningConfigLayer::META` (they rode
         // `SCHEDULER_KNOBS` before issue 2485), so the unknown-AETHER_*
-        // sweep (e1) doesn't flag them and the `--config` dump lists them.
+        // sweep (e1) doesn't flag them and the `--print-config` dump lists them.
         let known = chassis_known_keys();
         for key in [
             "AETHER_SPIN_WINDOW_USEC",
@@ -1074,7 +1219,7 @@ mod tests {
 
     #[test]
     fn hub_config_dump_lists_an_engine_knob() {
-        // e2's hub `--config` walks the same registry as e1's sweep, so
+        // e2's hub `--print-config` walks the same registry as e1's sweep, so
         // the hub-only engine knobs render in the dump.
         let dump = super::hub_config_dump();
         assert!(dump.contains("AETHER_HUB_HEARTBEAT_INTERVAL_SECS"));
@@ -1136,7 +1281,7 @@ mod tests {
 
     #[test]
     fn chassis_config_dump_lists_a_knob_from_each_cap_plus_scheduler() {
-        // ADR-0090 §4 `--config`: the dump walks the same registry as
+        // ADR-0090 §4 `--print-config`: the dump walks the same registry as
         // the sweep, so it lists a representative knob from each cap, a
         // chassis-boot knob, and a scheduler hot-path knob — with a
         // header row.
@@ -1152,6 +1297,48 @@ mod tests {
         assert!(dump.contains("AETHER_WORKERS")); // chassis-boot derive-Config knob
         assert!(dump.contains("AETHER_LOCAL_STICKY_MAX")); // scheduler knob
         assert!(dump.contains("AETHER_LOG_FILTER")); // runtime knob
+    }
+
+    #[test]
+    fn load_config_file_errors_on_missing_or_malformed_file() {
+        let missing = config_test_path("missing-config");
+        assert!(
+            matches!(
+                super::load_config_file(&missing),
+                Err(ConfigError::ConfigFile { .. })
+            ),
+            "explicit missing config file must hard-error",
+        );
+
+        let malformed = config_test_path("malformed-config");
+        fs::write(&malformed, "[http\n").expect("write malformed config");
+        let result = super::load_config_file(&malformed);
+        let _ = fs::remove_file(&malformed);
+        assert!(
+            matches!(result, Err(ConfigError::ConfigFile { .. })),
+            "malformed config file must hard-error",
+        );
+    }
+
+    #[test]
+    fn file_section_absent_is_none_and_present_section_deserializes() {
+        let table = "[http]\ndisabled = true\n"
+            .parse::<toml::Table>()
+            .expect("parse table");
+        assert!(
+            file_section::<ActorRingConfig>(&table, "actor")
+                .expect("absent section ok")
+                .is_none(),
+            "absent sections fall through to env/defaults",
+        );
+
+        let table = "[actor]\nlog_ring_capacity = 2048\n"
+            .parse::<toml::Table>()
+            .expect("parse table");
+        let section = file_section::<ActorRingConfig>(&table, "actor")
+            .expect("present section decodes")
+            .expect("actor section present");
+        assert_eq!(section.log_ring_capacity, Some(2048));
     }
 
     /// Regression guard for the enable / disable convention (#1791): a
