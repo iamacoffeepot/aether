@@ -467,9 +467,13 @@ fn label_lift(world: &World, owner: CellPos, wx: f32, wz: f32) -> (f32, f32) {
 /// lattice, where positional inference reads whichever subcell the vertex
 /// floors into and collapses both flaps onto one plate. A crossing lies
 /// within half a sample of its anchor, so the anchored patch never
-/// extrapolates. Off relief the anchor is unused — the owner-clamp and
-/// whole-cell paths are exactly [`label_lift`]'s, so relief-free worlds are
-/// byte-identical.
+/// extrapolates. The whole-cell lift resolves through the anchor sample's
+/// cell too — so a marched wall top or base on a material boundary with no
+/// subcell relief lands on the anchored side's committed plate, rather than
+/// collapsing onto the window-center `owner` wherever that owner falls on
+/// the low side of the boundary (the bug that left relief-free
+/// material-boundary cliffs with see-through faces). The relief owner-clamp
+/// branch is unchanged.
 fn anchored_lift(
     world: &World,
     owner: CellPos,
@@ -481,25 +485,31 @@ fn anchored_lift(
         x: floor_to_i32(wx),
         z: floor_to_i32(wz),
     };
+    // The cell owning the anchor sample — the vertex's own side of the
+    // crossed edge. The whole-cell lift resolves through it (not the
+    // window-center `owner`, nor the on-boundary midpoint `cell`), so a
+    // marched wall top/base lands on the anchored side's plate even with no
+    // subcell relief. A window-center-owned lift collapses the wall wherever
+    // the owner falls on the low side of the boundary.
+    let anchor_cell = CellPos {
+        x: anchor_oct[0].div_euclid(256),
+        z: anchor_oct[1].div_euclid(256),
+    };
     if cell != owner && world.edge_is_cliff(cell, owner) {
         if world.cell_has_height_relief(owner) {
             let patch = SubPatch::containing(world, owner, wx, wz);
             return (patch.y(wx, wz), patch.shade(wx, wz));
         }
-        let lift = CellLift::of(world, owner);
+        let lift = CellLift::of(world, anchor_cell);
         return (lift.y(wx, wz), lift.shade(wx, wz));
     }
     if world.cell_has_height_relief(cell) {
-        let anchor_cell = CellPos {
-            x: anchor_oct[0].div_euclid(256),
-            z: anchor_oct[1].div_euclid(256),
-        };
         let sub_x = anchor_oct[0].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
         let sub_z = anchor_oct[1].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
         let patch = SubPatch::of(world, anchor_cell, sub_x, sub_z);
         return (patch.y(wx, wz), patch.shade(wx, wz));
     }
-    let lift = CellLift::of(world, cell);
+    let lift = CellLift::of(world, anchor_cell);
     (lift.y(wx, wz), lift.shade(wx, wz))
 }
 
@@ -4804,6 +4814,44 @@ mod tests {
         world
     }
 
+    /// A cell-aligned stone block raised a whole-cell step above flat grass —
+    /// a MATERIAL boundary with **no subcell relief**, the relief-free cliff
+    /// that [`delta_column_world`]'s subcell deltas never exercise. Whole-cell
+    /// `height` only (`height_points` left inheriting), so
+    /// `cell_has_height_relief` stays false across the boundary. Smoothing is
+    /// pinned off (profile 1, iterations 0) so the marched contour stays
+    /// axis-aligned and the block's perimeter walls run straight.
+    fn material_block_world() -> World {
+        let mut world = World::new();
+        world.insert_smoothing_profile(
+            1,
+            SmoothingProfile {
+                iterations: 0,
+                degrees: 90,
+            },
+        );
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let mut c = Chunk::empty();
+                c.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+                c.smoothing = [1; CELLS_PER_CHUNK_AREA];
+                if dx == 0 && dz == 0 {
+                    // A 4x4 stone block on whole-cell heights — the cliff is a
+                    // material + cell-height break with zero subcell relief.
+                    for lz in 6..10 {
+                        for lx in 6..10 {
+                            let idx = (lz * EDGE + lx) as usize;
+                            c.underlay[idx] = Material::Stone;
+                            c.height[idx] = 512;
+                        }
+                    }
+                }
+                world.insert_chunk(ChunkPos { x: dx, z: dz }, c);
+            }
+        }
+        world
+    }
+
     /// Twice the xz-projected area of a triangle — a wall face is exactly
     /// vertical, so it projects to a line (zero area) while every cap
     /// triangle keeps a footprint; the split separates the two without
@@ -4845,6 +4893,42 @@ mod tests {
         assert!(
             (7.5..8.6).contains(&total),
             "wall top-edge coverage {total} m over an 8 m perimeter — alternating gaps halve it",
+        );
+    }
+
+    #[test]
+    fn a_material_block_wall_coverage_is_complete() {
+        // Tripwire: a relief-free material-boundary cliff must close its full
+        // perimeter. The bug lifted the marched wall top through the
+        // window-center owner rather than the anchored (high) side; on an
+        // axis-aligned boundary the owner sits on the low (grass) side for
+        // every boundary window, so every wall top collapses onto the grass
+        // plate and the whole face vanishes (zero-height, see-through). A 4x4
+        // cell stone block on flat grass has a 16 m perimeter; the emitted
+        // wall top-edge length must cover it, far above the collapsed
+        // near-zero the bug leaves.
+        let world = material_block_world();
+        let mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
+        let block_top = 512.0 / 256.0;
+        let total: f32 = mesh
+            .iter()
+            .filter(|t| y_span(t) > 0.5)
+            .filter_map(|t| {
+                // Each wall quad's top edge rides the triangle holding both
+                // top (block-height) vertices.
+                let tops: Vec<&Vertex> = t.verts.iter().filter(|v| v.y > block_top - 0.5).collect();
+                (tops.len() == 2).then(|| (tops[1].x - tops[0].x).hypot(tops[1].z - tops[0].z))
+            })
+            .sum();
+        assert!(
+            (15.0..17.5).contains(&total),
+            "wall top-edge coverage {total} m over a 16 m perimeter — \
+             a relief-free material-boundary cliff collapsed its faces",
         );
     }
 
