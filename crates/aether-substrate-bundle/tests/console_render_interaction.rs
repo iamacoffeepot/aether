@@ -49,10 +49,21 @@ fn assets_dir() -> PathBuf {
 }
 
 fn build_bench() -> TestBench {
-    let sandbox = init_save_sandbox("console-render-interaction");
+    build_bench_with_assets(assets_dir(), "console-render-interaction")
+}
+
+fn build_bench_without_assets_root() -> TestBench {
+    let sandbox = init_save_sandbox("console-render-interaction-no-assets");
+    let assets = sandbox.join("empty-assets");
+    fs::create_dir_all(&assets).expect("create empty assets root");
+    build_bench_with_assets(assets, "console-render-interaction-no-assets")
+}
+
+fn build_bench_with_assets(assets: PathBuf, sandbox_name: &str) -> TestBench {
+    let sandbox = init_save_sandbox(sandbox_name);
     let roots = NamespaceRoots {
         save: sandbox.to_path_buf(),
-        assets: assets_dir(),
+        assets,
         config: sandbox.to_path_buf(),
     };
     TestBench::builder()
@@ -72,6 +83,10 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
 }
 
 fn load_console(bench: &mut TestBench, wasm: &[u8]) {
+    load_console_with_config(bench, wasm, &ConsoleConfig::default());
+}
+
+fn load_console_with_config(bench: &mut TestBench, wasm: &[u8], config: &ConsoleConfig) {
     let loaded = bench
         .execute(vec![(
             "load",
@@ -80,7 +95,7 @@ fn load_console(bench: &mut TestBench, wasm: &[u8]) {
                 &LoadComponent {
                     wasm: wasm.to_vec(),
                     name: Some("console".to_owned()),
-                    config: ConsoleConfig::default().encode_into_bytes(),
+                    config: config.encode_into_bytes(),
                     export: Some("aether.kit.console".to_owned()),
                 },
             ),
@@ -258,7 +273,7 @@ fn markdown_command_output_renders_into_history_band() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = build_bench();
+    let mut bench = build_bench_without_assets_root();
     load_console(&mut bench, &wasm);
 
     bench
@@ -273,7 +288,7 @@ fn markdown_command_output_renders_into_history_band() {
                     },
                 ),
             ),
-            ("settle", BenchOp::advance(3)),
+            ("settle", BenchOp::advance(8)),
             (
                 "toggle",
                 BenchOp::send_mail(
@@ -313,5 +328,65 @@ fn markdown_command_output_renders_into_history_band() {
     assert!(
         rendered,
         "markdown output should add visible text/background pixels to the history band",
+    );
+}
+
+#[test]
+fn configured_font_override_renders_into_history_band() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let config = ConsoleConfig {
+        font_namespace: String::from("assets"),
+        font_path: String::from("fonts/RobotoMono.ttf"),
+        ..ConsoleConfig::default()
+    };
+    let mut bench = build_bench();
+    load_console_with_config(&mut bench, &wasm, &config);
+
+    bench
+        .execute(vec![
+            (
+                "size",
+                BenchOp::send_mail(
+                    console_address(),
+                    &WindowSize {
+                        width: WINDOW_WIDTH,
+                        height: WINDOW_HEIGHT,
+                    },
+                ),
+            ),
+            ("settle", BenchOp::advance(8)),
+            (
+                "toggle",
+                BenchOp::send_mail(
+                    console_address(),
+                    &Key {
+                        code: KEY_BACKQUOTE,
+                    },
+                ),
+            ),
+            (
+                "output",
+                BenchOp::send_mail(
+                    console_address(),
+                    &ConsoleCommandOutput {
+                        command: String::from("override"),
+                        lines: vec![
+                            String::from("## Override"),
+                            String::from("- [x] `font` rendered"),
+                        ],
+                        error: false,
+                    },
+                ),
+            ),
+        ])
+        .expect("open console with configured font");
+
+    let rendered = history_text_differs_from_panel(&mut bench, "override-rendered-history");
+    assert!(
+        rendered,
+        "configured font override should render visible text into the history band",
     );
 }

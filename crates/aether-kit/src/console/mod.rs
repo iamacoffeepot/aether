@@ -10,12 +10,13 @@ pub use state::*;
 
 use alloc::vec::Vec;
 
-use aether_actor::{ActorInitError, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Manual, ReplyMode, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::input::{InputCapability, InputMailboxExt};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::{DrawSolidQuads, SolidQuad};
 use aether_capabilities::text::{
-    DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult,
+    DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontBytes,
+    LoadFontResult, MEMORY_FONT_NAMESPACE,
 };
 use aether_capabilities::{LifecycleCapability, RenderCapability, TextCapability};
 use aether_data::MailboxId;
@@ -23,6 +24,7 @@ use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RI
 use aether_kinds::{
     CachedFontMetrics, Key, KeyRelease, MouseWheel, QuadSpace, Quit, TextInput, Tick, WindowSize,
 };
+use serde::{Deserialize, Serialize};
 
 use self::markdown::{MarkdownLine, MarkdownTone};
 
@@ -34,6 +36,20 @@ const SEPARATOR_HEIGHT: f32 = 1.0;
 const CURSOR_WIDTH: f32 = 8.0;
 const BACKSPACE_INITIAL_DELAY_TICKS: u32 = 18;
 const BACKSPACE_REPEAT_INTERVAL_TICKS: u32 = 3;
+const EMBEDDED_FONT_NAME: &str = "SourceCodePro-Regular.ttf";
+const EMBEDDED_FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/SourceCodePro-Regular.ttf");
+
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy)]
+#[kind(name = "aether.kit.console.font_load_context")]
+struct ConsoleFontLoadContext {
+    embedded: bool,
+}
+
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy)]
+#[kind(name = "aether.kit.console.font_metrics_context")]
+struct ConsoleFontMetricsContext {
+    font_id: u32,
+}
 
 pub struct ConsoleOverlay {
     config: ConsoleConfig,
@@ -41,6 +57,8 @@ pub struct ConsoleOverlay {
     window_size: [u32; 2],
     font_id: Option<u32>,
     metrics: Option<CachedFontMetrics>,
+    embedded_font_requested: bool,
+    override_font_failed: bool,
     backspace_held: bool,
     backspace_ticks: u32,
 }
@@ -334,6 +352,78 @@ impl ConsoleOverlay {
         }
     }
 
+    fn has_font_override(config: &ConsoleConfig) -> bool {
+        !config.font_path.is_empty()
+    }
+
+    fn request_initial_font(&mut self, ctx: &mut WasmCtx<'_>) {
+        if Self::has_font_override(&self.config) {
+            self.request_configured_font(ctx);
+        } else {
+            self.request_embedded_font(ctx);
+        }
+    }
+
+    fn request_configured_font<M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, M>) {
+        Self::request_font(
+            ctx,
+            self.config.font_namespace.as_str(),
+            self.config.font_path.as_str(),
+            false,
+        );
+    }
+
+    fn request_embedded_font<M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, M>) {
+        if self.embedded_font_requested {
+            return;
+        }
+        self.embedded_font_requested = true;
+        let load = LoadFontBytes {
+            name: EMBEDDED_FONT_NAME.into(),
+            bytes: EMBEDDED_FONT_BYTES.to_vec(),
+        };
+        let _ = ctx
+            .actor::<TextCapability>()
+            .send_with_context(&load, &ConsoleFontLoadContext { embedded: true });
+    }
+
+    fn request_font<M: ReplyMode>(
+        ctx: &mut WasmCtx<'_, M>,
+        namespace: &str,
+        path: &str,
+        embedded: bool,
+    ) {
+        let load = LoadFont {
+            namespace: namespace.into(),
+            path: path.into(),
+        };
+        let _ = ctx
+            .actor::<TextCapability>()
+            .send_with_context(&load, &ConsoleFontLoadContext { embedded });
+    }
+
+    fn request_font_metrics(ctx: &mut WasmCtx<'_, Manual>, font_id: u32) {
+        let request = FontMetricsRequest {
+            font: FontRef::Id(font_id),
+        };
+        let _ = ctx
+            .actor::<TextCapability>()
+            .send_with_context(&request, &ConsoleFontMetricsContext { font_id });
+    }
+
+    fn is_embedded_font_ref(namespace: &str, path: &str) -> bool {
+        namespace == MEMORY_FONT_NAMESPACE && path == EMBEDDED_FONT_NAME
+    }
+
+    fn handle_override_font_failure(&mut self, ctx: &mut WasmCtx<'_, Manual>, error: String) {
+        if !self.override_font_failed {
+            self.override_font_failed = true;
+            self.state
+                .push_error(format!("font override failed: {error}"));
+        }
+        self.request_embedded_font(ctx);
+    }
+
     fn register_command(&mut self, ctx: &mut WasmCtx<'_, Manual>, mail: RegisterConsoleCommand) {
         let mailbox = if mail.mailbox == MailboxId::NONE {
             ctx.source_mailbox().unwrap_or(MailboxId::NONE)
@@ -391,6 +481,8 @@ impl WasmActor for ConsoleOverlay {
             window_size: [1280, 720],
             font_id: None,
             metrics: None,
+            embedded_font_requested: false,
+            override_font_failed: false,
             backspace_held: false,
             backspace_ticks: 0,
         })
@@ -405,16 +497,7 @@ impl WasmActor for ConsoleOverlay {
         input.subscribe::<MouseWheel>();
         input.subscribe::<WindowSize>();
 
-        let font = FontRef::Path {
-            namespace: self.config.font_namespace.clone(),
-            path: self.config.font_path.clone(),
-        };
-        ctx.actor::<TextCapability>().send(&LoadFont {
-            namespace: self.config.font_namespace.clone(),
-            path: self.config.font_path.clone(),
-        });
-        ctx.actor::<TextCapability>()
-            .send(&FontMetricsRequest { font });
+        self.request_initial_font(ctx);
     }
 
     #[handler::manual]
@@ -490,21 +573,35 @@ impl WasmActor for ConsoleOverlay {
     }
 
     #[handler::manual]
-    fn on_load_font_result(&mut self, _ctx: &mut WasmCtx<'_, Manual>, result: LoadFontResult) {
+    fn on_load_font_result(&mut self, ctx: &mut WasmCtx<'_, Manual>, result: LoadFontResult) {
+        let Some(context) = ctx.take_context::<ConsoleFontLoadContext>() else {
+            return;
+        };
         match result {
-            LoadFontResult::Ok { font_id, .. } => self.font_id = Some(font_id),
-            LoadFontResult::Err { error, .. } => {
-                self.state.push_error(format!("font load failed: {error}"));
+            LoadFontResult::Ok { font_id, .. } => {
+                self.font_id = Some(font_id);
+                Self::request_font_metrics(ctx, font_id);
+            }
+            LoadFontResult::Err {
+                namespace,
+                path,
+                error,
+            } => {
+                if context.embedded || Self::is_embedded_font_ref(&namespace, &path) {
+                    self.state
+                        .push_error(format!("embedded font load failed: {error}"));
+                } else {
+                    self.handle_override_font_failure(ctx, error);
+                }
             }
         }
     }
 
     #[handler::manual]
-    fn on_font_metrics_result(
-        &mut self,
-        _ctx: &mut WasmCtx<'_, Manual>,
-        result: FontMetricsResult,
-    ) {
+    fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_, Manual>, result: FontMetricsResult) {
+        let Some(_context) = ctx.take_context::<ConsoleFontMetricsContext>() else {
+            return;
+        };
         match result {
             FontMetricsResult::Ok { metrics } => {
                 self.metrics = Some(CachedFontMetrics::new(&metrics));
@@ -572,6 +669,8 @@ mod tests {
             window_size: [100, 100],
             font_id: None,
             metrics: None,
+            embedded_font_requested: false,
+            override_font_failed: false,
             backspace_held: false,
             backspace_ticks: 0,
         };
@@ -600,6 +699,8 @@ mod tests {
             window_size: [100, 100],
             font_id: None,
             metrics: None,
+            embedded_font_requested: false,
+            override_font_failed: false,
             backspace_held: false,
             backspace_ticks: 0,
         };
@@ -626,6 +727,8 @@ mod tests {
             window_size: [100, 100],
             font_id: None,
             metrics: None,
+            embedded_font_requested: false,
+            override_font_failed: false,
             backspace_held: false,
             backspace_ticks: 0,
         };
@@ -653,6 +756,8 @@ mod tests {
             window_size: [100, 100],
             font_id: None,
             metrics: None,
+            embedded_font_requested: false,
+            override_font_failed: false,
             backspace_held: false,
             backspace_ticks: 0,
         };

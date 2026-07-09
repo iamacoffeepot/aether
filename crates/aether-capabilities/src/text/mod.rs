@@ -10,6 +10,9 @@
 //!   caller, recover it on `aether.fs.read_result`, parse the font off the
 //!   hot path in a `#[handler(task)]` arm, and register it under a
 //!   session-scoped `font_id`. The reply is `load_font_result`.
+//! - **`load_font_bytes`** takes already-resident TTF bytes from the caller
+//!   and runs the same off-hot-path parse/register/reply path without an
+//!   `aether.fs` round trip.
 //! - **`draw`** is fire-and-forget immediate mode: lay the string out with
 //!   fontdue's horizontal metrics, rasterize any unseen glyph into the
 //!   shelf-packed atlas, emit one `update_texture` per new glyph plus the

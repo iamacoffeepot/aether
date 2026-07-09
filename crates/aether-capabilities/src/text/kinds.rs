@@ -1,5 +1,5 @@
 //! `aether.text` mail kinds (ADR-0105, ADR-0121). The capability owns its
-//! own mail contract: the five `aether.text.*` kinds plus the `FontRef`
+//! own mail contract: the `aether.text.*` kinds plus the `FontRef`
 //! request param live here, beside the implementation that dispatches
 //! them. Always-on and wasm-safe — they need only `aether-data` + `serde`
 //! — so a wasm component can address the cap by type without pulling
@@ -16,6 +16,10 @@
 use aether_kinds::{FontMetrics, QuadSpace};
 use serde::{Deserialize, Serialize};
 
+/// Synthetic namespace used when a font is loaded directly from mail-carried
+/// bytes rather than through `aether.fs`.
+pub const MEMORY_FONT_NAMESPACE: &str = "memory";
+
 /// `aether.text.load_font` — fetch a TTF through `aether.fs` and
 /// register it under a session-scoped `font_id` (assigned the same
 /// way ADR-0103 assigns instrument ids). `namespace` / `path` address
@@ -27,6 +31,18 @@ use serde::{Deserialize, Serialize};
 pub struct LoadFont {
     pub namespace: String,
     pub path: String,
+}
+
+/// `aether.text.load_font_bytes` — parse and register a TTF supplied
+/// directly in the request payload. This is for wasm components that
+/// embed a small fallback font and need to register it without staging
+/// through `aether.fs`. `name` is used as the memory-backed font key
+/// and the human-readable name in `LoadFontResult::Ok`.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.text.load_font_bytes")]
+pub struct LoadFontBytes {
+    pub name: String,
+    pub bytes: Vec<u8>,
 }
 
 /// Reply to `LoadFont`. `Ok` carries the assigned `font_id` — thread
