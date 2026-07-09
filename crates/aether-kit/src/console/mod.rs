@@ -2,6 +2,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 mod kinds;
+mod markdown;
 mod state;
 
 pub use kinds::*;
@@ -22,6 +23,8 @@ use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RI
 use aether_kinds::{
     CachedFontMetrics, Key, KeyRelease, MouseWheel, QuadSpace, Quit, TextInput, Tick, WindowSize,
 };
+
+use self::markdown::{MarkdownLine, MarkdownTone};
 
 const HORIZONTAL_PADDING: f32 = 12.0;
 const TOP_PADDING: f32 = 10.0;
@@ -82,6 +85,7 @@ impl ConsoleOverlay {
             .config
             .panel_height
             .min(bounded_u32_to_f32(self.window_size[1]));
+        let history = self.state.visible_markdown_history(visible_rows);
         let mut quads = vec![
             SolidQuad {
                 x: 0.0,
@@ -112,6 +116,15 @@ impl ConsoleOverlay {
             });
         }
 
+        let mut y = self.history_top_y();
+        for line in &history {
+            if y + self.config.font_size > input_y - HISTORY_INPUT_GAP {
+                break;
+            }
+            self.push_markdown_quads(&mut quads, line, y, width);
+            y += self.row_height();
+        }
+
         ctx.actor::<RenderCapability>().send(&DrawSolidQuads {
             space: QuadSpace::Screen,
             quads,
@@ -122,18 +135,11 @@ impl ConsoleOverlay {
         };
 
         let mut y = self.history_top_y();
-        for line in self.state.visible_history(visible_rows) {
+        for line in &history {
             if y + self.config.font_size > input_y - HISTORY_INPUT_GAP {
                 break;
             }
-            ctx.actor::<TextCapability>().send(&DrawText {
-                font_id,
-                text: line.text,
-                size_pixels: self.config.font_size,
-                color: ConsoleState::theme_color(&self.config.theme, line.style),
-                origin: [HORIZONTAL_PADDING, y],
-                space: QuadSpace::Screen,
-            });
+            self.draw_markdown_line(ctx, font_id, line, y);
             y += self.row_height();
         }
 
@@ -156,6 +162,132 @@ impl ConsoleOverlay {
             ],
             space: QuadSpace::Screen,
         });
+    }
+
+    fn push_markdown_quads(
+        &self,
+        quads: &mut Vec<SolidQuad>,
+        line: &MarkdownLine,
+        y: f32,
+        width: f32,
+    ) {
+        let padding = self.config.theme.markdown.code_padding_pixels.max(0.0);
+        if line.thematic_break {
+            quads.push(SolidQuad {
+                x: HORIZONTAL_PADDING,
+                y: self.config.font_size.mul_add(0.55, y),
+                width: HORIZONTAL_PADDING.mul_add(-2.0, width).max(0.0),
+                height: 1.0,
+                color: self.config.theme.markdown.thematic_break_color,
+            });
+            return;
+        }
+        if line.code_block {
+            quads.push(SolidQuad {
+                x: HORIZONTAL_PADDING - padding,
+                y: y - padding,
+                width: padding.mul_add(2.0, HORIZONTAL_PADDING.mul_add(-2.0, width)),
+                height: self.config.font_size + (padding * 2.0),
+                color: self.config.theme.markdown.fenced_code_background_color,
+            });
+            return;
+        }
+
+        let mut x = HORIZONTAL_PADDING;
+        for run in &line.runs {
+            let run_width = self.measure(&run.text);
+            if run.tone == MarkdownTone::InlineCode {
+                quads.push(SolidQuad {
+                    x: x - padding,
+                    y: y - padding,
+                    width: run_width + (padding * 2.0),
+                    height: self.config.font_size + (padding * 2.0),
+                    color: self.config.theme.markdown.inline_code_background_color,
+                });
+            }
+            x += run_width;
+        }
+    }
+
+    fn draw_markdown_line(
+        &self,
+        ctx: &mut WasmCtx<'_, Manual>,
+        font_id: u32,
+        line: &MarkdownLine,
+        y: f32,
+    ) {
+        let mut x = HORIZONTAL_PADDING;
+        for run in &line.runs {
+            if run.text.is_empty() || run.tone == MarkdownTone::ThematicBreak {
+                continue;
+            }
+            let color = self.markdown_color(line.style, run.tone);
+            ctx.actor::<TextCapability>().send(&DrawText {
+                font_id,
+                text: run.text.clone(),
+                size_pixels: self.config.font_size,
+                color,
+                origin: [x, y],
+                space: QuadSpace::Screen,
+            });
+            if run.tone == MarkdownTone::Strong {
+                ctx.actor::<TextCapability>().send(&DrawText {
+                    font_id,
+                    text: run.text.clone(),
+                    size_pixels: self.config.font_size,
+                    color,
+                    origin: [
+                        x + self.config.theme.markdown.strong_offset_pixels.max(0.0),
+                        y,
+                    ],
+                    space: QuadSpace::Screen,
+                });
+            }
+            x += self.measure(&run.text);
+        }
+    }
+
+    fn markdown_color(&self, style: LineStyle, tone: MarkdownTone) -> [f32; 4] {
+        if style == LineStyle::Error
+            && matches!(
+                tone,
+                MarkdownTone::Text
+                    | MarkdownTone::Heading
+                    | MarkdownTone::Emphasis
+                    | MarkdownTone::Strong
+                    | MarkdownTone::InlineCode
+                    | MarkdownTone::FencedCode
+                    | MarkdownTone::Link
+                    | MarkdownTone::Image
+                    | MarkdownTone::QuoteText
+                    | MarkdownTone::TableHeader
+                    | MarkdownTone::TableText
+            )
+        {
+            return self.config.theme.error_color;
+        }
+
+        let markdown = &self.config.theme.markdown;
+        match tone {
+            MarkdownTone::Text => ConsoleState::theme_color(&self.config.theme, style),
+            MarkdownTone::Heading => markdown.heading_color,
+            MarkdownTone::Emphasis => markdown.emphasis_color,
+            MarkdownTone::Strong => markdown.strong_color,
+            MarkdownTone::InlineCode => markdown.inline_code_color,
+            MarkdownTone::FencedCode => markdown.fenced_code_color,
+            MarkdownTone::Link => markdown.link_color,
+            MarkdownTone::Image => markdown.image_color,
+            MarkdownTone::QuoteMarker => markdown.quote_marker_color,
+            MarkdownTone::QuoteText => markdown.quote_text_color,
+            MarkdownTone::ListMarker => markdown.list_marker_color,
+            MarkdownTone::TaskMarker => markdown.task_marker_color,
+            MarkdownTone::TableBorder => markdown.table_border_color,
+            MarkdownTone::TableHeader => markdown.table_header_color,
+            MarkdownTone::TableText => markdown.table_text_color,
+            MarkdownTone::ThematicBreak => markdown.thematic_break_color,
+            MarkdownTone::MutedMarker => markdown.muted_marker_color,
+            MarkdownTone::EscapedMarker => markdown.escaped_marker_color,
+        }
     }
 
     fn measure(&self, text: &str) -> f32 {
@@ -511,5 +643,88 @@ mod tests {
             overlay.tick_backspace_repeat();
         }
         assert_eq!(overlay.state.input, "ab");
+    }
+
+    #[test]
+    fn markdown_tones_map_to_explicit_theme_fields() {
+        let overlay = ConsoleOverlay {
+            config: ConsoleConfig::default(),
+            state: ConsoleState::new(&ConsoleConfig::default()),
+            window_size: [100, 100],
+            font_id: None,
+            metrics: None,
+            backspace_held: false,
+            backspace_ticks: 0,
+        };
+        let markdown = overlay.config.theme.markdown;
+
+        assert_eq!(
+            overlay.markdown_color(LineStyle::Output, MarkdownTone::Heading),
+            markdown.heading_color
+        );
+        assert_eq!(
+            overlay.markdown_color(LineStyle::Output, MarkdownTone::Emphasis),
+            markdown.emphasis_color
+        );
+        assert_eq!(
+            overlay.markdown_color(LineStyle::Output, MarkdownTone::Strong),
+            markdown.strong_color
+        );
+        assert_eq!(
+            overlay.markdown_color(LineStyle::Output, MarkdownTone::InlineCode),
+            markdown.inline_code_color
+        );
+        assert_eq!(
+            overlay.markdown_color(LineStyle::Output, MarkdownTone::FencedCode),
+            markdown.fenced_code_color
+        );
+        assert_eq!(
+            overlay.markdown_color(LineStyle::Output, MarkdownTone::Link),
+            markdown.link_color
+        );
+        assert_eq!(
+            overlay.markdown_color(LineStyle::Output, MarkdownTone::Image),
+            markdown.image_color
+        );
+        assert_eq!(
+            overlay.markdown_color(LineStyle::Output, MarkdownTone::QuoteMarker),
+            markdown.quote_marker_color
+        );
+        assert_eq!(
+            overlay.markdown_color(LineStyle::Output, MarkdownTone::QuoteText),
+            markdown.quote_text_color
+        );
+        assert_eq!(
+            overlay.markdown_color(LineStyle::Output, MarkdownTone::ListMarker),
+            markdown.list_marker_color
+        );
+        assert_eq!(
+            overlay.markdown_color(LineStyle::Output, MarkdownTone::TaskMarker),
+            markdown.task_marker_color
+        );
+        assert_eq!(
+            overlay.markdown_color(LineStyle::Output, MarkdownTone::TableBorder),
+            markdown.table_border_color
+        );
+        assert_eq!(
+            overlay.markdown_color(LineStyle::Output, MarkdownTone::TableHeader),
+            markdown.table_header_color
+        );
+        assert_eq!(
+            overlay.markdown_color(LineStyle::Output, MarkdownTone::TableText),
+            markdown.table_text_color
+        );
+        assert_eq!(
+            overlay.markdown_color(LineStyle::Output, MarkdownTone::ThematicBreak),
+            markdown.thematic_break_color
+        );
+        assert_eq!(
+            overlay.markdown_color(LineStyle::Output, MarkdownTone::MutedMarker),
+            markdown.muted_marker_color
+        );
+        assert_eq!(
+            overlay.markdown_color(LineStyle::Output, MarkdownTone::EscapedMarker),
+            markdown.escaped_marker_color
+        );
     }
 }
