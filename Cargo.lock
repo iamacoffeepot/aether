@@ -216,6 +216,8 @@ dependencies = [
  "aether-data",
  "bytemuck",
  "libm",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

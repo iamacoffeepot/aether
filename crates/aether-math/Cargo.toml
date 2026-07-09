@@ -17,6 +17,10 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # derive supplies it. Same version aether-kinds uses for its cast kinds.
 bytemuck = { workspace = true, features = ["derive"] }
 libm = "0.2"
+serde = { workspace = true, default-features = false, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
