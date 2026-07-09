@@ -559,6 +559,7 @@ impl NativeActor for RenderCapability {
             .push(QuadBatch {
                 texture_id: mail.texture_id,
                 space: mail.space,
+                clip: mail.clip,
                 quads: mail.quads,
             });
     }
@@ -633,6 +634,7 @@ impl NativeActor for RenderCapability {
             .push(QuadBatch {
                 texture_id: WHITE_TEXTURE_ID,
                 space: mail.space,
+                clip: mail.clip,
                 quads,
             });
     }

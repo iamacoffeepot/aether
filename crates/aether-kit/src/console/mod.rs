@@ -145,6 +145,7 @@ impl ConsoleOverlay {
 
         ctx.actor::<RenderCapability>().send(&DrawSolidQuads {
             space: QuadSpace::Screen,
+            clip: None,
             quads,
         });
 
@@ -168,6 +169,7 @@ impl ConsoleOverlay {
             color: self.config.theme.prompt_color,
             origin: [HORIZONTAL_PADDING, input_y],
             space: QuadSpace::Screen,
+            clip: None,
         });
         ctx.actor::<TextCapability>().send(&DrawText {
             font_id,
@@ -179,6 +181,7 @@ impl ConsoleOverlay {
                 input_y,
             ],
             space: QuadSpace::Screen,
+            clip: None,
         });
     }
 
@@ -247,6 +250,7 @@ impl ConsoleOverlay {
                 color,
                 origin: [x, y],
                 space: QuadSpace::Screen,
+                clip: None,
             });
             if run.tone == MarkdownTone::Strong {
                 ctx.actor::<TextCapability>().send(&DrawText {
@@ -259,6 +263,7 @@ impl ConsoleOverlay {
                         y,
                     ],
                     space: QuadSpace::Screen,
+                    clip: None,
                 });
             }
             x += self.measure(&run.text);

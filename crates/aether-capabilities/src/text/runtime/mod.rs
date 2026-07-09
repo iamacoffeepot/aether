@@ -638,7 +638,7 @@ impl NativeActor for TextCapability {
                     q.y += oy;
                 }
             }
-            emit_draw(ctx, texture_id, mail.space, quads);
+            emit_draw(ctx, texture_id, mail.space, mail.clip, quads);
         }
     }
 }
@@ -755,6 +755,7 @@ mod tests {
                 color: [1.0, 1.0, 1.0, 1.0],
                 origin,
                 space: QuadSpace::Screen,
+                clip: None,
             },
         );
     }

@@ -327,6 +327,7 @@ mod tests {
 
         let mail = DrawSolidQuads {
             space: QuadSpace::Screen,
+            clip: None,
             quads: vec![SolidQuad {
                 x: 10.0,
                 y: 20.0,
