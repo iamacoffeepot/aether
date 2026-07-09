@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 
 use aether_data::MailboxId;
 
+use super::markdown::{MarkdownLine, format_visible_history};
 use super::{ConsoleCommandInvoked, ConsoleConfig, ConsoleTheme};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +193,18 @@ impl ConsoleState {
             .take(end.saturating_sub(start))
             .cloned()
             .collect()
+    }
+
+    #[must_use]
+    pub fn visible_markdown_history(&self, visible_rows: usize) -> Vec<MarkdownLine> {
+        if visible_rows == 0 {
+            return Vec::new();
+        }
+        let max_offset = self.max_scroll_offset(visible_rows);
+        let offset = self.scroll_offset.min(max_offset);
+        let end = self.lines.len().saturating_sub(offset);
+        let start = end.saturating_sub(visible_rows);
+        format_visible_history(&self.lines, start, end)
     }
 
     pub fn insert_text(&mut self, text: &str) {
@@ -535,5 +548,28 @@ mod tests {
 
         assert!(!state.unregister_external("help"));
         assert!(state.commands().contains_key("help"));
+    }
+
+    #[test]
+    fn markdown_history_replays_fenced_code_before_visible_window() {
+        let mut state = state();
+        state.push_output("```rust");
+        state.push_output("let value = **literal**;");
+        state.push_output("```");
+
+        let visible = state.visible_markdown_history(2);
+
+        assert!(visible[0].code_block);
+        assert_eq!(visible[0].runs[0].text, "let value = **literal**;");
+    }
+
+    #[test]
+    fn markdown_history_keeps_raw_lines_unchanged() {
+        let mut state = state();
+        state.push_output("**strong**");
+
+        let _ = state.visible_markdown_history(1);
+
+        assert_eq!(state.lines()[0].text, "**strong**");
     }
 }

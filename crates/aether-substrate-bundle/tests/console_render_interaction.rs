@@ -26,7 +26,7 @@ use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, Key,
     LoadComponent, LoadResult, NamedMail, Tick, WindowSize,
 };
-use aether_kit::ConsoleConfig;
+use aether_kit::{ConsoleCommandOutput, ConsoleConfig};
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
     test_helpers::{init_save_sandbox, require_runtime},
@@ -108,6 +108,24 @@ fn top_band() -> FrameRect {
 }
 
 fn top_band_coverage(bench: &mut TestBench, label: &'static str) -> f32 {
+    coverage_in_region(bench, label, top_band(), CLEAR_SRGB)
+}
+
+fn history_text_band() -> FrameRect {
+    FrameRect {
+        min_x: 8,
+        min_y: 20,
+        max_x: WINDOW_WIDTH - 8,
+        max_y: 72,
+    }
+}
+
+fn coverage_in_region(
+    bench: &mut TestBench,
+    label: &'static str,
+    region: FrameRect,
+    background: [u8; 3],
+) -> f32 {
     let captured = bench
         .execute(vec![(
             label,
@@ -119,8 +137,8 @@ fn top_band_coverage(bench: &mut TestBench, label: &'static str) -> f32 {
                     checks: vec![FrameCheck {
                         reduction: FrameReduction::Coverage,
                         tolerance: PARTITION_TOLERANCE,
-                        background: Some(CLEAR_SRGB),
-                        region: Some(top_band()),
+                        background: Some(background),
+                        region: Some(region),
                     }],
                     similarity: None,
                 },
@@ -144,6 +162,46 @@ fn top_band_coverage(bench: &mut TestBench, label: &'static str) -> f32 {
     match result {
         FrameCheckResult::Coverage { fraction, .. } => fraction,
         other => panic!("expected Coverage result; got {other:?}"),
+    }
+}
+
+fn history_text_differs_from_panel(bench: &mut TestBench, label: &'static str) -> bool {
+    let captured = bench
+        .execute(vec![(
+            label,
+            BenchOp::send_and_await(
+                RenderCapability::NAMESPACE,
+                &CaptureFrame {
+                    mails: vec![envelope(&console_address(), &Tick)],
+                    after_mails: Vec::new(),
+                    checks: vec![FrameCheck {
+                        reduction: FrameReduction::DiffersFromBackground,
+                        tolerance: PARTITION_TOLERANCE,
+                        background: None,
+                        region: Some(history_text_band()),
+                    }],
+                    similarity: None,
+                },
+            ),
+        )])
+        .expect("capture sequence");
+    let result = match captured
+        .reply::<CaptureFrameResult>(label)
+        .expect("decode CaptureFrameResult")
+    {
+        CaptureFrameResult::Ok { verdict, .. } => {
+            let verdict = verdict.expect("checks requested");
+            verdict
+                .results
+                .into_iter()
+                .next()
+                .expect("one check result")
+        }
+        CaptureFrameResult::Err { error } => panic!("capture failed: {error}"),
+    };
+    match result {
+        FrameCheckResult::DiffersFromBackground { passed, .. } => passed,
+        other => panic!("expected DiffersFromBackground result; got {other:?}"),
     }
 }
 
@@ -191,5 +249,69 @@ fn backquote_key_opens_console_overlay() {
     assert!(
         open > 0.90,
         "backquote should open the console and cover the top band; coverage={open:.3}",
+    );
+}
+
+#[test]
+fn markdown_command_output_renders_into_history_band() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = build_bench();
+    load_console(&mut bench, &wasm);
+
+    bench
+        .execute(vec![
+            (
+                "size",
+                BenchOp::send_mail(
+                    console_address(),
+                    &WindowSize {
+                        width: WINDOW_WIDTH,
+                        height: WINDOW_HEIGHT,
+                    },
+                ),
+            ),
+            ("settle", BenchOp::advance(3)),
+            (
+                "toggle",
+                BenchOp::send_mail(
+                    console_address(),
+                    &Key {
+                        code: KEY_BACKQUOTE,
+                    },
+                ),
+            ),
+        ])
+        .expect("open console");
+
+    let empty = history_text_differs_from_panel(&mut bench, "empty-history");
+    assert!(
+        !empty,
+        "empty history band should match the panel background"
+    );
+
+    bench
+        .execute(vec![(
+            "markdown-output",
+            BenchOp::send_mail(
+                console_address(),
+                &ConsoleCommandOutput {
+                    command: String::from("diagnostics"),
+                    lines: vec![
+                        String::from("## Heading"),
+                        String::from("- [x] `code` [link](target)"),
+                    ],
+                    error: false,
+                },
+            ),
+        )])
+        .expect("send markdown output");
+
+    let rendered = history_text_differs_from_panel(&mut bench, "rendered-history");
+    assert!(
+        rendered,
+        "markdown output should add visible text/background pixels to the history band",
     );
 }
