@@ -1132,8 +1132,14 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
     eprintln!(
         "field interior coverage: typed {typed_interior:.3} → selected {selected_interior:.3}",
     );
+    // The band is the field accent (#a8c97a) — every channel >95 above the
+    // raised-surface fill, so it fully clears PARTITION_TOLERANCE — but it is
+    // only `caret_height` (~8px) tall over the two "cd" cells (~2 monospace
+    // advances) inside the full ~195x19px interior, so a correctly-placed band
+    // adds only ~0.02-0.03 coverage. Assert a floor comfortably above capture
+    // noise, not a large jump the small band geometry can never produce.
     assert!(
-        selected_interior > typed_interior + 0.05,
+        selected_interior > typed_interior + 0.01,
         "a Shift-extended selection must render an accent band over \"cd\", raising interior \
          coverage above the resting glyphs ({typed_interior:.3}); it was {selected_interior:.3} \
          — the selection-band-not-rendered class",
