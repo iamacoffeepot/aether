@@ -141,6 +141,17 @@ pub struct UpdateTexture {
     pub pixels: Vec<u8>,
 }
 
+/// `aether.render.destroy_texture` — release a previously-created
+/// texture from the render cap's session-scoped texture registry.
+/// Fire-and-forget; an unknown `texture_id` or the reserved internal
+/// white-texture id logs and drops. Dropping the registry entry releases
+/// staged pixels and any realized GPU resources.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.render.destroy_texture")]
+pub struct DestroyTexture {
+    pub texture_id: u32,
+}
+
 /// One textured quad in a `DrawTexturedQuads` batch. `(x, y)` is the
 /// top-left corner and `(width, height)` the size, both in the unit
 /// the batch's `space` selects — window pixels for `Screen`, pixel

@@ -173,11 +173,137 @@ mod tests {
         ));
     }
 
+    fn test_staged_texture(pixels: Vec<u8>) -> StagedTexture {
+        StagedTexture {
+            width: 2,
+            height: 2,
+            format: TextureFormat::Rgba8,
+            pixels,
+            realized: None,
+            dirty: true,
+        }
+    }
+
     // ADR-0082 retired the frame-bound pending counter; the
     // DrawTriangle → render dispatch path is now covered end-to-end
     // by the bundle scenario tests (`tick_roundtrip_component_to_sink`
     // and the `test_bench_scenario` suite), which exercise it through
     // real settlement rather than a per-mailbox counter poll.
+
+    /// Issue #2831: `destroy_texture` removes a user-owned registry entry,
+    /// dropping its staged pixels and recording the dispatched kind.
+    #[test]
+    fn destroy_texture_removes_registry_entry() {
+        let observed = Arc::new(Mutex::new(Vec::<String>::new()));
+        let config = RenderConfig {
+            observed_kinds: Some(Arc::clone(&observed)),
+            ..RenderConfig::default()
+        };
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<RenderCapability>(config)
+            .build_passive()
+            .expect("build succeeds");
+        let handles = chassis
+            .handle::<RenderHandles>()
+            .expect("RenderCapability publishes RenderHandles");
+        let texture_id = 7;
+        {
+            let mut textures = handles
+                .textures
+                .lock()
+                .expect("textures mutex is not poisoned");
+            textures
+                .entries
+                .insert(texture_id, test_staged_texture(vec![0xAB; 16]));
+        }
+
+        let mail = DestroyTexture { texture_id };
+        let payload = mail.encode_into_bytes();
+        deliver(
+            &registry,
+            RenderCapability::NAMESPACE,
+            <DestroyTexture as Kind>::ID,
+            &payload,
+        );
+
+        thread::sleep(Duration::from_millis(50));
+
+        let textures = handles
+            .textures
+            .lock()
+            .expect("textures mutex is not poisoned");
+        assert!(
+            !textures.entries.contains_key(&texture_id),
+            "destroy_texture should remove the staged registry entry",
+        );
+        drop(textures);
+
+        let seen = observed
+            .lock()
+            .expect("observed_kinds mutex is not poisoned")
+            .clone();
+        assert!(
+            seen.contains(&DestroyTexture::NAME.to_owned()),
+            "destroy_texture handler should push its kind name; observed: {seen:?}",
+        );
+
+        drop(chassis);
+    }
+
+    /// Issue #2831: unknown ids and the reserved internal white texture id
+    /// warn-drop and leave the registry untouched.
+    #[test]
+    fn destroy_texture_unknown_and_reserved_ids_leave_registry_untouched() {
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<RenderCapability>(RenderConfig::default())
+            .build_passive()
+            .expect("build succeeds");
+        let handles = chassis
+            .handle::<RenderHandles>()
+            .expect("RenderCapability publishes RenderHandles");
+        let user_texture_id = 3;
+        {
+            let mut textures = handles
+                .textures
+                .lock()
+                .expect("textures mutex is not poisoned");
+            textures
+                .entries
+                .insert(user_texture_id, test_staged_texture(vec![1; 16]));
+            textures
+                .entries
+                .insert(WHITE_TEXTURE_ID, test_staged_texture(vec![255; 16]));
+        }
+
+        for texture_id in [99, WHITE_TEXTURE_ID] {
+            let mail = DestroyTexture { texture_id };
+            let payload = mail.encode_into_bytes();
+            deliver(
+                &registry,
+                RenderCapability::NAMESPACE,
+                <DestroyTexture as Kind>::ID,
+                &payload,
+            );
+        }
+
+        thread::sleep(Duration::from_millis(50));
+
+        let textures = handles
+            .textures
+            .lock()
+            .expect("textures mutex is not poisoned");
+        assert_eq!(
+            textures.entries.len(),
+            2,
+            "unknown and reserved destroy requests must not remove registry entries",
+        );
+        assert!(textures.entries.contains_key(&user_texture_id));
+        assert!(textures.entries.contains_key(&WHITE_TEXTURE_ID));
+
+        drop(chassis);
+    }
 
     /// ADR-0107 §4: `draw_solid_quads` accumulates into `quad_frame` under
     /// the reserved `WHITE_TEXTURE_ID` and records its kind name in

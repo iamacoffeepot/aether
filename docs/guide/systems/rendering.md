@@ -51,6 +51,7 @@ the `RenderCapability` actor. It handles these payload kinds:
 | `aether.camera` | `{ view_proj: [f32; 16] }`, cast-shaped | the world→clip matrix; latest value wins |
 | `aether.render.create_texture` | `{ width, height, format, pixels }` → `create_texture_result` | register an `Rgba8` or `R8` texture; reply carries the `texture_id` |
 | `aether.render.update_texture` | `{ texture_id, x, y, width, height, pixels }` | overwrite a sub-rect of a texture (atlas growth) |
+| `aether.render.destroy_texture` | `{ texture_id }` | release a registered texture; fire-and-forget |
 | `aether.render.draw_textured_quads` | `{ texture_id, space, quads }` | per-tick textured alpha-blended quads; accumulates into the frame |
 | `aether.render.capture_frame` | `{ mails, after_mails }` | atomic "set state, read back a PNG, clean up" |
 
@@ -64,7 +65,9 @@ via `send_many` (each triangle is `DRAW_TRIANGLE_BYTES` on the wire).
 of quads sampling that texture, each carrying a pixel-unit rect, a uv sub-rect,
 and an RGBA tint. `R8` samples contribute their scalar value in the red channel
 (`vec4(r, 0, 0, 1)`), which is mainly a substrate for material passes; ordinary
-sprite/text atlas callers use `Rgba8`.
+sprite/text atlas callers use `Rgba8`. `destroy_texture` releases a registered
+texture when the producer knows it is no longer used; headless absorbs it as a
+no-op.
 Quads draw through a second alpha-blended pipeline in an overlay pass recorded
 after the world pass, so they always land on top. The accumulate-per-frame
 contract matches `draw_triangle`: resend the batch every frame it should appear.
@@ -98,9 +101,9 @@ last live frame drew.
 **Headless absorbs draw and camera mail.** The headless and hub chassis have no
 GPU, so they compose `HeadlessRenderCapability` on the same `aether.render`
 mailbox: `DrawTriangle`, `aether.camera`, `update_texture`, and
-`draw_textured_quads` no-op (a desktop-built component mailing them every frame
-doesn't warn-storm), and `aether.render.capture_frame` and `create_texture`
-reply `Err` so an MCP call fails fast instead of hanging.
+`destroy_texture`, and `draw_textured_quads` no-op (a desktop-built component
+mailing them every frame doesn't warn-storm), and `aether.render.capture_frame`
+and `create_texture` reply `Err` so an MCP call fails fast instead of hanging.
 
 ## How to use it
 

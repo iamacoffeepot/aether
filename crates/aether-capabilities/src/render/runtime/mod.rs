@@ -61,9 +61,9 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use super::{
-    Camera, CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DrawSolidQuads,
-    DrawTexturedQuads, DrawTriangle, RenderCapability, SolidQuad, TextureFormat, TexturedQuad,
-    UpdateTexture,
+    Camera, CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyTexture,
+    DrawSolidQuads, DrawTexturedQuads, DrawTriangle, RenderCapability, SolidQuad, TextureFormat,
+    TexturedQuad, UpdateTexture,
 };
 
 // These seam items are `pub` (visible in `render`) in their
@@ -483,6 +483,44 @@ impl NativeActor for RenderCapability {
                 texture_id = mail.texture_id,
                 "update_texture rect out of bounds, zero-sized, or pixel length mismatch; \
                  dropping",
+            );
+        }
+    }
+
+    /// `DestroyTexture` handler. Removes a texture from the session
+    /// registry, dropping staged CPU pixels and any realized GPU handles.
+    /// Fire-and-forget: an unknown `texture_id` logs and drops. The
+    /// reserved internal white texture is not caller-owned and cannot be
+    /// destroyed through this public kind.
+    ///
+    /// # Agent
+    /// Mail `aether.render.destroy_texture { texture_id }` when a
+    /// registered texture is no longer used; no reply.
+    #[handler::single]
+    fn on_destroy_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyTexture) {
+        if let Some(obs) = &state.config.observed_kinds {
+            obs.lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063")
+                .push(<DestroyTexture as Kind>::NAME.into());
+        }
+        if mail.texture_id == WHITE_TEXTURE_ID {
+            tracing::warn!(
+                target: "aether_capabilities::render",
+                texture_id = mail.texture_id,
+                "destroy_texture for reserved internal texture id; dropping",
+            );
+            return;
+        }
+        let mut registry = state
+            .handles
+            .textures
+            .lock()
+            .expect("mutex poisoned; fail-fast per ADR-0063");
+        if registry.entries.remove(&mail.texture_id).is_none() {
+            tracing::warn!(
+                target: "aether_capabilities::render",
+                texture_id = mail.texture_id,
+                "destroy_texture for unknown texture id; dropping",
             );
         }
     }
