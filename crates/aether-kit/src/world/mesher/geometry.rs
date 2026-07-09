@@ -1,4 +1,5 @@
 use aether_capabilities::render::{DrawTriangle, Vertex};
+use aether_math::Rgb;
 
 use super::constants::OCTIMETERS_PER_METER;
 
@@ -21,9 +22,7 @@ pub(super) fn emit_flat_quad(
             x: wx,
             y: surface(wx, wz),
             z: wz,
-            r: color[0],
-            g: color[1],
-            b: color[2],
+            color: Rgb::new(color[0], color[1], color[2]),
         }
     };
     let a = corner(rect[0], rect[1]);
@@ -49,9 +48,7 @@ pub(super) fn push_wall_quad(
         x,
         y,
         z,
-        r: color[0],
-        g: color[1],
-        b: color[2],
+        color: Rgb::new(color[0], color[1], color[2]),
     };
     let a = vert(top_a[0], top_a[1], top_a[2]);
     let b = vert(top_b[0], top_b[1], top_b[2]);

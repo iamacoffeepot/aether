@@ -1,4 +1,5 @@
 use aether_capabilities::render::{DrawTriangle, Vertex};
+use aether_math::Rgb;
 
 use crate::world::{CellPos, ChunkPos, Material, World};
 
@@ -147,9 +148,7 @@ pub(super) fn emit_void_floors(
                         x: wx,
                         y,
                         z: wz,
-                        r: rgb[0],
-                        g: rgb[1],
-                        b: rgb[2],
+                        color: Rgb::new(rgb[0], rgb[1], rgb[2]),
                     };
                     push_quad(
                         tris,

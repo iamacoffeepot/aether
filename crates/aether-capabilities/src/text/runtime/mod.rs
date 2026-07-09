@@ -656,6 +656,7 @@ mod tests {
     use crate::fs::FsError;
     use crate::render::DrawTexturedQuads;
     use aether_data::{Kind, MailId, SessionToken, SourceAddr, Uuid};
+    use aether_math::Rgba;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::testing::{
@@ -752,7 +753,7 @@ mod tests {
                 font_id,
                 text: text.to_owned(),
                 size_pixels,
-                color: [1.0, 1.0, 1.0, 1.0],
+                color: Rgba::new(1.0, 1.0, 1.0, 1.0),
                 origin,
                 space: QuadSpace::Screen,
                 clip: None,

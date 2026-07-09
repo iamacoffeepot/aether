@@ -28,6 +28,7 @@ use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::{DrawSolidQuads, SolidQuad};
 use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::{QuadSpace, Tick};
+use aether_math::Rgba;
 use aether_test_fixtures_kinds::UiWidgetConfig;
 
 pub struct UiWidget {
@@ -68,7 +69,7 @@ impl WasmActor for UiWidget {
                 y: 0.0,
                 width: 4.0,
                 height: 4.0,
-                color: [0.2, 0.4, 0.8, 1.0],
+                color: Rgba::new(0.2, 0.4, 0.8, 1.0),
             });
         }
         ctx.actor::<RenderCapability>().send(&DrawSolidQuads {

@@ -2,6 +2,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_capabilities::render::{DrawTriangle, Vertex};
+use aether_math::Rgb;
 
 use crate::world::{CellPos, ChunkPos, Material, STEP_MAX_OCTIMETERS, World};
 
@@ -461,9 +462,7 @@ fn emit_mixed_window(
                 x: wx,
                 y,
                 z: wz,
-                r: color[0],
-                g: color[1],
-                b: color[2],
+                color: Rgb::new(color[0], color[1], color[2]),
             }
         };
         for poly in label_window_polys(case, connected) {

@@ -66,6 +66,7 @@ use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::{DrawTriangle, Vertex};
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
 use aether_kinds::{Key, TextInput, Tick};
+use aether_math::Rgb;
 use aether_test_fixtures_kinds::{
     ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig, SetRender, TEST_BENCH_OBSERVER_MAILBOX_NAME,
     TextInputObserved, TickObserved,
@@ -132,9 +133,7 @@ impl WasmActor for Probe {
                 x,
                 y,
                 z: 0.5,
-                r,
-                g,
-                b,
+                color: Rgb::new(r, g, b),
             };
             ctx.actor::<RenderCapability>().send(&DrawTriangle {
                 verts: [v(-0.9, -0.9), v(0.9, -0.9), v(0.0, 0.9)],

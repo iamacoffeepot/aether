@@ -26,6 +26,7 @@ use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::{DrawTriangle, Vertex};
 use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::{Ping, Pong, Tick};
+use aether_math::Rgb;
 
 static TRIANGLE: DrawTriangle = DrawTriangle {
     verts: [
@@ -33,25 +34,19 @@ static TRIANGLE: DrawTriangle = DrawTriangle {
             x: 0.0,
             y: 0.5,
             z: 0.0,
-            r: 1.0,
-            g: 0.0,
-            b: 0.0,
+            color: Rgb::new(1.0, 0.0, 0.0),
         },
         Vertex {
             x: -0.5,
             y: -0.5,
             z: 0.0,
-            r: 0.0,
-            g: 1.0,
-            b: 0.0,
+            color: Rgb::new(0.0, 1.0, 0.0),
         },
         Vertex {
             x: 0.5,
             y: -0.5,
             z: 0.0,
-            r: 0.0,
-            g: 0.0,
-            b: 1.0,
+            color: Rgb::new(0.0, 0.0, 1.0),
         },
     ],
 };

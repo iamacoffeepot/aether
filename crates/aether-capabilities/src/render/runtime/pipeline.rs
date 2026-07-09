@@ -326,7 +326,7 @@ impl RenderHandles {
                             &mut vertex_bytes,
                             [quad.x, quad.y, quad.width, quad.height],
                             [quad.u0, quad.v0, quad.u1, quad.v1],
-                            quad.tint,
+                            quad.tint.to_array(),
                         );
                     }
                 }
@@ -345,7 +345,7 @@ impl RenderHandles {
                             *anchor,
                             [quad.x, quad.y, quad.width, quad.height],
                             [quad.u0, quad.v0, quad.u1, quad.v1],
-                            quad.tint,
+                            quad.tint.to_array(),
                             k,
                         );
                     }
@@ -450,7 +450,7 @@ impl RenderHandles {
                     };
                     for rect in rects {
                         let Some(params_offset) =
-                            push_textured_params(&mut textured_params, rect.tint)
+                            push_textured_params(&mut textured_params, rect.tint.to_array())
                         else {
                             tracing::warn!(
                                 target: "aether_capabilities::render",
@@ -500,8 +500,8 @@ impl RenderHandles {
                     for rect in rects {
                         let Some(params_offset) = push_coverage_params(
                             &mut coverage_params,
-                            rect.body_color,
-                            rect.rim_color,
+                            rect.body_color.to_array(),
+                            rect.rim_color.to_array(),
                             rect.rim_width,
                         ) else {
                             tracing::warn!(
