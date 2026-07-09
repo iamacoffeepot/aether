@@ -114,16 +114,23 @@ reply. If a reply matters, that's a separate, explicit contract between the two
 kinds — never an implicit "every kind has a response." Don't write a caller
 that blocks waiting for a reply a handler never agreed to send.
 
-**When several requests are in flight, track the envelope id.** A wasm actor
-that sends a one-shot request and needs to match the later reply should call
-`send_tracked(&request)`, stash the returned `RequestId`, and compare it with
-`ctx.in_reply_to()` in the reply handler. `in_reply_to()` returns `None` for
-ordinary inbound requests, uncorrelated mail, and inline-cluster local dispatches
-that never crossed the host envelope boundary. Echoed payload fields such as
-`namespace` + `path` on `aether.fs.read_result` remain useful domain context,
-but exact duplicate-safe matching belongs to the envelope request id. Multi
-emissions and detached data phases still carry their own domain-level
-correlation in their payloads.
+**When several requests are in flight, carry a typed request context.** A
+one-shot request that needs to match a later reply should call
+`send_with_context(&request, &context)` and recover the bookkeeping in the
+reply handler with `ctx.take_context::<Context>()`. Contexts are `Kind`s, so the
+table stores schema-typed bytes, checks the `KindId` on take, and rides guest
+dehydrate/rehydrate automatically. Keep contexts small: stash routing
+bookkeeping such as the caller's reply handle, origin, or parse mode; keep bulky
+domain state in actor fields and put only an id in the context.
+
+The lower-level `send_tracked(&request)` / `ctx.in_reply_to()` pair is still
+available when the request id itself is the domain key. `in_reply_to()` returns
+`None` for ordinary inbound requests, uncorrelated mail, and inline-cluster local
+dispatches that never crossed the host envelope boundary. Echoed payload fields
+such as `namespace` + `path` on `aether.fs.read_result` remain useful domain
+context, but exact duplicate-safe matching belongs to the request context or
+envelope request id. Multi emissions and detached data phases still carry their
+own domain-level correlation in their payloads.
 
 **The ordering spine** ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)) — **the single contract to hold in your head
 when writing handlers.** Get it wrong and you write code that passes in dev and

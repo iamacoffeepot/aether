@@ -62,12 +62,14 @@ shape: **return now, continue later.**
 The idiomatic shape is a small state machine spread across handler invocations:
 send the request, *return* from the handler (freeing the worker), and handle the
 reply when it arrives as a *separate* mail in a later handler call. Correlation
-survives across turns through the envelope request id: a wasm handler calls
-`send_tracked(&request)`, stashes the returned `RequestId`, and later compares
-it with `ctx.in_reply_to()` in the reply handler, so duplicate in-flight
-requests don't get confused (the surviving half of [ADR-0042](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0042-synchronous-mail-wait.md)). Every
-request/reply in the engine works this way: `aether.fs.read` →
-`…read_result`, reply-to-sender, and the rest.
+survives across turns through a typed request context: call
+`send_with_context(&request, &context)` and later recover it with
+`ctx.take_context::<Context>()`, so duplicate in-flight requests don't get
+confused (the surviving half of [ADR-0042](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0042-synchronous-mail-wait.md)). The context should be small
+bookkeeping; bulky state belongs in actor fields. Every request/reply in the
+engine works this way: `aether.fs.read` → `…read_result`, reply-to-sender, and
+the rest. Use the lower-level `send_tracked` / `ctx.in_reply_to()` only when the
+raw request id is itself the domain key.
 
 **2. Blocking I/O or slow off-thread work → `dispatch_blocking` + `#[handler(task)]`.**
 When a (native) capability must make a genuinely blocking call — a multi-second

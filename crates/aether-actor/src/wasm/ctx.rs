@@ -28,7 +28,7 @@ use crate::model::{
     validate_namespace_segment,
 };
 use crate::wasm::bridge::{mail, persist};
-use crate::wasm::inline::{ChainMode, Registry};
+use crate::wasm::inline::{ChainMode, Registry, RouteDecision};
 use crate::wasm::mailbox::WasmActorMailbox;
 use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor};
 use alloc::boxed::Box;
@@ -409,6 +409,16 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         (correlation != Source::NO_CORRELATION).then_some(RequestId(correlation))
     }
 
+    /// Recover and remove the typed context for the request this inbound reply
+    /// answers. Returns `None` for ordinary mail, unmatched replies, wrong
+    /// context kind, or decode failure.
+    pub fn take_context<C: Kind>(&mut self) -> Option<C> {
+        let request = self.in_reply_to()?;
+        // SAFETY: the macro-emitted registry is accessed only under the
+        // serialized wasm guest entrypoint.
+        unsafe { self.inline.request_contexts_mut().take(request) }
+    }
+
     /// The component's own mailbox id — the value the substrate uses to
     /// address `receive` calls to this instance. `wire`-stage explicit
     /// subscribes (sending `SubscribeInput` to the `InputCapability`)
@@ -744,6 +754,38 @@ impl<'a, M: ReplyMode> WasmCtx<'a, M> {
         );
     }
 
+    /// Send through a stored mailbox token and store a typed context for the
+    /// reply correlation id.
+    #[must_use]
+    pub fn send_with_context<K: Kind, C: Kind>(
+        &mut self,
+        mailbox: Mailbox<K>,
+        payload: &K,
+        context: &C,
+    ) -> RequestId {
+        match self.inline.route_decision(mailbox.mailbox()) {
+            RouteDecision::Local => {
+                tracing::warn!(
+                    kind = K::NAME,
+                    recipient = mailbox.mailbox(),
+                    "send_with_context on an inline-cluster local route has no host correlation",
+                );
+                self.send(mailbox, payload);
+                RequestId(Source::NO_CORRELATION)
+            }
+            RouteDecision::Remote => {
+                self.send(mailbox, payload);
+                let request = RequestId(mail::prev_correlation());
+                // SAFETY: the macro-emitted registry is accessed only under the
+                // serialized wasm guest entrypoint.
+                unsafe {
+                    self.inline.request_contexts_mut().insert(request, context);
+                }
+                request
+            }
+        }
+    }
+
     /// Issue 1987: send `payload` to a raw [`MailboxId`], threading this
     /// actor's own id as the send's `from`. The by-id escape hatch for a
     /// recipient address known only at runtime (the typed-token counterpart
@@ -755,6 +797,38 @@ impl<'a, M: ReplyMode> WasmCtx<'a, M> {
         let bytes = payload.encode_into_bytes();
         self.inline
             .route_or_enqueue(id.0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.mailbox);
+    }
+
+    /// Send to a raw mailbox id and store a typed context for the reply
+    /// correlation id.
+    #[must_use]
+    pub fn send_to_with_context<K: Kind, C: Kind>(
+        &mut self,
+        id: MailboxId,
+        payload: &K,
+        context: &C,
+    ) -> RequestId {
+        match self.inline.route_decision(id.0) {
+            RouteDecision::Local => {
+                tracing::warn!(
+                    kind = K::NAME,
+                    recipient = id.0,
+                    "send_to_with_context on an inline-cluster local route has no host correlation",
+                );
+                self.send_to(id, payload);
+                RequestId(Source::NO_CORRELATION)
+            }
+            RouteDecision::Remote => {
+                self.send_to(id, payload);
+                let request = RequestId(mail::prev_correlation());
+                // SAFETY: the macro-emitted registry is accessed only under the
+                // serialized wasm guest entrypoint.
+                unsafe {
+                    self.inline.request_contexts_mut().insert(request, context);
+                }
+                request
+            }
+        }
     }
 }
 

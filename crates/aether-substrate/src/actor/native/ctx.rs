@@ -621,6 +621,14 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         }
     }
 
+    /// Recover and remove the typed context for the request this inbound reply
+    /// answers. Returns `None` for ordinary mail, unmatched replies, wrong
+    /// context kind, or decode failure.
+    pub fn take_context<C: Kind>(&mut self) -> Option<C> {
+        let request = self.in_reply_to()?;
+        self.binding.take_request_context(request)
+    }
+
     native_sender_methods!();
 
     /// Reply to an explicit [`Source`] under an explicit `(root, parent)`
@@ -1432,6 +1440,56 @@ mod tests {
     }
 
     impl HandlesKind<CastOnly> for StubActor {}
+
+    #[derive(
+        aether_data::Kind,
+        aether_data::Schema,
+        serde::Serialize,
+        serde::Deserialize,
+        Debug,
+        Clone,
+        PartialEq,
+    )]
+    #[kind(name = "test.native_request_context")]
+    struct NativeRequestContext {
+        value: u32,
+    }
+
+    #[test]
+    fn native_ctx_take_context_consumes_stored_reply_context() {
+        use crate::testing::bare_substrate;
+
+        let (_registry, mailer) = bare_substrate();
+        let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF10)));
+        binding.store_request_context(RequestId(77), &NativeRequestContext { value: 9 });
+
+        let reply_source = Source::with_correlation(SourceAddr::None, 77);
+        let mut ctx = NativeCtx::new(&binding, reply_source, MailId::NONE, MailId::NONE);
+
+        assert_eq!(
+            ctx.take_context::<NativeRequestContext>(),
+            Some(NativeRequestContext { value: 9 })
+        );
+        assert_eq!(ctx.take_context::<NativeRequestContext>(), None);
+    }
+
+    #[test]
+    fn native_actor_mailbox_send_with_context_stores_by_minted_correlation() {
+        use crate::testing::bare_substrate;
+
+        let (_registry, mailer) = bare_substrate();
+        let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF11)));
+        let mailbox =
+            NativeActorMailbox::<'_, StubActor>::__new_in_flight(0x00FE_ED01, &binding, None, None);
+
+        let mail_id =
+            mailbox.send_with_context(&CastOnly { code: 1 }, &NativeRequestContext { value: 13 });
+
+        assert_eq!(
+            binding.take_request_context::<NativeRequestContext>(RequestId(mail_id.correlation_id)),
+            Some(NativeRequestContext { value: 13 })
+        );
+    }
 
     /// ADR-0080 §7 (issue 1802): a handler's `ctx.actor::<R>().send()`
     /// inherits the in-flight causal chain — the recipient mail lands

@@ -54,6 +54,7 @@ pub mod local;
 pub mod log;
 pub mod mail;
 pub mod model;
+pub mod request_context;
 pub mod trace;
 pub mod wasm;
 
@@ -66,6 +67,9 @@ pub use model::{
     Actor, Addressable, EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced, Lifecycle,
     Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Resolve, Singleton, Subname,
     validate_namespace_segment,
+};
+pub use request_context::{
+    REQUEST_CONTEXT_CAPACITY, RequestContextTable, compose_state_envelope, split_state_envelope,
 };
 // Issue 665: `Mailbox<K, T>` and `ActorMailbox<'_, R, T>` retired; the
 // surviving [`mail::mailbox::Mailbox<K>`] is a transport-free

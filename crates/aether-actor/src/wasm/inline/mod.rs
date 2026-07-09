@@ -47,6 +47,7 @@ use core::cell::{Cell, UnsafeCell};
 use aether_data::MailboxId;
 
 use crate::mail::{Mail, NO_REPLY_HANDLE};
+use crate::request_context::RequestContextTable;
 use crate::wasm::ErasedWasmActor;
 use crate::wasm::bridge::mail;
 use crate::wasm::ctx::{ActorTypeTag, SpawnError, WasmCtx};
@@ -219,6 +220,10 @@ pub struct Registry {
     /// handled by the queue — a busy target is just a later queue item —
     /// not by nested dispatch.
     queue: UnsafeCell<VecDeque<QueuedMail>>,
+    /// SDK-owned request contexts keyed by host reply correlation id
+    /// (ADR-0139). Lives beside the inline registry because every wasm ctx and
+    /// mailbox already carries this macro-emitted per-component static.
+    request_contexts: UnsafeCell<RequestContextTable>,
     /// The `export!`-installed by-tag spawn resolver (issue 2692), or `None`
     /// on a raw registry never wired by `export!` (a host-unit registry).
     /// Set once from each init shim — the resolver enumerates the module's
@@ -249,7 +254,31 @@ impl Registry {
             inner: UnsafeCell::new(BTreeMap::new()),
             self_id: Cell::new(0),
             queue: UnsafeCell::new(VecDeque::new()),
+            request_contexts: UnsafeCell::new(RequestContextTable::new()),
             spawn_resolver: Cell::new(None),
+        }
+    }
+
+    /// Mutably borrow the per-component request-context table.
+    ///
+    /// # Safety
+    /// The caller must be running under the serialized wasm guest entrypoint,
+    /// the same invariant required by the rest of `Registry`'s interior
+    /// mutable state.
+    #[doc(hidden)]
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn request_contexts_mut(&self) -> &mut RequestContextTable {
+        // SAFETY: caller upholds the serialized-dispatch invariant.
+        unsafe { &mut *self.request_contexts.get() }
+    }
+
+    /// Replace the per-component request-context table during rehydrate.
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub fn restore_request_contexts(&self, table: RequestContextTable) {
+        // SAFETY: see [`Self::request_contexts_mut`].
+        unsafe {
+            *self.request_contexts.get() = table;
         }
     }
 

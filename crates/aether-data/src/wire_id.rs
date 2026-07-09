@@ -14,6 +14,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::Schema;
+use crate::schema::{LabelNode, NamedField, SchemaType};
+use alloc::borrow::Cow;
+
 pub use uuid::Uuid;
 
 /// Hub-assigned stable identity for an engine connection. Fresh per
@@ -22,6 +26,18 @@ pub use uuid::Uuid;
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EngineId(pub Uuid);
 
+impl Schema for EngineId {
+    const SCHEMA: SchemaType = SchemaType::Struct {
+        fields: Cow::Borrowed(&[NamedField {
+            name: Cow::Borrowed("uuid"),
+            ty: SchemaType::Bytes,
+        }]),
+        repr_c: false,
+    };
+    const LABEL: Option<&'static str> = Some("aether.engine_id");
+    const LABEL_NODE: LabelNode = LabelNode::Anonymous;
+}
+
 /// Hub-minted routing handle for a Claude MCP session. The engine
 /// treats it as opaque bytes: it only echoes tokens the hub handed it
 /// on inbound mail back as the address on a reply. The hub validates
@@ -29,6 +45,18 @@ pub struct EngineId(pub Uuid);
 /// (per ADR-0008).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionToken(pub Uuid);
+
+impl Schema for SessionToken {
+    const SCHEMA: SchemaType = SchemaType::Struct {
+        fields: Cow::Borrowed(&[NamedField {
+            name: Cow::Borrowed("uuid"),
+            ty: SchemaType::Bytes,
+        }]),
+        repr_c: false,
+    };
+    const LABEL: Option<&'static str> = Some("aether.session_token");
+    const LABEL_NODE: LabelNode = LabelNode::Anonymous;
+}
 
 impl SessionToken {
     /// Placeholder used before session tracking lands at the hub.

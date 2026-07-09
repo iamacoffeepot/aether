@@ -730,11 +730,19 @@ macro_rules! __export_internal {
             // composite is byte-identical to the parent's own blob, so a
             // childless component dehydrates exactly as before; a parent
             // that saves nothing and has no children skips the host save.
-            if let Some((version, bytes)) = $crate::wasm::inline::compose::dehydrate(
+            let __aether_user_state = $crate::wasm::inline::compose::dehydrate(
                 mailbox_id,
                 &__AETHER_INLINE,
                 |ctx| <$component as $crate::WasmActor>::on_dehydrate(instance, ctx),
-            ) {
+            );
+            let __aether_state = {
+                // SAFETY: `on_dehydrate` runs under the serialized wasm guest
+                // entrypoint, matching the registry's interior-mutability
+                // invariant.
+                let __aether_contexts = unsafe { __AETHER_INLINE.request_contexts_mut() };
+                $crate::compose_state_envelope(__aether_contexts, __aether_user_state)
+            };
+            if let Some((version, bytes)) = __aether_state {
                 let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new(mailbox_id);
                 ctx.save_state(version, &bytes);
             }
@@ -772,9 +780,12 @@ macro_rules! __export_internal {
                 // ABI); the slice is bounded by this call.
                 unsafe { ::core::slice::from_raw_parts(ptr as usize as *const u8, len as usize) }
             };
+            let (__aether_contexts, __aether_user_version, __aether_user_bytes) =
+                $crate::split_state_envelope(version, prior_bytes);
+            __AETHER_INLINE.restore_request_contexts(__aether_contexts);
             $crate::wasm::inline::compose::reconstruct_inline_children(
-                version,
-                prior_bytes,
+                __aether_user_version,
+                &__aether_user_bytes,
                 &__AETHER_INLINE,
                 |parent_version, parent_bytes| {
                     let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
@@ -1277,11 +1288,19 @@ macro_rules! __export_multi_internal {
             // composite, then `save_state` once (the boxed instance's
             // dehydrate routes through `erased_on_dehydrate`). Childless ⇒
             // byte-identical to the boxed parent's own blob.
-            if let Some((version, bytes)) = $crate::wasm::inline::compose::dehydrate(
+            let __aether_user_state = $crate::wasm::inline::compose::dehydrate(
                 mailbox_id,
                 &__AETHER_INLINE,
                 |ctx| instance.erased_on_dehydrate(ctx),
-            ) {
+            );
+            let __aether_state = {
+                // SAFETY: `on_dehydrate` runs under the serialized wasm guest
+                // entrypoint, matching the registry's interior-mutability
+                // invariant.
+                let __aether_contexts = unsafe { __AETHER_INLINE.request_contexts_mut() };
+                $crate::compose_state_envelope(__aether_contexts, __aether_user_state)
+            };
+            if let Some((version, bytes)) = __aether_state {
                 let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new(mailbox_id);
                 ctx.save_state(version, &bytes);
             }
@@ -1316,9 +1335,12 @@ macro_rules! __export_multi_internal {
                 // ABI); the slice is bounded by this call.
                 unsafe { ::core::slice::from_raw_parts(ptr as usize as *const u8, len as usize) }
             };
+            let (__aether_contexts, __aether_user_version, __aether_user_bytes) =
+                $crate::split_state_envelope(version, prior_bytes);
+            __AETHER_INLINE.restore_request_contexts(__aether_contexts);
             $crate::wasm::inline::compose::reconstruct_inline_children(
-                version,
-                prior_bytes,
+                __aether_user_version,
+                &__aether_user_bytes,
                 &__AETHER_INLINE,
                 |parent_version, parent_bytes| {
                     // ADR-0112: the boxed `ErasedWasmActor` seam carries the
