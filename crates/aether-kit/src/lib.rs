@@ -20,10 +20,11 @@
 //! - [`mesh::MeshViewer`] — loads a `.dsl` / `.obj` mesh file and replays it
 //!   to the render sink, selected by the `aether_kit@aether.kit.mesh`
 //!   export. Its `aether.kit.mesh.load` kind lives in [`mesh`].
-//! - [`world::WorldView`] — meshes the chunked world plane stack into the
-//!   keyed-quilt gouache grammar, selected by the `aether_kit@aether.kit.world`
-//!   export. The [`world`] module also holds the `World` / `Chunk` /
-//!   `Material` data layer and the `aether.kit.world.*` wire kinds it meshes.
+//! - [`world::WorldView`] — meshes the chunked world plane stack into a
+//!   flat-color marching-squares base render, selected by the
+//!   `aether_kit@aether.kit.world` export. The [`world`] module also holds
+//!   the `World` / `Chunk` / `Material` data layer and the
+//!   `aether.kit.world.*` wire kinds it meshes.
 //! - [`mover::WorldMover`] — the input-driven body that walks the painted
 //!   world, selected by the `aether_kit@aether.kit.mover` export. Its
 //!   `aether.kit.mover.teleport` placement kind lives in [`mover`].
@@ -77,8 +78,7 @@ pub use widget::{
 pub use world::{
     CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk, ChunkPos,
     HEIGHT_POINT_INHERIT, HEIGHT_POINTS_PER_CHUNK, Material, Region, SetCellHeights, SetCellPoints,
-    SetChunk, SetMaterialStyle, SetRegion, SetSmoothingProfile, SetViewMode, SetWaterPlane,
-    SmoothingProfile, ViewMode, WaterPlane, World, WorldDecodeError, WorldLoad,
+    SetChunk, SetRegion, SmoothingProfile, WaterPlane, World, WorldDecodeError, WorldLoad,
 };
 
 /// Octimeters per tile: `1 tile = 1 meter = 256 octimeters`.
