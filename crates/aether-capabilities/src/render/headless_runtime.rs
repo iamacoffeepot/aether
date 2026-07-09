@@ -33,8 +33,8 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use super::{
-    Camera, CreateTexture, CreateTextureResult, DrawSolidQuads, DrawTexturedQuads, DrawTriangle,
-    HeadlessRenderCapability, UpdateTexture,
+    Camera, CreateTexture, CreateTextureResult, DestroyTexture, DrawSolidQuads, DrawTexturedQuads,
+    DrawTriangle, HeadlessRenderCapability, UpdateTexture,
 };
 
 /// `HeadlessRenderCapability` runtime state. Holds only the [`HubOutbound`]
@@ -130,6 +130,17 @@ impl NativeActor for HeadlessRenderCapability {
     /// warn path — mirrors `on_draw_triangle`.
     #[handler::single]
     fn on_update_texture(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: UpdateTexture) {
+    }
+
+    /// `DestroyTexture` lands here as a no-op so desktop-designed
+    /// components running on headless don't trip the unknown-mailbox
+    /// warn path — mirrors `on_update_texture`.
+    #[handler::single]
+    fn on_destroy_texture(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: DestroyTexture,
+    ) {
     }
 
     /// `DrawTexturedQuads` lands here as a no-op for the same reason

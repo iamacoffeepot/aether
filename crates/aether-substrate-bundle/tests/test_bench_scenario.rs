@@ -36,8 +36,8 @@ use aether_capabilities::fs::{
     Delete, DeleteResult, FsError, List, ListResult, Read, ReadResult, Write, WriteResult,
 };
 use aether_capabilities::render::{
-    Camera, CreateTexture, CreateTextureResult, DrawSolidQuads, DrawTexturedQuads, SolidQuad,
-    TextureFormat, TexturedQuad, UpdateTexture,
+    Camera, CreateTexture, CreateTextureResult, DestroyTexture, DrawSolidQuads, DrawTexturedQuads,
+    SolidQuad, TextureFormat, TexturedQuad, UpdateTexture,
 };
 use aether_capabilities::text::{
     DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult,
@@ -962,6 +962,99 @@ fn textured_quad_draws_screen_space_rect() {
         cleared_coverage < 0.01,
         "after the quad stopped being sent the frame should be uniform clear color, \
          but coverage was {cleared_coverage} (immediate-mode clear did not run)",
+    );
+}
+
+/// Issue #2831: a destroyed texture is removed from the registry, so a
+/// later draw using the old id warn-drops during frame record and the
+/// captured frame returns to clear color.
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn destroyed_texture_draw_drops_from_frame() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let (frame_width, frame_height) = (64u32, 48u32);
+    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+
+    let texture_width = 8u32;
+    let texture_height = 8u32;
+    let pixels = vec![255u8; (texture_width * texture_height * 4) as usize];
+    let created = bench
+        .execute(vec![(
+            "create",
+            BenchOp::send_and_await(
+                "aether.render",
+                &CreateTexture {
+                    width: texture_width,
+                    height: texture_height,
+                    format: TextureFormat::Rgba8,
+                    pixels,
+                },
+            ),
+        )])
+        .expect("create_texture sequence");
+    let texture_id = match created
+        .reply::<CreateTextureResult>("create")
+        .expect("decode CreateTextureResult")
+    {
+        CreateTextureResult::Ok { texture_id } => texture_id,
+        CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
+    };
+
+    let draw = || {
+        envelope(
+            "aether.render",
+            &DrawTexturedQuads {
+                texture_id,
+                space: QuadSpace::Screen,
+                quads: vec![TexturedQuad {
+                    x: 16.0,
+                    y: 12.0,
+                    width: 24.0,
+                    height: 18.0,
+                    u0: 0.0,
+                    v0: 0.0,
+                    u1: 1.0,
+                    v1: 1.0,
+                    tint: [1.0, 1.0, 1.0, 1.0],
+                }],
+            },
+        )
+    };
+
+    let captured = bench
+        .execute(vec![(
+            "snap",
+            BenchOp::capture_with_mails(vec![draw()], vec![]),
+        )])
+        .expect("capture with live texture");
+    let png = captured.captured("snap").expect("snap step ran");
+    let img = decode_png(png).expect("decode capture png");
+    let bg = background_top_left(&img);
+    let drawn = coverage(&img, bg, 5);
+    assert!(
+        (0.08..0.22).contains(&drawn),
+        "live texture quad coverage {drawn} fell outside the expected band",
+    );
+
+    let destroyed = bench
+        .execute(vec![
+            (
+                "destroy",
+                BenchOp::send_mail("aether.render", &DestroyTexture { texture_id }),
+            ),
+            ("advance", BenchOp::advance(1)),
+            ("snap2", BenchOp::capture_with_mails(vec![draw()], vec![])),
+        ])
+        .expect("destroy texture and capture same draw next frame");
+    let png2 = destroyed.captured("snap2").expect("snap2 step ran");
+    let img2 = decode_png(png2).expect("decode destroyed capture png");
+    let destroyed_coverage = coverage(&img2, background_top_left(&img2), 5);
+    assert!(
+        destroyed_coverage < 0.01,
+        "after destroy the same draw should drop from the frame, but coverage was \
+         {destroyed_coverage}",
     );
 }
 
