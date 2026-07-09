@@ -337,9 +337,11 @@ fn configured_font_override_renders_into_history_band() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut config = ConsoleConfig::default();
-    config.font_namespace = String::from("assets");
-    config.font_path = String::from("fonts/RobotoMono.ttf");
+    let config = ConsoleConfig {
+        font_namespace: String::from("assets"),
+        font_path: String::from("fonts/RobotoMono.ttf"),
+        ..ConsoleConfig::default()
+    };
     let mut bench = build_bench();
     load_console_with_config(&mut bench, &wasm, &config);
 

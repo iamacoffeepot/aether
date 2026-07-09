@@ -365,7 +365,7 @@ impl ConsoleOverlay {
     }
 
     fn request_configured_font<M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, M>) {
-        self.request_font(
+        Self::request_font(
             ctx,
             self.config.font_namespace.as_str(),
             self.config.font_path.as_str(),
@@ -388,7 +388,6 @@ impl ConsoleOverlay {
     }
 
     fn request_font<M: ReplyMode>(
-        &self,
         ctx: &mut WasmCtx<'_, M>,
         namespace: &str,
         path: &str,
