@@ -13,6 +13,7 @@
 //! draw kinds below import them from there.
 
 use aether_kinds::{ClipRect, QuadSpace};
+use aether_math::{Rgb, Rgba};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
@@ -28,9 +29,7 @@ pub struct Vertex {
     pub x: f32,
     pub y: f32,
     pub z: f32,
-    pub r: f32,
-    pub g: f32,
-    pub b: f32,
+    pub color: Rgb,
 }
 
 /// A draw-triangle item. One `DrawTriangle` is three vertices; the mail
@@ -158,7 +157,7 @@ pub struct DestroyTexture {
 /// offsets from the anchor for `World`. `(u0, v0)`–`(u1, v1)` is the
 /// uv sub-rect sampled from the batch's texture (`0,0` top-left to
 /// `1,1` bottom-right). `tint` is a linear RGBA multiplier applied to
-/// the sampled texel — `[1.0; 4]` draws the texture unmodified; the
+/// the sampled texel — `Rgba::WHITE` draws the texture unmodified; the
 /// alpha channel scales the blend. Not a kind on its own — only
 /// addressable inside `DrawTexturedQuads.quads`.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -171,7 +170,7 @@ pub struct TexturedQuad {
     pub v0: f32,
     pub u1: f32,
     pub v1: f32,
-    pub tint: [f32; 4],
+    pub tint: Rgba,
 }
 
 /// `aether.render.draw_textured_quads` — draw a batch of textured,
@@ -204,7 +203,7 @@ pub struct SolidQuad {
     pub y: f32,
     pub width: f32,
     pub height: f32,
-    pub color: [f32; 4],
+    pub color: Rgba,
 }
 
 /// `aether.render.draw_solid_quads` — draw a batch of flat-colored,
@@ -247,7 +246,7 @@ pub struct MaterialTexturedRect {
     pub v0: f32,
     pub u1: f32,
     pub v1: f32,
-    pub tint: [f32; 4],
+    pub tint: Rgba,
 }
 
 /// `aether.render.material.textured` — draw depth-tested, alpha-blended
@@ -270,8 +269,8 @@ pub struct DrawMaterialTextured {
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MaterialCoverageRect {
     pub rect: MaterialRect,
-    pub body_color: [f32; 4],
-    pub rim_color: [f32; 4],
+    pub body_color: Rgba,
+    pub rim_color: Rgba,
     pub rim_width: f32,
 }
 
@@ -298,9 +297,7 @@ mod tests {
             x: 0.0,
             y: 0.5,
             z: 0.0,
-            r: 1.0,
-            g: 0.0,
-            b: 0.0,
+            color: Rgb::new(1.0, 0.0, 0.0),
         };
         let tris = [
             DrawTriangle { verts: [v, v, v] },

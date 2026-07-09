@@ -43,7 +43,7 @@ use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::{DrawTriangle, Vertex};
 use aether_capabilities::{FsCapability, LifecycleCapability, RenderCapability};
 use aether_kinds::{MeshLoadResult, Render};
-use aether_math::Vec3;
+use aether_math::{Rgb, Vec3};
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
 use serde::{Deserialize, Serialize};
 
@@ -390,32 +390,26 @@ fn to_draw_triangle_palette(tri: [Point3; 3], color: u32) -> DrawTriangle {
 }
 
 fn to_draw_triangle_rgb(tri: [Vec3; 3], rgb: (f32, f32, f32)) -> DrawTriangle {
-    let (r, g, b) = rgb;
+    let color = Rgb::new(rgb.0, rgb.1, rgb.2);
     DrawTriangle {
         verts: [
             Vertex {
                 x: tri[0].x,
                 y: tri[0].y,
                 z: tri[0].z,
-                r,
-                g,
-                b,
+                color,
             },
             Vertex {
                 x: tri[1].x,
                 y: tri[1].y,
                 z: tri[1].z,
-                r,
-                g,
-                b,
+                color,
             },
             Vertex {
                 x: tri[2].x,
                 y: tri[2].y,
                 z: tri[2].z,
-                r,
-                g,
-                b,
+                color,
             },
         ],
     }
@@ -435,7 +429,11 @@ pub enum ObjParseError {
 pub fn parse_obj(text: &str) -> Result<Vec<DrawTriangle>, ObjParseError> {
     let mut vertices: Vec<[f32; 3]> = Vec::new();
     let mut triangles: Vec<DrawTriangle> = Vec::new();
-    let (cr, cg, cb) = OBJ_DEFAULT_COLOR;
+    let default_color = Rgb::new(
+        OBJ_DEFAULT_COLOR.0,
+        OBJ_DEFAULT_COLOR.1,
+        OBJ_DEFAULT_COLOR.2,
+    );
 
     for line in text.lines() {
         let trimmed = line.trim();
@@ -474,25 +472,19 @@ pub fn parse_obj(text: &str) -> Result<Vec<DrawTriangle>, ObjParseError> {
                                 x: va[0],
                                 y: va[1],
                                 z: va[2],
-                                r: cr,
-                                g: cg,
-                                b: cb,
+                                color: default_color,
                             },
                             Vertex {
                                 x: vb[0],
                                 y: vb[1],
                                 z: vb[2],
-                                r: cr,
-                                g: cg,
-                                b: cb,
+                                color: default_color,
                             },
                             Vertex {
                                 x: vc[0],
                                 y: vc[1],
                                 z: vc[2],
-                                r: cr,
-                                g: cg,
-                                b: cb,
+                                color: default_color,
                             },
                         ],
                     });

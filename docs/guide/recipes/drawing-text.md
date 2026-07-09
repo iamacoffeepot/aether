@@ -43,7 +43,7 @@ shows for one frame; stop sending it and it vanishes.
   "font_id": 0,
   "text": "hello aether",
   "size_pixels": 32.0,
-  "color": [1.0, 1.0, 1.0, 1.0],   // RGBA, linear
+  "color": { "r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0 }, // RGBA, linear
   "space": "Screen"
 }
 ```
@@ -55,8 +55,9 @@ batch to `aether.render` the same tick — so the first frame a new glyph appear
 costs one atlas upload and every frame after is a cache hit.
 
 `color` is a linear RGBA multiplier over the glyph coverage: the alpha channel
-scales the blend, so `[1, 0, 0, 1]` draws solid red text and `[1, 1, 1, 0.5]`
-draws half-transparent white.
+scales the blend, so `{ "r": 1, "g": 0, "b": 0, "a": 1 }` draws solid red
+text and `{ "r": 1, "g": 1, "b": 1, "a": 0.5 }` draws half-transparent
+white.
 
 ## 3. See it
 
@@ -69,7 +70,8 @@ string into the returned PNG:
   "mails": [
     { "recipient_name": "aether.text", "kind_name": "aether.text.draw",
       "params": { "font_id": 0, "text": "hello aether", "size_pixels": 32.0,
-                  "color": [1.0, 1.0, 1.0, 1.0], "space": "Screen" } }
+                  "color": { "r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0 },
+                  "space": "Screen" } }
   ]
 }
 ```
@@ -85,7 +87,7 @@ instance — use `World { anchor, scale }` instead of `Screen`.
   "font_id": 0,
   "text": "Player",
   "size_pixels": 18.0,
-  "color": [1.0, 1.0, 0.8, 1.0],
+  "color": { "r": 1.0, "g": 1.0, "b": 0.8, "a": 1.0 },
   "space": {
     "World": {
       "anchor": [0.0, 2.0, 0.0],

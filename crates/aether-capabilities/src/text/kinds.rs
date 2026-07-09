@@ -14,6 +14,7 @@
 //! the existing `capabilities → kinds` direction.
 
 use aether_kinds::{ClipRect, FontMetrics, QuadSpace};
+use aether_math::Rgba;
 use serde::{Deserialize, Serialize};
 
 /// Synthetic namespace used when a font is loaded directly from mail-carried
@@ -84,7 +85,7 @@ pub struct DrawText {
     pub font_id: u32,
     pub text: String,
     pub size_pixels: f32,
-    pub color: [f32; 4],
+    pub color: Rgba,
     /// Screen-pixel top-left the string flows from in `Screen` mode.
     /// `[0.0, 0.0]` is the window's top-left corner. Ignored in
     /// `World` mode — the `anchor` positions there.

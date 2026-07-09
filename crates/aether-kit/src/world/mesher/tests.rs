@@ -300,10 +300,9 @@ mod underlay {
         for at in [ChunkPos { x: 0, z: 0 }, ChunkPos { x: 1, z: 0 }] {
             let mesh = mesh_chunk(&world, at, &StyleTable::default());
             for t in &mesh {
-                let gray = t
-                    .verts
-                    .iter()
-                    .all(|v| (v.r - v.b).abs() < 0.05 && (v.g - v.b).abs() < 0.05);
+                let gray = t.verts.iter().all(|v| {
+                    (v.color.r - v.color.b).abs() < 0.05 && (v.color.g - v.color.b).abs() < 0.05
+                });
                 if gray {
                     continue; // walls own the vertical face
                 }

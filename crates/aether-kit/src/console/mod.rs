@@ -24,6 +24,7 @@ use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RI
 use aether_kinds::{
     CachedFontMetrics, Key, KeyRelease, MouseWheel, QuadSpace, Quit, TextInput, Tick, WindowSize,
 };
+use aether_math::Rgba;
 use serde::{Deserialize, Serialize};
 
 use self::markdown::{MarkdownLine, MarkdownTone};
@@ -110,14 +111,14 @@ impl ConsoleOverlay {
                 y: 0.0,
                 width,
                 height: panel_height,
-                color: self.config.theme.background_color,
+                color: Rgba::from_array(self.config.theme.background_color),
             },
             SolidQuad {
                 x: 0.0,
                 y: panel_height - SEPARATOR_HEIGHT,
                 width,
                 height: SEPARATOR_HEIGHT,
-                color: self.config.theme.separator_color,
+                color: Rgba::from_array(self.config.theme.separator_color),
             },
         ];
 
@@ -130,7 +131,7 @@ impl ConsoleOverlay {
                 y: input_y,
                 width: self.cursor_width(),
                 height: self.config.font_size,
-                color: self.config.theme.cursor_color,
+                color: Rgba::from_array(self.config.theme.cursor_color),
             });
         }
 
@@ -166,7 +167,7 @@ impl ConsoleOverlay {
             font_id,
             text: self.config.prompt.clone(),
             size_pixels: self.config.font_size,
-            color: self.config.theme.prompt_color,
+            color: Rgba::from_array(self.config.theme.prompt_color),
             origin: [HORIZONTAL_PADDING, input_y],
             space: QuadSpace::Screen,
             clip: None,
@@ -175,7 +176,7 @@ impl ConsoleOverlay {
             font_id,
             text: self.state.input.clone(),
             size_pixels: self.config.font_size,
-            color: self.config.theme.input_color,
+            color: Rgba::from_array(self.config.theme.input_color),
             origin: [
                 HORIZONTAL_PADDING + self.measure(&self.config.prompt),
                 input_y,
@@ -199,7 +200,7 @@ impl ConsoleOverlay {
                 y: self.config.font_size.mul_add(0.55, y),
                 width: HORIZONTAL_PADDING.mul_add(-2.0, width).max(0.0),
                 height: 1.0,
-                color: self.config.theme.markdown.thematic_break_color,
+                color: Rgba::from_array(self.config.theme.markdown.thematic_break_color),
             });
             return;
         }
@@ -209,7 +210,7 @@ impl ConsoleOverlay {
                 y: y - padding,
                 width: padding.mul_add(2.0, HORIZONTAL_PADDING.mul_add(-2.0, width)),
                 height: self.config.font_size + (padding * 2.0),
-                color: self.config.theme.markdown.fenced_code_background_color,
+                color: Rgba::from_array(self.config.theme.markdown.fenced_code_background_color),
             });
             return;
         }
@@ -223,7 +224,9 @@ impl ConsoleOverlay {
                     y: y - padding,
                     width: run_width + (padding * 2.0),
                     height: self.config.font_size + (padding * 2.0),
-                    color: self.config.theme.markdown.inline_code_background_color,
+                    color: Rgba::from_array(
+                        self.config.theme.markdown.inline_code_background_color,
+                    ),
                 });
             }
             x += run_width;
@@ -247,7 +250,7 @@ impl ConsoleOverlay {
                 font_id,
                 text: run.text.clone(),
                 size_pixels: self.config.font_size,
-                color,
+                color: Rgba::from_array(color),
                 origin: [x, y],
                 space: QuadSpace::Screen,
                 clip: None,
@@ -257,7 +260,7 @@ impl ConsoleOverlay {
                     font_id,
                     text: run.text.clone(),
                     size_pixels: self.config.font_size,
-                    color,
+                    color: Rgba::from_array(color),
                     origin: [
                         x + self.config.theme.markdown.strong_offset_pixels.max(0.0),
                         y,

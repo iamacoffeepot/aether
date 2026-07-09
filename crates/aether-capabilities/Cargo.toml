@@ -104,6 +104,7 @@ aether-data = { path = "../aether-data" }
 # an unconditional dep leaves the wasm-header-only build unaffected.
 aether-capabilities-derive = { path = "../aether-capabilities-derive" }
 aether-kinds = { path = "../aether-kinds" }
+aether-math = { path = "../aether-math" }
 # `alloc` rides along for the `rpc::wire` + `trace_walk` modules (folded
 # in per ADR-0124), whose owned-`String`/`Vec` wire types need serde's
 # alloc impls even in the marker-only isolated build.

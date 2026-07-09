@@ -49,6 +49,7 @@ tracing = { workspace = true, default-features = false }
 # feature). `aether-substrate` deps back on `aether-actor`, but cargo
 # permits dev-dep cycles for the test-target build graph.
 aether-capabilities = { path = "../aether-capabilities", features = ["render"] }
+aether-math = { path = "../aether-math" }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 bytemuck = { workspace = true, features = ["derive"] }
 # Issue #243: `#[derive(Kind)]` test fixtures emit `inventory::submit!`

@@ -7,6 +7,7 @@
 use std::path::Path;
 
 use aether_kinds::{ClipRect, FontMetrics, GlyphAdvance, QuadSpace};
+use aether_math::Rgba;
 use aether_substrate::actor::native::NativeCtx;
 
 use crate::render::{DrawTexturedQuads, RenderCapability, TexturedQuad};
@@ -48,7 +49,7 @@ pub fn glyph_quad(
     pen_x: f32,
     baseline: f32,
     entry: &AtlasEntry,
-    tint: [f32; 4],
+    tint: Rgba,
 ) -> TexturedQuad {
     let top = baseline - (metrics.ymin as f32 + metrics.height as f32);
     let left = pen_x + metrics.xmin as f32;

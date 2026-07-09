@@ -34,7 +34,7 @@ use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::{DrawTriangle, Vertex, ViewProjection};
 use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::Tick;
-use aether_math::{Mat4, Vec3};
+use aether_math::{Mat4, Rgb, Vec3};
 
 /// Half-extent of the unit cube: corners sit at ±`HALF` on every axis,
 /// so the cube spans one world unit and is centered at the origin.
@@ -96,9 +96,7 @@ impl Cube {
             x: position.0,
             y: position.1,
             z: position.2,
-            r: color[0],
-            g: color[1],
-            b: color[2],
+            color: Rgb::new(color[0], color[1], color[2]),
         };
         // A quad as two triangles, all six vertices sharing `color`.
         let quad = |a, b, c, d, color: [f32; 3]| {

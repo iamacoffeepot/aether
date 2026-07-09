@@ -62,7 +62,7 @@ use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability
 use aether_kinds::{
     Key, KeyRelease, MouseButton, MouseMove, Render, Tick, WindowSize, keycode, mouse_button,
 };
-use aether_math::{Mat4, Vec3};
+use aether_math::{Mat4, Rgb, Vec3};
 
 use crate::OCTIMETERS_PER_TILE;
 use crate::world::CellPos;
@@ -544,9 +544,7 @@ fn push_capsule(out: &mut Vec<DrawTriangle>, cx: f32, cz: f32, base: (f32, f32, 
         x: p.x,
         y: p.y,
         z: p.z,
-        r: rgb.0,
-        g: rgb.1,
-        b: rgb.2,
+        color: Rgb::new(rgb.0, rgb.1, rgb.2),
     };
 
     for band in 0..rings.len() - 1 {

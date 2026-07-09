@@ -141,6 +141,7 @@ mod tests {
     use aether_actor::Addressable;
     use aether_kinds::QuadSpace;
     use aether_kinds::trace::Nanos;
+    use aether_math::Rgba;
     use aether_substrate::chassis::builder::Builder;
     use aether_substrate::mail::MailId;
     use aether_substrate::mail::MailRef;
@@ -333,7 +334,7 @@ mod tests {
                 y: 20.0,
                 width: 30.0,
                 height: 40.0,
-                color: [1.0, 0.0, 0.5, 0.8],
+                color: Rgba::new(1.0, 0.0, 0.5, 0.8),
             }],
         };
         let payload = mail.encode_into_bytes();
@@ -376,7 +377,7 @@ mod tests {
         );
         assert_eq!(
             batches[0].quads[0].tint,
-            [1.0, 0.0, 0.5, 0.8],
+            Rgba::new(1.0, 0.0, 0.5, 0.8),
             "expanded quad tint must match the SolidQuad color",
         );
         assert_eq!(batches[0].quads[0].width, 30.0);

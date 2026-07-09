@@ -28,7 +28,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_capabilities::render::{DrawTriangle, Vertex};
-
 /// Octimeters per meter (`1 cell = 1 m = 256 octimeters`), for the
 /// octimeter-to-meter conversion at vertex emit.
 const OCTIMETERS_PER_METER: f32 = 256.0;
@@ -1045,9 +1044,7 @@ mod tests {
             x: wx,
             y: 0.0,
             z: wz,
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
+            color: aether_math::Rgb::new(0.0, 0.0, 0.0),
         }
     }
 
