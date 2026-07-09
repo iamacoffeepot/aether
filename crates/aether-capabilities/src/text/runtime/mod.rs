@@ -23,6 +23,7 @@ pub use crate::render::{
     CreateTexture, CreateTextureResult, RenderCapability, TextureFormat, TexturedQuad,
     UpdateTexture,
 };
+use crate::text::MEMORY_FONT_NAMESPACE;
 
 // ADR-0105 shelf-packed RGBA8 glyph atlas (`atlas`) and the pure layout /
 // rasterization helpers (`layout`), now nested under this `runtime` directory
@@ -161,6 +162,33 @@ impl TextCapabilityState {
             .send_with_context(&read, &context);
     }
 
+    /// Parse caller-supplied font bytes off the hot path, then resume through
+    /// `on_font_parsed` with the same registration and reply shaping used by
+    /// the `aether.fs.read` path.
+    pub fn dispatch_font_parse(
+        ctx: &mut NativeCtx<'_, Manual>,
+        source: Source,
+        namespace: String,
+        path: String,
+        name: String,
+        reply: PendingReply,
+        bytes: Vec<u8>,
+    ) {
+        let parse_context = FontParseContext {
+            namespace,
+            path,
+            name,
+            reply,
+        };
+        let hold = ctx.acquire_settlement_hold();
+        ctx.dispatch_blocking_resumed_with::<FontParseOutput, _, _>(
+            hold,
+            source,
+            parse_context,
+            move || parse_font_bytes(bytes),
+        );
+    }
+
     /// Send `create_texture` for the zeroed atlas, unless a creation is
     /// already in flight. The reply (`CreateTextureResult`) routes back
     /// to this cap's own mailbox, where `on_create_texture_result`
@@ -220,9 +248,20 @@ use self::layout::{
 };
 use super::TextCapability;
 use super::kinds::{
-    DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult,
+    DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontBytes,
+    LoadFontResult,
 };
 use aether_actor::runtime;
+
+fn parse_font_bytes(bytes: Vec<u8>) -> FontParseOutput {
+    match fontdue::Font::from_bytes(bytes.as_slice(), fontdue::FontSettings::default()) {
+        Ok(font) => Ok(ParsedFont {
+            font: Arc::new(font),
+            resident_bytes: bytes.len() as u64,
+        }),
+        Err(e) => Err(format!("font parse failed: {e}")),
+    }
+}
 
 #[runtime]
 impl NativeActor for TextCapability {
@@ -255,6 +294,32 @@ impl NativeActor for TextCapability {
             mail.namespace,
             mail.path,
             PendingReply::LoadFont,
+        );
+    }
+
+    /// Load a font from TTF bytes carried in the request payload.
+    ///
+    /// # Agent
+    /// Reply: `LoadFontResult`. The cap parses the supplied bytes off the hot
+    /// path and registers the font under the memory namespace keyed by `name`.
+    /// This avoids requiring a component with an embedded fallback font to
+    /// write that font through `aether.fs` before loading it.
+    #[handler::manual]
+    fn on_load_font_bytes(
+        _state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Manual>,
+        mail: LoadFontBytes,
+    ) {
+        let source = ctx.reply_target();
+        let name = mail.name;
+        TextCapabilityState::dispatch_font_parse(
+            ctx,
+            source,
+            MEMORY_FONT_NAMESPACE.to_owned(),
+            name.clone(),
+            name,
+            PendingReply::LoadFont,
+            mail.bytes,
         );
     }
 
@@ -323,27 +388,14 @@ impl NativeActor for TextCapability {
                 bytes,
             } => {
                 let name = font_name_from_path(&path);
-                let parse_context = FontParseContext {
+                TextCapabilityState::dispatch_font_parse(
+                    ctx,
+                    context.source,
                     namespace,
                     path,
                     name,
-                    reply: context.reply,
-                };
-                let hold = ctx.acquire_settlement_hold();
-                ctx.dispatch_blocking_resumed_with::<FontParseOutput, _, _>(
-                    hold,
-                    context.source,
-                    parse_context,
-                    move || match fontdue::Font::from_bytes(
-                        bytes.as_slice(),
-                        fontdue::FontSettings::default(),
-                    ) {
-                        Ok(font) => Ok(ParsedFont {
-                            font: Arc::new(font),
-                            resident_bytes: bytes.len() as u64,
-                        }),
-                        Err(e) => Err(format!("font parse failed: {e}")),
-                    },
+                    context.reply,
+                    bytes,
                 );
             }
             ReadResult::Err {
@@ -881,6 +933,77 @@ mod tests {
         drive_task_completion::<TextCapability>(&mut state, &binding, &rx);
         match decode_session_reply::<LoadFontResult>(&rx) {
             LoadFontResult::Err { error, .. } => {
+                assert!(error.contains("parse"), "unexpected error: {error}");
+            }
+            LoadFontResult::Ok { .. } => panic!("expected Err for malformed font bytes"),
+        }
+        assert!(
+            state.fonts.is_empty(),
+            "no font should register on a parse failure"
+        );
+    }
+
+    #[test]
+    fn load_font_bytes_registers_memory_font() {
+        let mut state = TextCapabilityState::new();
+        let (binding, rx) = ctx_binding();
+        let mut ctx =
+            NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        TextCapability::on_load_font_bytes(
+            &mut state,
+            &mut ctx,
+            LoadFontBytes {
+                name: "embedded.ttf".to_owned(),
+                bytes: test_font_bytes().to_vec(),
+            },
+        );
+
+        drive_task_completion::<TextCapability>(&mut state, &binding, &rx);
+        match decode_session_reply::<LoadFontResult>(&rx) {
+            LoadFontResult::Ok {
+                font_id,
+                name,
+                resident_bytes,
+            } => {
+                assert_eq!(font_id, 0);
+                assert_eq!(name, "embedded.ttf");
+                assert_eq!(resident_bytes, test_font_bytes().len() as u64);
+            }
+            LoadFontResult::Err { error, .. } => panic!("expected Ok: {error}"),
+        }
+        assert_eq!(state.fonts.len(), 1);
+        assert_eq!(
+            state
+                .font_ids
+                .get(&(MEMORY_FONT_NAMESPACE.to_owned(), "embedded.ttf".to_owned())),
+            Some(&0),
+        );
+    }
+
+    #[test]
+    fn malformed_load_font_bytes_replies_err() {
+        let mut state = TextCapabilityState::new();
+        let (binding, rx) = ctx_binding();
+        let mut ctx =
+            NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        TextCapability::on_load_font_bytes(
+            &mut state,
+            &mut ctx,
+            LoadFontBytes {
+                name: "junk.ttf".to_owned(),
+                bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            },
+        );
+
+        drive_task_completion::<TextCapability>(&mut state, &binding, &rx);
+        match decode_session_reply::<LoadFontResult>(&rx) {
+            LoadFontResult::Err {
+                namespace,
+                path,
+                error,
+            } => {
+                assert_eq!(namespace, MEMORY_FONT_NAMESPACE);
+                assert_eq!(path, "junk.ttf");
                 assert!(error.contains("parse"), "unexpected error: {error}");
             }
             LoadFontResult::Ok { .. } => panic!("expected Err for malformed font bytes"),

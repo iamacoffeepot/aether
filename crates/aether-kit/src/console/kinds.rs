@@ -138,8 +138,8 @@ impl Default for ConsoleConfig {
         Self {
             panel_height: 280.0,
             activation_key_code: u32::from(b'`'),
-            font_namespace: String::from("assets"),
-            font_path: String::from("fonts/RobotoMono.ttf"),
+            font_namespace: String::new(),
+            font_path: String::new(),
             font_size: 18.0,
             scrollback_limit: 256,
             prompt: String::from("> "),
@@ -214,6 +214,20 @@ mod tests {
         assert_eq!(theme.markdown.table_border_color, theme.separator_color);
         assert!(theme.markdown.code_padding_pixels > 0.0);
         assert!(theme.markdown.strong_offset_pixels > 0.0);
+    }
+
+    #[test]
+    fn default_config_uses_embedded_console_font() {
+        let config = ConsoleConfig::default();
+
+        assert!(
+            config.font_namespace.is_empty(),
+            "empty namespace selects the embedded console font",
+        );
+        assert!(
+            config.font_path.is_empty(),
+            "empty path selects the embedded console font",
+        );
     }
 
     #[test]
