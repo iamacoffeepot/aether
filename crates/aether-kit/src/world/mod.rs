@@ -57,11 +57,12 @@ pub mod mesher;
 use alloc::collections::BTreeMap;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::fs::{FsMailboxExt, ReadResult};
+use aether_capabilities::fs::{Read, ReadResult};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::DrawTriangle;
 use aether_capabilities::{FsCapability, LifecycleCapability, RenderCapability};
 use aether_kinds::Render;
+use serde::{Deserialize, Serialize};
 
 use self::mesher::mesh_chunk;
 use self::mesher::style::StyleTable;
@@ -83,6 +84,13 @@ pub struct WorldView {
     meshes: BTreeMap<ChunkPos, Vec<DrawTriangle>>,
     mode: ViewMode,
     styles: StyleTable,
+}
+
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.world.load_context")]
+struct WorldLoadContext {
+    namespace: String,
+    path: String,
 }
 
 impl WorldView {
@@ -315,13 +323,23 @@ impl WasmActor for WorldView {
     #[allow(clippy::unused_self)]
     #[handler::single]
     fn on_load(&mut self, ctx: &mut WasmCtx<'_>, msg: WorldLoad) {
+        let read = Read {
+            namespace: msg.namespace.clone(),
+            path: msg.path.clone(),
+        };
+        let context = WorldLoadContext {
+            namespace: msg.namespace,
+            path: msg.path,
+        };
         tracing::info!(
             target: "aether_kit",
-            namespace = %msg.namespace,
-            path = %msg.path,
+            namespace = %read.namespace,
+            path = %read.path,
             "world load requested; issuing read",
         );
-        ctx.actor::<FsCapability>().read(&msg.namespace, &msg.path);
+        let _ = ctx
+            .actor::<FsCapability>()
+            .send_with_context(&read, &context);
     }
 
     /// Consume the `aether.fs` read reply. On `Ok`, decode the bytes with
@@ -332,40 +350,35 @@ impl WasmActor for WorldView {
     /// # Agent
     /// Substrate-driven; do not send manually.
     #[handler::single]
-    fn on_read_result(&mut self, _ctx: &mut WasmCtx<'_>, result: ReadResult) {
+    fn on_read_result(&mut self, ctx: &mut WasmCtx<'_>, result: ReadResult) {
+        let Some(context) = ctx.take_context::<WorldLoadContext>() else {
+            return;
+        };
         match result {
-            ReadResult::Ok {
-                namespace,
-                path,
-                bytes,
-            } => match World::from_bytes(&bytes) {
+            ReadResult::Ok { bytes, .. } => match World::from_bytes(&bytes) {
                 Ok(world) => {
                     self.world = world;
                     self.remesh_all();
                     tracing::info!(
                         target: "aether_kit",
-                        namespace = %namespace,
-                        path = %path,
+                        namespace = %context.namespace,
+                        path = %context.path,
                         chunks = self.meshes.len(),
                         "world load complete; cache replaced",
                     );
                 }
                 Err(error) => tracing::warn!(
                     target: "aether_kit",
-                    namespace = %namespace,
-                    path = %path,
+                    namespace = %context.namespace,
+                    path = %context.path,
                     error = ?error,
                     "world decode failed; keeping prior world",
                 ),
             },
-            ReadResult::Err {
-                namespace,
-                path,
-                error,
-            } => tracing::warn!(
+            ReadResult::Err { error, .. } => tracing::warn!(
                 target: "aether_kit",
-                namespace = %namespace,
-                path = %path,
+                namespace = %context.namespace,
+                path = %context.path,
                 error = ?error,
                 "world read failed; keeping prior world",
             ),

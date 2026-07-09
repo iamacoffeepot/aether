@@ -38,6 +38,7 @@ use aether_substrate_bundle::visual::{decode_png, differs_from_background};
 use aether_kit as _;
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 /// User-facing component name passed to `LoadComponent`.
 const COMPONENT_NAME: &str = "mv";
@@ -355,4 +356,64 @@ fn bad_dsl_load_replies_err() {
     assert!(reply.error.is_some(), "bad load carries a failure reason");
     assert_eq!(reply.namespace, "save", "reply echoes request namespace");
     assert_eq!(reply.path, path, "reply echoes request path");
+}
+
+/// Issue 2796: overlapping mesh loads carry their requester and parse
+/// dispatch in request contexts rather than a single actor slot. A second
+/// load must not steal the first load's eventual `MeshLoadResult`.
+#[test]
+fn overlapping_loads_reply_to_their_own_requesters() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let sandbox = init_save_sandbox("kit-mesh");
+    let dsl_path = write_fixture("overlap_first.dsl", BOX_DSL);
+    let obj_path = write_fixture("overlap_second.obj", QUAD_OBJ);
+
+    let mut bench = TestBench::builder()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .settlement_cap(Some(Duration::from_secs(10)))
+        .build()
+        .expect("boot");
+    load_viewer(&mut bench, &wasm_path);
+
+    let first = bench
+        .send_deferred(
+            &component_address(),
+            &LoadMesh {
+                namespace: "save".to_owned(),
+                path: dsl_path.clone(),
+            },
+        )
+        .expect("enqueue first mesh load");
+    let second = bench
+        .send_deferred(
+            &component_address(),
+            &LoadMesh {
+                namespace: "save".to_owned(),
+                path: obj_path.clone(),
+            },
+        )
+        .expect("enqueue second mesh load");
+
+    let second_reply = bench
+        .await_deferred::<MeshLoadResult>(second)
+        .expect("second load replies");
+    let first_reply = bench
+        .await_deferred::<MeshLoadResult>(first)
+        .expect("first load replies");
+
+    assert!(
+        first_reply.ok,
+        "first DSL load should succeed: {:?}",
+        first_reply.error,
+    );
+    assert!(
+        second_reply.ok,
+        "second OBJ load should succeed: {:?}",
+        second_reply.error,
+    );
+    assert_eq!(first_reply.path, dsl_path, "first reply keeps its path");
+    assert_eq!(second_reply.path, obj_path, "second reply keeps its path");
 }

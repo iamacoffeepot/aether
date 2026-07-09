@@ -14,8 +14,8 @@
 //!
 //! Reply correlation: every API call gets a fresh `correlation_id`.
 //! The substrate echoes it on the reply per ADR-0042, so multiple
-//! in-flight requests would be unambiguous — though `TestBench`'s
-//! synchronous shape means at most one is ever outstanding.
+//! in-flight requests are unambiguous. The common `execute` path stays
+//! synchronous, while focused tests can defer replies explicitly.
 
 // Test-only skip diagnostics emit `eprintln!` so `cargo test` runners
 // surface a visible "skipping: ..." line alongside `test ... ok`;
@@ -216,6 +216,14 @@ pub struct TestBench {
     /// stay alive; drops in reverse declaration order before
     /// `_boot`, so render+log shut down before the scheduler joins.
     passive: PassiveChassis<TestBenchChassis>,
+}
+
+/// A request enqueued through [`TestBench::send_deferred`] whose reply will
+/// be awaited later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingBenchReply {
+    cid: u64,
+    expected: &'static str,
 }
 
 /// Fixed UUID used as the `SessionToken` for in-process replies.
@@ -820,6 +828,42 @@ impl TestBench {
         self.queue
             .push(Mail::new(mailbox, kind, payload, 1).with_reply_to(reply_to));
         self.pump_until_reply_bytes(cid, "<await-reply bytes>")
+    }
+
+    /// Enqueue a typed request with this bench's session as the reply target,
+    /// but do not pump the chassis or wait for the reply yet.
+    ///
+    /// This is the asynchronous counterpart to `send_and_await` for tests that
+    /// need several requests in flight at once to validate correlation.
+    pub fn send_deferred<K>(
+        &self,
+        recipient_name: &str,
+        mail: &K,
+    ) -> Result<PendingBenchReply, TestBenchError>
+    where
+        K: Kind,
+    {
+        let mailbox = self
+            .registry
+            .lookup(recipient_name)
+            .ok_or_else(|| TestBenchError::UnknownMailbox(recipient_name.to_owned()))?;
+        let cid = self.fresh_correlation_id();
+        let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
+        self.queue
+            .push(Mail::new(mailbox, K::ID, mail.encode_into_bytes(), 1).with_reply_to(reply_to));
+        Ok(PendingBenchReply {
+            cid,
+            expected: K::NAME,
+        })
+    }
+
+    /// Pump until the reply for a request returned by [`Self::send_deferred`]
+    /// arrives, stashing out-of-order replies for later awaits.
+    pub fn await_deferred<R>(&mut self, pending: PendingBenchReply) -> Result<R, TestBenchError>
+    where
+        R: Kind,
+    {
+        self.pump_until_reply(pending.cid, pending.expected)
     }
 
     /// Run `ticks` complete frames synchronously. Each frame
