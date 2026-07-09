@@ -57,7 +57,8 @@ use aether_substrate_bundle::test_bench::{
     test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
 };
 use aether_substrate_bundle::visual::{
-    Image, background_top_left, bounding_box, centroid, coverage, decode_png,
+    Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png,
+    target_color_stats,
 };
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
