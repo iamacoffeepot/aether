@@ -1916,6 +1916,14 @@ mod tests {
     }
 
     #[test]
+    fn map_winit_keycode_covers_console_activation_key() {
+        assert_eq!(
+            map_winit_keycode(KeyCode::Backquote),
+            Some(keycode::KEY_BACKQUOTE)
+        );
+    }
+
+    #[test]
     fn map_mouse_button_covers_named_buttons() {
         assert_eq!(
             map_mouse_button(WinitMouseButton::Left),

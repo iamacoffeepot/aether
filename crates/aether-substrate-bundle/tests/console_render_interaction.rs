@@ -1,0 +1,195 @@
+//! Console render + activation acceptance tests.
+//!
+//! These tests load the real `aether.kit.console` actor into a `TestBench`,
+//! drive its typed input path, and assert rendered output through frame
+//! reductions. The desktop driver has a unit tripwire for the physical
+//! `Backquote` mapping; this suite proves the engine key code actually opens
+//! the console overlay and reaches the render sink.
+//!
+//! Skipped when no wgpu adapter is available or the `aether_kit` wasm has not
+//! been pre-built. CI sets `AETHER_REQUIRE_RUNTIME=1` to make either skip a
+//! hard failure.
+
+// Integration-test skip diagnostic: emit via stderr so `cargo test` surfaces
+// "skipping: ..." alongside `test ... ok`.
+#![allow(clippy::print_stderr)]
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use aether_actor::Addressable;
+use aether_capabilities::RenderCapability;
+use aether_capabilities::fs::NamespaceRoots;
+use aether_data::Kind;
+use aether_kinds::keycode::KEY_BACKQUOTE;
+use aether_kinds::{
+    CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, Key,
+    LoadComponent, LoadResult, NamedMail, Tick, WindowSize,
+};
+use aether_kit::ConsoleConfig;
+use aether_substrate_bundle::test_bench::{
+    BenchOp, TestBench,
+    test_helpers::{init_save_sandbox, require_runtime},
+};
+
+const WINDOW_WIDTH: u32 = 320;
+const WINDOW_HEIGHT: u32 = 200;
+const CLEAR_SRGB: [u8; 3] = [63, 75, 97];
+const PARTITION_TOLERANCE: u8 = 8;
+
+fn console_address() -> String {
+    format!(
+        "aether.component/{}:console",
+        aether_capabilities::WasmTrampoline::NAMESPACE,
+    )
+}
+
+fn assets_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
+}
+
+fn build_bench() -> TestBench {
+    let sandbox = init_save_sandbox("console-render-interaction");
+    let roots = NamespaceRoots {
+        save: sandbox.to_path_buf(),
+        assets: assets_dir(),
+        config: sandbox.to_path_buf(),
+    };
+    TestBench::builder()
+        .size(WINDOW_WIDTH, WINDOW_HEIGHT)
+        .namespace_roots(roots)
+        .build()
+        .expect("boot")
+}
+
+fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
+    NamedMail {
+        recipient_name: recipient.to_owned(),
+        kind_name: K::NAME.to_owned(),
+        payload: mail.encode_into_bytes(),
+        count: 1,
+    }
+}
+
+fn load_console(bench: &mut TestBench, wasm: &[u8]) {
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm: wasm.to_vec(),
+                    name: Some("console".to_owned()),
+                    config: ConsoleConfig::default().encode_into_bytes(),
+                    export: Some("aether.kit.console".to_owned()),
+                },
+            ),
+        )])
+        .expect("load sequence");
+    match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        LoadResult::Ok { name, .. } => assert!(
+            name.ends_with(":console"),
+            "console should register under :console; got {name}",
+        ),
+        LoadResult::Err { error } => panic!("load console: {error}"),
+    }
+}
+
+fn top_band() -> FrameRect {
+    FrameRect {
+        min_x: 0,
+        min_y: 0,
+        max_x: WINDOW_WIDTH - 1,
+        max_y: 96,
+    }
+}
+
+fn top_band_coverage(bench: &mut TestBench, label: &'static str) -> f32 {
+    let captured = bench
+        .execute(vec![(
+            label,
+            BenchOp::send_and_await(
+                RenderCapability::NAMESPACE,
+                &CaptureFrame {
+                    mails: vec![envelope(&console_address(), &Tick)],
+                    after_mails: Vec::new(),
+                    checks: vec![FrameCheck {
+                        reduction: FrameReduction::Coverage,
+                        tolerance: PARTITION_TOLERANCE,
+                        background: Some(CLEAR_SRGB),
+                        region: Some(top_band()),
+                    }],
+                    similarity: None,
+                },
+            ),
+        )])
+        .expect("capture sequence");
+    let result = match captured
+        .reply::<CaptureFrameResult>(label)
+        .expect("decode CaptureFrameResult")
+    {
+        CaptureFrameResult::Ok { verdict, .. } => {
+            let verdict = verdict.expect("checks requested");
+            verdict
+                .results
+                .into_iter()
+                .next()
+                .expect("one check result")
+        }
+        CaptureFrameResult::Err { error } => panic!("capture failed: {error}"),
+    };
+    match result {
+        FrameCheckResult::Coverage { fraction, .. } => fraction,
+        other => panic!("expected Coverage result; got {other:?}"),
+    }
+}
+
+#[test]
+fn backquote_key_opens_console_overlay() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = build_bench();
+    load_console(&mut bench, &wasm);
+
+    bench
+        .execute(vec![(
+            "size",
+            BenchOp::send_mail(
+                &console_address(),
+                &WindowSize {
+                    width: WINDOW_WIDTH,
+                    height: WINDOW_HEIGHT,
+                },
+            ),
+        )])
+        .expect("window size");
+
+    let closed = top_band_coverage(&mut bench, "closed");
+    assert!(
+        closed < 0.01,
+        "closed console should leave the top band at clear color; coverage={closed:.3}",
+    );
+
+    bench
+        .execute(vec![(
+            "toggle",
+            BenchOp::send_mail(
+                &console_address(),
+                &Key {
+                    code: KEY_BACKQUOTE,
+                },
+            ),
+        )])
+        .expect("toggle key");
+
+    let open = top_band_coverage(&mut bench, "open");
+    assert!(
+        open > 0.90,
+        "backquote should open the console and cover the top band; coverage={open:.3}",
+    );
+}
