@@ -14,6 +14,9 @@
 //!   `aether_kit@aether.kit.camera_controller` export. Its
 //!   `aether.kit.camera_controller.config` init-config lives in
 //!   [`camera_controller`].
+//! - [`console::ConsoleOverlay`] — a primitive-rendered developer console
+//!   overlay, selected by the `aether_kit@aether.kit.console` export. Its
+//!   config and extension command vocabulary live in [`console`].
 //! - [`mesh::MeshViewer`] — loads a `.dsl` / `.obj` mesh file and replays it
 //!   to the render sink, selected by the `aether_kit@aether.kit.mesh`
 //!   export. Its `aether.kit.mesh.load` kind lives in [`mesh`].
@@ -53,11 +56,16 @@ extern crate alloc;
 
 pub mod camera;
 pub mod camera_controller;
+pub mod console;
 pub mod mesh;
 pub mod mover;
 pub mod widget;
 pub mod world;
 
+pub use console::{
+    ConsoleCommandInvoked, ConsoleCommandOutput, ConsoleConfig, ConsoleTheme,
+    RegisterConsoleCommand, UnregisterConsoleCommand,
+};
 pub use mover::MoverTeleport;
 pub use widget::theme::{SetTheme, Theme, WidgetState};
 pub use widget::{
@@ -97,6 +105,7 @@ pub const TILE_BITS: u32 = 8;
 aether_actor::export!(
     camera::CameraComponent,
     camera_controller::CameraController,
+    console::ConsoleOverlay,
     mesh::MeshViewer,
     world::WorldView,
     mover::WorldMover,
@@ -113,6 +122,7 @@ aether_actor::export!(
 aether_actor::export!(
     camera::CameraComponent,
     camera_controller::CameraController,
+    console::ConsoleOverlay,
     mesh::MeshViewer,
     world::WorldView,
     mover::WorldMover,
