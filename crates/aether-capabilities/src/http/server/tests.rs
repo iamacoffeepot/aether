@@ -16,11 +16,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use test_handlers::{
-    ApiRouteHandler, ApiV2Handler, EchoHttpHandler, ExclusiveMacroFirstHandler,
-    ExclusiveMacroSecondHandler, ExtractRouteHandler, FixedBodyHttpHandler, FloodHttpHandler,
-    MethodAnyHandler, MethodPostHandler, STREAM_CHUNK_COUNT, SharedAlphaHandler, SharedBetaHandler,
-    SharedMacroPoolHandler, SilentHttpHandler, StreamHttpHandler, StreamingUploadHandler,
-    TmpRouteHandler, WiredRouteHandler, stream_chunk_body,
+    ApiRouteHandler, ApiV2Handler, EchoHttpHandler, ExclusiveMacroPoolHandler, ExtractRouteHandler,
+    FixedBodyHttpHandler, FloodHttpHandler, MethodAnyHandler, MethodPostHandler,
+    STREAM_CHUNK_COUNT, SharedAlphaHandler, SharedBetaHandler, SharedMacroPoolHandler,
+    SilentHttpHandler, StreamHttpHandler, StreamingUploadHandler, TmpRouteHandler,
+    WiredRouteHandler, stream_chunk_body,
 };
 
 mod test_handlers {
@@ -427,82 +427,45 @@ mod test_handlers {
         }
     }
 
-    /// A bare `#[http::router]` handler used by the regression guard
-    /// proving the default flag stays `shared: false` through the new
-    /// argument-parsing path (issue 2625): claims the contested
-    /// `/macro-excl` prefix.
-    pub struct ExclusiveMacroFirstHandler;
-    pub struct ExclusiveMacroFirstHandlerState;
-
-    #[http::router]
-    #[actor(singleton)]
-    impl NativeActor for ExclusiveMacroFirstHandler {
-        type State = ExclusiveMacroFirstHandlerState;
-        type Config = ();
-        const NAMESPACE: &'static str = "aether.http.test_route_excl_macro_first";
-
-        fn init(
-            (): (),
-            _ctx: &mut NativeInitCtx<'_>,
-        ) -> Result<ExclusiveMacroFirstHandlerState, BootError> {
-            Ok(ExclusiveMacroFirstHandlerState)
-        }
-
-        #[http::route(any, "/macro-excl")]
-        fn on_excl(
-            _state: &mut ExclusiveMacroFirstHandlerState,
-            _ctx: http::Ctx<'_, NativeCtx<'_>>,
-        ) -> HttpServerResponse {
-            HttpServerResponse {
-                status: 200,
-                headers: Vec::new(),
-                body: b"excl-macro-first".to_vec(),
-            }
-        }
+    /// A bare `#[http::router]` instanced handler (issue 2827): two
+    /// runtime instances of this one compiled actor type claim
+    /// `/macro-excl` with the same macro-minted kind. With today's
+    /// default (`shared: false`), only one instance can own the route;
+    /// if bare routers accidentally default to `shared: true`, both
+    /// instances can join and both configured tags become observable.
+    pub struct ExclusiveMacroPoolHandler;
+    pub struct ExclusiveMacroPoolHandlerState {
+        tag: &'static [u8],
     }
 
-    /// The second bare `#[http::router]` claimant of `/macro-excl`: its
-    /// own distinct `/macro-excl-second-ok` route proves this handler's
-    /// registrations were processed even though its `/macro-excl` claim
-    /// is rejected (the first claimant keeps it).
-    pub struct ExclusiveMacroSecondHandler;
-    pub struct ExclusiveMacroSecondHandlerState;
-
     #[http::router]
-    #[actor(singleton)]
-    impl NativeActor for ExclusiveMacroSecondHandler {
-        type State = ExclusiveMacroSecondHandlerState;
-        type Config = ();
-        const NAMESPACE: &'static str = "aether.http.test_route_excl_macro_second";
+    #[actor(instanced)]
+    impl NativeActor for ExclusiveMacroPoolHandler {
+        type State = ExclusiveMacroPoolHandlerState;
+        type Config = &'static [u8];
+        const NAMESPACE: &'static str = "aether.http.test_route_excl_macro_pool";
 
         fn init(
-            (): (),
+            tag: &'static [u8],
             _ctx: &mut NativeInitCtx<'_>,
-        ) -> Result<ExclusiveMacroSecondHandlerState, BootError> {
-            Ok(ExclusiveMacroSecondHandlerState)
+        ) -> Result<ExclusiveMacroPoolHandlerState, BootError> {
+            Ok(ExclusiveMacroPoolHandlerState { tag })
+        }
+
+        fn wire(_state: &mut ExclusiveMacroPoolHandlerState, ctx: &mut NativeCtx<'_>) {
+            // Body is otherwise empty; `#[http::router]` appends the
+            // registration send that uses `ctx`.
         }
 
         #[http::route(any, "/macro-excl")]
         fn on_excl(
-            _state: &mut ExclusiveMacroSecondHandlerState,
+            state: &mut ExclusiveMacroPoolHandlerState,
             _ctx: http::Ctx<'_, NativeCtx<'_>>,
         ) -> HttpServerResponse {
             HttpServerResponse {
                 status: 200,
                 headers: Vec::new(),
-                body: b"excl-macro-second".to_vec(),
-            }
-        }
-
-        #[http::route(any, "/macro-excl-second-ok")]
-        fn on_ok(
-            _state: &mut ExclusiveMacroSecondHandlerState,
-            _ctx: http::Ctx<'_, NativeCtx<'_>>,
-        ) -> HttpServerResponse {
-            HttpServerResponse {
-                status: 200,
-                headers: Vec::new(),
-                body: b"excl-macro-second-ok".to_vec(),
+                body: state.tag.to_vec(),
             }
         }
     }
@@ -1748,32 +1711,59 @@ fn method_specific_route_beats_agnostic() {
 }
 
 /// A bare `#[http::router]` impl still registers exclusive (issue 2625
-/// regression guard on the default): `ExclusiveMacroFirstHandler` and
-/// `ExclusiveMacroSecondHandler` both claim `/macro-excl` through the
-/// typed macro surface with no `shared` argument, so the second
-/// claimant's registration must conflict and lose — proving the new
-/// argument-parsing path still defaults `shared` to `false` rather than
-/// letting every bare `#[http::router]` impl accidentally join a member
-/// set.
+/// regression guard on the default): two instances of the same compiled
+/// actor claim `/macro-excl` through the typed macro surface with no
+/// `shared` argument. Because they share the same macro-minted kind, an
+/// accidental `shared: true` default would let both instances serve; the
+/// exclusive default keeps the route owned by exactly one instance.
 #[test]
 fn bare_router_stays_exclusive_second_claim_rejected() {
-    let chassis = routed_chassis!(ExclusiveMacroFirstHandler, ExclusiveMacroSecondHandler);
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<HttpServerCapability>(HttpServerConfig {
+            bind_addr: "127.0.0.1:0".to_string(),
+            handler_mailbox: <FixedBodyHttpHandler as Addressable>::NAMESPACE.to_string(),
+            request_timeout_millis: 5_000,
+            dispatch_shards: 1,
+            ..HttpServerConfig::default()
+        })
+        .with_actor::<FixedBodyHttpHandler>(())
+        .build_passive()
+        .expect("caps boot");
+    chassis
+        .spawn_actor::<ExclusiveMacroPoolHandler>(Subname::Named("alpha"), b"excl-macro-alpha")
+        .finish()
+        .expect("spawn alpha");
+    chassis
+        .spawn_actor::<ExclusiveMacroPoolHandler>(Subname::Named("beta"), b"excl-macro-beta")
+        .finish()
+        .expect("spawn beta");
     let port = port_of(&chassis);
 
-    // The second handler's own distinct route being live proves its
-    // rejected `/macro-excl` claim was processed too.
-    poll_body(
-        port,
-        b"GET /macro-excl-second-ok HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        "excl-macro-second-ok",
-    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let owner = loop {
+        let contested = round_trip(port, b"GET /macro-excl HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        match body_of(&contested) {
+            "excl-macro-alpha" | "excl-macro-beta" => break body_of(&contested).to_string(),
+            _ => {
+                assert!(
+                    Instant::now() < deadline,
+                    "expected /macro-excl to become live within 10s",
+                );
+                thread::sleep(Duration::from_millis(25));
+            }
+        }
+    };
 
-    let contested = round_trip(port, b"GET /macro-excl HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert_eq!(
-        body_of(&contested),
-        "excl-macro-first",
-        "bare #[http::router] must stay exclusive: first claimant keeps the route",
-    );
+    for _ in 0..24 {
+        let contested = round_trip(port, b"GET /macro-excl HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let body = body_of(&contested);
+        assert_eq!(
+            body, owner,
+            "bare #[http::router] must stay exclusive; observed a second route member",
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// `#[http::router(shared)]` (issue 2625) threads the flag from the
