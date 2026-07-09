@@ -29,10 +29,12 @@ pub use aether_substrate::render::IDENTITY_VIEW_PROJ;
 // The native impl seams, now nested under this `runtime` directory so the one
 // `mod runtime;` gate in the parent covers them (no per-sibling `#[cfg]`):
 // `pipeline` (GPU bundle + accumulator handles), `texture` (the texture
-// registry), `quad` (the quad-batch accumulator), `capture` (the cross-thread
-// readback machinery), and `config` (the per-instance `RenderConfig`).
+// registry), `quad` (the quad-batch accumulator), `material` (the
+// material-batch accumulator), `capture` (the cross-thread readback
+// machinery), and `config` (the per-instance `RenderConfig`).
 mod capture;
 mod config;
+mod material;
 mod pipeline;
 mod quad;
 mod texture;
@@ -61,9 +63,9 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use super::{
-    CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyTexture, DrawSolidQuads,
-    DrawTexturedQuads, DrawTriangle, RenderCapability, SolidQuad, TextureFormat, TexturedQuad,
-    UpdateTexture, ViewProjection,
+    CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyTexture, DrawMaterialCoverage,
+    DrawMaterialTextured, DrawSolidQuads, DrawTexturedQuads, DrawTriangle, RenderCapability,
+    SolidQuad, TextureFormat, TexturedQuad, UpdateTexture, ViewProjection,
 };
 
 // These seam items are `pub` (visible in `render`) in their
@@ -72,6 +74,7 @@ use super::{
 // `render`, the scope the co-located test module names them in. `pub use`
 // would try to widen them to `pub` and fail (E0364/E0365).
 pub use self::capture::resolve_reference;
+pub use self::material::MaterialBatch;
 pub use self::quad::QuadBatch;
 pub use self::texture::{StagedTexture, TextureRegistry, WHITE_TEXTURE_ID, expected_pixel_bytes};
 
@@ -139,6 +142,8 @@ impl NativeActor for RenderCapability {
             camera_state: Arc::new(Mutex::new(IDENTITY_VIEW_PROJ)),
             quad_frame: Arc::new(Mutex::new(Vec::new())),
             quad_last_submitted: Arc::new(Mutex::new(Vec::new())),
+            material_frame: Arc::new(Mutex::new(Vec::new())),
+            material_last_submitted: Arc::new(Mutex::new(Vec::new())),
             textures: Arc::new(Mutex::new(TextureRegistry::new())),
             gpu: Arc::new(OnceLock::new()),
             vertex_buffer_bytes: config.vertex_buffer_bytes,
@@ -629,6 +634,66 @@ impl NativeActor for RenderCapability {
                 texture_id: WHITE_TEXTURE_ID,
                 space: mail.space,
                 quads,
+            });
+    }
+
+    /// `DrawMaterialTextured` handler (ADR-0140). Accumulates a typed
+    /// textured material batch into the ordered material stream. Texture
+    /// existence is checked at record time so the handler stays a cheap
+    /// immediate-mode push.
+    ///
+    /// # Agent
+    /// Mail `aether.render.material.textured { texture_id, rects }`
+    /// every frame the world-space material rects should appear; no reply.
+    #[handler::single]
+    fn on_draw_material_textured(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: DrawMaterialTextured,
+    ) {
+        if let Some(obs) = &state.config.observed_kinds {
+            obs.lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063")
+                .push(<DrawMaterialTextured as Kind>::NAME.into());
+        }
+        state
+            .handles
+            .material_frame
+            .lock()
+            .expect("mutex poisoned; fail-fast per ADR-0063")
+            .push(MaterialBatch::Textured {
+                texture_id: mail.texture_id,
+                rects: mail.rects,
+            });
+    }
+
+    /// `DrawMaterialCoverage` handler (ADR-0140). Accumulates a typed
+    /// coverage material batch into the ordered material stream. The R8
+    /// format requirement is checked at record time when the texture
+    /// registry is available to the encoder path.
+    ///
+    /// # Agent
+    /// Mail `aether.render.material.coverage { texture_id, rects }`
+    /// every frame the coverage material should appear; no reply.
+    #[handler::single]
+    fn on_draw_material_coverage(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: DrawMaterialCoverage,
+    ) {
+        if let Some(obs) = &state.config.observed_kinds {
+            obs.lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063")
+                .push(<DrawMaterialCoverage as Kind>::NAME.into());
+        }
+        state
+            .handles
+            .material_frame
+            .lock()
+            .expect("mutex poisoned; fail-fast per ADR-0063")
+            .push(MaterialBatch::Coverage {
+                texture_id: mail.texture_id,
+                rects: mail.rects,
             });
     }
 }

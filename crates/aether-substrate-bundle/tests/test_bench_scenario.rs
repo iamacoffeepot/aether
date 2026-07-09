@@ -36,8 +36,10 @@ use aether_capabilities::fs::{
     Delete, DeleteResult, FsError, List, ListResult, Read, ReadResult, Write, WriteResult,
 };
 use aether_capabilities::render::{
-    CreateTexture, CreateTextureResult, DestroyTexture, DrawSolidQuads, DrawTexturedQuads,
-    SolidQuad, TextureFormat, TexturedQuad, UpdateTexture, ViewProjection,
+    CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured,
+    DrawSolidQuads, DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect,
+    MaterialTexturedRect, SolidQuad, TextureFormat, TexturedQuad, UpdateTexture, Vertex,
+    ViewProjection,
 };
 use aether_capabilities::text::{
     DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult,
@@ -55,7 +57,7 @@ use aether_substrate_bundle::test_bench::{
     test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
 };
 use aether_substrate_bundle::visual::{
-    background_top_left, bounding_box, centroid, coverage, decode_png,
+    Image, background_top_left, bounding_box, centroid, coverage, decode_png,
 };
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
@@ -99,6 +101,16 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
         payload: mail.encode_into_bytes(),
         count: 1,
     }
+}
+
+fn rgba_at(img: &Image, x: u32, y: u32) -> [u8; 4] {
+    let start = ((y * img.width + x) * 4) as usize;
+    [
+        img.rgba[start],
+        img.rgba[start + 1],
+        img.rgba[start + 2],
+        img.rgba[start + 3],
+    ]
 }
 
 /// Load the probe into the bench via `execute`, blocking on the
@@ -1159,6 +1171,249 @@ fn r8_texture_updates_and_draws_red_channel_only() {
         left[1] <= 10 && left[2] <= 10 && right[1] <= 10 && right[2] <= 10,
         "R8 texture sampled through quad shader should not contribute green/blue; \
          left={left:?} right={right:?}",
+    );
+}
+
+/// ADR-0140 coverage material: an R8 plane renders in the world-space
+/// material pass between the main pass and overlay. A hand-authored
+/// horizontal coverage field produces outside/body/rim samples at known
+/// pixels.
+#[test]
+fn coverage_material_renders_body_rim_and_outside_bands() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let pixels = vec![
+        0, 0, 0, 0, 128, 128, 255, 255, //
+        0, 0, 0, 0, 128, 128, 255, 255, //
+        0, 0, 0, 0, 128, 128, 255, 255, //
+        0, 0, 0, 0, 128, 128, 255, 255,
+    ];
+    let created = bench
+        .execute(vec![(
+            "create",
+            BenchOp::send_and_await(
+                "aether.render",
+                &CreateTexture {
+                    width: 8,
+                    height: 4,
+                    format: TextureFormat::R8,
+                    pixels,
+                },
+            ),
+        )])
+        .expect("create coverage texture");
+    let texture_id = match created
+        .reply::<CreateTextureResult>("create")
+        .expect("decode CreateTextureResult")
+    {
+        CreateTextureResult::Ok { texture_id } => texture_id,
+        CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
+    };
+
+    let pre = vec![envelope(
+        "aether.render",
+        &DrawMaterialCoverage {
+            texture_id,
+            rects: vec![MaterialCoverageRect {
+                rect: MaterialRect {
+                    x: -0.8,
+                    y: -0.6,
+                    width: 1.6,
+                    height: 1.2,
+                    z: 0.5,
+                },
+                body_color: [0.0, 0.9, 0.1, 1.0],
+                rim_color: [1.0, 0.9, 0.0, 1.0],
+                rim_width: 0.25,
+            }],
+        },
+    )];
+    let captured = bench
+        .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
+        .expect("capture coverage material");
+    let img = decode_png(captured.captured("snap").expect("snap step ran"))
+        .expect("decode coverage material png");
+    let bg = background_top_left(&img);
+    let outside = rgba_at(&img, 12, 24);
+    let rim = rgba_at(&img, 38, 24);
+    let body = rgba_at(&img, 48, 24);
+
+    assert!(
+        outside[0].abs_diff(bg[0]) <= 8
+            && outside[1].abs_diff(bg[1]) <= 8
+            && outside[2].abs_diff(bg[2]) <= 8,
+        "outside coverage sample should stay background; bg={bg:?} outside={outside:?}",
+    );
+    assert!(
+        rim[0] > 150 && rim[1] > 120 && rim[2] < 80,
+        "coverage rim sample should be yellow; got {rim:?}",
+    );
+    assert!(
+        body[1] > body[0].saturating_add(80) && body[1] > body[2].saturating_add(60),
+        "coverage body sample should be green; got {body:?}",
+    );
+}
+
+/// ADR-0140 textured material: a world-space RGBA8 material rect samples
+/// a texture and depth-tests against the main pass. The left half is
+/// covered by a main-pass triangle at a nearer depth, while the right
+/// half remains visible.
+#[test]
+fn textured_material_depth_tests_against_main_geometry() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let pixels = vec![255u8, 255, 255, 255];
+    let created = bench
+        .execute(vec![(
+            "create",
+            BenchOp::send_and_await(
+                "aether.render",
+                &CreateTexture {
+                    width: 1,
+                    height: 1,
+                    format: TextureFormat::Rgba8,
+                    pixels,
+                },
+            ),
+        )])
+        .expect("create textured material texture");
+    let texture_id = match created
+        .reply::<CreateTextureResult>("create")
+        .expect("decode CreateTextureResult")
+    {
+        CreateTextureResult::Ok { texture_id } => texture_id,
+        CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
+    };
+
+    let occluder = DrawTriangle {
+        verts: [
+            Vertex {
+                x: -0.9,
+                y: -0.8,
+                z: 0.0,
+                r: 0.9,
+                g: 0.0,
+                b: 0.0,
+            },
+            Vertex {
+                x: -0.9,
+                y: 0.8,
+                z: 0.0,
+                r: 0.9,
+                g: 0.0,
+                b: 0.0,
+            },
+            Vertex {
+                x: 0.0,
+                y: 0.8,
+                z: 0.0,
+                r: 0.9,
+                g: 0.0,
+                b: 0.0,
+            },
+        ],
+    };
+    let pre = vec![
+        envelope("aether.render", &occluder),
+        envelope(
+            "aether.render",
+            &DrawMaterialTextured {
+                texture_id,
+                rects: vec![MaterialTexturedRect {
+                    rect: MaterialRect {
+                        x: -0.8,
+                        y: -0.6,
+                        width: 1.6,
+                        height: 1.2,
+                        z: 0.5,
+                    },
+                    u0: 0.0,
+                    v0: 0.0,
+                    u1: 1.0,
+                    v1: 1.0,
+                    tint: [0.0, 0.1, 1.0, 1.0],
+                }],
+            },
+        ),
+    ];
+    let captured = bench
+        .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
+        .expect("capture textured material");
+    let img = decode_png(captured.captured("snap").expect("snap step ran"))
+        .expect("decode textured material png");
+    let left = rgba_at(&img, 12, 20);
+    let right = rgba_at(&img, 48, 24);
+    assert!(
+        left[0] > left[2].saturating_add(80),
+        "left sample should show red main-pass occluder, not blue material; got {left:?}",
+    );
+    assert!(
+        right[2] > right[0].saturating_add(100),
+        "right sample should show blue textured material; got {right:?}",
+    );
+}
+
+/// ADR-0140 coverage material rejects non-R8 textures at encode time:
+/// the batch warn-drops, the frame still renders, and no material pixels
+/// appear.
+#[test]
+fn coverage_material_warn_drops_non_r8_texture() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let created = bench
+        .execute(vec![(
+            "create",
+            BenchOp::send_and_await(
+                "aether.render",
+                &CreateTexture {
+                    width: 2,
+                    height: 2,
+                    format: TextureFormat::Rgba8,
+                    pixels: vec![255u8; 16],
+                },
+            ),
+        )])
+        .expect("create rgba texture");
+    let texture_id = match created
+        .reply::<CreateTextureResult>("create")
+        .expect("decode CreateTextureResult")
+    {
+        CreateTextureResult::Ok { texture_id } => texture_id,
+        CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
+    };
+    let pre = vec![envelope(
+        "aether.render",
+        &DrawMaterialCoverage {
+            texture_id,
+            rects: vec![MaterialCoverageRect {
+                rect: MaterialRect {
+                    x: -0.8,
+                    y: -0.6,
+                    width: 1.6,
+                    height: 1.2,
+                    z: 0.5,
+                },
+                body_color: [0.0, 1.0, 0.0, 1.0],
+                rim_color: [1.0, 1.0, 0.0, 1.0],
+                rim_width: 0.25,
+            }],
+        },
+    )];
+    let captured = bench
+        .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
+        .expect("capture non-r8 coverage");
+    let img = decode_png(captured.captured("snap").expect("snap step ran"))
+        .expect("decode non-r8 coverage png");
+    let drawn = coverage(&img, background_top_left(&img), 5);
+    assert!(
+        drawn < 0.01,
+        "coverage draw against RGBA8 should be warn-dropped, but lit coverage was {drawn}",
     );
 }
 

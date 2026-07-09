@@ -407,7 +407,12 @@ impl Gpu {
             Err(RenderError::VertexBufferOverflow { .. }) => return None,
         }
 
-        // ADR-0105 textured-quad overlay, recorded after the world pass —
+        // ADR-0140 material pass, recorded after the world pass and
+        // before the screen overlay.
+        self.render_handles
+            .record_material_pass(&mut encoder, false);
+
+        // ADR-0105 textured-quad overlay, recorded after world/material —
         // commit-current semantic to match `record_frame` above.
         self.render_handles.record_overlay_pass(&mut encoder, false);
 

@@ -33,8 +33,9 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use super::{
-    CreateTexture, CreateTextureResult, DestroyTexture, DrawSolidQuads, DrawTexturedQuads,
-    DrawTriangle, HeadlessRenderCapability, UpdateTexture, ViewProjection,
+    CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured,
+    DrawSolidQuads, DrawTexturedQuads, DrawTriangle, HeadlessRenderCapability, UpdateTexture,
+    ViewProjection,
 };
 
 /// `HeadlessRenderCapability` runtime state. Holds only the [`HubOutbound`]
@@ -160,6 +161,26 @@ impl NativeActor for HeadlessRenderCapability {
         _state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
         _mail: DrawSolidQuads,
+    ) {
+    }
+
+    /// `DrawMaterialTextured` lands here as a no-op for the same
+    /// reason as `on_draw_textured_quads`.
+    #[handler::single]
+    fn on_draw_material_textured(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: DrawMaterialTextured,
+    ) {
+    }
+
+    /// `DrawMaterialCoverage` lands here as a no-op for the same
+    /// reason as `on_draw_textured_quads`.
+    #[handler::single]
+    fn on_draw_material_coverage(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: DrawMaterialCoverage,
     ) {
     }
 }

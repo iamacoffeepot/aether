@@ -218,6 +218,69 @@ pub struct DrawSolidQuads {
     pub quads: Vec<SolidQuad>,
 }
 
+/// Shared world-plane rect for material draws. `(x, y, width, height)`
+/// are world units and `z` is the depth-tested layer the material quad
+/// sits on. Not a kind on its own — embedded in the typed material
+/// draw payloads below.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct MaterialRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub z: f32,
+}
+
+/// One textured material rect. The rect expands to a world-space quad;
+/// `(u0, v0)`–`(u1, v1)` selects the sampled texture region and `tint`
+/// multiplies the sampled RGBA texel.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct MaterialTexturedRect {
+    pub rect: MaterialRect,
+    pub u0: f32,
+    pub v0: f32,
+    pub u1: f32,
+    pub v1: f32,
+    pub tint: [f32; 4],
+}
+
+/// `aether.render.material.textured` — draw depth-tested, alpha-blended
+/// world-space image rects sampling one registered texture. This is the
+/// general substrate-authored image-in-world material for sprites,
+/// decals, and splats. `texture_id` comes from `CreateTexture`; an
+/// unknown texture warn-drops the batch at record time. Fire-and-forget,
+/// immediate-mode: resend every frame the material should be visible.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.render.material.textured")]
+pub struct DrawMaterialTextured {
+    pub texture_id: u32,
+    pub rects: Vec<MaterialTexturedRect>,
+}
+
+/// One coverage material rect. The shader samples an R8 texture,
+/// thresholds at the fixed iso value 127.5, antialiases the edge with
+/// `fwidth`, fills inside with `body_color`, and colors an inner band of
+/// `rim_width` coverage-fraction units with `rim_color`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct MaterialCoverageRect {
+    pub rect: MaterialRect,
+    pub body_color: [f32; 4],
+    pub rim_color: [f32; 4],
+    pub rim_width: f32,
+}
+
+/// `aether.render.material.coverage` — draw depth-tested coverage bands
+/// from an R8 texture. The material is substrate-authored and closed:
+/// callers provide data (texture id + rect parameters), not WGSL. A
+/// non-R8 texture or unknown texture warn-drops the batch at record time.
+/// Fire-and-forget, immediate-mode.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.render.material.coverage")]
+pub struct DrawMaterialCoverage {
+    pub texture_id: u32,
+    pub rects: Vec<MaterialCoverageRect>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

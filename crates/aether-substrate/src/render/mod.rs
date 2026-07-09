@@ -17,12 +17,18 @@
 //! hub don't enable the feature so wgpu stays out of their build.
 
 mod capture;
+mod material;
 mod pipeline;
 mod quad;
 mod targets;
 
 pub use capture::{
     CaptureMeta, encode_png, finish_capture, map_capture_rgba, prepare_capture_copy,
+};
+pub use material::{
+    MATERIAL_VERTEX_BUFFER_BYTES, MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw,
+    MaterialPassDraw, MaterialPassRecord, MaterialPipelines, build_material_pipelines,
+    push_coverage_params, push_material_rect_vertices, push_textured_params, record_material_pass,
 };
 pub use pipeline::{Pipeline, RenderError, build_main_pipeline, record_main_pass};
 pub use quad::{
