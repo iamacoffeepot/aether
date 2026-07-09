@@ -12,7 +12,7 @@
 //! view mode, and the cache invalidation. Each chunk becomes keyed-quilt
 //! underlay cells (flat world-anchored color with pooled rims and a wash
 //! gradient) and corner-minimized overlay contours over the subcell masks,
-//! in world-space meters (`1 cell = 1 m`) with the existing `aether.camera`
+//! in world-space meters (`1 cell = 1 m`) with the existing `aether.view_projection`
 //! `view_proj` handling projection. A chunk's rims and contours read a
 //! bounded apron into its neighbors, so a write invalidates its own mesh
 //! and its eight cached neighbors.
@@ -75,7 +75,7 @@ use self::mesher::style::StyleTable;
 /// sending `aether.kit.world.set_chunk` (one chunk's planes) and
 /// `aether.kit.world.set_region` (a region default for the underlay
 /// cascade); each send remeshes and the meadow renders every frame under
-/// the active `aether.camera` view. `aether.kit.world.set_view_mode`
+/// the active `aether.view_projection` view. `aether.kit.world.set_view_mode`
 /// toggles the raw grayscale field for calibrating the material table;
 /// `aether.kit.world.load` swaps a serialized world from `aether.fs`. Use
 /// `capture_frame` to verify.

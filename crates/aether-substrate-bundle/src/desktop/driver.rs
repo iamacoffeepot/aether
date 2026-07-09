@@ -1248,7 +1248,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // ADR-0082 §11 / issues 1378 + 1489: drive one full
                 // `Tick → Render → Present` cycle. Each `LifecycleAdvance`
                 // broadcasts the cap's current stage; components emit their
-                // `DrawTriangle` / `aether.camera` mail into render as
+                // `DrawTriangle` / `aether.view_projection` mail into render as
                 // descendants of that advance's chain root. We wait for the
                 // broadcast root to settle (ADR-0080 §6 — the
                 // causal-completion replacement for the retired

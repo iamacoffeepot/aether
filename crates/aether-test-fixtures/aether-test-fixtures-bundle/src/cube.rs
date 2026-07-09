@@ -7,7 +7,7 @@
 //! flat NDC triangle at identity `view_proj`, which touches none of
 //! the camera path. This fixture instead emits a twelve-triangle
 //! world-space cube centered at the origin (corners at ±0.5) and
-//! publishes a hand-computed `Camera { view_proj }` that frames the
+//! publishes a hand-computed `ViewProjection { view_proj }` that frames the
 //! cube as a centered silhouette. The camera sits in the all-positive
 //! octant looking back at the origin, so three faces are visible and
 //! the view is non-axis-aligned — the depth test actually orders the
@@ -20,7 +20,7 @@
 //!   every captured frame is deterministic.
 //! - `wire` subscribes `Tick` on `aether.lifecycle` (ADR-0082),
 //!   mirroring the reference camera and the probe.
-//! - On each tick the fixture publishes the stored `Camera` to the
+//! - On each tick the fixture publishes the stored `ViewProjection` to the
 //!   chassis render mailbox, then emits the cube's twelve
 //!   `DrawTriangle`s — six faces, each a distinct flat color so the
 //!   silhouette reads as one solid blob. Vertices carry world `z`, so
@@ -31,7 +31,7 @@ use core::f32::consts::FRAC_PI_4;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::render::{Camera, DrawTriangle, Vertex};
+use aether_capabilities::render::{DrawTriangle, Vertex, ViewProjection};
 use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::Tick;
 use aether_math::{Mat4, Vec3};
@@ -154,7 +154,7 @@ impl WasmActor for Cube {
     /// silhouette.
     #[handler::single]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _: Tick) {
-        ctx.actor::<RenderCapability>().send(&Camera {
+        ctx.actor::<RenderCapability>().send(&ViewProjection {
             view_proj: self.view_proj,
         });
         for triangle in Cube::triangles() {

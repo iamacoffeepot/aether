@@ -33,8 +33,8 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use super::{
-    Camera, CreateTexture, CreateTextureResult, DestroyTexture, DrawSolidQuads, DrawTexturedQuads,
-    DrawTriangle, HeadlessRenderCapability, UpdateTexture,
+    CreateTexture, CreateTextureResult, DestroyTexture, DrawSolidQuads, DrawTexturedQuads,
+    DrawTriangle, HeadlessRenderCapability, UpdateTexture, ViewProjection,
 };
 
 /// `HeadlessRenderCapability` runtime state. Holds only the [`HubOutbound`]
@@ -83,11 +83,11 @@ impl NativeActor for HeadlessRenderCapability {
     ) {
     }
 
-    /// `Camera` lands here as a no-op for the same reason as
+    /// `ViewProjection` lands here as a no-op for the same reason as
     /// `on_draw_triangle` — desktop-designed components publish
-    /// `aether.camera` every tick.
+    /// `aether.view_projection` every tick.
     #[handler::single]
-    fn on_camera(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: Camera) {}
+    fn on_camera(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ViewProjection) {}
 
     /// `CaptureFrame` replies `Err` inline so MCP `capture_frame`
     /// fails fast on headless instead of hanging on a reply that

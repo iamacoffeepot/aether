@@ -1,7 +1,7 @@
 // Vertex positions are world-space (x, y, z). The camera uniform
 // `view_proj` (column-major, uploaded verbatim from the
-// `aether.camera` sink) multiplies every vertex to produce clip
-// space. Before the first `Camera` mail arrives the uniform holds
+// `aether.view_projection` sink) multiplies every vertex to produce clip
+// space. Before the first view-projection mail arrives the uniform holds
 // identity, so components still emitting clip-space-ish world coords
 // render unchanged.
 

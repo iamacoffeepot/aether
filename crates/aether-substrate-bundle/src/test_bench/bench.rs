@@ -195,7 +195,7 @@ pub struct TestBench {
 
     /// Kind names of mail observed via the chassis-owned render sink
     /// (`aether.render` — both `aether.draw_triangle` and
-    /// `aether.camera` flow here post-ADR-0074 §Decision 7) plus
+    /// `aether.view_projection` flow here post-ADR-0074 §Decision 7) plus
     /// broadcast / session-zero frames that arrived on the loopback.
     /// Read back via [`Self::count_observed`] / [`Self::observed_kinds`]
     /// for scenario assertions.
@@ -497,7 +497,7 @@ impl TestBench {
     /// Count how many mail observations match `kind_name`. Includes
     /// mail observed at the chassis-owned `aether.render` sink
     /// (which receives both `aether.draw_triangle` and
-    /// `aether.camera` post-ADR-0074 §Decision 7) plus any broadcast
+    /// `aether.view_projection` post-ADR-0074 §Decision 7) plus any broadcast
     /// / session-zero frames that arrived on the loopback. Mail to
     /// other sinks and direct component-to-component flows are not
     /// observed (v1).

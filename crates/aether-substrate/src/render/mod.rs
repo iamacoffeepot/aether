@@ -51,7 +51,7 @@ pub const VERTEX_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 /// Camera uniform buffer size: a single 4×4 column-major `f32` view-
 /// projection matrix. The vertex shader applies `camera.view_proj *
 /// vec4(position, 1.0)` to every vertex; until the first
-/// `aether.camera` mail arrives the buffer holds [`IDENTITY_VIEW_PROJ`].
+/// `aether.view_projection` mail arrives the buffer holds [`IDENTITY_VIEW_PROJ`].
 pub const CAMERA_UNIFORM_BYTES: u64 = 64;
 
 /// Depth target format. `LessEqual` comparison with this paired
@@ -66,7 +66,7 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 pub const COPY_ROW_ALIGN: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
 
 /// 4×4 identity matrix in column-major order — what the camera
-/// uniform holds before the first `aether.camera` mail arrives.
+/// uniform holds before the first `aether.view_projection` mail arrives.
 pub const IDENTITY_VIEW_PROJ: [f32; 16] = [
     1.0, 0.0, 0.0, 0.0, //
     0.0, 1.0, 0.0, 0.0, //

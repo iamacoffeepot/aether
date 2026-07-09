@@ -53,21 +53,21 @@ pub struct DrawTriangle {
 /// per-triangle wire footprint.
 pub const DRAW_TRIANGLE_BYTES: usize = size_of::<DrawTriangle>();
 
-/// Camera state: column-major `view_proj` matrix (world → clip). The
-/// desktop chassis's `camera` sink writes the latest payload into the
-/// GPU uniform every frame; the WGSL vertex shader multiplies each
-/// vertex position by this matrix. Column-major layout matches wgpu's
-/// uniform upload — 64 bytes uploaded verbatim, no transpose. Camera
-/// components emit this on every `Tick`; the substrate reads only the
-/// most recent value before issuing the next draw. Before the first
-/// `Camera` arrives, the uniform holds identity and vertices render
+/// View-projection state: column-major `view_proj` matrix (world → clip).
+/// The desktop chassis's `aether.view_projection` sink writes the latest
+/// payload into the GPU uniform every frame; the WGSL vertex shader
+/// multiplies each vertex position by this matrix. Column-major layout
+/// matches wgpu's uniform upload — 64 bytes uploaded verbatim, no transpose.
+/// Camera components emit this on every `Tick`; the substrate reads only
+/// the most recent value before issuing the next draw. Before the first
+/// `ViewProjection` arrives, the uniform holds identity and vertices render
 /// in clip-space 1:1 (the pre-camera behaviour).
 #[repr(C)]
 #[derive(
     Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
 )]
-#[kind(name = "aether.camera")]
-pub struct Camera {
+#[kind(name = "aether.view_projection")]
+pub struct ViewProjection {
     pub view_proj: [f32; 16],
 }
 

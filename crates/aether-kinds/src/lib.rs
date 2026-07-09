@@ -617,7 +617,7 @@ pub struct Modifiers {
 }
 
 // The render cap's drawing/texture kinds — `Vertex` / `DrawTriangle` /
-// `DRAW_TRIANGLE_BYTES` / `Camera` and the `aether.render.*` texture +
+// `DRAW_TRIANGLE_BYTES` / `ViewProjection` and the `aether.render.*` texture +
 // quad family — moved to `aether_capabilities::render::kinds` (ADR-0121,
 // "capabilities own their kinds"). The capture-request and `FrameCheck`
 // verification kinds stay below: `aether-mcp` and the substrate core
@@ -641,7 +641,7 @@ pub struct Modifiers {
 /// (`w = 1`) picks up the translation column and a direction (`w = 0`)
 /// does not.
 ///
-/// Cast-shaped (`#[repr(C)]` + `Pod`, like `Vec4` and `Camera`),
+/// Cast-shaped (`#[repr(C)]` + `Pod`, like `Vec4` and `ViewProjection`),
 /// composing the math primitives directly rather than flattening them
 /// to raw `[f32; N]` arrays. The `Kind` canonical encode/decode keeps
 /// the transform boundary consistent: a source encodes its output and
@@ -2345,10 +2345,10 @@ mod control_plane {
     // ADR-0066: camera control kinds (`aether.kit.camera.{create, destroy,
     // set_active, set_mode, orbit.set, topdown.set}` + `OrbitParams` /
     // `TopdownParams` / `ModeInit`) live in the `aether-kit::camera`
-    // trunk module. The `aether.camera` view_proj sink contract above stays
-    // here — it's a chassis primitive consumed by the desktop chassis's
+    // trunk module. The `aether.view_projection` view_proj sink contract stays
+    // in `aether-capabilities` — it's a chassis primitive consumed by the desktop chassis's
     // `aether.render` mailbox (the camera mailbox folded into
-    // render per ADR-0074 §Decision 7; the kind name is unchanged).
+    // render per ADR-0074 §Decision 7).
     // The migrated kinds are still wire-compatible (kind names +
     // schemas unchanged); only the source-side home moved.
 
