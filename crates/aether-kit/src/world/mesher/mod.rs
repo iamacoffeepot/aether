@@ -467,9 +467,13 @@ fn label_lift(world: &World, owner: CellPos, wx: f32, wz: f32) -> (f32, f32) {
 /// lattice, where positional inference reads whichever subcell the vertex
 /// floors into and collapses both flaps onto one plate. A crossing lies
 /// within half a sample of its anchor, so the anchored patch never
-/// extrapolates. Off relief the anchor is unused — the owner-clamp and
-/// whole-cell paths are exactly [`label_lift`]'s, so relief-free worlds are
-/// byte-identical.
+/// extrapolates. The whole-cell lift resolves through the anchor sample's
+/// cell too — so a marched wall top or base on a material boundary with no
+/// subcell relief lands on the anchored side's committed plate, rather than
+/// collapsing onto the window-center `owner` wherever that owner falls on
+/// the low side of the boundary (the bug that left relief-free
+/// material-boundary cliffs with see-through faces). The relief owner-clamp
+/// branch is unchanged.
 fn anchored_lift(
     world: &World,
     owner: CellPos,
@@ -481,25 +485,31 @@ fn anchored_lift(
         x: floor_to_i32(wx),
         z: floor_to_i32(wz),
     };
+    // The cell owning the anchor sample — the vertex's own side of the
+    // crossed edge. The whole-cell lift resolves through it (not the
+    // window-center `owner`, nor the on-boundary midpoint `cell`), so a
+    // marched wall top/base lands on the anchored side's plate even with no
+    // subcell relief. A window-center-owned lift collapses the wall wherever
+    // the owner falls on the low side of the boundary.
+    let anchor_cell = CellPos {
+        x: anchor_oct[0].div_euclid(256),
+        z: anchor_oct[1].div_euclid(256),
+    };
     if cell != owner && world.edge_is_cliff(cell, owner) {
         if world.cell_has_height_relief(owner) {
             let patch = SubPatch::containing(world, owner, wx, wz);
             return (patch.y(wx, wz), patch.shade(wx, wz));
         }
-        let lift = CellLift::of(world, owner);
+        let lift = CellLift::of(world, anchor_cell);
         return (lift.y(wx, wz), lift.shade(wx, wz));
     }
     if world.cell_has_height_relief(cell) {
-        let anchor_cell = CellPos {
-            x: anchor_oct[0].div_euclid(256),
-            z: anchor_oct[1].div_euclid(256),
-        };
         let sub_x = anchor_oct[0].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
         let sub_z = anchor_oct[1].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
         let patch = SubPatch::of(world, anchor_cell, sub_x, sub_z);
         return (patch.y(wx, wz), patch.shade(wx, wz));
     }
-    let lift = CellLift::of(world, cell);
+    let lift = CellLift::of(world, anchor_cell);
     (lift.y(wx, wz), lift.shade(wx, wz))
 }
 
@@ -511,16 +521,19 @@ fn anchored_lift(
 /// stands on and the relief walls loft from. A flap polygon spanning a
 /// returned line must be clipped there ([`emit_clipped_flap`]): a cap fan
 /// must never connect vertices whose plates split.
+///
+/// Reads the point-surface levels directly rather than gating on
+/// [`World::cell_has_height_relief`], so a **whole-cell** height cliff — a
+/// plate break at a cell boundary with no subcell relief — also returns a
+/// break line. That is what lets a chamfered relief-free material boundary
+/// clip its overhang flap so the sliver closer ([`emit_clip_gap_walls`]) can
+/// seal it; a flat cell splits nothing (equal levels) and stays break-free.
 fn window_break_lines(
     world: &World,
-    owner: CellPos,
     x_lo: i32,
     z_lo: i32,
     step_oct: i32,
 ) -> (Option<i32>, Option<i32>) {
-    if !world.cell_has_height_relief(owner) {
-        return (None, None);
-    }
     let x_hi = x_lo + step_oct;
     let z_hi = z_lo + step_oct;
     // Corner-sample point levels in [BL, BR, TR, TL] order.
@@ -767,8 +780,10 @@ fn emit_clip_gap_walls(
 /// its plate, the low fragment holds the ground, and the wall classes close
 /// the vertical gap on the same subcells. Off the break lines the two forms
 /// agree wherever the plates connect, so continuous relief stays seamless.
-/// The owner-clamp and relief-free paths are exactly [`label_lift`]'s, so
-/// cell-cliff and relief-free worlds are untouched.
+/// The whole-cell (relief-free) lift resolves through the fragment's own
+/// side cell as well, so a clipped relief-free material-boundary fragment
+/// reads its own plate; off any break line the side cell is the vertex's own
+/// floor cell, leaving an unclipped relief-free vertex unchanged.
 fn fragment_lift(
     world: &World,
     owner: CellPos,
@@ -780,42 +795,43 @@ fn fragment_lift(
         x: floor_to_i32(wx),
         z: floor_to_i32(wz),
     };
+    // The subcell on the fragment's own side of any clipped break line (per
+    // axis): on the line, `sides` says which side; off it, the floor subcell.
+    let sub_of = |w: f32, side: Option<(i32, bool)>| -> i32 {
+        if let Some((line, above)) = side {
+            let oct = w * OCTIMETERS_PER_METER;
+            if (oct - line as f32).abs() < 0.5 {
+                let lattice = line / OCTIMETERS_PER_SUBCELL;
+                return if above { lattice } else { lattice - 1 };
+            }
+        }
+        floor_to_i32(w * SUB as f32)
+    };
+    let sx = sub_of(wx, sides[0]);
+    let sz = sub_of(wz, sides[1]);
+    // The plate the fragment sits on — its own side cell resolved from the
+    // clipped break sides, not the window-center owner. This is what a
+    // relief-free clipped material-boundary fragment must read so its lift
+    // lands on the correct plate rather than collapsing both sides to one
+    // height (the twin of the `anchored_lift` bug, which left chamfered
+    // relief-free corners with unclosed overhang slivers).
+    let side_cell = CellPos {
+        x: sx.div_euclid(SUB),
+        z: sz.div_euclid(SUB),
+    };
     if cell != owner && world.edge_is_cliff(cell, owner) {
         if world.cell_has_height_relief(owner) {
             let patch = SubPatch::containing(world, owner, wx, wz);
             return (patch.y(wx, wz), patch.shade(wx, wz));
         }
-        let lift = CellLift::of(world, owner);
+        let lift = CellLift::of(world, side_cell);
         return (lift.y(wx, wz), lift.shade(wx, wz));
     }
     if world.cell_has_height_relief(cell) {
-        // Subcell per axis: the fragment's side when the coordinate sits
-        // exactly on that axis's clipped break line (always a subcell
-        // lattice line), else the floor subcell.
-        let sub_of = |w: f32, side: Option<(i32, bool)>| -> i32 {
-            if let Some((line, above)) = side {
-                let oct = w * OCTIMETERS_PER_METER;
-                if (oct - line as f32).abs() < 0.5 {
-                    let lattice = line / OCTIMETERS_PER_SUBCELL;
-                    return if above { lattice } else { lattice - 1 };
-                }
-            }
-            floor_to_i32(w * SUB as f32)
-        };
-        let sx = sub_of(wx, sides[0]);
-        let sz = sub_of(wz, sides[1]);
-        let patch = SubPatch::of(
-            world,
-            CellPos {
-                x: sx.div_euclid(SUB),
-                z: sz.div_euclid(SUB),
-            },
-            sx.rem_euclid(SUB),
-            sz.rem_euclid(SUB),
-        );
+        let patch = SubPatch::of(world, side_cell, sx.rem_euclid(SUB), sz.rem_euclid(SUB));
         return (patch.y(wx, wz), patch.shade(wx, wz));
     }
-    let lift = CellLift::of(world, cell);
+    let lift = CellLift::of(world, side_cell);
     (lift.y(wx, wz), lift.shade(wx, wz))
 }
 
@@ -935,28 +951,31 @@ fn partition_inputs(
             // break: paint smoothing must never cross a physical cliff, or
             // the silhouette's flank would alternate between painted steep
             // caps and wall wedges. Pure world reads (position-based), so
-            // neighboring chunks agree over the shared apron. The relief
-            // shortcut keeps flat neighborhoods off this path entirely.
-            if world.cell_has_height_relief(cell) {
-                let gx = at.x * EDGE * SUB + si;
-                let gz = at.z * EDGE * SUB + sj;
-                let own_level = point_surface_level_at(
-                    world,
-                    gx * OCTIMETERS_PER_SUBCELL,
-                    gz * OCTIMETERS_PER_SUBCELL,
-                );
-                frozen[idx] =
-                    [(1, 0), (-1, 0), (0, 1), (0, -1)]
-                        .into_iter()
-                        .any(|(dx, dz): (i32, i32)| {
-                            let level = point_surface_level_at(
-                                world,
-                                (gx + dx) * OCTIMETERS_PER_SUBCELL,
-                                (gz + dz) * OCTIMETERS_PER_SUBCELL,
-                            );
-                            (own_level - level).abs() > STEP_MAX_OCTIMETERS
-                        });
-            }
+            // neighboring chunks agree over the shared apron. Reads the point
+            // levels directly rather than gating on relief, so a **whole-cell**
+            // cliff freezes the contour too: without this the chamfer smooths
+            // across a relief-free material cliff, flipping the corner to the
+            // low neighbor's paint over the high plate (the floating sliver)
+            // and leaving its flank unwalled. A flat neighborhood reads equal
+            // levels and stays unfrozen, so an unshaped world is unchanged.
+            let gx = at.x * EDGE * SUB + si;
+            let gz = at.z * EDGE * SUB + sj;
+            let own_level = point_surface_level_at(
+                world,
+                gx * OCTIMETERS_PER_SUBCELL,
+                gz * OCTIMETERS_PER_SUBCELL,
+            );
+            frozen[idx] =
+                [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                    .into_iter()
+                    .any(|(dx, dz): (i32, i32)| {
+                        let level = point_surface_level_at(
+                            world,
+                            (gx + dx) * OCTIMETERS_PER_SUBCELL,
+                            (gz + dz) * OCTIMETERS_PER_SUBCELL,
+                        );
+                        (own_level - level).abs() > STEP_MAX_OCTIMETERS
+                    });
         }
     }
     any.then_some((ids, params, frozen))
@@ -1242,7 +1261,7 @@ fn emit_partition_windows(
             // routes through the mixed emitter, whose break clipping splits
             // it (the label's case is 15 — the full window polygon).
             if corners[0] != 0 && corners.iter().all(|&c| c == corners[0]) {
-                let (bx, bz) = window_break_lines(world, owner, x_lo, z_lo, step_oct);
+                let (bx, bz) = window_break_lines(world, x_lo, z_lo, step_oct);
                 if bx.is_none() && bz.is_none() {
                     match run {
                         Some((label, cell, _)) if label == corners[0] && cell == owner => {}
@@ -1321,7 +1340,7 @@ fn emit_mixed_window(
     // The break midlines a flap must be clipped along — a fan across a
     // split would draw a slanted bridge over the break instead of letting
     // the walls close it.
-    let (clip_x, clip_z) = window_break_lines(world, owner, x_lo, z_lo, step_oct);
+    let (clip_x, clip_z) = window_break_lines(world, x_lo, z_lo, step_oct);
     // Window point positions in octimeters, contour point numbering
     // (corners 0..4, edge midpoints 4..8).
     let points = [
@@ -4804,6 +4823,120 @@ mod tests {
         world
     }
 
+    /// A cell-aligned stone block raised a whole-cell step above flat grass —
+    /// a MATERIAL boundary with **no subcell relief**, the relief-free cliff
+    /// that [`delta_column_world`]'s subcell deltas never exercise. Whole-cell
+    /// `height` only (`height_points` left inheriting), so
+    /// `cell_has_height_relief` stays false across the boundary. Smoothing is
+    /// pinned off (profile 1, iterations 0) so the marched contour stays
+    /// axis-aligned and the block's perimeter walls run straight.
+    fn material_block_world() -> World {
+        let mut world = World::new();
+        world.insert_smoothing_profile(
+            1,
+            SmoothingProfile {
+                iterations: 0,
+                degrees: 90,
+            },
+        );
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let mut c = Chunk::empty();
+                c.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+                c.smoothing = [1; CELLS_PER_CHUNK_AREA];
+                if dx == 0 && dz == 0 {
+                    // A 4x4 stone block on whole-cell heights — the cliff is a
+                    // material + cell-height break with zero subcell relief.
+                    for lz in 6..10 {
+                        for lx in 6..10 {
+                            let idx = (lz * EDGE + lx) as usize;
+                            c.underlay[idx] = Material::Stone;
+                            c.height[idx] = 512;
+                        }
+                    }
+                }
+                world.insert_chunk(ChunkPos { x: dx, z: dz }, c);
+            }
+        }
+        world
+    }
+
+    /// [`material_block_world`] with corner-flattening **on**: a chamfering
+    /// smoothing profile (`iterations: 2`, `degrees: 45`) so `minimize_corners`
+    /// cuts the block's right-angle corners into diagonals. Still relief-free
+    /// (whole-cell `height`, no `height_points`) — the case the chamfer-sliver
+    /// closer never runs for, because its clip lines come from height breaks.
+    fn material_block_chamfered_world() -> World {
+        let mut world = World::new();
+        world.insert_smoothing_profile(
+            1,
+            SmoothingProfile {
+                iterations: 2,
+                degrees: 45,
+            },
+        );
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let mut c = Chunk::empty();
+                c.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+                c.smoothing = [1; CELLS_PER_CHUNK_AREA];
+                if dx == 0 && dz == 0 {
+                    for lz in 6..10 {
+                        for lx in 6..10 {
+                            let idx = (lz * EDGE + lx) as usize;
+                            c.underlay[idx] = Material::Stone;
+                            c.height[idx] = 512;
+                        }
+                    }
+                }
+                world.insert_chunk(ChunkPos { x: dx, z: dz }, c);
+            }
+        }
+        world
+    }
+
+    #[test]
+    fn a_chamfered_material_block_seals_its_corners() {
+        // Tripwire: a relief-free material-boundary cliff whose corners are
+        // chamfered must still close its full silhouette. `minimize_corners`
+        // cuts a diagonal cap edge at each flattened corner, but the marched
+        // wall follows the axis-aligned lattice, leaving a sliver; the closer
+        // that seals that sliver (`emit_clip_gap_walls`) only runs behind a
+        // height-break clip line, so on a relief-free chamfer nothing closes it
+        // and the corner is a see-through hole. The block-top cap's silhouette
+        // (its boundary edge length) must be matched by the wall top-edge
+        // length — an open sliver leaves wall coverage short of the silhouette.
+        let world = material_block_chamfered_world();
+        let mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
+        let block_top = 512.0 / 256.0;
+        let at_top = |v: &Vertex| (v.y - block_top).abs() < 0.05;
+
+        // Wall top-edge coverage: the top edge of each vertical wall quad.
+        // A chamfer trades each right-angle corner for a slightly shorter
+        // diagonal, so the sealed silhouette stays close to the 16 m
+        // un-chamfered perimeter; an open corner sliver drops coverage well
+        // below it (the bug leaves ~13.6 m).
+        let wall_top: f32 = mesh
+            .iter()
+            .filter(|t| y_span(t) > 0.5)
+            .filter_map(|t| {
+                let tops: Vec<&Vertex> = t.verts.iter().filter(|v| at_top(v)).collect();
+                (tops.len() == 2).then(|| (tops[1].x - tops[0].x).hypot(tops[1].z - tops[0].z))
+            })
+            .sum();
+
+        assert!(
+            (15.0..17.5).contains(&wall_top),
+            "wall top-edge coverage {wall_top:.3} m over a ~16 m chamfered \
+             perimeter — an open corner sliver on a relief-free chamfer",
+        );
+    }
+
     /// Twice the xz-projected area of a triangle — a wall face is exactly
     /// vertical, so it projects to a line (zero area) while every cap
     /// triangle keeps a footprint; the split separates the two without
@@ -4845,6 +4978,42 @@ mod tests {
         assert!(
             (7.5..8.6).contains(&total),
             "wall top-edge coverage {total} m over an 8 m perimeter — alternating gaps halve it",
+        );
+    }
+
+    #[test]
+    fn a_material_block_wall_coverage_is_complete() {
+        // Tripwire: a relief-free material-boundary cliff must close its full
+        // perimeter. The bug lifted the marched wall top through the
+        // window-center owner rather than the anchored (high) side; on an
+        // axis-aligned boundary the owner sits on the low (grass) side for
+        // every boundary window, so every wall top collapses onto the grass
+        // plate and the whole face vanishes (zero-height, see-through). A 4x4
+        // cell stone block on flat grass has a 16 m perimeter; the emitted
+        // wall top-edge length must cover it, far above the collapsed
+        // near-zero the bug leaves.
+        let world = material_block_world();
+        let mesh = mesh_chunk(
+            &world,
+            ChunkPos { x: 0, z: 0 },
+            ViewMode::Painted,
+            &StyleTable::default(),
+        );
+        let block_top = 512.0 / 256.0;
+        let total: f32 = mesh
+            .iter()
+            .filter(|t| y_span(t) > 0.5)
+            .filter_map(|t| {
+                // Each wall quad's top edge rides the triangle holding both
+                // top (block-height) vertices.
+                let tops: Vec<&Vertex> = t.verts.iter().filter(|v| v.y > block_top - 0.5).collect();
+                (tops.len() == 2).then(|| (tops[1].x - tops[0].x).hypot(tops[1].z - tops[0].z))
+            })
+            .sum();
+        assert!(
+            (15.0..17.5).contains(&total),
+            "wall top-edge coverage {total} m over a 16 m perimeter — \
+             a relief-free material-boundary cliff collapsed its faces",
         );
     }
 
