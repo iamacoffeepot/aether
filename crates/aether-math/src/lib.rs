@@ -1,4 +1,4 @@
-//! Tiny scalar `f32` math for Aether: `Vec2`, `Vec3`, `Vec4`, `Mat4`, `Quat`.
+//! Tiny scalar `f32` math for Aether: `Vec2`, `Vec3`, `Vec4`, `Mat4`, `Quat`, colors.
 //!
 //! Designed for WASM guest components and native substrate alike —
 //! `no_std`, no heap, no SIMD, no generics. Scalar code that LLVM +
@@ -32,6 +32,7 @@
 #![forbid(unsafe_code)]
 
 mod aabb;
+mod color;
 mod mat;
 mod quat;
 #[cfg(test)]
@@ -39,6 +40,7 @@ mod test_helpers;
 mod vec;
 
 pub use aabb::{Aabb, Axis};
+pub use color::{Hsl, Rgb, Rgba};
 pub use mat::Mat4;
 pub use quat::Quat;
 pub use vec::{Vec2, Vec3, Vec4};
