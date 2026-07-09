@@ -3,7 +3,7 @@
 //! push a [`QuadBatch`] into the accumulator; the driver's
 //! `record_overlay_pass` consumes them at record time.
 
-use aether_kinds::QuadSpace;
+use aether_kinds::{ClipRect, QuadSpace};
 
 use super::super::kinds::TexturedQuad;
 
@@ -16,5 +16,6 @@ use super::super::kinds::TexturedQuad;
 pub struct QuadBatch {
     pub texture_id: u32,
     pub space: QuadSpace,
+    pub clip: Option<ClipRect>,
     pub quads: Vec<TexturedQuad>,
 }

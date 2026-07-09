@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use aether_kinds::{FontMetrics, GlyphAdvance, QuadSpace};
+use aether_kinds::{ClipRect, FontMetrics, GlyphAdvance, QuadSpace};
 use aether_substrate::actor::native::NativeCtx;
 
 use crate::render::{DrawTexturedQuads, RenderCapability, TexturedQuad};
@@ -18,11 +18,13 @@ pub fn emit_draw(
     ctx: &mut NativeCtx<'_>,
     texture_id: u32,
     space: QuadSpace,
+    clip: Option<ClipRect>,
     quads: Vec<TexturedQuad>,
 ) {
     let draw = DrawTexturedQuads {
         texture_id,
         space,
+        clip,
         quads,
     };
     ctx.actor::<RenderCapability>().send(&draw);

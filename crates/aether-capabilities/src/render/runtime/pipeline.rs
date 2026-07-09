@@ -360,6 +360,10 @@ impl RenderHandles {
                 bind_group: realized.bind_group(),
                 first_vertex,
                 vertex_count,
+                clip: batch
+                    .clip
+                    .as_ref()
+                    .map(|clip| [clip.x, clip.y, clip.width, clip.height]),
             });
         }
 

@@ -1721,6 +1721,19 @@ mod control_plane {
     // moving them would close a cycle — they're sibling-kind-consumed and
     // therefore pinned here.
 
+    /// Screen/framebuffer-pixel clip rectangle applied after projection.
+    ///
+    /// Render and text draw calls use this as a per-call scissor. The
+    /// coordinates are framebuffer pixels regardless of whether the draw's
+    /// projection space is screen or world.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+    pub struct ClipRect {
+        pub x: f32,
+        pub y: f32,
+        pub width: f32,
+        pub height: f32,
+    }
+
     /// How a `QuadSpace::World` quad's clip-space scale factor `k`
     /// relates on-screen size to distance (ADR-0105).
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]

@@ -197,6 +197,7 @@ pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
     if !quads.is_empty() {
         ctx.actor::<RenderCapability>().send(&DrawSolidQuads {
             space: QuadSpace::Screen,
+            clip: None,
             quads,
         });
     }
@@ -217,6 +218,7 @@ pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
                 color: *color,
                 origin: [*x, *y],
                 space: QuadSpace::Screen,
+                clip: None,
             });
         }
     }

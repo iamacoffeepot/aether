@@ -12,7 +12,7 @@
 //! `aether.text.draw` kind in `aether-kinds` consumes them — so the quad
 //! draw kinds below import them from there.
 
-use aether_kinds::QuadSpace;
+use aether_kinds::{ClipRect, QuadSpace};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
@@ -186,6 +186,9 @@ pub struct TexturedQuad {
 pub struct DrawTexturedQuads {
     pub texture_id: u32,
     pub space: QuadSpace,
+    /// Optional framebuffer-pixel scissor applied to this batch. `None`
+    /// leaves the draw unclipped.
+    pub clip: Option<ClipRect>,
     pub quads: Vec<TexturedQuad>,
 }
 
@@ -215,6 +218,9 @@ pub struct SolidQuad {
 #[kind(name = "aether.render.draw_solid_quads")]
 pub struct DrawSolidQuads {
     pub space: QuadSpace,
+    /// Optional framebuffer-pixel scissor applied to this batch. `None`
+    /// leaves the draw unclipped.
+    pub clip: Option<ClipRect>,
     pub quads: Vec<SolidQuad>,
 }
 

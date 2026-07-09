@@ -46,8 +46,8 @@ use aether_capabilities::text::{
 };
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
-    CachedFontMetrics, CaptureFrame, CaptureFrameResult, DropComponent, DropResult, FrameCheck,
-    FrameCheckResult, FrameRect, FrameReduction, ListComponents, ListComponentsResult,
+    CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, DropComponent, DropResult,
+    FrameCheck, FrameCheckResult, FrameRect, FrameReduction, ListComponents, ListComponentsResult,
     LoadComponent, LoadResult, NamedMail, Ping, QuadScale, QuadSpace, ReplaceComponent,
     ReplaceResult,
 };
@@ -111,6 +111,40 @@ fn rgba_at(img: &Image, x: u32, y: u32) -> [u8; 4] {
         img.rgba[start + 2],
         img.rgba[start + 3],
     ]
+}
+
+fn rgb_close(actual: [u8; 4], expected: [u8; 3], tolerance: u8) -> bool {
+    actual[..3]
+        .iter()
+        .zip(expected)
+        .all(|(actual, expected)| actual.abs_diff(expected) <= tolerance)
+}
+
+fn pixel_is_lit(img: &Image, x: u32, y: u32, bg: [u8; 3], tolerance: u8) -> bool {
+    !rgb_close(rgba_at(img, x, y), bg, tolerance)
+}
+
+fn lit_fraction_in_rect(
+    img: &Image,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    bg: [u8; 3],
+    tolerance: u8,
+) -> f32 {
+    let mut lit = 0u32;
+    for py in y..y + height {
+        for px in x..x + width {
+            if pixel_is_lit(img, px, py, bg, tolerance) {
+                lit += 1;
+            }
+        }
+    }
+    #[allow(clippy::cast_precision_loss)]
+    {
+        lit as f32 / (width * height) as f32
+    }
 }
 
 /// Load the probe into the bench via `execute`, blocking on the
@@ -915,6 +949,7 @@ fn textured_quad_draws_screen_space_rect() {
         &DrawTexturedQuads {
             texture_id,
             space: QuadSpace::Screen,
+            clip: None,
             quads: vec![TexturedQuad {
                 x: quad_x,
                 y: quad_y,
@@ -1020,6 +1055,7 @@ fn destroyed_texture_draw_drops_from_frame() {
             &DrawTexturedQuads {
                 texture_id,
                 space: QuadSpace::Screen,
+                clip: None,
                 quads: vec![TexturedQuad {
                     x: 16.0,
                     y: 12.0,
@@ -1129,6 +1165,7 @@ fn r8_texture_updates_and_draws_red_channel_only() {
             &DrawTexturedQuads {
                 texture_id,
                 space: QuadSpace::Screen,
+                clip: None,
                 quads: vec![TexturedQuad {
                     x: 16.0,
                     y: 16.0,
@@ -1439,6 +1476,7 @@ fn solid_quad_draws_screen_space_rect() {
         "aether.render",
         &DrawSolidQuads {
             space: QuadSpace::Screen,
+            clip: None,
             quads: vec![SolidQuad {
                 x: quad_x,
                 y: quad_y,
@@ -1494,6 +1532,148 @@ fn solid_quad_draws_screen_space_rect() {
     );
 }
 
+/// Issue #2855: a per-batch clip rect becomes a GPU scissor. A clipped
+/// solid batch can only light pixels inside the clip, and the following
+/// unclipped batch resets to the full framebuffer instead of inheriting
+/// the prior scissor.
+#[test]
+fn solid_quad_clip_bounds_pixels_and_does_not_leak() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let clipped = envelope(
+        "aether.render",
+        &DrawSolidQuads {
+            space: QuadSpace::Screen,
+            clip: Some(ClipRect {
+                x: 20.0,
+                y: 12.0,
+                width: 12.0,
+                height: 10.0,
+            }),
+            quads: vec![SolidQuad {
+                x: 10.0,
+                y: 8.0,
+                width: 44.0,
+                height: 30.0,
+                color: [1.0, 0.0, 0.0, 1.0],
+            }],
+        },
+    );
+    let unclipped = envelope(
+        "aether.render",
+        &DrawSolidQuads {
+            space: QuadSpace::Screen,
+            clip: None,
+            quads: vec![SolidQuad {
+                x: 44.0,
+                y: 30.0,
+                width: 8.0,
+                height: 8.0,
+                color: [0.0, 1.0, 0.0, 1.0],
+            }],
+        },
+    );
+
+    let captured = bench
+        .execute(vec![(
+            "snap",
+            BenchOp::capture_with_mails(vec![clipped, unclipped], vec![]),
+        )])
+        .expect("capture clipped solid quads");
+    let img = decode_png(captured.captured("snap").expect("snap step ran"))
+        .expect("decode clipped solid png");
+    let bg = background_top_left(&img);
+    let tolerance = 5;
+    assert!(
+        pixel_is_lit(&img, 24, 16, bg, tolerance),
+        "pixel inside the solid clip rect should be painted",
+    );
+    assert!(
+        !pixel_is_lit(&img, 16, 16, bg, tolerance),
+        "pixel inside the solid quad but outside the clip rect should remain clear",
+    );
+    assert!(
+        pixel_is_lit(&img, 48, 34, bg, tolerance),
+        "following unclipped batch should paint outside the previous clip rect",
+    );
+}
+
+/// Issue #2855: user-textured quad batches carry the same per-call
+/// framebuffer clip as solid batches.
+#[test]
+fn textured_quad_clip_bounds_pixels() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let created = bench
+        .execute(vec![(
+            "create",
+            BenchOp::send_and_await(
+                "aether.render",
+                &CreateTexture {
+                    width: 1,
+                    height: 1,
+                    format: TextureFormat::Rgba8,
+                    pixels: vec![255, 255, 255, 255],
+                },
+            ),
+        )])
+        .expect("create white texture");
+    let texture_id = match created
+        .reply::<CreateTextureResult>("create")
+        .expect("decode CreateTextureResult")
+    {
+        CreateTextureResult::Ok { texture_id } => texture_id,
+        CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
+    };
+    let draw = envelope(
+        "aether.render",
+        &DrawTexturedQuads {
+            texture_id,
+            space: QuadSpace::Screen,
+            clip: Some(ClipRect {
+                x: 18.0,
+                y: 14.0,
+                width: 14.0,
+                height: 12.0,
+            }),
+            quads: vec![TexturedQuad {
+                x: 8.0,
+                y: 8.0,
+                width: 40.0,
+                height: 30.0,
+                u0: 0.0,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+                tint: [1.0, 1.0, 1.0, 1.0],
+            }],
+        },
+    );
+
+    let captured = bench
+        .execute(vec![(
+            "snap",
+            BenchOp::capture_with_mails(vec![draw], vec![]),
+        )])
+        .expect("capture clipped textured quad");
+    let img = decode_png(captured.captured("snap").expect("snap step ran"))
+        .expect("decode clipped textured png");
+    let bg = background_top_left(&img);
+    let tolerance = 5;
+    assert!(
+        pixel_is_lit(&img, 24, 20, bg, tolerance),
+        "pixel inside the textured clip rect should be painted",
+    );
+    assert!(
+        !pixel_is_lit(&img, 12, 20, bg, tolerance),
+        "pixel inside the textured quad but outside the clip rect should remain clear",
+    );
+}
+
 /// iamacoffeepot/aether#1777: a `capture_frame` carrying a `checks`
 /// request returns a substrate-side verdict scored on the exact RGBA
 /// the PNG is built from — no caller-side PNG decode. Draws a known
@@ -1520,6 +1700,7 @@ fn capture_frame_checks_return_substrate_verdict() {
         "aether.render",
         &DrawSolidQuads {
             space: QuadSpace::Screen,
+            clip: None,
             quads: vec![SolidQuad {
                 x: quad_x,
                 y: quad_y,
@@ -1647,6 +1828,7 @@ fn capture_frame_region_scopes_reduction_to_one_widget_rect() {
         "aether.render",
         &DrawSolidQuads {
             space: QuadSpace::Screen,
+            clip: None,
             quads: vec![
                 SolidQuad {
                     x: first_x,
@@ -2454,6 +2636,7 @@ fn text_draws_a_screen_space_string() {
         color: [1.0, 1.0, 1.0, 1.0],
         origin: [0.0, 0.0],
         space: QuadSpace::Screen,
+        clip: None,
     };
 
     // First draw: lazily creates the atlas texture (fire-and-forget — a
@@ -2508,6 +2691,126 @@ fn text_draws_a_screen_space_string() {
         silhouette.min_x < frame_width / 2 && silhouette.max_y < frame_height,
         "text silhouette {silhouette:?} should bound the upper-left of the \
          {frame_width}x{frame_height} frame",
+    );
+}
+
+/// Issue #2855: `aether.text.draw` forwards its framebuffer clip to the
+/// textured glyph quad batch it emits, so glyph pixels outside the clip
+/// are discarded by the same overlay-pass scissor as primitive quads.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn text_draw_clip_bounds_glyph_pixels() {
+    const TTF: &[u8] = include_bytes!("../assets/fonts/RobotoMono.ttf");
+    if !require_wgpu_only() {
+        return;
+    }
+    let sandbox = init_save_sandbox("test-bench-text-clip");
+    fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
+
+    let mut bench = TestBench::builder()
+        .size(128, 64)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.text",
+                &LoadFont {
+                    namespace: "assets".to_owned(),
+                    path: "font.ttf".to_owned(),
+                },
+            ),
+        )])
+        .expect("load_font sequence");
+    let font_id = match loaded
+        .reply::<LoadFontResult>("load")
+        .expect("decode LoadFontResult")
+    {
+        LoadFontResult::Ok { font_id, .. } => font_id,
+        LoadFontResult::Err { error, .. } => panic!("load_font failed: {error}"),
+    };
+
+    let unclipped = DrawText {
+        font_id,
+        text: "MMMMMMMM".to_owned(),
+        size_pixels: 32.0,
+        color: [1.0, 1.0, 1.0, 1.0],
+        origin: [8.0, 8.0],
+        space: QuadSpace::Screen,
+        clip: None,
+    };
+    bench
+        .execute(vec![
+            (
+                "prime",
+                BenchOp::send_mail::<DrawText>("aether.text", &unclipped),
+            ),
+            ("settle", BenchOp::advance(2)),
+        ])
+        .expect("prime draw");
+
+    let outside_region = (58, 18, 18, 18);
+    let baseline = bench
+        .execute(vec![(
+            "baseline",
+            BenchOp::capture_with_mails(vec![envelope("aether.text", &unclipped)], vec![]),
+        )])
+        .expect("capture unclipped text");
+    let baseline_img = decode_png(baseline.captured("baseline").expect("baseline ran"))
+        .expect("decode unclipped text png");
+    let baseline_bg = background_top_left(&baseline_img);
+    let tolerance = 5;
+    let baseline_outside = lit_fraction_in_rect(
+        &baseline_img,
+        outside_region.0,
+        outside_region.1,
+        outside_region.2,
+        outside_region.3,
+        baseline_bg,
+        tolerance,
+    );
+    assert!(
+        baseline_outside > 0.05,
+        "unclipped text should light the sampled outside region; coverage={baseline_outside}",
+    );
+
+    let clipped = DrawText {
+        clip: Some(ClipRect {
+            x: 18.0,
+            y: 12.0,
+            width: 22.0,
+            height: 24.0,
+        }),
+        ..unclipped
+    };
+    let captured = bench
+        .execute(vec![(
+            "clipped",
+            BenchOp::capture_with_mails(vec![envelope("aether.text", &clipped)], vec![]),
+        )])
+        .expect("capture clipped text");
+    let img =
+        decode_png(captured.captured("clipped").expect("clipped ran")).expect("decode text png");
+    let bg = background_top_left(&img);
+    let inside = lit_fraction_in_rect(&img, 20, 18, 14, 14, bg, tolerance);
+    let outside = lit_fraction_in_rect(
+        &img,
+        outside_region.0,
+        outside_region.1,
+        outside_region.2,
+        outside_region.3,
+        bg,
+        tolerance,
+    );
+    assert!(
+        inside > 0.05,
+        "clipped text should still light pixels inside the clip; coverage={inside}",
+    );
+    assert_eq!(
+        outside, 0.0,
+        "glyph pixels outside the text clip should remain background",
     );
 }
 
@@ -2637,6 +2940,7 @@ fn text_screen_origin_shifts_centroid() {
         color: [1.0, 1.0, 1.0, 1.0],
         origin: [0.0, 0.0],
         space: QuadSpace::Screen,
+        clip: None,
     };
 
     // Prime pass: lazily creates the atlas texture; nothing draws yet.
@@ -2784,6 +3088,7 @@ fn text_draws_world_space_label() {
                 reference_distance: 10.0,
             },
         },
+        clip: None,
     };
     let draw_px = DrawText {
         font_id,
@@ -2795,6 +3100,7 @@ fn text_draws_world_space_label() {
             anchor,
             scale: QuadScale::Pixels,
         },
+        clip: None,
     };
 
     // Prime: the first draw lazily creates the atlas texture and draws

@@ -13,7 +13,7 @@
 //! kinds reference them via `use aether_kinds::{FontMetrics, QuadSpace}` —
 //! the existing `capabilities → kinds` direction.
 
-use aether_kinds::{FontMetrics, QuadSpace};
+use aether_kinds::{ClipRect, FontMetrics, QuadSpace};
 use serde::{Deserialize, Serialize};
 
 /// Synthetic namespace used when a font is loaded directly from mail-carried
@@ -90,6 +90,9 @@ pub struct DrawText {
     /// `World` mode — the `anchor` positions there.
     pub origin: [f32; 2],
     pub space: QuadSpace,
+    /// Optional framebuffer-pixel scissor applied to the emitted glyph
+    /// quad batch. `None` leaves the text unclipped.
+    pub clip: Option<ClipRect>,
 }
 
 /// Names the font a `FontMetricsRequest` measures: by the

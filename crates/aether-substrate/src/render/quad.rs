@@ -91,6 +91,8 @@ pub struct OverlayDraw<'a> {
     pub bind_group: &'a wgpu::BindGroup,
     pub first_vertex: u32,
     pub vertex_count: u32,
+    /// Optional framebuffer-pixel scissor: `[x, y, width, height]`.
+    pub clip: Option<[f32; 4]>,
 }
 
 /// Build the shared texture + sampler bindings used by texture-sampling
@@ -529,10 +531,42 @@ pub fn record_quad_overlay_pass(
         if draw.vertex_count == 0 {
             continue;
         }
+        let Some(scissor) = clamped_scissor(draw.clip, targets.width(), targets.height()) else {
+            continue;
+        };
+        pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
         pass.set_bind_group(1, draw.bind_group, &[]);
         pass.draw(
             draw.first_vertex..draw.first_vertex + draw.vertex_count,
             0..1,
         );
     }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn clamped_scissor(
+    clip: Option<[f32; 4]>,
+    target_width: u32,
+    target_height: u32,
+) -> Option<[u32; 4]> {
+    let Some([x, y, width, height]) = clip else {
+        return Some([0, 0, target_width, target_height]);
+    };
+    if !x.is_finite() || !y.is_finite() || !width.is_finite() || !height.is_finite() {
+        return None;
+    }
+    let min_x = x.max(0.0).min(target_width as f32).floor();
+    let min_y = y.max(0.0).min(target_height as f32).floor();
+    let max_x = (x + width).max(0.0).min(target_width as f32).ceil();
+    let max_y = (y + height).max(0.0).min(target_height as f32).ceil();
+    if max_x <= min_x || max_y <= min_y {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some([
+        min_x as u32,
+        min_y as u32,
+        (max_x - min_x) as u32,
+        (max_y - min_y) as u32,
+    ])
 }

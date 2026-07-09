@@ -73,6 +73,7 @@ impl WasmActor for UiWidget {
         }
         ctx.actor::<RenderCapability>().send(&DrawSolidQuads {
             space: QuadSpace::Screen,
+            clip: None,
             quads,
         });
     }
