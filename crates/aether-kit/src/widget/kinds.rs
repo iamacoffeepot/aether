@@ -31,7 +31,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_math::Vec2;
+use aether_math::{Rgba, Vec2};
 use serde::{Deserialize, Serialize};
 
 use crate::widget::theme::Theme;
@@ -92,7 +92,7 @@ pub enum WidgetDrawItem {
         y: f32,
         width: f32,
         height: f32,
-        color: [f32; 4],
+        color: Rgba,
     },
     /// A glyph run. `(x, y)` is the baseline origin in local pixels;
     /// `font_id` names a session-scoped font loaded through `aether.text`;
@@ -103,7 +103,7 @@ pub enum WidgetDrawItem {
         font_id: u32,
         text: String,
         size_pixels: f32,
-        color: [f32; 4],
+        color: Rgba,
     },
 }
 
@@ -500,7 +500,7 @@ mod tests {
             y: 5.0,
             width: 10.0,
             height: 4.0,
-            color: [1.0, 0.0, 0.0, 1.0],
+            color: Rgba::new(1.0, 0.0, 0.0, 1.0),
         };
         assert_eq!(
             item.offset(Vec2::new(100.0, 20.0)),
@@ -509,7 +509,7 @@ mod tests {
                 y: 25.0,
                 width: 10.0,
                 height: 4.0,
-                color: [1.0, 0.0, 0.0, 1.0],
+                color: Rgba::new(1.0, 0.0, 0.0, 1.0),
             },
             "offset moves the corner by the vector and leaves the extent untouched",
         );
@@ -523,7 +523,7 @@ mod tests {
             font_id: 7,
             text: "hp".into(),
             size_pixels: 12.0,
-            color: [1.0, 1.0, 1.0, 1.0],
+            color: Rgba::WHITE,
         };
         assert_eq!(
             item.offset(Vec2::new(10.0, 40.0)),
@@ -533,7 +533,7 @@ mod tests {
                 font_id: 7,
                 text: "hp".into(),
                 size_pixels: 12.0,
-                color: [1.0, 1.0, 1.0, 1.0],
+                color: Rgba::WHITE,
             },
             "offset moves the baseline and preserves the glyph run",
         );

@@ -38,11 +38,13 @@ pub use text_field::TextFieldWidget;
 
 use alloc::vec::Vec;
 
+use aether_math::Rgba;
+
 use crate::widget::WidgetDrawItem;
 
 /// A flat-colored quad in a widget's own local coordinates — the shared
 /// constructor the widgets build their chrome from.
-pub(crate) fn quad(x: f32, y: f32, width: f32, height: f32, color: [f32; 4]) -> WidgetDrawItem {
+pub(crate) fn quad(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> WidgetDrawItem {
     WidgetDrawItem::Quad {
         x,
         y,
@@ -61,7 +63,7 @@ pub(crate) fn push_border(
     width: f32,
     height: f32,
     thickness: f32,
-    color: [f32; 4],
+    color: Rgba,
 ) {
     items.push(quad(0.0, 0.0, width, thickness, color));
     items.push(quad(0.0, height - thickness, width, thickness, color));

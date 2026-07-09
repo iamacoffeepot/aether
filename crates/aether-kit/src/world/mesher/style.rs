@@ -1,21 +1,11 @@
-// The style layer works in continuous f32 color space; the coordinate and
-// index casts (percent values to unit range) are small and the pedantic
-// precision / sign / truncation lints flag them as non-issues in this
-// bounded domain.
+// Material discriminants are bounded table indices, so the pedantic cast
+// lints do not signal a real truncation or sign hazard here.
 #![allow(
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap
 )]
-// Color math reads clearest with the conventional single-letter channel
-// names (h/s/l, r/g/b).
-#![allow(clippy::many_single_char_names)]
-// The color arithmetic is written as explicit multiply-add chains for
-// readability; a fused mul_add would need a libm symbol on the wasm target
-// and does not change the result meaningfully here.
-#![allow(clippy::suboptimal_flops)]
-
 //! The material style table and the flat color each material renders.
 //!
 //! A [`MaterialStyle`] row carries a material's base color in HSL.
@@ -24,18 +14,16 @@
 //! cell's color is a pure function of its material alone, so two chunks
 //! agree on their shared border with no shared state.
 
+use aether_math::{Hsl, Rgb};
+
 use crate::world::Material;
 
 /// One material's render style — its base color in HSL. Indexed by
 /// [`Material`] through [`StyleTable::get`]; the [`Material::Void`] row is a
 /// placeholder that is never painted.
 pub struct MaterialStyle {
-    /// Base hue in degrees `[0, 360)`.
-    pub base_hue: f32,
-    /// Base saturation in percent `[0, 100]`.
-    pub base_sat: f32,
-    /// Base lightness in percent `[0, 100]`.
-    pub base_light: f32,
+    /// Base color: hue in degrees and saturation/lightness in `[0, 1]`.
+    pub base: Hsl,
 }
 
 /// Per-material style rows. Base colors are the HSL of the ground palette's
@@ -45,39 +33,27 @@ pub struct MaterialStyle {
 const STYLES: [MaterialStyle; 6] = [
     // Void — never painted.
     MaterialStyle {
-        base_hue: 0.0,
-        base_sat: 0.0,
-        base_light: 0.0,
+        base: Hsl::new(0.0, 0.0, 0.0),
     },
     // Grass — hsl(110, 37.5, 40).
     MaterialStyle {
-        base_hue: 110.0,
-        base_sat: 37.5,
-        base_light: 40.0,
+        base: Hsl::new(110.0, 0.375, 0.4),
     },
     // Dirt — hsl(31, 42.9, 31.5).
     MaterialStyle {
-        base_hue: 31.0,
-        base_sat: 42.9,
-        base_light: 31.5,
+        base: Hsl::new(31.0, 0.429, 0.315),
     },
     // Stone — hsl(240, 3.45, 56.5).
     MaterialStyle {
-        base_hue: 240.0,
-        base_sat: 3.45,
-        base_light: 56.5,
+        base: Hsl::new(240.0, 0.0345, 0.565),
     },
     // Sand — hsl(46, 50, 70).
     MaterialStyle {
-        base_hue: 46.0,
-        base_sat: 50.0,
-        base_light: 70.0,
+        base: Hsl::new(46.0, 0.5, 0.7),
     },
     // Water — hsl(216, 55.6, 45).
     MaterialStyle {
-        base_hue: 216.0,
-        base_sat: 55.6,
-        base_light: 45.0,
+        base: Hsl::new(216.0, 0.556, 0.45),
     },
 ];
 
@@ -99,41 +75,10 @@ impl StyleTable {
     }
 }
 
-/// The flat linear-RGB color for a material style row — its base HSL passed
-/// straight through [`hsl_to_linear_rgb`].
+/// The flat linear-RGB color for a material style row.
 #[must_use]
-pub fn flat_color(style: &MaterialStyle) -> [f32; 3] {
-    hsl_to_linear_rgb(style.base_hue, style.base_sat, style.base_light)
-}
-
-/// Convert HSL (hue degrees, saturation / lightness percent) to linear RGB
-/// in `[0, 1]`. The HSL-to-sRGB step is the standard piecewise chroma
-/// construction; the sRGB channels are then squared as an approximate
-/// transfer into the linear space the render pipeline multiplies by
-/// `view_proj`.
-#[must_use]
-pub fn hsl_to_linear_rgb(hue: f32, sat: f32, light: f32) -> [f32; 3] {
-    let s = (sat / 100.0).clamp(0.0, 1.0);
-    let l = (light / 100.0).clamp(0.0, 1.0);
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let hp = (((hue % 360.0) + 360.0) % 360.0) / 60.0;
-    let x = c * (1.0 - ((hp % 2.0) - 1.0).abs());
-    let (r, g, b) = if hp < 1.0 {
-        (c, x, 0.0)
-    } else if hp < 2.0 {
-        (x, c, 0.0)
-    } else if hp < 3.0 {
-        (0.0, c, x)
-    } else if hp < 4.0 {
-        (0.0, x, c)
-    } else if hp < 5.0 {
-        (x, 0.0, c)
-    } else {
-        (c, 0.0, x)
-    };
-    let m = l - c / 2.0;
-    let srgb = [r + m, g + m, b + m];
-    [srgb[0] * srgb[0], srgb[1] * srgb[1], srgb[2] * srgb[2]]
+pub fn flat_color(style: &MaterialStyle) -> Rgb {
+    style.base.to_rgb()
 }
 
 #[cfg(test)]
@@ -147,7 +92,7 @@ mod tests {
         // row, or an HSL conversion that flattened them), two materials would
         // render indistinguishably.
         let styles = StyleTable::default();
-        let colors: Vec<[f32; 3]> = [
+        let colors: Vec<Rgb> = [
             Material::Grass,
             Material::Dirt,
             Material::Stone,
