@@ -257,16 +257,6 @@ impl SampleVoice {
     }
 }
 
-/// A `load_instrument` request parked while its `.sfz` `aether.fs.read`
-/// is in flight (ADR-0103 §2/§5). Keyed in
-/// `AudioCapabilityState::pending_instruments` by the echoed
-/// `(namespace, path)` of the `.sfz`. Only the original requester's
-/// reply route lives here — the namespace / path come back on the
-/// `ReadResult`, and the bank's name is derived from the `.sfz` path.
-pub struct PendingInstrument {
-    pub source: Source,
-}
-
 /// One unique sample a bank assembly is fetching: the path as written
 /// in the `.sfz` (resolved against `default_path`), the fs path it is
 /// read from (joined with the `.sfz`'s own directory), and its bytes
@@ -280,15 +270,15 @@ pub struct SampleSlot {
 /// A bank load in progress: the `.sfz` parsed into regions, fanning out
 /// one `aether.fs.read` per unique referenced sample, assembling when
 /// the last reply lands (ADR-0103 §2). Keyed in
-/// `AudioCapabilityState::assemblies` by a minted id; the per-sample reads
-/// correlate back to it through `AudioCapabilityState::pending_samples`.
+/// `AudioCapabilityState::assemblies` by a minted id; each per-sample
+/// read carries that id plus its exact sample slot in a request context.
 pub struct BankAssembly {
     /// The original `load_instrument` requester — the
     /// `LoadInstrumentResult` reply routes here.
     pub source: Source,
     /// The fs namespace the `.sfz` and its samples live in (shared).
     pub namespace: String,
-    /// The `.sfz` path — echoed on an `Err` reply for correlation.
+    /// The `.sfz` path — echoed on an `Err` reply for diagnostics.
     pub sfz_path: String,
     /// Bank name, derived from the `.sfz` filename stem.
     pub name: String,

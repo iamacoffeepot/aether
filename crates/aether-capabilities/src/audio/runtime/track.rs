@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use aether_data::{MailboxId, Source};
+use aether_data::MailboxId;
 
 use super::decode::DecodeError;
 
@@ -132,27 +132,6 @@ impl TrackVoice {
         }
         sample
     }
-}
-
-/// A `play_track` request parked while its `aether.fs.read` is in
-/// flight (ADR-0103 §2). Keyed in `AudioCapabilityState::pending_tracks`
-/// by the echoed `(namespace, path)` the `ReadResult` carries; the
-/// original requester's reply route + the synth-side track key live
-/// here until the bytes land.
-pub struct PendingTrack {
-    /// The original `play_track` requester — the `PlayTrackResult`
-    /// reply routes here across the fs round-trip + decode.
-    pub source: Source,
-    /// The synth-side track key's sender component, baked into the
-    /// `TrackStart` event so the lane keys by `(sender, lane,
-    /// namespace, path)` while the fs correlation keys by
-    /// `(namespace, path)`.
-    pub sender_mailbox: MailboxId,
-    /// The caller-supplied lane that disambiguates senders sharing a
-    /// source mailbox; part of the synth-side track key.
-    pub lane: Option<String>,
-    pub gain: f32,
-    pub looping: bool,
 }
 
 /// Completion context the `play_track` decode dispatch carries so the
