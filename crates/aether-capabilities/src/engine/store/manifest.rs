@@ -3,8 +3,10 @@
 
 use std::path::PathBuf;
 
+use aether_data::{canonical::kind_id_from_parts, wire};
 use aether_kinds::{
-    BinaryManifest, ComponentActor, ComponentManifest, ListComponentBinaries, ListEngineBinaries,
+    BinaryManifest, ComponentActor, ComponentManifest, KindDescriptorWire, ListComponentBinaries,
+    ListEngineBinaries,
 };
 use serde::{Deserialize, Serialize};
 
@@ -188,6 +190,48 @@ pub fn component_manifest(wasm: &[u8]) -> Result<ComponentManifest, String> {
         provenance,
         default_entry,
     })
+}
+
+/// Read the component's typed init-config descriptor from its wasm bytes.
+/// The persisted [`ComponentManifest`] intentionally stores only ids/names;
+/// resolve computes this full descriptor from the same wasm bytes the store
+/// already holds so aether-mcp can JSON-encode config before load/boot.
+pub fn config_descriptor(
+    wasm: &[u8],
+    export: Option<&str>,
+) -> Result<Option<KindDescriptorWire>, String> {
+    use aether_substrate::actor::wasm::kind_manifest;
+
+    let capabilities = match export {
+        Some(export) => kind_manifest::read_actor_inputs_from_bytes(wasm)?
+            .into_iter()
+            .find(|actor| actor.namespace.as_deref() == Some(export))
+            .map(|actor| actor.capabilities)
+            .ok_or_else(|| format!("export {export:?} is not declared in the component"))?,
+        None => kind_manifest::read_inputs_from_bytes(wasm)?,
+    };
+    let Some(config) = capabilities.config else {
+        return Ok(None);
+    };
+
+    let descriptors = kind_manifest::read_from_bytes(wasm)?;
+    let Some(descriptor) = descriptors
+        .into_iter()
+        .find(|descriptor| kind_id_from_parts(&descriptor.name, &descriptor.schema) == config.id.0)
+    else {
+        return Err(format!(
+            "component declares config kind {} ({}) but its schema descriptor is absent",
+            config.name, config.id
+        ));
+    };
+
+    let schema_wire = wire::to_vec(&descriptor.schema)
+        .map_err(|e| format!("encoding config schema for {}: {e}", descriptor.name))?;
+    Ok(Some(KindDescriptorWire {
+        id: config.id,
+        name: descriptor.name,
+        schema_wire,
+    }))
 }
 
 #[cfg(test)]

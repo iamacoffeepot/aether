@@ -38,9 +38,8 @@ pub struct SpawnSubstrateArgs {
     /// `AETHER_BOOT_MANIFEST` at the fork — so the spawned engine comes
     /// up with these components already loading, in one call, with no
     /// follow-up `load_component`. Spawn is single-host, so the substrate
-    /// reads each `binary_path` (and `config_path`) itself — pass paths
-    /// that exist on the host running the fleet. Empty (default) boots a
-    /// bare engine.
+    /// reads each staged wasm and schema-encoded config path itself. Empty
+    /// (default) boots a bare engine.
     #[serde(default)]
     pub components: Vec<ComponentSpec>,
 }
@@ -64,9 +63,13 @@ pub struct ComponentSpec {
     /// from the wasm if omitted.
     #[serde(default)]
     pub name: Option<String>,
-    /// Optional absolute path to a file holding the component's
-    /// init-config bytes (ADR-0090), already encoded to the component's
-    /// `Config` kind wire shape. Omit for a no-config component.
+    /// Optional inline init-config JSON (ADR-0090), schema-encoded to the
+    /// component's `Config` kind before boot. Omit for a no-config component.
+    #[serde(default)]
+    pub config: Option<serde_json::Value>,
+    /// Optional path to a JSON file holding the component's init-config
+    /// (ADR-0090), schema-encoded to the component's `Config` kind before
+    /// boot. Mutually exclusive with `config`.
     #[serde(default)]
     pub config_path: Option<String>,
     /// ADR-0096: which exported actor type to instantiate from a
@@ -315,12 +318,14 @@ pub struct LoadComponentArgs {
     /// the wasm if omitted; the reply echoes the resolved name.
     #[serde(default)]
     pub name: Option<String>,
-    /// ADR-0090 (issue 1257): optional absolute path to a file holding
-    /// the component's init-config bytes (already encoded to the
-    /// component's `Config` kind wire shape). `aether-mcp` reads the
-    /// file and forwards the bytes on the load mail — paths, not inline
-    /// bytes, per the MCP convention. Omit for a no-config component;
-    /// `describe_component` reports the expected config kind.
+    /// ADR-0090 (issue 1257): optional inline init-config JSON.
+    /// `aether-mcp` schema-encodes it to the component's `Config` kind and
+    /// forwards the resulting bytes on the load mail. Omit for a no-config
+    /// component; `describe_component` reports the expected config kind.
+    #[serde(default)]
+    pub config: Option<serde_json::Value>,
+    /// ADR-0090 (issue 1257): optional path to a JSON file holding the
+    /// component's init-config. Mutually exclusive with `config`.
     #[serde(default)]
     pub config_path: Option<String>,
     /// ADR-0096: which exported actor type to instantiate from a
@@ -366,10 +371,13 @@ pub struct ReplaceComponentArgs {
     /// substrate (post-ADR-0038 the splice is structural).
     #[serde(default)]
     pub drain_timeout_ms: Option<u32>,
-    /// ADR-0090 (issue 1257): optional absolute path to a file holding
-    /// the replacement instance's init-config bytes, threaded to its
-    /// typed `init` the same way [`LoadComponentArgs::config_path`] is
-    /// on first load.
+    /// ADR-0090 (issue 1257): optional inline init-config JSON for the
+    /// replacement instance, threaded to its typed `init` the same way
+    /// [`LoadComponentArgs::config`] is on first load.
+    #[serde(default)]
+    pub config: Option<serde_json::Value>,
+    /// ADR-0090 (issue 1257): optional path to a JSON file holding the
+    /// replacement instance's init-config. Mutually exclusive with `config`.
     #[serde(default)]
     pub config_path: Option<String>,
     /// ADR-0096: which exported actor type to instantiate from the

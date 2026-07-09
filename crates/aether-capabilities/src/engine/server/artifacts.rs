@@ -7,6 +7,7 @@
 
 use crate::engine::store::{
     ArtifactKind, ArtifactStore, Selector, StoredArtifact, StoredManifest, component_manifest,
+    config_descriptor,
 };
 use aether_kinds::{
     BinaryManifest, BinarySelector, ComponentSelector, ListComponentBinaries, ListEngineBinaries,
@@ -231,12 +232,21 @@ fn stored_component_reply(
             };
         }
     };
+    let config_kind = match config_descriptor(&wasm, export.as_deref()) {
+        Ok(config_kind) => config_kind,
+        Err(error) => {
+            return ResolveComponentResult::Err {
+                error: format!("reading config descriptor for {hash:?}: {error}"),
+            };
+        }
+    };
     ResolveComponentResult::Ok {
         hash: found.hash,
         wasm,
         name: found.name,
         manifest,
         export,
+        config_kind,
     }
 }
 

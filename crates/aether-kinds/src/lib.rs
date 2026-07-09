@@ -779,6 +779,7 @@ mod engine {
     use alloc::string::String;
     use alloc::vec::Vec;
 
+    use crate::KindDescriptorWire;
     use serde::{Deserialize, Serialize};
 
     /// `aether.engine.list` — ask the engines cap (`aether.engine`) to
@@ -1200,6 +1201,7 @@ mod engine {
     /// (ADR-0096); `None` for a plain selector. `Err` carries a free-form
     /// reason — a selector that resolves to no stored component, or an
     /// attribute query matching more than one (a clean ambiguity error).
+    #[allow(clippy::large_enum_variant)]
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.engine.resolve_component_result")]
     pub enum ResolveComponentResult {
@@ -1209,6 +1211,12 @@ mod engine {
             name: Option<String>,
             manifest: ComponentManifest,
             export: Option<String>,
+            /// Full schema descriptor for the component's typed
+            /// init-config kind, when it declares one. Added after the
+            /// original ADR-0116 resolve reply, so older stored/forwarded
+            /// values decode with `None`.
+            #[serde(default)]
+            config_kind: Option<KindDescriptorWire>,
         },
         Err {
             error: String,
