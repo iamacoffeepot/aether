@@ -19,5 +19,5 @@ Use this Codex skill for the repository's issue-to-draft-PR workflow.
 3. Create a dedicated Codex worktree under `.agents/worktrees/issue-<N>` from `origin/main`; do not edit the primary `main` checkout.
 4. Move the issue to `phase:executing` before implementation work starts.
 5. Follow the issue's `## Implementation plan` literally. Deviations are bounces, not freelancing.
-6. Commit the work, run `cargo fmt`, assert a clean worktree, push, and open a draft PR over REST.
+6. Commit the work, then run the cheap deterministic pre-PR tier before any push that opens or updates a draft PR: `cargo fmt -- --check` and `cargo clippy --all-targets -- -D warnings`. If either check fails, fix it locally and amend or recommit before pushing; do not push a known fmt, compile, or clippy red. Assert a clean worktree, push, and open a draft PR over REST.
 7. Use `scripts/wave-status.sh --wait <pr>` for CI monitoring. Leave successful work at `phase:refine` with the PR still draft.
