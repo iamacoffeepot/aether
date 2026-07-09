@@ -96,9 +96,11 @@
 //! cell's surface is its plane level regardless of its points, so a delta
 //! under water is lakebed relief the flat surface ignores.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::ptr;
 
 /// Cells along one edge of a chunk. Chunks are `16 × 16` cells.
 pub const CELLS_PER_CHUNK: i32 = 16;
@@ -116,20 +118,20 @@ pub const CELLS_PER_CHUNK_AREA: usize = 256;
 /// each `SUB × SUB` subcell sample. Raising this is a single-constant
 /// change; the wire plane length is derived from it
 /// ([`OVERLAY_MASK_WIRE_BYTES`]), never hard-coded.
-pub const SUBCELLS_PER_CELL_EDGE: u32 = 4;
+pub const SUBCELLS_PER_CELL_EDGE: u32 = 16;
 
 /// Coverage samples in one cell's overlay plane: `SUB²`.
 pub const SUBCELLS_PER_CELL: usize = (SUBCELLS_PER_CELL_EDGE * SUBCELLS_PER_CELL_EDGE) as usize;
 
 /// Wire length in bytes of a chunk's overlay-mask plane:
-/// `CELLS_PER_CHUNK_AREA * SUB²` (= 4096 at `SUB = 4`). Version 7 and
+/// `CELLS_PER_CHUNK_AREA * SUB²` (= 65536 at `SUB = 16`). Version 7 and
 /// newer store one coverage byte per subcell, row-major cell order and
 /// `z*SUB + x` within each cell. Older save versions stored little-endian
 /// bitmasks and expand on decode to `0` / `255`.
 pub const OVERLAY_MASK_WIRE_BYTES: usize = CELLS_PER_CHUNK_AREA * SUBCELLS_PER_CELL;
 
 /// Points in one chunk's underlay-point plane: `CELLS_PER_CHUNK_AREA *
-/// SUB²` (= 4096 at `SUB = 4`) — one material point per subcell, row-major
+/// SUB²` (= 65536 at `SUB = 16`) — one material point per subcell, row-major
 /// cell order, and within a cell the same `z*SUB + x` subcell order as the
 /// overlay mask. Stride-agnostic by construction: raising
 /// [`SUBCELLS_PER_CELL_EDGE`] regrows the plane with no other change.
@@ -144,7 +146,7 @@ pub const UNDERLAY_POINTS_PER_CHUNK: usize = CELLS_PER_CHUNK_AREA * SUBCELLS_PER
 pub const UNDERLAY_POINT_INHERIT: u8 = 255;
 
 /// Points in one chunk's height-delta plane: `CELLS_PER_CHUNK_AREA * SUB²`
-/// (= 4096 at `SUB = 4`), one `i16` octimeter delta per subcell in the same
+/// (= 65536 at `SUB = 16`), one `i16` octimeter delta per subcell in the same
 /// row-major cell order and `z*SUB + x` within-cell order as
 /// [`UNDERLAY_POINTS_PER_CHUNK`]. Stride-agnostic by construction: raising
 /// [`SUBCELLS_PER_CELL_EDGE`] regrows the plane with no other change.
@@ -157,6 +159,11 @@ pub const HEIGHT_POINTS_PER_CHUNK: usize = CELLS_PER_CHUNK_AREA * SUBCELLS_PER_C
 /// many octimeters ([`World::point_height`]), the subcell-resolution relief
 /// the height pipeline resolves one stride down.
 pub const HEIGHT_POINT_INHERIT: i16 = 0;
+
+/// Pre-v7 saves store overlay coverage as one 16-bit cell mask, fixed at the
+/// old 4x4 subcell lattice. Decode expands each legacy bit to the current
+/// subcell block so old binary masks keep the same world-space shape.
+const LEGACY_MASK_SUBCELLS_PER_CELL_EDGE: usize = 4;
 
 /// Octimeters per cell: `1 cell = 1 m = 256 octimeters`.
 const OCTIMETERS_PER_CELL: i32 = 256;
@@ -324,6 +331,7 @@ pub struct WaterPlane {
 
 /// One `16 × 16` block of the world, as a struct-of-arrays: property
 /// planes, each row-major (`z * 16 + x`).
+#[allow(clippy::large_stack_frames)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Chunk {
     /// Ground fabric — cascade-resolved by [`World::underlay`].
@@ -367,17 +375,38 @@ pub struct Chunk {
 impl Chunk {
     /// An empty chunk — all planes `Void` / zero.
     #[must_use]
+    #[allow(clippy::large_stack_frames)]
     pub fn empty() -> Self {
-        Self {
-            underlay: [Material::Void; CELLS_PER_CHUNK_AREA],
-            underlay_points: [UNDERLAY_POINT_INHERIT; UNDERLAY_POINTS_PER_CHUNK],
-            height_points: [HEIGHT_POINT_INHERIT; HEIGHT_POINTS_PER_CHUNK],
-            overlay: [Material::Void; CELLS_PER_CHUNK_AREA],
-            overlay_mask: [0; OVERLAY_MASK_WIRE_BYTES],
-            height: [0; CELLS_PER_CHUNK_AREA],
-            region: [0; CELLS_PER_CHUNK_AREA],
-            water_plane: [0; CELLS_PER_CHUNK_AREA],
-            smoothing: [0; CELLS_PER_CHUNK_AREA],
+        *Self::empty_boxed()
+    }
+
+    /// An empty chunk allocated at its final address. The dense subcell
+    /// planes are large at `SUB = 16`, so decode and sparse insertion paths
+    /// use this form instead of building the chunk by value on a guest stack.
+    #[must_use]
+    pub fn empty_boxed() -> Box<Self> {
+        let mut chunk = Box::<Self>::new_uninit();
+        let ptr = chunk.as_mut_ptr();
+        // SAFETY: every field is initialized exactly once before
+        // `assume_init`, and no read happens until the fully initialized box
+        // is returned.
+        unsafe {
+            ptr::addr_of_mut!((*ptr).underlay).write([Material::Void; CELLS_PER_CHUNK_AREA]);
+            ptr::addr_of_mut!((*ptr).underlay_points)
+                .cast::<u8>()
+                .write_bytes(UNDERLAY_POINT_INHERIT, UNDERLAY_POINTS_PER_CHUNK);
+            ptr::addr_of_mut!((*ptr).height_points)
+                .cast::<i16>()
+                .write_bytes(0, HEIGHT_POINTS_PER_CHUNK);
+            ptr::addr_of_mut!((*ptr).overlay).write([Material::Void; CELLS_PER_CHUNK_AREA]);
+            ptr::addr_of_mut!((*ptr).overlay_mask)
+                .cast::<u8>()
+                .write_bytes(0, OVERLAY_MASK_WIRE_BYTES);
+            ptr::addr_of_mut!((*ptr).height).write([0; CELLS_PER_CHUNK_AREA]);
+            ptr::addr_of_mut!((*ptr).region).write([0; CELLS_PER_CHUNK_AREA]);
+            ptr::addr_of_mut!((*ptr).water_plane).write([0; CELLS_PER_CHUNK_AREA]);
+            ptr::addr_of_mut!((*ptr).smoothing).write([0; CELLS_PER_CHUNK_AREA]);
+            chunk.assume_init()
         }
     }
 }
@@ -392,7 +421,7 @@ impl Default for Chunk {
 /// chunk read as `Void` / `0`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct World {
-    chunks: BTreeMap<ChunkPos, Chunk>,
+    chunks: BTreeMap<ChunkPos, Box<Chunk>>,
     regions: Vec<Region>,
     smoothing_profiles: Vec<SmoothingProfile>,
     water_planes: Vec<WaterPlane>,
@@ -458,7 +487,10 @@ impl World {
     /// slice clears the cell back to all-inherit. Bytes past the cell's
     /// point count are ignored.
     pub fn set_cell_points(&mut self, cell: CellPos, points: &[u8]) {
-        let chunk = self.chunks.entry(cell.chunk()).or_insert_with(Chunk::empty);
+        let chunk = self
+            .chunks
+            .entry(cell.chunk())
+            .or_insert_with(Chunk::empty_boxed);
         let base = cell.chunk_index() * SUBCELLS_PER_CELL;
         for i in 0..SUBCELLS_PER_CELL {
             chunk.underlay_points[base + i] =
@@ -473,7 +505,10 @@ impl World {
     /// the cell back to no relief; deltas past the cell's point count are
     /// ignored.
     pub fn set_cell_heights(&mut self, cell: CellPos, deltas: &[i16]) {
-        let chunk = self.chunks.entry(cell.chunk()).or_insert_with(Chunk::empty);
+        let chunk = self
+            .chunks
+            .entry(cell.chunk())
+            .or_insert_with(Chunk::empty_boxed);
         let base = cell.chunk_index() * SUBCELLS_PER_CELL;
         for i in 0..SUBCELLS_PER_CELL {
             chunk.height_points[base + i] = deltas.get(i).copied().unwrap_or(HEIGHT_POINT_INHERIT);
@@ -831,12 +866,12 @@ impl World {
     /// The chunk at `at`, if present.
     #[must_use]
     pub fn chunk(&self, at: ChunkPos) -> Option<&Chunk> {
-        self.chunks.get(&at)
+        self.chunks.get(&at).map(Box::as_ref)
     }
 
     /// Insert (or replace) the chunk at `at`.
-    pub fn insert_chunk(&mut self, at: ChunkPos, chunk: Chunk) {
-        self.chunks.insert(at, chunk);
+    pub fn insert_chunk(&mut self, at: ChunkPos, chunk: impl Into<Box<Chunk>>) {
+        self.chunks.insert(at, chunk.into());
     }
 
     /// Register a region under a 1-based `id`. The table is positional,
@@ -923,7 +958,9 @@ impl World {
     /// Iterate the chunk set in `ChunkPos` order (deterministic — the
     /// `BTreeMap` key order).
     pub fn chunks(&self) -> impl Iterator<Item = (ChunkPos, &Chunk)> {
-        self.chunks.iter().map(|(pos, chunk)| (*pos, chunk))
+        self.chunks
+            .iter()
+            .map(|(pos, chunk)| (*pos, chunk.as_ref()))
     }
 }
 
@@ -1137,7 +1174,7 @@ impl World {
         for _ in 0..chunk_count {
             let x = reader.i32()?;
             let z = reader.i32()?;
-            let mut chunk = Chunk::empty();
+            let mut chunk = Chunk::empty_boxed();
             for slot in &mut chunk.underlay {
                 *slot = Material::from_u8_or_void(reader.u8()?);
             }
@@ -1196,8 +1233,18 @@ fn read_overlay_mask(
     for cell in 0..CELLS_PER_CHUNK_AREA {
         let mask = reader.u16()?;
         let base = cell * SUBCELLS_PER_CELL;
-        for bit in 0..SUBCELLS_PER_CELL {
-            chunk.overlay_mask[base + bit] = if (mask >> bit) & 1 == 1 { 255 } else { 0 };
+        let scale = SUBCELLS_PER_CELL_EDGE as usize / LEGACY_MASK_SUBCELLS_PER_CELL_EDGE;
+        for legacy_z in 0..LEGACY_MASK_SUBCELLS_PER_CELL_EDGE {
+            for legacy_x in 0..LEGACY_MASK_SUBCELLS_PER_CELL_EDGE {
+                let bit = legacy_z * LEGACY_MASK_SUBCELLS_PER_CELL_EDGE + legacy_x;
+                let coverage = if (mask >> bit) & 1 == 1 { 255 } else { 0 };
+                for sz in legacy_z * scale..(legacy_z + 1) * scale {
+                    for sx in legacy_x * scale..(legacy_x + 1) * scale {
+                        chunk.overlay_mask[base + sz * SUBCELLS_PER_CELL_EDGE as usize + sx] =
+                            coverage;
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -1476,7 +1523,7 @@ mod tests {
 
     #[test]
     fn set_chunk_copies_overlay_coverage_bytes() {
-        // 4096-byte coverage plane; cell 1's first two subcells get direct
+        // Dense coverage plane; cell 1's first two subcells get direct
         // scalar coverage bytes.
         let mut overlay_mask = vec![0u8; OVERLAY_MASK_WIRE_BYTES];
         overlay_mask[SUBCELLS_PER_CELL] = 17;
@@ -1498,7 +1545,7 @@ mod tests {
         assert_eq!(chunk.overlay_mask[0], 0);
         assert_eq!(chunk.overlay_mask[SUBCELLS_PER_CELL], 17);
         assert_eq!(chunk.overlay_mask[SUBCELLS_PER_CELL + 1], 239);
-        assert_eq!(OVERLAY_MASK_WIRE_BYTES, 4096, "SUB=4 -> 256*16 bytes");
+        assert_eq!(OVERLAY_MASK_WIRE_BYTES, 65_536, "SUB=16 -> 256*256 bytes");
     }
 
     #[test]
@@ -1879,8 +1926,11 @@ mod tests {
 
         let world = World::from_bytes(&buf).expect("a v4 buffer still decodes");
         let chunk = world.chunk(ChunkPos { x: 0, z: 0 }).expect("chunk");
-        assert_eq!(
-            chunk.underlay_points, [UNDERLAY_POINT_INHERIT; UNDERLAY_POINTS_PER_CHUNK],
+        assert!(
+            chunk
+                .underlay_points
+                .iter()
+                .all(|point| *point == UNDERLAY_POINT_INHERIT),
             "a pre-5 buffer reads an all-inherit underlay-point plane",
         );
         assert_eq!(
@@ -2092,12 +2142,18 @@ mod tests {
         buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // water planes
         buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // regions
         buf.extend_from_slice(&[0u8; CELLS_PER_CHUNK_AREA]); // smoothing
-        buf.extend_from_slice(&[UNDERLAY_POINT_INHERIT; UNDERLAY_POINTS_PER_CHUNK]); // points
+        buf.resize(
+            buf.len() + UNDERLAY_POINTS_PER_CHUNK,
+            UNDERLAY_POINT_INHERIT,
+        ); // points
 
         let world = World::from_bytes(&buf).expect("a v5 buffer still decodes");
         let chunk = world.chunk(ChunkPos { x: 0, z: 0 }).expect("chunk");
-        assert_eq!(
-            chunk.height_points, [HEIGHT_POINT_INHERIT; HEIGHT_POINTS_PER_CHUNK],
+        assert!(
+            chunk
+                .height_points
+                .iter()
+                .all(|point| *point == HEIGHT_POINT_INHERIT),
             "a pre-6 buffer reads an all-zero height-delta plane",
         );
         assert_eq!(
@@ -2129,15 +2185,24 @@ mod tests {
         buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // water planes
         buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // regions
         buf.extend_from_slice(&[0u8; CELLS_PER_CHUNK_AREA]); // smoothing
-        buf.extend_from_slice(&[UNDERLAY_POINT_INHERIT; UNDERLAY_POINTS_PER_CHUNK]); // points
-        buf.extend_from_slice(&[0u8; 2 * HEIGHT_POINTS_PER_CHUNK]); // height deltas
+        buf.resize(
+            buf.len() + UNDERLAY_POINTS_PER_CHUNK,
+            UNDERLAY_POINT_INHERIT,
+        ); // points
+        buf.resize(buf.len() + 2 * HEIGHT_POINTS_PER_CHUNK, 0); // height deltas
 
         let world = World::from_bytes(&buf).expect("a v6 buffer still decodes");
         let chunk = world.chunk(ChunkPos { x: 0, z: 0 }).expect("chunk");
         assert_eq!(chunk.overlay_mask[0], 255);
-        assert_eq!(chunk.overlay_mask[1], 0);
-        assert_eq!(chunk.overlay_mask[2], 255);
-        assert_eq!(chunk.overlay_mask[3], 0);
+        assert_eq!(
+            chunk.overlay_mask[3], 255,
+            "legacy bit 0 expands across its SUB=16 block",
+        );
+        assert_eq!(chunk.overlay_mask[4], 0);
+        assert_eq!(
+            chunk.overlay_mask[8], 255,
+            "legacy bit 2 expands across its SUB=16 block",
+        );
     }
 
     #[test]
@@ -2231,14 +2296,15 @@ mod tests {
         }
         world.set_cell_heights(cell(5, 5), &deltas);
         // Center of the raised block (subcell (1,1)..(2,2)) stands at 200/256.
-        let inside = world.surface_height(5.0 + 1.5 / 4.0, 5.0 + 1.5 / 4.0);
+        let sub_f = sub as f32;
+        let inside = world.surface_height(5.0 + 1.5 / sub_f, 5.0 + 1.5 / sub_f);
         assert!(
             (inside - 200.0 / 256.0).abs() < 1e-4,
             "the plateau interior stands at the raised level, got {inside}",
         );
         // A flat corner subcell stays at the base — the plate did not blend
         // the raise outward across the break.
-        let outside = world.surface_height(5.0 + 0.5 / 4.0, 5.0 + 0.5 / 4.0);
+        let outside = world.surface_height(5.0 + 0.5 / sub_f, 5.0 + 0.5 / sub_f);
         assert!(
             outside.abs() < 1e-4,
             "a flat subcell outside the plateau stays at the base, got {outside}",

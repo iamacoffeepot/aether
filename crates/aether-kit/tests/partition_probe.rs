@@ -12,7 +12,10 @@
 use aether_capabilities::render::DrawTriangle;
 use aether_kit::{
     CELLS_PER_CHUNK_AREA, Chunk, ChunkPos, Material, Region, ViewMode, WaterPlane, World,
-    world::mesher::{mesh_chunk, style::StyleTable},
+    world::{
+        SUBCELLS_PER_CELL,
+        mesher::{mesh_chunk, style::StyleTable},
+    },
 };
 
 fn lake_world() -> World {
@@ -42,7 +45,7 @@ fn lake_world() -> World {
     };
     for cz in 0..2 {
         for cx in 0..2 {
-            let mut chunk = Chunk::empty();
+            let mut chunk = Chunk::empty_boxed();
             chunk.region = [1; CELLS_PER_CHUNK_AREA];
             for lz in 0..16i32 {
                 for lx in 0..16i32 {
@@ -117,7 +120,8 @@ fn demo_world_fits_the_frame_vertex_budget() {
     // The desktop render capability accepts 64 MiB of vertices per frame
     // by default (~932k triangles at 24-byte vertices) and warn-drops the
     // excess — the failure mode that motivated window ownership and strip
-    // merging. The four-chunk lake scene must sit comfortably inside it.
+    // merging. At SUB=16, this four-chunk lake scene should still cost less
+    // than one full-water chunk's per-subcell body mesh.
     let world = lake_world();
     let styles = StyleTable::default();
     let total: usize = (0..4)
@@ -131,5 +135,9 @@ fn demo_world_fits_the_frame_vertex_budget() {
             .len()
         })
         .sum();
-    assert!(total < 45_000, "frame budget headroom: {total} triangles");
+    let budget = CELLS_PER_CHUNK_AREA * SUBCELLS_PER_CELL * 2;
+    assert!(
+        total < budget,
+        "frame budget headroom: {total} triangles, budget {budget}",
+    );
 }
