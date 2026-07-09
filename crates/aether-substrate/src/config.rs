@@ -79,6 +79,7 @@ use std::env;
 use std::error::Error as StdError;
 use std::fmt;
 use std::fmt::Write as _;
+use std::path::PathBuf;
 
 use aether_actor::log::DEFAULT_RING_CAP;
 use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
@@ -215,7 +216,8 @@ impl Default for SchedulerTuning {
 }
 
 /// Build a cap config by overlaying an argv-derived partial confique
-/// layer on top of the env layer (ADR-0090 unit d).
+/// layer on top of the env layer (ADR-0090 unit d) and, optionally, a
+/// lower-priority config-file layer (ADR-0090 step 3).
 ///
 /// The cap declares its env-shaped layer via [`Layer`] (a
 /// `#[derive(confique::Config)]` struct) and its per-cap mapping via
@@ -272,11 +274,28 @@ pub trait FromArgvThenEnv: Sized {
     fn try_from_argv_then_env(
         argv: <Self::Layer as confique::Config>::Layer,
     ) -> Result<Self, ConfigError> {
-        let layer = <Self::Layer as confique::Config>::builder()
+        Self::try_resolve(argv, None)
+    }
+
+    /// Resolve with a lower-priority config-file layer. Source order is
+    /// argv > env > file > typed defaults; `None` preserves the old
+    /// argv > env > defaults path byte-for-byte.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::UnparseableKnown`] when a known env key or
+    /// preloaded layer value fails the layer's parser.
+    fn try_resolve(
+        argv: <Self::Layer as confique::Config>::Layer,
+        file: Option<<Self::Layer as confique::Config>::Layer>,
+    ) -> Result<Self, ConfigError> {
+        let mut builder = <Self::Layer as confique::Config>::builder()
             .preloaded(argv)
-            .env()
-            .load()
-            .map_err(ConfigError::from_confique)?;
+            .env();
+        if let Some(file) = file {
+            builder = builder.preloaded(file);
+        }
+        let layer = builder.load().map_err(ConfigError::from_confique)?;
         Ok(Self::from_layer(layer))
     }
 }
@@ -551,6 +570,23 @@ pub enum ConfigError {
         /// The underlying parse error.
         source: Box<dyn StdError + Send + Sync + 'static>,
     },
+    /// An explicitly supplied chassis config file could not be read or
+    /// parsed. Missing files are hard errors because the operator asked
+    /// for this source.
+    ConfigFile {
+        /// File path supplied by `--config` or `AETHER_CONFIG_FILE`.
+        path: PathBuf,
+        /// The underlying read or TOML parse error.
+        source: Box<dyn StdError + Send + Sync + 'static>,
+    },
+    /// A section inside the chassis config file was present but could
+    /// not be decoded into the target config layer.
+    ConfigSection {
+        /// TOML section name, e.g. `http` or `scheduler`.
+        section: String,
+        /// The underlying TOML decode error.
+        source: Box<dyn StdError + Send + Sync + 'static>,
+    },
 }
 
 impl ConfigError {
@@ -581,6 +617,30 @@ impl ConfigError {
             source: Box::new(source),
         }
     }
+
+    /// Build a hard error for an explicitly supplied config file.
+    #[must_use]
+    pub fn config_file(
+        path: impl Into<PathBuf>,
+        source: impl StdError + Send + Sync + 'static,
+    ) -> Self {
+        Self::ConfigFile {
+            path: path.into(),
+            source: Box::new(source),
+        }
+    }
+
+    /// Build a hard error for a malformed section in a config file.
+    #[must_use]
+    pub fn config_section(
+        section: impl Into<String>,
+        source: impl StdError + Send + Sync + 'static,
+    ) -> Self {
+        Self::ConfigSection {
+            section: section.into(),
+            source: Box::new(source),
+        }
+    }
 }
 
 impl fmt::Display for ConfigError {
@@ -601,6 +661,16 @@ impl fmt::Display for ConfigError {
                     )
                 }
             }
+            Self::ConfigFile { path, source } => {
+                let path = path.display();
+                write!(f, "failed to load chassis config file {path}: {source}")
+            }
+            Self::ConfigSection { section, source } => {
+                write!(
+                    f,
+                    "failed to parse chassis config section [{section}]: {source}"
+                )
+            }
         }
     }
 }
@@ -608,7 +678,9 @@ impl fmt::Display for ConfigError {
 impl StdError for ConfigError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
-            Self::UnparseableKnown { source, .. } => Some(&**source),
+            Self::UnparseableKnown { source, .. }
+            | Self::ConfigFile { source, .. }
+            | Self::ConfigSection { source, .. } => Some(&**source),
         }
     }
 }
@@ -669,6 +741,28 @@ mod tests {
         count: u32,
         #[config(env = "AETHER_TEST_FLAG", default = false)]
         enabled: bool,
+    }
+
+    #[derive(Clone, Debug, confique::Config)]
+    #[allow(dead_code)]
+    struct PrecedenceConfig {
+        #[config(env = "AETHER_PRECEDENCE_COUNT", default = 7)]
+        count: u32,
+    }
+
+    impl FromArgvThenEnv for PrecedenceConfig {
+        type Layer = Self;
+
+        fn from_layer(layer: Self::Layer) -> Self {
+            layer
+        }
+    }
+
+    fn precedence_file_layer(value: u32) -> <PrecedenceConfig as confique::Config>::Layer {
+        use confique::Layer as _;
+        let mut file = <PrecedenceConfig as confique::Config>::Layer::empty();
+        file.count = Some(value);
+        file
     }
 
     fn parse_count(raw: &str) -> Result<u32, ParseIntError> {
@@ -798,5 +892,36 @@ mod tests {
         unsafe { env::remove_var("AETHER_TEST_COUNT") };
         let result = loaded.map_err(ConfigError::from_confique);
         assert!(matches!(result, Err(ConfigError::UnparseableKnown { .. })));
+    }
+
+    #[test]
+    fn try_resolve_orders_argv_over_env_over_file() {
+        use confique::Layer as _;
+
+        // Tripwire: file layer must sit below env below argv.
+        let mut argv = <PrecedenceConfig as confique::Config>::Layer::empty();
+        argv.count = Some(33);
+
+        // SAFETY: unique key set then removed in this test scope.
+        unsafe { env::set_var("AETHER_PRECEDENCE_COUNT", "22") };
+        let resolved = PrecedenceConfig::try_resolve(argv, Some(precedence_file_layer(11)))
+            .expect("argv/env/file resolve");
+        assert_eq!(resolved.count, 33, "argv wins over env and file");
+
+        let env_wins = PrecedenceConfig::try_resolve(
+            <PrecedenceConfig as confique::Config>::Layer::empty(),
+            Some(precedence_file_layer(11)),
+        )
+        .expect("env/file resolve");
+        assert_eq!(env_wins.count, 22, "env wins over file");
+
+        // SAFETY: same scope.
+        unsafe { env::remove_var("AETHER_PRECEDENCE_COUNT") };
+        let file_wins = PrecedenceConfig::try_resolve(
+            <PrecedenceConfig as confique::Config>::Layer::empty(),
+            Some(precedence_file_layer(11)),
+        )
+        .expect("file/default resolve");
+        assert_eq!(file_wins.count, 11, "file wins over default");
     }
 }

@@ -98,10 +98,15 @@ pub struct DesktopCli {
     #[command(flatten)]
     pub window: WindowOverlay,
 
+    /// Sectioned TOML chassis config file. Values from this file sit
+    /// below env and argv in the source stack.
+    #[arg(long = "config", value_name = "PATH")]
+    pub config: Option<String>,
+
     /// Print every config knob (source-resolved value, default, doc)
     /// and exit before boot (ADR-0090 §4 discovery dump).
-    #[arg(long = "config")]
-    pub config: bool,
+    #[arg(long = "print-config")]
+    pub print_config: bool,
 
     /// Print this binary's `BinaryManifest` (chassis kind, linked caps,
     /// build provenance) as JSON and exit before boot (ADR-0115, issue
@@ -124,10 +129,15 @@ pub struct HeadlessCli {
     #[command(flatten)]
     pub tick: TickOverlay,
 
+    /// Sectioned TOML chassis config file. Values from this file sit
+    /// below env and argv in the source stack.
+    #[arg(long = "config", value_name = "PATH")]
+    pub config: Option<String>,
+
     /// Print every config knob (source-resolved value, default, doc)
     /// and exit before boot (ADR-0090 §4 discovery dump).
-    #[arg(long = "config")]
-    pub config: bool,
+    #[arg(long = "print-config")]
+    pub print_config: bool,
 
     /// Print this binary's `BinaryManifest` (chassis kind, linked caps,
     /// build provenance) as JSON and exit before boot (ADR-0115, issue
@@ -155,10 +165,15 @@ pub struct HubCli {
     #[command(flatten)]
     pub engine: EngineOverlay,
 
+    /// Sectioned TOML chassis config file. Values from this file sit
+    /// below env and argv in the source stack.
+    #[arg(long = "config", value_name = "PATH")]
+    pub config: Option<String>,
+
     /// Print every config knob (source-resolved value, default, doc)
     /// and exit before boot (ADR-0090 §4 discovery dump).
-    #[arg(long = "config")]
-    pub config: bool,
+    #[arg(long = "print-config")]
+    pub print_config: bool,
 
     /// Print this binary's `BinaryManifest` (chassis kind, linked caps,
     /// build provenance) as JSON and exit before boot (ADR-0115, issue

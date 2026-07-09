@@ -10,8 +10,8 @@
 A knob is a field on a subsystem's resolved-config struct, declared once with a
 `#[config(...)]` hint that supplies its default and its env/CLI names. That
 single declaration generates the env layer, the `clap` argument
-overlay, the layered resolver, and the `--config` discovery entry — so you never
-write an `env::var(...).parse()` read. This recipe adds a knob end to end, with
+overlay, the layered resolver, and the `--print-config` discovery entry — so you
+never write an `env::var(...).parse()` read. This recipe adds a knob end to end, with
 the two gotchas (the `native` feature gate, the `*_defaults_match` test) inline at
 the step where each bites.
 
@@ -26,7 +26,7 @@ it alongside this recipe and mirror the field you're closest to.
 
 The steps below add a field to an **existing** config struct (`HttpConfig`),
 which is the common case — the struct's layer is already registered for
-discovery, so a new field joins the `--config` dump for free. Adding a
+discovery, so a new field joins the `--print-config` dump for free. Adding a
 **brand-new** config struct takes two extra steps, called out at the end.
 
 ## Enable / disable flags
@@ -166,14 +166,14 @@ lowercase, hyphenate — `AETHER_HTTP_REQUIRE_HTTPS` becomes `--http-require-htt
 A bool flag accepts zero or one value (`--http-disable` ⇒ `true`,
 `--http-disable=false` ⇒ `false`, absent ⇒ `None`).
 
-### 4. Confirm the knob in the `--config` dump
+### 4. Confirm the knob in the `--print-config` dump
 
-Build and run any full-stack chassis with `--config` — it walks the same
+Build and run any full-stack chassis with `--print-config` — it walks the same
 declarations and prints every knob's env key, resolved value, source, default,
 and doc, then exits before boot:
 
 ```sh
-cargo run -p aether-substrate-bundle --bin aether-substrate-headless -- --config
+cargo run -p aether-substrate-bundle --bin aether-substrate-headless -- --print-config
 ```
 
 Your new field appears with its default. The dump is rendered by
@@ -200,7 +200,7 @@ If the knob doesn't belong on any existing struct, you're declaring a new
 
 - **Register its layer META for discovery.** Add `&YourConfigLayer::META` to the
   `METAS` slice in `chassis_registry()`
-  (`crates/aether-substrate-bundle/src/chassis_common.rs`) so the `--config` dump
+  (`crates/aether-substrate-bundle/src/chassis_common.rs`) so the `--print-config` dump
   and the unknown-key sweep (`chassis_known_keys`) both see its knobs.
 - **Flatten its overlay into a chassis CLI.** Re-export `YourOverlay` in
   `crates/aether-substrate-bundle/src/cli.rs` and `#[command(flatten)]` it into

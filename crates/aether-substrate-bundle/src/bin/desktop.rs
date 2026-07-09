@@ -5,7 +5,7 @@
 //! each per-cap overlay shadows its `AETHER_*` env var, unset flags
 //! fall through to env-only resolution.
 
-// `--config` prints the discovery dump to stdout before boot
+// `--print-config` prints the discovery dump to stdout before boot
 // (ADR-0090 §4 / e2).
 #![allow(clippy::print_stdout)]
 
@@ -17,7 +17,7 @@ use clap::Parser as _;
 
 fn main() -> anyhow::Result<()> {
     let cli = DesktopCli::parse();
-    if cli.config {
+    if cli.print_config {
         print!("{}", chassis_config_dump());
         return Ok(());
     }

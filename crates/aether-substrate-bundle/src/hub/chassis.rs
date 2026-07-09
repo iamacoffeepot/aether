@@ -13,6 +13,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use aether_actor::Addressable;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
@@ -22,11 +23,12 @@ use aether_substrate::chassis::builder::{
     Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError,
 };
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::config::{ConfigError, validate_env};
+use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, validate_env};
 use aether_substrate::{Chassis, SubstrateBoot};
 
 use crate::chassis_common::{
-    ActorRingConfig, SchedulerTuningConfig, hub_known_keys, resolve_teardown_cap,
+    ActorRingConfig, SchedulerTuningConfig, hub_known_keys, load_chassis_config,
+    resolve_env_with_file, resolve_teardown_cap_with_file, resolve_with_file,
 };
 use crate::cli::HubCli;
 use crate::hub::DEFAULT_RPC_PORT;
@@ -75,6 +77,9 @@ impl HubChassis {
 pub struct HubEnv {
     pub rpc_addr: SocketAddr,
     pub engine: EngineConfig,
+    pub ring_caps: RingCapacities,
+    pub scheduler_tuning: SchedulerTuning,
+    pub teardown_cap: Duration,
 }
 
 impl HubEnv {
@@ -98,7 +103,7 @@ impl HubEnv {
     /// derive-emitted `from_argv_then_env` (argv beats
     /// `AETHER_HUB_HEARTBEAT_*` env beats the literal default). Takes
     /// `&HubCli`, cloning the overlay rather than consuming `cli` so the
-    /// bin keeps it for the `--config` dump.
+    /// bin keeps it for the `--print-config` dump.
     ///
     /// # Errors
     ///
@@ -111,40 +116,45 @@ impl HubEnv {
         // ADR-0090 §4 (e1): warn on any unknown AETHER_ env var before
         // resolving — a typo / stale export is loud but non-fatal.
         validate_env(&hub_known_keys())?;
+        let config_file = load_chassis_config(cli.config.clone())?;
+        let config_file = config_file.as_ref();
         let rpc_port = cli
             .rpc_port
             .or_else(super::rpc_port_from_env)
             .unwrap_or(DEFAULT_RPC_PORT);
         Ok(Self {
             rpc_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
-            engine: EngineConfig::from_argv_then_env(cli.engine.clone().into_layer()),
+            engine: resolve_with_file::<EngineConfig>(
+                cli.engine.clone().into_layer(),
+                config_file,
+                "engine",
+            )?,
+            ring_caps: resolve_env_with_file::<ActorRingConfig>(config_file, "actor")?
+                .to_ring_capacities(),
+            scheduler_tuning: resolve_env_with_file::<SchedulerTuningConfig>(
+                config_file,
+                "scheduler",
+            )?
+            .to_scheduler_tuning(),
+            teardown_cap: resolve_teardown_cap_with_file(config_file)?,
         })
     }
 }
 
 impl HubChassis {
     fn build_inner(env: HubEnv) -> Result<BuiltChassis<Self>, BootError> {
-        let HubEnv { rpc_addr, engine } = env;
+        let HubEnv {
+            rpc_addr,
+            engine,
+            ring_caps,
+            scheduler_tuning,
+            teardown_cap,
+        } = env;
         let boot = SubstrateBoot::builder("aether-hub", env!("CARGO_PKG_VERSION")).build()?;
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
 
         let driver = HubServerDriverCapability { boot };
-
-        // Issue 1990: resolve the per-actor ring capacities so the hub
-        // chassis honours `AETHER_ACTOR_{LOG,TRACE}_RING_SIZE` like the
-        // full-stack chassis (which thread it via `with_common_caps`).
-        let ring_caps = ActorRingConfig::try_from_env()?.to_ring_capacities();
-        // Issue 2485: resolve the scheduler hot-path tuning so the hub
-        // chassis honours `AETHER_SPIN_WINDOW_USEC` / `AETHER_LOCAL_*` /
-        // etc. like the full-stack chassis (which thread it via
-        // `with_common_caps`).
-        let scheduler_tuning = SchedulerTuningConfig::try_from_env()?.to_scheduler_tuning();
-        // Issue #2509: the instanced-actor teardown gate honors the same
-        // `AETHER_SETTLEMENT_CAP_SECS` knob (including its `0 → wait
-        // forever` sentinel) as the settlement gates, like the full-stack
-        // chassis (which thread it via `with_common_caps`).
-        let teardown_cap = resolve_teardown_cap();
 
         Builder::<Self>::new(registry, mailer)
             .with_ring_caps(ring_caps)
