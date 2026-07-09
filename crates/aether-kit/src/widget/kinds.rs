@@ -336,11 +336,23 @@ pub struct SliderConfig {
     pub theme: Theme,
 }
 
+impl Default for SliderConfig {
+    fn default() -> Self {
+        Self {
+            min: 0.0,
+            max: 1.0,
+            step: 0.0,
+            initial: 0.0,
+            theme: Theme::default(),
+        }
+    }
+}
+
 /// `aether.kit.widget.text_field.config` — a single-line editable string
 /// starting at `initial`, capped at `max_chars` characters (`0` = no cap).
 /// The field holds a `String` and a byte-offset caret; there is no selection
 /// in v1.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.kit.widget.text_field.config")]
 pub struct TextFieldConfig {
     pub initial: String,
@@ -351,7 +363,7 @@ pub struct TextFieldConfig {
 /// `aether.kit.widget.radio.config` — a vertical list of mutually-exclusive
 /// `options`, one selected at a time, starting at `initial_index` (clamped
 /// into range at init). Each option draws as one theme row.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.kit.widget.radio.config")]
 pub struct RadioConfig {
     pub options: Vec<String>,
@@ -361,7 +373,7 @@ pub struct RadioConfig {
 
 /// `aether.kit.widget.button.config` — a momentary push button showing
 /// `label`, firing [`ButtonClicked`] on a press-then-release-inside.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.kit.widget.button.config")]
 pub struct ButtonConfig {
     pub label: String,
@@ -370,7 +382,7 @@ pub struct ButtonConfig {
 
 /// `aether.kit.widget.label.config` — static, non-interactive `text`. A label
 /// is not focus-eligible (the root's focus register skips it).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.kit.widget.label.config")]
 pub struct LabelConfig {
     pub text: String,
@@ -461,6 +473,20 @@ pub struct PanelConfig {
     pub font_path: String,
     pub theme: Theme,
     pub children: Vec<WidgetChildSpec>,
+}
+
+impl Default for PanelConfig {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            width: 240.0,
+            font_namespace: String::new(),
+            font_path: String::new(),
+            theme: Theme::default(),
+            children: Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]

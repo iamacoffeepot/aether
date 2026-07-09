@@ -491,7 +491,7 @@ mod tests {
     /// only succeeds on exactly 4 bytes, so it decodes `None` from empty
     /// bytes just like a real typed config would, the branch
     /// `reconstruct_one_child` must still honor.
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Default)]
     struct TypedConfig(u32);
 
     impl Kind for TypedConfig {

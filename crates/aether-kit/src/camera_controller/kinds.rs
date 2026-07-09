@@ -5,12 +5,9 @@
 //! ([`crate::camera`]); this module holds only the controller's own
 //! configuration vocabulary.
 //!
-//! [`ControllerConfig`] is a non-unit typed config, so an instance
-//! must be loaded *with* config bytes — a bare load with no
-//! `config_path` fails to decode (the same contract the widget
-//! cluster's config carries). [`Default`] supplies the compiled
-//! control scheme for the unit tests and as the documented baseline
-//! a caller starts from.
+//! [`ControllerConfig`] is a non-unit typed config. A bare load with no
+//! `config_path` boots the compiled [`Default`] control scheme; callers can
+//! still encode and pass a config to override that baseline.
 
 use alloc::string::String;
 
@@ -44,8 +41,7 @@ pub enum ControllerMode {
 /// Encode one of these to the controller's `Config` shape and pass it
 /// as the `config` bytes of the `aether.component.load` that
 /// instantiates the controller (or `load_component`'s `config_path`).
-/// A load with no config bytes is rejected — there is no bare-load
-/// default instance.
+/// Omitting config bytes boots [`ControllerConfig::default()`].
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.camera_controller.config")]
 pub struct ControllerConfig {

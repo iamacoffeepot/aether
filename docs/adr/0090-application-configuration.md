@@ -217,7 +217,10 @@ a native actor receives `NativeActor::Config`. Concretely: give the guest
 `WasmActor` (currently `fn init<C: Resolver>(ctx: &mut C)`, no config) a
 `type Config` with `init(config: Self::Config, ctx: …)`, mirroring
 `NativeActor { type Config; fn init(config, ctx) }`. The default is
-`type Config = ()` for components that need none.
+`type Config = ()` for components that need none. A wasm config kind must also
+implement `Default`: when the host supplies zero config bytes, the guest init
+shim resolves that to the compiled `Config::default()` rather than treating the
+empty byte slice as a decode attempt.
 
 Because a wasm guest's config must cross the FFI as bytes, `type Config` for a
 guest is a **`Kind`** (schema-bearing). That is what "expose a configuration kind"
@@ -225,13 +228,16 @@ means: the config *type* is a kind whose schema rides the `aether.kinds` custom
 section, so `describe_component` surfaces the config shape just like a handler
 kind. The config bytes ride the load/spawn call (`load_component` /
 `SpawnEngine`) — passed by the hub **upward** through the substrate — and the
-chassis decodes them into `Self::Config` and hands them to the guest's `init`.
+chassis delivers them to the guest's init shim, which decodes non-empty bytes
+into `Self::Config` and hands them to the guest's `init`. Empty bytes are the
+no-config signal and resolve guest-side to `Self::Config::default()`; the
+substrate stays byte-transparent and does not synthesize default bytes.
 This unifies the model:
 
 | | declares | delivered |
 |---|---|---|
 | native actor | `type Config = HttpConfig` (plain struct) | `init(config, ctx)` |
-| wasm component | `type Config = MyConfig` (a `Kind`) | `init(config, ctx)`, bytes decoded by chassis |
+| wasm component | `type Config = MyConfig` (a `Kind + Default`) | `init(config, ctx)`, non-empty bytes decoded by the guest shim or empty bytes resolved to `Default` |
 
 Init-time delivery (rather than a post-init mail) is the right call because
 `init` is where load-bearing state is built — config must be present there, and

@@ -189,6 +189,12 @@ impl Theme {
     };
 }
 
+impl Default for Theme {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// `aether.kit.widget.set_theme` — re-fan a live theme change down to
 /// a panel root's widget children. Fire-and-forget; because the
 /// widget surface redraws every tick (immediate mode), the next frame

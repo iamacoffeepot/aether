@@ -5,11 +5,10 @@
 //! a wasm actor, so its config crosses the spawn boundary as encoded bytes
 //! and is handed to `init` by value (as `PanelConfig` is to the reference
 //! widget panel), never the ADR-0090 Resolver derive (unreachable without
-//! `aether-substrate`, which this crate's boundary forbids). Since #2694 the
-//! composite reload reconstructs a typed-config inline child from its *real*
-//! retained config bytes, so `HostConfig` carries no decode-from-empty
-//! requirement: the real config arrives once, on the first spawn from the
-//! #2681 child spec, and is retained in the slot for every later reload.
+//! `aether-substrate`, which this crate's boundary forbids). Since #2878, a
+//! bare load supplies [`HostConfig::default()`]; composite reload still
+//! reconstructs a typed-config inline child from its *real* retained config
+//! bytes (#2694), so this default is only the initial no-config boot value.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -23,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// bytes. Stored as a raw `u64` because [`ChildSpec`] is a `Schema`-derived
 /// config that wire-encodes and persists cleanly; the host wraps it as
 /// `ActorTypeTag(type_tag)` at the spawn call.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Schema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Schema, Default)]
 pub struct ChildSpec {
     /// `hash(NAMESPACE)` of the wrapped actor type. For a stock `aether-kit`
     /// widget, `aether_kit::widgets::WidgetKind::type_tag()` produces this
@@ -37,10 +36,11 @@ pub struct ChildSpec {
 }
 
 /// Where the host's script bytes come from at boot / on a swap.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Schema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Schema, Default)]
 pub enum ScriptSource {
     /// Boot wrapper-transparent — no script until a `load_script` /
     /// `set_script` swaps one in.
+    #[default]
     None,
     /// The script bytes inline (the kit's `set_script` path, or a config
     /// that ships the wasm directly).
@@ -98,6 +98,19 @@ impl HostConfig {
     #[must_use]
     pub fn is_mirror_kind(&self, kind: KindId) -> bool {
         self.mirror_kinds.contains(&kind.0)
+    }
+}
+
+impl Default for HostConfig {
+    fn default() -> Self {
+        Self {
+            child: ChildSpec::default(),
+            script: ScriptSource::default(),
+            fuel_per_call: Self::DEFAULT_FUEL_PER_CALL,
+            disable_after_traps: Self::DEFAULT_DISABLE_AFTER_TRAPS,
+            frame_trigger: 0,
+            mirror_kinds: Vec::new(),
+        }
     }
 }
 
