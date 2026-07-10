@@ -120,10 +120,14 @@ lineage name (the `aether.component/aether.embedded:NAME` address `spawn_substra
 / `list_components` / `load_component` hand back). `describe_transforms` lists the
 native transforms registered at link time.
 
-**Components.** `load_component` and `replace_component` take a filesystem **path** to
-the `.wasm` — the tool reads the bytes; you never inline a wasm buffer through a tool
-call. Both accept a `config_path` for a typed-config component (a file holding the
-config kind's wire bytes; `describe_component` tells you which kind it wants).
+**Components.** `upload_component` takes the filesystem path to a `.wasm` and
+stages it in the hub's component registry. `load_component` and
+`replace_component` then take that upload's registry `selector` (hash, name, or
+`module@actor`), never a host wasm path or inline wasm bytes. For a typed-config
+component, pass either `config` as inline structured JSON or `config_path` as a
+path to a JSON file; they are mutually exclusive. The harness schema-encodes the
+JSON to the Config kind that `describe_component` identifies; `describe_kinds`
+shows its schema. `config_path` does not contain pre-encoded wire bytes.
 
 **Observation.** `capture_frame` returns the engine's current frame as inline PNG,
 and can carry two mail bundles dispatched atomically around the readback — `mails`

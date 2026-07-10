@@ -13,15 +13,23 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_kinds::keycode::{KEY_ENTER, KEY_SPACE};
 use aether_kinds::mouse_button;
-use aether_kinds::{MouseButton, MouseButtonRelease};
+use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
 
-use crate::widget::set::{push_border, quad, text_origin_y};
-use crate::widget::theme::{SetTheme, Theme, WidgetState};
+use crate::widget::set::{push_border, quad, reply_if_hidden, text_origin_y};
+use crate::widget::state::{InteractionState, emit_state_changed};
+use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
-    ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, WidgetDrawItem, WidgetDrawList,
-    WidgetFrame,
+    ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost,
+    SetWidgetState, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyboardArm {
+    Enter,
+    Space,
+}
 
 /// A momentary push button. Holds its label plus the cached theme / frame /
 /// focus and the armed (`pressed`) state.
@@ -29,9 +37,12 @@ pub struct ButtonWidget {
     label: String,
     theme: Theme,
     frame: WidgetFrame,
-    focused: bool,
-    /// Armed by a press inside; a release-inside while armed fires the click.
-    pressed: bool,
+    state: InteractionState,
+    /// Armed by a pointer press inside; a release-inside fires the click.
+    pointer_pressed: bool,
+    /// Suppresses key-repeat duplicates. Enter fires on its first press; Space
+    /// fires on the matching release.
+    keyboard_arm: Option<KeyboardArm>,
 }
 
 impl ButtonWidget {
@@ -46,17 +57,74 @@ impl ButtonWidget {
     /// Arm the button if the press landed inside. Owned state-machine step —
     /// unit-tested.
     fn press_at(&mut self, x: f32, y: f32) {
-        if self.contains(x, y) {
-            self.pressed = true;
+        if self.state.is_available() && self.contains(x, y) {
+            self.pointer_pressed = true;
         }
     }
 
     /// Resolve a release: returns `true` (a click fired) only if the button
     /// was armed and the release landed back inside. Disarms either way.
     fn release_at(&mut self, x: f32, y: f32) -> bool {
-        let clicked = self.pressed && self.contains(x, y);
-        self.pressed = false;
+        let clicked = self.state.is_available() && self.pointer_pressed && self.contains(x, y);
+        self.pointer_pressed = false;
         clicked
+    }
+
+    fn pressed(&self) -> bool {
+        self.pointer_pressed || self.keyboard_arm == Some(KeyboardArm::Space)
+    }
+
+    fn clear_arms(&mut self) {
+        self.pointer_pressed = false;
+        self.keyboard_arm = None;
+    }
+
+    fn apply_control_state(&mut self, ctx: &WasmCtx<'_>, next: WidgetControlState) {
+        if self.state.replace(next) {
+            if !self.state.is_available() {
+                self.clear_arms();
+            }
+            emit_state_changed(ctx, &self.state);
+        }
+    }
+
+    fn emit_click(ctx: &WasmCtx<'_>) {
+        if let Some(parent) = ctx.parent() {
+            parent.send(&ButtonClicked);
+        }
+    }
+
+    /// Apply one key press. Returns whether activation fires immediately.
+    fn press_key(&mut self, code: u32) -> bool {
+        if !self.state.is_available() || self.keyboard_arm.is_some() {
+            return false;
+        }
+        match code {
+            KEY_ENTER => {
+                self.keyboard_arm = Some(KeyboardArm::Enter);
+                true
+            }
+            KEY_SPACE => {
+                self.keyboard_arm = Some(KeyboardArm::Space);
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Apply one matching key release. Returns whether activation fires now.
+    fn release_key(&mut self, code: u32) -> bool {
+        match (code, self.keyboard_arm) {
+            (KEY_ENTER, Some(KeyboardArm::Enter)) => {
+                self.keyboard_arm = None;
+                false
+            }
+            (KEY_SPACE, Some(KeyboardArm::Space)) => {
+                self.keyboard_arm = None;
+                self.state.is_available()
+            }
+            _ => false,
+        }
     }
 }
 
@@ -75,22 +143,31 @@ impl WasmActor for ButtonWidget {
         Ok(ButtonWidget {
             label: config.label,
             theme: config.theme,
+            state: InteractionState::new(config.state),
             frame: WidgetFrame {
                 x: 0.0,
                 y: 0.0,
                 width: 0.0,
                 height: 0.0,
             },
-            focused: false,
-            pressed: false,
+            pointer_pressed: false,
+            keyboard_arm: None,
         })
     }
 
     /// Relabel / restyle in place from a re-sent config.
     #[handler::single]
-    fn on_config(&mut self, _ctx: &mut WasmCtx<'_>, config: ButtonConfig) {
+    fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: ButtonConfig) {
         self.label = config.label;
         self.theme = config.theme;
+        self.apply_control_state(ctx, config.state);
+    }
+
+    /// Read-only and validation are deliberately inapplicable to a momentary
+    /// button; visibility/enabled still control routing and presentation.
+    #[handler::single]
+    fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
+        self.apply_control_state(ctx, set.state);
     }
 
     /// Restyle: adopt the fanned theme.
@@ -108,13 +185,24 @@ impl WasmActor for ButtonWidget {
     /// Take keyboard focus.
     #[handler::single]
     fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
-        self.focused = true;
+        self.state.gain_focus();
     }
 
     /// Release keyboard focus.
     #[handler::single]
     fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
-        self.focused = false;
+        self.state.lose_focus();
+        self.clear_arms();
+    }
+
+    #[handler::single]
+    fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
+        self.state.set_hovered(true);
+    }
+
+    #[handler::single]
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+        self.state.set_hovered(false);
     }
 
     /// A left press inside arms the button.
@@ -131,10 +219,24 @@ impl WasmActor for ButtonWidget {
         if release.button != mouse_button::LEFT {
             return;
         }
-        if self.release_at(release.x, release.y)
-            && let Some(parent) = ctx.parent()
-        {
-            parent.send(&ButtonClicked);
+        if self.release_at(release.x, release.y) {
+            Self::emit_click(ctx);
+        }
+    }
+
+    /// Enter activates once on its first press; Space arms until its matching
+    /// release. Key-repeat presses are ignored while either key is armed.
+    #[handler::single]
+    fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
+        if self.press_key(key.code) {
+            Self::emit_click(ctx);
+        }
+    }
+
+    #[handler::single]
+    fn on_key_release(&mut self, ctx: &mut WasmCtx<'_>, release: KeyRelease) {
+        if self.release_key(release.code) {
+            Self::emit_click(ctx);
         }
     }
 
@@ -145,13 +247,12 @@ impl WasmActor for ButtonWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
+        if reply_if_hidden(ctx, &self.state) {
+            return;
+        }
         let width = self.frame.width;
         let height = self.frame.height;
-        let state = if self.pressed {
-            WidgetState::Pressed
-        } else {
-            WidgetState::Normal
-        };
+        let theme_state = self.state.theme_state(self.pressed());
         let size = self.theme.label_size_pixels;
 
         let mut items: Vec<WidgetDrawItem> = Vec::new();
@@ -160,7 +261,7 @@ impl WasmActor for ButtonWidget {
             0.0,
             width,
             height,
-            self.theme.fill(self.theme.accent, state),
+            self.theme.fill(self.theme.accent, theme_state),
         ));
         if !self.label.is_empty() {
             items.push(WidgetDrawItem::Text {
@@ -169,11 +270,11 @@ impl WasmActor for ButtonWidget {
                 font_id: self.theme.font_id,
                 text: self.label.clone(),
                 size_pixels: size,
-                color: self.theme.accent_text,
+                color: self.theme.fill(self.theme.accent_text, theme_state),
                 clip: None,
             });
         }
-        if self.focused {
+        if self.state.focused() {
             push_border(&mut items, width, height, 2.0, self.theme.accent);
         }
         if let Some(parent) = ctx.parent() {
@@ -188,19 +289,21 @@ impl WasmActor for ButtonWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widget::WidgetControlState;
 
     fn button() -> ButtonWidget {
         ButtonWidget {
             label: String::from("go"),
             theme: Theme::DEFAULT,
+            state: InteractionState::new(WidgetControlState::default()),
             frame: WidgetFrame {
                 x: 10.0,
                 y: 10.0,
                 width: 40.0,
                 height: 20.0,
             },
-            focused: false,
-            pressed: false,
+            pointer_pressed: false,
+            keyboard_arm: None,
         }
     }
 
@@ -208,12 +311,12 @@ mod tests {
     fn press_inside_then_release_inside_clicks() {
         let mut b = button();
         b.press_at(20.0, 20.0);
-        assert!(b.pressed);
+        assert!(b.pointer_pressed);
         assert!(
             b.release_at(30.0, 25.0),
             "press-inside then release-inside is a click"
         );
-        assert!(!b.pressed, "disarmed after release");
+        assert!(!b.pointer_pressed, "disarmed after release");
     }
 
     #[test]
@@ -224,17 +327,49 @@ mod tests {
             !b.release_at(200.0, 200.0),
             "a release that drifts off the button does not click",
         );
-        assert!(!b.pressed, "disarmed even on a cancel");
+        assert!(!b.pointer_pressed, "disarmed even on a cancel");
     }
 
     #[test]
     fn press_outside_never_arms() {
         let mut b = button();
         b.press_at(200.0, 200.0);
-        assert!(!b.pressed);
+        assert!(!b.pointer_pressed);
         assert!(
             !b.release_at(20.0, 20.0),
             "a release with no prior inside-press does not click"
         );
+    }
+
+    #[test]
+    fn enter_fires_once_per_press_release_pair_and_ignores_repeat() {
+        let mut b = button();
+        assert!(b.press_key(KEY_ENTER));
+        assert!(
+            !b.press_key(KEY_ENTER),
+            "repeat while armed cannot duplicate"
+        );
+        assert!(
+            !b.release_key(KEY_ENTER),
+            "Enter fires on press, not release"
+        );
+        assert!(
+            b.press_key(KEY_ENTER),
+            "matching release rearms the next press"
+        );
+    }
+
+    #[test]
+    fn space_fires_only_on_matching_release_and_cancels_with_focus_loss() {
+        let mut b = button();
+        assert!(!b.press_key(KEY_SPACE));
+        assert_eq!(b.keyboard_arm, Some(KeyboardArm::Space));
+        assert!(b.release_key(KEY_SPACE));
+        assert_eq!(b.keyboard_arm, None);
+
+        b.press_key(KEY_SPACE);
+        b.state.lose_focus();
+        b.clear_arms();
+        assert!(!b.release_key(KEY_SPACE));
     }
 }

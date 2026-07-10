@@ -21,7 +21,7 @@ use aether_math::Rgba;
 /// — it's derived fresh each frame from input, not carried on the
 /// wire. Passed by value to [`Theme::fill`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WidgetState {
+pub enum ThemeState {
     Normal,
     Hover,
     Pressed,
@@ -58,14 +58,18 @@ pub struct Theme {
     /// Text/iconography drawn on top of an `accent`-filled surface.
     pub accent_text: Rgba,
     /// Role-agnostic lift composited over a base color on
-    /// [`WidgetState::Hover`] — a subtle white brighten.
+    /// [`ThemeState::Hover`] — a subtle white brighten.
     pub hover_overlay: Rgba,
     /// Role-agnostic press composited over a base color on
-    /// [`WidgetState::Pressed`] — a subtle black darken.
+    /// [`ThemeState::Pressed`] — a subtle black darken.
     pub pressed_overlay: Rgba,
     /// Alpha multiplier applied to a base color on
-    /// [`WidgetState::Disabled`].
+    /// [`ThemeState::Disabled`].
     pub disabled_alpha: f32,
+    /// Validation-warning outline role.
+    pub warning: Rgba,
+    /// Validation-error outline role.
+    pub error: Rgba,
     /// Inner padding, in pixels, a widget reserves between its
     /// border and its content.
     pub pad: f32,
@@ -87,21 +91,19 @@ pub struct Theme {
 
 impl Theme {
     /// Resolve a widget's actual draw color: `base` unchanged for
-    /// [`WidgetState::Normal`]; `hover_overlay` / `pressed_overlay`
+    /// [`ThemeState::Normal`]; `hover_overlay` / `pressed_overlay`
     /// alpha-composited over `base` as standard src-over (the overlay
     /// as source, `base`'s own alpha preserved — overlays shift
     /// color/luminance, they never punch holes in an opaque surface)
     /// for `Hover` / `Pressed`; `base`'s alpha scaled by
     /// `disabled_alpha` for `Disabled`.
     #[must_use]
-    pub fn fill(&self, base: Rgba, state: WidgetState) -> Rgba {
+    pub fn fill(&self, base: Rgba, state: ThemeState) -> Rgba {
         match state {
-            WidgetState::Normal => base,
-            WidgetState::Hover => Self::composite_over(base, self.hover_overlay),
-            WidgetState::Pressed => Self::composite_over(base, self.pressed_overlay),
-            WidgetState::Disabled => {
-                Rgba::new(base.r, base.g, base.b, base.a * self.disabled_alpha)
-            }
+            ThemeState::Normal => base,
+            ThemeState::Hover => Self::composite_over(base, self.hover_overlay),
+            ThemeState::Pressed => Self::composite_over(base, self.pressed_overlay),
+            ThemeState::Disabled => Rgba::new(base.r, base.g, base.b, base.a * self.disabled_alpha),
         }
     }
 
@@ -135,6 +137,8 @@ impl Theme {
         hover_overlay: Rgba::new(1.0, 1.0, 1.0, 0.08),
         pressed_overlay: Rgba::new(0.0, 0.0, 0.0, 0.12),
         disabled_alpha: 0.4,
+        warning: Rgba::from_srgb8(0xe2, 0xa8, 0x4a, 0xff),
+        error: Rgba::from_srgb8(0xe0, 0x62, 0x58, 0xff),
         pad: 8.0,
         gap: 6.0,
         row_height: 24.0,
@@ -171,7 +175,7 @@ mod tests {
         // overlay, no alpha scaling.
         let theme = Theme::DEFAULT;
         let base = Rgba::new(0.2, 0.4, 0.6, 0.8);
-        assert_eq!(theme.fill(base, WidgetState::Normal), base);
+        assert_eq!(theme.fill(base, ThemeState::Normal), base);
     }
 
     #[test]
@@ -185,7 +189,7 @@ mod tests {
         };
         let base = Rgba::new(0.0, 1.0, 0.0, 1.0);
         assert_eq!(
-            theme.fill(base, WidgetState::Hover),
+            theme.fill(base, ThemeState::Hover),
             Rgba::new(0.5, 0.5, 0.0, 1.0)
         );
     }
@@ -200,7 +204,7 @@ mod tests {
         };
         let base = Rgba::new(0.1, 0.2, 0.3, 1.0);
         assert_eq!(
-            theme.fill(base, WidgetState::Disabled),
+            theme.fill(base, ThemeState::Disabled),
             Rgba::new(0.1, 0.2, 0.3, 0.4)
         );
     }

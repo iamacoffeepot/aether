@@ -97,7 +97,8 @@ error. A single-actor module has only the entry type, so an omitted selector is 
 whole story there.
 
 In practice you drive this through the MCP harness — `load_component(engine_id,
-selector, name?, export?)`, `replace_component(...)`, `terminate_substrate(...)` — where
+selector, name?, config?, config_path?, export?)`, `replace_component(...)`,
+`terminate_substrate(...)` — where
 `selector` resolves against the hub's content-addressed component registry
 ([ADR-0116](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0116-component-registry.md)). Stage the wasm first with `upload_component`, which
 takes the **path** and reads the bytes for you (tool JSON never carries the wasm
@@ -112,6 +113,9 @@ A component takes typed boot config the same way a capability does — declare a
 wasm-specific is the *carrier*: the config rides as raw bytes on
 `LoadComponent.config`, encoded at the hub / MCP edge (SDK-typed, not wire-typed),
 so the substrate stays byte-transparent and never needs the config's Rust type.
+The MCP tool accepts the source value as inline structured `config` JSON or a
+`config_path` to JSON and performs that schema encoding; callers do not supply
+raw wire bytes through tool JSON. The two JSON sources are mutually exclusive.
 Omit `type Config` and the macro synthesizes `()` and injects the unused argument,
 so a no-config `init` stays terse. A declared config kind shows up in the
 component's advertised capabilities, so `describe_kinds` can resolve its schema.
