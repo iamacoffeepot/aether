@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use aether_data::{EngineId, Kind};
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameRect, FrameReduction, NamedMail,
@@ -49,6 +51,25 @@ pub(super) fn capture_check(spec: &CaptureCheckSpec) -> Result<FrameCheck, McpEr
     })
 }
 
+/// Persist a captured PNG to `path` (iamacoffeepot/aether#2962):
+/// `create_dir_all` the parent, then write, overwriting whatever is
+/// already there. Precondition: `path` is absolute — `capture_frame`
+/// validates that before the capture ever touches the wire, so this
+/// helper assumes it rather than re-checking. Blocking `std::fs`, not
+/// an async path — mirrors `spill_reply_bytes`'s rationale
+/// (`crates/aether-mcp/src/tools/bytes.rs`): a `capture_frame` reply is
+/// not latency-critical. Returns the written path and byte count, or
+/// the IO error's message on failure; the caller folds a failure into a
+/// `{"saved": {"error": …}}` block instead of failing the call — the
+/// image bytes are already in hand and must not be dropped.
+pub(super) fn save_capture_png(path: &Path, bytes: &[u8]) -> Result<(PathBuf, usize), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create_dir_all {parent:?}: {e}"))?;
+    }
+    std::fs::write(path, bytes).map_err(|e| format!("write {path:?}: {e}"))?;
+    Ok((path.to_path_buf(), bytes.len()))
+}
+
 impl Mcp {
     pub(super) async fn encode_named_mail_bundle<S: NamedMailSpec>(
         &self,
@@ -92,6 +113,17 @@ pub(super) async fn capture_frame(
     args: CaptureFrameArgs,
 ) -> Result<CallToolResult, McpError> {
     let engine = parse_engine_id(&args.engine_id)?;
+    // A relative save_path is invalid-params before anything else runs
+    // (iamacoffeepot/aether#2962) — mirrors the bad-bundle abort
+    // posture: a bad param never touches the wire.
+    if let Some(save_path) = &args.save_path
+        && !Path::new(save_path).is_absolute()
+    {
+        return Err(McpError::invalid_params(
+            format!("capture_frame save_path must be an absolute path, got {save_path:?}"),
+            None,
+        ));
+    }
     // Encode both bundles before sending — a bad entry produces a
     // clean invalid-params error and never touches the wire.
     // ADR-0091: descriptors come from the per-engine merged view
@@ -163,6 +195,22 @@ pub(super) async fn capture_frame(
                     "similarity_pass": similarity_pass,
                 }))
                 .map_err(|e| internal_msg(&format!("similarity serialize: {e}")))?;
+                content.push(Content::text(json));
+            }
+            // Persist the exact PNG bytes to save_path when requested
+            // (iamacoffeepot/aether#2962). A write failure never fails
+            // the call — the image is already in hand and must not be
+            // dropped — so it rides as its own `saved` text block
+            // instead; the inline image above is unchanged either way.
+            if let Some(save_path) = &args.save_path {
+                let saved = match save_capture_png(Path::new(save_path), &png) {
+                    Ok((path, bytes)) => serde_json::json!({
+                        "saved": {"path": path.to_string_lossy(), "bytes": bytes},
+                    }),
+                    Err(error) => serde_json::json!({"saved": {"error": error}}),
+                };
+                let json = serde_json::to_string(&saved)
+                    .map_err(|e| internal_msg(&format!("saved serialize: {e}")))?;
                 content.push(Content::text(json));
             }
             Ok(CallToolResult::success(content))
