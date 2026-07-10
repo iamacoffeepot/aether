@@ -34,16 +34,17 @@ use std::fs;
 use aether_data::Kind;
 use aether_kinds::{LoadComponent, LoadResult, NamedMail};
 use aether_kit::{WidgetChildSpec, WidgetConfig, WidgetDrawItem, WidgetKind};
+use aether_math::Rgba;
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{Image, background_top_left, decode_png};
 
 /// Linear RGBA primaries chosen so each survives the sRGB encode as a
 /// single dominant channel — the compositing order is then read off the
 /// captured pixels by which channel wins, gamma-invariant.
-const BLUE: [f32; 4] = [0.05, 0.05, 0.90, 1.0];
-const RED: [f32; 4] = [0.90, 0.05, 0.05, 1.0];
-const GREEN: [f32; 4] = [0.05, 0.90, 0.05, 1.0];
-const WHITE: [f32; 4] = [0.95, 0.95, 0.95, 1.0];
+const BLUE: Rgba = Rgba::new(0.05, 0.05, 0.90, 1.0);
+const RED: Rgba = Rgba::new(0.90, 0.05, 0.05, 1.0);
+const GREEN: Rgba = Rgba::new(0.05, 0.90, 0.05, 1.0);
+const WHITE: Rgba = Rgba::new(0.95, 0.95, 0.95, 1.0);
 
 /// The full trampoline address a loaded component registers at (ADR-0099
 /// §4) — `aether.component` `/`-joined to the trampoline node named
@@ -57,7 +58,7 @@ fn panel_address() -> String {
 }
 
 /// A flat-colored quad draw item in the widget's own local coordinates.
-fn quad(x: f32, y: f32, width: f32, height: f32, color: [f32; 4]) -> WidgetDrawItem {
+fn quad(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> WidgetDrawItem {
     WidgetDrawItem::Quad {
         x,
         y,
@@ -69,7 +70,7 @@ fn quad(x: f32, y: f32, width: f32, height: f32, color: [f32; 4]) -> WidgetDrawI
 
 /// A leaf `WidgetConfig` (no children) whose only draw is one local quad,
 /// pre-encoded to the bytes a parent's `WidgetChildSpec` carries.
-fn leaf_config(width: f32, height: f32, color: [f32; 4]) -> Vec<u8> {
+fn leaf_config(width: f32, height: f32, color: Rgba) -> Vec<u8> {
     WidgetConfig {
         root: false,
         chrome: vec![quad(0.0, 0.0, width, height, color)],

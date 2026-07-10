@@ -11,7 +11,7 @@ use super::constants::OCTIMETERS_PER_METER;
 #[allow(clippy::many_single_char_names)]
 pub(super) fn emit_flat_quad(
     rect: [i32; 4],
-    color: [f32; 3],
+    color: Rgb,
     surface: &impl Fn(f32, f32) -> f32,
     tris: &mut Vec<DrawTriangle>,
 ) {
@@ -22,7 +22,7 @@ pub(super) fn emit_flat_quad(
             x: wx,
             y: surface(wx, wz),
             z: wz,
-            color: Rgb::new(color[0], color[1], color[2]),
+            color,
         }
     };
     let a = corner(rect[0], rect[1]);
@@ -42,14 +42,9 @@ pub(super) fn push_wall_quad(
     top_b: [f32; 3],
     y_bottom_a: f32,
     y_bottom_b: f32,
-    color: [f32; 3],
+    color: Rgb,
 ) {
-    let vert = |x: f32, z: f32, y: f32| Vertex {
-        x,
-        y,
-        z,
-        color: Rgb::new(color[0], color[1], color[2]),
-    };
+    let vert = |x: f32, z: f32, y: f32| Vertex { x, y, z, color };
     let a = vert(top_a[0], top_a[1], top_a[2]);
     let b = vert(top_b[0], top_b[1], top_b[2]);
     let c = vert(top_b[0], top_b[1], y_bottom_b);

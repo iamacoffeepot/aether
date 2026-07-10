@@ -1,4 +1,5 @@
 use aether_capabilities::render::DrawTriangle;
+use aether_math::Rgb;
 
 use crate::world::{CellPos, ChunkPos, Material, STEP_MAX_OCTIMETERS, World};
 
@@ -59,7 +60,7 @@ pub(super) fn emit_walls(
 /// The flat wall color for a cliff owned by `cell`: the cell's cliff
 /// material's flat color. A pure function of the cell, so the two sides of a
 /// shared edge agree on the color.
-fn wall_color(world: &World, cell: CellPos, styles: &StyleTable) -> [f32; 3] {
+fn wall_color(world: &World, cell: CellPos, styles: &StyleTable) -> Rgb {
     flat_color(styles.get(world.cliff_material(cell)))
 }
 

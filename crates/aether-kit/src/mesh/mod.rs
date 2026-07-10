@@ -51,20 +51,20 @@ use core::str;
 
 const OUTLINE_WIDTH: f32 = 0.012;
 const OUTLINE_LIFT: f32 = 0.002;
-const OUTLINE_RGB: (f32, f32, f32) = (0.12, 0.12, 0.16);
+const OUTLINE_RGB: Rgb = Rgb::new(0.12, 0.12, 0.16);
 
-const PALETTE: &[(f32, f32, f32)] = &[
-    (0.55, 0.70, 0.92), // 0 — soft blue (default)
-    (0.85, 0.40, 0.30), // 1 — terracotta
-    (0.45, 0.75, 0.45), // 2 — sage green
-    (0.95, 0.85, 0.40), // 3 — mustard
-    (0.80, 0.55, 0.85), // 4 — lilac
-    (0.65, 0.50, 0.35), // 5 — wood brown
-    (0.95, 0.95, 0.95), // 6 — white
-    (0.30, 0.30, 0.35), // 7 — slate
+const PALETTE: &[Rgb] = &[
+    Rgb::new(0.55, 0.70, 0.92), // 0 — soft blue (default)
+    Rgb::new(0.85, 0.40, 0.30), // 1 — terracotta
+    Rgb::new(0.45, 0.75, 0.45), // 2 — sage green
+    Rgb::new(0.95, 0.85, 0.40), // 3 — mustard
+    Rgb::new(0.80, 0.55, 0.85), // 4 — lilac
+    Rgb::new(0.65, 0.50, 0.35), // 5 — wood brown
+    Rgb::new(0.95, 0.95, 0.95), // 6 — white
+    Rgb::new(0.30, 0.30, 0.35), // 7 — slate
 ];
 
-const OBJ_DEFAULT_COLOR: (f32, f32, f32) = PALETTE[0];
+const OBJ_DEFAULT_COLOR: Rgb = PALETTE[0];
 
 pub struct MeshViewer {
     triangles: Vec<DrawTriangle>,
@@ -389,8 +389,7 @@ fn to_draw_triangle_palette(tri: [Point3; 3], color: u32) -> DrawTriangle {
     to_draw_triangle_rgb([tri[0].to_f32(), tri[1].to_f32(), tri[2].to_f32()], rgb)
 }
 
-fn to_draw_triangle_rgb(tri: [Vec3; 3], rgb: (f32, f32, f32)) -> DrawTriangle {
-    let color = Rgb::new(rgb.0, rgb.1, rgb.2);
+fn to_draw_triangle_rgb(tri: [Vec3; 3], color: Rgb) -> DrawTriangle {
     DrawTriangle {
         verts: [
             Vertex {
@@ -429,11 +428,7 @@ pub enum ObjParseError {
 pub fn parse_obj(text: &str) -> Result<Vec<DrawTriangle>, ObjParseError> {
     let mut vertices: Vec<[f32; 3]> = Vec::new();
     let mut triangles: Vec<DrawTriangle> = Vec::new();
-    let default_color = Rgb::new(
-        OBJ_DEFAULT_COLOR.0,
-        OBJ_DEFAULT_COLOR.1,
-        OBJ_DEFAULT_COLOR.2,
-    );
+    let default_color = OBJ_DEFAULT_COLOR;
 
     for line in text.lines() {
         let trimmed = line.trim();
