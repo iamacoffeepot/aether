@@ -32,7 +32,7 @@ async fn list_engines_show_alive_omits_recently_died() {
         .list_engines(Parameters(ListEnginesArgs { show: Some("alive".to_owned()) }))
         .await
         .expect("list_engines ok");
-    assert_eq!(out, "{\"engines\":[]}", "show=alive keeps only engines and omits the recently_died key",);
+    assert_eq!(out, "{\"engines\":[]}", "show=alive keeps only engines and omits the recently_died key");
 }
 
 /// `show: "dead"` renders only `recently_died`; the live `engines` list
@@ -44,7 +44,7 @@ async fn list_engines_show_dead_omits_engines() {
     let mcp = connect_mcp(port);
     let out =
         mcp.list_engines(Parameters(ListEnginesArgs { show: Some("dead".to_owned()) })).await.expect("list_engines ok");
-    assert_eq!(out, "{\"recently_died\":[]}", "show=dead keeps only recently_died and omits the engines key",);
+    assert_eq!(out, "{\"recently_died\":[]}", "show=dead keeps only recently_died and omits the engines key");
 }
 
 /// An unrecognized `show` value is a tool error naming the three
