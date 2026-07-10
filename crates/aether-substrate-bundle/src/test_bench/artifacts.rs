@@ -148,31 +148,17 @@ impl ArtifactGuard {
     /// panic. Never panics itself: a write failure is reported to
     /// stderr, naming either the written directory or the error.
     // Test-diagnostic surface, not a host code path — `actor_logs` /
-    // `tracing` has no channel back to a `cargo test` runner, and
-    // eprintln! is exactly how sibling test-only helpers in this crate
-    // (e.g. `test_helpers::require_runtime`) already surface skip/fail
-    // context.
-    #[allow(clippy::print_stderr)]
+    // `tracing` has no channel back to a `cargo test` runner. Reporting
+    // deliberately ignores stderr write errors because this method also
+    // runs during panic unwinding and must never trigger a second panic.
     pub fn persist(&mut self) {
         if self.persisted {
             return;
         }
         self.persisted = true;
-        match self.write() {
-            Ok(dir) => {
-                eprintln!(
-                    "test-bench artifact guard '{}': wrote failure artifacts to {}",
-                    self.id,
-                    dir.display(),
-                );
-            }
-            Err(error) => {
-                eprintln!(
-                    "test-bench artifact guard '{}': failed to write failure artifacts: {error}",
-                    self.id,
-                );
-            }
-        }
+        let result = self.write();
+        let mut stderr = io::stderr().lock();
+        report_persist(&mut stderr, &self.id, &result);
     }
 
     /// The actual write path: replaces only this guard's own
@@ -229,6 +215,28 @@ impl Drop for ArtifactGuard {
     fn drop(&mut self) {
         if !self.persisted && thread::panicking() {
             self.persist();
+        }
+    }
+}
+
+fn report_persist<W: io::Write + ?Sized>(
+    writer: &mut W,
+    id: &str,
+    result: &Result<PathBuf, ArtifactWriteError>,
+) {
+    match result {
+        Ok(dir) => {
+            let _ = writeln!(
+                writer,
+                "test-bench artifact guard '{id}': wrote failure artifacts to {}",
+                dir.display(),
+            );
+        }
+        Err(error) => {
+            let _ = writeln!(
+                writer,
+                "test-bench artifact guard '{id}': failed to write failure artifacts: {error}",
+            );
         }
     }
 }
@@ -313,6 +321,7 @@ fn sanitize_id(id: &str) -> String {
 mod tests {
     use std::collections::BTreeSet;
     use std::panic::{self, AssertUnwindSafe};
+    use std::path::Component;
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, process};
 
@@ -350,6 +359,18 @@ mod tests {
                 .expect("system clock after epoch")
                 .as_nanos(),
         ))
+    }
+
+    struct FailingWriter;
+
+    impl io::Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("simulated stderr failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("simulated stderr failure"))
+        }
     }
 
     #[test]
@@ -447,6 +468,27 @@ mod tests {
     }
 
     #[test]
+    fn expectation_is_written_to_measurements() {
+        let root = temp_root("expectation");
+        let (checks, results) = checks_and_results();
+        let mut guard =
+            ArtifactGuard::arm_with_root("expected", tiny_png(), checks, results, root.clone())
+                .with_expectation("the widget remains centered");
+        guard.persist();
+
+        let measurements: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.join("expected/measurements.json")).expect("read measurements.json"),
+        )
+        .expect("decode measurements.json");
+        assert_eq!(
+            measurements["expectation"].as_str(),
+            Some("the widget remains centered"),
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn mismatched_dimension_reference_is_dropped_silently() {
         let root = temp_root("reference-mismatch");
         let (checks, results) = checks_and_results();
@@ -516,10 +558,6 @@ mod tests {
             ArtifactGuard::arm_with_root("once", tiny_png(), checks, results, root.clone());
         guard.persist();
         let dir = root.join("once");
-        let first_written = fs::metadata(dir.join("actual.png"))
-            .expect("first persist wrote actual.png")
-            .modified()
-            .expect("mtime available");
         // Mutate the on-disk file so a second write would be observable,
         // then call persist again — it must be a no-op.
         fs::write(dir.join("actual.png"), b"mutated").expect("mutate actual.png");
@@ -529,40 +567,112 @@ mod tests {
             contents, b"mutated",
             "a second persist() call must be a no-op and not overwrite the mutated file",
         );
-        let _ = first_written;
 
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn unsafe_ids_cannot_escape_the_root() {
-        let root = temp_root("path-traversal");
-        for unsafe_id in ["../../etc/passwd", "..", "/etc/passwd", "a/b/../../c"] {
-            let (checks, results) = checks_and_results();
-            let mut guard =
-                ArtifactGuard::arm_with_root(unsafe_id, tiny_png(), checks, results, root.clone());
-            guard.persist();
-        }
-        // Every write must land strictly inside `root` — walk its
-        // direct children and confirm each resolved path is still
-        // rooted there.
-        let mut saw_any = false;
-        for entry in fs::read_dir(&root).expect("read root dir") {
-            let entry = entry.expect("dir entry");
-            saw_any = true;
-            let canonical = fs::canonicalize(entry.path()).expect("canonicalize child");
-            let canonical_root = fs::canonicalize(&root).expect("canonicalize root");
+    fn sanitize_id_collapses_hostile_paths_to_safe_leaf_names() {
+        for (unsafe_id, expected) in [
+            ("../../etc/passwd", "______etc_passwd"),
+            ("..", "unnamed"),
+            ("/etc/passwd", "_etc_passwd"),
+            ("a/b/../../c", "a_b_______c"),
+        ] {
+            let sanitized = sanitize_id(unsafe_id);
+            assert_eq!(sanitized, expected, "unexpected mapping for {unsafe_id:?}");
+            let mut components = Path::new(&sanitized).components();
             assert!(
-                canonical.starts_with(&canonical_root),
-                "artifact directory {canonical:?} escaped root {canonical_root:?}",
+                matches!(components.next(), Some(Component::Normal(_))),
+                "sanitized id {sanitized:?} must be one normal path component",
+            );
+            assert!(
+                components.next().is_none(),
+                "sanitized id {sanitized:?} must not contain a second path component",
             );
         }
+    }
+
+    #[test]
+    fn sanitized_id_persists_inside_the_injected_root() {
+        let root = temp_root("safe-path-smoke");
+        let safe_id = sanitize_id("../../etc/passwd");
+        let (checks, results) = checks_and_results();
+        let mut guard = ArtifactGuard::arm_with_root(
+            safe_id.clone(),
+            tiny_png(),
+            checks,
+            results,
+            root.clone(),
+        );
+        guard.persist();
         assert!(
-            saw_any,
-            "at least one unsafe id should still persist somewhere under root"
+            root.join(safe_id).join("actual.png").is_file(),
+            "the already-sanitized leaf should persist beneath the injected root",
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mismatched_checks_and_results_persist_the_shared_prefix_without_panicking() {
+        let (checks, results) = checks_and_results();
+        let check = checks[0].clone();
+        let result = results[0].clone();
+        for (label, checks, results) in [
+            (
+                "checks-longer",
+                vec![check.clone(), check.clone()],
+                vec![result.clone()],
+            ),
+            ("results-longer", vec![check], vec![result.clone(), result]),
+        ] {
+            let root = temp_root(label);
+            let root_for_guard = root.clone();
+            let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+                let mut guard = ArtifactGuard::arm_with_root(
+                    label,
+                    tiny_png(),
+                    checks,
+                    results,
+                    root_for_guard,
+                );
+                guard.persist();
+            }));
+            assert!(
+                outcome.is_ok(),
+                "a {label} mismatch must not panic: {outcome:?}",
+            );
+
+            let dir = root.join(label);
+            let measurements: serde_json::Value = serde_json::from_slice(
+                &fs::read(dir.join("measurements.json")).expect("read measurements.json"),
+            )
+            .expect("decode measurements.json");
+            assert_eq!(measurements["checks"].as_array().map(Vec::len), Some(1));
+            assert_eq!(measurements["results"].as_array().map(Vec::len), Some(1));
+            assert!(dir.join("mask_0.png").is_file());
+            assert!(!dir.join("mask_1.png").exists());
+
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn report_persist_ignores_writer_errors() {
+        let outcome = panic::catch_unwind(|| {
+            let mut writer = FailingWriter;
+            let success = Ok(PathBuf::from("artifacts"));
+            report_persist(&mut writer, "success", &success);
+            let failure = Err(ArtifactWriteError::Io(io::Error::other(
+                "simulated artifact failure",
+            )));
+            report_persist(&mut writer, "failure", &failure);
+        });
+        assert!(
+            outcome.is_ok(),
+            "a reporter write error must not panic: {outcome:?}",
+        );
     }
 
     #[test]

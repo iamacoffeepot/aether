@@ -993,6 +993,35 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_mask_not_all_black_ignores_background_and_tolerance() {
+        let mut img = solid(2, 1, [0, 0, 0, 255]);
+        img.rgba[4] = 1;
+        let check = FrameCheck {
+            reduction: FrameReduction::NotAllBlack,
+            tolerance: u8::MAX,
+            background: Some([1, 0, 0]),
+            region: None,
+        };
+        let mask = diagnostic_mask(&img, &check);
+        assert_eq!(
+            pixel_at(&mask, 2, 0, 0),
+            [0, 0, 0, 255],
+            "a black pixel must remain unlit regardless of the check background",
+        );
+        assert_eq!(
+            pixel_at(&mask, 2, 1, 0),
+            [255, 255, 255, 255],
+            "a non-zero RGB component must remain lit regardless of check tolerance",
+        );
+
+        let verdict = run_checks(img.rgba, img.width, img.height, &[check]);
+        assert!(matches!(
+            verdict.results.as_slice(),
+            [FrameCheckResult::NotAllBlack { passed: true, .. }],
+        ));
+    }
+
+    #[test]
     fn diagnostic_mask_clips_out_of_region_pixels_to_transparent() {
         let bg = [69, 79, 105];
         let rect = Rect {
