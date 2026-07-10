@@ -19,6 +19,13 @@ name: Review
 # bypasses the once-only guard (findings already posted are deduped by the
 # poster's fingerprints, so a re-run never double-annotates).
 #
+# Two skip paths guard against reviewing mass mechanical sweeps: an
+# owner-applied `review:skip` label waives the review (gate success only
+# when the timeline actor is the owner — agents never apply it), and a
+# changed-`.rs`-file cap (AETHER_REVIEW_MAX_FILES) skips the session and
+# FAILS the gate closed until the owner waives or dispatches a full review.
+# `workflow_dispatch` bypasses both — the deliberate "review it anyway".
+#
 # Same security posture as the dogfood runner: subscription OAuth token
 # (CLAUDE_CODE_OAUTH_TOKEN), same-repo head only, and a least-privilege
 # split — the code-executing `review` job is read-only on the repo, and
@@ -39,6 +46,12 @@ on:
 concurrency:
   group: review-${{ github.event.workflow_run.head_branch || github.event.inputs.pr }}
   cancel-in-progress: true
+
+# One-place knob for the review size cap: a PR changing more `.rs` files
+# than this skips the session (no fan-out spend) and the gate FAILS CLOSED
+# until the owner applies `review:skip` or dispatches a full review.
+env:
+  AETHER_REVIEW_MAX_FILES: "40"
 
 jobs:
   review:
@@ -81,6 +94,11 @@ jobs:
       # session is skipped (marker present) — not only on the proceed path.
       head_sha: ${{ steps.resolve.outputs.head_sha }}
       touches_rust: ${{ steps.resolve.outputs.touches_rust }}
+      # skip_reason (label | cap) marks a deliberately-skipped session; the
+      # gate turns it into an owner-verified success (label) or a fail-closed
+      # decision prompt (cap). rs_count rides along for the cap description.
+      skip_reason: ${{ steps.resolve.outputs.skip_reason }}
+      rs_count: ${{ steps.resolve.outputs.rs_count }}
       rollup_produced: ${{ steps.rollup.outputs.produced }}
     steps:
       - uses: runs-on/action@v2
@@ -125,6 +143,24 @@ jobs:
           echo "pr_number=$pr" >> "$GITHUB_OUTPUT"
           echo "head_sha=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha')" >> "$GITHUB_OUTPUT"
 
+          # Owner waiver: a `review:skip` label skips the review session
+          # outright. The gate decides whether it counts — it verifies the
+          # label was applied by the repo owner (timeline actor check) and
+          # posts success only then; any other applier keeps the gate red.
+          # A workflow_dispatch bypasses the label (like the marker guard
+          # below): dispatching is the deliberate "review it anyway" path.
+          # Capture then match with a here-string so grep -q can't SIGPIPE
+          # the paginated gh under pipefail.
+          if [ "$EVENT" != "workflow_dispatch" ]; then
+            pr_labels="$(gh api "repos/${REPO}/issues/${pr}/labels" --jq '.[].name')"
+            if grep -qx 'review:skip' <<<"$pr_labels"; then
+              echo "PR #$pr carries review:skip — review session skipped; gate verifies the applier."
+              echo "skip_reason=label" >> "$GITHUB_OUTPUT"
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
           # Rust-touch detection drives the gate verdict: classification
           # tracks changed `.rs` source only — the surface the five pillars
           # judge; a PR that changes any `.rs` file is held to the review
@@ -139,6 +175,24 @@ jobs:
           files="$(gh api "repos/${REPO}/pulls/${pr}/files" --paginate --jq '.[].filename')"
           if grep -qE '\.rs$' <<<"$files"; then
             echo "touches_rust=true" >> "$GITHUB_OUTPUT"
+
+            # Size cap: a mass mechanical sweep (fmt/lint-shaped, hundreds
+            # of files) would fan the five-pillar review out over every one
+            # of them — a self-DDoS on runner time and tokens. Over the cap
+            # the session never spawns and the gate FAILS CLOSED with the
+            # decision instructions: the owner either waives with
+            # review:skip or forces the full review via workflow_dispatch
+            # (which bypasses this cap). Auto-green is deliberately not an
+            # option — an unreviewed mass change must not pass on size
+            # alone.
+            rs_count=$(grep -cE '\.rs$' <<<"$files")
+            if [ "$EVENT" != "workflow_dispatch" ] && [ "$rs_count" -gt "$AETHER_REVIEW_MAX_FILES" ]; then
+              echo "PR #$pr changes $rs_count .rs files (cap $AETHER_REVIEW_MAX_FILES) — review session skipped; gate fails closed."
+              echo "skip_reason=cap" >> "$GITHUB_OUTPUT"
+              echo "rs_count=$rs_count" >> "$GITHUB_OUTPUT"
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           else
             # No Rust source in the diff (including a manifest-only PR) →
             # skip the review session entirely, not just the verdict: the
@@ -389,10 +443,23 @@ jobs:
       # failure rather than leaving the required context missing.
       #
       # Verdict table (first match wins):
+      #   review:skip, applied by owner  -> success  (owner waiver; session never ran)
+      #   review:skip, any other actor   -> failure  (waiver is the owner's signoff alone)
+      #   over the .rs file cap          -> failure  (too large to auto-review; owner
+      #                                               waives with review:skip or forces a
+      #                                               full review via workflow_dispatch)
       #   review job did not succeed     -> failure  (infra/cancelled; re-run via dispatch)
       #   PR touches no Rust             -> success  (review not required)
       #   Rust + review:unresolved set   -> failure  (points at the rollup)
       #   Rust + label absent            -> success
+      #
+      # The review:skip waiver is verified against the issue timeline: the
+      # most recent review:skip `labeled` event's actor must be the repo
+      # owner. That blocks any non-owner identity; an agent operating the
+      # owner's own token is API-indistinguishable from the owner, so that
+      # layer is process — agents never apply review:skip (recorded in the
+      # /land skill's never-do list, same class as never stripping
+      # review:unresolved).
       #
       # The infra-failure check runs first so a review job that dies before
       # computing touches_rust (leaving it empty) fails closed rather than
@@ -410,17 +477,39 @@ jobs:
           PR: ${{ needs.review.outputs.pr_number }}
           HEAD_SHA: ${{ needs.review.outputs.head_sha }}
           TOUCHES_RUST: ${{ needs.review.outputs.touches_rust }}
+          SKIP_REASON: ${{ needs.review.outputs.skip_reason }}
+          RS_COUNT: ${{ needs.review.outputs.rs_count }}
           REVIEW_RESULT: ${{ needs.review.result }}
+          OWNER: iamacoffeepot
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          # Infra-failure check first: a review job that dies before computing
+          # Owner waiver first — it is the explicit human override, so it
+          # outranks every other row (including a stale review:unresolved
+          # from an earlier review of this PR). Verify the applier via the
+          # timeline: the most recent review:skip labeled event's actor.
+          if [ "$SKIP_REASON" = "label" ]; then
+            actor="$(gh api "repos/${REPO}/issues/${PR}/timeline" --paginate \
+              --jq '[.[] | select(.event=="labeled" and .label.name=="review:skip")] | last | .actor.login // empty')"
+            if [ "$actor" = "$OWNER" ]; then
+              state="success"
+              description="review skipped — review:skip applied by owner"
+            else
+              state="failure"
+              description="review:skip ignored: applied by '${actor:-unknown}', not the owner. Owner must re-apply, or workflow_dispatch a full review."
+            fi
+          elif [ "$SKIP_REASON" = "cap" ]; then
+            # Fail closed on size: an unreviewed mass change never goes
+            # green on size alone — the owner decides (waive or review).
+            state="failure"
+            description="${RS_COUNT} .rs files exceed cap ${AETHER_REVIEW_MAX_FILES} — owner: apply review:skip to waive, or workflow_dispatch a full review."
+          # Infra-failure check next: a review job that dies before computing
           # touches_rust leaves it empty, which must fail closed rather than
           # fall through to the non-Rust success branch below. Keyed on
           # != "success" (not == "failure") so a cancelled run fails closed
           # too — the review can't be bypassed by an infra flake; re-run to
           # clear.
-          if [ "$REVIEW_RESULT" != "success" ]; then
+          elif [ "$REVIEW_RESULT" != "success" ]; then
             state="failure"
             description="review run failed (infra). Re-run via workflow_dispatch."
           elif [ "$TOUCHES_RUST" != "true" ]; then
