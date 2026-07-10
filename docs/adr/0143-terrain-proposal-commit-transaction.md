@@ -1,4 +1,4 @@
-# ADR-0141: Terrain proposal/commit transaction
+# ADR-0143: Terrain proposal/commit transaction
 
 - **Status:** Proposed
 - **Date:** 2026-07-09
