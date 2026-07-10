@@ -1138,12 +1138,9 @@ fn capture_frame_similarity_resolves_reference_from_configured_assets_root() {
     let reference = bench
         .execute(vec![("reference", BenchOp::capture())])
         .expect("capture reference frame");
-    let reference_png = reference
-        .captured("reference")
-        .expect("reference step ran")
-        .to_vec();
+    let reference_png = reference.captured("reference").expect("reference step ran");
     let reference_path = "similarity-reference.png";
-    fs::write(sandbox.join(reference_path), &reference_png)
+    fs::write(sandbox.join(reference_path), reference_png)
         .expect("write reference png under the sandbox assets root");
 
     let result = bench
