@@ -8,7 +8,9 @@ use aether_kinds::{
 use rmcp::ErrorData as McpError;
 use tokio::time;
 
-use crate::args::{DeadEngineInfo, EngineInfo, ListEnginesResponse, SpawnSubstrateArgs, TerminateSubstrateArgs};
+use crate::args::{
+    DeadEngineInfo, EngineInfo, ListEnginesArgs, ListEnginesResponse, SpawnSubstrateArgs, TerminateSubstrateArgs,
+};
 
 use super::components::components_all_loaded;
 use super::envelope::{engine_envelope, local_envelope};
@@ -16,33 +18,50 @@ use super::ids::parse_engine_id;
 use super::render::{death_reason_parts, internal, internal_msg, json};
 use super::{ENGINE_CAP, Mcp};
 
-pub(super) async fn list_engines(mcp: &Mcp) -> Result<String, McpError> {
+pub(super) async fn list_engines(mcp: &Mcp, args: ListEnginesArgs) -> Result<String, McpError> {
+    // Decide which lists to render before the wire round-trip so a bad
+    // `show` value fails at the tool boundary. The wire call still
+    // fetches both — the fleet is small and the filter is a projection
+    // concern (issue 2985) — but the unasked list is dropped from the
+    // reply as `None` rather than serialized empty.
+    let (want_alive, want_dead) = match args.show.as_deref().unwrap_or("all") {
+        "all" => (true, true),
+        "alive" => (true, false),
+        "dead" => (false, true),
+        other => {
+            return Err(McpError::invalid_params(format!("unknown show {other:?}; expected alive|dead|all"), None));
+        }
+    };
     let reply = mcp.session.call_one(local_envelope(ENGINE_CAP, &ListEngines {})).await.map_err(internal)?;
     let result = ListEnginesResult::decode_from_bytes(&reply.payload)
         .ok_or_else(|| internal_msg("undecodable ListEnginesResult"))?;
-    let engines: Vec<EngineInfo> = result
-        .engines
-        .into_iter()
-        .map(|e| EngineInfo {
-            engine_id: e.engine_id,
-            rpc_port: e.rpc_port,
-            last_heartbeat_age_millis: e.last_heartbeat_age_millis,
-        })
-        .collect();
-    let recently_died: Vec<DeadEngineInfo> = result
-        .recently_died
-        .into_iter()
-        .map(|d| {
-            let (reason, detail) = death_reason_parts(d.reason);
-            DeadEngineInfo {
-                engine_id: d.engine_id,
-                rpc_port: d.rpc_port,
-                reason,
-                detail,
-                died_age_millis: d.died_age_millis,
-            }
-        })
-        .collect();
+    let engines: Option<Vec<EngineInfo>> = want_alive.then(|| {
+        result
+            .engines
+            .into_iter()
+            .map(|e| EngineInfo {
+                engine_id: e.engine_id,
+                rpc_port: e.rpc_port,
+                last_heartbeat_age_millis: e.last_heartbeat_age_millis,
+            })
+            .collect()
+    });
+    let recently_died: Option<Vec<DeadEngineInfo>> = want_dead.then(|| {
+        result
+            .recently_died
+            .into_iter()
+            .map(|d| {
+                let (reason, detail) = death_reason_parts(d.reason);
+                DeadEngineInfo {
+                    engine_id: d.engine_id,
+                    rpc_port: d.rpc_port,
+                    reason,
+                    detail,
+                    died_age_millis: d.died_age_millis,
+                }
+            })
+            .collect()
+    });
     json(&ListEnginesResponse { engines, recently_died })
 }
 

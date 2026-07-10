@@ -3,18 +3,65 @@ use super::super::test_support::*;
 #[allow(clippy::wildcard_imports)]
 use super::super::*;
 
-/// `list_engines` over the RPC round-trip yields an object with empty
+/// `list_engines` with no `show` argument yields an object with empty
 /// `engines` / `recently_died` arrays on a fresh hub — proves the
 /// whole `RpcSession` demux + the `engine = None` Call path against
-/// the real `aether.engine` cap, and the issue-1906 output shape.
+/// the real `aether.engine` cap, the issue-1906 output shape, and that
+/// the issue-2985 `show` default (`"all"`) preserves the pre-filter
+/// shape byte-for-byte so existing callers see no change.
 #[tokio::test]
 async fn list_engines_on_empty_hub_is_empty() {
     let (_chassis, port) = boot_hub();
     let mcp = connect_mcp(port);
-    let out = mcp.list_engines().await.expect("list_engines ok");
+    let out = mcp.list_engines(Parameters(ListEnginesArgs { show: None })).await.expect("list_engines ok");
     assert_eq!(
         out, "{\"engines\":[],\"recently_died\":[]}",
         "fresh hub supervises no engines and has no recent deaths",
+    );
+}
+
+/// `show: "alive"` renders only `engines`; `recently_died` is dropped
+/// from the JSON entirely (issue 2985). Tripwire: catches an inverted
+/// filter (returning the dead list) or a default that keeps both lists
+/// present-but-empty instead of omitting the unasked one.
+#[tokio::test]
+async fn list_engines_show_alive_omits_recently_died() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let out = mcp
+        .list_engines(Parameters(ListEnginesArgs { show: Some("alive".to_owned()) }))
+        .await
+        .expect("list_engines ok");
+    assert_eq!(out, "{\"engines\":[]}", "show=alive keeps only engines and omits the recently_died key",);
+}
+
+/// `show: "dead"` renders only `recently_died`; the live `engines` list
+/// is dropped from the JSON entirely (issue 2985). Tripwire mirror of
+/// the alive case — catches the same inversion from the other side.
+#[tokio::test]
+async fn list_engines_show_dead_omits_engines() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let out =
+        mcp.list_engines(Parameters(ListEnginesArgs { show: Some("dead".to_owned()) })).await.expect("list_engines ok");
+    assert_eq!(out, "{\"recently_died\":[]}", "show=dead keeps only recently_died and omits the engines key",);
+}
+
+/// An unrecognized `show` value is a tool error naming the three
+/// accepted values, rejected at the tool boundary before the wire
+/// round-trip (issue 2985).
+#[tokio::test]
+async fn list_engines_bad_show_is_tool_error() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let err = mcp
+        .list_engines(Parameters(ListEnginesArgs { show: Some("bogus".to_owned()) }))
+        .await
+        .expect_err("an unknown show value should be a tool error");
+    let message = err.to_string();
+    assert!(
+        message.contains("alive") && message.contains("dead") && message.contains("all"),
+        "the error should name the three accepted show values, got: {message}",
     );
 }
 

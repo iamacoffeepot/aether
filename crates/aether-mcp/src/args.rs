@@ -161,6 +161,23 @@ pub struct ListBinariesArgs {
     pub target: Option<String>,
 }
 
+/// `list_engines` arguments (issue 2985). One optional filter deciding
+/// which of the two reported lists come back, so a routine liveness
+/// check doesn't pay the context cost of the whole recently-died fleet
+/// history — and a death-forensics call doesn't enumerate the live
+/// fleet.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListEnginesArgs {
+    /// Which lists to return: `"alive"` renders only the live `engines`,
+    /// `"dead"` renders only the `recently_died` sidecar, and `"all"`
+    /// (the default when omitted) renders both exactly as before. The
+    /// omitted list is absent from the reply JSON, not present-but-empty,
+    /// so the tokens are actually saved. Any other value is a tool error
+    /// naming the three accepted values.
+    #[serde(default)]
+    pub show: Option<String>,
+}
+
 /// `send_mail` arguments — a best-effort batch.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendMailArgs {
@@ -242,13 +259,23 @@ pub struct DeadEngineInfo {
 /// `list_engines` output: the live fleet plus the recently-died sidecar
 /// (issue 1906). An object rather than a bare array so an observer can
 /// tell a clean shutdown from a failure without grepping host logs.
+/// Each list is optional (issue 2985): the `show` filter renders only
+/// the requested list(s), and the unasked one is `None` — dropped from
+/// the JSON via `skip_serializing_if` rather than serialized empty, so
+/// its absence states the filter and the tokens are saved. The default
+/// (`show` omitted / `"all"`) leaves both `Some`, so an unfiltered call
+/// serializes exactly as before.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ListEnginesResponse {
-    /// Every engine the hub currently supervises.
-    pub engines: Vec<EngineInfo>,
+    /// Every engine the hub currently supervises. `None` (absent from
+    /// the JSON) when `show` was `"dead"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engines: Option<Vec<EngineInfo>>,
     /// The last few engines that left the fleet, each with why it left
-    /// and how long ago.
-    pub recently_died: Vec<DeadEngineInfo>,
+    /// and how long ago. `None` (absent from the JSON) when `show` was
+    /// `"alive"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recently_died: Option<Vec<DeadEngineInfo>>,
 }
 
 /// Per-item outcome from a `send_mail` batch.
