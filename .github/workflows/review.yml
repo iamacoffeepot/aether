@@ -47,7 +47,10 @@ jobs:
     # agents at ~min(16, cores - 2), so the 4-core GitHub-hosted box
     # squeezes the per-file finder fan-out to ~2-wide while every agent
     # just waits on inference. 8 cores buys ~6-wide fan-out; the job's
-    # own compute stays trivial (no cargo build, no s3-cache needed).
+    # own compute stays trivial (no cargo build, no s3-cache needed — the
+    # correctness refuter's write-and-run cargo-test path is gated off here
+    # via the noBuild: true workflow arg, so this premise is enforced, not
+    # just asserted; see the "Run the five-pillar review" step).
     runs-on: runs-on=${{ github.run_id }}/runner=8cpu-linux-x64
     # Bring-up leash: a wedged in-flight workflow (the session now waits
     # for it indefinitely, iamacoffeepot/aether#2979) must not idle an
@@ -249,7 +252,10 @@ jobs:
           Invoke the repo's /review skill in INTEGRATED mode against origin/main...HEAD:
           resolve the changed .rs files and their per-file diffs from git, and read the issue
           text this PR closes (use gh to find the PR's closing reference for issue #${PR_NUMBER}
-          if needed). Let the skill run the review.js workflow in a single pass.
+          if needed). Pass noBuild: true in the /review invocation's workflow args — this
+          runner has no Rust toolchain, so the high-severity correctness refuter must ground
+          read-only rather than write and run a scratch cargo test. Let the skill run the
+          review.js workflow in a single pass.
           THE WAIT CONTRACT (load-bearing — two prior runs died on this): the Workflow tool
           runs in the BACKGROUND. In headless mode your final reply exits the process and
           KILLS the in-flight workflow, so you may not produce a final reply until
@@ -263,7 +269,8 @@ jobs:
           When the workflow returns { rollup, files }, write the returned ROLLUP object as JSON
           verbatim to exactly ${GITHUB_WORKSPACE}/review-rollup.json — that absolute path, not
           a path relative to your working directory (the rollup, not the whole return).
-          Do not edit any source. Print exactly REVIEW-DONE when the file is written." \
+          Do not edit any source (the noBuild flag above keeps the correctness refuter
+          subagent non-editing too). Print exactly REVIEW-DONE when the file is written." \
             --dangerously-skip-permissions \
             --model claude-sonnet-5 \
             --max-turns 80 \
