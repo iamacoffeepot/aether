@@ -159,9 +159,13 @@ jobs:
       - name: "Stage 2a — auth probe (no MCP)"
         if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
         run: |
+          # --max-turns 3, not 1: the model occasionally spends a turn
+          # before emitting the reply text, and a 1-turn cap turns that
+          # into a spurious "Reached max turns" failure that reads like
+          # an auth problem.
           claude -p "Reply with exactly: AUTH-OK" \
             --model claude-sonnet-5 \
-            --max-turns 1 | tee /tmp/auth.log
+            --max-turns 3 | tee /tmp/auth.log
           grep -q "AUTH-OK" /tmp/auth.log
 
       # Stage 2 — drive. Headless Claude Code, subscription OAuth auth,
