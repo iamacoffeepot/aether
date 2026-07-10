@@ -331,6 +331,31 @@ jobs:
             aether-evidence.s3.amazonaws.com aether-evidence.s3.${RUNS_ON_AWS_REGION}.amazonaws.com \
             ${RUNS_ON_S3_BUCKET_CACHE}.s3.amazonaws.com ${RUNS_ON_S3_BUCKET_CACHE}.s3.${RUNS_ON_AWS_REGION}.amazonaws.com"
 
+          # The runner agent's OWN control plane. Without these, the DROP policy
+          # silences the agent's re-dials: connections opened before the flip
+          # keep working (the ESTABLISHED rule) — so live logs still stream —
+          # but the first channel that must reconnect (session long-poll /
+          # short-lived credential renewal, ~10 min TTL) hits the drop, GitHub
+          # declares the runner lost, and cancels the job after its ~10-minute
+          # grace ("The operation was canceled." mid-build).
+          domains="$domains \
+            pipelines.actions.githubusercontent.com \
+            broker.actions.githubusercontent.com \
+            results-receiver.actions.githubusercontent.com \
+            vstoken.actions.githubusercontent.com \
+            launch.actions.githubusercontent.com \
+            token.actions.githubusercontent.com"
+
+          # Artifact + log payloads (upload-artifact v4, step logs) upload to
+          # GitHub's OWN Azure storage accounts — a finite, GitHub-owned set
+          # (productionresultssa0..N; unresolvable names drop out harmlessly in
+          # the getent loop). Enumerating them keeps uploads pinned to GitHub's
+          # accounts; a blanket *.blob.core.windows.net allow would reopen
+          # arbitrary-account exfiltration, defeating the firewall's whole point.
+          for i in $(seq 0 29); do
+            domains="$domains productionresultssa${i}.blob.core.windows.net"
+          done
+
           # Flush OUTPUT but leave the policy ACCEPT during setup so the getent
           # DNS lookups below still resolve; the final rule flips it to DROP.
           sudo iptables -F OUTPUT
