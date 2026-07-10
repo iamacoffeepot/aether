@@ -53,8 +53,9 @@ use aether_kinds::{
     MouseButtonRelease, MouseMove, MouseWheel, NamedMail, TextInput, Tick,
 };
 use aether_kit::{
-    ButtonConfig, PanelConfig, ScrollConfig, ScrollExtent, ScrollOffset, SetWidgetState, SliderConfig, Theme,
-    TextAreaConfig, ThemeState, WidgetChildSpec, WidgetConfig, WidgetControlState, WidgetDrawItem, WidgetKind,
+    ButtonConfig, LabelConfig, PanelConfig, ScrollConfig, ScrollExtent, ScrollOffset, SetTheme, SetWidgetState,
+    SliderConfig, TextAreaConfig, Theme, ThemeState, WidgetChildSpec, WidgetConfig, WidgetControlState, WidgetDrawItem,
+    WidgetKind,
     WidgetValidation,
 };
 use aether_math::Rgba;
@@ -118,11 +119,11 @@ const DARKEN_TOLERANCE: u8 = 6;
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
 fn panel_address() -> String {
-    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE,)
+    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE)
 }
 
 fn child_address(subname: &str) -> String {
-    format!("{}/{}:{}", panel_address(), aether_capabilities::WasmTrampoline::NAMESPACE, subname,)
+    format!("{}/{}:{}", panel_address(), aether_capabilities::WasmTrampoline::NAMESPACE, subname)
 }
 
 /// The bundle's `assets/` dir — where `RobotoMono.ttf` ships, resolved relative
@@ -210,7 +211,7 @@ fn load_panel_with_children(bench: &mut TestBench, wasm: &[u8], font_id: u32, ch
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { name, .. } => {
-            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}",)
+            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}");
         }
         LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
     }
@@ -691,7 +692,7 @@ fn panel_renders_every_text_row_inside_its_frame() {
         .collect();
 
     let verdict = capture(&mut bench, checks);
-    assert_eq!(verdict.results.len(), rows.len() + 2, "one result per requested check",);
+    assert_eq!(verdict.results.len(), rows.len() + 2, "one result per requested check");
 
     for (row, result) in rows.iter().zip(&verdict.results) {
         assert_row_contained(row, result);
@@ -755,7 +756,7 @@ fn slider_drag_renders_fill_at_track_fraction() {
     let fill_right = bbox.max_x as f32 + 1.0;
     let fraction = (fill_right - PANEL_X) / PANEL_WIDTH;
     let expected = 191.0 / 255.0;
-    eprintln!("slider fill right edge x={fill_right:.0} → fraction {fraction:.3} (expected {expected:.3})",);
+    eprintln!("slider fill right edge x={fill_right:.0} → fraction {fraction:.3} (expected {expected:.3})");
     assert!(
         (fraction - expected).abs() <= 0.05,
         "the rendered slider fill should reach {expected:.3} of the track; it reached \
@@ -809,8 +810,8 @@ fn radio_click_moves_marker_into_clicked_row() {
     let verdict = capture(&mut bench, checks);
 
     let fractions: Vec<f32> = verdict.results.iter().map(coverage).collect();
-    eprintln!("radio marker coverage per row: [0]={:.3} [1]={:.3} [2]={:.3}", fractions[0], fractions[1], fractions[2],);
-    assert!(fractions[2] > 0.5, "the accent marker should fill the clicked row 2; coverage was {:.3}", fractions[2],);
+    eprintln!("radio marker coverage per row: [0]={:.3} [1]={:.3} [2]={:.3}", fractions[0], fractions[1], fractions[2]);
+    assert!(fractions[2] > 0.5, "the accent marker should fill the clicked row 2; coverage was {:.3}", fractions[2]);
     for i in [0usize, 1] {
         assert!(
             fractions[i] < 0.1,
@@ -940,7 +941,7 @@ fn button_press_renders_pressed_state_and_reports_click() {
     bench.execute(vec![("press", BenchOp::send_mail(&panel, &press(button_x, button_y)))]).expect("button press");
 
     let pressed_cov = coverage(&capture(&mut bench, fill_check()).results[0]);
-    eprintln!("button fill coverage-off-accent: un-pressed {baseline_cov:.3} → pressed {pressed_cov:.3}",);
+    eprintln!("button fill coverage-off-accent: un-pressed {baseline_cov:.3} → pressed {pressed_cov:.3}");
     assert!(
         baseline_cov < 0.1,
         "the un-pressed button fill should match its accent color (coverage off-accent ≈ 0); \
@@ -1567,6 +1568,76 @@ fn resident_label_glyphs_forward_the_exact_parent_row_clip() {
 }
 
 #[test]
+fn nested_scroll_relays_live_font_theme_to_real_label_glyphs() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let label = WidgetChildSpec {
+        subname: "theme_label".to_owned(),
+        kind: WidgetKind::Label,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: LabelConfig {
+            text: "Nested scroll label".to_owned(),
+            theme: Theme { font_id: u32::MAX, ..Theme::DEFAULT },
+            state: WidgetControlState::default(),
+        }
+        .encode_into_bytes(),
+    };
+    let inner = scroll_child(
+        "theme_inner",
+        ScrollExtent { width_pixels: 100.0, height_pixels: ROW_HEIGHT },
+        ScrollExtent { width_pixels: 120.0, height_pixels: ROW_HEIGHT },
+        0.0,
+        0.0,
+        label,
+    );
+    let outer = scroll_child(
+        "theme_outer",
+        ScrollExtent { width_pixels: 80.0, height_pixels: ROW_HEIGHT },
+        ScrollExtent { width_pixels: 100.0, height_pixels: ROW_HEIGHT },
+        0.0,
+        0.0,
+        inner,
+    );
+
+    let mut bench = build_bench();
+    let font_id = load_font(&mut bench);
+    load_panel_with_children(&mut bench, &wasm, font_id, vec![outer]);
+    warm_panel(&mut bench);
+    let panel = panel_address();
+    bench
+        .execute(vec![
+            ("relay_theme", BenchOp::send_mail(&panel, &SetTheme { theme: Theme { font_id, ..Theme::DEFAULT } })),
+            ("prime_relayed_glyph", BenchOp::send_mail(&panel, &Tick)),
+            ("settle_relayed_glyph", BenchOp::advance(2)),
+            ("capture_relayed_glyph", BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
+        ])
+        .expect("relay theme through both scroll actors and capture the nested label");
+
+    let expected = ClipRect { x: PANEL_X, y: PANEL_Y, width: 80.0, height: ROW_HEIGHT };
+    let snapshot = bench.committed_overlay_snapshot();
+    let glyph_batches: Vec<_> = snapshot
+        .iter()
+        .filter(|batch| batch.texture_id != WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(&expected))
+        .collect();
+    assert!(
+        !glyph_batches.is_empty(),
+        "the live font theme must traverse outer → inner → Label; snapshot: {snapshot:?}",
+    );
+    for quad in glyph_batches.iter().flat_map(|batch| &batch.quads) {
+        assert!(
+            quad.x >= expected.x
+                && quad.y >= expected.y
+                && quad.x + quad.width <= expected.x + expected.width
+                && quad.y + quad.height <= expected.y + expected.height,
+            "nested label glyph {quad:?} must stay inside the effective outer viewport {expected:?}",
+        );
+    }
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // one end-to-end nested ownership + clipping matrix
 fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
@@ -1646,7 +1717,7 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
     let inner_id = mailbox_id_from_path(&inner_address).0;
     let first_log = panel_log_messages(&mut bench);
     let outcomes: Vec<_> = first_log.iter().filter(|message| message.contains("widget scroll outcome")).collect();
-    assert_eq!(outcomes.len(), 5, "inner-only, split, and pinned requests emit 1 + 2 + 2 typed outcomes: {outcomes:?}",);
+    assert_eq!(outcomes.len(), 5, "inner-only, split, and pinned requests emit 1 + 2 + 2 typed outcomes: {outcomes:?}");
     assert_eq!(log_u64(outcomes[0], "container"), Some(inner_id));
     assert_eq!(log_f32(outcomes[0], "offset_y_pixels"), Some(20.0));
     assert_eq!(log_f32(outcomes[0], "consumed_y_pixels"), Some(20.0));

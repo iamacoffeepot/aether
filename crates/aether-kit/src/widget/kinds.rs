@@ -389,13 +389,13 @@ pub enum WidgetKind {
     /// A static image — `config` decodes as [`ImageConfig`]. Not focusable.
     /// Appended to preserve the established wire discriminants above.
     Image,
-    /// A multiline text area — `config` decodes as [`TextAreaConfig`]. Kept at
-    /// the end so adding it does not renumber the landed image discriminant or
+    /// A multiline text area — `config` decodes as [`TextAreaConfig`]. Appended
+    /// after Image so adding it does not renumber that landed discriminant or
     /// any earlier wire discriminant.
     TextArea,
     /// A stateful clipped viewport — `config` decodes as [`ScrollConfig`].
-    /// The actor owns its offset and recursively routes wheel residuals. Kept
-    /// at the end so adding it does not renumber any landed discriminant.
+    /// The actor owns its offset and recursively routes wheel residuals.
+    /// Appended to preserve every established wire discriminant above.
     Scroll,
 }
 
@@ -829,16 +829,7 @@ impl Default for PanelConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_data::wire::to_vec;
-    use alloc::vec;
-
-    #[test]
-    fn text_area_appends_after_the_landed_image_wire_discriminant() {
-        assert_eq!(to_vec(&WidgetKind::BehaviorHost).expect("encode BehaviorHost"), vec![6, 0, 0, 0]);
-        assert_eq!(to_vec(&WidgetKind::Image).expect("encode Image"), vec![7, 0, 0, 0]);
-        assert_eq!(to_vec(&WidgetKind::TextArea).expect("encode TextArea"), vec![8, 0, 0, 0]);
-        assert_eq!(to_vec(&WidgetKind::Scroll).expect("encode Scroll"), vec![9, 0, 0, 0]);
-    }
+    use aether_data::wire;
 
     #[test]
     fn scroll_wire_vocabulary_uses_named_semantic_records() {
@@ -860,6 +851,21 @@ mod tests {
         assert_eq!(vertical_delta, 9.0);
         assert_eq!(horizontal_remainder, 0.0);
         assert_eq!(vertical_remainder, 3.0);
+    }
+
+    #[test]
+    fn widget_kind_preserves_established_wire_discriminants() {
+        // Tripwire: WidgetKind is nested in public configs and its encoded
+        // variant index is the wire contract. Add variants at the end; never
+        // re-bless this golden when inserting a new kind.
+        let behavior_host = wire::to_vec(&WidgetKind::BehaviorHost).expect("encode BehaviorHost");
+        let image = wire::to_vec(&WidgetKind::Image).expect("encode Image");
+        let text_area = wire::to_vec(&WidgetKind::TextArea).expect("encode TextArea");
+        let scroll = wire::to_vec(&WidgetKind::Scroll).expect("encode Scroll");
+        assert_eq!(behavior_host.as_slice(), 6_u32.to_le_bytes());
+        assert_eq!(image.as_slice(), 7_u32.to_le_bytes());
+        assert_eq!(text_area.as_slice(), 8_u32.to_le_bytes());
+        assert_eq!(scroll.as_slice(), 9_u32.to_le_bytes());
     }
 
     #[test]

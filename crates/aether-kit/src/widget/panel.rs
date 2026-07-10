@@ -92,10 +92,10 @@ impl ChildLayout {
         }
     }
 
-    fn accepts_scroll_viewport(self, viewport: ScrollExtent) -> bool {
+    fn scroll_viewport_mismatch(self, viewport: ScrollExtent) -> Option<ScrollExtent> {
         match self {
-            Self::Panel { .. } => true,
-            Self::Content { assigned_extent } => viewport == assigned_extent,
+            Self::Panel { .. } => None,
+            Self::Content { assigned_extent } => (viewport != assigned_extent).then_some(assigned_extent),
         }
     }
 }
@@ -191,6 +191,7 @@ impl WidgetPanel {
     /// the focus table (as its hit rect), send it its `WidgetFrame`, and
     /// remember it for value-up attribution.
     fn place(&mut self, ctx: &mut WasmCtx<'_, Manual>, child: &SpawnedChild, frame: WidgetFrame, name: String) {
+        let focus_rect = FocusRect { x: frame.x, y: frame.y, width: frame.width, height: frame.height };
         self.composite.register_slot(
             child.id,
             Vec2::new(frame.x, frame.y),
@@ -200,14 +201,14 @@ impl WidgetPanel {
         );
         self.focus.register(
             child.id,
-            FocusRect { x: frame.x, y: frame.y, width: frame.width, height: frame.height },
+            focus_rect,
             FocusEligibility { pointer: child.pointer_eligible, keyboard: child.focusable },
             &child.state,
         );
         if child.scroll_viewport.is_some() {
             self.scroll_focus.register(
                 child.id,
-                FocusRect { x: frame.x, y: frame.y, width: frame.width, height: frame.height },
+                focus_rect,
                 FocusEligibility { pointer: true, keyboard: false },
                 &WidgetControlState::default(),
             );
@@ -343,70 +344,72 @@ pub fn spawn_widget_child(
             })
         }),
         WidgetKind::BehaviorHost => spawn_behavior_host(ctx, spec, row),
-        WidgetKind::Composite | WidgetKind::Scroll => spawn_container_child(ctx, spec, layout, row),
+        WidgetKind::Composite => spawn_composite_child(ctx, spec, layout, row),
+        WidgetKind::Scroll => spawn_scroll_child(ctx, spec, layout),
     }
 }
 
-fn spawn_container_child(
+fn spawn_composite_child(
     ctx: &mut WasmCtx<'_, Manual>,
     spec: &WidgetChildSpec,
     layout: ChildLayout,
     row_height_pixels: f32,
 ) -> Option<SpawnedChild> {
-    match spec.kind {
-        WidgetKind::Composite => decode_child::<WidgetConfig>(spec).and_then(|config| {
-            let intrinsic = config.intrinsic;
-            spawn::<Widget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
-                id,
-                width_pixels: intrinsic
-                    .and_then(|extent| (extent[0].is_finite() && extent[0] >= 0.0).then_some(extent[0])),
-                height_pixels: intrinsic
-                    .and_then(|extent| (extent[1].is_finite() && extent[1] >= 0.0).then_some(extent[1]))
-                    .unwrap_or(row_height_pixels),
-                pointer_eligible: false,
-                focusable: false,
-                state: WidgetControlState::default(),
-                type_namespace: <Widget as Addressable>::NAMESPACE,
-                scroll_viewport: None,
-            })
-        }),
-        WidgetKind::Scroll => decode_child::<ScrollConfig>(spec).and_then(|config| {
-            if !layout.accepts_scroll_viewport(config.viewport_extent) {
-                let ChildLayout::Content { assigned_extent } = layout else {
-                    unreachable!("panel layout accepts every finite scroll viewport")
-                };
-                tracing::warn!(
-                    target: "aether_kit",
-                    subname = %spec.subname,
-                    assigned_width_pixels = assigned_extent.width_pixels,
-                    assigned_height_pixels = assigned_extent.height_pixels,
-                    viewport_width_pixels = config.viewport_extent.width_pixels,
-                    viewport_height_pixels = config.viewport_extent.height_pixels,
-                    "nested scroll viewport does not match its assigned content extent; slot skipped",
-                );
-                return None;
-            }
-            let viewport = config.viewport_extent;
-            spawn::<ScrollWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
-                id,
-                width_pixels: Some(viewport.width_pixels),
-                height_pixels: viewport.height_pixels,
-                pointer_eligible: false,
-                focusable: false,
-                state: WidgetControlState::default(),
-                type_namespace: <ScrollWidget as Addressable>::NAMESPACE,
-                scroll_viewport: Some(viewport),
-            })
-        }),
-        WidgetKind::Label
-        | WidgetKind::Image
-        | WidgetKind::Slider
-        | WidgetKind::Radio
-        | WidgetKind::TextField
-        | WidgetKind::TextArea
-        | WidgetKind::Button
-        | WidgetKind::BehaviorHost => unreachable!("caller sends only container kinds"),
+    if matches!(layout, ChildLayout::Panel { .. }) {
+        tracing::warn!(
+            target: "aether_kit",
+            subname = %spec.subname,
+            "a bare Composite child is supported only as scroll content; panel slot skipped",
+        );
+        return None;
     }
+    decode_child::<WidgetConfig>(spec).and_then(|config| {
+        let intrinsic = config.intrinsic;
+        spawn::<Widget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            id,
+            width_pixels: intrinsic.and_then(|extent| (extent[0].is_finite() && extent[0] >= 0.0).then_some(extent[0])),
+            height_pixels: intrinsic
+                .and_then(|extent| (extent[1].is_finite() && extent[1] >= 0.0).then_some(extent[1]))
+                .unwrap_or(row_height_pixels),
+            pointer_eligible: false,
+            focusable: false,
+            state: WidgetControlState::default(),
+            type_namespace: <Widget as Addressable>::NAMESPACE,
+            scroll_viewport: None,
+        })
+    })
+}
+
+fn spawn_scroll_child(
+    ctx: &mut WasmCtx<'_, Manual>,
+    spec: &WidgetChildSpec,
+    layout: ChildLayout,
+) -> Option<SpawnedChild> {
+    decode_child::<ScrollConfig>(spec).and_then(|config| {
+        if let Some(assigned_extent) = layout.scroll_viewport_mismatch(config.viewport_extent) {
+            tracing::warn!(
+                target: "aether_kit",
+                subname = %spec.subname,
+                assigned_width_pixels = assigned_extent.width_pixels,
+                assigned_height_pixels = assigned_extent.height_pixels,
+                viewport_width_pixels = config.viewport_extent.width_pixels,
+                viewport_height_pixels = config.viewport_extent.height_pixels,
+                "nested scroll viewport does not match its assigned content extent; slot skipped",
+            );
+            return None;
+        }
+        let viewport = config.viewport_extent;
+        spawn::<ScrollWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            id,
+            width_pixels: Some(viewport.width_pixels),
+            height_pixels: viewport.height_pixels,
+            pointer_eligible: false,
+            focusable: false,
+            state: WidgetControlState::default(),
+            type_namespace: <ScrollWidget as Addressable>::NAMESPACE,
+            scroll_viewport: Some(viewport),
+        })
+    })
 }
 
 /// Decode one child spec's opaque config bytes as the concrete config type
@@ -1022,11 +1025,15 @@ mod dispatch_tests {
     fn nested_scroll_requires_the_exact_named_assigned_extent() {
         let assigned_extent = ScrollExtent { width_pixels: 80.0, height_pixels: 50.0 };
         let content = ChildLayout::Content { assigned_extent };
-        assert!(content.accepts_scroll_viewport(assigned_extent));
-        assert!(!content.accepts_scroll_viewport(ScrollExtent { width_pixels: 80.0, height_pixels: 49.0 }));
-        assert!(
+        assert_eq!(content.scroll_viewport_mismatch(assigned_extent), None);
+        assert_eq!(
+            content.scroll_viewport_mismatch(ScrollExtent { width_pixels: 80.0, height_pixels: 49.0 }),
+            Some(assigned_extent),
+        );
+        assert_eq!(
             ChildLayout::Panel { row_height_pixels: 24.0 }
-                .accepts_scroll_viewport(ScrollExtent { width_pixels: 12.0, height_pixels: 8.0 })
+                .scroll_viewport_mismatch(ScrollExtent { width_pixels: 12.0, height_pixels: 8.0 }),
+            None,
         );
     }
 

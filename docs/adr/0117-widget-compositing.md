@@ -67,6 +67,10 @@ named fields; a non-zero `ScrollResidual` moves upward already converted.
 Ancestors apply that residual directly and relay any remainder, preserving
 partial overshoot and inner-before-outer event order.
 
+Container transparency also applies to live style: `SetTheme` follows the
+scroll actor tree to the retained content root, so a panel's resolved font id
+and later restyles reach stock widgets nested inside one or more viewports.
+
 ### Ordering escape hatch (deferred)
 
 Structural order cannot express a node that must draw outside its tree slot — a tooltip or modal floating above everything regardless of where it lives, or order between top-level roots. That needs an explicit ordering key or edge the compositor evaluates (lift a flagged subtree later in the order, or to a higher root). It is **named here but not built**: the common case is pure structural order, and the escape hatch earns its keep only when a real overlay needs it. It is forward-compatible — the absence of a key is what tree order means, so an opt-in key added later promotes only the nodes that request it and changes nothing else; the compositor collects-then-emits, so the later reorder is a localized change; and the postcard draw kinds can grow an optional field without breaking the wire. Order between independent top-level roots, when it lands, is the substrate's concern, sequenced where top-level surfaces are tracked — structural order governs everything inside a root.

@@ -175,6 +175,10 @@ again. Intermediate scroll actors relay descendant outcomes unchanged, so a
 panel log preserves inner-before-outer ownership. A remainder that reaches the
 panel is logged as a terminal residual and dropped.
 
+`SetTheme` follows the same actor tree to the retained content root. This keeps
+live restyles and the panel's resolved session font id intact through nested
+scroll containers.
+
 ## The reference panel
 
 `WidgetPanel` (export `aether.kit.widget.panel`) is the worked example — the

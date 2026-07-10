@@ -40,7 +40,7 @@ mod kinds;
 pub use kinds::*;
 pub mod composite;
 pub mod focus;
-pub(crate) mod panel;
+mod panel;
 mod scroll;
 pub mod set;
 mod state;

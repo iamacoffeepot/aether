@@ -19,6 +19,7 @@ use aether_math::Vec2;
 use crate::widget::composite::Composite;
 use crate::widget::focus::{Focus, FocusEligibility, FocusRect};
 use crate::widget::panel::{ChildLayout, spawn_widget_child};
+use crate::widget::theme::SetTheme;
 use crate::widget::{
     Collect, ScrollConfig, ScrollDelta, ScrollExtent, ScrollOffset, ScrollOutcome, ScrollResidual, WidgetChildSpec,
     WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame,
@@ -194,9 +195,10 @@ impl ScrollWidget {
     }
 
     fn content_frame(&self) -> WidgetFrame {
+        let local_origin = self.local_content_origin();
         WidgetFrame {
-            x: self.frame.x + self.content_origin.x - self.offset.x_pixels,
-            y: self.frame.y + self.content_origin.y - self.offset.y_pixels,
+            x: self.frame.x + local_origin.x,
+            y: self.frame.y + local_origin.y,
             width: self.content_extent.width_pixels,
             height: self.content_extent.height_pixels,
         }
@@ -318,6 +320,15 @@ impl WasmActor for ScrollWidget {
     fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Manual>, list: WidgetDrawList) {
         if accept_child_list(&mut self.composite, ctx, list) {
             self.finish(ctx);
+        }
+    }
+
+    /// Relay a live theme or font update to the retained content root. Nested
+    /// scroll actors apply the same rule, so style follows the actor tree.
+    #[handler::single]
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        if let Some(content) = &self.content {
+            ctx.send_to(content.id, &set);
         }
     }
 

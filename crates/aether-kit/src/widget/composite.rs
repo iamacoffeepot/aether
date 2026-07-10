@@ -291,7 +291,7 @@ mod tests {
 
         let clip = WidgetClipRect { x: 0.0, y: 0.0, width: 8.0, height: 6.0 };
         assert!(composite.update_slot_layout(child, Vec2::new(-3.0, -2.0), Some(clip)));
-        assert!(composite.take_membership_changes().is_none(), "layout motion is not a membership change",);
+        assert!(composite.take_membership_changes().is_none(), "layout motion is not a membership change");
         composite.begin_frame();
         assert!(composite.fill(child, list(vec![quad(4.0, 0.5)])));
         assert_eq!(

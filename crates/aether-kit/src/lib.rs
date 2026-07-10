@@ -89,7 +89,7 @@ pub use widget::theme::{SetTheme, Theme, ThemeState};
 pub use widget::{
     ButtonClicked, ButtonConfig, ChildrenChanged, Collect, FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig,
     ImageFit, LabelConfig, MembershipEntry, PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollDelta,
-    ScrollExtent, ScrollOffset, ScrollOutcome, ScrollResidual, ScrollWidget, SetWidgetState, SliderChanged,
+    ScrollExtent, ScrollOffset, ScrollOutcome, ScrollResidual, SetWidgetState, SliderChanged,
     SliderConfig, TextAreaConfig, TextCommitted, TextFieldConfig, WidgetChildSpec, WidgetClipRect, WidgetConfig,
     WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged, WidgetValidation,
 };
@@ -137,7 +137,7 @@ aether_actor::export!(
     world::WorldView,
     mover::WorldMover,
     widget::Widget,
-    ScrollWidget,
+    widget::ScrollWidget,
     widget::set::SliderWidget,
     widget::set::TextFieldWidget,
     widget::set::TextAreaWidget,
@@ -159,7 +159,7 @@ aether_actor::export!(
     world::WorldView,
     mover::WorldMover,
     widget::Widget,
-    ScrollWidget,
+    widget::ScrollWidget,
     widget::set::SliderWidget,
     widget::set::TextFieldWidget,
     widget::set::TextAreaWidget,
