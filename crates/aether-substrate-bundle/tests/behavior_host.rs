@@ -122,6 +122,7 @@ fn load_panel_with_host(bench: &mut TestBench, kit_wasm: &[u8], script: Vec<u8>)
             subname: SLOT.to_owned(),
             kind: WidgetKind::BehaviorHost,
             origin: [0.0, 0.0],
+            clip: None,
             config: host_spec.encode_into_bytes(),
         }],
     };

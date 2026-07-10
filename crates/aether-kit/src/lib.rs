@@ -72,8 +72,8 @@ pub use widget::theme::{SetTheme, Theme, WidgetState};
 pub use widget::{
     ButtonClicked, ButtonConfig, ChildrenChanged, Collect, FocusGained, FocusLost, LabelConfig,
     MembershipEntry, PanelConfig, RadioConfig, RadioSelected, SliderChanged, SliderConfig,
-    TextCommitted, TextFieldConfig, WidgetChildSpec, WidgetConfig, WidgetDrawItem, WidgetDrawList,
-    WidgetFrame, WidgetKind,
+    TextCommitted, TextFieldConfig, WidgetChildSpec, WidgetClipRect, WidgetConfig, WidgetDrawItem,
+    WidgetDrawList, WidgetFrame, WidgetKind,
 };
 pub use world::{
     CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk, ChunkPos,

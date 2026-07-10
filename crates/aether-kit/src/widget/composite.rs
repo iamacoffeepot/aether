@@ -20,18 +20,22 @@ use alloc::vec::Vec;
 use aether_data::MailboxId;
 use aether_math::Vec2;
 
-use crate::widget::{ChildrenChanged, MembershipEntry, WidgetDrawItem, WidgetDrawList};
+use crate::widget::{
+    ChildrenChanged, MembershipEntry, WidgetClipRect, WidgetDrawItem, WidgetDrawList,
+};
 
 /// One child's place in a compositing node's layout. `child` is the
 /// inline-child alias the reply is attributed to; `subname` is the child's
 /// inline address segment (recorded so a despawn can name what it removed
 /// without the caller re-supplying it); `origin` is the offset applied to
 /// every draw the child reports; `list` is that child's draws for the current
-/// frame, `None` until it replies.
+/// frame, `None` until it replies. `clip` is the optional parent-local bound
+/// enforced over every draw returned by the child subtree.
 struct Slot {
     child: MailboxId,
     subname: String,
     origin: Vec2,
+    clip: Option<WidgetClipRect>,
     list: Option<WidgetDrawList>,
 }
 
@@ -69,17 +73,19 @@ impl Composite {
         Self::default()
     }
 
-    /// Register a child slot at `origin`, once, when the child is spawned,
-    /// naming it `subname` and its actor type `type_namespace` (the spawned
-    /// actor's `NAMESPACE`). The slot persists across frames (the child's
-    /// alias and its assigned rect are stable); only its per-frame `list`
-    /// resets. A duplicate registration of the same `child` is ignored so a
+    /// Register a child slot at `origin` and optional parent-local `clip`,
+    /// once, when the child is spawned, naming it `subname` and its actor type
+    /// `type_namespace` (the spawned actor's `NAMESPACE`). The slot persists
+    /// across frames (the child's alias and assigned layout are stable); only
+    /// its per-frame `list` resets. A duplicate registration of the same
+    /// `child` is ignored so a
     /// re-`wire` cannot inflate the completion count — and records no
     /// membership delta, so a re-register does not re-announce the child.
     pub fn register_slot(
         &mut self,
         child: MailboxId,
         origin: Vec2,
+        clip: Option<WidgetClipRect>,
         subname: &str,
         type_namespace: &str,
     ) {
@@ -90,6 +96,7 @@ impl Composite {
             child,
             subname: String::from(subname),
             origin,
+            clip,
             list: None,
         });
         self.pending_membership.push(MembershipDelta::Added {
@@ -178,16 +185,22 @@ impl Composite {
         self.slots.iter().all(|slot| slot.list.is_some())
     }
 
-    /// Flatten own chrome then every slot's draws — each offset by the
-    /// slot's origin — into one [`WidgetDrawList`] in depth-first order,
-    /// tagged with `intrinsic`. A slot still `None` (called before
-    /// completion) contributes nothing; call once [`Self::is_complete`].
+    /// Flatten own chrome then every slot's draws — each offset by the slot's
+    /// origin and intersected with its parent-local clip — into one
+    /// [`WidgetDrawList`] in depth-first order, tagged with `intrinsic`. Own
+    /// chrome stays in this node's local space for its eventual parent to
+    /// constrain. A slot still `None` (called before completion) contributes
+    /// nothing; call once [`Self::is_complete`].
     #[must_use]
     pub fn flatten(&self, intrinsic: Option<[f32; 2]>) -> WidgetDrawList {
         let mut items = self.chrome.clone();
         for slot in &self.slots {
             if let Some(list) = &slot.list {
-                items.extend(list.items.iter().map(|item| item.offset(slot.origin)));
+                items.extend(
+                    list.items
+                        .iter()
+                        .filter_map(|item| item.offset(slot.origin).intersect_clip(slot.clip)),
+                );
             }
         }
         WidgetDrawList { intrinsic, items }
@@ -206,7 +219,17 @@ mod tests {
             width: 1.0,
             height: 1.0,
             color: Rgba::new(tag, 0.0, 0.0, 1.0),
+            clip: None,
         }
+    }
+
+    fn clipped_quad(x: f32, tag: f32, clip: WidgetClipRect) -> WidgetDrawItem {
+        let mut item = quad(x, tag);
+        let WidgetDrawItem::Quad { clip: own, .. } = &mut item else {
+            unreachable!("quad helper always returns a quad")
+        };
+        *own = Some(clip);
+        item
     }
 
     fn list(items: Vec<WidgetDrawItem>) -> WidgetDrawList {
@@ -230,8 +253,8 @@ mod tests {
         let mut composite = Composite::new();
         let a = MailboxId(1);
         let b = MailboxId(2);
-        composite.register_slot(a, Vec2::ZERO, "a", "aether.kit.widget");
-        composite.register_slot(b, Vec2::ZERO, "b", "aether.kit.widget");
+        composite.register_slot(a, Vec2::ZERO, None, "a", "aether.kit.widget");
+        composite.register_slot(b, Vec2::ZERO, None, "b", "aether.kit.widget");
         composite.begin_frame();
         assert!(!composite.is_complete(), "two slots, none filled");
         assert!(composite.fill(a, list(vec![quad(0.0, 0.1)])));
@@ -246,7 +269,7 @@ mod tests {
     #[test]
     fn a_reply_from_an_unregistered_child_is_dropped() {
         let mut composite = Composite::new();
-        composite.register_slot(MailboxId(1), Vec2::ZERO, "a", "aether.kit.widget");
+        composite.register_slot(MailboxId(1), Vec2::ZERO, None, "a", "aether.kit.widget");
         composite.begin_frame();
         assert!(
             !composite.fill(MailboxId(99), list(vec![quad(0.0, 0.5)])),
@@ -262,7 +285,7 @@ mod tests {
     fn begin_frame_resets_fills_but_keeps_slots() {
         let mut composite = Composite::new();
         let a = MailboxId(1);
-        composite.register_slot(a, Vec2::ZERO, "a", "aether.kit.widget");
+        composite.register_slot(a, Vec2::ZERO, None, "a", "aether.kit.widget");
         composite.begin_frame();
         composite.fill(a, list(vec![quad(0.0, 0.1)]));
         assert!(composite.is_complete());
@@ -278,8 +301,8 @@ mod tests {
         let mut composite = Composite::new();
         let a = MailboxId(1);
         let b = MailboxId(2);
-        composite.register_slot(a, Vec2::ZERO, "a", "aether.kit.widget");
-        composite.register_slot(b, Vec2::ZERO, "b", "aether.kit.widget");
+        composite.register_slot(a, Vec2::ZERO, None, "a", "aether.kit.widget");
+        composite.register_slot(b, Vec2::ZERO, None, "b", "aether.kit.widget");
         composite.begin_frame();
         composite.fill(a, list(vec![quad(0.0, 0.1)]));
         assert!(!composite.is_complete(), "b still owed");
@@ -295,8 +318,8 @@ mod tests {
         let mut composite = Composite::new();
         let a = MailboxId(1);
         let b = MailboxId(2);
-        composite.register_slot(a, Vec2::new(100.0, 0.0), "a", "aether.kit.widget");
-        composite.register_slot(b, Vec2::new(200.0, 0.0), "b", "aether.kit.widget");
+        composite.register_slot(a, Vec2::new(100.0, 0.0), None, "a", "aether.kit.widget");
+        composite.register_slot(b, Vec2::new(200.0, 0.0), None, "b", "aether.kit.widget");
         composite.begin_frame();
         composite.extend_chrome([quad(0.0, 0.9)]); // chrome at local origin
         composite.fill(a, list(vec![quad(1.0, 0.1)]));
@@ -322,15 +345,149 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // one cohesive nested clip/order invariant
+    fn nested_flatten_translates_intersects_and_omits_without_reordering() {
+        let mut interior = Composite::new();
+        interior.register_slot(
+            MailboxId(11),
+            Vec2::new(4.0, 3.0),
+            Some(WidgetClipRect {
+                x: 6.0,
+                y: 5.0,
+                width: 10.0,
+                height: 8.0,
+            }),
+            "leaf",
+            "aether.kit.widget",
+        );
+        interior.begin_frame();
+        interior.extend_chrome([clipped_quad(
+            0.0,
+            0.2,
+            WidgetClipRect {
+                x: 0.0,
+                y: 0.0,
+                width: 30.0,
+                height: 20.0,
+            },
+        )]);
+        assert!(interior.fill(
+            MailboxId(11),
+            list(vec![
+                clipped_quad(
+                    0.0,
+                    0.3,
+                    WidgetClipRect {
+                        x: 2.0,
+                        y: 1.0,
+                        width: 20.0,
+                        height: 20.0,
+                    },
+                ),
+                clipped_quad(
+                    1.0,
+                    0.4,
+                    WidgetClipRect {
+                        x: 30.0,
+                        y: 30.0,
+                        width: 4.0,
+                        height: 4.0,
+                    },
+                ),
+                clipped_quad(
+                    2.0,
+                    0.5,
+                    WidgetClipRect {
+                        x: 3.0,
+                        y: 2.0,
+                        width: 12.0,
+                        height: 12.0,
+                    },
+                ),
+            ]),
+        ));
+        let interior_list = interior.flatten(None);
+        assert_eq!(
+            interior_list.items.len(),
+            3,
+            "the disjoint middle item is omitted"
+        );
+
+        let mut root = Composite::new();
+        root.register_slot(
+            MailboxId(22),
+            Vec2::new(10.0, 8.0),
+            Some(WidgetClipRect {
+                x: 12.0,
+                y: 10.0,
+                width: 20.0,
+                height: 16.0,
+            }),
+            "interior",
+            "aether.kit.widget",
+        );
+        root.begin_frame();
+        root.extend_chrome([quad(0.0, 0.1)]);
+        assert!(root.fill(MailboxId(22), interior_list));
+
+        let flat = root.flatten(None);
+        let mut xs = Vec::new();
+        let mut tags = Vec::new();
+        let mut clips = Vec::new();
+        for item in &flat.items {
+            let (x, tag, clip) = match item {
+                WidgetDrawItem::Quad { x, color, clip, .. } => (*x, color.r, *clip),
+                WidgetDrawItem::Text { .. } => unreachable!("test builds only quads"),
+            };
+            xs.push(x);
+            tags.push(tag);
+            clips.push(clip);
+        }
+        assert_eq!(xs, vec![0.0, 10.0, 14.0, 16.0]);
+        assert_eq!(tags, vec![0.1, 0.2, 0.3, 0.5]);
+        assert_eq!(
+            clips,
+            vec![
+                None,
+                Some(WidgetClipRect {
+                    x: 12.0,
+                    y: 10.0,
+                    width: 20.0,
+                    height: 16.0,
+                }),
+                Some(WidgetClipRect {
+                    x: 16.0,
+                    y: 13.0,
+                    width: 10.0,
+                    height: 8.0,
+                }),
+                Some(WidgetClipRect {
+                    x: 17.0,
+                    y: 13.0,
+                    width: 9.0,
+                    height: 8.0,
+                }),
+            ],
+        );
+    }
+
+    #[test]
     fn registers_buffer_one_batched_add_per_child_in_order() {
         let mut composite = Composite::new();
         composite.register_slot(
             MailboxId(1),
             Vec2::ZERO,
+            None,
             "alpha",
             "aether.kit.widget.slider",
         );
-        composite.register_slot(MailboxId(2), Vec2::ZERO, "beta", "aether.kit.widget.button");
+        composite.register_slot(
+            MailboxId(2),
+            Vec2::ZERO,
+            None,
+            "beta",
+            "aether.kit.widget.button",
+        );
         let changed = composite
             .take_membership_changes()
             .expect("two adds are buffered and drain together");
@@ -357,7 +514,7 @@ mod tests {
     #[test]
     fn forget_buffers_one_remove_naming_the_dropped_subname() {
         let mut composite = Composite::new();
-        composite.register_slot(MailboxId(1), Vec2::ZERO, "alpha", "aether.kit.widget");
+        composite.register_slot(MailboxId(1), Vec2::ZERO, None, "alpha", "aether.kit.widget");
         composite
             .take_membership_changes()
             .expect("drain the add so the remove stands alone");
@@ -380,7 +537,7 @@ mod tests {
             composite.take_membership_changes().is_none(),
             "nothing has changed yet, so there is no event",
         );
-        composite.register_slot(MailboxId(1), Vec2::ZERO, "alpha", "aether.kit.widget");
+        composite.register_slot(MailboxId(1), Vec2::ZERO, None, "alpha", "aether.kit.widget");
         assert!(
             composite.take_membership_changes().is_some(),
             "the buffered add drains as an event",
@@ -394,11 +551,11 @@ mod tests {
     #[test]
     fn a_dedup_suppressed_reregister_records_no_delta() {
         let mut composite = Composite::new();
-        composite.register_slot(MailboxId(1), Vec2::ZERO, "alpha", "aether.kit.widget");
+        composite.register_slot(MailboxId(1), Vec2::ZERO, None, "alpha", "aether.kit.widget");
         composite
             .take_membership_changes()
             .expect("drain the first, genuine add");
-        composite.register_slot(MailboxId(1), Vec2::ZERO, "alpha", "aether.kit.widget");
+        composite.register_slot(MailboxId(1), Vec2::ZERO, None, "alpha", "aether.kit.widget");
         assert!(
             composite.take_membership_changes().is_none(),
             "a re-register of an existing child is dedup-suppressed and announces nothing",

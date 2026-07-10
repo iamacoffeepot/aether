@@ -183,6 +183,7 @@ impl WasmActor for RadioGroupWidget {
                 text: option.clone(),
                 size_pixels: size,
                 color: self.theme.text_primary,
+                clip: None,
             });
         }
         if self.focused {

@@ -46,6 +46,7 @@ use std::path::{Path, PathBuf};
 use aether_actor::Addressable;
 use aether_capabilities::RenderCapability;
 use aether_capabilities::fs::NamespaceRoots;
+use aether_capabilities::render::WHITE_TEXTURE_ID;
 use aether_capabilities::text::{
     FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult,
 };
@@ -53,9 +54,10 @@ use aether_data::Kind;
 use aether_kinds::keycode::{KEY_BACKSPACE, KEY_ENTER, KEY_RIGHT, KEY_TAB};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
-    CachedFontMetrics, CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect,
-    FrameReduction, FrameVerdict, ImePreedit, Key, LoadComponent, LoadResult, LogTailResult,
-    Modifiers, MouseButton, MouseButtonRelease, MouseMove, NamedMail, TextInput, Tick,
+    CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, FrameCheck, FrameCheckResult,
+    FrameRect, FrameReduction, FrameVerdict, ImePreedit, Key, LoadComponent, LoadResult,
+    LogTailResult, Modifiers, MouseButton, MouseButtonRelease, MouseMove, NamedMail, TextInput,
+    Tick,
 };
 use aether_kit::{PanelConfig, Theme};
 use aether_substrate_bundle::test_bench::{
@@ -1312,4 +1314,51 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
         "clicking after `abé`, extending over `cd`, and committing `Z` must leave the non-ASCII \
          value `abéZ`; log was:\n{joined}",
     );
+}
+
+#[test]
+fn resident_label_glyphs_forward_the_exact_parent_row_clip() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = build_bench();
+    boot_panel(&mut bench, &wasm);
+
+    bench
+        .execute(vec![(
+            "snap",
+            BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new()),
+        )])
+        .expect("capture resident clipped glyphs");
+    let expected = ClipRect {
+        x: PANEL_X,
+        y: PANEL_Y,
+        width: PANEL_WIDTH,
+        height: ROW_HEIGHT,
+    };
+    let snapshot = bench.committed_overlay_snapshot();
+    let label_batches: Vec<_> = snapshot
+        .iter()
+        .filter(|batch| {
+            batch.texture_id != WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(&expected)
+        })
+        .collect();
+    assert!(
+        !label_batches.is_empty(),
+        "resident label glyphs should retain the panel-derived framebuffer clip; snapshot: {snapshot:?}",
+    );
+    assert!(
+        label_batches.iter().all(|batch| !batch.quads.is_empty()),
+        "the matched atlas-backed batches carry resident glyph geometry",
+    );
+    for quad in label_batches.iter().flat_map(|batch| &batch.quads) {
+        assert!(
+            quad.x >= expected.x
+                && quad.y >= expected.y
+                && quad.x + quad.width <= expected.x + expected.width
+                && quad.y + quad.height <= expected.y + expected.height,
+            "label glyph {quad:?} should lie inside its forwarded row clip {expected:?}",
+        );
+    }
 }

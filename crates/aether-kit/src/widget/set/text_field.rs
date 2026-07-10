@@ -473,6 +473,7 @@ impl WasmActor for TextFieldWidget {
                 text: displayed.text.clone(),
                 size_pixels: size,
                 color: self.theme.text_primary,
+                clip: None,
             });
         }
         if let Some(span) = displayed.preedit_span {

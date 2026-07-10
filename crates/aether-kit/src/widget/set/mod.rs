@@ -51,6 +51,7 @@ pub(crate) fn quad(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> Widg
         width,
         height,
         color,
+        clip: None,
     }
 }
 

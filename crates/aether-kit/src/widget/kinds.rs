@@ -3,9 +3,10 @@
 //! A widget tree is a cluster of inline-child actors (ADR-0114). Each
 //! widget draws in its own local coordinates and never touches
 //! `aether.render`; instead the cluster's root composites the whole
-//! subtree and emits it as **one** ordered batch, so a dense panel costs
-//! one render sender rather than one per widget and draw order is the
-//! structural depth-first traversal of the tree.
+//! subtree and emits it as one ordered stream from the root, so a dense panel
+//! costs one render sender rather than one per widget and draw order is the
+//! structural depth-first traversal of the tree. Distinct effective clips may
+//! split that stream into contiguous render batches without adding senders.
 //!
 //! Two kinds carry the protocol:
 //!
@@ -76,12 +77,103 @@ pub struct ChildrenChanged {
     pub removed: Vec<String>,
 }
 
+/// A clip rectangle in the current widget composition space.
+///
+/// On a [`WidgetDrawItem`] the rectangle is local to that item's widget. On a
+/// [`WidgetChildSpec`] it is local to the parent that owns the child slot.
+/// Composition translates item clips with their geometry and intersects them
+/// with parent-local slot clips until the root holds one effective rectangle
+/// in screen-pixel coordinates. Only the root converts this kit-owned type to
+/// the framebuffer-only `aether_kinds::ClipRect`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct WidgetClipRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl WidgetClipRect {
+    /// Translate this rectangle into its parent's composition space.
+    #[must_use]
+    fn offset(self, by: Vec2) -> Self {
+        Self {
+            x: self.x + by.x,
+            y: self.y + by.y,
+            ..self
+        }
+    }
+
+    /// Whether this rectangle has finite coordinates and a positive finite
+    /// extent. Invalid and empty explicit clips omit their item.
+    #[must_use]
+    pub(super) fn is_valid(self) -> bool {
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.width.is_finite()
+            && self.height.is_finite()
+            && self.width > 0.0
+            && self.height > 0.0
+            && (self.x + self.width).is_finite()
+            && (self.y + self.height).is_finite()
+    }
+}
+
+/// Result of composing two optional widget clips. Two absent clips are
+/// unbounded, while an explicit invalid, empty, disjoint, or edge-touching
+/// rectangle is empty and omits the item.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum WidgetClipIntersection {
+    Unbounded,
+    Finite { rect: WidgetClipRect },
+    Empty,
+}
+
+/// Intersect two clips expressed in the same widget composition space.
+#[must_use]
+pub(super) fn intersect_widget_clips(
+    item: Option<WidgetClipRect>,
+    slot: Option<WidgetClipRect>,
+) -> WidgetClipIntersection {
+    match (item, slot) {
+        (None, None) => WidgetClipIntersection::Unbounded,
+        (Some(rect), None) | (None, Some(rect)) => {
+            if rect.is_valid() {
+                WidgetClipIntersection::Finite { rect }
+            } else {
+                WidgetClipIntersection::Empty
+            }
+        }
+        (Some(item), Some(slot)) => {
+            if !item.is_valid() || !slot.is_valid() {
+                return WidgetClipIntersection::Empty;
+            }
+            let x = item.x.max(slot.x);
+            let y = item.y.max(slot.y);
+            let right = (item.x + item.width).min(slot.x + slot.width);
+            let bottom = (item.y + item.height).min(slot.y + slot.height);
+            let rect = WidgetClipRect {
+                x,
+                y,
+                width: right - x,
+                height: bottom - y,
+            };
+            if rect.is_valid() {
+                WidgetClipIntersection::Finite { rect }
+            } else {
+                WidgetClipIntersection::Empty
+            }
+        }
+    }
+}
+
 /// One draw in a [`WidgetDrawList`], in the widget's own local
 /// coordinates (offset by the parent at composite time). A widget emits a
 /// heterogeneous run of these in authored order — the single-list shape
 /// preserves per-item quad/text interleave, which a two-vector
-/// quads-then-texts split would foreclose. Not a kind on its own; only
-/// addressable inside [`WidgetDrawList::items`].
+/// quads-then-texts split would foreclose. Each variant's optional `clip` is
+/// a [`WidgetClipRect`] in the same local space as its geometry. Not a kind on
+/// its own; only addressable inside [`WidgetDrawList::items`].
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum WidgetDrawItem {
     /// A flat-colored rectangle. `(x, y)` is the top-left corner and
@@ -93,6 +185,7 @@ pub enum WidgetDrawItem {
         width: f32,
         height: f32,
         color: Rgba,
+        clip: Option<WidgetClipRect>,
     },
     /// A glyph run. `(x, y)` is the baseline origin in local pixels;
     /// `font_id` names a session-scoped font loaded through `aether.text`;
@@ -104,6 +197,7 @@ pub enum WidgetDrawItem {
         text: String,
         size_pixels: f32,
         color: Rgba,
+        clip: Option<WidgetClipRect>,
     },
 }
 
@@ -122,12 +216,14 @@ impl WidgetDrawItem {
                 width,
                 height,
                 color,
+                clip,
             } => Self::Quad {
                 x: x + by.x,
                 y: y + by.y,
                 width: *width,
                 height: *height,
                 color: *color,
+                clip: clip.map(|rect| rect.offset(by)),
             },
             Self::Text {
                 x,
@@ -136,6 +232,7 @@ impl WidgetDrawItem {
                 text,
                 size_pixels,
                 color,
+                clip,
             } => Self::Text {
                 x: x + by.x,
                 y: y + by.y,
@@ -143,8 +240,37 @@ impl WidgetDrawItem {
                 text: text.clone(),
                 size_pixels: *size_pixels,
                 color: *color,
+                clip: clip.map(|rect| rect.offset(by)),
             },
         }
+    }
+
+    /// Intersect this item's clip with a slot clip in the same coordinate
+    /// space. Empty or invalid results omit the item.
+    #[must_use]
+    pub(super) fn intersect_clip(&self, slot: Option<WidgetClipRect>) -> Option<Self> {
+        let own = match self {
+            Self::Quad { clip, .. } | Self::Text { clip, .. } => *clip,
+        };
+        let clip = match intersect_widget_clips(own, slot) {
+            WidgetClipIntersection::Unbounded => None,
+            WidgetClipIntersection::Finite { rect } => Some(rect),
+            WidgetClipIntersection::Empty => return None,
+        };
+        let mut item = self.clone();
+        match &mut item {
+            Self::Quad { clip: own, .. } | Self::Text { clip: own, .. } => *own = clip,
+        }
+        Some(item)
+    }
+
+    /// This item's effective clip, rejecting an invalid explicit rectangle.
+    #[must_use]
+    pub(super) fn valid_clip(&self) -> WidgetClipIntersection {
+        let clip = match self {
+            Self::Quad { clip, .. } | Self::Text { clip, .. } => *clip,
+        };
+        intersect_widget_clips(clip, None)
     }
 }
 
@@ -281,12 +407,15 @@ pub struct BehaviorHostSpec {
 /// config by value) is what lets a tree nest without forming a
 /// self-referential schema, which a recursive `const SCHEMA` cannot
 /// express. A layout-owning parent (the reference panel) derives each
-/// child's `origin` from its stack order and ignores this field.
+/// child's `origin` from its stack order and ignores this field. `clip` is an
+/// optional parent-local bound over the child's whole subtree; the reference
+/// panel derives its slot clip from the assigned [`WidgetFrame`].
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct WidgetChildSpec {
     pub subname: String,
     pub kind: WidgetKind,
     pub origin: [f32; 2],
+    pub clip: Option<WidgetClipRect>,
     pub config: Vec<u8>,
 }
 
@@ -501,6 +630,12 @@ mod tests {
             width: 10.0,
             height: 4.0,
             color: Rgba::new(1.0, 0.0, 0.0, 1.0),
+            clip: Some(WidgetClipRect {
+                x: 4.0,
+                y: 6.0,
+                width: 8.0,
+                height: 2.0,
+            }),
         };
         assert_eq!(
             item.offset(Vec2::new(100.0, 20.0)),
@@ -510,6 +645,12 @@ mod tests {
                 width: 10.0,
                 height: 4.0,
                 color: Rgba::new(1.0, 0.0, 0.0, 1.0),
+                clip: Some(WidgetClipRect {
+                    x: 104.0,
+                    y: 26.0,
+                    width: 8.0,
+                    height: 2.0,
+                }),
             },
             "offset moves the corner by the vector and leaves the extent untouched",
         );
@@ -524,6 +665,7 @@ mod tests {
             text: "hp".into(),
             size_pixels: 12.0,
             color: Rgba::WHITE,
+            clip: None,
         };
         assert_eq!(
             item.offset(Vec2::new(10.0, 40.0)),
@@ -534,8 +676,151 @@ mod tests {
                 text: "hp".into(),
                 size_pixels: 12.0,
                 color: Rgba::WHITE,
+                clip: None,
             },
             "offset moves the baseline and preserves the glyph run",
         );
+    }
+
+    #[test]
+    fn clip_intersection_distinguishes_unbounded_finite_and_empty() {
+        let outer = WidgetClipRect {
+            x: 10.0,
+            y: 20.0,
+            width: 30.0,
+            height: 40.0,
+        };
+        assert_eq!(
+            intersect_widget_clips(None, None),
+            WidgetClipIntersection::Unbounded,
+        );
+        assert_eq!(
+            intersect_widget_clips(Some(outer), None),
+            WidgetClipIntersection::Finite { rect: outer },
+        );
+        assert_eq!(
+            intersect_widget_clips(
+                Some(outer),
+                Some(WidgetClipRect {
+                    x: 15.0,
+                    y: 25.0,
+                    width: 10.0,
+                    height: 12.0,
+                }),
+            ),
+            WidgetClipIntersection::Finite {
+                rect: WidgetClipRect {
+                    x: 15.0,
+                    y: 25.0,
+                    width: 10.0,
+                    height: 12.0,
+                },
+            },
+        );
+        assert_eq!(
+            intersect_widget_clips(
+                Some(outer),
+                Some(WidgetClipRect {
+                    x: 40.0,
+                    y: 20.0,
+                    width: 5.0,
+                    height: 5.0,
+                }),
+            ),
+            WidgetClipIntersection::Empty,
+            "touching edges have zero area",
+        );
+        assert_eq!(
+            intersect_widget_clips(
+                Some(outer),
+                Some(WidgetClipRect {
+                    x: 100.0,
+                    y: 100.0,
+                    width: 5.0,
+                    height: 5.0,
+                }),
+            ),
+            WidgetClipIntersection::Empty,
+            "disjoint rectangles have no effective clip",
+        );
+    }
+
+    #[test]
+    fn clip_intersection_handles_partial_nested_and_invalid_rects() {
+        let a = WidgetClipRect {
+            x: -5.0,
+            y: -5.0,
+            width: 20.0,
+            height: 20.0,
+        };
+        let b = WidgetClipRect {
+            x: 0.0,
+            y: 3.0,
+            width: 20.0,
+            height: 4.0,
+        };
+        let first = match intersect_widget_clips(Some(a), Some(b)) {
+            WidgetClipIntersection::Finite { rect } => rect,
+            other => panic!("expected finite overlap, got {other:?}"),
+        };
+        assert_eq!(
+            first,
+            WidgetClipRect {
+                x: 0.0,
+                y: 3.0,
+                width: 15.0,
+                height: 4.0,
+            },
+        );
+        assert_eq!(
+            intersect_widget_clips(
+                Some(first),
+                Some(WidgetClipRect {
+                    x: 2.0,
+                    y: 0.0,
+                    width: 3.0,
+                    height: 20.0,
+                }),
+            ),
+            WidgetClipIntersection::Finite {
+                rect: WidgetClipRect {
+                    x: 2.0,
+                    y: 3.0,
+                    width: 3.0,
+                    height: 4.0,
+                },
+            },
+        );
+        for invalid in [
+            WidgetClipRect {
+                x: 0.0,
+                y: 0.0,
+                width: -1.0,
+                height: 1.0,
+            },
+            WidgetClipRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: -1.0,
+            },
+            WidgetClipRect {
+                x: f32::NAN,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            WidgetClipRect {
+                x: 0.0,
+                y: 0.0,
+                width: f32::INFINITY,
+                height: 1.0,
+            },
+        ] {
+            assert_eq!(
+                intersect_widget_clips(Some(invalid), None),
+                WidgetClipIntersection::Empty,
+            );
+        }
     }
 }

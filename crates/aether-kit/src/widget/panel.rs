@@ -30,7 +30,8 @@
 //!   drag-captured child, Tab to cycle focus, a left press to set focus + drag
 //!   capture. Focus transitions fan `FocusGained` / `FocusLost` down.
 //! - **Draw.** Each frame it drives [`Composite`] — `Collect` down, draw lists
-//!   up — and emits the whole panel as one `DrawSolidQuads` (plus text).
+//!   up — and emits the whole panel as contiguous equal-clip solid batches
+//!   (plus text) from one root render sender.
 //! - **Value.** Each value-up event (`SliderChanged` / `TextCommitted` /
 //!   `RadioSelected` / `ButtonClicked`), attributed by `ctx.source_mailbox()`,
 //!   is the seam a real editor translates into world-knob driver mail; the
@@ -65,7 +66,7 @@ use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
     ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, LabelConfig, PanelConfig,
     RadioConfig, RadioSelected, SliderChanged, SliderConfig, TextCommitted, TextFieldConfig,
-    WidgetChildSpec, WidgetDrawList, WidgetFrame, WidgetKind,
+    WidgetChildSpec, WidgetClipRect, WidgetDrawList, WidgetFrame, WidgetKind,
 };
 use crate::widget::{accept_child_list, emit, flush_membership};
 
@@ -204,16 +205,26 @@ impl WidgetPanel {
         name: String,
         type_namespace: &'static str,
     ) {
-        self.composite
-            .register_slot(id, Vec2::new(frame.x, frame.y), &name, type_namespace);
+        self.composite.register_slot(
+            id,
+            Vec2::new(frame.x, frame.y),
+            Some(WidgetClipRect {
+                x: frame.x,
+                y: frame.y,
+                width: frame.width,
+                height: frame.height,
+            }),
+            &name,
+            type_namespace,
+        );
         self.focus
             .register(id, frame.x, frame.y, frame.width, frame.height, focusable);
         ctx.send_to(id, &frame);
         self.children.push(ChildRef { id, name });
     }
 
-    /// Discharge a closed frame: flatten the composite and emit it as the
-    /// panel's single render + text output.
+    /// Discharge a closed frame: flatten the composite and emit it from the
+    /// panel's single render + text sender.
     fn finish(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
         let list = self.composite.flatten(None);
         emit(ctx, &list);
@@ -266,6 +277,7 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
         subname: String::from(subname),
         kind,
         origin: [0.0, 0.0],
+        clip: None,
         config,
     };
     vec![
@@ -796,6 +808,7 @@ mod behavior_tests {
             subname: String::from("knob"),
             kind: WidgetKind::BehaviorHost,
             origin: [0.0, 0.0],
+            clip: None,
             config: spec.encode_into_bytes(),
         };
         let decoded = decode_child::<BehaviorHostSpec>(&child).expect("host spec decodes");

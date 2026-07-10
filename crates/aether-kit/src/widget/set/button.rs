@@ -170,6 +170,7 @@ impl WasmActor for ButtonWidget {
                 text: self.label.clone(),
                 size_pixels: size,
                 color: self.theme.accent_text,
+                clip: None,
             });
         }
         if self.focused {
