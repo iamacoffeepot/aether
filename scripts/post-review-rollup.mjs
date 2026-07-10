@@ -7,7 +7,9 @@
 // The posture is load-bearing: the review event is ALWAYS `COMMENT`, never
 // `REQUEST_CHANGES` — a bot changes-requested review would hard-gate the
 // merge, and the five-pillar verdicts are agent judgment. The teeth are the
-// label + the implement loop's obligation to address the comment.
+// label: it mirrors into the required `Review gate` commit status on a
+// Rust-touching PR (blocking merge there), plus the implement loop's
+// obligation to address the comment.
 //
 // Inputs (env):
 //   GITHUB_TOKEN        least-privilege token (pull-requests + issues write)
@@ -205,7 +207,7 @@ async function main() {
     if (softHolds.length) {
       bodyLines.push(`**${softHolds.length} soft-hold** finding(s) — clear before un-draft.`, '')
     }
-    bodyLines.push('_Advisory: this review never gates the merge._')
+    bodyLines.push('_Findings are advisory (this is a COMMENT review); on a Rust-touching PR an unresolved verdict blocks merge via the required `Review gate` status._')
 
     const review = { event: 'COMMENT', body: bodyLines.join('\n') }
     if (inline.length && commitId) { review.commit_id = commitId; review.comments = inline }
@@ -289,7 +291,7 @@ function renderSummary(rollup, normalized, fingerprints) {
     lines.push('_No confirmed findings — the change is clean under all five pillars._', '')
   }
 
-  lines.push('_Advisory only: this review never gates the merge._')
+  lines.push('_Findings are advisory (this is a COMMENT review); on a Rust-touching PR an unresolved verdict blocks merge via the required `Review gate` status._')
   // Hidden fingerprints so a dispatched re-run dedups against this comment.
   for (const fp of fingerprints) lines.push(`<!-- aether-review-fp:${fp} -->`)
   return lines.join('\n')
