@@ -90,21 +90,26 @@ jobs:
         run: scripts/ensure-tunnel.sh
       - name: "Stage 1 — assert tunnel + children are up"
         run: |
+          # Both children must be alive, not just the tunnel answering —
+          # the tunnel supervises + re-forks a crashed child, and stage 2
+          # must not start against a mid-restart harness.
           ok=""
           for _ in $(seq 1 30); do
-            if curl -fsS --max-time 2 http://127.0.0.1:8890/admin/status -o /tmp/status.json; then
+            if curl -fsS --max-time 2 http://127.0.0.1:8890/admin/status -o /tmp/status.json \
+               && grep -q '"aether_mcp":{"alive":true' /tmp/status.json \
+               && grep -q '"hub":{"alive":true' /tmp/status.json; then
               ok=1
               break
             fi
             sleep 2
           done
+          echo "admin/status:"
+          cat /tmp/status.json 2>/dev/null || echo "(no response)"
+          echo
           if [ -z "$ok" ]; then
-            echo "SPIKE-HARNESS-FAIL: /admin/status never answered"
+            echo "SPIKE-HARNESS-FAIL: tunnel + both children never all alive"
             exit 1
           fi
-          echo "admin/status:"
-          cat /tmp/status.json
-          echo
           echo "SPIKE-HARNESS-PASS"
 
       - name: Note when the OAuth token secret is absent
