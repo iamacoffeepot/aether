@@ -53,9 +53,13 @@ jobs:
       - uses: runs-on/action@v2
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install Linux deps (ALSA headers for cpal, Mesa lavapipe for wgpu, Xvfb for the desktop chassis, mold)
+      - name: Install Linux deps (ALSA headers for cpal, Mesa lavapipe for wgpu, Xvfb + xkbcommon-x11 for the desktop chassis, mold)
+        # libxkbcommon-x11-{0,dev}: winit's keyboard layer dlopens
+        # libxkbcommon-x11.so at runtime (xkbcommon-dl); the runner image
+        # ships neither the library nor the unversioned dev symlink, and
+        # without them the desktop chassis panics at boot under Xvfb.
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-          mesa-vulkan-drivers xvfb mold
+          mesa-vulkan-drivers xvfb libxkbcommon-x11-0 libxkbcommon-x11-dev mold
       - uses: Swatinem/rust-cache@v2
       - name: Configure sccache (S3 backend)
         run: |
