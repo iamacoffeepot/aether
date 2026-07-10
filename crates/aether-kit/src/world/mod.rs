@@ -23,6 +23,9 @@
 //! - `aether.kit.world.set_cell_heights` — stamp one cell's height deltas
 //!   (subcell relief off the cell height) and remesh that cell's chunk plus
 //!   its eight cached neighbors (the height sibling of `set_cell_points`).
+//! - `aether.kit.world.stamp_{polygon,disc,hexagon}` — rasterize a compact
+//!   world-octimeter shape into scalar subcell coverage and remesh every
+//!   touched chunk plus its cached apron neighbors.
 //! - `aether.kit.world.set_region` — register a region so the underlay
 //!   cascade has a default to resolve to; remeshes every cached chunk
 //!   (a region default can change any chunk's cascade-resolved underlay).
@@ -35,6 +38,7 @@ pub use data::*;
 mod kinds;
 pub use kinds::*;
 pub mod mesher;
+mod raster;
 
 use alloc::collections::BTreeMap;
 
@@ -54,11 +58,12 @@ use self::mesher::style::StyleTable;
 ///
 /// # Agent
 /// Load with the `aether_kit@aether.kit.world` export. Paint the world by
-/// sending `aether.kit.world.set_chunk` (one chunk's planes) and
-/// `aether.kit.world.set_region` (a region default for the underlay
-/// cascade); each send remeshes and the world renders every frame under
-/// the active `aether.view_projection` view. `aether.kit.world.load` swaps a
-/// serialized world from `aether.fs`. Use `capture_frame` to verify.
+/// sending `aether.kit.world.stamp_{polygon,disc,hexagon}` for compact smooth
+/// shapes, `aether.kit.world.set_chunk` for raw planes, and
+/// `aether.kit.world.set_region` for an underlay cascade default; each send
+/// remeshes and the world renders every frame under the active
+/// `aether.view_projection` view. `aether.kit.world.load` swaps a serialized
+/// world from `aether.fs`. Use `capture_frame` to verify.
 pub struct WorldView {
     world: World,
     meshes: BTreeMap<ChunkPos, Vec<DrawTriangle>>,
@@ -103,6 +108,15 @@ impl WorldView {
                         .insert(neighbor, mesh_chunk(&self.world, neighbor, &self.styles));
                 }
             }
+        }
+    }
+
+    /// Rasterize `vertices` into the overlay coverage plane and rebuild every
+    /// changed chunk through the ordinary apron-aware invalidation path.
+    fn stamp_vertices(&mut self, vertices: &[WorldPoint], material: Material) {
+        let touched = raster::stamp_polygon(&mut self.world, vertices, material);
+        for pos in touched {
+            self.remesh_around(pos);
         }
     }
 }
@@ -177,6 +191,45 @@ impl WasmActor for WorldView {
         let cell = msg.cell();
         self.world.set_cell_points(cell, &msg.points);
         self.remesh_around(cell.chunk());
+    }
+
+    /// Rasterize an arbitrary polygon in world-octimeter coordinates into
+    /// anti-aliased scalar overlay coverage, then remesh every touched chunk
+    /// and its cached apron neighbors.
+    ///
+    /// # Agent
+    /// Send `aether.kit.world.stamp_polygon` with a vertex ring in
+    /// `points` (named `x_octimeters` / `z_octimeters` fields) and a raw
+    /// `Material` byte. This is the compact shape-authoring counterpart to
+    /// hand-building `set_cell_points` / `set_chunk` arrays.
+    #[handler::single]
+    fn on_stamp_polygon(&mut self, _ctx: &mut WasmCtx<'_>, msg: StampPolygon) {
+        self.stamp_vertices(&msg.points, Material::from_u8_or_void(msg.material));
+    }
+
+    /// Generate and rasterize a disc vertex ring in world-octimeter
+    /// coordinates, then remesh every touched chunk and apron.
+    ///
+    /// # Agent
+    /// Send `aether.kit.world.stamp_disc` with a `center` world point,
+    /// `radius_octimeters`, and a raw `Material` byte.
+    #[handler::single]
+    fn on_stamp_disc(&mut self, _ctx: &mut WasmCtx<'_>, msg: StampDisc) {
+        let vertices = raster::disc_vertices(msg.center, msg.radius_octimeters);
+        self.stamp_vertices(&vertices, Material::from_u8_or_void(msg.material));
+    }
+
+    /// Generate and rasterize a flat-top regular hexagon in world-octimeter
+    /// coordinates, then remesh every touched chunk and apron.
+    ///
+    /// # Agent
+    /// Send `aether.kit.world.stamp_hexagon` with
+    /// a `center` world point, center-to-vertex `radius_octimeters`, and a raw
+    /// `Material` byte.
+    #[handler::single]
+    fn on_stamp_hexagon(&mut self, _ctx: &mut WasmCtx<'_>, msg: StampHexagon) {
+        let vertices = raster::regular_hexagon_vertices(msg.center, msg.radius_octimeters);
+        self.stamp_vertices(&vertices, Material::from_u8_or_void(msg.material));
     }
 
     /// Stamp one cell's height deltas into the world, then remesh that cell's
@@ -281,5 +334,47 @@ impl WasmActor for WorldView {
                 "world read failed; keeping prior world",
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_border_stamp_remeshes_both_touched_chunks() {
+        let mut view = WorldView {
+            world: World::new(),
+            meshes: BTreeMap::new(),
+            styles: StyleTable::default(),
+        };
+        view.stamp_vertices(
+            &[
+                WorldPoint::new(4080, 256),
+                WorldPoint::new(4112, 256),
+                WorldPoint::new(4112, 512),
+                WorldPoint::new(4080, 512),
+            ],
+            Material::Stone,
+        );
+
+        let west = ChunkPos { x: 0, z: 0 };
+        let east = ChunkPos { x: 1, z: 0 };
+        assert!(
+            view.meshes.contains_key(&west),
+            "west touched chunk remeshed"
+        );
+        assert!(
+            view.meshes.contains_key(&east),
+            "east touched chunk remeshed"
+        );
+        assert!(
+            view.meshes.get(&west).is_some_and(|mesh| !mesh.is_empty()),
+            "west mesh includes the border stamp and its east apron",
+        );
+        assert!(
+            view.meshes.get(&east).is_some_and(|mesh| !mesh.is_empty()),
+            "east mesh includes the border stamp and its west apron",
+        );
     }
 }
