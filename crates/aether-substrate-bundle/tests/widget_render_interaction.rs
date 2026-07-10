@@ -407,8 +407,11 @@ fn assert_virtual_list_rows(
         assert_eq!(quad.y, PANEL_Y + row_offset as f32 * ROW_HEIGHT);
         assert_eq!(quad.width, PANEL_WIDTH);
         assert_eq!(quad.height, ROW_HEIGHT);
-        let expected_tint =
-            if row_offset == selected_row_offset { selected_tint } else { Theme::DEFAULT.surface_raised };
+        let expected_tint = if row_offset == selected_row_offset {
+            selected_tint
+        } else {
+            Theme::DEFAULT.surface_raised
+        };
         assert_eq!(quad.tint, expected_tint, "row offset {row_offset} has the wrong selection/state fill");
     }
 }

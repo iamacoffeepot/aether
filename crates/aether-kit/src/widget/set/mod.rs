@@ -58,7 +58,11 @@ use crate::widget::theme::{Theme, ThemeState};
 use crate::widget::{WidgetControlState, WidgetDrawItem, WidgetDrawList};
 
 fn text_control_theme_state(state: &InteractionState, dragging: bool) -> ThemeState {
-    if state.focused() { state.supporting_theme_state(dragging) } else { state.theme_state(dragging) }
+    if state.focused() {
+        state.supporting_theme_state(dragging)
+    } else {
+        state.theme_state(dragging)
+    }
 }
 
 fn apply_text_control_state(
