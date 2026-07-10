@@ -92,6 +92,20 @@ impl Composite {
         });
     }
 
+    /// Update an existing slot's parent-local origin and clip without changing
+    /// membership or its current-frame reply. Stateful containers use this to
+    /// move one retained content root as their offset changes; re-registering
+    /// would either be ignored as a duplicate or manufacture false membership
+    /// churn.
+    pub fn update_slot_layout(&mut self, child: MailboxId, origin: Vec2, clip: Option<WidgetClipRect>) -> bool {
+        let Some(slot) = self.slots.iter_mut().find(|slot| slot.child == child) else {
+            return false;
+        };
+        slot.origin = origin;
+        slot.clip = clip;
+        true
+    }
+
     /// Drop the slot for `child` — the despawn counterpart of
     /// [`Self::register_slot`], so a torn-down child stops being counted
     /// toward completion. Records a membership delta naming the dropped slot's
@@ -265,6 +279,32 @@ mod tests {
         assert!(composite.is_complete());
         composite.begin_frame();
         assert!(!composite.is_complete(), "a new frame re-opens the slot so its reply must arrive again");
+    }
+
+    #[test]
+    fn updating_slot_layout_moves_and_clips_without_membership_churn() {
+        let mut composite = Composite::new();
+        let child = MailboxId(1);
+        composite.register_slot(child, Vec2::ZERO, None, "content", "aether.kit.widget");
+        let initial_membership = composite.take_membership_changes().expect("registration emits membership");
+        assert_eq!(initial_membership.added.len(), 1);
+
+        let clip = WidgetClipRect { x: 0.0, y: 0.0, width: 8.0, height: 6.0 };
+        assert!(composite.update_slot_layout(child, Vec2::new(-3.0, -2.0), Some(clip)));
+        assert!(composite.take_membership_changes().is_none(), "layout motion is not a membership change",);
+        composite.begin_frame();
+        assert!(composite.fill(child, list(vec![quad(4.0, 0.5)])));
+        assert_eq!(
+            composite.flatten(None).items,
+            vec![WidgetDrawItem::Quad {
+                x: 1.0,
+                y: -2.0,
+                width: 1.0,
+                height: 1.0,
+                color: Rgba::new(0.5, 0.0, 0.0, 1.0),
+                clip: Some(clip),
+            }],
+        );
     }
 
     #[test]

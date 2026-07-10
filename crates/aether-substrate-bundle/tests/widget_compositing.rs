@@ -40,7 +40,10 @@ use aether_capabilities::render::{
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{ClipRect, LoadComponent, LoadResult, NamedMail, QuadSpace};
 use aether_kit::widget::composite::Composite;
-use aether_kit::{WidgetChildSpec, WidgetClipRect, WidgetConfig, WidgetDrawItem, WidgetDrawList, WidgetKind};
+use aether_kit::{
+    PanelConfig, ScrollConfig, ScrollExtent, ScrollOffset, Theme, WidgetChildSpec, WidgetClipRect, WidgetConfig,
+    WidgetDrawItem, WidgetDrawList, WidgetKind,
+};
 use aether_math::{Rgba, Vec2};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{Image, Rect, background_top_left, decode_png, target_color_stats};
@@ -63,7 +66,7 @@ const TEXTURE_YELLOW: [u8; 3] = [255, 255, 0];
 /// `panel`, matching what `LoadResult.name` reports.
 fn panel_address() -> String {
     use aether_actor::Addressable;
-    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE)
+    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE,)
 }
 
 /// A flat-colored quad draw item in the widget's own local coordinates.
@@ -161,9 +164,39 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8], config: &WidgetConfig) {
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { name, .. } => {
-            assert!(name.ends_with(":panel"), "the Widget root should register under :panel; got {name}");
+            assert!(name.ends_with(":panel"), "the Widget root should register under :panel; got {name}",)
         }
         LoadResult::Err { error } => panic!("load Widget root: {error}"),
+    }
+}
+
+fn load_scroll_panel(bench: &mut TestBench, wasm: &[u8], child: WidgetChildSpec) {
+    let config = PanelConfig {
+        x: 12.0,
+        y: 8.0,
+        width: 64.0,
+        font_namespace: String::new(),
+        font_path: String::new(),
+        theme: Theme::DEFAULT,
+        children: vec![child],
+    };
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm: wasm.to_vec(),
+                    name: Some("panel".to_owned()),
+                    config: config.encode_into_bytes(),
+                    export: Some("aether.kit.widget.panel".to_owned()),
+                },
+            ),
+        )])
+        .expect("load scroll panel sequence");
+    match loaded.reply::<LoadResult>("load").expect("decode scroll-panel LoadResult") {
+        LoadResult::Ok { name, .. } => assert!(name.ends_with(":panel")),
+        LoadResult::Err { error } => panic!("load scroll WidgetPanel: {error}"),
     }
 }
 
@@ -256,7 +289,7 @@ fn flat_panel_is_one_sender_with_chrome_under_children() {
         "child a's rect should read red (its fill over the blue background), got {:?}",
         rgb_at(&img, 18, 18),
     );
-    assert!(dominant(rgb_at(&img, 42, 26), 1), "child b's rect should read green, got {:?}", rgb_at(&img, 42, 26));
+    assert!(dominant(rgb_at(&img, 42, 26), 1), "child b's rect should read green, got {:?}", rgb_at(&img, 42, 26),);
     // A background-only pixel (inside the chrome rect, outside both
     // children) reads blue — the chrome is visible where nothing overdraws.
     assert!(
@@ -345,7 +378,7 @@ fn nested_tree_draws_in_depth_first_order() {
 
     // Depth-first order, read by hue: root chrome (blue) under the interior
     // node's chrome (green) under the interior's leaf (white).
-    assert!(dominant(rgb_at(&img, 16, 18), 0), "leaf a reads red, got {:?}", rgb_at(&img, 16, 18));
+    assert!(dominant(rgb_at(&img, 16, 18), 0), "leaf a reads red, got {:?}", rgb_at(&img, 16, 18),);
     // Inside b's green chrome but outside its white leaf: green wins,
     // proving b's chrome drew over the root's blue background.
     assert!(
@@ -650,12 +683,12 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
     let tolerance = 20;
     let intended_region = Rect { min_x: 29, min_y: 13, max_x: 33, max_y: 17 };
     let intended = target_color_stats(&img, TEXTURE_RED, tolerance, Some(intended_region));
-    assert!(intended.fraction > 0.8, "the child's red UV crop should own its intended region: {intended:?}");
+    assert!(intended.fraction > 0.8, "the child's red UV crop should own its intended region: {intended:?}",);
     let wrong_color = target_color_stats(&img, TEXTURE_GREEN, tolerance, Some(intended_region));
-    assert!(wrong_color.fraction < 0.1, "the red crop must not silently sample the green quadrant: {wrong_color:?}");
+    assert!(wrong_color.fraction < 0.1, "the red crop must not silently sample the green quadrant: {wrong_color:?}",);
     let clipped_out =
         target_color_stats(&img, TEXTURE_RED, tolerance, Some(Rect { min_x: 24, min_y: 12, max_x: 25, max_y: 17 }));
-    assert!(clipped_out.fraction < 0.1, "the textured child must not escape its slot clip: {clipped_out:?}");
+    assert!(clipped_out.fraction < 0.1, "the textured child must not escape its slot clip: {clipped_out:?}",);
     let overlap_blue =
         target_color_stats(&img, TEXTURE_BLUE, tolerance, Some(Rect { min_x: 38, min_y: 18, max_x: 42, max_y: 20 }));
     assert!(
@@ -664,7 +697,102 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
     );
     let final_region = Rect { min_x: 46, min_y: 24, max_x: 49, max_y: 27 };
     let final_yellow = target_color_stats(&img, TEXTURE_YELLOW, tolerance, Some(final_region));
-    assert!(final_yellow.fraction > 0.8, "the final solid should overdraw the blue textured item: {final_yellow:?}");
+    assert!(final_yellow.fraction > 0.8, "the final solid should overdraw the blue textured item: {final_yellow:?}",);
     let covered_blue = target_color_stats(&img, TEXTURE_BLUE, tolerance, Some(final_region));
-    assert!(covered_blue.fraction < 0.1, "the blue crop should be hidden beneath the final solid: {covered_blue:?}");
+    assert!(covered_blue.fraction < 0.1, "the blue crop should be hidden beneath the final solid: {covered_blue:?}",);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // one cohesive exact-layout + four-edge pixel proof
+fn scroll_composition_offsets_content_and_contains_pixels_on_every_viewport_edge() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let content = WidgetConfig {
+        root: false,
+        chrome: vec![quad(0.0, 0.0, 40.0, 32.0, RED), quad(12.0, 12.0, 8.0, 8.0, GREEN)],
+        intrinsic: Some([40.0, 32.0]),
+        children: Vec::new(),
+    };
+    let scroll = WidgetChildSpec {
+        subname: "scroll".to_owned(),
+        kind: WidgetKind::Scroll,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: ScrollConfig {
+            viewport_extent: ScrollExtent { width_pixels: 24.0, height_pixels: 16.0 },
+            content_extent: ScrollExtent { width_pixels: 40.0, height_pixels: 32.0 },
+            initial_offset: ScrollOffset { x_pixels: 8.0, y_pixels: 10.0 },
+            content: WidgetChildSpec {
+                subname: "content".to_owned(),
+                kind: WidgetKind::Composite,
+                origin: [4.0, 3.0],
+                clip: None,
+                config: content.encode_into_bytes(),
+            },
+        }
+        .encode_into_bytes(),
+    };
+
+    let mut bench = TestBench::start_with_size(80, 48).expect("boot");
+    load_scroll_panel(&mut bench, &wasm, scroll);
+    let captured = bench
+        .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], Vec::new()))])
+        .expect("capture scrolled composite");
+    let image = decode_png(captured.captured("snap").expect("scroll capture bytes")).expect("decode scroll capture");
+
+    let clip = ClipRect { x: 12.0, y: 8.0, width: 24.0, height: 16.0 };
+    let snapshot = bench.committed_overlay_snapshot();
+    let content_batch = snapshot
+        .iter()
+        .find(|batch| batch.clip.as_ref() == Some(&clip))
+        .unwrap_or_else(|| panic!("missing scroll viewport batch {clip:?}: {snapshot:?}"));
+    assert_eq!(content_batch.texture_id, WHITE_TEXTURE_ID);
+    assert_eq!(
+        content_batch.quads,
+        vec![
+            RenderTexturedQuad {
+                x: 8.0,
+                y: 1.0,
+                width: 40.0,
+                height: 32.0,
+                u0: 0.0,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+                tint: RED,
+            },
+            RenderTexturedQuad {
+                x: 20.0,
+                y: 13.0,
+                width: 8.0,
+                height: 8.0,
+                u0: 0.0,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+                tint: GREEN,
+            },
+        ],
+        "content_origin - initial_offset and panel placement agree exactly",
+    );
+    assert_eq!(
+        bench.count_observed("aether.render.draw_solid_quads"),
+        2,
+        "the panel background and one equal-clip content run are the only solid batches",
+    );
+
+    let strong_primary = |pixel: [u8; 3], channel: usize| {
+        (0..3).all(|other| other == channel || i16::from(pixel[channel]) > i16::from(pixel[other]) + 80)
+    };
+    assert!(strong_primary(rgb_at(&image, 14, 10), 0));
+    assert!(strong_primary(rgb_at(&image, 22, 15), 1));
+    for (x, y, side) in [(11, 12, "left"), (36, 12, "right"), (20, 7, "top"), (20, 24, "bottom")] {
+        let pixel = rgb_at(&image, x, y);
+        assert!(
+            !strong_primary(pixel, 0) && !strong_primary(pixel, 1),
+            "scroll content escaped the {side} clip edge at ({x}, {y}): {pixel:?}",
+        );
+    }
 }

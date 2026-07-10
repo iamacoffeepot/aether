@@ -40,13 +40,15 @@ mod kinds;
 pub use kinds::*;
 pub mod composite;
 pub mod focus;
-mod panel;
+pub(crate) mod panel;
+mod scroll;
 pub mod set;
 mod state;
 pub mod text_edit;
 pub mod theme;
 
 pub use panel::WidgetPanel;
+pub use scroll::ScrollWidget;
 
 use aether_actor::{ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;

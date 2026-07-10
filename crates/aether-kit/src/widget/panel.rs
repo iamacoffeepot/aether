@@ -64,9 +64,9 @@ use crate::widget::set::{
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
     ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig,
-    PanelConfig, RadioConfig, RadioSelected, SliderChanged, SliderConfig, TextAreaConfig, TextCommitted,
-    TextFieldConfig, WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind,
-    WidgetStateChanged,
+    PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollExtent, ScrollOutcome, ScrollResidual, ScrollWidget,
+    SliderChanged, SliderConfig, TextAreaConfig, TextCommitted, TextFieldConfig, Widget, WidgetChildSpec,
+    WidgetClipRect, WidgetConfig, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
 };
 use crate::widget::{accept_child_list, emit, flush_membership};
 
@@ -78,13 +78,37 @@ struct ChildRef {
     name: String,
 }
 
-struct SpawnedChild {
-    id: MailboxId,
-    height: f32,
-    pointer_eligible: bool,
-    focusable: bool,
-    state: WidgetControlState,
-    type_namespace: &'static str,
+#[derive(Clone, Copy)]
+pub enum ChildLayout {
+    Panel { row_height_pixels: f32 },
+    Content { assigned_extent: ScrollExtent },
+}
+
+impl ChildLayout {
+    fn row_height_pixels(self) -> f32 {
+        match self {
+            Self::Panel { row_height_pixels } => row_height_pixels,
+            Self::Content { assigned_extent } => assigned_extent.height_pixels,
+        }
+    }
+
+    fn accepts_scroll_viewport(self, viewport: ScrollExtent) -> bool {
+        match self {
+            Self::Panel { .. } => true,
+            Self::Content { assigned_extent } => viewport == assigned_extent,
+        }
+    }
+}
+
+pub struct SpawnedChild {
+    pub id: MailboxId,
+    pub width_pixels: Option<f32>,
+    pub height_pixels: f32,
+    pub pointer_eligible: bool,
+    pub focusable: bool,
+    pub state: WidgetControlState,
+    pub type_namespace: &'static str,
+    pub scroll_viewport: Option<ScrollExtent>,
 }
 
 /// The reference panel root. Loaded as a component with a [`PanelConfig`]; its
@@ -96,6 +120,9 @@ pub struct WidgetPanel {
     theme: Theme,
     composite: Composite,
     focus: Focus,
+    /// Wheel-only hit table. It intentionally excludes ordinary controls so
+    /// drag capture in `focus` cannot steal a separate wheel gesture.
+    scroll_focus: Focus,
     children: Vec<ChildRef>,
     spawned: bool,
     /// The total stack height, for the background chrome; set at spawn.
@@ -125,7 +152,7 @@ impl WidgetPanel {
         let gap = self.theme.gap;
         let mut y = self.config.y;
 
-        let row_rect = |y: f32, height: f32| WidgetFrame { x, y, width, height };
+        let row_rect = |y: f32, width: f32, height: f32| WidgetFrame { x, y, width, height };
 
         let specs =
             if self.config.children.is_empty() { reference_stack(&self.theme) } else { self.config.children.clone() };
@@ -139,7 +166,7 @@ impl WidgetPanel {
             // from any arm (an undecodable config, a spawn failure, or a
             // rejected container) skips the slot entirely so the stack
             // stays honest.
-            let placed = spawn_panel_child(ctx, spec, row);
+            let placed = spawn_widget_child(ctx, spec, ChildLayout::Panel { row_height_pixels: row });
             let Some(placed) = placed else {
                 continue;
             };
@@ -147,8 +174,13 @@ impl WidgetPanel {
                 y += gap;
             }
             first = false;
-            self.place(ctx, &placed, row_rect(y, placed.height), spec.subname.clone());
-            y += placed.height;
+            self.place(
+                ctx,
+                &placed,
+                row_rect(y, placed.width_pixels.unwrap_or(width), placed.height_pixels),
+                spec.subname.clone(),
+            );
+            y += placed.height_pixels;
         }
 
         self.panel_height = y - self.config.y;
@@ -172,6 +204,14 @@ impl WidgetPanel {
             FocusEligibility { pointer: child.pointer_eligible, keyboard: child.focusable },
             &child.state,
         );
+        if child.scroll_viewport.is_some() {
+            self.scroll_focus.register(
+                child.id,
+                FocusRect { x: frame.x, y: frame.y, width: frame.width, height: frame.height },
+                FocusEligibility { pointer: true, keyboard: false },
+                &WidgetControlState::default(),
+            );
+        }
         ctx.send_to(child.id, &frame);
         self.children.push(ChildRef { id: child.id, name });
     }
@@ -202,39 +242,50 @@ impl WidgetPanel {
 /// Decode, spawn, and derive one panel child's static/dynamic routing profile.
 /// Keeping this dispatch out of `ensure_spawned` leaves the layout loop focused
 /// on ordering and placement.
-fn spawn_panel_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
+pub fn spawn_widget_child(
+    ctx: &mut WasmCtx<'_, Manual>,
+    spec: &WidgetChildSpec,
+    layout: ChildLayout,
+) -> Option<SpawnedChild> {
+    let row = layout.row_height_pixels();
     match spec.kind {
         WidgetKind::Label => decode_child::<LabelConfig>(spec).and_then(|config| {
             let state = config.state.clone();
             spawn::<LabelWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
-                height: row,
+                width_pixels: None,
+                height_pixels: row,
                 pointer_eligible: false,
                 focusable: false,
                 state,
                 type_namespace: <LabelWidget as Addressable>::NAMESPACE,
+                scroll_viewport: None,
             })
         }),
         WidgetKind::Image => decode_child::<ImageConfig>(spec).and_then(|config| {
             let state = config.state.clone();
             spawn::<ImageWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
-                height: row,
+                width_pixels: None,
+                height_pixels: row,
                 pointer_eligible: false,
                 focusable: false,
                 state,
                 type_namespace: <ImageWidget as Addressable>::NAMESPACE,
+                scroll_viewport: None,
             })
         }),
         WidgetKind::Slider => decode_child::<SliderConfig>(spec).and_then(|config| {
             let state = config.state.clone();
             spawn::<SliderWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
-                height: row,
+                width_pixels: None,
+                height_pixels: row,
                 pointer_eligible: true,
                 focusable: true,
                 state,
                 type_namespace: <SliderWidget as Addressable>::NAMESPACE,
+                scroll_viewport: None,
             })
         }),
         WidgetKind::Radio => decode_child::<RadioConfig>(spec).and_then(|config| {
@@ -242,22 +293,26 @@ fn spawn_panel_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row:
             let state = config.state.clone();
             spawn::<RadioGroupWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
-                height,
+                width_pixels: None,
+                height_pixels: height,
                 pointer_eligible: true,
                 focusable: true,
                 state,
                 type_namespace: <RadioGroupWidget as Addressable>::NAMESPACE,
+                scroll_viewport: None,
             })
         }),
         WidgetKind::TextField => decode_child::<TextFieldConfig>(spec).and_then(|config| {
             let state = config.state.clone();
             spawn::<TextFieldWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
-                height: row,
+                width_pixels: None,
+                height_pixels: row,
                 pointer_eligible: true,
                 focusable: true,
                 state,
                 type_namespace: <TextFieldWidget as Addressable>::NAMESPACE,
+                scroll_viewport: None,
             })
         }),
         WidgetKind::TextArea => decode_child::<TextAreaConfig>(spec).and_then(|config| {
@@ -265,34 +320,92 @@ fn spawn_panel_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row:
             let state = config.state.clone();
             spawn::<TextAreaWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
-                height,
+                width_pixels: None,
+                height_pixels: height,
                 pointer_eligible: true,
                 focusable: true,
                 state,
                 type_namespace: <TextAreaWidget as Addressable>::NAMESPACE,
+                scroll_viewport: None,
             })
         }),
         WidgetKind::Button => decode_child::<ButtonConfig>(spec).and_then(|config| {
             let state = config.state.clone();
             spawn::<ButtonWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
-                height: row,
+                width_pixels: None,
+                height_pixels: row,
                 pointer_eligible: true,
                 focusable: true,
                 state,
                 type_namespace: <ButtonWidget as Addressable>::NAMESPACE,
+                scroll_viewport: None,
             })
         }),
         WidgetKind::BehaviorHost => spawn_behavior_host(ctx, spec, row),
-        WidgetKind::Composite => {
-            tracing::warn!(
-                target: "aether_kit",
-                subname = %spec.subname,
-                "a Composite child in a panel is not supported (nested \
-                 containers are out of scope in v1); slot skipped",
-            );
-            None
-        }
+        WidgetKind::Composite | WidgetKind::Scroll => spawn_container_child(ctx, spec, layout, row),
+    }
+}
+
+fn spawn_container_child(
+    ctx: &mut WasmCtx<'_, Manual>,
+    spec: &WidgetChildSpec,
+    layout: ChildLayout,
+    row_height_pixels: f32,
+) -> Option<SpawnedChild> {
+    match spec.kind {
+        WidgetKind::Composite => decode_child::<WidgetConfig>(spec).and_then(|config| {
+            let intrinsic = config.intrinsic;
+            spawn::<Widget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                width_pixels: intrinsic
+                    .and_then(|extent| (extent[0].is_finite() && extent[0] >= 0.0).then_some(extent[0])),
+                height_pixels: intrinsic
+                    .and_then(|extent| (extent[1].is_finite() && extent[1] >= 0.0).then_some(extent[1]))
+                    .unwrap_or(row_height_pixels),
+                pointer_eligible: false,
+                focusable: false,
+                state: WidgetControlState::default(),
+                type_namespace: <Widget as Addressable>::NAMESPACE,
+                scroll_viewport: None,
+            })
+        }),
+        WidgetKind::Scroll => decode_child::<ScrollConfig>(spec).and_then(|config| {
+            if !layout.accepts_scroll_viewport(config.viewport_extent) {
+                let ChildLayout::Content { assigned_extent } = layout else {
+                    unreachable!("panel layout accepts every finite scroll viewport")
+                };
+                tracing::warn!(
+                    target: "aether_kit",
+                    subname = %spec.subname,
+                    assigned_width_pixels = assigned_extent.width_pixels,
+                    assigned_height_pixels = assigned_extent.height_pixels,
+                    viewport_width_pixels = config.viewport_extent.width_pixels,
+                    viewport_height_pixels = config.viewport_extent.height_pixels,
+                    "nested scroll viewport does not match its assigned content extent; slot skipped",
+                );
+                return None;
+            }
+            let viewport = config.viewport_extent;
+            spawn::<ScrollWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                width_pixels: Some(viewport.width_pixels),
+                height_pixels: viewport.height_pixels,
+                pointer_eligible: false,
+                focusable: false,
+                state: WidgetControlState::default(),
+                type_namespace: <ScrollWidget as Addressable>::NAMESPACE,
+                scroll_viewport: Some(viewport),
+            })
+        }),
+        WidgetKind::Label
+        | WidgetKind::Image
+        | WidgetKind::Slider
+        | WidgetKind::Radio
+        | WidgetKind::TextField
+        | WidgetKind::TextArea
+        | WidgetKind::Button
+        | WidgetKind::BehaviorHost => unreachable!("caller sends only container kinds"),
     }
 }
 
@@ -434,11 +547,38 @@ where
     }
 }
 
+#[cfg(feature = "behavior")]
+fn behavior_mirror_kinds() -> Vec<u64> {
+    vec![
+        LabelConfig::ID.0,
+        ImageConfig::ID.0,
+        SliderConfig::ID.0,
+        TextFieldConfig::ID.0,
+        TextAreaConfig::ID.0,
+        ButtonConfig::ID.0,
+        RadioConfig::ID.0,
+        SliderChanged::ID.0,
+        TextCommitted::ID.0,
+        ButtonClicked::ID.0,
+        RadioSelected::ID.0,
+        FocusGained::ID.0,
+        FocusLost::ID.0,
+        HoverGained::ID.0,
+        HoverLost::ID.0,
+        crate::widget::SetWidgetState::ID.0,
+        WidgetStateChanged::ID.0,
+        crate::widget::ChildrenChanged::ID.0,
+        ScrollOutcome::ID.0,
+        ScrollResidual::ID.0,
+    ]
+}
+
 /// Spawn a [`WidgetKind::BehaviorHost`] slot (issue 2687): decode the
 /// [`BehaviorHostSpec`], map the wrapped widget kind to its type tag, build the
 /// `aether-behavior` `HostConfig`, and spawn the host by tag (#2692) — the host
 /// then spawns the wrapped widget as its own inline child and interposes on the
-/// slot's mail. Returns the placed-tuple shape the other arms produce; `None`
+/// slot's mail. Returns the named [`SpawnedChild`] profile the other arms
+/// produce; `None`
 /// (slot skipped) on an unsupported wrapped kind, a decode failure, or a spawn
 /// error. The panel's per-frame `Collect` is handed to the host as its FRAME
 /// trigger.
@@ -488,7 +628,7 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
             let config = decode_named::<ButtonConfig>(&spec.subname, &host_spec.wrapped_config)?;
             (row, true, true, config.state)
         }
-        WidgetKind::Composite | WidgetKind::BehaviorHost => return None,
+        WidgetKind::Composite | WidgetKind::Scroll | WidgetKind::BehaviorHost => return None,
     };
     let script = match host_spec.script {
         ScriptRef::None => ScriptSource::None,
@@ -517,26 +657,7 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
         // The panel drives the wrapped slot with `Collect` each frame; hand the
         // host that kind as its FRAME sentinel trigger.
         frame_trigger: Collect::ID.0,
-        mirror_kinds: vec![
-            LabelConfig::ID.0,
-            ImageConfig::ID.0,
-            SliderConfig::ID.0,
-            TextFieldConfig::ID.0,
-            TextAreaConfig::ID.0,
-            ButtonConfig::ID.0,
-            RadioConfig::ID.0,
-            SliderChanged::ID.0,
-            TextCommitted::ID.0,
-            ButtonClicked::ID.0,
-            RadioSelected::ID.0,
-            FocusGained::ID.0,
-            FocusLost::ID.0,
-            HoverGained::ID.0,
-            HoverLost::ID.0,
-            crate::widget::SetWidgetState::ID.0,
-            WidgetStateChanged::ID.0,
-            crate::widget::ChildrenChanged::ID.0,
-        ],
+        mirror_kinds: behavior_mirror_kinds(),
     };
     let bytes = config.encode_into_bytes();
     match ctx.spawn_inline_child_by_tag(
@@ -546,11 +667,13 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
     ) {
         Ok(id) => Some(SpawnedChild {
             id,
-            height,
+            width_pixels: None,
+            height_pixels: height,
             pointer_eligible,
             focusable,
             state,
             type_namespace: <aether_behavior::BehaviorHost as Addressable>::NAMESPACE,
+            scroll_viewport: None,
         }),
         Err(error) => {
             tracing::warn!(
@@ -599,6 +722,7 @@ impl WasmActor for WidgetPanel {
             config,
             composite: Composite::new(),
             focus: Focus::new(),
+            scroll_focus: Focus::new(),
             children: Vec::new(),
             spawned: false,
             panel_height: 0.0,
@@ -705,14 +829,15 @@ impl WasmActor for WidgetPanel {
         }
     }
 
-    /// Reserved for scroll-aware widgets; no widget consumes the wheel in v1,
-    /// so the panel absorbs it here (subscribed, but dropped) rather than
-    /// forwarding an unhandled kind to a child.
-    // Subscribing the stream needs a handler to sink it; there is no per-panel
-    // wheel state yet, so the handler is deliberately empty.
-    #[allow(clippy::unused_self)]
+    /// Route a wheel to the topmost scroll viewport under the cursor. This is
+    /// deliberately a fresh `hit_test`, not `pointer_target`: a button's drag
+    /// capture owns move/release, not a separate wheel gesture.
     #[handler::single]
-    fn on_mouse_wheel(&mut self, _ctx: &mut WasmCtx<'_>, _wheel: MouseWheel) {}
+    fn on_mouse_wheel(&mut self, ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
+        if let Some(child) = self.scroll_focus.hit_test(wheel.x, wheel.y) {
+            ctx.send_to(child, &wheel);
+        }
+    }
 
     /// Tab cycles focus; every other key forwards to the focused child.
     #[handler::single]
@@ -773,6 +898,40 @@ impl WasmActor for WidgetPanel {
         };
         let effects = self.focus.update_availability(source, &changed.state);
         apply_availability(ctx, effects);
+    }
+
+    /// Observe one descendant scroll container's exact typed outcome. The
+    /// `container` field remains authoritative after intermediate scroll
+    /// actors relay the event unchanged.
+    #[allow(clippy::unused_self)] // actor handler ABI always receives state
+    #[handler::manual]
+    fn on_scroll_outcome(&mut self, ctx: &mut WasmCtx<'_, Manual>, outcome: ScrollOutcome) {
+        tracing::info!(
+            target: "aether_kit",
+            source = ctx.source_mailbox().unwrap_or(MailboxId::NONE).0,
+            container = outcome.container.0,
+            offset_x_pixels = outcome.offset.x_pixels,
+            offset_y_pixels = outcome.offset.y_pixels,
+            consumed_x_pixels = outcome.consumed.x_pixels,
+            consumed_y_pixels = outcome.consumed.y_pixels,
+            residual_x_pixels = outcome.residual.x_pixels,
+            residual_y_pixels = outcome.residual.y_pixels,
+            "widget scroll outcome",
+        );
+    }
+
+    /// The root is the terminal residual sink. Log every named axis field and
+    /// drop the remainder; no second wheel-sign conversion occurs here.
+    #[allow(clippy::unused_self)] // actor handler ABI always receives state
+    #[handler::manual]
+    fn on_scroll_residual(&mut self, ctx: &mut WasmCtx<'_, Manual>, residual: ScrollResidual) {
+        tracing::info!(
+            target: "aether_kit",
+            source = ctx.source_mailbox().unwrap_or(MailboxId::NONE).0,
+            residual_x_pixels = residual.x_pixels,
+            residual_y_pixels = residual.y_pixels,
+            "widget terminal scroll residual",
+        );
     }
 
     /// A slider value-up. The map-editor seam: translate to world-knob driver
@@ -855,6 +1014,52 @@ impl WasmActor for WidgetPanel {
     }
 }
 
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn nested_scroll_requires_the_exact_named_assigned_extent() {
+        let assigned_extent = ScrollExtent { width_pixels: 80.0, height_pixels: 50.0 };
+        let content = ChildLayout::Content { assigned_extent };
+        assert!(content.accepts_scroll_viewport(assigned_extent));
+        assert!(!content.accepts_scroll_viewport(ScrollExtent { width_pixels: 80.0, height_pixels: 49.0 }));
+        assert!(
+            ChildLayout::Panel { row_height_pixels: 24.0 }
+                .accepts_scroll_viewport(ScrollExtent { width_pixels: 12.0, height_pixels: 8.0 })
+        );
+    }
+
+    #[test]
+    fn scroll_config_decodes_from_the_closed_child_spec_and_rejects_bad_bytes() {
+        let config = ScrollConfig {
+            viewport_extent: ScrollExtent { width_pixels: 40.0, height_pixels: 30.0 },
+            content_extent: ScrollExtent { width_pixels: 60.0, height_pixels: 90.0 },
+            ..ScrollConfig::default()
+        };
+        let valid = WidgetChildSpec {
+            subname: String::from("scroll"),
+            kind: WidgetKind::Scroll,
+            origin: [0.0, 0.0],
+            clip: None,
+            config: config.encode_into_bytes(),
+        };
+        let decoded = decode_child::<ScrollConfig>(&valid).expect("scroll config decodes");
+        assert_eq!(decoded.viewport_extent, config.viewport_extent);
+        assert_eq!(decoded.content_extent, config.content_extent);
+
+        let malformed = WidgetChildSpec { config: vec![0xff], ..valid };
+        assert!(decode_child::<ScrollConfig>(&malformed).is_none());
+    }
+
+    #[cfg(not(feature = "behavior"))]
+    #[test]
+    fn feature_off_keeps_behavior_host_and_scroll_unwrappable() {
+        assert_eq!(WidgetKind::BehaviorHost.type_tag(), None);
+        assert_eq!(WidgetKind::Scroll.type_tag(), None);
+    }
+}
+
 #[cfg(all(test, feature = "behavior"))]
 mod behavior_tests {
     use super::*;
@@ -877,7 +1082,15 @@ mod behavior_tests {
         assert_eq!(WidgetKind::TextField.type_tag(), Some(ActorTypeTag::of::<TextFieldWidget>().0));
         assert_eq!(WidgetKind::TextArea.type_tag(), Some(ActorTypeTag::of::<TextAreaWidget>().0));
         assert_eq!(WidgetKind::Composite.type_tag(), None);
+        assert_eq!(WidgetKind::Scroll.type_tag(), None);
         assert_eq!(WidgetKind::BehaviorHost.type_tag(), None);
+    }
+
+    #[test]
+    fn behavior_host_mirrors_scroll_observability_kinds() {
+        let mirrored = behavior_mirror_kinds();
+        assert!(mirrored.contains(&ScrollOutcome::ID.0));
+        assert!(mirrored.contains(&ScrollResidual::ID.0));
     }
 
     // Tripwire: a `BehaviorHostSpec` carrying a stock wrapped widget encodes as
