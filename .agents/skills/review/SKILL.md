@@ -1,6 +1,6 @@
 ---
 name: review
-description: "Run Aether pre-land review with specialist lenses. Use to audit a change for spec fidelity, correctness, test integrity, economy, and convention before un-drafting."
+description: "Run Aether pre-land review with specialist lenses. Integrated review of a PR-bound change is automatic in CI (the review action runs it at the PR's first green) — do not run this inline at the end of implement. Use for backfill audits of existing code, or for a change that never becomes a PR."
 ---
 
 # Review
