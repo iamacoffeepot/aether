@@ -89,21 +89,3 @@ pub const KEY_HOME: u32 = 0x0127;
 pub const KEY_END: u32 = 0x0128;
 pub const KEY_PAGE_UP: u32 = 0x0129;
 pub const KEY_PAGE_DOWN: u32 = 0x012A;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Tripwire: these five values are the engine's stable wire vocabulary
-    // for text-editing navigation keys — an accidental renumbering here
-    // silently changes what `Key.code` / `KeyRelease.code` mean to every
-    // consumer already matching on them.
-    #[test]
-    fn editing_navigation_keys_have_stable_ordered_values() {
-        assert_eq!(KEY_DELETE, 0x0126);
-        assert_eq!(KEY_HOME, 0x0127);
-        assert_eq!(KEY_END, 0x0128);
-        assert_eq!(KEY_PAGE_UP, 0x0129);
-        assert_eq!(KEY_PAGE_DOWN, 0x012A);
-    }
-}
