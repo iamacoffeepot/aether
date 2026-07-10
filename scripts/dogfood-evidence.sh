@@ -67,7 +67,14 @@ if git -C "$work_dir" diff --cached --quiet; then
   exit 0
 fi
 
-git -C "$work_dir" commit -q -m "evidence: dogfood run $issue/$run_id"
+# Commit with an explicit bot identity: the CI runner has no git
+# user.name/email configured, and commit dies on "empty ident name"
+# without one. -c scoped so nothing leaks into the invoking checkout's
+# config when the script runs on a dev box.
+git -C "$work_dir" \
+  -c user.name="github-actions[bot]" \
+  -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+  commit -q -m "evidence: dogfood run $issue/$run_id"
 
 # Push with fetch-and-reapply retries. A rejected push means another run
 # advanced the branch between our fetch and our push; rebase our single
@@ -86,5 +93,9 @@ while true; do
   fi
   echo "dogfood-evidence: push rejected, refetching and reapplying (attempt $attempt/$max_retries)" >&2
   git -C "$work_dir" fetch "$remote" "$branch"
-  git -C "$work_dir" rebase "$remote/$branch"
+  # Rebase recommits, so it needs the same explicit identity as the commit.
+  git -C "$work_dir" \
+    -c user.name="github-actions[bot]" \
+    -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+    rebase "$remote/$branch"
 done
