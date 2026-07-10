@@ -577,6 +577,185 @@ fn committed_overlay_snapshot_excludes_record_time_rejections() {
     );
 }
 
+/// Palette for the four-quadrant texture built by
+/// `four_quadrant_texture_pixels` and probed by
+/// `target_color_stats_distinguishes_quadrant_colors_on_real_capture`.
+const QUADRANT_RED: [u8; 3] = [255, 0, 0];
+const QUADRANT_GREEN: [u8; 3] = [0, 255, 0];
+const QUADRANT_BLUE: [u8; 3] = [0, 0, 255];
+const QUADRANT_YELLOW: [u8; 3] = [255, 255, 0];
+
+/// Build a `size x size` opaque RGBA8 texture split into four solid
+/// color quadrants: red (top-left), green (top-right), blue
+/// (bottom-left), yellow (bottom-right).
+fn four_quadrant_texture_pixels(size: u32) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let color = match (x < size / 2, y < size / 2) {
+                (true, true) => QUADRANT_RED,
+                (false, true) => QUADRANT_GREEN,
+                (true, false) => QUADRANT_BLUE,
+                (false, false) => QUADRANT_YELLOW,
+            };
+            pixels.extend_from_slice(&[color[0], color[1], color[2], 255]);
+        }
+    }
+    pixels
+}
+
+/// Assert `target_color_stats` reports a high matching fraction for
+/// `target` within `region`, with a centroid landing inside that same
+/// region — the per-quadrant assertion shared by
+/// `target_color_stats_distinguishes_quadrant_colors_on_real_capture`.
+#[allow(clippy::cast_precision_loss)]
+fn assert_quadrant_matches(img: &Image, label: &str, region: Rect, target: [u8; 3], tolerance: u8) {
+    let stats = target_color_stats(img, target, tolerance, Some(region));
+    assert!(
+        stats.fraction > 0.8,
+        "{label} quadrant probe matched {target:?} at fraction {}, expected > 0.8 \
+         (region {region:?})",
+        stats.fraction,
+    );
+    let center = stats.centroid.expect("high-fraction probe has a centroid");
+    assert!(
+        (region.min_x as f32..=region.max_x as f32).contains(&center.x)
+            && (region.min_y as f32..=region.max_y as f32).contains(&center.y),
+        "{label} centroid ({}, {}) should sit inside its own probe \
+         region {region:?}",
+        center.x,
+        center.y,
+    );
+    assert_eq!(
+        stats.bounding_box,
+        Some(region),
+        "{label} target-color extent should exactly recover its inset probe region",
+    );
+}
+
+/// Prerequisite for issue #2912's `target_color_stats`: create a
+/// four-quadrant RGBA8 texture, draw it as a known `Screen`-space quad,
+/// decode the capture, and probe an inset rect in each quadrant. Unlike
+/// `textured_quad_draws_screen_space_rect` (which only proves
+/// *something* lit the requested rect against a dark background), this
+/// proves the color-aware probe: the intended color owns a high
+/// matching fraction with a bounded centroid inside its own quadrant,
+/// while the same target has near-zero matches in a neighboring
+/// quadrant that holds a different color. Probe rects are inset from
+/// every quadrant edge (including the internal seams) so
+/// linear-filtered boundary texels never fall inside a probed region.
+#[test]
+fn target_color_stats_distinguishes_quadrant_colors_on_real_capture() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let (frame_width, frame_height) = (64u32, 48u32);
+    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+
+    let texture_size = 8u32;
+    let pixels = four_quadrant_texture_pixels(texture_size);
+    let created = bench
+        .execute(vec![(
+            "create",
+            BenchOp::send_and_await(
+                "aether.render",
+                &CreateTexture {
+                    width: texture_size,
+                    height: texture_size,
+                    format: TextureFormat::Rgba8,
+                    pixels,
+                },
+            ),
+        )])
+        .expect("create_texture sequence");
+    let texture_id = match created
+        .reply::<CreateTextureResult>("create")
+        .expect("decode CreateTextureResult")
+    {
+        CreateTextureResult::Ok { texture_id } => texture_id,
+        CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
+    };
+
+    // Screen rect (16, 12) sized 32x24: columns 16..48, rows 12..36,
+    // split at the midlines x=32 / y=24 into four 16x12 quadrants
+    // matching the texture's u/v split.
+    let pre = vec![envelope(
+        "aether.render",
+        &DrawTexturedQuads {
+            texture_id,
+            space: QuadSpace::Screen,
+            clip: None,
+            quads: vec![TexturedQuad {
+                x: 16.0,
+                y: 12.0,
+                width: 32.0,
+                height: 24.0,
+                u0: 0.0,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+                tint: Rgba::new(1.0, 1.0, 1.0, 1.0),
+            }],
+        },
+    )];
+
+    let captured = bench
+        .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
+        .expect("capture-with-mails");
+    let png = captured.captured("snap").expect("snap step ran");
+    let img = decode_png(png).expect("decode capture png");
+    let tolerance = 20;
+
+    // Inset 8x4 probe rects, one per quadrant, each pulled at least 4px
+    // back from its quadrant's outer edges and the internal x=32/y=24
+    // seams so no linear-filtered boundary texel falls inside a probe.
+    let top_left = Rect {
+        min_x: 20,
+        min_y: 16,
+        max_x: 27,
+        max_y: 19,
+    };
+    let top_right = Rect {
+        min_x: 36,
+        min_y: 16,
+        max_x: 43,
+        max_y: 19,
+    };
+    let bottom_left = Rect {
+        min_x: 20,
+        min_y: 28,
+        max_x: 27,
+        max_y: 31,
+    };
+    let bottom_right = Rect {
+        min_x: 36,
+        min_y: 28,
+        max_x: 43,
+        max_y: 31,
+    };
+
+    assert_quadrant_matches(&img, "top-left", top_left, QUADRANT_RED, tolerance);
+    assert_quadrant_matches(&img, "top-right", top_right, QUADRANT_GREEN, tolerance);
+    assert_quadrant_matches(&img, "bottom-left", bottom_left, QUADRANT_BLUE, tolerance);
+    assert_quadrant_matches(
+        &img,
+        "bottom-right",
+        bottom_right,
+        QUADRANT_YELLOW,
+        tolerance,
+    );
+
+    // Cross-check: the top-left region's own color (red) does not
+    // appear in the top-right region, which holds green.
+    let cross = target_color_stats(&img, QUADRANT_RED, tolerance, Some(top_right));
+    assert!(
+        cross.fraction < 0.1,
+        "red target matched {} fraction of the top-right (green) quadrant probe, \
+         expected < 0.1",
+        cross.fraction,
+    );
+}
+
 /// Issue #2831: a destroyed texture is removed from the registry, so a
 /// later draw using the old id warn-drops during frame record and the
 /// captured frame returns to clear color.

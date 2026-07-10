@@ -88,6 +88,21 @@ fn is_lit(rgb: &[u8], bg: [u8; 3], tol: u8) -> bool {
     rgb[0].abs_diff(bg[0]) > tol || rgb[1].abs_diff(bg[1]) > tol || rgb[2].abs_diff(bg[2]) > tol
 }
 
+/// A pixel "matches" `target` when every one of its RGB channels is
+/// within an inclusive `tolerance` of the corresponding target channel —
+/// the logical complement of `is_lit` against the same reference color
+/// and tolerance (`matches_target(rgb, c, tol) == !is_lit(rgb, c, tol)`),
+/// but named and used separately: `is_lit` partitions the frame relative
+/// to a *background* for the silhouette reductions, while
+/// `matches_target` asks whether a pixel *is* a known *foreground*
+/// color for `target_color_stats`. `rgb` is the leading three bytes of
+/// an RGBA chunk; alpha is ignored.
+fn matches_target(rgb: &[u8], target: [u8; 3], tolerance: u8) -> bool {
+    rgb[0].abs_diff(target[0]) <= tolerance
+        && rgb[1].abs_diff(target[1]) <= tolerance
+        && rgb[2].abs_diff(target[2]) <= tolerance
+}
+
 /// Clamp a requested region against the frame bounds, yielding the
 /// `Rect` a reduction should walk: `None` (no region requested) maps to
 /// the whole frame; `Some(rect)` maps to the frame-clamped
@@ -211,6 +226,33 @@ impl From<Rect> for FrameRect {
     }
 }
 
+/// A point in absolute frame pixel coordinates. Coordinates may be
+/// fractional when the point is an aggregate such as a pixel centroid;
+/// `x` increases across columns and `y` increases down rows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FramePoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Bounded target-color statistics for a frame-clamped region, returned
+/// by `target_color_stats`: how many pixels the region walk sampled, how
+/// many matched the requested target within tolerance, the resulting
+/// matching fraction, and the matched pixels' centroid and bounding box
+/// (both in absolute frame coordinates, mirroring `centroid` /
+/// `bounding_box`). The centroid is a [`FramePoint`] whose named `x`
+/// and `y` fields make the coordinate order explicit. `centroid` and
+/// `bounding_box` are `None` exactly when `matching` is `0` — an empty
+/// match set has no location or extent to report.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColorRegionStats {
+    pub sampled: u64,
+    pub matching: u64,
+    pub fraction: f32,
+    pub centroid: Option<FramePoint>,
+    pub bounding_box: Option<Rect>,
+}
+
 /// Region-scoped core of `coverage`: lit pixels within the
 /// frame-clamped `region` divided by the clamped region's pixel count.
 /// `region: None` scores the whole frame. Guards the divide-by-zero the
@@ -327,6 +369,79 @@ fn bounding_box_in_region(
 #[allow(clippy::cast_possible_truncation)]
 pub fn bounding_box(image: &Image, bg: [u8; 3], tol: u8) -> Option<Rect> {
     bounding_box_in_region(image, None, bg, tol)
+}
+
+/// Bounded target-color statistics for the frame-clamped `region`: walk
+/// the region once, counting pixels whose RGB is within an inclusive
+/// per-channel `tolerance` of `target` (`matches_target`; alpha
+/// ignored, matching every other reduction's convention), and return
+/// the aggregate `ColorRegionStats` — sampled and matching pixel
+/// counts, matching fraction, and the matched pixels' centroid and
+/// bounding box in absolute frame coordinates. The centroid's named
+/// `FramePoint` `x` and `y` fields identify the axes.
+/// `region: None` scores the whole frame. An empty or fully out-of-frame
+/// region (an empty `clamp_region` result — a zero-size frame, a region
+/// entirely outside the frame, or a degenerate `min > max`) yields zero
+/// sampled/matching counts, `0.0` fraction, and no centroid/bounding
+/// box; a non-empty region with no matching pixel reports its non-zero
+/// `sampled` count alongside the same zero `matching`/`fraction`/`None`
+/// geometry.
+#[must_use]
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+pub fn target_color_stats(
+    image: &Image,
+    target: [u8; 3],
+    tolerance: u8,
+    region: Option<Rect>,
+) -> ColorRegionStats {
+    let empty = ColorRegionStats {
+        sampled: 0,
+        matching: 0,
+        fraction: 0.0,
+        centroid: None,
+        bounding_box: None,
+    };
+    let Some(rect) = clamp_region(region, image.width, image.height) else {
+        return empty;
+    };
+    let sampled = region_pixel_count(rect);
+    let mut matching = 0u64;
+    let mut sum_x = 0u64;
+    let mut sum_y = 0u64;
+    let mut min_x = u32::MAX;
+    let mut min_y = u32::MAX;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    for (x, y, rgb) in region_pixels(image, rect) {
+        if !matches_target(rgb, target, tolerance) {
+            continue;
+        }
+        matching += 1;
+        sum_x += u64::from(x);
+        sum_y += u64::from(y);
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    if matching == 0 {
+        return ColorRegionStats { sampled, ..empty };
+    }
+    ColorRegionStats {
+        sampled,
+        matching,
+        fraction: matching as f32 / sampled as f32,
+        centroid: Some(FramePoint {
+            x: sum_x as f32 / matching as f32,
+            y: sum_y as f32 / matching as f32,
+        }),
+        bounding_box: Some(Rect {
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        }),
+    }
 }
 
 /// RGB of the top-left pixel — the conventional background reference
@@ -777,6 +892,235 @@ mod tests {
         assert_eq!(coverage_in_region(&img, Some(degenerate), bg, 5), 0.0);
         assert!(centroid_in_region(&img, Some(degenerate), bg, 5).is_none());
         assert!(bounding_box_in_region(&img, Some(degenerate), bg, 5).is_none());
+    }
+
+    #[test]
+    fn target_color_stats_matches_within_inclusive_tolerance_boundary() {
+        // A pixel exactly `tolerance` away on every channel must match
+        // (inclusive bound); one channel a single unit further must not.
+        let target = [200, 32, 32];
+        let tolerance = 5;
+        let on_boundary = solid(2, 2, [205, 37, 27, 255]);
+        let stats = target_color_stats(&on_boundary, target, tolerance, None);
+        assert_eq!(
+            stats.matching, 4,
+            "a pixel exactly at the tolerance boundary must match"
+        );
+
+        let past_boundary = solid(2, 2, [206, 32, 32, 255]);
+        let stats = target_color_stats(&past_boundary, target, tolerance, None);
+        assert_eq!(
+            stats.matching, 0,
+            "a pixel one unit past the tolerance boundary must not match"
+        );
+        assert_eq!(stats.sampled, 4);
+        assert_eq!(stats.fraction, 0.0);
+        assert_eq!(stats.centroid, None);
+        assert_eq!(stats.bounding_box, None);
+    }
+
+    #[test]
+    fn target_color_stats_ignores_alpha() {
+        // Same RGB, wildly different alpha — the match predicate must
+        // ignore alpha entirely, matching every other reduction's
+        // convention.
+        let target = [10, 20, 30];
+        let opaque = solid(2, 2, [10, 20, 30, 255]);
+        let transparent = solid(2, 2, [10, 20, 30, 0]);
+        let opaque_stats = target_color_stats(&opaque, target, 0, None);
+        let transparent_stats = target_color_stats(&transparent, target, 0, None);
+        assert_eq!(opaque_stats.matching, 4);
+        assert_eq!(
+            transparent_stats.matching, 4,
+            "alpha must not affect the target-color match"
+        );
+    }
+
+    #[test]
+    fn target_color_stats_excludes_matches_outside_requested_region() {
+        let target = [200, 32, 32];
+        let bg = [69, 79, 105];
+        // Two separate target-colored rects: one the requested region
+        // will include, one it will exclude entirely.
+        let included_rect = Rect {
+            min_x: 4,
+            min_y: 6,
+            max_x: 7,
+            max_y: 9,
+        };
+        let excluded_rect = Rect {
+            min_x: 12,
+            min_y: 12,
+            max_x: 14,
+            max_y: 14,
+        };
+        let mut img = solid_with_rect(
+            16,
+            16,
+            [bg[0], bg[1], bg[2], 255],
+            [target[0], target[1], target[2], 255],
+            included_rect,
+        );
+        for y in excluded_rect.min_y..=excluded_rect.max_y {
+            for x in excluded_rect.min_x..=excluded_rect.max_x {
+                let start = ((y * 16 + x) * 4) as usize;
+                img.rgba[start..start + 4].copy_from_slice(&[target[0], target[1], target[2], 255]);
+            }
+        }
+        // Region covers only `included_rect` (with background padding).
+        let region = Rect {
+            min_x: 0,
+            min_y: 0,
+            max_x: 9,
+            max_y: 11,
+        };
+        let stats = target_color_stats(&img, target, 5, Some(region));
+        assert_eq!(
+            stats.matching, 16,
+            "only the 4x4 included rect should count, not the excluded rect too"
+        );
+    }
+
+    #[test]
+    fn target_color_stats_reports_frame_coordinate_centroid_and_bounds() {
+        let target = [200, 32, 32];
+        let bg = [69, 79, 105];
+        let rect = Rect {
+            min_x: 4,
+            min_y: 6,
+            max_x: 7,
+            max_y: 9,
+        };
+        let img = solid_with_rect(
+            16,
+            16,
+            [bg[0], bg[1], bg[2], 255],
+            [target[0], target[1], target[2], 255],
+            rect,
+        );
+        let stats = target_color_stats(&img, target, 5, None);
+        let center = stats.centroid.expect("a matched region has a centroid");
+        assert!(
+            (center.x - 5.5).abs() < 1e-6 && (center.y - 7.5).abs() < 1e-6,
+            "centroid ({}, {}) should be the rect's frame-coordinate \
+             center (5.5, 7.5)",
+            center.x,
+            center.y,
+        );
+        assert_eq!(
+            stats.bounding_box,
+            Some(rect),
+            "bounding box should recover the exact rect corners in frame coordinates",
+        );
+    }
+
+    #[test]
+    fn target_color_stats_counts_sampled_and_matching_with_fraction() {
+        let target = [200, 32, 32];
+        let bg = [69, 79, 105];
+        // 4x4 target-colored rect on a 16x16 frame: 16 of 256 pixels.
+        let rect = Rect {
+            min_x: 4,
+            min_y: 6,
+            max_x: 7,
+            max_y: 9,
+        };
+        let img = solid_with_rect(
+            16,
+            16,
+            [bg[0], bg[1], bg[2], 255],
+            [target[0], target[1], target[2], 255],
+            rect,
+        );
+        let stats = target_color_stats(&img, target, 5, None);
+        assert_eq!(stats.sampled, 256);
+        assert_eq!(stats.matching, 16);
+        assert!(
+            (stats.fraction - 16.0 / 256.0).abs() < 1e-6,
+            "fraction was {}, expected 16/256",
+            stats.fraction,
+        );
+    }
+
+    #[test]
+    fn target_color_stats_clamps_overhanging_region_to_the_frame() {
+        let target = [200, 32, 32];
+        let bg = [69, 79, 105];
+        // Target-colored rect touching the bottom-right corner of a
+        // 16x16 frame.
+        let rect = Rect {
+            min_x: 12,
+            min_y: 12,
+            max_x: 15,
+            max_y: 15,
+        };
+        let img = solid_with_rect(
+            16,
+            16,
+            [bg[0], bg[1], bg[2], 255],
+            [target[0], target[1], target[2], 255],
+            rect,
+        );
+        // Region overhangs the frame on both far edges; clamping should
+        // restrict sampling to the in-frame intersection (12..=15 x
+        // 12..=15 — exactly the target rect), a 16-pixel area.
+        let overhanging_region = Rect {
+            min_x: 12,
+            min_y: 12,
+            max_x: 100,
+            max_y: 100,
+        };
+        let stats = target_color_stats(&img, target, 5, Some(overhanging_region));
+        assert_eq!(stats.sampled, 16);
+        assert_eq!(stats.matching, 16);
+        assert_eq!(stats.bounding_box, Some(rect));
+    }
+
+    #[test]
+    fn target_color_stats_empty_on_degenerate_or_out_of_bounds_region() {
+        let target = [200, 32, 32];
+        let bg = [69, 79, 105];
+        let rect = Rect {
+            min_x: 4,
+            min_y: 6,
+            max_x: 7,
+            max_y: 9,
+        };
+        let img = solid_with_rect(
+            16,
+            16,
+            [bg[0], bg[1], bg[2], 255],
+            [target[0], target[1], target[2], 255],
+            rect,
+        );
+
+        // Fully out-of-bounds region (frame is 16x16).
+        let out_of_bounds = Rect {
+            min_x: 20,
+            min_y: 20,
+            max_x: 25,
+            max_y: 25,
+        };
+        let stats = target_color_stats(&img, target, 5, Some(out_of_bounds));
+        assert_eq!(stats.sampled, 0);
+        assert_eq!(stats.matching, 0);
+        assert_eq!(stats.fraction, 0.0);
+        assert!(stats.centroid.is_none());
+        assert!(stats.bounding_box.is_none());
+
+        // Degenerate region: min > max on both axes.
+        let degenerate = Rect {
+            min_x: 10,
+            min_y: 10,
+            max_x: 2,
+            max_y: 2,
+        };
+        let stats = target_color_stats(&img, target, 5, Some(degenerate));
+        assert_eq!(stats.sampled, 0);
+        assert_eq!(stats.matching, 0);
+        assert_eq!(stats.fraction, 0.0);
+        assert!(stats.centroid.is_none());
+        assert!(stats.bounding_box.is_none());
     }
 
     #[test]
