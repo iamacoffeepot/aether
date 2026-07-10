@@ -350,8 +350,8 @@ impl Default for SliderConfig {
 
 /// `aether.kit.widget.text_field.config` — a single-line editable string
 /// starting at `initial`, capped at `max_chars` characters (`0` = no cap).
-/// The field holds a `String` and a byte-offset caret; there is no selection
-/// in v1.
+/// The field keeps its caret and active selection on UTF-8 character boundaries
+/// and places both from resolved font metrics once the font settles.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.kit.widget.text_field.config")]
 pub struct TextFieldConfig {

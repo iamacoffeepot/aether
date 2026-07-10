@@ -46,14 +46,16 @@ use std::path::{Path, PathBuf};
 use aether_actor::Addressable;
 use aether_capabilities::RenderCapability;
 use aether_capabilities::fs::NamespaceRoots;
-use aether_capabilities::text::{LoadFont, LoadFontResult};
+use aether_capabilities::text::{
+    FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult,
+};
 use aether_data::Kind;
-use aether_kinds::keycode::{KEY_BACKSPACE, KEY_ENTER, KEY_TAB};
+use aether_kinds::keycode::{KEY_BACKSPACE, KEY_ENTER, KEY_RIGHT, KEY_TAB};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
-    CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction,
-    FrameVerdict, Key, LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease,
-    MouseMove, NamedMail, TextInput, Tick,
+    CachedFontMetrics, CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect,
+    FrameReduction, FrameVerdict, ImePreedit, Key, LoadComponent, LoadResult, LogTailResult,
+    Modifiers, MouseButton, MouseButtonRelease, MouseMove, NamedMail, TextInput, Tick,
 };
 use aether_kit::{PanelConfig, Theme};
 use aether_substrate_bundle::test_bench::{
@@ -166,6 +168,30 @@ fn load_font(bench: &mut TestBench) -> u32 {
     {
         LoadFontResult::Ok { font_id, .. } => font_id,
         LoadFontResult::Err { error, .. } => panic!("load RobotoMono: {error}"),
+    }
+}
+
+/// Grab `RobotoMono`'s resolved metric table (the same one the field measures
+/// against) so the test can compute expected pixel boundaries for pointer
+/// placement and caret geometry.
+fn load_metrics(bench: &mut TestBench, font_id: u32) -> CachedFontMetrics {
+    let got = bench
+        .execute(vec![(
+            "metrics",
+            BenchOp::send_and_await(
+                "aether.text",
+                &FontMetricsRequest {
+                    font: FontRef::Id(font_id),
+                },
+            ),
+        )])
+        .expect("font_metrics sequence");
+    match got
+        .reply::<FontMetricsResult>("metrics")
+        .expect("decode FontMetricsResult")
+    {
+        FontMetricsResult::Ok { metrics } => CachedFontMetrics::new(&metrics),
+        FontMetricsResult::Err { error } => panic!("grab RobotoMono metrics: {error}"),
     }
 }
 
@@ -962,5 +988,328 @@ fn focus_ring_follows_tab() {
         slider_after < 0.1,
         "the ring must leave the slider when focus advances; coverage over its top edge stayed \
          {slider_after:.3} — the ring-follows-focus class",
+    );
+}
+
+/// **Bug class: measured selection / composition / caret geometry drifting from
+/// the edited UTF-8 value.** The measured click is deliberately chosen where
+/// the warm-up approximation resolves to the *next* character, so the final
+/// committed value proves the field installed its metric table. Tight positive
+/// and neighboring exclusion regions then pin the first selected cell, the full
+/// non-collapsed IME cursor span, the preedit underline at the replaced
+/// selection (not the old trailing position), and the final measured caret.
+#[test]
+#[allow(clippy::too_many_lines)] // one cohesive place → select → compose → commit acceptance run
+fn text_field_selection_and_ime_render_measured_bands_and_commit() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = build_bench();
+
+    let font_id = load_font(&mut bench);
+    let metrics = load_metrics(&mut bench, font_id);
+    load_panel(&mut bench, &wasm, font_id);
+    let panel = panel_address();
+    // Warm up: spawn + prime the atlas, and give the field's own single-flight
+    // metrics request the extra ticks it needs to round-trip and install before
+    // the measured interactions.
+    bench
+        .execute(vec![
+            ("spawn", BenchOp::send_mail(&panel, &Tick)),
+            ("prime", BenchOp::send_mail(&panel, &Tick)),
+            ("settle", BenchOp::advance(4)),
+        ])
+        .expect("warm-up");
+
+    let size = Theme::DEFAULT.value_size_pixels;
+    let (text_top, _) = row_band(TEXT_ROW, 1.0);
+    let content_x = PANEL_X + PAD;
+    let typed_text = "abécd";
+
+    // Focus the field, type a value with a multibyte scalar, and rasterize it.
+    bench
+        .execute(vec![
+            (
+                "focus",
+                BenchOp::send_mail(&panel, &press(50.0, text_top + 10.0)),
+            ),
+            (
+                "focus_up",
+                BenchOp::send_mail(&panel, &release(50.0, text_top + 10.0)),
+            ),
+            (
+                "type",
+                BenchOp::send_mail(
+                    &panel,
+                    &TextInput {
+                        text: typed_text.to_owned(),
+                    },
+                ),
+            ),
+            ("rasterize", BenchOp::send_mail(&panel, &Tick)),
+            ("settle", BenchOp::advance(2)),
+        ])
+        .expect("focus + type");
+
+    // Click after "abé" (char index 3, byte 4). Roboto Mono advances 0.6em,
+    // while the bounded warm-up fallback uses 0.5em: at this boundary the
+    // fallback rounds to char index 4. Pin that fixture property so this
+    // scenario cannot silently stop discriminating exact from approximate hit
+    // testing after a font or theme change.
+    let measured_boundary = metrics.caret_x(typed_text, 3, size);
+    let fallback_advance = (size * 0.5).max(1.0);
+    let fallback_index =
+        ((measured_boundary / fallback_advance + 0.5) as usize).min(typed_text.chars().count());
+    assert_eq!(
+        fallback_index, 4,
+        "the measured click fixture must differ from the 0.5em fallback"
+    );
+    let boundary_x = content_x + measured_boundary;
+    let after_two_x = content_x + metrics.caret_x(typed_text, 2, size);
+    let after_four_x = content_x + metrics.caret_x(typed_text, 4, size);
+    let after_five_x = content_x + metrics.caret_x(typed_text, 5, size);
+    let mark_top = text_top + PAD + 1.0;
+    let mark_bottom = text_top + ROW_HEIGHT - PAD - 1.0;
+    let selected_first_cell = rect(boundary_x + 1.0, mark_top, after_four_x - 1.0, mark_bottom);
+    let selection_exclusion = rect(after_two_x + 1.0, mark_top, boundary_x - 1.0, mark_bottom);
+    let second_selected_cell = rect(
+        after_four_x + 1.0,
+        mark_top,
+        after_five_x - 1.0,
+        mark_bottom,
+    );
+    let cell_checks = || {
+        [
+            selected_first_cell,
+            selection_exclusion,
+            second_selected_cell,
+        ]
+        .into_iter()
+        .map(|region| {
+            check(
+                FrameReduction::Coverage,
+                region,
+                SURFACE_RAISED_SRGB,
+                PARTITION_TOLERANCE,
+            )
+        })
+        .collect()
+    };
+    let typed_cells = capture(&mut bench, cell_checks());
+    let typed_first = coverage(&typed_cells.results[0]);
+    let typed_exclusion = coverage(&typed_cells.results[1]);
+
+    let click_y = text_top + 10.0;
+    // Shift-extend two characters right to select "cd". If the click takes the
+    // approximate path it starts after `c` and selects only `d`, so the first
+    // expected cell and final committed value both fail.
+    bench
+        .execute(vec![
+            (
+                "place",
+                BenchOp::send_mail(&panel, &press(boundary_x, click_y)),
+            ),
+            (
+                "place_up",
+                BenchOp::send_mail(&panel, &release(boundary_x, click_y)),
+            ),
+            (
+                "shift",
+                BenchOp::send_mail(
+                    &panel,
+                    &Modifiers {
+                        shift: true,
+                        ..Modifiers::default()
+                    },
+                ),
+            ),
+            (
+                "extend1",
+                BenchOp::send_mail(&panel, &Key { code: KEY_RIGHT }),
+            ),
+            (
+                "extend2",
+                BenchOp::send_mail(&panel, &Key { code: KEY_RIGHT }),
+            ),
+        ])
+        .expect("measured place + Shift-extend");
+
+    let selected_cells = capture(&mut bench, cell_checks());
+    let selected_first = coverage(&selected_cells.results[0]);
+    let selected_exclusion_coverage = coverage(&selected_cells.results[1]);
+    eprintln!(
+        "selection first-cell coverage: typed {typed_first:.3} → selected {selected_first:.3}; \
+         neighbor {typed_exclusion:.3} → {selected_exclusion_coverage:.3}",
+    );
+    assert!(
+        selected_first > 0.75 && selected_first > typed_first + 0.25,
+        "the first measured selection cell (`c`) must be accent-filled; resting coverage was \
+         {typed_first:.3}, selected was {selected_first:.3}",
+    );
+    assert!(
+        (selected_exclusion_coverage - typed_exclusion).abs() < 0.08,
+        "the preceding `é` cell must remain outside the selection; coverage changed from \
+         {typed_exclusion:.3} to {selected_exclusion_coverage:.3}",
+    );
+
+    // Compose `üx` over `cd`, with a non-collapsed byte span selecting the
+    // first, two-byte `ü`. The cursor-span band must fill only the first preedit
+    // cell, while the whole two-cell preedit receives an underline at this
+    // measured selection position.
+    bench
+        .execute(vec![
+            (
+                "preedit",
+                BenchOp::send_mail(
+                    &panel,
+                    &ImePreedit {
+                        text: "üx".to_owned(),
+                        cursor_begin: Some(0),
+                        cursor_end: Some(2),
+                    },
+                ),
+            ),
+            ("rasterize", BenchOp::send_mail(&panel, &Tick)),
+            ("settle", BenchOp::advance(2)),
+        ])
+        .expect("ime preedit");
+
+    let underline_y = text_top + (ROW_HEIGHT - size) * 0.5 + size;
+    let preedit_underline = rect(
+        boundary_x + 1.0,
+        underline_y,
+        after_five_x - 1.0,
+        underline_y + 2.0,
+    );
+    let underline_exclusion = rect(
+        after_five_x + 1.0,
+        underline_y,
+        after_five_x + (after_four_x - boundary_x) - 1.0,
+        underline_y + 2.0,
+    );
+    let composition = capture(
+        &mut bench,
+        vec![
+            check(
+                FrameReduction::Coverage,
+                selected_first_cell,
+                SURFACE_RAISED_SRGB,
+                PARTITION_TOLERANCE,
+            ),
+            check(
+                FrameReduction::Coverage,
+                second_selected_cell,
+                SURFACE_RAISED_SRGB,
+                PARTITION_TOLERANCE,
+            ),
+            check(
+                FrameReduction::Coverage,
+                preedit_underline,
+                SURFACE_RAISED_SRGB,
+                PARTITION_TOLERANCE,
+            ),
+            check(
+                FrameReduction::Coverage,
+                underline_exclusion,
+                SURFACE_RAISED_SRGB,
+                PARTITION_TOLERANCE,
+            ),
+        ],
+    );
+    let cursor_span = coverage(&composition.results[0]);
+    let cursor_exclusion = coverage(&composition.results[1]);
+    let underline = coverage(&composition.results[2]);
+    let underline_after = coverage(&composition.results[3]);
+    eprintln!(
+        "composition coverage: cursor-span {cursor_span:.3}, next-cell {cursor_exclusion:.3}, \
+         underline {underline:.3}, after-underline {underline_after:.3}",
+    );
+    assert!(
+        cursor_span > 0.75 && cursor_span > cursor_exclusion + 0.25,
+        "the full IME cursor selection must fill the first preedit cell only; span coverage was \
+         {cursor_span:.3}, neighboring cell was {cursor_exclusion:.3}",
+    );
+    assert!(
+        underline > 0.2 && underline > underline_after + 0.15,
+        "the preedit underline must occupy its two measured cells at the replaced selection; \
+         coverage there was {underline:.3}, after the preedit was {underline_after:.3}",
+    );
+
+    // Commit replacement text (clears the composition and replaces `cd`), then
+    // measure the caret at the end of the non-ASCII result `abéZ`.
+    bench
+        .execute(vec![
+            (
+                "commit_text",
+                BenchOp::send_mail(
+                    &panel,
+                    &TextInput {
+                        text: "Z".to_owned(),
+                    },
+                ),
+            ),
+            ("rasterize", BenchOp::send_mail(&panel, &Tick)),
+            ("settle", BenchOp::advance(2)),
+        ])
+        .expect("commit replacement text");
+
+    let final_text = "abéZ";
+    let final_caret_x = content_x + metrics.caret_x(final_text, 4, size);
+    let final_caret = rect(
+        final_caret_x - 1.0,
+        text_top + PAD,
+        final_caret_x + 2.0,
+        text_top + ROW_HEIGHT - PAD,
+    );
+    let final_caret_exclusion = rect(
+        final_caret_x + 3.0,
+        text_top + PAD,
+        final_caret_x + 6.0,
+        text_top + ROW_HEIGHT - PAD,
+    );
+    let final_verdict = capture(
+        &mut bench,
+        vec![
+            check(
+                FrameReduction::Coverage,
+                final_caret,
+                SURFACE_RAISED_SRGB,
+                PARTITION_TOLERANCE,
+            ),
+            check(
+                FrameReduction::Coverage,
+                final_caret_exclusion,
+                SURFACE_RAISED_SRGB,
+                PARTITION_TOLERANCE,
+            ),
+        ],
+    );
+    let caret_coverage = coverage(&final_verdict.results[0]);
+    let caret_exclusion = coverage(&final_verdict.results[1]);
+    eprintln!(
+        "final caret coverage: expected {caret_coverage:.3}, neighboring exclusion \
+         {caret_exclusion:.3}",
+    );
+    assert!(
+        caret_coverage > 0.2 && caret_coverage > caret_exclusion + 0.2,
+        "the final measured caret must occupy its tight expected band; coverage there was \
+         {caret_coverage:.3}, neighboring coverage was {caret_exclusion:.3}",
+    );
+
+    bench
+        .execute(vec![(
+            "commit",
+            BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }),
+        )])
+        .expect("commit");
+
+    let log = panel_log_messages(&mut bench);
+    let joined = log.join("\n");
+    assert!(
+        log.iter()
+            .any(|m| m.contains("widget text committed") && m.contains("text=abéZ")),
+        "clicking after `abé`, extending over `cd`, and committing `Z` must leave the non-ASCII \
+         value `abéZ`; log was:\n{joined}",
     );
 }
