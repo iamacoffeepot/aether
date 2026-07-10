@@ -90,6 +90,7 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8], config: &ImageConfig) -> Strin
             clip: None,
             config: config.encode_into_bytes(),
         }],
+        owns_input: true,
     };
     let loaded = bench
         .execute(vec![(

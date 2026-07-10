@@ -15,6 +15,7 @@
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use bytemuck::{Pod, Zeroable};
 
 /// Mirror of `aether_substrate_bundle::test_bench::TEST_BENCH_OBSERVER_MAILBOX_NAME`.
@@ -367,3 +368,41 @@ pub const MATRIX_CELL_CHILD_TO_PARENT: u32 = 2;
 pub const MATRIX_CELL_CHILD_TO_SIBLING: u32 = 3;
 /// [`MatrixPing::cell`] marker — child a to self (in place).
 pub const MATRIX_CELL_CHILD_TO_SELF: u32 = 4;
+
+/// Typed config for an editor-region probe. The probe intentionally does not
+/// subscribe to input itself: an editor shell must address each observation
+/// directly to the probe's mailbox.
+#[derive(
+    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq,
+)]
+#[kind(name = "aether.test_fixtures.editor_region_probe.config")]
+pub struct EditorRegionProbeConfig {
+    pub region_name: String,
+}
+
+/// One raw input observed by an editor-region probe.
+#[derive(aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+pub enum ObservedEditorInput {
+    PointerPress { button: u32, x_pixels: f32, y_pixels: f32 },
+    PointerRelease { button: u32, x_pixels: f32, y_pixels: f32 },
+    PointerMotion { x_pixels: f32, y_pixels: f32 },
+    Wheel { delta_x_pixels: f32, delta_y_pixels: f32, x_pixels: f32, y_pixels: f32 },
+    KeyPress { key_code: u32 },
+    KeyRelease { key_code: u32 },
+    TextInput { text: String },
+    ImePreedit { text: String, cursor_begin: Option<u32>, cursor_end: Option<u32> },
+    Modifiers { shift: bool, ctrl: bool, alt: bool, meta: bool },
+}
+
+/// Query that drains an editor-region probe's observations.
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.test_fixtures.drain_editor_inputs")]
+pub struct DrainEditorInputs;
+
+/// Reply containing every editor input observed since the previous drain.
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+#[kind(name = "aether.test_fixtures.drain_editor_inputs_result")]
+pub struct DrainEditorInputsResult {
+    pub region_name: String,
+    pub inputs: Vec<ObservedEditorInput>,
+}

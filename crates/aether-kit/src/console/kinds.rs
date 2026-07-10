@@ -5,6 +5,10 @@ use aether_data::MailboxId;
 use aether_math::Rgba;
 use serde::{Deserialize, Serialize};
 
+const fn owns_input_by_default() -> bool {
+    true
+}
+
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct ConsoleTheme {
     pub background_color: Rgba,
@@ -117,6 +121,10 @@ pub struct ConsoleConfig {
     pub scrollback_limit: u32,
     pub prompt: String,
     pub theme: ConsoleTheme,
+    /// Whether this standalone console subscribes key, text, and wheel input.
+    /// `WindowSize` remains independently subscribed in either mode.
+    #[serde(default = "owns_input_by_default")]
+    pub owns_input: bool,
 }
 
 impl Default for ConsoleConfig {
@@ -130,6 +138,7 @@ impl Default for ConsoleConfig {
             scrollback_limit: 256,
             prompt: String::from("> "),
             theme: ConsoleTheme::default(),
+            owns_input: true,
         }
     }
 }

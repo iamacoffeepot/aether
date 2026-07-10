@@ -44,7 +44,7 @@ use aether_capabilities::RenderCapability;
 use aether_capabilities::fs::NamespaceRoots;
 use aether_capabilities::render::{DrawTexturedQuads, WHITE_TEXTURE_ID};
 use aether_capabilities::text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
-use aether_data::{Kind, mailbox_id_from_path};
+use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_PAGE_DOWN, KEY_RIGHT, KEY_TAB, KEY_UP};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
@@ -53,9 +53,10 @@ use aether_kinds::{
     MouseButtonRelease, MouseMove, MouseWheel, NamedMail, TextInput, Tick,
 };
 use aether_kit::{
-    ButtonConfig, LabelConfig, PanelConfig, ScrollConfig, ScrollExtent, ScrollOffset, SetTheme, SetWidgetState,
-    SliderConfig, TextAreaConfig, Theme, ThemeState, VirtualListConfig, WidgetChildSpec, WidgetConfig,
-    WidgetControlState, WidgetDrawItem, WidgetKind, WidgetValidation,
+    ButtonConfig, EditorConfig, EditorRegionRect, LabelConfig, PanelConfig, RegionInputLanes, RegionSpec, ScrollConfig,
+    ScrollExtent, ScrollOffset, SetTheme, SetWidgetState, SliderConfig, TextAreaConfig, TextFieldConfig, Theme,
+    ThemeState, VirtualListConfig, WidgetChildSpec, WidgetConfig, WidgetControlState, WidgetDrawItem, WidgetKind,
+    WidgetValidation,
 };
 use aether_math::Rgba;
 use aether_substrate_bundle::test_bench::{
@@ -63,6 +64,7 @@ use aether_substrate_bundle::test_bench::{
     test_helpers::{init_save_sandbox, require_runtime},
 };
 use aether_substrate_bundle::visual::{Image, decode_png};
+use aether_test_fixtures_kinds::{DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig};
 
 /// Panel origin and stack width (widget-local `(0, 0)` maps to this window
 /// point), matching `widget_set` / `widget_text_alignment`.
@@ -180,11 +182,26 @@ fn load_metrics(bench: &mut TestBench, font_id: u32) -> CachedFontMetrics {
 /// theme pinned to the already-resident `font_id` (empty font path, so the
 /// panel does not kick off its own load). Every widget draws text with that
 /// font.
-fn load_panel(bench: &mut TestBench, wasm: &[u8], font_id: u32) {
-    load_panel_with_children(bench, wasm, font_id, Vec::new());
+fn load_panel(bench: &mut TestBench, wasm: &[u8], font_id: u32) -> MailboxId {
+    load_panel_with_children(bench, wasm, font_id, Vec::new())
 }
 
-fn load_panel_with_children(bench: &mut TestBench, wasm: &[u8], font_id: u32, children: Vec<WidgetChildSpec>) {
+fn load_panel_with_children(
+    bench: &mut TestBench,
+    wasm: &[u8],
+    font_id: u32,
+    children: Vec<WidgetChildSpec>,
+) -> MailboxId {
+    load_panel_with_children_and_ownership(bench, wasm, font_id, children, true)
+}
+
+fn load_panel_with_children_and_ownership(
+    bench: &mut TestBench,
+    wasm: &[u8],
+    font_id: u32,
+    children: Vec<WidgetChildSpec>,
+    owns_input: bool,
+) -> MailboxId {
     let config = PanelConfig {
         x: PANEL_X,
         y: PANEL_Y,
@@ -193,6 +210,7 @@ fn load_panel_with_children(bench: &mut TestBench, wasm: &[u8], font_id: u32, ch
         font_path: String::new(),
         theme: Theme { font_id, ..Theme::DEFAULT },
         children,
+        owns_input,
     };
     let loaded = bench
         .execute(vec![(
@@ -209,11 +227,103 @@ fn load_panel_with_children(bench: &mut TestBench, wasm: &[u8], font_id: u32, ch
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name, .. } => {
+        LoadResult::Ok { mailbox_id, name, .. } => {
             assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}");
+            mailbox_id
         }
         LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
     }
+}
+
+struct LoadedProbe {
+    mailbox_id: MailboxId,
+    address: String,
+}
+
+fn load_editor_probe(bench: &mut TestBench, wasm_path: &Path) -> LoadedProbe {
+    let loaded = bench
+        .execute(vec![(
+            "load-region-probe",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm: fs::read(wasm_path).expect("read fixture wasm"),
+                    name: Some("region-b".to_owned()),
+                    config: EditorRegionProbeConfig { region_name: "region-b".to_owned() }.encode_into_bytes(),
+                    export: Some("test.editor_region_probe".to_owned()),
+                },
+            ),
+        )])
+        .expect("load editor region probe");
+    match loaded.reply::<LoadResult>("load-region-probe").expect("decode probe LoadResult") {
+        LoadResult::Ok { mailbox_id, name: address, .. } => LoadedProbe { mailbox_id, address },
+        LoadResult::Err { error } => panic!("load editor region probe: {error}"),
+    }
+}
+
+fn load_editor_shell(bench: &mut TestBench, wasm: &[u8], panel: MailboxId, probe: MailboxId) {
+    let probe_lanes = RegionInputLanes {
+        pointer_press: true,
+        pointer_release: true,
+        pointer_motion: true,
+        ..RegionInputLanes::default()
+    };
+    let config = EditorConfig {
+        regions: vec![
+            RegionSpec {
+                name: "panel".to_owned(),
+                rect: EditorRegionRect {
+                    x_pixels: 0.0,
+                    y_pixels: 0.0,
+                    width_pixels: 120.0,
+                    height_pixels: WINDOW_HEIGHT as f32,
+                },
+                target: panel,
+                keyboard_focus_eligible: true,
+                input_lanes: RegionInputLanes::ALL,
+                activation_chord: None,
+            },
+            RegionSpec {
+                name: "region-b".to_owned(),
+                rect: EditorRegionRect {
+                    x_pixels: 120.0,
+                    y_pixels: 0.0,
+                    width_pixels: 120.0,
+                    height_pixels: WINDOW_HEIGHT as f32,
+                },
+                target: probe,
+                keyboard_focus_eligible: false,
+                input_lanes: probe_lanes,
+                activation_chord: None,
+            },
+        ],
+    };
+    let loaded = bench
+        .execute(vec![(
+            "load-editor-shell",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm: wasm.to_vec(),
+                    name: Some("editor".to_owned()),
+                    config: config.encode_into_bytes(),
+                    export: Some("aether.kit.widget.editor".to_owned()),
+                },
+            ),
+        )])
+        .expect("load editor shell");
+    match loaded.reply::<LoadResult>("load-editor-shell").expect("decode editor LoadResult") {
+        LoadResult::Ok { .. } => {}
+        LoadResult::Err { error } => panic!("load editor shell: {error}"),
+    }
+}
+
+fn drain_editor_probe(bench: &mut TestBench, probe: &LoadedProbe) -> DrainEditorInputsResult {
+    bench
+        .execute(vec![("drain-editor-probe", BenchOp::send_and_await(probe.address.as_str(), &DrainEditorInputs))])
+        .expect("drain editor region probe")
+        .reply::<DrainEditorInputsResult>("drain-editor-probe")
+        .expect("decode DrainEditorInputsResult")
 }
 
 /// Load font + panel and warm the render path: the first tick spawns + lays out
@@ -354,6 +464,22 @@ fn virtual_list_child(subname: &str, state: WidgetControlState) -> WidgetChildSp
             visible_row_count: 5,
             theme: Theme::DEFAULT,
             state,
+        }
+        .encode_into_bytes(),
+    }
+}
+
+fn text_field_child(subname: &str, initial: &str) -> WidgetChildSpec {
+    WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::TextField,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: TextFieldConfig {
+            initial: initial.to_owned(),
+            max_chars: 0,
+            theme: Theme::DEFAULT,
+            state: WidgetControlState::default(),
         }
         .encode_into_bytes(),
     }
@@ -835,6 +961,54 @@ fn slider_drag_renders_fill_at_track_fraction() {
         (fraction - expected).abs() <= 0.05,
         "the rendered slider fill should reach {expected:.3} of the track; it reached \
          {fraction:.3} (right edge x={fill_right:.0}) — the fill-fraction render class",
+    );
+}
+
+#[test]
+fn editor_shell_keeps_a_real_panel_drag_owned_across_a_peer_region() {
+    let (Some(kit_wasm_path), Some(fixtures_wasm_path)) =
+        (require_runtime("aether_kit"), require_runtime("aether_test_fixtures_bundle"))
+    else {
+        return;
+    };
+    let kit_wasm = fs::read(&kit_wasm_path).expect("read kit wasm");
+    let mut bench = build_bench();
+    let font_id = load_font(&mut bench);
+    let panel = load_panel_with_children_and_ownership(
+        &mut bench,
+        &kit_wasm,
+        font_id,
+        vec![text_field_child("field", "abcd")],
+        false,
+    );
+    warm_panel(&mut bench);
+    let probe = load_editor_probe(&mut bench, &fixtures_wasm_path);
+    load_editor_shell(&mut bench, &kit_wasm, panel, probe.mailbox_id);
+
+    // The press begins in the panel editor region. Motion and release cross
+    // x=120 into the peer region, but the shell's first-press ownership keeps
+    // the complete drag addressed to the panel. Selecting all of `abcd`, then
+    // typing `Z`, distinguishes capture (`Z`) from a lost drag (`Zabcd`).
+    bench
+        .execute(vec![
+            ("press", BenchOp::send_mail("aether.input", &press(PANEL_X + PAD, PANEL_Y + 12.0))),
+            ("cross-region-drag", BenchOp::send_mail("aether.input", &MouseMove { x: 150.0, y: PANEL_Y + 12.0 })),
+            ("cross-region-release", BenchOp::send_mail("aether.input", &release(150.0, PANEL_Y + 12.0))),
+            ("replace-selection", BenchOp::send_mail("aether.input", &TextInput { text: "Z".to_owned() })),
+            ("commit", BenchOp::send_mail("aether.input", &Key { code: KEY_ENTER })),
+        ])
+        .expect("route real panel drag through editor shell");
+
+    let log = panel_log_messages(&mut bench);
+    let joined = log.join("\n");
+    assert!(
+        log.iter().any(|message| message.contains("widget text committed") && message.contains("text=Z")),
+        "cross-region drag must select the complete initial value before replacement; log was:\n{joined}",
+    );
+    assert_eq!(
+        drain_editor_probe(&mut bench, &probe),
+        DrainEditorInputsResult { region_name: "region-b".to_owned(), inputs: Vec::new() },
+        "the peer region must not steal motion or release from the press owner",
     );
 }
 

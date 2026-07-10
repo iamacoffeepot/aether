@@ -116,6 +116,7 @@ fn load_panel_with_host(bench: &mut TestBench, kit_wasm: &[u8], script: Vec<u8>)
             clip: None,
             config: host_spec.encode_into_bytes(),
         }],
+        owns_input: true,
     };
     let loaded = bench
         .execute(vec![(

@@ -827,16 +827,18 @@ impl WasmActor for WidgetPanel {
     /// stage (lifecycle cap) once, and kick off the font load. Widgets never
     /// subscribe — the root forwards everything.
     fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
-        let input = ctx.actor::<InputCapability>();
-        input.subscribe::<MouseButton>();
-        input.subscribe::<MouseButtonRelease>();
-        input.subscribe::<MouseMove>();
-        input.subscribe::<MouseWheel>();
-        input.subscribe::<Key>();
-        input.subscribe::<KeyRelease>();
-        input.subscribe::<TextInput>();
-        input.subscribe::<ImePreedit>();
-        input.subscribe::<Modifiers>();
+        if self.config.owns_input {
+            let input = ctx.actor::<InputCapability>();
+            input.subscribe::<MouseButton>();
+            input.subscribe::<MouseButtonRelease>();
+            input.subscribe::<MouseMove>();
+            input.subscribe::<MouseWheel>();
+            input.subscribe::<Key>();
+            input.subscribe::<KeyRelease>();
+            input.subscribe::<TextInput>();
+            input.subscribe::<ImePreedit>();
+            input.subscribe::<Modifiers>();
+        }
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
         if !self.config.font_path.is_empty() {
             ctx.actor::<TextCapability>()
