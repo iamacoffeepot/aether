@@ -1546,6 +1546,90 @@ fn capture_frame_checks_return_substrate_verdict() {
     }
 }
 
+/// Issue #2913 regression: a `CaptureFrame.similarity` request resolves
+/// its reference image from the `TestBench`'s configured `assets`
+/// namespace root, the same way the desktop chassis wires
+/// `RenderConfig.assets_dir`. Captures a deterministic clear-color
+/// frame, stores that exact PNG under the sandbox's assets root as the
+/// reference, then requests a second capture with a `SimilarityCheck`
+/// against it. Two captures of the same unchanged scene are pixel-
+/// identical, so the score is `0.0` and the check passes — proving
+/// `TestBenchChassis::build_passive` no longer leaves `assets_dir`
+/// unconditionally `None` (the bug this issue fixes; on unfixed `main`
+/// this fails at reference resolution with "no assets directory is
+/// configured").
+#[test]
+fn capture_frame_similarity_resolves_reference_from_configured_assets_root() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let sandbox = init_save_sandbox("test-bench-render-similarity");
+    let mut bench = TestBench::builder()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
+
+    let reference = bench
+        .execute(vec![("reference", BenchOp::capture())])
+        .expect("capture reference frame");
+    let reference_png = reference.captured("reference").expect("reference step ran");
+    let reference_path = "similarity-reference.png";
+    fs::write(sandbox.join(reference_path), reference_png)
+        .expect("write reference png under the sandbox assets root");
+
+    let result = bench
+        .execute(vec![(
+            "snap",
+            BenchOp::send_and_await(
+                "aether.render",
+                &CaptureFrame {
+                    mails: vec![],
+                    after_mails: vec![],
+                    checks: vec![],
+                    similarity: Some(SimilarityCheck {
+                        namespace: "assets".to_owned(),
+                        reference_path: reference_path.to_owned(),
+                        threshold: 0.0,
+                    }),
+                },
+            ),
+        )])
+        .expect("send_and_await(CaptureFrame) with similarity");
+    let reply: CaptureFrameResult = result.reply("snap").expect("decode CaptureFrameResult");
+    match reply {
+        CaptureFrameResult::Ok {
+            png,
+            verdict,
+            similarity_score,
+            similarity_pass,
+        } => {
+            assert!(
+                png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
+                "the PNG still rides back alongside the similarity score",
+            );
+            assert!(
+                verdict.is_none(),
+                "no checks were requested, so no intrinsic verdict should ride back",
+            );
+            assert_eq!(
+                similarity_score,
+                Some(0.0),
+                "an unchanged scene captured twice should score a perfect match",
+            );
+            assert_eq!(
+                similarity_pass,
+                Some(true),
+                "a 0.0 score against a 0.0 threshold must pass",
+            );
+        }
+        CaptureFrameResult::Err { error } => panic!(
+            "capture_frame similarity replied Err (assets root not wired into TestBench?): \
+             {error}"
+        ),
+    }
+}
+
 /// A region-scoped `FrameCheck` restricts a reduction to one screen
 /// rect — the composition primitive a per-widget assertion needs so it
 /// doesn't fold every widget in the scene into one whole-frame number

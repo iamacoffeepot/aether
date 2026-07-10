@@ -229,6 +229,14 @@ impl TestBenchChassis {
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
 
+        // Mirrors the desktop chassis's wiring: the `capture_frame`
+        // similarity check (iamacoffeepot/aether#1780) reads its reference
+        // image from the same `assets` root the fs cap serves. Cloned out
+        // ahead of the `io_roots` pre-validation match below, which moves
+        // `namespace_roots` — capture similarity needs only the configured
+        // assets root, independent of whether fs cap boot itself succeeds.
+        let assets_dir = namespace_roots.as_ref().map(|roots| roots.assets.clone());
+
         // Capture handoff lives on `RenderCapability` post-issue-603
         // Phase 2. The cap dispatcher parks the request on
         // `capture_queue`; the embedder loop sees `CaptureRequested`
@@ -237,7 +245,7 @@ impl TestBenchChassis {
         let render_config = RenderConfig {
             vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
             observed_kinds: observed_kinds.clone(),
-            assets_dir: None,
+            assets_dir,
             capture_backend: Some(CaptureBackend {
                 queue: capture_queue,
                 wake: Arc::new(move || {

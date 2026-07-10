@@ -60,8 +60,12 @@ jobs:
     name: Clippy
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    # 8 vCPU ephemeral EC2 spot runner (RunsOn stack, us-east-1).
+    # extras=s3-cache redirects the GitHub cache API (rust-cache
+    # included) to the stack's S3 bucket — no 10 GB repo cap.
+    runs-on: runs-on=${{ github.run_id }}/runner=8cpu-linux-x64/extras=s3-cache
     steps:
+      - uses: runs-on/action@v2
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -127,7 +131,14 @@ jobs:
     name: Test (workspace, linux, shard ${{ matrix.partition }}/2)
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    # 8 vCPU ephemeral EC2 spot runner per shard (RunsOn stack,
+    # us-east-1); both shards fit the current 32-vCPU spot quota
+    # alongside clippy + qodana. S3 magic cache — see clippy.
+    # volume=150gb: the default ~40 GB root volume ENOSPCs under the
+    # full runner image + the --all-features workspace test build +
+    # fleetbench's per-test substrate copies; the volume lives only
+    # for the job so the size is effectively free.
+    runs-on: runs-on=${{ github.run_id }}/runner=8cpu-linux-x64/volume=150gb/extras=s3-cache
     # The suite is sharded 2-way by nextest's deterministic name-hash
     # partition (iamacoffeepot/aether#2803): each shard compiles the
     # workspace against the shared rust-cache and runs half the tests,
@@ -146,16 +157,13 @@ jobs:
     env:
       # Use mold to reduce peak link memory and speed up the test
       # build — keeps the linker OOM (collect2: ld terminated with
-      # signal 7) off the ubuntu runner. CI-scoped so dev machines
-      # are unaffected. Companion to the free-disk-space step below.
-      # Target-scoped to the native host triple: the wasm32 component
-      # cross-build links with rust-lld, which rejects -fuse-ld=mold,
-      # so a job-wide RUSTFLAGS would break it.
+      # signal 7) off the runner. CI-scoped so dev machines are
+      # unaffected. Target-scoped to the native host triple: the
+      # wasm32 component cross-build links with rust-lld, which
+      # rejects -fuse-ld=mold, so a job-wide RUSTFLAGS would break it.
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -Clink-arg=-fuse-ld=mold
       # line-tables-only (instead of full DWARF) shrinks test
-      # binaries and the linked artifacts on disk, reducing the
-      # chance of hitting "no space left on device" even after
-      # the free-disk-space reclaim.
+      # binaries and the linked artifacts on disk.
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       # Issue #612: fetch-depth 2 (PR) / 0 (push) so the changed-crate
@@ -167,27 +175,10 @@ jobs:
       # tests (gated by AETHER_REQUIRE_RUNTIME) panicked. Configuring
       # fetch-depth on the initial checkout keeps target/ alive into
       # the test step.
+      - uses: runs-on/action@v2
       - uses: actions/checkout@v4
         with:
           fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
-      # Reclaim ~19 GB by removing preinstalled Android / .NET /
-      # Haskell tooling that the build never uses. Runs before the
-      # rust-toolchain step so cargo's own build artifacts have the
-      # most headroom. Swap is kept (swap-storage: false) to avoid
-      # degrading the linker under memory pressure. large-packages and
-      # docker-images default to 'true' and are the slow half of the
-      # step (apt purges — most of its wall clock for ~6 GB), so they
-      # are pinned off; the three kept categories are fast rm -rf's
-      # (iamacoffeepot/aether#2803).
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
-        with:
-          android: 'true'
-          dotnet: 'true'
-          haskell: 'true'
-          large-packages: 'false'
-          docker-images: 'false'
-          swap-storage: 'false'
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -252,12 +243,15 @@ jobs:
     name: Qodana scan
     needs: changes
     if: needs.changes.outputs.qodana == 'true'
-    runs-on: ubuntu-latest
+    # 8 vCPU ephemeral EC2 spot runner (RunsOn stack, us-east-1).
+    # S3 magic cache — see clippy.
+    runs-on: runs-on=${{ github.run_id }}/runner=8cpu-linux-x64/extras=s3-cache
     permissions:
       contents: write
       pull-requests: write
       checks: write
     steps:
+      - uses: runs-on/action@v2
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
