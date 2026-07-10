@@ -39,14 +39,17 @@
 mod kinds;
 pub use kinds::*;
 pub mod composite;
+mod editor;
 pub mod focus;
 mod panel;
+pub mod routing;
 mod scroll;
 pub mod set;
 mod state;
 pub mod text_edit;
 pub mod theme;
 
+pub use editor::EditorShell;
 pub use panel::WidgetPanel;
 pub use scroll::ScrollWidget;
 

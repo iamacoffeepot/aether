@@ -19,14 +19,16 @@
 use std::fs;
 
 use aether_actor::Addressable;
-use aether_data::Kind;
+use aether_data::{Kind, MailboxId};
 use aether_kinds::keycode::KEY_W;
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameReduction, Key, KeyRelease, LoadComponent,
     LoadResult, NamedMail, Render, WindowSize,
 };
-use aether_kit::MoverTeleport;
 use aether_kit::world::{Material, SetChunk, SetRegion};
+use aether_kit::{
+    EditorConfig, EditorKeyChord, EditorRegionRect, MoverConfig, MoverTeleport, RegionInputLanes, RegionSpec,
+};
 use aether_substrate_bundle::test_bench::{ArtifactGuard, BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{ColorRegionStats, Rect, decode_png, mean_absolute_error, target_color_stats};
 
@@ -73,7 +75,17 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
     }
 }
 
-fn load_kit_export(bench: &mut TestBench, wasm: &[u8], export: &str, name: &str) {
+fn load_kit_export(bench: &mut TestBench, wasm: &[u8], export: &str, name: &str) -> MailboxId {
+    load_kit_export_with_config(bench, wasm, export, name, Vec::new())
+}
+
+fn load_kit_export_with_config(
+    bench: &mut TestBench,
+    wasm: &[u8],
+    export: &str,
+    name: &str,
+    config: Vec<u8>,
+) -> MailboxId {
     let loaded = bench
         .execute(vec![(
             "load",
@@ -82,19 +94,44 @@ fn load_kit_export(bench: &mut TestBench, wasm: &[u8], export: &str, name: &str)
                 &LoadComponent {
                     wasm: wasm.to_vec(),
                     name: Some(name.to_owned()),
-                    config: Vec::new(),
+                    config,
                     export: Some(export.to_owned()),
                 },
             ),
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name: address, .. } => assert!(
-            address.ends_with(&format!(":{name}")),
-            "export {export} should register under :{name}; got {address}",
-        ),
+        LoadResult::Ok { mailbox_id, name: address, .. } => {
+            assert!(
+                address.ends_with(&format!(":{name}")),
+                "export {export} should register under :{name}; got {address}",
+            );
+            mailbox_id
+        }
         LoadResult::Err { error } => panic!("load {export}: {error}"),
     }
+}
+
+fn load_mover_editor_shell(bench: &mut TestBench, wasm: &[u8], mover: MailboxId) {
+    let lanes = RegionInputLanes { key_press: true, key_release: true, ..RegionInputLanes::default() };
+    let config = EditorConfig {
+        regions: vec![RegionSpec {
+            name: "world".to_owned(),
+            rect: EditorRegionRect { x_pixels: 0.0, y_pixels: 0.0, width_pixels: 128.0, height_pixels: 96.0 },
+            target: mover,
+            keyboard_focus_eligible: true,
+            input_lanes: lanes,
+            activation_chord: Some(EditorKeyChord {
+                key_code: KEY_W,
+                shift: false,
+                ctrl: false,
+                alt: false,
+                meta: false,
+            }),
+        }],
+    };
+    let _editor =
+        load_kit_export_with_config(bench, wasm, "aether.kit.widget.editor", "editor", config.encode_into_bytes());
 }
 
 /// Chunk 0 is one grass region. Rows north of z=8 sit one meter above the
@@ -201,6 +238,82 @@ fn assert_cliff_shape(label: &str, stats: ColorRegionStats, exclusion: ColorRegi
             && (1..=14).contains(&height),
         "{label} sand target should be a wide, shallow interior cliff face; \
          bounds={bounds:?} width={width} height={height} stats={stats:?}",
+    );
+}
+
+#[test]
+fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = TestBench::start_with_size(WINDOW_WIDTH, WINDOW_HEIGHT).expect("boot");
+    let world = component_address("world");
+    let mover_address = component_address("mover");
+    let _world_mailbox = load_kit_export(&mut bench, &wasm, "aether.kit.world", "world");
+    let mover_mailbox = load_kit_export_with_config(
+        &mut bench,
+        &wasm,
+        "aether.kit.mover",
+        "mover",
+        MoverConfig { owns_input: false }.encode_into_bytes(),
+    );
+
+    bench
+        .execute(vec![
+            (
+                "region",
+                BenchOp::send_mail(
+                    world.as_str(),
+                    &SetRegion {
+                        region_id: REGION_ID,
+                        name: "meadow".to_owned(),
+                        default_material: Material::Grass.to_u8(),
+                        cliff_material: Material::Sand.to_u8(),
+                    },
+                ),
+            ),
+            ("chunk", BenchOp::send_mail(world.as_str(), &height_break_chunk())),
+            (
+                "retained-window-size",
+                BenchOp::send_mail("aether.input", &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
+            ),
+            ("place", BenchOp::send_mail(mover_address.as_str(), &MoverTeleport { cell_x: 8, cell_z: 12 })),
+            ("settle", BenchOp::advance(2)),
+        ])
+        .expect("author world and settle opted-out mover");
+
+    let before = capture_scene(&mut bench, &mover_address, &world, "opt-out-before");
+    bench
+        .execute(vec![
+            ("unrouted-w", BenchOp::send_mail("aether.input", &Key { code: KEY_W })),
+            ("unrouted-advance", BenchOp::advance(32)),
+        ])
+        .expect("unrouted input window");
+    let blocked = capture_scene(&mut bench, &mover_address, &world, "opt-out-blocked");
+
+    load_mover_editor_shell(&mut bench, &wasm, mover_mailbox);
+    bench
+        .execute(vec![
+            ("routed-w", BenchOp::send_mail("aether.input", &Key { code: KEY_W })),
+            ("routed-advance", BenchOp::advance(32)),
+            ("routed-release", BenchOp::send_mail("aether.input", &KeyRelease { code: KEY_W })),
+        ])
+        .expect("editor-routed input window");
+    let routed = capture_scene(&mut bench, &mover_address, &world, "editor-routed");
+
+    let before_image = decode_png(&before.png).expect("decode before png");
+    let blocked_image = decode_png(&blocked.png).expect("decode blocked png");
+    let routed_image = decode_png(&routed.png).expect("decode routed png");
+    let blocked_mae = mean_absolute_error(&blocked_image, &before_image).expect("same-size blocked captures");
+    let routed_mae = mean_absolute_error(&routed_image, &blocked_image).expect("same-size routed captures");
+    assert!(
+        blocked_mae < 0.005,
+        "owns_input=false must prevent the mover from self-subscribing to W; blocked MAE={blocked_mae:.4}",
+    );
+    assert!(
+        (0.002..0.35).contains(&routed_mae),
+        "the editor shell must forward W to the opted-out mover; routed MAE={routed_mae:.4}",
     );
 }
 

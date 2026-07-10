@@ -106,6 +106,10 @@ fn scaled_color(color: Rgba, rgb_scale: f32, alpha: f32) -> Rgba {
     Rgba::new(color.r * rgb_scale, color.g * rgb_scale, color.b * rgb_scale, alpha)
 }
 
+const fn owns_input_by_default() -> bool {
+    true
+}
+
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.console.config")]
 pub struct ConsoleConfig {
@@ -117,6 +121,10 @@ pub struct ConsoleConfig {
     pub scrollback_limit: u32,
     pub prompt: String,
     pub theme: ConsoleTheme,
+    /// Whether this standalone console subscribes key, text, and wheel input.
+    /// `WindowSize` remains independently subscribed in either mode.
+    #[serde(default = "owns_input_by_default")]
+    pub owns_input: bool,
 }
 
 impl Default for ConsoleConfig {
@@ -130,6 +138,7 @@ impl Default for ConsoleConfig {
             scrollback_limit: 256,
             prompt: String::from("> "),
             theme: ConsoleTheme::default(),
+            owns_input: true,
         }
     }
 }

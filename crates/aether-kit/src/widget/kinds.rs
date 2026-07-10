@@ -819,6 +819,84 @@ pub struct HoverGained;
 #[kind(name = "aether.kit.widget.hover_lost")]
 pub struct HoverLost;
 
+/// A fixed editor region in window pixel coordinates.
+///
+/// Named axes and units keep hit geometry explicit at the wire boundary.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq)]
+pub struct EditorRegionRect {
+    pub x_pixels: f32,
+    pub y_pixels: f32,
+    pub width_pixels: f32,
+    pub height_pixels: f32,
+}
+
+/// Raw input lanes an editor region accepts from [`EditorShell`](crate::widget::EditorShell).
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct RegionInputLanes {
+    pub pointer_press: bool,
+    pub pointer_release: bool,
+    pub pointer_motion: bool,
+    pub wheel: bool,
+    pub key_press: bool,
+    pub key_release: bool,
+    pub text_input: bool,
+    pub ime_preedit: bool,
+    pub modifiers: bool,
+}
+
+impl RegionInputLanes {
+    /// Every raw editor-input lane enabled.
+    pub const ALL: Self = Self {
+        pointer_press: true,
+        pointer_release: true,
+        pointer_motion: true,
+        wheel: true,
+        key_press: true,
+        key_release: true,
+        text_input: true,
+        ime_preedit: true,
+        modifiers: true,
+    };
+}
+
+/// An exact editor-global key chord, matched against the shell's cached
+/// modifier snapshot.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+// Named modifier fields are the schema contract, matching `Modifiers` rather
+// than hiding the chord behind an opaque mask.
+#[allow(clippy::struct_excessive_bools)]
+pub struct EditorKeyChord {
+    pub key_code: u32,
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub meta: bool,
+}
+
+/// One independently-rooted editor surface registered with the shell.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RegionSpec {
+    pub name: String,
+    pub rect: EditorRegionRect,
+    pub target: MailboxId,
+    pub keyboard_focus_eligible: bool,
+    pub input_lanes: RegionInputLanes,
+    pub activation_chord: Option<EditorKeyChord>,
+}
+
+/// `aether.kit.widget.editor.config` — ordered peer regions routed by an
+/// input-only [`EditorShell`](crate::widget::EditorShell).
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.kit.widget.editor.config")]
+pub struct EditorConfig {
+    pub regions: Vec<RegionSpec>,
+}
+
+const fn owns_input_by_default() -> bool {
+    true
+}
+
 /// `aether.kit.widget.panel.config` — the reference panel root's layout
 /// config: where the vertical widget stack sits (`x` / `y` top-left, `width`),
 /// its base [`Theme`], the font it loads through `aether.text` to fill the
@@ -841,6 +919,10 @@ pub struct PanelConfig {
     pub font_path: String,
     pub theme: Theme,
     pub children: Vec<WidgetChildSpec>,
+    /// Whether this standalone panel subscribes the raw interactive streams.
+    /// Set false when an [`EditorShell`](crate::widget::EditorShell) owns them.
+    #[serde(default = "owns_input_by_default")]
+    pub owns_input: bool,
 }
 
 impl Default for PanelConfig {
@@ -853,6 +935,7 @@ impl Default for PanelConfig {
             font_path: String::new(),
             theme: Theme::default(),
             children: Vec::new(),
+            owns_input: true,
         }
     }
 }

@@ -1,6 +1,6 @@
 # ADR-0141: Editor-shell input ownership across region roots
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-09
 
 ## Context
@@ -113,3 +113,38 @@ mechanism.
   issues (#2915/#2916) amend ADR-0117 because they stay within one cluster;
   editor-wide input ownership crosses cluster roots, the boundary #2919
   reserved for a dedicated decision record.
+
+## Realization
+
+Issue #2918 realizes the decision in `aether-kit` with `EditorShell` at export
+namespace `aether.kit.widget.editor`. Its `EditorConfig` contains ordered
+`RegionSpec` records. Each spec names an `EditorRegionRect`, a target
+`MailboxId`, whether it participates in editor keyboard focus, a
+`RegionInputLanes` record, and an optional exact `EditorKeyChord`. Invalid or
+non-positive rectangles are ignored. Hit testing is ordered and topmost-first;
+when that hit region rejects a lane, routing stops rather than falling through
+to a covered region.
+
+The plain `widget::routing::Routing` state records focus, cached `Modifiers`,
+and a named `RegionPressOwner { target, button }`. The first accepted press
+owns motion and release until the matching button release; a different button
+release remains addressed to that owner without clearing it. Wheel routes by
+its own cursor coordinates. Exact activation chords can focus a region.
+Ctrl+Tab is reserved for forward region cycling, Ctrl+Shift+Tab cycles
+backward, and the matching Tab release is consumed; plain Tab press/release is
+forwarded to the focused region for its internal focus ring.
+
+`EditorShell` subscribes only the nine interactive raw kinds: pointer press,
+pointer release, pointer motion, wheel, key press, key release, committed text,
+IME preedit, and modifiers. It has no lifecycle, render, or `WindowSize`
+subscription. Focus transitions prime a target that accepts the modifier lane
+with the shell's cached named `Modifiers` record before forwarding the event
+that caused focus.
+
+`PanelConfig`, `ConsoleConfig`, and `MoverConfig` expose a default-compatible
+`owns_input: true`. Setting it to `false` gates only their interactive input
+subscriptions. The console and mover retain their direct `WindowSize`
+subscriptions, and every peer retains its existing lifecycle and render roles.
+Editor assembly therefore loads peer roots first, records their returned
+mailbox ids, disables their interactive ownership, and then loads one shell
+whose region config addresses those peers.

@@ -156,6 +156,8 @@ impl CamHeld {
 
 /// The controllable body on the painted world.
 pub struct WorldMover {
+    /// Whether this standalone mover subscribes raw interactive input.
+    owns_input: bool,
     /// Body position in octimeters on the world XZ plane.
     pos: (i32, i32),
     /// Held WASD directions.
@@ -179,12 +181,14 @@ pub struct WorldMover {
     cam_held: CamHeld,
 }
 
-#[actor]
+#[actor(instanced)]
 impl WasmActor for WorldMover {
+    type Config = MoverConfig;
     const NAMESPACE: &'static str = "aether.kit.mover";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+    fn init(config: MoverConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Self {
+            owns_input: config.owns_input,
             pos: SPAWN_CELL.center_octimeters(),
             held: Held::default(),
             target: None,
@@ -199,10 +203,12 @@ impl WasmActor for WorldMover {
 
     fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         let input = ctx.actor::<InputCapability>();
-        input.subscribe::<Key>();
-        input.subscribe::<KeyRelease>();
-        input.subscribe::<MouseButton>();
-        input.subscribe::<MouseMove>();
+        if self.owns_input {
+            input.subscribe::<Key>();
+            input.subscribe::<KeyRelease>();
+            input.subscribe::<MouseButton>();
+            input.subscribe::<MouseMove>();
+        }
         input.subscribe::<WindowSize>();
         let lifecycle = ctx.actor::<LifecycleCapability>();
         lifecycle.subscribe::<Tick>();

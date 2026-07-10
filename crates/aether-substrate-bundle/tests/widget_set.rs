@@ -63,6 +63,7 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8]) -> String {
         font_path: String::new(),
         theme: Theme::DEFAULT,
         children: Vec::new(),
+        owns_input: true,
     };
     let loaded = bench
         .execute(vec![(
@@ -290,6 +291,7 @@ fn load_panel_with(bench: &mut TestBench, wasm: &[u8], children: Vec<WidgetChild
         font_path: String::new(),
         theme: Theme::DEFAULT,
         children,
+        owns_input: true,
     };
     let loaded = bench
         .execute(vec![(

@@ -423,10 +423,12 @@ impl WasmActor for ConsoleOverlay {
     fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
         let input = ctx.actor::<InputCapability>();
-        input.subscribe::<Key>();
-        input.subscribe::<KeyRelease>();
-        input.subscribe::<TextInput>();
-        input.subscribe::<MouseWheel>();
+        if self.config.owns_input {
+            input.subscribe::<Key>();
+            input.subscribe::<KeyRelease>();
+            input.subscribe::<TextInput>();
+            input.subscribe::<MouseWheel>();
+        }
         input.subscribe::<WindowSize>();
 
         self.request_initial_font(ctx);

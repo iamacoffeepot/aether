@@ -178,6 +178,7 @@ fn load_scroll_panel(bench: &mut TestBench, wasm: &[u8], child: WidgetChildSpec)
         font_path: String::new(),
         theme: Theme::DEFAULT,
         children: vec![child],
+        owns_input: true,
     };
     let loaded = bench
         .execute(vec![(

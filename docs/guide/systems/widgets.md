@@ -198,6 +198,36 @@ panel is logged as a terminal residual and dropped.
 live restyles and the panel's resolved session font id intact through nested
 scroll containers.
 
+## Editor-wide region ownership
+
+`EditorShell` (export `aether.kit.widget.editor`) composes several independent
+roots into one input domain without turning them into one widget tree. It is
+the sole subscriber for interactive input across its configured regions; each
+panel still owns widget focus and capture inside its own cluster, while the
+shell owns region focus and capture between clusters.
+
+Assemble an editor peer-first. Load each panel, console, or mover, retain the
+returned `MailboxId`, and set its config's `owns_input` to `false`. Then load
+one `EditorShell` with an ordered `EditorConfig { regions }`. Each `RegionSpec`
+contains a named pixel rectangle, target mailbox, keyboard eligibility,
+`RegionInputLanes`, and optional exact `EditorKeyChord`. Later entries are
+topmost. A topmost region that rejects a lane blocks that event; routing does
+not fall through to a covered region.
+
+The first accepted pointer press owns pointer motion and releases across region
+boundaries until the matching button is released. Wheel uses the position in
+its own event. Keyboard, committed text, IME preedit, and modifiers route only
+to the focused region. An exact activation chord can focus a region (for
+example, the console's backquote chord). Ctrl+Tab cycles editor regions,
+Ctrl+Shift+Tab cycles backward, and both the reserved press and matching
+release are consumed. Plain Tab is forwarded unchanged so the focused panel's
+own widget traversal remains intact.
+
+`owns_input` defaults to `true`, preserving standalone behavior. It gates only
+interactive subscriptions: panel/console/mover lifecycle and render roles are
+unchanged, and console/mover continue subscribing to `WindowSize` directly.
+The shell itself owns no lifecycle, render, or window-size work.
+
 ## The reference panel
 
 `WidgetPanel` (export `aether.kit.widget.panel`) is the worked example — the

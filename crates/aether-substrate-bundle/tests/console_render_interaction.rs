@@ -20,13 +20,15 @@ use std::path::{Path, PathBuf};
 use aether_actor::Addressable;
 use aether_capabilities::RenderCapability;
 use aether_capabilities::fs::NamespaceRoots;
-use aether_data::Kind;
+use aether_data::{Kind, MailboxId};
 use aether_kinds::keycode::KEY_BACKQUOTE;
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, Key, LoadComponent,
     LoadResult, NamedMail, Tick, WindowSize,
 };
-use aether_kit::{ConsoleCommandOutput, ConsoleConfig};
+use aether_kit::{
+    ConsoleCommandOutput, ConsoleConfig, EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec,
+};
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
     test_helpers::{init_save_sandbox, require_runtime},
@@ -71,11 +73,11 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
     }
 }
 
-fn load_console(bench: &mut TestBench, wasm: &[u8]) {
-    load_console_with_config(bench, wasm, &ConsoleConfig::default());
+fn load_console(bench: &mut TestBench, wasm: &[u8]) -> MailboxId {
+    load_console_with_config(bench, wasm, &ConsoleConfig::default())
 }
 
-fn load_console_with_config(bench: &mut TestBench, wasm: &[u8], config: &ConsoleConfig) {
+fn load_console_with_config(bench: &mut TestBench, wasm: &[u8], config: &ConsoleConfig) -> MailboxId {
     let loaded = bench
         .execute(vec![(
             "load",
@@ -91,10 +93,48 @@ fn load_console_with_config(bench: &mut TestBench, wasm: &[u8], config: &Console
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name, .. } => {
+        LoadResult::Ok { mailbox_id, name, .. } => {
             assert!(name.ends_with(":console"), "console should register under :console; got {name}");
+            mailbox_id
         }
         LoadResult::Err { error } => panic!("load console: {error}"),
+    }
+}
+
+fn load_editor_shell(bench: &mut TestBench, wasm: &[u8], target: MailboxId) {
+    let config = EditorConfig {
+        regions: vec![RegionSpec {
+            name: "console".to_owned(),
+            rect: EditorRegionRect { x_pixels: 0.0, y_pixels: 0.0, width_pixels: 320.0, height_pixels: 200.0 },
+            target,
+            keyboard_focus_eligible: true,
+            input_lanes: RegionInputLanes::ALL,
+            activation_chord: Some(EditorKeyChord {
+                key_code: KEY_BACKQUOTE,
+                shift: false,
+                ctrl: false,
+                alt: false,
+                meta: false,
+            }),
+        }],
+    };
+    let loaded = bench
+        .execute(vec![(
+            "load-editor",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm: wasm.to_vec(),
+                    name: Some("editor".to_owned()),
+                    config: config.encode_into_bytes(),
+                    export: Some("aether.kit.widget.editor".to_owned()),
+                },
+            ),
+        )])
+        .expect("load editor shell");
+    match loaded.reply::<LoadResult>("load-editor").expect("decode editor LoadResult") {
+        LoadResult::Ok { .. } => {}
+        LoadResult::Err { error } => panic!("load editor shell: {error}"),
     }
 }
 
@@ -201,6 +241,36 @@ fn backquote_key_opens_console_overlay() {
 
     let open = top_band_coverage(&mut bench, "open");
     assert!(open > 0.90, "backquote should open the console and cover the top band; coverage={open:.3}");
+}
+
+#[test]
+fn editor_shell_exclusively_forwards_console_input_while_window_size_stays_direct() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = build_bench();
+    let console =
+        load_console_with_config(&mut bench, &wasm, &ConsoleConfig { owns_input: false, ..ConsoleConfig::default() });
+
+    bench
+        .execute(vec![
+            (
+                "size-direct-fanout",
+                BenchOp::send_mail("aether.input", &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
+            ),
+            ("unrouted-toggle", BenchOp::send_mail("aether.input", &Key { code: KEY_BACKQUOTE })),
+        ])
+        .expect("direct fanout before editor shell");
+    let closed = top_band_coverage(&mut bench, "owns-input-disabled");
+    assert!(closed < 0.01, "console must not self-subscribe to interactive input; coverage={closed:.3}");
+
+    load_editor_shell(&mut bench, &wasm, console);
+    bench
+        .execute(vec![("routed-toggle", BenchOp::send_mail("aether.input", &Key { code: KEY_BACKQUOTE }))])
+        .expect("toggle through editor shell");
+    let open = top_band_coverage(&mut bench, "editor-routed");
+    assert!(open > 0.90, "editor shell should forward backquote exactly once; coverage={open:.3}");
 }
 
 #[test]

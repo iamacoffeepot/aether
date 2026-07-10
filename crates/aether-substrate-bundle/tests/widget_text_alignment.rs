@@ -126,6 +126,7 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8], font_id: u32) {
         font_path: String::new(),
         theme: Theme { font_id, ..Theme::DEFAULT },
         children: Vec::new(),
+        owns_input: true,
     };
     let loaded = bench
         .execute(vec![(

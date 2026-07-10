@@ -39,6 +39,8 @@
 //!   [`widget::WidgetPanel`] and the concrete [`widget::set`] widgets. The
 //!   widget-compositing vocabulary lives in [`widget`] and the visual tokens
 //!   in [`widget::theme`].
+//! - [`widget::EditorShell`] — the input-only arbiter between independently
+//!   rooted editor regions (ADR-0141).
 //!
 //! `export!` (below) packs the actors into one cdylib (ADR-0096 multi-actor
 //! module); the explicit entry type is the bare-load target, and the FFI
@@ -79,7 +81,7 @@ pub use mark::{
     Mark, MarkCreate, MarkCreateResult, MarkDelete, MarkDeleteResult, MarkGeometry, MarkGet, MarkGetResult, MarkId,
     MarkList, MarkListResult, MarkMutationError, MarkRef, MarkUpdate, MarkUpdateResult, SavedMarks,
 };
-pub use mover::MoverTeleport;
+pub use mover::{MoverConfig, MoverTeleport};
 pub use terrain_editor::{
     ClearTerrainSelection, CreateTerrainMark, DeleteTerrainSelection, MoveTerrainSelection, RelabelTerrainSelection,
     SetTerrainSelection, TerrainCommandResult, TerrainEditorConfig, TerrainEditorError, TerrainEditorQuery,
@@ -87,12 +89,12 @@ pub use terrain_editor::{
 };
 pub use widget::theme::{SetTheme, Theme, ThemeState};
 pub use widget::{
-    ButtonClicked, ButtonConfig, ChildrenChanged, Collect, FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig,
-    ImageFit, LabelConfig, MembershipEntry, PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollDelta,
-    ScrollExtent, ScrollOffset, ScrollOutcome, ScrollResidual, SetWidgetState, SliderChanged, SliderConfig,
-    TextAreaConfig, TextCommitted, TextFieldConfig, VirtualListConfig, VirtualListSelected, WidgetChildSpec,
-    WidgetClipRect, WidgetConfig, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetKind,
-    WidgetStateChanged, WidgetValidation,
+    ButtonClicked, ButtonConfig, ChildrenChanged, Collect, EditorConfig, EditorKeyChord, EditorRegionRect, EditorShell,
+    FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, ImageFit, LabelConfig, MembershipEntry, PanelConfig,
+    RadioConfig, RadioSelected, RegionInputLanes, RegionSpec, ScrollConfig, ScrollDelta, ScrollExtent, ScrollOffset,
+    ScrollOutcome, ScrollResidual, SetWidgetState, SliderChanged, SliderConfig, TextAreaConfig, TextCommitted,
+    TextFieldConfig, VirtualListConfig, VirtualListSelected, WidgetChildSpec, WidgetClipRect, WidgetConfig,
+    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged, WidgetValidation,
 };
 pub use world::{
     ApplyBrush, AutomatonRule, BrushParameters, CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk,
@@ -147,6 +149,7 @@ aether_actor::export!(
     widget::set::LabelWidget,
     widget::set::ImageWidget,
     widget::set::VirtualListWidget,
+    EditorShell,
     widget::WidgetPanel
 );
 
@@ -170,6 +173,7 @@ aether_actor::export!(
     widget::set::LabelWidget,
     widget::set::ImageWidget,
     widget::set::VirtualListWidget,
+    EditorShell,
     widget::WidgetPanel,
     aether_behavior::BehaviorHost
 );
