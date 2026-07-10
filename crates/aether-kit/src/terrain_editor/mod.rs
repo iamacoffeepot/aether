@@ -117,7 +117,6 @@ struct OutboundMarkRequest {
 }
 
 struct ReplyEnvelope {
-    source: MailboxId,
     request: RequestId,
     context: MarkRequestContext,
 }
@@ -306,25 +305,30 @@ impl TerrainEditor {
     }
 
     fn accepts_envelope(&self, envelope: &ReplyEnvelope) -> bool {
-        self.config.mark_book_mailbox == envelope.source
-            && self.pending_request == Some(envelope.request)
+        self.pending_request == Some(envelope.request)
             && self
                 .pending
                 .as_ref()
                 .is_some_and(|pending| pending.expected_context() == envelope.context)
     }
 
+    fn reply_source_allowed(source: Option<MailboxId>) -> bool {
+        // Peer-component replies deliberately carry SourceAddr::None while
+        // echoing the request correlation. A present component source means
+        // this is an ordinary send, not the reply issued through MarkBook's
+        // one-shot ReplyHandle. The configured mailbox is enforced as the
+        // request destination; reply identity is then proven by the stored
+        // RequestId plus the request registry's typed, one-shot context.
+        source.is_none()
+    }
+
     fn take_reply_envelope(&self, ctx: &mut WasmCtx<'_, Manual>) -> Option<ReplyEnvelope> {
-        let Some(source) = ctx.source_mailbox() else {
-            tracing::warn!(target: "aether_kit", "terrain editor ignored sourceless mark reply");
-            return None;
-        };
-        if source != self.config.mark_book_mailbox {
+        let source = ctx.source_mailbox();
+        if !Self::reply_source_allowed(source) {
             tracing::warn!(
                 target: "aether_kit",
-                observed = source.0,
-                expected = self.config.mark_book_mailbox.0,
-                "terrain editor ignored mark reply from wrong source",
+                observed = source.map_or(MailboxId::NONE.0, |mailbox| mailbox.0),
+                "terrain editor ignored correlated mail carrying an ordinary component source",
             );
             return None;
         }
@@ -348,11 +352,7 @@ impl TerrainEditor {
             );
             return None;
         };
-        let envelope = ReplyEnvelope {
-            source,
-            request,
-            context,
-        };
+        let envelope = ReplyEnvelope { request, context };
         if !self.accepts_envelope(&envelope) {
             tracing::warn!(
                 target: "aether_kit",
@@ -481,6 +481,25 @@ impl TerrainEditor {
             MarkUpdateResult::Rejected { error } => {
                 Some(TerrainEditorError::MarkMutationRejected {
                     requested: Some(requested),
+                    error,
+                })
+            }
+        }
+    }
+
+    fn apply_create_result(&mut self, result: MarkCreateResult) -> TerrainCommandResult {
+        match result {
+            MarkCreateResult::Created { reference } => {
+                self.selection.replace(vec![reference]);
+                TerrainCommandResult::Applied {
+                    selection: self.selection.snapshot(),
+                    changed: vec![reference],
+                    deleted: Vec::new(),
+                }
+            }
+            MarkCreateResult::Rejected { error } => {
+                self.rejection(TerrainEditorError::MarkMutationRejected {
+                    requested: None,
                     error,
                 })
             }
@@ -721,26 +740,8 @@ impl WasmActor for TerrainEditor {
             );
             return;
         }
-        match result {
-            MarkCreateResult::Created { reference } => {
-                self.selection.replace(vec![reference]);
-                self.finish(
-                    ctx,
-                    &TerrainCommandResult::Applied {
-                        selection: self.selection.snapshot(),
-                        changed: vec![reference],
-                        deleted: Vec::new(),
-                    },
-                );
-            }
-            MarkCreateResult::Rejected { error } => self.finish_error(
-                ctx,
-                TerrainEditorError::MarkMutationRejected {
-                    requested: None,
-                    error,
-                },
-            ),
-        }
+        let command_result = self.apply_create_result(result);
+        self.finish(ctx, &command_result);
     }
 
     #[handler::manual]
@@ -885,25 +886,19 @@ mod tests {
             stage: MarkRequestStage::ValidateSelection,
             index: 0,
         };
-        let wrong_source = ReplyEnvelope {
-            source: MailboxId(45),
-            request: RequestId(12),
-            context: expected,
-        };
         let stale_request = ReplyEnvelope {
-            source: MailboxId(44),
             request: RequestId(11),
             context: expected,
         };
         let wrong_stage = ReplyEnvelope {
-            source: MailboxId(44),
             request: RequestId(12),
             context: MarkRequestContext {
                 stage: MarkRequestStage::Update,
                 index: 0,
             },
         };
-        assert!(!editor.accepts_envelope(&wrong_source));
+        assert!(TerrainEditor::reply_source_allowed(None));
+        assert!(!TerrainEditor::reply_source_allowed(Some(MailboxId(44))));
         assert!(!editor.accepts_envelope(&stale_request));
         assert!(!editor.accepts_envelope(&wrong_stage));
         assert_eq!(
@@ -912,6 +907,37 @@ mod tests {
             "ignored replies retain the original deferred reply handle"
         );
         assert_eq!(editor.pending_request, Some(RequestId(12)));
+    }
+
+    #[test]
+    fn create_result_replaces_selection_or_preserves_it_on_rejection() {
+        let previous = reference(8, 2);
+        let created = reference(9, 1);
+        let mut editor = editor();
+        editor.selection.replace(vec![previous]);
+        assert_eq!(
+            editor.apply_create_result(MarkCreateResult::Created { reference: created }),
+            TerrainCommandResult::Applied {
+                selection: vec![created],
+                changed: vec![created],
+                deleted: Vec::new(),
+            }
+        );
+
+        let error = MarkMutationError::IdExhausted;
+        assert_eq!(
+            editor.apply_create_result(MarkCreateResult::Rejected {
+                error: error.clone(),
+            }),
+            TerrainCommandResult::Rejected {
+                selection: vec![created],
+                error: TerrainEditorError::MarkMutationRejected {
+                    requested: None,
+                    error,
+                },
+            }
+        );
+        assert_eq!(editor.selection.snapshot(), vec![created]);
     }
 
     #[test]

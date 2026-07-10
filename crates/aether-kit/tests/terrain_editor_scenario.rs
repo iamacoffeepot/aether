@@ -10,9 +10,9 @@ use aether_kit::mark::{
     MarkUpdateResult,
 };
 use aether_kit::terrain_editor::{
-    DeleteTerrainSelection, MoveTerrainSelection, RelabelTerrainSelection, SetTerrainSelection,
-    TerrainCommandResult, TerrainEditorConfig, TerrainEditorError, TerrainEditorQuery,
-    TerrainEditorQueryResult, WorldDelta,
+    CreateTerrainMark, DeleteTerrainSelection, MoveTerrainSelection, RelabelTerrainSelection,
+    SetTerrainSelection, TerrainCommandResult, TerrainEditorConfig, TerrainEditorError,
+    TerrainEditorQuery, TerrainEditorQueryResult, WorldDelta,
 };
 use aether_kit::world::WorldPoint;
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
@@ -160,11 +160,35 @@ fn editor_selection_semantics_and_preflight_run_through_real_wasm() {
     let mark_address = component_address(MARK_COMPONENT_NAME);
     let editor_address = component_address(EDITOR_COMPONENT_NAME);
 
-    let point = create_mark(
-        &mut bench,
-        &mark_address,
-        MarkGeometry::Point(WorldPoint::new(10, 20)),
-        "camp",
+    let created_point = bench
+        .execute(vec![(
+            "editor_create",
+            BenchOp::send_and_await(
+                &editor_address,
+                &CreateTerrainMark {
+                    geometry: MarkGeometry::Point(WorldPoint::new(10, 20)),
+                    label: "camp".to_owned(),
+                },
+            ),
+        )])
+        .expect("editor create sequence");
+    let created_point = expect_applied(
+        created_point
+            .reply::<TerrainCommandResult>("editor_create")
+            .expect("decode editor create result"),
+    );
+    assert_eq!(created_point.selection, created_point.changed);
+    assert_eq!(created_point.changed.len(), 1);
+    assert!(created_point.deleted.is_empty());
+    let point = created_point.changed[0];
+    assert_eq!(
+        get_mark(&mut bench, &mark_address, point),
+        Mark {
+            id: point.id,
+            revision: 1,
+            geometry: MarkGeometry::Point(WorldPoint::new(10, 20)),
+            label: "camp".to_owned(),
+        }
     );
     let path = create_mark(
         &mut bench,
@@ -296,6 +320,12 @@ fn editor_selection_semantics_and_preflight_run_through_real_wasm() {
         assert_eq!(mark.reference(), *reference);
         assert_eq!(mark.label, "ridge");
     }
+    let before_external: Vec<Mark> = relabeled
+        .selection
+        .iter()
+        .map(|reference| get_mark(&mut bench, &mark_address, *reference))
+        .collect();
+    let stale_index = relabeled.selection.len() - 1;
 
     let externally_changed = bench
         .execute(vec![(
@@ -303,7 +333,7 @@ fn editor_selection_semantics_and_preflight_run_through_real_wasm() {
             BenchOp::send_and_await(
                 &mark_address,
                 &MarkUpdate {
-                    id: relabeled.selection[0].id,
+                    id: relabeled.selection[stale_index].id,
                     geometry: None,
                     label: Some("external".to_owned()),
                 },
@@ -339,24 +369,33 @@ fn editor_selection_semantics_and_preflight_run_through_real_wasm() {
         TerrainCommandResult::Rejected {
             selection: relabeled.selection.clone(),
             error: TerrainEditorError::StaleReference {
-                requested: relabeled.selection[0],
+                requested: relabeled.selection[stale_index],
                 current: externally_changed,
             },
         }
     );
-    let first_after_stale = get_mark(&mut bench, &mark_address, externally_changed);
-    assert_eq!(first_after_stale.reference(), externally_changed);
-    assert_eq!(first_after_stale.label, "external");
-    for reference in &relabeled.selection[1..] {
-        let untouched = get_mark(&mut bench, &mark_address, *reference);
-        assert_eq!(untouched.reference(), *reference);
-        assert_eq!(untouched.label, "ridge");
+    for (reference, before) in relabeled.selection[..stale_index]
+        .iter()
+        .zip(&before_external[..stale_index])
+    {
+        assert_eq!(
+            get_mark(&mut bench, &mark_address, *reference),
+            *before,
+            "complete preflight must perform no eager writes before the final stale mark"
+        );
     }
+    let changed_after_stale = get_mark(&mut bench, &mark_address, externally_changed);
+    assert_eq!(changed_after_stale.reference(), externally_changed);
+    assert_eq!(
+        changed_after_stale.geometry,
+        before_external[stale_index].geometry
+    );
+    assert_eq!(changed_after_stale.label, "external");
 
     let fresh_selection = vec![
-        externally_changed,
+        relabeled.selection[0],
         relabeled.selection[1],
-        relabeled.selection[2],
+        externally_changed,
     ];
     let deleted = bench
         .execute(vec![
