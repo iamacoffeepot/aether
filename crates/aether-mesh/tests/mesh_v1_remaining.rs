@@ -54,7 +54,11 @@ fn cylinder_outward_normals() {
         // Pick the dominant axis component of the centroid as the
         // expected outward direction.
         let radial_len = c.x.hypot(c.z);
-        let outward = if c.y.abs() > radial_len { [0.0, c.y.signum(), 0.0] } else { [c.x, 0.0, c.z] };
+        let outward = if c.y.abs() > radial_len {
+            [0.0, c.y.signum(), 0.0]
+        } else {
+            [c.x, 0.0, c.z]
+        };
         let dot = n.z.mul_add(outward[2], n.x.mul_add(outward[0], n.y * outward[1]));
         assert!(dot > 0.0, "cylinder face normal points inward for triangle {tri:?}");
     }

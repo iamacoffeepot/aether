@@ -311,7 +311,11 @@ pub(super) fn stamp_polygon_bounded(
                 };
                 (material_changes, chunk.overlay_mask[base + within], cleared_subcells)
             });
-        let composed = if material_changes { coverage } else { prior_coverage.max(coverage) };
+        let composed = if material_changes {
+            coverage
+        } else {
+            prior_coverage.max(coverage)
+        };
         let coverage_writes = u32::from(material_changes || prior_coverage != composed);
         let write_cost = cleared_subcells + coverage_writes;
         if write_cost > max_subcells - result.subcells_written {
@@ -530,8 +534,16 @@ mod tests {
         let mut sorting_too_expensive = Vec::with_capacity(MAX_STAMP_VERTICES);
         for index in 0..MAX_STAMP_VERTICES {
             sorting_too_expensive.push(point(
-                if index % 2 == 0 { 0 } else { OCTIMETERS_PER_SUBCELL },
-                if index % 4 < 2 { 0 } else { MAX_STAMP_EDGE_SUBCELLS as i32 * OCTIMETERS_PER_SUBCELL },
+                if index % 2 == 0 {
+                    0
+                } else {
+                    OCTIMETERS_PER_SUBCELL
+                },
+                if index % 4 < 2 {
+                    0
+                } else {
+                    MAX_STAMP_EDGE_SUBCELLS as i32 * OCTIMETERS_PER_SUBCELL
+                },
             ));
         }
         assert!(rasterize_polygon(&sorting_too_expensive).coverage.is_empty());

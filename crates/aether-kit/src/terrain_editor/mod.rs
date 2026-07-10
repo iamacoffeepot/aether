@@ -190,7 +190,11 @@ impl TerrainEditor {
     }
 
     fn require_idle(&self) -> Result<(), TerrainEditorError> {
-        if self.busy() { Err(TerrainEditorError::Busy) } else { Ok(()) }
+        if self.busy() {
+            Err(TerrainEditorError::Busy)
+        } else {
+            Ok(())
+        }
     }
 
     fn require_mark_book(&self) -> Result<(), TerrainEditorError> {

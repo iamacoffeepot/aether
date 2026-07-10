@@ -95,7 +95,11 @@ impl LifecycleCapabilityState {
         let next_nanos = self.settlement_latency_ewma.map_or(latency.as_nanos(), |prev| {
             let prev = prev.as_nanos();
             let sample = latency.as_nanos();
-            if sample >= prev { prev + (sample - prev) * alpha / 1000 } else { prev - (prev - sample) * alpha / 1000 }
+            if sample >= prev {
+                prev + (sample - prev) * alpha / 1000
+            } else {
+                prev - (prev - sample) * alpha / 1000
+            }
         });
         let ewma = Duration::from_nanos(u64::try_from(next_nanos).unwrap_or(u64::MAX));
         self.settlement_latency_ewma = Some(ewma);

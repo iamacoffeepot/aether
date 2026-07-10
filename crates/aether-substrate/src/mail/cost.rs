@@ -117,7 +117,11 @@ impl CostCell {
 /// scheduler's handoff calibration, which folds with its own shift.
 #[must_use]
 pub fn ewma_step(current: u64, sample: u64, shift: u32) -> u64 {
-    if sample >= current { current + ((sample - current) >> shift) } else { current - ((current - sample) >> shift) }
+    if sample >= current {
+        current + ((sample - current) >> shift)
+    } else {
+        current - ((current - sample) >> shift)
+    }
 }
 
 /// Per-actor cache mapping a handled `KindId` to its shared [`CostCell`].

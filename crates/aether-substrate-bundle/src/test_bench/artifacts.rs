@@ -276,9 +276,21 @@ fn resolve_artifact_root() -> PathBuf {
 /// nothing but underscores falls back to a fixed name rather than
 /// writing into `root` itself.
 fn sanitize_id(id: &str) -> String {
-    let sanitized: String =
-        id.chars().map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '_' }).collect();
-    if sanitized.trim_matches('_').is_empty() { "unnamed".to_owned() } else { sanitized }
+    let sanitized: String = id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.trim_matches('_').is_empty() {
+        "unnamed".to_owned()
+    } else {
+        sanitized
+    }
 }
 
 #[cfg(test)]

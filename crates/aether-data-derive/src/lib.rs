@@ -551,7 +551,9 @@ fn field_type_schema_expr(ty: &Type) -> TokenStream2 {
 /// syntactic — a type alias (`type Blob = Vec<u8>`) is not resolved by the
 /// proc macro and falls through to the generic `Vec` schema.
 fn is_vec_u8(ty: &Type) -> bool {
-    let Type::Path(tp) = ty else { return false };
+    let Type::Path(tp) = ty else {
+        return false;
+    };
     let Some(seg) = tp.path.segments.last() else {
         return false;
     };

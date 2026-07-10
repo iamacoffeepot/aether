@@ -905,7 +905,11 @@ fn harvest_runtime_identity(
     let dir = decl_path.parent().unwrap_or_else(|| Path::new("."));
     let flat = dir.join(format!("{module_name}.rs"));
     let nested = dir.join(module_name).join("mod.rs");
-    let target = if flat.exists() { flat } else { nested };
+    let target = if flat.exists() {
+        flat
+    } else {
+        nested
+    };
 
     let src = fs::read_to_string(&target).map_err(|e| {
         syn::Error::new(

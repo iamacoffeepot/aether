@@ -321,7 +321,9 @@ fn closure_handler_runs_on_call() {
             c2.fetch_add(dispatch.count, Ordering::SeqCst);
         }),
     );
-    let Some(MailboxEntry::Inbox { handler: h, .. }) = r.entry(id) else { panic!("expected closure entry") };
+    let Some(MailboxEntry::Inbox { handler: h, .. }) = r.entry(id) else {
+        panic!("expected closure entry")
+    };
     // Test-side id is irrelevant — the handler ignores it.
     h.enqueue(test_owned_dispatch(KindId(0), "aether.tick", &[], 7));
     h.enqueue(OwnedDispatch::disarmed(

@@ -75,7 +75,11 @@ pub(super) async fn spawn_substrate(mcp: &Mcp, args: SpawnSubstrateArgs) -> Resu
     // path-based, now fed by the registry. Hold the temp files across
     // the spawn call — the substrate reads them at boot, before the
     // spawn reply returns — then clean them up.
-    let staged = if args.components.is_empty() { None } else { Some(mcp.stage_boot_manifest(&args.components).await?) };
+    let staged = if args.components.is_empty() {
+        None
+    } else {
+        Some(mcp.stage_boot_manifest(&args.components).await?)
+    };
     let reply = mcp
         .session
         .call_one(local_envelope(

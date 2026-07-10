@@ -52,7 +52,11 @@ pub fn extract_agent_doc(attrs: &[Attribute]) -> Option<String> {
 
     if found_agent {
         let s = agent_lines.join("\n").trim().to_string();
-        if s.is_empty() { None } else { Some(s) }
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     } else {
         Some(full_trimmed.to_string())
     }

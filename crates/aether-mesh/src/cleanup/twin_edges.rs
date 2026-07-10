@@ -21,7 +21,11 @@ pub(super) fn surviving_directed_edges(directed: &HashMap<(VertexId, VertexId), 
     let mut keys: Vec<(VertexId, VertexId)> = directed.keys().copied().collect();
     keys.sort_unstable();
     for (a, b) in keys {
-        let canonical = if a < b { (a, b) } else { (b, a) };
+        let canonical = if a < b {
+            (a, b)
+        } else {
+            (b, a)
+        };
         if !seen.insert(canonical) {
             continue;
         }

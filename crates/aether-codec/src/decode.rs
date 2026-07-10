@@ -439,7 +439,11 @@ fn decode_enum_body(cur: &mut Cursor<'_>, variant: &EnumVariant, path: &str) -> 
 fn render_map_key(key_value: &Value, key_schema: &SchemaType, path: &str) -> Result<String, DecodeError> {
     match (key_schema, key_value) {
         (SchemaType::String, Value::String(s)) => Ok(s.clone()),
-        (SchemaType::Bool, Value::Bool(b)) => Ok(if *b { "true".into() } else { "false".into() }),
+        (SchemaType::Bool, Value::Bool(b)) => Ok(if *b {
+            "true".into()
+        } else {
+            "false".into()
+        }),
         (SchemaType::Scalar(p), Value::Number(n)) => match p {
             Primitive::U8 | Primitive::U16 | Primitive::U32 | Primitive::U64 => Ok(n
                 .as_u64()

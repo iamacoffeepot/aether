@@ -292,7 +292,11 @@ fn median_nanos(samples: &mut [u64]) -> u64 {
     }
     samples.sort_unstable();
     let mid = samples.len() / 2;
-    if samples.len().is_multiple_of(2) { u64::midpoint(samples[mid - 1], samples[mid]) } else { samples[mid] }
+    if samples.len().is_multiple_of(2) {
+        u64::midpoint(samples[mid - 1], samples[mid])
+    } else {
+        samples[mid]
+    }
 }
 
 #[cfg(test)]

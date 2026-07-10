@@ -149,7 +149,11 @@ pub(super) fn label_case_is_connected(corners: [u8; 4], label: u8, case: u8) -> 
         return true;
     }
     // The other diagonal pair: [BR, TL] for case 5, [BL, TR] for case 10.
-    let (other_a, other_b) = if case == 5 { (corners[1], corners[2]) } else { (corners[0], corners[3]) };
+    let (other_a, other_b) = if case == 5 {
+        (corners[1], corners[2])
+    } else {
+        (corners[0], corners[3])
+    };
     other_a != other_b || label > other_a
 }
 

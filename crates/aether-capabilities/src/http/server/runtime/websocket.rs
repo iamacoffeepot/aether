@@ -94,7 +94,11 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
 pub fn serialize_ws_frame(opcode: u8, payload: &[u8], mask: Option<[u8; 4]>) -> Vec<u8> {
     let mut out = Vec::with_capacity(payload.len() + 14);
     out.push(0x80 | (opcode & 0x0F));
-    let masked_bit: u8 = if mask.is_some() { 0x80 } else { 0x00 };
+    let masked_bit: u8 = if mask.is_some() {
+        0x80
+    } else {
+        0x00
+    };
     let len = payload.len();
     if len < 126 {
         out.push(masked_bit | u8::try_from(len).unwrap_or(0));
@@ -571,7 +575,11 @@ impl HttpShardState {
         let Some((_, stream_id)) = self.ws_target(conn_id) else {
             return;
         };
-        let opcode = if binary { OPCODE_BINARY } else { OPCODE_TEXT };
+        let opcode = if binary {
+            OPCODE_BINARY
+        } else {
+            OPCODE_TEXT
+        };
         let frame = serialize_ws_frame(opcode, data, None);
         let Some(has_credit) = self.streams.get(&stream_id).map(|stream| stream.credit_outstanding > 0) else {
             return;

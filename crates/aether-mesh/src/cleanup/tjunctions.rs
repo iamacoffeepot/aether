@@ -51,7 +51,11 @@ impl IndexedMesh {
                     if a == b {
                         continue;
                     }
-                    edges.insert(if a < b { (a, b) } else { (b, a) });
+                    edges.insert(if a < b {
+                        (a, b)
+                    } else {
+                        (b, a)
+                    });
                 }
             }
 
@@ -101,7 +105,11 @@ impl IndexedMesh {
                     let a = poly.vertices[i];
                     let b = poly.vertices[(i + 1) % n];
                     new_verts.push(a);
-                    let canon = if a < b { (a, b) } else { (b, a) };
+                    let canon = if a < b {
+                        (a, b)
+                    } else {
+                        (b, a)
+                    };
                     if let Some(&v) = subdivisions.get(&canon)
                         && v != a
                         && v != b

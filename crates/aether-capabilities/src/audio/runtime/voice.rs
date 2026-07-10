@@ -439,7 +439,11 @@ impl PartialBankVoice {
             let i_f = i as f32;
             let n = i_f + 1.0;
             let stretch = (def.inharmonicity * n).mul_add(n, 1.0).sqrt();
-            let detune = if i % 2 == 0 { 1.0 + def.detune } else { 1.0 - def.detune };
+            let detune = if i % 2 == 0 {
+                1.0 + def.detune
+            } else {
+                1.0 - def.detune
+            };
             p.phase_step = (n * f0 * stretch * detune) / sample_rate;
             let rate = def.decay_base * i_f.mul_add(def.decay_spread, 1.0) * pitch_scale;
             p.decay_mul = (-rate * dt).exp();

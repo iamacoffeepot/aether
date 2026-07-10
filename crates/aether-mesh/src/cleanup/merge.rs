@@ -308,7 +308,11 @@ fn collapse_unbacked_boundary_runs(
     if out.len() >= 2 && out.first() == out.last() {
         out.pop();
     }
-    if out.len() < 3 { verts } else { out }
+    if out.len() < 3 {
+        verts
+    } else {
+        out
+    }
 }
 
 /// Normalize a possibly non-simple loop into a list of simple loops.

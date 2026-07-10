@@ -53,7 +53,12 @@ pub(super) async fn send_mail(mcp: &Mcp, args: SendMailArgs) -> Result<String, M
                     let engine_kinds = engine.map(|e| mcp.snapshot_engine_kinds(e)).unwrap_or_default();
                     replies = decode_reply_events(&events, &engine_kinds, declared_reply);
                     timed_out = hit_timeout;
-                    if hit_timeout { "timeout" } else { "delivered" }.to_owned()
+                    if hit_timeout {
+                        "timeout"
+                    } else {
+                        "delivered"
+                    }
+                    .to_owned()
                 }
                 Err(e) => format!("error: {e}"),
             }

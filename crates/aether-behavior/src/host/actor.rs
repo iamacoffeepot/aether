@@ -452,7 +452,11 @@ impl BehaviorHost {
     /// Forward the in-flight mail raw (no interpreter call) along its lane —
     /// up to the parent, or down to the wrapped child.
     fn forward_raw(&self, ctx: &WasmCtx<'_>, is_up: bool, kind: KindId, bytes: &[u8]) {
-        let relative = if is_up { ctx.parent() } else { ctx.child(&self.config.child.subname) };
+        let relative = if is_up {
+            ctx.parent()
+        } else {
+            ctx.child(&self.config.child.subname)
+        };
         if let Some(target) = relative {
             target.send_bytes(kind, bytes);
         } else {
@@ -508,7 +512,11 @@ impl DrainSink for LaneSink<'_, '_> {
     fn record(&mut self, event: DrainEvent) {
         let (relative, kind_id, bytes) = match event {
             DrainEvent::Forward { kind_id, bytes } => {
-                let relative = if self.is_up { self.ctx.parent() } else { self.ctx.child(self.wrapped_subname) };
+                let relative = if self.is_up {
+                    self.ctx.parent()
+                } else {
+                    self.ctx.child(self.wrapped_subname)
+                };
                 (relative, kind_id, bytes)
             }
             DrainEvent::Effect { target, kind_id, bytes } => {
@@ -535,12 +543,13 @@ impl DrainSink for LaneSink<'_, '_> {
 fn resolve_child_path<'a>(ctx: &WasmCtx<'a>, path: &str) -> Option<aether_actor::RelativeMailbox<'a>> {
     let mut segments = path.split('/');
     let first = segments.next().filter(|segment| !segment.is_empty())?;
-    segments.try_fold(
-        ctx.child(first)?,
-        |relative, segment| {
-            if segment.is_empty() { None } else { relative.child(segment) }
-        },
-    )
+    segments.try_fold(ctx.child(first)?, |relative, segment| {
+        if segment.is_empty() {
+            None
+        } else {
+            relative.child(segment)
+        }
+    })
 }
 
 #[cfg(test)]

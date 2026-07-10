@@ -190,9 +190,17 @@ pub(crate) fn projection_axes(plane: &Plane3) -> (Axis, Axis) {
     let ay = plane.n_y.unsigned_abs();
     let az = plane.n_z.unsigned_abs();
     if ax >= ay && ax >= az {
-        if plane.n_x >= 0 { (Axis::Y, Axis::Z) } else { (Axis::Z, Axis::Y) }
+        if plane.n_x >= 0 {
+            (Axis::Y, Axis::Z)
+        } else {
+            (Axis::Z, Axis::Y)
+        }
     } else if ay >= az {
-        if plane.n_y >= 0 { (Axis::Z, Axis::X) } else { (Axis::X, Axis::Z) }
+        if plane.n_y >= 0 {
+            (Axis::Z, Axis::X)
+        } else {
+            (Axis::X, Axis::Z)
+        }
     } else if plane.n_z >= 0 {
         (Axis::X, Axis::Y)
     } else {

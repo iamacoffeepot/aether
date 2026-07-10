@@ -240,12 +240,20 @@ pub fn read_producers_from_bytes(wasm: &[u8]) -> String {
             return String::new();
         };
         for field in producers {
-            let Ok(field) = field else { continue };
+            let Ok(field) = field else {
+                continue;
+            };
             let values: Vec<String> = field
                 .values
                 .into_iter()
                 .filter_map(Result::ok)
-                .map(|v| if v.version.is_empty() { v.name.to_owned() } else { format!("{} {}", v.name, v.version) })
+                .map(|v| {
+                    if v.version.is_empty() {
+                        v.name.to_owned()
+                    } else {
+                        format!("{} {}", v.name, v.version)
+                    }
+                })
                 .collect();
             if !values.is_empty() {
                 parts.push(format!("{}: {}", field.name, values.join(", ")));

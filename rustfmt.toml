@@ -1,2 +1,6 @@
 max_width = 120
 use_small_heuristics = "Max"
+# An if-else (and let-else) never collapses onto one line, whatever fits: the
+# branch structure is the point of the expression, so it always reads vertically.
+single_line_if_else_max_width = 0
+single_line_let_else_max_width = 0

@@ -797,7 +797,11 @@ fn compare_latency(
             let delta_iqr = iqr_sorted(&delta_sorted);
 
             let verdict = classify(&deltas, delta_median, delta_iqr, base_median, Direction::LowerIsBetter, cfg);
-            let delta_pct = if base_median > 0.0 { delta_median / base_median * 100.0 } else { 0.0 };
+            let delta_pct = if base_median > 0.0 {
+                delta_median / base_median * 100.0
+            } else {
+                0.0
+            };
 
             cells.push(CellComparison {
                 workers: key.workers,
@@ -893,7 +897,11 @@ fn compare_throughput(
         let delta_iqr = iqr_sorted(&delta_sorted);
 
         let verdict = classify(&deltas, delta_median, delta_iqr, base_median, Direction::HigherIsBetter, cfg);
-        let delta_pct = if base_median > 0.0 { delta_median / base_median * 100.0 } else { 0.0 };
+        let delta_pct = if base_median > 0.0 {
+            delta_median / base_median * 100.0
+        } else {
+            0.0
+        };
 
         cells.push(ThroughputComparison {
             workers: key.workers,
@@ -962,7 +970,11 @@ fn compare_keepup(
         base_cells.first().map(|c| c.iter().map(|x| (x.workers, x.topo.clone())).collect()).unwrap_or_default();
 
     let pace_ratio = |c: &KeepUpCell| -> f64 {
-        if c.expected_nanos > 0 { c.elapsed_nanos as f64 / c.expected_nanos as f64 } else { 0.0 }
+        if c.expected_nanos > 0 {
+            c.elapsed_nanos as f64 / c.expected_nanos as f64
+        } else {
+            0.0
+        }
     };
 
     for (workers, topo) in &keys {
@@ -1029,7 +1041,11 @@ fn classify(
         Direction::LowerIsBetter => value_fell,
         Direction::HigherIsBetter => !value_fell,
     };
-    if improved { Verdict::Improved } else { Verdict::Regressed }
+    if improved {
+        Verdict::Improved
+    } else {
+        Verdict::Regressed
+    }
 }
 
 fn us(ns: f64) -> String {

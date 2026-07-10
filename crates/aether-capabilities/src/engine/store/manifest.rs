@@ -140,7 +140,11 @@ pub fn component_manifest(wasm: &[u8]) -> Result<ComponentManifest, String> {
     // marker and omits `aether.namespace`, so it has no bare-load entry.
     // Otherwise the entry is the module's `aether.namespace` value (the
     // single-actor namespace or the `export!(entry = …)` opt-in).
-    let default_entry = if kind_manifest::read_no_entry_marker(wasm) { None } else { module_namespace.clone() };
+    let default_entry = if kind_manifest::read_no_entry_marker(wasm) {
+        None
+    } else {
+        module_namespace.clone()
+    };
 
     let mut actors: Vec<ComponentActor> = Vec::with_capacity(groups.len());
     for group in groups {

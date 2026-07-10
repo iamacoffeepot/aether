@@ -81,7 +81,11 @@ impl IndexedMesh {
                     if ra == rb {
                         continue;
                     }
-                    let (keep, drop) = if ra < rb { (ra, rb) } else { (rb, ra) };
+                    let (keep, drop) = if ra < rb {
+                        (ra, rb)
+                    } else {
+                        (rb, ra)
+                    };
                     merges.insert(drop, keep);
                 }
             }

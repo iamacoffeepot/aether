@@ -77,7 +77,11 @@ impl Vec2 {
     #[must_use]
     pub fn normalize(self) -> Self {
         let len = self.length();
-        if len > 0.0 { self * (1.0 / len) } else { Self::ZERO }
+        if len > 0.0 {
+            self * (1.0 / len)
+        } else {
+            Self::ZERO
+        }
     }
 
     #[inline]
@@ -156,7 +160,11 @@ impl Vec3 {
     #[must_use]
     pub fn normalize(self) -> Self {
         let len = self.length();
-        if len > 0.0 { self * (1.0 / len) } else { Self::ZERO }
+        if len > 0.0 {
+            self * (1.0 / len)
+        } else {
+            Self::ZERO
+        }
     }
 
     /// Like [`Self::normalize`] but returns `fallback` (instead of
@@ -215,7 +223,11 @@ impl Vec3 {
         if cross.length_squared() > 1e-10 * mag_a_sq * mag_b_sq {
             return None;
         }
-        Some(if self.dot(other) >= 0.0 { 1.0 } else { -1.0 })
+        Some(if self.dot(other) >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        })
     }
 
     #[inline]
@@ -288,7 +300,11 @@ impl Vec4 {
     #[must_use]
     pub fn normalize(self) -> Self {
         let len = self.length();
-        if len > 0.0 { self * (1.0 / len) } else { Self::ZERO }
+        if len > 0.0 {
+            self * (1.0 / len)
+        } else {
+            Self::ZERO
+        }
     }
 
     #[inline]

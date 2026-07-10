@@ -566,7 +566,11 @@ pub(crate) fn diagnostic_mask(image: &Image, check: &FrameCheck) -> Vec<u8> {
     if let Some(rect) = clamp_region(region, image.width, image.height) {
         for (x, y, rgb) in region_pixels(image, rect) {
             let start = ((y * image.width + x) * 4) as usize;
-            let pixel = if is_lit(rgb, bg, tolerance) { [255, 255, 255, 255] } else { [0, 0, 0, 255] };
+            let pixel = if is_lit(rgb, bg, tolerance) {
+                [255, 255, 255, 255]
+            } else {
+                [0, 0, 0, 255]
+            };
             mask[start..start + 4].copy_from_slice(&pixel);
         }
     }

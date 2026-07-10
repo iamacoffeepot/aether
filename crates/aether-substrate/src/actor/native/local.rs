@@ -60,7 +60,11 @@ pub fn with_stamped<R>(slots: &ActorSlots, f: impl FnOnce() -> R) -> R {
 /// `None` when no actor is stamped on this thread.
 fn host_lookup() -> Option<*const ActorSlots> {
     let p = CURRENT_SLOTS.get();
-    if p.is_null() { None } else { Some(p) }
+    if p.is_null() {
+        None
+    } else {
+        Some(p)
+    }
 }
 
 /// Install the host thread-local backend as the process-global `Local`

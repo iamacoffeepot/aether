@@ -405,7 +405,11 @@ fn run_bundle(args: &BundleArgs) -> Result<()> {
         |triple| target_dir.join(triple).join(args.profile.as_str()),
     );
     let windows = args.target.as_deref().map_or(cfg!(windows), |t| t.contains("windows"));
-    let exe = profile_dir.join(if windows { format!("{bin}.exe") } else { bin.to_string() });
+    let exe = profile_dir.join(if windows {
+        format!("{bin}.exe")
+    } else {
+        bin.to_string()
+    });
     println!("{} bundle ({} component(s)) -> {}", plan.chassis.as_str(), plan.components.len(), exe.display());
     Ok(())
 }
@@ -450,7 +454,13 @@ fn resolve_bundle_spec(spec_path: &Path, chassis_flag: BundleChassis) -> Result<
     let spec: BundleSpec =
         serde_json::from_str(&text).with_context(|| format!("parse bundle spec {}", spec_path.display()))?;
     let spec_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));
-    let anchor = |path: &Path| -> PathBuf { if path.is_absolute() { path.to_path_buf() } else { spec_dir.join(path) } };
+    let anchor = |path: &Path| -> PathBuf {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            spec_dir.join(path)
+        }
+    };
     let mut components = Vec::new();
     for (i, entry) in spec.components.iter().enumerate() {
         let source = match (&entry.package, &entry.wasm) {
@@ -483,7 +493,11 @@ fn resolve_bundle_spec(spec_path: &Path, chassis_flag: BundleChassis) -> Result<
 /// `.wasm` suffix; anything else is a workspace package name.
 fn classify_component(raw: &str) -> ComponentSource {
     let is_wasm_path = Path::new(raw).extension().is_some_and(|extension| extension.eq_ignore_ascii_case("wasm"));
-    if is_wasm_path { ComponentSource::Prebuilt(PathBuf::from(raw)) } else { ComponentSource::Package(raw.to_string()) }
+    if is_wasm_path {
+        ComponentSource::Prebuilt(PathBuf::from(raw))
+    } else {
+        ComponentSource::Package(raw.to_string())
+    }
 }
 
 /// Render the pack manifest JSON the chassis package's `build.rs`
@@ -521,7 +535,11 @@ fn bundle_manifest_json(plan: &BundlePlan, wasm_paths: &[PathBuf]) -> Result<ser
 /// dir.
 fn wasm_artifact_path(wasm_profile_dir: &Path, component: &Component) -> PathBuf {
     let file = format!("{}.wasm", component.stem);
-    if component.from_example { wasm_profile_dir.join("examples").join(file) } else { wasm_profile_dir.join(file) }
+    if component.from_example {
+        wasm_profile_dir.join("examples").join(file)
+    } else {
+        wasm_profile_dir.join(file)
+    }
 }
 
 fn copy_artifact(src: &Path, dst: &Path) -> Result<()> {
@@ -541,7 +559,11 @@ fn build_component(plan: &BuildPlan, profile: Profile) -> Result<()> {
     if let Some(flag) = profile.cargo_flag() {
         cmd.arg(flag);
     }
-    let label = if plan.examples { format!("{} (examples)", plan.package) } else { plan.package.clone() };
+    let label = if plan.examples {
+        format!("{} (examples)", plan.package)
+    } else {
+        plan.package.clone()
+    };
     run(cmd, &format!("build component {label}"))
 }
 

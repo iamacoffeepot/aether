@@ -222,7 +222,11 @@ impl SampleVoice {
         // The interpolation neighbour is the next frame — but if that
         // frame reaches or crosses `loop_end`, the loop wraps, so read
         // `loop_start` instead (the seam neighbour).
-        let next_index = if (i + 1) as f32 >= lp.end { (lp.start.floor() as usize).min(len - 1) } else { i + 1 };
+        let next_index = if (i + 1) as f32 >= lp.end {
+            (lp.start.floor() as usize).min(len - 1)
+        } else {
+            i + 1
+        };
         let b = self.pcm[next_index];
         let frac = self.pos - i as f32;
         let s = (b - a).mul_add(frac, a) * self.amplitude * ramp;
@@ -364,7 +368,11 @@ pub fn sfz_dir(path: &str) -> &str {
 /// Join a sample path onto the `.sfz`'s directory. An empty directory
 /// leaves the sample as-is.
 pub fn join_fs(dir: &str, rel: &str) -> String {
-    if dir.is_empty() { rel.to_owned() } else { format!("{dir}/{rel}") }
+    if dir.is_empty() {
+        rel.to_owned()
+    } else {
+        format!("{dir}/{rel}")
+    }
 }
 
 /// Derive a bank name from the `.sfz` filename stem (the last path
@@ -373,5 +381,9 @@ pub fn join_fs(dir: &str, rel: &str) -> String {
 pub fn bank_name_from_path(path: &str) -> String {
     let file = path.rsplit('/').next().unwrap_or(path);
     let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
-    if stem.is_empty() { "instrument".to_owned() } else { stem.to_owned() }
+    if stem.is_empty() {
+        "instrument".to_owned()
+    } else {
+        stem.to_owned()
+    }
 }

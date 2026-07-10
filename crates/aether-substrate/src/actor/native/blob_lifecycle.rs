@@ -72,7 +72,14 @@ fn sealed_of(w: u64) -> bool {
 }
 #[inline]
 fn pack(cursor: u64, len: u64, done: u64, seal: bool) -> u64 {
-    cursor | (len << LEN_SHIFT) | (done << DONE_SHIFT) | if seal { SEAL_BIT } else { 0 }
+    cursor
+        | (len << LEN_SHIFT)
+        | (done << DONE_SHIFT)
+        | if seal {
+            SEAL_BIT
+        } else {
+            0
+        }
 }
 
 /// Outcome of a producer's [`Lifecycle::publish`].

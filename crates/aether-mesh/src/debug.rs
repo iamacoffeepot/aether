@@ -152,7 +152,11 @@ pub fn validate_manifold(polygons: &[Polygon]) -> Vec<ManifoldViolation> {
     let mut violations = Vec::new();
     let mut seen = HashSet::new();
     for &(a, b) in directed.keys() {
-        let canonical = if a < b { (a, b) } else { (b, a) };
+        let canonical = if a < b {
+            (a, b)
+        } else {
+            (b, a)
+        };
         if !seen.insert(canonical) {
             continue;
         }
@@ -332,7 +336,11 @@ pub fn validate_normal_coherence(polygons: &[Polygon]) -> Vec<GeometryViolation>
                 if a == b {
                     continue;
                 }
-                let canonical = if a < b { (a, b) } else { (b, a) };
+                let canonical = if a < b {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
                 edges.entry(canonical).or_default().push((i, poly.plane_normal));
             }
         };
@@ -353,7 +361,11 @@ pub fn validate_normal_coherence(polygons: &[Polygon]) -> Vec<GeometryViolation>
         if i0 == i1 {
             continue;
         }
-        let pair = if i0 < i1 { (i0, i1) } else { (i1, i0) };
+        let pair = if i0 < i1 {
+            (i0, i1)
+        } else {
+            (i1, i0)
+        };
         if !seen.insert(pair) {
             continue;
         }
@@ -398,7 +410,11 @@ pub fn validate_no_t_junctions(polygons: &[Polygon]) -> Vec<GeometryViolation> {
                 if a == b {
                     continue;
                 }
-                let canonical = if a < b { (a, b) } else { (b, a) };
+                let canonical = if a < b {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
                 edges.insert(canonical);
             }
         };
@@ -490,7 +506,11 @@ pub fn summary(polygons: &[Polygon]) -> Summary {
         let n = p.vertices.len();
         (mn.min(n), mx.max(n), sum + n)
     });
-    let avg = if polygon_count == 0 { 0.0 } else { vsum as f32 / polygon_count as f32 };
+    let avg = if polygon_count == 0 {
+        0.0
+    } else {
+        vsum as f32 / polygon_count as f32
+    };
     let hole_count_total = polygons.iter().map(|p| p.holes.len()).sum();
     let mut by_plane_direction: HashMap<(i8, i8, i8), usize> = HashMap::new();
     for p in polygons {
@@ -500,7 +520,11 @@ pub fn summary(polygons: &[Polygon]) -> Summary {
     Summary {
         polygon_count,
         triangle_count_after_fan,
-        vertex_count_min: if polygon_count == 0 { 0 } else { vmin },
+        vertex_count_min: if polygon_count == 0 {
+            0
+        } else {
+            vmin
+        },
         vertex_count_max: vmax,
         vertex_count_avg: avg,
         hole_count_total,

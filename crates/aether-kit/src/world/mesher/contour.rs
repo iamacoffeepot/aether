@@ -162,7 +162,11 @@ fn corner_flip(
 /// sample's angle setting; `99` (unreachable — the window holds 24
 /// neighbors) disables the rule at 90 degrees.
 fn t24_of(smoothing_degrees: u32) -> i32 {
-    if smoothing_degrees >= 90 { 99 } else { 13 + ((smoothing_degrees as i32 - 45) * 2 + 15) / 30 }
+    if smoothing_degrees >= 90 {
+        99
+    } else {
+        13 + ((smoothing_degrees as i32 - 45) * 2 + 15) / 30
+    }
 }
 
 /// Upsample `coverage` (`width × height`) by `upsample` and minimize its
@@ -250,7 +254,11 @@ pub fn minimize_corners(
             {
                 m = a;
             }
-            grid[gz * gw + gx] = if m { u8::MAX } else { 0 };
+            grid[gz * gw + gx] = if m {
+                u8::MAX
+            } else {
+                0
+            };
         }
     }
 
@@ -307,7 +315,11 @@ fn prune_one_wide_artifacts(
                     .filter(|(dx, dz)| in_mask(&grid, gw, gh, gx + dx, gz + dz, m))
                     .count();
                 if (m && orth_covered <= 1) || (!m && orth_covered >= 3) {
-                    next[gz as usize * gw + gx as usize] = if m { 0 } else { u8::MAX };
+                    next[gz as usize * gw + gx as usize] = if m {
+                        0
+                    } else {
+                        u8::MAX
+                    };
                     changed = true;
                 }
             }
@@ -384,7 +396,11 @@ fn cellular_pass(
                 flip = c24 >= t24;
             }
             if flip {
-                next[gz as usize * gw + gx as usize] = if m { 0 } else { u8::MAX };
+                next[gz as usize * gw + gx as usize] = if m {
+                    0
+                } else {
+                    u8::MAX
+                };
             }
         }
     }
@@ -907,7 +923,11 @@ fn emit_window_poly(
 ) {
     let step_oct = window.place.step_oct;
     let edge_t = |a: u8, b: u8| -> f32 {
-        if a == b { 0.5 } else { ((COVERAGE_CROSSING - f32::from(a)) / (f32::from(b) - f32::from(a))).clamp(0.0, 1.0) }
+        if a == b {
+            0.5
+        } else {
+            ((COVERAGE_CROSSING - f32::from(a)) / (f32::from(b) - f32::from(a))).clamp(0.0, 1.0)
+        }
     };
     let x_lo = window.place.origin_oct[0] + wi * step_oct;
     let x_hi = window.place.origin_oct[0] + (wi + 1) * step_oct;
@@ -970,7 +990,15 @@ mod tests {
     }
 
     fn coverage(mask: &[bool]) -> Vec<u8> {
-        mask.iter().map(|&sample| if sample { u8::MAX } else { 0 }).collect()
+        mask.iter()
+            .map(|&sample| {
+                if sample {
+                    u8::MAX
+                } else {
+                    0
+                }
+            })
+            .collect()
     }
 
     fn minimize_bool(
@@ -1002,7 +1030,11 @@ mod tests {
         let gw = w * factor;
         for gz in 0..h * factor {
             for gx in 0..gw {
-                out[gz * gw + gx] = if mask[(gz / factor) * w + gx / factor] { u8::MAX } else { 0 };
+                out[gz * gw + gx] = if mask[(gz / factor) * w + gx / factor] {
+                    u8::MAX
+                } else {
+                    0
+                };
             }
         }
         out

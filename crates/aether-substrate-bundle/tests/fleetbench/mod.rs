@@ -102,7 +102,11 @@ const DEFAULT_REPLY_CAP_SECS: u64 = 300;
 /// stays the live heartbeat). Mirrors #2062's `AETHER_SETTLEMENT_CAP_SECS`
 /// sentinel.
 pub fn cap_from_secs(secs: u64) -> Duration {
-    if secs == 0 { Duration::MAX } else { Duration::from_secs(secs) }
+    if secs == 0 {
+        Duration::MAX
+    } else {
+        Duration::from_secs(secs)
+    }
 }
 
 /// Resolve the steady-state reply backstop from

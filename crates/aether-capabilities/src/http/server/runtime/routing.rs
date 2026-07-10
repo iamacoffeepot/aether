@@ -57,7 +57,11 @@ pub fn normalize_prefix(raw: &str) -> Result<String, String> {
         return Err(format!("route prefix {raw:?} must start with '/'"));
     }
     let trimmed = raw.trim_end_matches('/');
-    Ok(if trimmed.is_empty() { "/".to_string() } else { trimmed.to_string() })
+    Ok(if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    })
 }
 
 /// Registrant-mailbox validation for the explicit-`mailbox`
@@ -119,8 +123,16 @@ pub fn register_route(
                 error: format!(
                     "route ({prefix:?}, {method:?}) is {}; a {} registration cannot \
                      join it (ADR-0136: spreading is a joint opt-in)",
-                    if existing.shared { "a shared member set" } else { "exclusively claimed" },
-                    if shared { "shared" } else { "exclusive" },
+                    if existing.shared {
+                        "a shared member set"
+                    } else {
+                        "exclusively claimed"
+                    },
+                    if shared {
+                        "shared"
+                    } else {
+                        "exclusive"
+                    },
                 ),
             };
         }

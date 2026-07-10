@@ -385,7 +385,15 @@ pub fn max_out_degree(topo: &Topology) -> usize {
 /// the [`depth_chain`] (light) and [`ui_roundtrip`] (real) factories so the
 /// chain-build lives in one place.
 fn forward_chain_edges(d: usize) -> Vec<Vec<usize>> {
-    (0..d).map(|i| if i + 1 < d { vec![i + 1] } else { vec![] }).collect()
+    (0..d)
+        .map(|i| {
+            if i + 1 < d {
+                vec![i + 1]
+            } else {
+                vec![]
+            }
+        })
+        .collect()
 }
 
 /// `0 -> 1 -> ... -> d-1`. Each relay forwards to the next; the last is
@@ -1036,7 +1044,11 @@ pub fn parse_workers() -> Vec<usize> {
         .split(',')
         .filter_map(|tok| {
             let t = tok.trim();
-            if t.eq_ignore_ascii_case("max") { Some(max) } else { t.parse::<usize>().ok().map(|w| w.max(1)) }
+            if t.eq_ignore_ascii_case("max") {
+                Some(max)
+            } else {
+                t.parse::<usize>().ok().map(|w| w.max(1))
+            }
         })
         .collect();
     out.sort_unstable();

@@ -1007,7 +1007,11 @@ pub(super) fn cliff_material_from_u8(byte: u8) -> Material {
 fn floor_to_i32(v: f32) -> i32 {
     #[allow(clippy::cast_possible_truncation)] // world coordinates are far inside i32
     let t = v as i32;
-    if (t as f32) > v { t - 1 } else { t }
+    if (t as f32) > v {
+        t - 1
+    } else {
+        t
+    }
 }
 
 /// Partition four cyclically-ordered incident members into non-cliff plates
@@ -1092,15 +1096,35 @@ const MAX_DECODED_WATER_PLANES: usize = u16::MAX as usize;
 const MAX_DECODED_CHUNKS: usize = 65_536;
 
 fn chunk_record_bytes(version: u8) -> usize {
-    let overlay_mask_bytes = if version >= 7 { OVERLAY_MASK_WIRE_BYTES } else { 2 * CELLS_PER_CHUNK_AREA };
+    let overlay_mask_bytes = if version >= 7 {
+        OVERLAY_MASK_WIRE_BYTES
+    } else {
+        2 * CELLS_PER_CHUNK_AREA
+    };
     8 + 2 * CELLS_PER_CHUNK_AREA
         + overlay_mask_bytes
         + 4 * CELLS_PER_CHUNK_AREA
-        + if version >= 4 { 2 * CELLS_PER_CHUNK_AREA } else { 0 }
+        + if version >= 4 {
+            2 * CELLS_PER_CHUNK_AREA
+        } else {
+            0
+        }
         + 2 * CELLS_PER_CHUNK_AREA
-        + if version >= 2 { CELLS_PER_CHUNK_AREA } else { 0 }
-        + if version >= 5 { UNDERLAY_POINTS_PER_CHUNK } else { 0 }
-        + if version >= 6 { 2 * HEIGHT_POINTS_PER_CHUNK } else { 0 }
+        + if version >= 2 {
+            CELLS_PER_CHUNK_AREA
+        } else {
+            0
+        }
+        + if version >= 5 {
+            UNDERLAY_POINTS_PER_CHUNK
+        } else {
+            0
+        }
+        + if version >= 6 {
+            2 * HEIGHT_POINTS_PER_CHUNK
+        } else {
+            0
+        }
 }
 
 impl World {
@@ -1182,7 +1206,11 @@ impl World {
             let name_bytes = reader.take(name_len)?;
             let name = String::from_utf8(name_bytes.to_vec()).map_err(|_| WorldDecodeError::BadName)?;
             let default_material = Material::from_u8_or_void(reader.u8()?);
-            let cliff_material = if version >= 3 { cliff_material_from_u8(reader.u8()?) } else { Material::Stone };
+            let cliff_material = if version >= 3 {
+                cliff_material_from_u8(reader.u8()?)
+            } else {
+                Material::Stone
+            };
             regions.push(Region { name, default_material, cliff_material });
         }
         let mut smoothing_profiles = Vec::new();
@@ -1265,7 +1293,11 @@ fn read_overlay_mask(reader: &mut Reader<'_>, version: u8, chunk: &mut Chunk) ->
         for legacy_z in 0..LEGACY_MASK_SUBCELLS_PER_CELL_EDGE {
             for legacy_x in 0..LEGACY_MASK_SUBCELLS_PER_CELL_EDGE {
                 let bit = legacy_z * LEGACY_MASK_SUBCELLS_PER_CELL_EDGE + legacy_x;
-                let coverage = if (mask >> bit) & 1 == 1 { 255 } else { 0 };
+                let coverage = if (mask >> bit) & 1 == 1 {
+                    255
+                } else {
+                    0
+                };
                 for sz in legacy_z * scale..(legacy_z + 1) * scale {
                     for sx in legacy_x * scale..(legacy_x + 1) * scale {
                         chunk.overlay_mask[base + sz * SUBCELLS_PER_CELL_EDGE as usize + sx] = coverage;
@@ -1747,7 +1779,13 @@ mod tests {
         // Rows z=0 at 0 and z=1 at 200 octimeters: a cliff runs along the
         // whole shared edge, so at corner (1,1) the four incident cells
         // split 2/2 and each side reads its own plate mean.
-        let world = height_world(|_, z| if z == 0 { 0 } else { 200 });
+        let world = height_world(|_, z| {
+            if z == 0 {
+                0
+            } else {
+                200
+            }
+        });
         let low = world.cell_corner_heights(cell(0, 0));
         let high = world.cell_corner_heights(cell(0, 1));
         // Cell (0,0)'s far corners (indices 2, 3 — the z+1 pair) sit on the
@@ -2253,7 +2291,11 @@ mod tests {
         let subcells = SUBCELLS_PER_CELL_EDGE as usize;
         for subcell_z in 0..subcells {
             for subcell_x in 0..subcells {
-                chunk.overlay_mask[subcell_z * subcells + subcell_x] = if subcell_x < subcells / 2 { 100 } else { 200 };
+                chunk.overlay_mask[subcell_z * subcells + subcell_x] = if subcell_x < subcells / 2 {
+                    100
+                } else {
+                    200
+                };
             }
         }
         world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);

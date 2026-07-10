@@ -164,7 +164,18 @@ pub(super) fn push_control_outlines(
         push_border(items, width, height, 2.0, color);
     }
     if state.focused() {
-        push_inset_border(items, width, height, if validation.is_some() { 2.0 } else { 0.0 }, 2.0, theme.accent);
+        push_inset_border(
+            items,
+            width,
+            height,
+            if validation.is_some() {
+                2.0
+            } else {
+                0.0
+            },
+            2.0,
+            theme.accent,
+        );
     }
 }
 

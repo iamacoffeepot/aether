@@ -188,7 +188,11 @@ impl Kind for () {
     const ID: KindId = KindId(with_tag(Tag::Kind, fnv1a_64_prefixed(KIND_DOMAIN, Self::NAME.as_bytes())));
 
     fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.is_empty() { Some(()) } else { None }
+        if bytes.is_empty() {
+            Some(())
+        } else {
+            None
+        }
     }
 
     fn encode_into_bytes(&self) -> Vec<u8> {

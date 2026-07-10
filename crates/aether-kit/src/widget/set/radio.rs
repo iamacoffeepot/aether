@@ -198,7 +198,11 @@ impl WasmActor for RadioGroupWidget {
             #[allow(clippy::cast_precision_loss)]
             let row_y = i as f32 * row_height;
             let marker_y = (row_height - marker).mul_add(0.5, row_y);
-            let base = if i == self.selected { self.theme.accent } else { self.theme.surface_raised };
+            let base = if i == self.selected {
+                self.theme.accent
+            } else {
+                self.theme.surface_raised
+            };
             let marker_state = if i == self.selected {
                 self.state.theme_state(self.pressed)
             } else {
@@ -225,7 +229,11 @@ impl WasmActor for RadioGroupWidget {
 /// Clamp a 1-past-the-end initial index down to the last option (or `0` for an
 /// empty group).
 fn clamp_index(index: u32, len: usize) -> usize {
-    if len == 0 { 0 } else { (index as usize).min(len - 1) }
+    if len == 0 {
+        0
+    } else {
+        (index as usize).min(len - 1)
+    }
 }
 
 #[cfg(test)]

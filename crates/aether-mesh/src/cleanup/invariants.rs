@@ -204,7 +204,11 @@ pub(super) fn find_unrepaired_tjunctions(mesh: &IndexedMesh) -> Vec<UnrepairedTJ
             if a == b {
                 continue;
             }
-            edges.insert(if a < b { (a, b) } else { (b, a) });
+            edges.insert(if a < b {
+                (a, b)
+            } else {
+                (b, a)
+            });
         }
     }
 
