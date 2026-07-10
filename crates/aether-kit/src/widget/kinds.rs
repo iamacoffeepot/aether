@@ -304,6 +304,9 @@ pub enum WidgetKind {
     /// (`aether-behavior`'s `BehaviorHost`) instead of a widget. Only spawnable
     /// under the kit's `behavior` feature; without it the slot is skipped.
     BehaviorHost,
+    /// A static image — `config` decodes as [`ImageConfig`]. Not focusable.
+    /// Appended to preserve the established wire discriminants above.
+    Image,
 }
 
 impl WidgetKind {
@@ -325,6 +328,7 @@ impl WidgetKind {
     pub const fn type_tag(self) -> Option<u64> {
         let tag = match self {
             Self::Label => aether_data::mailbox_id_from_name("aether.kit.widget.label").0,
+            Self::Image => aether_data::mailbox_id_from_name("aether.kit.widget.image").0,
             Self::Slider => aether_data::mailbox_id_from_name("aether.kit.widget.slider").0,
             Self::Radio => aether_data::mailbox_id_from_name("aether.kit.widget.radio").0,
             Self::TextField => aether_data::mailbox_id_from_name("aether.kit.widget.text_field").0,
@@ -554,6 +558,54 @@ pub struct LabelConfig {
     pub theme: Theme,
     #[serde(default)]
     pub state: WidgetControlState,
+}
+
+/// How an [`ImageConfig`]'s natural size maps into its parent-owned frame.
+///
+/// Schema-only: this value is nested in `ImageConfig`, not addressable as its
+/// own mail kind.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImageFit {
+    /// Distort the full image to fill the assigned frame.
+    Fill,
+    /// Preserve aspect ratio, show the whole image, and center any letterbox.
+    #[default]
+    Contain,
+    /// Preserve aspect ratio, fill the frame, and center-crop through UVs.
+    Cover,
+    /// Draw at the configured natural pixel size, centered in the frame.
+    Natural,
+}
+
+/// `aether.kit.widget.image.config` — a non-interactive image whose texture
+/// lifecycle remains owned by the consumer that created `texture_id` through
+/// `aether.render`. Natural dimensions drive fit arithmetic and the inherited
+/// `WidgetDrawList::intrinsic` channel; they do not resize the parent slot.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.image.config")]
+pub struct ImageConfig {
+    pub texture_id: u32,
+    pub natural_width_pixels: f32,
+    pub natural_height_pixels: f32,
+    pub fit: ImageFit,
+    pub tint: Rgba,
+    pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
+}
+
+impl Default for ImageConfig {
+    fn default() -> Self {
+        Self {
+            texture_id: 0,
+            natural_width_pixels: 0.0,
+            natural_height_pixels: 0.0,
+            fit: ImageFit::default(),
+            tint: Rgba::WHITE,
+            theme: Theme::default(),
+            state: WidgetControlState::default(),
+        }
+    }
 }
 
 /// `aether.kit.widget.slider.changed` — a slider's value-up event.

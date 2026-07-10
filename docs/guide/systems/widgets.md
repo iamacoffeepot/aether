@@ -1,7 +1,8 @@
 # The widget set & focus model
 
 `aether-kit` ships a set of guest-side widgets — a slider, a text field, a
-radio group, a button, and a label — as ordinary `#[actor(instanced)]` types.
+radio group, a button, a label, and an image — as ordinary
+`#[actor(instanced)]` types.
 A panel root spawns them as inline children (ADR-0114) and drives them entirely
 by mail, so composing an editor panel is a matter of laying out widgets and
 translating their value events, never re-deriving hit rects, focus, or per-row
@@ -25,7 +26,8 @@ recorded at spawn, so a widget's identity is its inline subname and nothing a
 widget sends can misreport it.
 
 - **Config, down.** One `Config` kind per widget — `SliderConfig`,
-  `TextFieldConfig`, `RadioConfig`, `ButtonConfig`, `LabelConfig` — each
+  `TextFieldConfig`, `RadioConfig`, `ButtonConfig`, `LabelConfig`,
+  `ImageConfig` — each
   embedding a `theme: Theme`. The config is both the value
   `spawn_inline_child::<W>(subname, &config)` boots the widget with and a
   re-sendable mail: send a widget its config kind again to reconfigure it in
@@ -61,6 +63,33 @@ widget sends can misreport it.
   `ctx.parent()`. A slider streams `committed: false` values through a drag and
   a final `committed: true` on release, so a consumer previews the drag and
   commits the expensive work once.
+
+## Image widget
+
+`WidgetKind::Image` spawns a non-interactive `ImageWidget` from
+`ImageConfig`. The config borrows a session-scoped `texture_id` previously
+created through `aether.render`; the creator still owns updates and
+`DestroyTexture`. Re-sending `ImageConfig` replaces the borrowed texture and
+presentation in place without resizing or respawning the parent slot.
+
+The config names its natural pixel size with `natural_width_pixels` and
+`natural_height_pixels`. `ImageFit::Fill` stretches the full texture into the
+row, `Contain` preserves aspect ratio and centers the whole image, `Cover`
+fills the row and center-crops through UV coordinates, and `Natural` centers
+the configured natural size. Natural content larger than the row is clipped by
+the parent-owned slot. `Contain` is the default. Texture id `0`, zero or
+non-finite natural dimensions, and non-positive or non-finite frame dimensions
+produce no textured draw; the inert `ImageConfig::default()` therefore cannot
+draw the renderer's reserved white texture.
+
+Valid natural dimensions are reported through the existing
+`WidgetDrawList::intrinsic` field, including while the image is hidden. The
+reference panel does not yet consume child intrinsic values for layout, so
+this report does not make its row content-sized. Hidden images keep their slot
+but draw nothing. Disabled images stay visible with the theme's disabled alpha
+applied to their configured tint. Images are never pointer- or focus-eligible;
+read-only and validation state have no visual or behavioral meaning for this
+static leaf.
 
 ## Root-owned focus and input
 
@@ -103,7 +132,7 @@ test vehicle and the template a real editor forks. It embeds `Composite` and
 `Focus`, spawns the vertical stack its `PanelConfig` declares on its first
 frame (each `WidgetChildSpec` names a `WidgetKind` and carries that widget's
 pre-encoded config; an empty child list falls back to the built-in reference
-stack of every widget), loads a font through `aether.text` and stamps the
+original reference stack), loads a font through `aether.text` and stamps the
 session `font_id` into its theme when `load_font_result` arrives, drives the
 collect/emit loop each frame, and routes input through `Focus`. Row height,
 initial state, and static eligibility derive from each child's decoded config.

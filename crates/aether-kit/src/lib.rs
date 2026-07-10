@@ -87,10 +87,10 @@ pub use terrain_editor::{
 };
 pub use widget::theme::{SetTheme, Theme, ThemeState};
 pub use widget::{
-    ButtonClicked, ButtonConfig, ChildrenChanged, Collect, FocusGained, FocusLost, HoverGained, HoverLost, LabelConfig,
-    MembershipEntry, PanelConfig, RadioConfig, RadioSelected, SetWidgetState, SliderChanged, SliderConfig,
-    TextCommitted, TextFieldConfig, WidgetChildSpec, WidgetClipRect, WidgetConfig, WidgetControlState, WidgetDrawItem,
-    WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged, WidgetValidation,
+    ButtonClicked, ButtonConfig, ChildrenChanged, Collect, FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig,
+    ImageFit, LabelConfig, MembershipEntry, PanelConfig, RadioConfig, RadioSelected, SetWidgetState, SliderChanged,
+    SliderConfig, TextCommitted, TextFieldConfig, WidgetChildSpec, WidgetClipRect, WidgetConfig, WidgetControlState,
+    WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged, WidgetValidation,
 };
 pub use world::{
     ApplyBrush, AutomatonRule, BrushParameters, CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk,
@@ -135,6 +135,7 @@ aether_actor::export!(
     widget::set::RadioGroupWidget,
     widget::set::ButtonWidget,
     widget::set::LabelWidget,
+    widget::set::ImageWidget,
     widget::WidgetPanel
 );
 
@@ -154,6 +155,7 @@ aether_actor::export!(
     widget::set::RadioGroupWidget,
     widget::set::ButtonWidget,
     widget::set::LabelWidget,
+    widget::set::ImageWidget,
     widget::WidgetPanel,
     aether_behavior::BehaviorHost
 );
