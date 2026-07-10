@@ -116,26 +116,26 @@ impl VirtualListWidget {
         }
     }
 
-    fn row_at_local_y(&self, local_y: f32) -> Option<usize> {
-        let window = self.window();
+    fn window_row_height(&self, window: VisibleRowWindow) -> Option<f32> {
         let visible_row_count = window.len();
-        if visible_row_count == 0
-            || !local_y.is_finite()
-            || local_y < 0.0
-            || !valid_frame(&self.frame)
-            || local_y >= self.frame.height
-        {
+        if visible_row_count == 0 || !valid_frame(&self.frame) {
             return None;
         }
         #[allow(clippy::cast_precision_loss)]
         let divisor = visible_row_count as f32;
         let row_height = self.frame.height / divisor;
-        if !row_height.is_finite() || row_height <= 0.0 {
+        (row_height.is_finite() && row_height > 0.0).then_some(row_height)
+    }
+
+    fn row_at_local_y(&self, local_y: f32) -> Option<usize> {
+        let window = self.window();
+        if !local_y.is_finite() || local_y < 0.0 || local_y >= self.frame.height {
             return None;
         }
+        let row_height = self.window_row_height(window)?;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let row_offset = (local_y / row_height).floor() as usize;
-        (row_offset < visible_row_count).then(|| window.first_index + row_offset)
+        (row_offset < window.len()).then(|| window.first_index + row_offset)
     }
 
     fn draw_items(&self) -> Vec<WidgetDrawItem> {
@@ -144,15 +144,9 @@ impl VirtualListWidget {
         }
         let window = self.window();
         let visible_row_count = window.len();
-        if visible_row_count == 0 || !valid_frame(&self.frame) {
+        let Some(row_height) = self.window_row_height(window) else {
             return Vec::new();
-        }
-        #[allow(clippy::cast_precision_loss)]
-        let divisor = visible_row_count as f32;
-        let row_height = self.frame.height / divisor;
-        if !row_height.is_finite() || row_height <= 0.0 {
-            return Vec::new();
-        }
+        };
 
         let mut items = Vec::with_capacity(visible_row_count.saturating_mul(2).saturating_add(8));
         for (row_offset, item) in self.items[window.first_index..window.end_exclusive_index].iter().enumerate() {

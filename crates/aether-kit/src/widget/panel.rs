@@ -114,6 +114,11 @@ pub struct SpawnedChild {
     pub scroll_viewport: Option<ScrollExtent>,
 }
 
+struct VirtualListProfile {
+    height: f32,
+    eligible: bool,
+}
+
 #[cfg(feature = "behavior")]
 struct ChildProfile {
     height: f32,
@@ -369,28 +374,32 @@ pub fn spawn_widget_child(
 
 fn spawn_virtual_list_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
     let config = decode_child::<VirtualListConfig>(spec)?;
-    let Some(height) = virtual_list_height(row, config.visible_row_count) else {
+    let profile = virtual_list_profile(&spec.subname, row, &config)?;
+    let state = config.state.clone();
+    spawn::<VirtualListWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+        id,
+        width_pixels: None,
+        height_pixels: profile.height,
+        pointer_eligible: profile.eligible,
+        focusable: profile.eligible,
+        state,
+        type_namespace: <VirtualListWidget as Addressable>::NAMESPACE,
+        scroll_viewport: None,
+    })
+}
+
+fn virtual_list_profile(subname: &str, row_height: f32, config: &VirtualListConfig) -> Option<VirtualListProfile> {
+    let Some(height) = virtual_list_height(row_height, config.visible_row_count) else {
         tracing::warn!(
             target: "aether_kit",
-            subname = %spec.subname,
-            row_height = row,
+            subname,
+            row_height,
             visible_row_count = config.visible_row_count,
             "virtual-list viewport height is invalid; slot skipped",
         );
         return None;
     };
-    let eligible = !config.items.is_empty() && config.visible_row_count > 0;
-    let state = config.state.clone();
-    spawn::<VirtualListWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
-        id,
-        width_pixels: None,
-        height_pixels: height,
-        pointer_eligible: eligible,
-        focusable: eligible,
-        state,
-        type_namespace: <VirtualListWidget as Addressable>::NAMESPACE,
-        scroll_viewport: None,
-    })
+    Some(VirtualListProfile { height, eligible: !config.items.is_empty() && config.visible_row_count > 0 })
 }
 
 fn virtual_list_height(row_height: f32, visible_row_count: u32) -> Option<f32> {
@@ -697,18 +706,13 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
         }
         WidgetKind::VirtualList => {
             let config = decode_named::<VirtualListConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            let Some(height) = virtual_list_height(row, config.visible_row_count) else {
-                tracing::warn!(
-                    target: "aether_kit",
-                    subname = %spec.subname,
-                    row_height = row,
-                    visible_row_count = config.visible_row_count,
-                    "wrapped virtual-list viewport height is invalid; slot skipped",
-                );
-                return None;
-            };
-            let eligible = !config.items.is_empty() && config.visible_row_count > 0;
-            ChildProfile { height, pointer_eligible: eligible, focusable: eligible, state: config.state }
+            let profile = virtual_list_profile(&spec.subname, row, &config)?;
+            ChildProfile {
+                height: profile.height,
+                pointer_eligible: profile.eligible,
+                focusable: profile.eligible,
+                state: config.state,
+            }
         }
         WidgetKind::Composite | WidgetKind::Scroll | WidgetKind::BehaviorHost => return None,
     };

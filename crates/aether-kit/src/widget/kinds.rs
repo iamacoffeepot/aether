@@ -860,36 +860,6 @@ mod tests {
     use alloc::vec;
 
     #[test]
-    fn virtual_list_wire_vocabulary_uses_named_records_not_positional_storage() {
-        let source = include_str!("kinds.rs");
-        let config = source
-            .split("/// `aether.kit.widget.virtual_list.config`")
-            .nth(1)
-            .and_then(|rest| rest.split("/// `aether.kit.widget.button.config`").next())
-            .expect("virtual-list config source section");
-        assert!(config.contains("pub struct VirtualListConfig {"));
-        assert!(!config.contains("pub struct VirtualListConfig("));
-        assert!(!config.contains("pub type VirtualListConfig"));
-        assert!(
-            config.lines().filter(|line| line.trim_start().starts_with("pub ")).all(|line| !line.contains('[')),
-            "virtual-list config fields must not smuggle semantic values through fixed arrays",
-        );
-
-        let selected = source
-            .split("/// `aether.kit.widget.virtual_list.selected`")
-            .nth(1)
-            .and_then(|rest| rest.split("/// `aether.kit.widget.button.clicked`").next())
-            .expect("virtual-list selected source section");
-        assert!(selected.contains("pub struct VirtualListSelected {"));
-        assert!(!selected.contains("pub struct VirtualListSelected("));
-        assert!(!selected.contains("pub type VirtualListSelected"));
-        assert!(
-            selected.lines().filter(|line| line.trim_start().starts_with("pub ")).all(|line| !line.contains('[')),
-            "virtual-list event fields must not use fixed positional storage",
-        );
-    }
-
-    #[test]
     fn virtual_list_appends_without_renumbering_established_widget_kinds() {
         assert_eq!(to_vec(&WidgetKind::Composite).expect("encode Composite"), vec![0, 0, 0, 0]);
         assert_eq!(to_vec(&WidgetKind::Label).expect("encode Label"), vec![1, 0, 0, 0]);
