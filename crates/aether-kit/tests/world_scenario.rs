@@ -1,3 +1,6 @@
+// Pixel projection rounds bounded 128x128 coordinates into signed indices.
+#![allow(clippy::cast_possible_truncation)]
+
 //! World-stamp acceptance coverage through the real wasm component and
 //! `TestBench` render path. The host tests pin scalar area math and chunk-border
 //! remeshing; this test proves a compact `stamp_hexagon` mail reaches the
@@ -14,17 +17,19 @@ use aether_actor::Addressable;
 use aether_capabilities::render::ViewProjection;
 use aether_data::Kind;
 use aether_kinds::{LoadComponent, LoadResult, NamedMail, Render};
-use aether_kit::world::{Material, StampHexagon, WorldPoint};
+use aether_kit::world::{CELLS_PER_CHUNK_AREA, Material, SetChunk, StampHexagon, WorldPoint};
 use aether_math::{Mat4, Vec3};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{
-    background_top_left, bounding_box, centroid, coverage, decode_png,
+    Image, background_top_left, bounding_box, centroid, coverage, decode_png,
 };
 
 const COMPONENT_NAME: &str = "world";
 const WIDTH: u32 = 128;
 const HEIGHT: u32 = 128;
 const FRAME_CENTER: f32 = 64.0;
+const WIDTH_F32: f32 = 128.0;
+const HEIGHT_F32: f32 = 128.0;
 
 fn component_address() -> String {
     format!(
@@ -75,6 +80,40 @@ fn top_down_view_projection(center_x: f32, center_z: f32, extent: f32) -> ViewPr
     ViewProjection {
         view_proj: (projection * view).to_cols_array(),
     }
+}
+
+fn oblique_view_projection() -> (ViewProjection, Mat4) {
+    let eye = Vec3::new(13.0, 8.0, 14.0);
+    let target = Vec3::new(8.0, 0.5, 8.0);
+    let view = Mat4::look_at_rh(eye, target, Vec3::new(0.0, 1.0, 0.0));
+    let projection = Mat4::orthographic_rh(-5.0, 5.0, -5.0, 5.0, 0.1, 100.0);
+    let matrix = projection * view;
+    (
+        ViewProjection {
+            view_proj: matrix.to_cols_array(),
+        },
+        matrix,
+    )
+}
+
+fn projected_pixel(matrix: Mat4, point: Vec3) -> (i32, i32) {
+    let clip = matrix * point.extend(1.0);
+    let normalized_x = clip.x / clip.w;
+    let normalized_y = clip.y / clip.w;
+    let pixel_x = ((normalized_x * 0.5 + 0.5) * WIDTH_F32).round() as i32;
+    let pixel_y = ((0.5 - normalized_y * 0.5) * HEIGHT_F32).round() as i32;
+    (pixel_x, pixel_y)
+}
+
+fn pixel_differs(image: &Image, background: [u8; 3], x: i32, y: i32) -> bool {
+    if x < 0 || y < 0 || x >= image.width.cast_signed() || y >= image.height.cast_signed() {
+        return false;
+    }
+    let offset = ((y.cast_unsigned() * image.width + x.cast_unsigned()) * 4) as usize;
+    image.rgba[offset..offset + 3]
+        .iter()
+        .zip(background)
+        .any(|(actual, clear)| actual.abs_diff(clear) > 5)
 }
 
 #[test]
@@ -162,4 +201,91 @@ fn stamp_hexagon_renders_a_smooth_centered_silhouette() {
         drawn_width > 85 && drawn_height > 70,
         "hexagon silhouette should have broad smooth extents; got {drawn_width}x{drawn_height}",
     );
+}
+
+#[test]
+fn rounded_cliff_renders_without_a_convex_corner_seam() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let mut bench = TestBench::start_with_size(WIDTH, HEIGHT).expect("boot");
+    load_world(&mut bench, &wasm_path);
+    let world = component_address();
+
+    // A four-by-four grass plateau in a Void chunk. Its one-meter height
+    // step is the physical cliff; the material is deliberately uniform on
+    // the high side so the rendered curtain proves the bounded height plan,
+    // not a material-only contour.
+    let mut underlay = vec![Material::Void.to_u8(); CELLS_PER_CHUNK_AREA];
+    let mut height = vec![0; CELLS_PER_CHUNK_AREA];
+    for cell_z in 6..10 {
+        for cell_x in 6..10 {
+            let index = cell_z * 16 + cell_x;
+            underlay[index] = Material::Grass.to_u8();
+            height[index] = 256;
+        }
+    }
+    bench
+        .execute(vec![(
+            "plateau",
+            BenchOp::send_mail(
+                world.as_str(),
+                &SetChunk {
+                    chunk_x: 0,
+                    chunk_z: 0,
+                    underlay,
+                    underlay_points: Vec::new(),
+                    height_points: Vec::new(),
+                    overlay: Vec::new(),
+                    overlay_mask: Vec::new(),
+                    height,
+                    region: Vec::new(),
+                    water_plane: Vec::new(),
+                    smoothing: Vec::new(),
+                },
+            ),
+        )])
+        .expect("author plateau");
+
+    let (view_projection, matrix) = oblique_view_projection();
+    let captured = bench
+        .execute(vec![(
+            "capture",
+            BenchOp::capture_with_mails(
+                vec![
+                    envelope("aether.render", &view_projection),
+                    envelope(world.as_str(), &Render),
+                ],
+                Vec::new(),
+            ),
+        )])
+        .expect("capture cliff");
+    let image =
+        decode_png(captured.captured("capture").expect("capture bytes")).expect("decode cliff png");
+    let background = background_top_left(&image);
+
+    let cap = projected_pixel(matrix, Vec3::new(8.0, 1.0, 8.0));
+    assert!(
+        pixel_differs(&image, background, cap.0, cap.1),
+        "high-cap control sample must render",
+    );
+    let clear = projected_pixel(matrix, Vec3::new(3.0, 0.0, 3.0));
+    assert!(
+        !pixel_differs(&image, background, clear.0, clear.1),
+        "off-terrain control sample must remain clear",
+    );
+
+    // The southeast convex corner was where independent cap/chamfer/sliver
+    // passes left a clear pinhole. The new chord is within half a subcell of
+    // the authored corner, so sample a compact projected ROI through the
+    // vertical curtain rather than a single antialiased edge pixel.
+    let former_seam = projected_pixel(matrix, Vec3::new(9.97, 0.45, 9.97));
+    for pixel_y in former_seam.1 - 1..=former_seam.1 + 1 {
+        for pixel_x in former_seam.0 - 1..=former_seam.0 + 1 {
+            assert!(
+                pixel_differs(&image, background, pixel_x, pixel_y),
+                "clear pixel in former-seam ROI at ({pixel_x}, {pixel_y}); center {former_seam:?}",
+            );
+        }
+    }
 }
