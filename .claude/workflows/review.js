@@ -221,6 +221,14 @@ if (FINDER_SHAPE === 'merged') {
   FILE_LENSES = merged
 }
 
+// Lens subset for out-of-scope (drive-by / unrelated) changed files. Phase 0's spec filter keeps
+// these files in the funnel with correctness ALONE — a bug does not become acceptable because the
+// file was out of scope, and correctness is the one soft-hold pillar. The advisory lenses (economy,
+// convention, test-integrity) stay pruned: nitpicking the style of a to-be-reverted edit is noise.
+// Derived from FILE_LENSES (already intersected with SELECTED), so a lens-restricted run that
+// excludes correctness leaves this empty and prunes out-of-scope files entirely, as before.
+const OUT_OF_SCOPE_LENSES = FILE_LENSES.filter(l => l.key === 'correctness')
+
 // Deterministic scope resolution (no agents): one entry per file, carrying the lenses that
 // apply to it (code lenses for files, test-integrity for testFiles) and its diff hunk if any.
 // In the pr profile, small-diff code-only entries are grouped into shared finder calls.
@@ -612,12 +620,25 @@ if (A.issue && SPEC_LENS) {
   spec = await agent(specPrompt(A.issue, scoped), { label: 'spec-fidelity', phase: 'Scope', model: FINDER_MODEL, schema: SPEC_SCHEMA })
   const out = new Set((spec && spec.outOfScope) || [])
   if (out.size) {
-    inScope = scoped.map(e => {
-      if (!e.batch) return out.has(e.file) ? null : e
-      const members = e.members.filter(m => !out.has(m.file))
-      return members.length ? { ...e, members } : null
-    }).filter(Boolean)
-    log(`spec-fidelity: ${out.size} out-of-scope file(s) pruned from the per-file passes`)
+    // Keep out-of-scope files in the funnel with the reduced correctness-only lens set (a demoted
+    // single entry) rather than dropping them, so a drive-by file's bugs are still caught and can
+    // soft-hold. Out-of-scope members of a small-diff batch are lifted out into their own demoted
+    // entries so the batch's uniform FILE_LENSES stays honored. When correctness is not selected,
+    // OUT_OF_SCOPE_LENSES is empty and the file is pruned entirely, as before.
+    inScope = scoped.flatMap(e => {
+      if (!e.batch) {
+        if (!out.has(e.file)) return [e]
+        return OUT_OF_SCOPE_LENSES.length ? [{ ...e, lenses: OUT_OF_SCOPE_LENSES }] : []
+      }
+      const kept = e.members.filter(m => !out.has(m.file))
+      const demoted = OUT_OF_SCOPE_LENSES.length
+        ? e.members.filter(m => out.has(m.file)).map(m => ({ file: m.file, lenses: OUT_OF_SCOPE_LENSES, diff: m.diff }))
+        : []
+      const batch = kept.length ? [{ ...e, members: kept }] : []
+      return [...batch, ...demoted]
+    })
+    const note = OUT_OF_SCOPE_LENSES.length ? 'reduced to the correctness lens (advisory lenses pruned)' : 'pruned from the per-file passes'
+    log(`spec-fidelity: ${out.size} out-of-scope file(s) ${note}`)
   }
 }
 
