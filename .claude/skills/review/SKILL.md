@@ -1,6 +1,6 @@
 ---
 name: review
-description: Pre-land review of a code change against five judgment pillars that mechanical gates (clippy/rustc/Qodana/fmt) cannot decide — spec fidelity (asked-vs-changed delta), correctness (named bug-shapes), test integrity (does the test catch an owned bug), economy (fewest chars that still make sense), and convention/architecture (stated rules + ADR conformance). Returns an issue-ready rollup with soft-hold flags on high-severity correctness/spec findings; never gates CI, never touches GitHub. Use at the end of /implement (before un-draft) to review a change against its issue, or in backfill mode to audit existing whole files per crate. Distinct from the global /code-review skill — this wraps the repo's five-pillar review workflow.
+description: Pre-land review of a code change against five judgment pillars that mechanical gates (clippy/rustc/Qodana/fmt) cannot decide — spec fidelity (asked-vs-changed delta), correctness (named bug-shapes), test integrity (does the test catch an owned bug), economy (fewest chars that still make sense), and convention/architecture (stated rules + ADR conformance). Returns an issue-ready rollup with soft-hold flags on high-severity correctness/spec findings; never gates CI, never touches GitHub. Integrated review of a PR-bound change is automatic in CI — the review action runs it at the PR's first green — so do not invoke /review inline at the end of /implement. Invoke manually for backfill mode (auditing existing whole files per crate) or for a change that never becomes a PR. Distinct from the global /code-review skill — this wraps the repo's five-pillar review workflow.
 ---
 
 # /review — five-pillar pre-land review
@@ -18,7 +18,7 @@ The Claude entry point to the `review` workflow (`.claude/workflows/review.js`).
 /review --backfill <crate|path>   whole-file audit of existing code, no issue (sharded per crate)
 ```
 
-- **Integrated mode** runs when an issue and its diff are in hand — the spec-fidelity lens runs (the asked-vs-changed delta), so this is the mode to run at the end of `/implement` before un-draft.
+- **Integrated mode** runs when an issue and its diff are in hand — the spec-fidelity lens runs (the asked-vs-changed delta). For a PR-bound change this mode runs automatically: the review action (`.github/workflows/review.yml`) invokes it in CI at the PR's first green and posts the rollup as PR annotations plus the `review:unresolved` label, so an inline invocation at the end of `/implement` duplicates the pass. Invoke it directly only for a change that never becomes a PR.
 - **Backfill mode** runs against a crate or path's whole-file set with no issue — the spec lens does not run; the other four pillars audit existing code.
 
 ## Inputs
