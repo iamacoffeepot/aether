@@ -29,6 +29,7 @@ The skill assembles the workflow's arg contract (`{issue?, files, testFiles?, di
 - `testFiles` — absolute `.rs` paths for the test-integrity lens.
 - `issue` — the issue or scope text for the spec-fidelity lens. Omit for backfill; its presence is what selects integrated mode.
 - `diffs` — per-file diff hunks keyed by path, so the finders judge the change rather than the whole file (integrated mode).
+- `noBuild` — passed through to the workflow args; set true in CI so the correctness refuter grounds read-only.
 
 ## Caller-side prep
 

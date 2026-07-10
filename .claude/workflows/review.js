@@ -28,6 +28,9 @@ export const meta = {
 //   finderModel,  string              — model for Phase 0 + finders + batched/challenge verify (default 'sonnet').
 //   verifyModel,  string              — model for the high-severity correctness refuter (default 'opus').
 //   noChallenge,  bool                — skip the false-negative challenge (per-PR in pr, per-file in backfill).
+//   noBuild,      bool                — the high-severity correctness refuter grounds read-only (no
+//                                       scratch #[test] write + cargo test run); set true where no
+//                                       toolchain/build cache is provisioned (default false).
 // }
 //
 // returns { rollup, files }. rollup = { totals, spec, softHolds, confirmed, grouped,
@@ -47,6 +50,7 @@ if (!FILES.length && !TEST_FILES.length) throw new Error('review: args.files (an
 
 const FINDER_MODEL = A.finderModel || 'sonnet'
 const VERIFY_MODEL = A.verifyModel || 'opus'
+const NO_BUILD = A.noBuild === true
 const DIFFS = A.diffs || {}
 const HAS_DIFFS = Object.keys(DIFFS).length > 0
 
@@ -486,10 +490,13 @@ Report every site this lens flags as a finding: symbol + approximate line, categ
 
 function refutePrompt(file, fd, lens) {
   const corr = lens.key === 'correctness'
+  const step2 = NO_BUILD
+    ? `2. No test covers the claim and no build is available here — ground by reading the existing #[test]s and the code path; if a high-severity claim has no covering test, state that in the rationale and return final_verdict='uncertain' rather than confirming on inspection alone.`
+    : `2. If no test covers the claim and the finding is high-severity, WRITE one and RUN it: add a focused #[test], run \`cargo test -p <crate> <name>\` from the crate root, let the result decide, then delete the scratch test.`
   const grounding = corr
     ? `\nGROUND THE VERDICT IN TESTS, not inspection — a confident reading of subtle code (math conventions, sign order, edge cases) is exactly where this lens hallucinates a bug.
 1. Read the existing #[test]s for this item. A passing test that pins the claimed-broken behavior REFUTES the finding (final_verdict='false-positive') — cite the test by name.
-2. If no test covers the claim and the finding is high-severity, WRITE one and RUN it: add a focused #[test], run \`cargo test -p <crate> <name>\` from the crate root, let the result decide, then delete the scratch test.
+${step2}
 3. NEVER uphold a finding whose suggested fix would break a currently-passing test — check the fix against the suite before confirming.\n`
     : ''
   return `A code-review finding was raised under the ${lens.name} lens. Decide whether it survives a STRICT bar — do not rescue it with a plausible story, and do not reject a real issue out of conservatism.
