@@ -905,10 +905,12 @@ mod tests {
         let image = wire::to_vec(&WidgetKind::Image).expect("encode Image");
         let text_area = wire::to_vec(&WidgetKind::TextArea).expect("encode TextArea");
         let scroll = wire::to_vec(&WidgetKind::Scroll).expect("encode Scroll");
+        let virtual_list = wire::to_vec(&WidgetKind::VirtualList).expect("encode VirtualList");
         assert_eq!(behavior_host.as_slice(), 6_u32.to_le_bytes());
         assert_eq!(image.as_slice(), 7_u32.to_le_bytes());
         assert_eq!(text_area.as_slice(), 8_u32.to_le_bytes());
         assert_eq!(scroll.as_slice(), 9_u32.to_le_bytes());
+        assert_eq!(virtual_list.as_slice(), 10_u32.to_le_bytes());
     }
 
     #[test]
