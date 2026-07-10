@@ -233,7 +233,7 @@ mod tests {
             req.reply.reply(&CaptureFrameResult::Err { error: "deferred".to_owned() }),
             "the deferred capture reply routed to the Component target",
         );
-        assert!(settle.try_recv().is_err(), "the reply's Sent holds the chain open",);
+        assert!(settle.try_recv().is_err(), "the reply's Sent holds the chain open");
         drop(req);
         assert!(
             settle.try_recv().is_err(),
@@ -248,7 +248,7 @@ mod tests {
             <CaptureFrameResult as Kind>::NAME,
             "the deferred reply is a CaptureFrameResult",
         );
-        assert_eq!(reply_env.root, root, "the deferred capture reply joins the inbound's causal chain (#1758)",);
+        assert_eq!(reply_env.root, root, "the deferred capture reply joins the inbound's causal chain (#1758)");
         let reply_id = reply_env.mail_id;
         reply_env.discharge();
         mailer.record_finished(reply_id, root);

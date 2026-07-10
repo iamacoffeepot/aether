@@ -135,7 +135,7 @@ fn fs_list_returns_written_path() {
 
     match result.reply::<ListResult>("list").expect("decode ListResult") {
         ListResult::Ok { entries, .. } => {
-            assert!(entries.iter().any(|e| e == &path), "expected entries to include {path:?}; got {entries:?}",);
+            assert!(entries.iter().any(|e| e == &path), "expected entries to include {path:?}; got {entries:?}");
         }
         ListResult::Err { error, .. } => panic!("list failed: {error:?}"),
     }

@@ -145,7 +145,7 @@ pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
 pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
     let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
     if !has_wgpu_adapter() {
-        assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available",);
+        assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available");
         eprintln!("skipping: no wgpu adapter available");
         return None;
     }

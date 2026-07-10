@@ -52,7 +52,7 @@ const COMPONENT_NAME: &str = "mv";
 /// trampoline node — exactly what `LoadResult.name` reports.
 fn component_address() -> String {
     use aether_actor::Addressable;
-    format!("aether.component/{}:{}", aether_capabilities::WasmTrampoline::NAMESPACE, COMPONENT_NAME,)
+    format!("aether.component/{}:{}", aether_capabilities::WasmTrampoline::NAMESPACE, COMPONENT_NAME)
 }
 
 const BOX_DSL: &[u8] = b"(box 1 1 1 :color 0)\n";
@@ -252,7 +252,7 @@ fn good_dsl_load_replies_ok() {
     let reply = result.reply::<MeshLoadResult>("load_mesh").expect("decode MeshLoadResult");
     assert!(reply.ok, "good DSL should load: {:?}", reply.error);
     assert!(reply.error.is_none(), "good load carries no error");
-    assert!(reply.warnings.is_empty(), "good load carries no warnings; got {:?}", reply.warnings,);
+    assert!(reply.warnings.is_empty(), "good load carries no warnings; got {:?}", reply.warnings);
     assert_eq!(reply.namespace, "save", "reply echoes request namespace");
     assert_eq!(reply.path, path, "reply echoes request path");
 }
@@ -316,8 +316,8 @@ fn overlapping_loads_reply_to_their_own_requesters() {
     let second_reply = bench.await_deferred::<MeshLoadResult>(second).expect("second load replies");
     let first_reply = bench.await_deferred::<MeshLoadResult>(first).expect("first load replies");
 
-    assert!(first_reply.ok, "first DSL load should succeed: {:?}", first_reply.error,);
-    assert!(second_reply.ok, "second OBJ load should succeed: {:?}", second_reply.error,);
+    assert!(first_reply.ok, "first DSL load should succeed: {:?}", first_reply.error);
+    assert!(second_reply.ok, "second OBJ load should succeed: {:?}", second_reply.error);
     assert_eq!(first_reply.path, dsl_path, "first reply keeps its path");
     assert_eq!(second_reply.path, obj_path, "second reply keeps its path");
 }

@@ -32,10 +32,10 @@ fn decode_reply_events_decodes_known_substrate_kind() {
     let decoded = decode_reply_events(&[reply], &HashMap::new(), None);
     assert_eq!(decoded.len(), 1, "one reply in, one out");
     let only = &decoded[0];
-    assert_eq!(only.kind_name.as_deref(), Some("aether.fs.list"), "the known kind resolves to its name",);
-    assert_eq!(only.params.as_ref(), Some(&params), "params decode back to the original JSON",);
-    assert!(only.payload_bytes.is_none(), "a clean decode omits the raw bytes (issue 1246)",);
-    assert!(only.kind_id.starts_with("knd-"), "the kind id renders as the ADR-0064 tagged string: {}", only.kind_id,);
+    assert_eq!(only.kind_name.as_deref(), Some("aether.fs.list"), "the known kind resolves to its name");
+    assert_eq!(only.params.as_ref(), Some(&params), "params decode back to the original JSON");
+    assert!(only.payload_bytes.is_none(), "a clean decode omits the raw bytes (issue 1246)");
+    assert!(only.kind_id.starts_with("knd-"), "the kind id renders as the ADR-0064 tagged string: {}", only.kind_id);
 }
 
 /// Issue 1242 / 1246: an unknown / undecodable reply kind never
@@ -57,7 +57,7 @@ fn decode_reply_events_falls_back_on_unknown_kind() {
     let only = &decoded[0];
     assert_eq!(only.kind_name, None, "an unknown kind has no name");
     assert_eq!(only.params, None, "an unknown kind doesn't decode");
-    assert_eq!(only.payload_bytes.as_deref(), Some("AQID"), "raw bytes survive as base64 (issue 1246)",);
+    assert_eq!(only.payload_bytes.as_deref(), Some("AQID"), "raw bytes survive as base64 (issue 1246)");
 }
 
 /// Issue 1246: a clean-decode reply serializes to JSON with no
@@ -83,7 +83,7 @@ fn clean_decode_reply_omits_payload_bytes_key_in_json() {
     let decoded = decode_reply_events(&[reply], &HashMap::new(), None);
     let json = serde_json::to_value(&decoded[0]).expect("reply serializes");
     let obj = json.as_object().expect("reply is a JSON object");
-    assert!(!obj.contains_key("payload_bytes"), "a clean decode omits the payload_bytes key entirely: {json}",);
+    assert!(!obj.contains_key("payload_bytes"), "a clean decode omits the payload_bytes key entirely: {json}");
     assert!(obj.contains_key("params"), "params is still present");
 }
 
@@ -129,8 +129,8 @@ fn decode_reply_events_decodes_component_defined_reply_via_engine_cache() {
     let decoded = decode_reply_events(&[envelope], &engine_kinds, Some(reply_kind_id));
     assert_eq!(decoded.len(), 1);
     let only = &decoded[0];
-    assert_eq!(only.params.as_ref(), Some(&value), "component-defined reply kind decodes to params via engine cache",);
-    assert!(only.payload_bytes.is_none(), "a clean decode omits the raw bytes",);
+    assert_eq!(only.params.as_ref(), Some(&value), "component-defined reply kind decodes to params via engine cache");
+    assert!(only.payload_bytes.is_none(), "a clean decode omits the raw bytes");
     assert_eq!(
         only.kind_name.as_deref(),
         Some("test.component.reply"),
@@ -157,5 +157,5 @@ fn decode_reply_events_base64_fallback_when_kind_absent_from_all_caches() {
     assert_eq!(decoded.len(), 1);
     let only = &decoded[0];
     assert_eq!(only.params, None, "absent kind doesn't decode to params");
-    assert!(only.payload_bytes.is_some(), "absent kind surfaces as base64 fallback",);
+    assert!(only.payload_bytes.is_some(), "absent kind surfaces as base64 fallback");
 }

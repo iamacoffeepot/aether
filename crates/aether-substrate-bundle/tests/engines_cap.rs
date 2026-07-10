@@ -343,7 +343,7 @@ mod tests {
         );
         let engine_id = match spawn {
             SpawnEngineResult::Err { engine_id: Some(id), error } => {
-                assert!(error.contains("proxy failed to connect"), "unexpected error: {error}",);
+                assert!(error.contains("proxy failed to connect"), "unexpected error: {error}");
                 id
             }
             other => panic!("expected an id-bearing spawn Err, got {other:?}"),

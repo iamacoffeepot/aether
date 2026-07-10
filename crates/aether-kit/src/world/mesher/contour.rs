@@ -1201,7 +1201,7 @@ mod tests {
         let raw = raw_upsample(&mask, w, h, 2);
         for gz in 0..h * 2 {
             for gx in 0..w {
-                assert_eq!(grid[gz * gw + gx], raw[gz * gw + gx], "the zero-iteration side stays raw at ({gx}, {gz})",);
+                assert_eq!(grid[gz * gw + gx], raw[gz * gw + gx], "the zero-iteration side stays raw at ({gx}, {gz})");
             }
         }
 
@@ -1326,7 +1326,7 @@ mod tests {
         let (grid, gw, _) = repartition(&ids, w, h, 2, &params, &vec![false; w * h]);
         for gz in 0..h * 2 {
             for gx in 0..12 {
-                assert_eq!(grid[gz * gw + gx], ids[(gz / 2) * w + gx / 2], "crisp-zone sample moved at ({gx}, {gz})",);
+                assert_eq!(grid[gz * gw + gx], ids[(gz / 2) * w + gx / 2], "crisp-zone sample moved at ({gx}, {gz})");
             }
         }
     }
@@ -1360,8 +1360,8 @@ mod tests {
         let split_area = poly_area(&tris);
         emit_label_window(0, 0, &place, case2, true, &indexed, &mut tris);
         let window_area = (64.0f32 / 256.0) * (64.0 / 256.0);
-        assert!((poly_area(&tris) - window_area).abs() < 1e-6, "the saddle window tiles exactly",);
-        assert!((split_area - window_area / 4.0).abs() < 1e-6, "the split loser holds its two corner triangles",);
+        assert!((poly_area(&tris) - window_area).abs() < 1e-6, "the saddle window tiles exactly");
+        assert!((split_area - window_area / 4.0).abs() < 1e-6, "the split loser holds its two corner triangles");
     }
 
     #[test]
@@ -1382,7 +1382,7 @@ mod tests {
             emit_label_window(0, 0, &place, case, true, &indexed, &mut tris);
         }
         let window_area = (64.0f32 / 256.0) * (64.0 / 256.0);
-        assert!((poly_area(&tris) - window_area).abs() < 1e-6, "three labels tile the window exactly",);
+        assert!((poly_area(&tris) - window_area).abs() < 1e-6, "three labels tile the window exactly");
     }
 
     #[test]

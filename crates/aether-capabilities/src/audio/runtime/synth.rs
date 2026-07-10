@@ -214,7 +214,7 @@ impl Synth {
     pub fn fire_scheduled(&mut self, sender_mailbox: MailboxId, note: &ScheduledNote) {
         match *note {
             ScheduledNote::On { pitch, velocity, instrument_id, pan } => {
-                self.trigger_note_on(sender_mailbox, pitch, velocity, instrument_id, pan)
+                self.trigger_note_on(sender_mailbox, pitch, velocity, instrument_id, pan);
             }
             ScheduledNote::Off { pitch, instrument_id } => self.trigger_note_off(sender_mailbox, pitch, instrument_id),
         }
@@ -224,10 +224,10 @@ impl Synth {
         while let Some(ev) = self.events.pop() {
             match ev {
                 AudioEvent::NoteOn { sender_mailbox, pitch, velocity, instrument_id, pan } => {
-                    self.trigger_note_on(sender_mailbox, pitch, velocity, instrument_id, pan)
+                    self.trigger_note_on(sender_mailbox, pitch, velocity, instrument_id, pan);
                 }
                 AudioEvent::NoteOff { sender_mailbox, pitch, instrument_id } => {
-                    self.trigger_note_off(sender_mailbox, pitch, instrument_id)
+                    self.trigger_note_off(sender_mailbox, pitch, instrument_id);
                 }
                 AudioEvent::SetMasterGain { gain } => {
                     self.master_gain = gain.clamp(0.0, 1.0);
@@ -245,7 +245,7 @@ impl Synth {
                     self.start_track(sender_mailbox, lane, namespace, path, pcm, gain, looping);
                 }
                 AudioEvent::TrackStop { sender_mailbox, lane, namespace, path } => {
-                    self.stop_track(sender_mailbox, lane.as_ref(), &namespace, &path)
+                    self.stop_track(sender_mailbox, lane.as_ref(), &namespace, &path);
                 }
                 AudioEvent::RegisterInstrument { id, bank } => {
                     // Banks arrive in load order on this single-producer

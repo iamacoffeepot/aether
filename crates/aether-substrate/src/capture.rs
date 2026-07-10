@@ -191,7 +191,7 @@ mod tests {
     fn second_request_rejected_while_pending() {
         let q = CaptureQueue::new();
         assert!(q.request(pending()).is_ok());
-        assert!(q.request(pending()).is_err(), "a second request is rejected (and handed back) while one is pending",);
+        assert!(q.request(pending()).is_err(), "a second request is rejected (and handed back) while one is pending");
     }
 
     #[test]

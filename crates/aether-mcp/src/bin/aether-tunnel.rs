@@ -771,7 +771,7 @@ mod tests {
         assert!(sup.poll_alive(), "re-forked hub must be alive");
         let pid_after = sup.child.id();
         drop(children);
-        assert_ne!(pid_before, Some(pid_after), "restart-hub must fork a new child, not reuse the old pid",);
+        assert_ne!(pid_before, Some(pid_after), "restart-hub must fork a new child, not reuse the old pid");
 
         // Clean up the still-running sleep child.
         tunnel.terminate_all().await;

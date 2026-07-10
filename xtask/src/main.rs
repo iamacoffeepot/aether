@@ -271,7 +271,7 @@ fn run_dist(args: &DistArgs) -> Result<()> {
     );
     if !behaviors.is_empty() {
         let stems: Vec<&str> = behaviors.iter().map(|b| b.stem.as_str()).collect();
-        println!("dist: {} behavior script(s) built into target/: {}", stems.len(), stems.join(", "),);
+        println!("dist: {} behavior script(s) built into target/: {}", stems.len(), stems.join(", "));
     }
     Ok(())
 }
@@ -406,7 +406,7 @@ fn run_bundle(args: &BundleArgs) -> Result<()> {
     );
     let windows = args.target.as_deref().map_or(cfg!(windows), |t| t.contains("windows"));
     let exe = profile_dir.join(if windows { format!("{bin}.exe") } else { bin.to_string() });
-    println!("{} bundle ({} component(s)) -> {}", plan.chassis.as_str(), plan.components.len(), exe.display(),);
+    println!("{} bundle ({} component(s)) -> {}", plan.chassis.as_str(), plan.components.len(), exe.display());
     Ok(())
 }
 
@@ -636,7 +636,7 @@ mod tests {
             "aether_test_fixtures_stateful_reshaped",
             "aether_kit",
         ] {
-            assert!(stems.contains(expected), "discovery dropped component {expected}; found {stems:?}",);
+            assert!(stems.contains(expected), "discovery dropped component {expected}; found {stems:?}");
         }
 
         // The fixture crates are lib cdylibs, not `[[example]]` targets, so
@@ -648,13 +648,13 @@ mod tests {
         ] {
             let component =
                 components.iter().find(|c| c.stem == fixture).unwrap_or_else(|| panic!("fixture {fixture} discovered"));
-            assert!(!component.from_example, "fixture {fixture} is a lib cdylib, not an example target",);
+            assert!(!component.from_example, "fixture {fixture} is a lib cdylib, not an example target");
         }
 
         // aether-actor's own example cdylibs are NOT components — the
         // crate does not depend on itself, so it fails the actor-dep gate.
         for excluded in ["hello", "input_logger"] {
-            assert!(!stems.contains(excluded), "discovery wrongly included aether-actor example {excluded}",);
+            assert!(!stems.contains(excluded), "discovery wrongly included aether-actor example {excluded}");
         }
     }
 
@@ -667,7 +667,7 @@ mod tests {
         // The #2688 fixture crate's example cdylibs depend on `aether-behavior`
         // and never `aether-actor`, so the behavior pass discovers each.
         for expected in ["intercept_slider", "intercept_slider_v2", "trap_script"] {
-            assert!(stems.contains(expected), "behavior discovery dropped {expected}; found {stems:?}",);
+            assert!(stems.contains(expected), "behavior discovery dropped {expected}; found {stems:?}");
         }
 
         // The disjointness guard: `aether-kit` declares an optional
@@ -684,7 +684,7 @@ mod tests {
         // Every discovered behavior is an `[[example]]` cdylib, so no lib-cdylib
         // special-casing on the build side.
         for behavior in &behaviors {
-            assert!(behavior.from_example, "behavior {} is an [[example]] cdylib", behavior.stem,);
+            assert!(behavior.from_example, "behavior {} is an [[example]] cdylib", behavior.stem);
         }
     }
 }

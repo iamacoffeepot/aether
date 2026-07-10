@@ -340,7 +340,7 @@ mod tests {
         // sign-change edge → one quad → 9 quads per face. 6 * 9 = 54 quads
         // → 108 triangles. The interior is never meshed (the O(area)
         // guarantee, not O(volume)).
-        assert_eq!(tris_shallow.len(), 6 * 3 * 3 * 2, "3x3x3 full box shell = 6 faces * 9 quads * 2 tris",);
+        assert_eq!(tris_shallow.len(), 6 * 3 * 3 * 2, "3x3x3 full box shell = 6 faces * 9 quads * 2 tris");
     }
 
     /// A volume with an interior empty pocket emits more triangles than
@@ -357,7 +357,7 @@ mod tests {
         let pocket = volume(w, h, d, |x, y, z| (x, y, z) != (2, 2, 2));
         let tris_full = surface_net(w, h, d, &full, 1, cell, origin);
         let tris_pocket = surface_net(w, h, d, &pocket, 1, cell, origin);
-        assert!(tris_pocket.len() > tris_full.len(), "an interior empty pocket adds boundary surface (a cavity)",);
+        assert!(tris_pocket.len() > tris_full.len(), "an interior empty pocket adds boundary surface (a cavity)");
         // The vertex bounding box spans the outer shell's cube centroids,
         // which sit a half-cell outside the sample extent: real coordinate
         // -0.5 at the low side, (dim-1)+0.5 at the high side along each
@@ -394,7 +394,7 @@ mod tests {
             let normal = (b - a).cross(c - a);
             let face_center = (a + b + c) * (1.0 / 3.0);
             let outward = face_center - center;
-            assert!(normal.dot(outward) > 0.0, "triangle normal must face outward: n·out = {}", normal.dot(outward),);
+            assert!(normal.dot(outward) > 0.0, "triangle normal must face outward: n·out = {}", normal.dot(outward));
         }
     }
 
@@ -410,7 +410,7 @@ mod tests {
         // index z*H*W + y*W + x = 1*9 + 1*3 + 1 = 13.
         v[13] = u32::MAX;
         let tris = surface_net(3, 3, 3, &v, 1, cell, origin);
-        assert_eq!(tris.len(), 12, "a u32::MAX sample is inside under iso_threshold = 1",);
+        assert_eq!(tris.len(), 12, "a u32::MAX sample is inside under iso_threshold = 1");
     }
 
     /// Degenerate dimensions (a single slice along any axis) have no
@@ -422,7 +422,7 @@ mod tests {
         for (w, h, d) in [(1, 3, 3), (3, 1, 3), (3, 3, 1)] {
             let v = volume(w, h, d, |_, _, _| true);
             let tris = surface_net(w, h, d, &v, 1, cell, origin);
-            assert!(tris.is_empty(), "a {w}x{h}x{d} volume has no cells → 0 triangles",);
+            assert!(tris.is_empty(), "a {w}x{h}x{d} volume has no cells → 0 triangles");
         }
     }
 

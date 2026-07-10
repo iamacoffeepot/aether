@@ -38,7 +38,7 @@ const CLEAR_SRGB: [u8; 3] = [63, 75, 97];
 const PARTITION_TOLERANCE: u8 = 8;
 
 fn console_address() -> String {
-    format!("aether.component/{}:console", aether_capabilities::WasmTrampoline::NAMESPACE,)
+    format!("aether.component/{}:console", aether_capabilities::WasmTrampoline::NAMESPACE)
 }
 
 fn assets_dir() -> PathBuf {
@@ -92,7 +92,7 @@ fn load_console_with_config(bench: &mut TestBench, wasm: &[u8], config: &Console
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { name, .. } => {
-            assert!(name.ends_with(":console"), "console should register under :console; got {name}",)
+            assert!(name.ends_with(":console"), "console should register under :console; got {name}");
         }
         LoadResult::Err { error } => panic!("load console: {error}"),
     }
@@ -193,14 +193,14 @@ fn backquote_key_opens_console_overlay() {
         .expect("window size");
 
     let closed = top_band_coverage(&mut bench, "closed");
-    assert!(closed < 0.01, "closed console should leave the top band at clear color; coverage={closed:.3}",);
+    assert!(closed < 0.01, "closed console should leave the top band at clear color; coverage={closed:.3}");
 
     bench
         .execute(vec![("toggle", BenchOp::send_mail(console_address(), &Key { code: KEY_BACKQUOTE }))])
         .expect("toggle key");
 
     let open = top_band_coverage(&mut bench, "open");
-    assert!(open > 0.90, "backquote should open the console and cover the top band; coverage={open:.3}",);
+    assert!(open > 0.90, "backquote should open the console and cover the top band; coverage={open:.3}");
 }
 
 #[test]
@@ -238,7 +238,7 @@ fn markdown_command_output_renders_into_history_band() {
         .expect("send markdown output");
 
     let rendered = history_text_differs_from_panel(&mut bench, "rendered-history");
-    assert!(rendered, "markdown output should add visible text/background pixels to the history band",);
+    assert!(rendered, "markdown output should add visible text/background pixels to the history band");
 }
 
 #[test]
@@ -275,5 +275,5 @@ fn configured_font_override_renders_into_history_band() {
         .expect("open console with configured font");
 
     let rendered = history_text_differs_from_panel(&mut bench, "override-rendered-history");
-    assert!(rendered, "configured font override should render visible text into the history band",);
+    assert!(rendered, "configured font override should render visible text into the history band");
 }

@@ -71,14 +71,14 @@ const EPS: f32 = 0.5;
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
 fn panel_address() -> String {
-    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE,)
+    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE)
 }
 
 /// The host's registered inline-child lineage address: the panel's address,
 /// then the trampoline scope and the slot subname (the `host_fns` `alias_name`
 /// fold). Sending `SetScript` here swaps the script and gets the reply.
 fn host_address() -> String {
-    format!("{}/{}:{}", panel_address(), aether_capabilities::WasmTrampoline::NAMESPACE, SLOT,)
+    format!("{}/{}:{}", panel_address(), aether_capabilities::WasmTrampoline::NAMESPACE, SLOT)
 }
 
 /// Load the reference panel with a single `BehaviorHost` slot wrapping a slider
@@ -133,7 +133,7 @@ fn load_panel_with_host(bench: &mut TestBench, kit_wasm: &[u8], script: Vec<u8>)
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { name, .. } => {
-            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}",)
+            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}");
         }
         LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
     }
@@ -255,7 +255,7 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
     // panel is clamped, not the raw ~242 the far-right drag produced. Catches
     // interposition up-lane routing + the `&mut K` re-encode/forward.
     let committed = committed_values(&phase1);
-    assert!(!committed.is_empty(), "the drag-release should forward one committed change; log was:\n{joined1}",);
+    assert!(!committed.is_empty(), "the drag-release should forward one committed change; log was:\n{joined1}");
     assert!(
         committed.iter().all(|v| *v <= CAP + EPS),
         "every committed value the script forwards must be clamped to {CAP}; \

@@ -505,7 +505,7 @@ mod client {
 
             match result {
                 Err(RpcClientError::Handshake(reason)) => {
-                    assert!(reason.contains("wire_version"), "handshake error should mention wire_version: {reason}",)
+                    assert!(reason.contains("wire_version"), "handshake error should mention wire_version: {reason}");
                 }
                 Err(other) => panic!("expected Handshake error, got {other:?}"),
                 Ok(_) => panic!("mismatched wire_version should not yield a connection"),

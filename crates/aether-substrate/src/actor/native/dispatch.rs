@@ -330,7 +330,7 @@ mod cost_tests {
         let CostTailResult::Ok { rows } = mailer.cost_table().tail(self_mbx, &CostTail { kind: None }) else {
             panic!("expected Ok");
         };
-        assert!(rows.iter().all(|r| r.kind_id != stranger), "an unseeded kind folds into no cell",);
+        assert!(rows.iter().all(|r| r.kind_id != stranger), "an unseeded kind folds into no cell");
         // The seeded handler stays at its neutral seed (samples = 0).
         let seeded_row = rows.iter().find(|r| r.kind_id == handled).unwrap();
         assert_eq!(seeded_row.samples, 0);

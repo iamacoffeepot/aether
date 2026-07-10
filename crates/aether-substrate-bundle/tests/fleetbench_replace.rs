@@ -53,7 +53,7 @@ mod tests {
             loaded.capabilities.handlers,
         );
         let expected = format!("aether.component/{}:test.probe", WasmTrampoline::NAMESPACE);
-        assert_eq!(loaded.addr, expected, "probe should load at its ADR-0099 lineage address",);
+        assert_eq!(loaded.addr, expected, "probe should load at its ADR-0099 lineage address");
 
         let caps = bench.replace_export(engine, loaded.mailbox_id, "aether_kit", "aether.kit.camera");
 

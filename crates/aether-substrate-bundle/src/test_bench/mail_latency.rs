@@ -507,7 +507,7 @@ fn settled_chains_reclaim_without_growing_per_actor_ring() {
                 "settled chains must reclaim, not grow: ring holds {} entries, floor is {FLOOR}",
                 entries.len()
             );
-            assert!(truncated_before.is_some(), "reclaiming a settled prefix must signal truncated_before",);
+            assert!(truncated_before.is_some(), "reclaiming a settled prefix must signal truncated_before");
         }
         TraceTailResult::Err { error } => panic!("trace.tail error: {error}"),
     }
@@ -564,7 +564,7 @@ fn small_trace_ring_cap_laps_per_actor_ring() {
         }
         TraceTailResult::Err { error } => panic!("trace.tail error: {error}"),
     };
-    assert!(truncated_before.is_some(), "expected a truncated_before gap after lapping a {CAP}-cap per-actor ring",);
+    assert!(truncated_before.is_some(), "expected a truncated_before gap after lapping a {CAP}-cap per-actor ring");
 }
 
 /// ADR-0086 Phase 3: the decentralized guided walk reconstructs a

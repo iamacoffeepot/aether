@@ -122,7 +122,7 @@ fn subscribed_component_receives_published_text_input() {
         .expect("text send sequence");
 
     let delta = bench.count_observed(TextInputObserved::NAME) - baseline;
-    assert_eq!(delta, 1, "expected 1 text_input_observed broadcast; observed kinds: {:?}", bench.observed_kinds(),);
+    assert_eq!(delta, 1, "expected 1 text_input_observed broadcast; observed kinds: {:?}", bench.observed_kinds());
 }
 
 /// One subscribed probe broadcasts once per injected key.
@@ -137,7 +137,7 @@ fn subscribed_component_receives_published_keys() {
 
     send_keys(&mut bench, 3);
     let delta = bench.count_observed(KeyObserved::NAME) - baseline;
-    assert_eq!(delta, 3, "expected 3 key_observed broadcasts; observed kinds: {:?}", bench.observed_kinds(),);
+    assert_eq!(delta, 3, "expected 3 key_observed broadcasts; observed kinds: {:?}", bench.observed_kinds());
 }
 
 /// Two independently-loaded probes each subscribe their own mailbox

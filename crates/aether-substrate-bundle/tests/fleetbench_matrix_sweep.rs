@@ -67,20 +67,20 @@ mod tests {
         let report_replies = bench.send(engine, &parent_addr, &CollectMatrix);
         let report_env = match report_replies.as_slice() {
             [one] => one,
-            other => panic!("CollectMatrix should reply exactly one MatrixReport, got {}", other.len(),),
+            other => panic!("CollectMatrix should reply exactly one MatrixReport, got {}", other.len()),
         };
-        assert_eq!(report_env.kind, MatrixReport::ID, "the CollectMatrix reply should be a MatrixReport",);
+        assert_eq!(report_env.kind, MatrixReport::ID, "the CollectMatrix reply should be a MatrixReport");
         let report = MatrixReport::decode_from_bytes(&report_env.payload).expect("the reply decodes as MatrixReport");
 
         let parent_id = report.parent_id;
         let child_a_id = report.child_a_id;
         assert_ne!(parent_id, 0, "the parent recorded its own id");
         assert_ne!(child_a_id, 0, "the parent recorded child[a]'s id");
-        assert_ne!(parent_id, child_a_id, "the parent and child[a] are distinct addresses",);
+        assert_ne!(parent_id, child_a_id, "the parent and child[a] are distinct addresses");
 
         // Cell: parent -> child[a] (in place). child[a] received it and
         // read the parent's id as its source.
-        assert_eq!(report.parent_to_child_arrived, 1, "parent -> child[a] should be delivered",);
+        assert_eq!(report.parent_to_child_arrived, 1, "parent -> child[a] should be delivered");
         assert_eq!(
             report.parent_to_child_source, parent_id,
             "child[a] should read the parent's id as the source of parent -> child[a]",
@@ -88,7 +88,7 @@ mod tests {
 
         // Cell: child[a] -> parent (in place). The parent received it and
         // read child[a]'s id as its source (the Task 1 in-place "from").
-        assert_eq!(report.child_to_parent_arrived, 1, "child[a] -> parent should be delivered",);
+        assert_eq!(report.child_to_parent_arrived, 1, "child[a] -> parent should be delivered");
         assert_eq!(
             report.child_to_parent_source, child_a_id,
             "the parent should read child[a]'s id as the source of child[a] -> parent",
@@ -96,7 +96,7 @@ mod tests {
 
         // Cell: child[a] -> sibling child[b] (in place). child[b] received
         // it and read child[a]'s id as its source.
-        assert_eq!(report.child_to_sibling_arrived, 1, "child[a] -> sibling child[b] should be delivered",);
+        assert_eq!(report.child_to_sibling_arrived, 1, "child[a] -> sibling child[b] should be delivered");
         assert_eq!(
             report.child_to_sibling_source, child_a_id,
             "child[b] should read child[a]'s id as the source of child[a] -> sibling",
@@ -104,7 +104,7 @@ mod tests {
 
         // Cell: child[a] -> self (in place). child[a] re-received it and
         // read its own id as its source.
-        assert_eq!(report.child_to_self_arrived, 1, "child[a] -> self should be delivered",);
+        assert_eq!(report.child_to_self_arrived, 1, "child[a] -> self should be delivered");
         assert_eq!(
             report.child_to_self_source, child_a_id,
             "child[a] should read its own id as the source of child[a] -> self",

@@ -461,7 +461,7 @@ mod tests {
         tx.send(armed_env(id, MailId::NONE, guard_root, Source::NONE)).unwrap();
         // Drop without reading — a NONE inbound must not settle anything.
         drop(inbox.try_next().expect("one queued"));
-        assert!(guard_rx.try_recv().is_err(), "a NONE inbound discharges no root",);
+        assert!(guard_rx.try_recv().is_err(), "a NONE inbound discharges no root");
     }
 
     /// ADR-0080 §6: a reply's `Sent` is recorded before the inbound's
@@ -499,10 +499,10 @@ mod tests {
             "reply routed to the Component target",
         );
         // The reply's `Sent` is now on the root; it is not yet settled.
-        assert!(settle.try_recv().is_err(), "reply Sent holds the chain open",);
+        assert!(settle.try_recv().is_err(), "reply Sent holds the chain open");
         drop(mail);
         // The inbound's `Finished` landed, but the reply is still in flight.
-        assert!(settle.try_recv().is_err(), "inbound Finished alone does not settle — the reply is still open",);
+        assert!(settle.try_recv().is_err(), "inbound Finished alone does not settle — the reply is still open");
 
         // Finish the reply the way its eventual recipient's dispatcher
         // would; only now does the root settle.
@@ -542,8 +542,8 @@ mod tests {
         drop(mail);
 
         let reply_env = rrx.recv().expect("reply routed");
-        assert!(reply_env.mail_id.correlation_id >= ReplyLineage::BASE, "reply id sits in the reply-lineage space",);
-        assert_eq!(reply_env.mail_id.sender, id, "reply id is stamped with the claimed mailbox",);
+        assert!(reply_env.mail_id.correlation_id >= ReplyLineage::BASE, "reply id sits in the reply-lineage space");
+        assert_eq!(reply_env.mail_id.sender, id, "reply id is stamped with the claimed mailbox");
         reply_env.discharge();
     }
 
@@ -621,10 +621,10 @@ mod tests {
 
         let reply =
             reply_rx.recv_timeout(Duration::from_secs(2)).expect("the -> R handler replied to the inbound sender");
-        assert_eq!(reply.kind, ReplyAck::ID, "the reply carries the handler's declared return kind",);
-        assert_eq!(reply.sender.correlation_id, 5, "the caller's correlation is echoed onto the reply",);
+        assert_eq!(reply.kind, ReplyAck::ID, "the reply carries the handler's declared return kind");
+        assert_eq!(reply.sender.correlation_id, 5, "the caller's correlation is echoed onto the reply");
         let ack = ReplyAck::decode_from_bytes(reply.payload.bytes()).expect("reply decodes");
-        assert_eq!(ack, ReplyAck { seq: 9 }, "the value the handler returned is what was replied",);
+        assert_eq!(ack, ReplyAck { seq: 9 }, "the value the handler returned is what was replied");
     }
 
     /// #1757: `NativeCtx::take_inbound` moves the *single* dispatched
@@ -736,7 +736,7 @@ mod tests {
         });
         worker.join().expect("worker thread");
 
-        assert!(settle.try_recv().is_err(), "the reply's Sent holds the chain open — no premature settle",);
+        assert!(settle.try_recv().is_err(), "the reply's Sent holds the chain open — no premature settle");
 
         // Finish the reply the way its eventual recipient's dispatcher
         // would; only now does the root settle — exactly once.
@@ -745,6 +745,6 @@ mod tests {
         reply_env.discharge();
         mailer.record_finished(reply_id, root);
         settle.recv().expect("root settles once the deferred reply finishes");
-        assert!(settle.try_recv().is_err(), "the chain settles exactly once — no double-settle",);
+        assert!(settle.try_recv().is_err(), "the chain settles exactly once — no double-settle");
     }
 }

@@ -185,10 +185,10 @@ impl AudioCapabilityState {
                 let reason = format!("file read failed: {error:?}");
                 match context {
                     AudioLoadContext::Track { source, lane, .. } => {
-                        ctx.reply_to(source, &PlayTrackResult::Err { namespace, path, lane, error: reason })
+                        ctx.reply_to(source, &PlayTrackResult::Err { namespace, path, lane, error: reason });
                     }
                     AudioLoadContext::Instrument { source } => {
-                        ctx.reply_to(source, &LoadInstrumentResult::Err { namespace, path, error: reason })
+                        ctx.reply_to(source, &LoadInstrumentResult::Err { namespace, path, error: reason });
                     }
                     AudioLoadContext::Sample { assembly_id, .. } => {
                         self.fail_assembly(ctx, assembly_id, reason);

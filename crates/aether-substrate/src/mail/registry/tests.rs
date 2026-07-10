@@ -838,5 +838,5 @@ fn inbox_handler_hand_rolled_impl_dispatches_per_call() {
     assert_eq!(received.kind, KindId(42));
     assert_eq!(received.kind_name, "aether.fs.write");
     assert_eq!(received.payload.into_vec(), vec![0xAB, 0xCD]);
-    assert!(rx.try_recv().is_err(), "exactly one enqueue should send exactly one envelope",);
+    assert!(rx.try_recv().is_err(), "exactly one enqueue should send exactly one envelope");
 }

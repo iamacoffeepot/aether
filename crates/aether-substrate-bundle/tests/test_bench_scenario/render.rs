@@ -473,7 +473,7 @@ fn committed_overlay_snapshot_excludes_record_time_rejections() {
     let overflow =
         decode_png(overflow.captured("overflow").expect("overflow capture")).expect("decode overflow capture");
     let overflow_coverage = coverage(&overflow, background_top_left(&overflow), 5);
-    assert!(overflow_coverage < 0.01, "over-budget pass should render nothing, coverage was {overflow_coverage}",);
+    assert!(overflow_coverage < 0.01, "over-budget pass should render nothing, coverage was {overflow_coverage}");
 }
 
 /// Palette for the four-quadrant texture built by
@@ -677,7 +677,7 @@ fn destroyed_texture_draw_drops_from_frame() {
     let img = decode_png(png).expect("decode capture png");
     let bg = background_top_left(&img);
     let drawn = coverage(&img, bg, 5);
-    assert!((0.08..0.22).contains(&drawn), "live texture quad coverage {drawn} fell outside the expected band",);
+    assert!((0.08..0.22).contains(&drawn), "live texture quad coverage {drawn} fell outside the expected band");
 
     let destroyed = bench
         .execute(vec![
@@ -842,7 +842,7 @@ fn coverage_material_renders_body_rim_and_outside_bands() {
         outside[0].abs_diff(bg[0]) <= 8 && outside[1].abs_diff(bg[1]) <= 8 && outside[2].abs_diff(bg[2]) <= 8,
         "outside coverage sample should stay background; bg={bg:?} outside={outside:?}",
     );
-    assert!(rim[0] > 150 && rim[1] > 120 && rim[2] < 80, "coverage rim sample should be yellow; got {rim:?}",);
+    assert!(rim[0] > 150 && rim[1] > 120 && rim[2] < 80, "coverage rim sample should be yellow; got {rim:?}");
     assert!(
         body[1] > body[0].saturating_add(80) && body[1] > body[2].saturating_add(60),
         "coverage body sample should be green; got {body:?}",
@@ -907,7 +907,7 @@ fn textured_material_depth_tests_against_main_geometry() {
         left[0] > left[2].saturating_add(80),
         "left sample should show red main-pass occluder, not blue material; got {left:?}",
     );
-    assert!(right[2] > right[0].saturating_add(100), "right sample should show blue textured material; got {right:?}",);
+    assert!(right[2] > right[0].saturating_add(100), "right sample should show blue textured material; got {right:?}");
 }
 
 /// ADR-0140 coverage material rejects non-R8 textures at encode time:
@@ -948,7 +948,7 @@ fn coverage_material_warn_drops_non_r8_texture() {
         bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture non-r8 coverage");
     let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode non-r8 coverage png");
     let drawn = coverage(&img, background_top_left(&img), 5);
-    assert!(drawn < 0.01, "coverage draw against RGBA8 should be warn-dropped, but lit coverage was {drawn}",);
+    assert!(drawn < 0.01, "coverage draw against RGBA8 should be warn-dropped, but lit coverage was {drawn}");
 }
 
 /// ADR-0107 §4 flat-fill primitive: a `draw_solid_quads` batch draws an
@@ -1054,7 +1054,7 @@ fn solid_quad_clip_bounds_pixels_and_does_not_leak() {
     let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode clipped solid png");
     let bg = background_top_left(&img);
     let tolerance = 5;
-    assert!(pixel_is_lit(&img, 24, 16, bg, tolerance), "pixel inside the solid clip rect should be painted",);
+    assert!(pixel_is_lit(&img, 24, 16, bg, tolerance), "pixel inside the solid clip rect should be painted");
     assert!(
         !pixel_is_lit(&img, 16, 16, bg, tolerance),
         "pixel inside the solid quad but outside the clip rect should remain clear",
@@ -1112,7 +1112,7 @@ fn textured_quad_clip_bounds_pixels() {
     let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode clipped textured png");
     let bg = background_top_left(&img);
     let tolerance = 5;
-    assert!(pixel_is_lit(&img, 24, 20, bg, tolerance), "pixel inside the textured clip rect should be painted",);
+    assert!(pixel_is_lit(&img, 24, 20, bg, tolerance), "pixel inside the textured clip rect should be painted");
     assert!(
         !pixel_is_lit(&img, 12, 20, bg, tolerance),
         "pixel inside the textured quad but outside the clip rect should remain clear",
@@ -1191,7 +1191,7 @@ fn capture_frame_checks_return_substrate_verdict() {
     let reply: CaptureFrameResult = result.reply("snap").expect("decode CaptureFrameResult");
     let verdict = match reply {
         CaptureFrameResult::Ok { png, verdict, .. } => {
-            assert!(png.starts_with(&[0x89, 0x50, 0x4E, 0x47]), "the PNG still rides back alongside the verdict",);
+            assert!(png.starts_with(&[0x89, 0x50, 0x4E, 0x47]), "the PNG still rides back alongside the verdict");
             verdict.expect("a checks request returns a verdict")
         }
         CaptureFrameResult::Err { error } => panic!("capture_frame replied Err: {error}"),
@@ -1208,7 +1208,7 @@ fn capture_frame_checks_return_substrate_verdict() {
     match &verdict.results[1] {
         FrameCheckResult::Coverage { fraction, .. } => {
             // 24*18 / 64*48 ≈ 0.14 — the same band the decode test asserts.
-            assert!((0.08..0.22).contains(fraction), "solid quad coverage {fraction} fell outside the expected band",);
+            assert!((0.08..0.22).contains(fraction), "solid quad coverage {fraction} fell outside the expected band");
         }
         other => panic!("expected Coverage result, got {other:?}"),
     }
@@ -1291,9 +1291,9 @@ fn capture_frame_similarity_resolves_reference_from_configured_assets_root() {
                 png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
                 "the PNG still rides back alongside the similarity score",
             );
-            assert!(verdict.is_none(), "no checks were requested, so no intrinsic verdict should ride back",);
-            assert_eq!(similarity_score, Some(0.0), "an unchanged scene captured twice should score a perfect match",);
-            assert_eq!(similarity_pass, Some(true), "a 0.0 score against a 0.0 threshold must pass",);
+            assert!(verdict.is_none(), "no checks were requested, so no intrinsic verdict should ride back");
+            assert_eq!(similarity_score, Some(0.0), "an unchanged scene captured twice should score a perfect match");
+            assert_eq!(similarity_pass, Some(true), "a 0.0 score against a 0.0 threshold must pass");
         }
         CaptureFrameResult::Err { error } => panic!(
             "capture_frame similarity replied Err (assets root not wired into TestBench?): \
@@ -1516,7 +1516,7 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
     assert!(outcome.is_err(), "test setup: the guarded closure must panic");
 
     let actual_bytes = fs::read(panic_dir.join("actual.png")).expect("actual.png should persist");
-    assert_eq!(actual_bytes, png, "the persisted actual.png must be byte-identical to the exact captured PNG",);
+    assert_eq!(actual_bytes, png, "the persisted actual.png must be byte-identical to the exact captured PNG");
 
     let measurements_json =
         fs::read_to_string(panic_dir.join("measurements.json")).expect("measurements.json should persist");
@@ -1569,8 +1569,8 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
             }
         }
     }
-    assert!(!panic_dir.join("reference.png").exists(), "no reference.png without an attached reference",);
-    assert!(!panic_dir.join("difference.png").exists(), "no difference.png without an attached reference",);
+    assert!(!panic_dir.join("reference.png").exists(), "no reference.png without an attached reference");
+    assert!(!panic_dir.join("difference.png").exists(), "no difference.png without an attached reference");
 
     // An explicit altered reference produces a deterministic difference
     // image. The reference is all-black, so `difference.png`'s RGB
@@ -1606,7 +1606,7 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
         let _guard = ArtifactGuard::arm(passing_id, png.clone(), checks.clone(), verdict.results.clone());
         // Guard drops here without panicking.
     }
-    assert!(!passing_dir.exists(), "a passing assertion must leave no artifact directory behind",);
+    assert!(!passing_dir.exists(), "a passing assertion must leave no artifact directory behind");
 
     let _ = fs::remove_dir_all(&panic_dir);
     let _ = fs::remove_dir_all(&reference_dir);

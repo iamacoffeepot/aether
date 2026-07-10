@@ -613,7 +613,7 @@ mod tests {
         let rect = Rect { min_x: 4, min_y: 6, max_x: 7, max_y: 9 };
         let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [200, 32, 32, 255], rect);
         let fraction = coverage(&img, bg, 5);
-        assert!((fraction - 16.0 / 256.0).abs() < 1e-6, "coverage was {fraction}, expected 16/256",);
+        assert!((fraction - 16.0 / 256.0).abs() < 1e-6, "coverage was {fraction}, expected 16/256");
     }
 
     #[test]
@@ -623,8 +623,8 @@ mod tests {
         let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [200, 32, 32, 255], rect);
         let (center_x, center_y) = centroid(&img, bg, 5).expect("a lit mask has a centroid");
         // Mean of the inclusive spans 4..=7 and 6..=9.
-        assert!((center_x - 5.5).abs() < 1e-6, "centroid x was {center_x}, expected 5.5",);
-        assert!((center_y - 7.5).abs() < 1e-6, "centroid y was {center_y}, expected 7.5",);
+        assert!((center_x - 5.5).abs() < 1e-6, "centroid x was {center_x}, expected 5.5");
+        assert!((center_y - 7.5).abs() < 1e-6, "centroid y was {center_y}, expected 7.5");
     }
 
     #[test]
@@ -647,7 +647,7 @@ mod tests {
         // region, not the 256-pixel frame.
         let region = Rect { min_x: 2, min_y: 4, max_x: 9, max_y: 11 };
         let fraction = coverage_in_region(&img, Some(region), bg, 5);
-        assert!((fraction - 16.0 / 64.0).abs() < 1e-6, "region coverage was {fraction}, expected 16/64",);
+        assert!((fraction - 16.0 / 64.0).abs() < 1e-6, "region coverage was {fraction}, expected 16/64");
         // A region that excludes half the lit rect (only rows 6..=7 of
         // the lit rect's 6..=9) scores just the included lit pixels
         // over the smaller region's area.
@@ -684,7 +684,7 @@ mod tests {
              coordinate center (5.5, 7.5), not blended with the excluded rect",
         );
         let bbox = bounding_box_in_region(&img, Some(region), bg, 5).expect("region has a lit sub-rect");
-        assert_eq!(bbox, included_rect, "region bounding box should be the included rect's own frame coordinates",);
+        assert_eq!(bbox, included_rect, "region bounding box should be the included rect's own frame coordinates");
     }
 
     #[test]
@@ -813,7 +813,7 @@ mod tests {
         let stats = target_color_stats(&img, target, 5, None);
         assert_eq!(stats.sampled, 256);
         assert_eq!(stats.matching, 16);
-        assert!((stats.fraction - 16.0 / 256.0).abs() < 1e-6, "fraction was {}, expected 16/256", stats.fraction,);
+        assert!((stats.fraction - 16.0 / 256.0).abs() < 1e-6, "fraction was {}, expected 16/256", stats.fraction);
     }
 
     #[test]
@@ -924,7 +924,7 @@ mod tests {
         let b = solid(2, 2, [0, 0, 0, 255]);
         let score = mean_absolute_error(&a, &b).expect("test setup: same dims");
         let expected = 1.0_f32 / 3.0;
-        assert!((score - expected).abs() < 1e-6, "red vs black MAE was {score}, expected {expected}",);
+        assert!((score - expected).abs() < 1e-6, "red vs black MAE was {score}, expected {expected}");
     }
 
     #[test]
@@ -932,7 +932,7 @@ mod tests {
         let a = solid(4, 4, [0, 0, 0, 255]);
         let b = solid(8, 8, [0, 0, 0, 255]);
         let err = mean_absolute_error(&a, &b).expect_err("test setup: different dims must err");
-        assert!(err.contains("dimension mismatch"), "error message should describe the mismatch: {err}",);
+        assert!(err.contains("dimension mismatch"), "error message should describe the mismatch: {err}");
     }
 
     #[test]
@@ -990,8 +990,8 @@ mod tests {
         let check =
             FrameCheck { reduction: FrameReduction::Coverage, tolerance: 5, background: Some(bg), region: None };
         let mask = diagnostic_mask(&img, &check);
-        assert_eq!(pixel_at(&mask, 16, 5, 7), [255, 255, 255, 255], "a lit pixel should render opaque white",);
-        assert_eq!(pixel_at(&mask, 16, 0, 0), [0, 0, 0, 255], "an in-frame unlit pixel should render opaque black",);
+        assert_eq!(pixel_at(&mask, 16, 5, 7), [255, 255, 255, 255], "a lit pixel should render opaque white");
+        assert_eq!(pixel_at(&mask, 16, 0, 0), [0, 0, 0, 255], "an in-frame unlit pixel should render opaque black");
     }
 
     #[test]

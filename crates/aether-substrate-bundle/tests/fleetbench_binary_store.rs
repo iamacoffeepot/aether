@@ -37,7 +37,7 @@ mod tests {
             .iter()
             .find(|e| e.hash == hash)
             .unwrap_or_else(|| panic!("uploaded binary {hash} should be listed: {all:?}"));
-        assert_eq!(entry.manifest.chassis, "headless", "the stored manifest reports the headless chassis",);
+        assert_eq!(entry.manifest.chassis, "headless", "the stored manifest reports the headless chassis");
         assert!(
             !entry.manifest.caps.is_empty(),
             "the stored manifest carries a non-empty cap list, got {:?}",
@@ -51,13 +51,13 @@ mod tests {
             caps: vec![],
             target: None,
         });
-        assert!(headless_filtered.iter().any(|e| e.hash == hash), "a matching chassis filter keeps the entry",);
+        assert!(headless_filtered.iter().any(|e| e.hash == hash), "a matching chassis filter keeps the entry");
         let desktop_filtered = bench.list_engine_binaries(&ListEngineBinaries {
             chassis: Some("desktop".to_owned()),
             caps: vec![],
             target: None,
         });
-        assert!(!desktop_filtered.iter().any(|e| e.hash == hash), "a non-matching chassis filter drops the entry",);
+        assert!(!desktop_filtered.iter().any(|e| e.hash == hash), "a non-matching chassis filter drops the entry");
 
         // A second identical upload dedups to the same content hash.
         let again = match bench.upload_binary(headless, None) {

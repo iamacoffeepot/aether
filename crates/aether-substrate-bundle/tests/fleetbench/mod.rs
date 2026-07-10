@@ -761,7 +761,7 @@ impl FleetBench {
                          within the {budget:?} backstop — a healthy chain never reaches this cap, \
                          so this is a genuine deadlock/livelock",
                     );
-                    eprintln!("fleetbench: {gate} call {cid} to {mailbox:?} slow: waited {waited:?}, extending",);
+                    eprintln!("fleetbench: {gate} call {cid} to {mailbox:?} slow: waited {waited:?}, extending");
                 }
                 // Any other read error is a real failure (connection closed,
                 // decode), not a slow chain.

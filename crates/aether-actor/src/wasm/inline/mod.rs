@@ -799,9 +799,9 @@ mod tests {
         assert!(registry.take(id).is_none(), "empty registry has no child");
         registry.insert_child(id, 0, String::from("widget"), false, 0, Vec::new(), Box::new(RecordingChild::new().0));
         let taken = registry.take(id).expect("insert then take returns the child");
-        assert!(registry.take(id).is_none(), "a taken-out slot is empty until reinsert",);
+        assert!(registry.take(id).is_none(), "a taken-out slot is empty until reinsert");
         registry.reinsert(id, taken);
-        assert!(registry.take(id).is_some(), "reinsert refills the slot for the next dispatch",);
+        assert!(registry.take(id).is_some(), "reinsert refills the slot for the next dispatch");
     }
 
     /// Step 1 coverage: a spawned child's slot carries its actor-type tag
@@ -864,7 +864,7 @@ mod tests {
         let own = 0x4000_u64;
         let stray = 0x4999_u64;
         let rc = membrane_dispatch(own, mail_to(stray), &registry, MailboxId::NONE.0, |_mail| OWN_CODE);
-        assert_eq!(rc, OWN_CODE, "an unknown recipient falls back to the parent's unmatched path",);
+        assert_eq!(rc, OWN_CODE, "an unknown recipient falls back to the parent's unmatched path");
     }
 
     /// Step 3 coverage: a child that despawns itself mid-dispatch drops
@@ -896,12 +896,12 @@ mod tests {
             panic!("own dispatch must not run while the child is resident")
         });
         assert_eq!(rc, CHILD_CODE, "the child handled the despawning dispatch");
-        assert_eq!(drops.get(), 1, "the self-despawned box dropped at end of dispatch, not reinserted",);
+        assert_eq!(drops.get(), 1, "the self-despawned box dropped at end of dispatch, not reinserted");
 
         // The alias is gone: a second send falls through to the parent's
         // unmatched path rather than re-dispatching a dropped child.
         let rc2 = membrane_dispatch(own, mail_to(child), &registry, MailboxId::NONE.0, |_mail| OWN_CODE);
-        assert_eq!(rc2, OWN_CODE, "the torn-down alias falls through to the parent",);
+        assert_eq!(rc2, OWN_CODE, "the torn-down alias falls through to the parent");
     }
 
     /// Install a recording child under `id` with `parent`, returning the
@@ -956,13 +956,13 @@ mod tests {
             None,
             "the cluster root has no registry parent (its parent is cross-cluster)",
         );
-        assert_eq!(registry.parent_of(MailboxId(0xDEAD)), None, "a stray id resolves to no parent",);
+        assert_eq!(registry.parent_of(MailboxId(0xDEAD)), None, "a stray id resolves to no parent");
 
         // child_of: the root's child named "bar"/"baz"; bar's child "button".
         assert_eq!(registry.child_of(MailboxId(root), "bar"), Some(bar));
         assert_eq!(registry.child_of(MailboxId(root), "baz"), Some(baz));
         assert_eq!(registry.child_of(bar, "button"), Some(button));
-        assert_eq!(registry.child_of(MailboxId(root), "missing"), None, "no child named 'missing' resides",);
+        assert_eq!(registry.child_of(MailboxId(root), "missing"), None, "no child named 'missing' resides");
         assert_eq!(
             registry.child_of(MailboxId(root), "button"),
             None,
@@ -972,7 +972,7 @@ mod tests {
         // sibling_of: bar and baz are siblings under the root.
         assert_eq!(registry.sibling_of(bar, "baz"), Some(baz));
         assert_eq!(registry.sibling_of(baz, "bar"), Some(bar));
-        assert_eq!(registry.sibling_of(button, "bar"), None, "button's parent (bar) has no child named 'bar'",);
+        assert_eq!(registry.sibling_of(button, "bar"), None, "button's parent (bar) has no child named 'bar'");
     }
 
     /// Addressing amendment: `route_decision` classifies the cluster's own
@@ -988,8 +988,8 @@ mod tests {
         registry.set_self_id(root);
         install_recording(&registry, child, root);
 
-        assert_eq!(registry.route_decision(root), RouteDecision::Local, "the cluster's own id is local",);
-        assert_eq!(registry.route_decision(child), RouteDecision::Local, "a resident inline-child alias is local",);
+        assert_eq!(registry.route_decision(root), RouteDecision::Local, "the cluster's own id is local");
+        assert_eq!(registry.route_decision(child), RouteDecision::Local, "a resident inline-child alias is local");
         assert_eq!(
             registry.route_decision(0x9999),
             RouteDecision::Remote,
@@ -1010,9 +1010,9 @@ mod tests {
 
         assert_eq!(registry.queued_len(), 0, "the queue starts empty");
         registry.route_or_enqueue(root, 7, &[1, 2, 3], 1, ChainMode::Inherit, root);
-        assert_eq!(registry.queued_len(), 1, "an own-id send enqueues locally, no host call",);
+        assert_eq!(registry.queued_len(), 1, "an own-id send enqueues locally, no host call");
         registry.route_or_enqueue(child, 8, &[4], 1, ChainMode::Inherit, root);
-        assert_eq!(registry.queued_len(), 2, "a child-alias send enqueues locally too",);
+        assert_eq!(registry.queued_len(), 2, "a child-alias send enqueues locally too");
     }
 
     /// Addressing amendment: a seeded local item drains through the membrane
@@ -1039,9 +1039,9 @@ mod tests {
             }
         });
 
-        assert_eq!(dispatches.get(), 1, "the child-addressed item dispatched the child once",);
-        assert_eq!(own_dispatches.get(), 0, "a child-addressed item never ran the parent dispatch",);
-        assert_eq!(registry.queued_len(), 0, "the queue is empty after the drain",);
+        assert_eq!(dispatches.get(), 1, "the child-addressed item dispatched the child once");
+        assert_eq!(own_dispatches.get(), 0, "a child-addressed item never ran the parent dispatch");
+        assert_eq!(registry.queued_len(), 0, "the queue is empty after the drain");
     }
 
     /// Addressing amendment: a cascade — a drained item whose dispatch
@@ -1089,13 +1089,13 @@ mod tests {
         });
 
         assert!(own_ran.get(), "the seeded own item dispatched");
-        assert_eq!(child_dispatches.get(), 1, "the cascaded follow-up reached the child in the same drain call",);
+        assert_eq!(child_dispatches.get(), 1, "the cascaded follow-up reached the child in the same drain call");
         assert_eq!(
             order.borrow().as_slice(),
             ["own"],
             "exactly one own dispatch ran (the seed); the cascade went to the child",
         );
-        assert_eq!(registry.queued_len(), 0, "the cascade drained fully — queue empty",);
+        assert_eq!(registry.queued_len(), 0, "the cascade drained fully — queue empty");
     }
 
     /// Install a recording child under `id` with `parent`, returning both the
@@ -1163,6 +1163,6 @@ mod tests {
         });
         assert_eq!(rc, CHILD_CODE, "the child handled the direct dispatch");
         assert_eq!(dispatches.get(), 1, "the child was dispatched once");
-        assert_eq!(observed.get(), None, "a top-level dispatch reads no in-place source (NONE source on the ctx)",);
+        assert_eq!(observed.get(), None, "a top-level dispatch reads no in-place source (NONE source on the ctx)");
     }
 }

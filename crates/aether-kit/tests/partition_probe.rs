@@ -96,7 +96,7 @@ fn demo_world_fits_the_frame_vertex_budget() {
     let styles = StyleTable::default();
     let total: usize = (0..4).map(|k| mesh_chunk(&world, ChunkPos { x: k % 2, z: k / 2 }, &styles).len()).sum();
     let budget = CELLS_PER_CHUNK_AREA * SUBCELLS_PER_CELL * 2;
-    assert!(total < budget, "frame budget headroom: {total} triangles, budget {budget}",);
+    assert!(total < budget, "frame budget headroom: {total} triangles, budget {budget}");
 }
 
 #[test]

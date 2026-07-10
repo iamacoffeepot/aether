@@ -239,7 +239,7 @@ impl NativeActor for WasmTrampoline {
                 // on a future epoch-deadline ADR — symmetric with
                 // native actors, which have no wedge guard either
                 // today.
-                ctx.fatal_abort(format!("component {} (kind {}) trapped: {e}", state.mailbox, env.kind_name,));
+                ctx.fatal_abort(format!("component {} (kind {}) trapped: {e}", state.mailbox, env.kind_name));
             }
             component.drain_pending_spawns()
         };

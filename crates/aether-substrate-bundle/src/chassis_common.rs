@@ -980,7 +980,7 @@ mod tests {
         // directly, so the test exercises our `to_cap`, not confique's
         // env/argv resolution (which the derive macro generates and
         // confique's own tests cover).
-        assert_eq!(SettlementConfig { cap_secs: 0 }.to_cap(), Duration::MAX, "0 → wait forever",);
+        assert_eq!(SettlementConfig { cap_secs: 0 }.to_cap(), Duration::MAX, "0 → wait forever");
         assert_eq!(SettlementConfig { cap_secs: 45 }.to_cap(), Duration::from_secs(45),);
         assert_eq!(SettlementConfig::default().to_cap(), Duration::from_secs(DEFAULT_SETTLEMENT_CAP_SECS),);
     }
@@ -1065,12 +1065,12 @@ mod tests {
         let shutdown = format!("{:?}", <Shutdown as Kind>::ID);
 
         // Start state is Tick.
-        assert!(graph_dbg.contains(&format!("start: {tick}")), "expected start Tick in {graph_dbg}",);
+        assert!(graph_dbg.contains(&format!("start: {tick}")), "expected start Tick in {graph_dbg}");
         // Tick, Render, and Present are all non-terminal states.
-        assert!(graph_dbg.contains(&render), "expected a Render state in {graph_dbg}",);
-        assert!(graph_dbg.contains(&present), "expected a Present state in {graph_dbg}",);
+        assert!(graph_dbg.contains(&render), "expected a Render state in {graph_dbg}");
+        assert!(graph_dbg.contains(&present), "expected a Present state in {graph_dbg}");
         // Shutdown is the sole terminal.
-        assert!(graph_dbg.contains(&format!("terminals: [{shutdown}]")), "expected Shutdown terminal in {graph_dbg}",);
+        assert!(graph_dbg.contains(&format!("terminals: [{shutdown}]")), "expected Shutdown terminal in {graph_dbg}");
 
         // No initial subscribers: components subscribe the `Tick` stage
         // directly on `aether.lifecycle` (ADR-0082 §7/§11); the boot-time
@@ -1121,7 +1121,7 @@ mod tests {
             known.contains("AETHER_HUB_HEARTBEAT_INTERVAL_SECS"),
             "AETHER_HUB_HEARTBEAT_INTERVAL_SECS must be a known hub key",
         );
-        assert!(known.contains("AETHER_ENGINE_STORE_ROOT"), "AETHER_ENGINE_STORE_ROOT must be a known hub key",);
+        assert!(known.contains("AETHER_ENGINE_STORE_ROOT"), "AETHER_ENGINE_STORE_ROOT must be a known hub key");
         assert!(
             known.contains("AETHER_AUDIO_DISABLE"),
             "fleet cap keys must stay in the hub known-key set (spawned substrates inherit \
@@ -1145,8 +1145,8 @@ mod tests {
         // registered scheduler-side because `aether-capabilities` couldn't
         // hold it; the bundle can, so the workaround is gone).
         let known = chassis_known_keys();
-        assert!(known.contains("AETHER_WORKERS"), "AETHER_WORKERS must be a known key",);
-        assert!(known.contains("AETHER_BOOT_MANIFEST"), "AETHER_BOOT_MANIFEST must be a known key",);
+        assert!(known.contains("AETHER_WORKERS"), "AETHER_WORKERS must be a known key");
+        assert!(known.contains("AETHER_BOOT_MANIFEST"), "AETHER_BOOT_MANIFEST must be a known key");
         assert!(
             known.contains("AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS"),
             "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS must be a known key",
@@ -1171,8 +1171,8 @@ mod tests {
         // chassis registry so the unknown-AETHER_* sweep (e1) doesn't
         // flag `AETHER_HTTP_SERVER_*` env vars set by operators.
         let known = chassis_known_keys();
-        assert!(known.contains("AETHER_HTTP_SERVER_ENABLED"), "AETHER_HTTP_SERVER_ENABLED must be a known key",);
-        assert!(known.contains("AETHER_HTTP_SERVER_BIND_ADDR"), "AETHER_HTTP_SERVER_BIND_ADDR must be a known key",);
+        assert!(known.contains("AETHER_HTTP_SERVER_ENABLED"), "AETHER_HTTP_SERVER_ENABLED must be a known key");
+        assert!(known.contains("AETHER_HTTP_SERVER_BIND_ADDR"), "AETHER_HTTP_SERVER_BIND_ADDR must be a known key");
         assert!(
             known.contains("AETHER_HTTP_SERVER_HANDLER_MAILBOX"),
             "AETHER_HTTP_SERVER_HANDLER_MAILBOX must be a known key",
@@ -1211,7 +1211,7 @@ mod tests {
         fs::write(&malformed, "[http\n").expect("write malformed config");
         let result = super::load_config_file(&malformed);
         let _ = fs::remove_file(&malformed);
-        assert!(matches!(result, Err(ConfigError::ConfigFile { .. })), "malformed config file must hard-error",);
+        assert!(matches!(result, Err(ConfigError::ConfigFile { .. })), "malformed config file must hard-error");
     }
 
     #[test]

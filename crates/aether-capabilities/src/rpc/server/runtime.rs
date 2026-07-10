@@ -207,7 +207,7 @@ impl RpcServerState {
             self.write_frame_to(
                 conn_id,
                 &WireFrame::Bye {
-                    reason: format!("wire_version mismatch: peer={}, server={WIRE_VERSION}", hello.wire_version,),
+                    reason: format!("wire_version mismatch: peer={}, server={WIRE_VERSION}", hello.wire_version),
                 },
             );
             self.close_connection(conn_id, "wire_version mismatch");

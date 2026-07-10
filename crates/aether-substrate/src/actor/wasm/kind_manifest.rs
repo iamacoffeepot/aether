@@ -131,7 +131,7 @@ pub fn read_from_bytes(wasm: &[u8]) -> Result<Vec<KindDescriptor>, String> {
         match reader.name() {
             MANIFEST_SECTION => decode_kinds_records(reader.data(), &mut kinds)?,
             LABELS_SECTION => {
-                decode_records(LABELS_SECTION, LABELS_SUPPORTED_VERSIONS, reader.data(), &mut labels_list)?
+                decode_records(LABELS_SECTION, LABELS_SUPPORTED_VERSIONS, reader.data(), &mut labels_list)?;
             }
             _ => {}
         }

@@ -430,7 +430,7 @@ mod tests {
         assert!(result.exhausted);
         let cell = CellPos { x: 0, z: 0 };
         assert_eq!(world.overlay_coverage(cell, 0, 0), 255);
-        assert_eq!(world.overlay_coverage(cell, 1, 0), 0, "the second covered sample is the rejected over-cap write",);
+        assert_eq!(world.overlay_coverage(cell, 1, 0), 0, "the second covered sample is the rejected over-cap write");
     }
 
     #[test]

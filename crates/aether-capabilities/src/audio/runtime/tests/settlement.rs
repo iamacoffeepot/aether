@@ -72,12 +72,12 @@ fn play_track_deferred_reply_settles_caller_chain() {
     // reply is now in-flight on the caller root — live_roots must
     // stay at 1. Pre-fix: root was MailId::NONE so record_sent_inflight
     // was a no-op and live_roots dropped to 0 here (premature settle).
-    assert_eq!(counter.live_roots(), 1, "deferred reply holds the caller chain open after hold releases",);
+    assert_eq!(counter.live_roots(), 1, "deferred reply holds the caller chain open after hold releases");
 
     let dispatch = reply_rx.recv_timeout(Duration::from_secs(2)).expect("reply reached the caller inbox");
     assert_eq!(dispatch.root, root, "reply inherits the caller's root");
     mailer.record_finished(dispatch.mail_id, dispatch.root);
-    assert_eq!(counter.live_roots(), 0, "chain settles after the reply's Finished fires",);
+    assert_eq!(counter.live_roots(), 0, "chain settles after the reply's Finished fires");
 }
 
 /// #1693 / #1701 regression: `load_instrument`'s deferred assembly
@@ -143,10 +143,10 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
 
     drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
 
-    assert_eq!(counter.live_roots(), 1, "assembly reply holds the caller chain open after hold releases",);
+    assert_eq!(counter.live_roots(), 1, "assembly reply holds the caller chain open after hold releases");
 
     let dispatch = reply_rx.recv_timeout(Duration::from_secs(2)).expect("reply reached the caller inbox");
     assert_eq!(dispatch.root, root, "assembly reply inherits the caller's root");
     mailer.record_finished(dispatch.mail_id, dispatch.root);
-    assert_eq!(counter.live_roots(), 0, "chain settles after the reply's Finished fires",);
+    assert_eq!(counter.live_roots(), 0, "chain settles after the reply's Finished fires");
 }

@@ -358,7 +358,7 @@ mod tests {
         let malformed = drive(&mailer, &TerminateEngine { engine_id: "not-a-uuid".to_owned() }, || {
             cells.terminate.lock().expect("test setup: terminate cell mutex poisoned").take()
         });
-        assert!(matches!(malformed, TerminateEngineResult::Err { .. }), "a malformed engine_id should be rejected",);
+        assert!(matches!(malformed, TerminateEngineResult::Err { .. }), "a malformed engine_id should be rejected");
 
         let unknown =
             drive(&mailer, &TerminateEngine { engine_id: "00000000-0000-0000-0000-000000000000".to_owned() }, || {
@@ -390,8 +390,8 @@ mod tests {
                 reason: DeathReason::Crashed { detail: "peer closed".to_owned() },
             },
         );
-        assert!(after_malformed.engines.is_empty(), "a malformed died must not panic or insert",);
-        assert!(after_malformed.recently_died.is_empty(), "a malformed died records no phantom death",);
+        assert!(after_malformed.engines.is_empty(), "a malformed died must not panic or insert");
+        assert!(after_malformed.recently_died.is_empty(), "a malformed died records no phantom death");
 
         let after_unknown = push_then_list(
             &mailer,
@@ -401,8 +401,8 @@ mod tests {
                 reason: DeathReason::Evicted { detail: "heartbeat miss limit 3 of 3".to_owned() },
             },
         );
-        assert!(after_unknown.engines.is_empty(), "a died for an unknown engine is a no-op",);
-        assert!(after_unknown.recently_died.is_empty(), "a died for an unknown engine records no phantom death",);
+        assert!(after_unknown.engines.is_empty(), "a died for an unknown engine is a no-op");
+        assert!(after_unknown.recently_died.is_empty(), "a died for an unknown engine records no phantom death");
     }
 
     /// `on_engine_alive` for an unknown engine is a silent no-op (no
@@ -416,6 +416,6 @@ mod tests {
             &cells,
             &EngineAlive { engine_id: "00000000-0000-0000-0000-000000000000".to_owned() },
         );
-        assert!(after.engines.is_empty(), "an alive for an unknown engine must not insert it",);
+        assert!(after.engines.is_empty(), "an alive for an unknown engine must not insert it");
     }
 }

@@ -115,11 +115,11 @@ const DARKEN_TOLERANCE: u8 = 6;
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
 fn panel_address() -> String {
-    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE,)
+    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE)
 }
 
 fn child_address(subname: &str) -> String {
-    format!("{}/{}:{}", panel_address(), aether_capabilities::WasmTrampoline::NAMESPACE, subname,)
+    format!("{}/{}:{}", panel_address(), aether_capabilities::WasmTrampoline::NAMESPACE, subname)
 }
 
 /// The bundle's `assets/` dir — where `RobotoMono.ttf` ships, resolved relative
@@ -207,7 +207,7 @@ fn load_panel_with_children(bench: &mut TestBench, wasm: &[u8], font_id: u32, ch
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { name, .. } => {
-            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}",)
+            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}");
         }
         LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
     }
@@ -577,7 +577,7 @@ fn panel_renders_every_text_row_inside_its_frame() {
         .collect();
 
     let verdict = capture(&mut bench, checks);
-    assert_eq!(verdict.results.len(), rows.len() + 2, "one result per requested check",);
+    assert_eq!(verdict.results.len(), rows.len() + 2, "one result per requested check");
 
     for (row, result) in rows.iter().zip(&verdict.results) {
         assert_row_contained(row, result);
@@ -641,7 +641,7 @@ fn slider_drag_renders_fill_at_track_fraction() {
     let fill_right = bbox.max_x as f32 + 1.0;
     let fraction = (fill_right - PANEL_X) / PANEL_WIDTH;
     let expected = 191.0 / 255.0;
-    eprintln!("slider fill right edge x={fill_right:.0} → fraction {fraction:.3} (expected {expected:.3})",);
+    eprintln!("slider fill right edge x={fill_right:.0} → fraction {fraction:.3} (expected {expected:.3})");
     assert!(
         (fraction - expected).abs() <= 0.05,
         "the rendered slider fill should reach {expected:.3} of the track; it reached \
@@ -695,8 +695,8 @@ fn radio_click_moves_marker_into_clicked_row() {
     let verdict = capture(&mut bench, checks);
 
     let fractions: Vec<f32> = verdict.results.iter().map(coverage).collect();
-    eprintln!("radio marker coverage per row: [0]={:.3} [1]={:.3} [2]={:.3}", fractions[0], fractions[1], fractions[2],);
-    assert!(fractions[2] > 0.5, "the accent marker should fill the clicked row 2; coverage was {:.3}", fractions[2],);
+    eprintln!("radio marker coverage per row: [0]={:.3} [1]={:.3} [2]={:.3}", fractions[0], fractions[1], fractions[2]);
+    assert!(fractions[2] > 0.5, "the accent marker should fill the clicked row 2; coverage was {:.3}", fractions[2]);
     for i in [0usize, 1] {
         assert!(
             fractions[i] < 0.1,
@@ -826,7 +826,7 @@ fn button_press_renders_pressed_state_and_reports_click() {
     bench.execute(vec![("press", BenchOp::send_mail(&panel, &press(button_x, button_y)))]).expect("button press");
 
     let pressed_cov = coverage(&capture(&mut bench, fill_check()).results[0]);
-    eprintln!("button fill coverage-off-accent: un-pressed {baseline_cov:.3} → pressed {pressed_cov:.3}",);
+    eprintln!("button fill coverage-off-accent: un-pressed {baseline_cov:.3} → pressed {pressed_cov:.3}");
     assert!(
         baseline_cov < 0.1,
         "the un-pressed button fill should match its accent color (coverage off-accent ≈ 0); \

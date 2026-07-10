@@ -24,7 +24,7 @@ mod tests {
     const PROBE_NAME: &str = "probe";
 
     fn probe_address() -> String {
-        format!("aether.component/{}:{}", aether_capabilities::WasmTrampoline::NAMESPACE, PROBE_NAME,)
+        format!("aether.component/{}:{}", aether_capabilities::WasmTrampoline::NAMESPACE, PROBE_NAME)
     }
 
     /// `info` in the `0 = trace .. 4 = error` level mapping shared across
@@ -94,7 +94,7 @@ mod tests {
             )
         });
 
-        assert!(entry.sequence >= 1, "a buffered entry should carry a 1-based ring sequence, got {}", entry.sequence,);
+        assert!(entry.sequence >= 1, "a buffered entry should carry a 1-based ring sequence, got {}", entry.sequence);
 
         // Walk the cursor: a re-query past `next_since` must not re-yield
         // the entry we already consumed.

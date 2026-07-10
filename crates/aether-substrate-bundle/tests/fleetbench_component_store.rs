@@ -33,7 +33,7 @@ mod tests {
 
     /// The probe's registered ADR-0099 lineage address.
     fn probe_lineage_addr() -> String {
-        format!("aether.component/{}:{PROBE_NAMESPACE}", WasmTrampoline::NAMESPACE,)
+        format!("aether.component/{}:{PROBE_NAMESPACE}", WasmTrampoline::NAMESPACE)
     }
 
     /// Resolve `selector` hub-local and return the matched content hash,
@@ -69,7 +69,7 @@ mod tests {
             "the manifest reports the probe's namespace, got {:?}",
             entry.manifest.namespaces,
         );
-        assert!(entry.manifest.handled_kinds.contains(&Tick::ID), "the manifest reports the probe handles Tick",);
+        assert!(entry.manifest.handled_kinds.contains(&Tick::ID), "the manifest reports the probe handles Tick");
         assert_eq!(entry.name.as_deref(), Some("probe"), "the name points at it");
 
         // Attribute filters: namespace + handled-kind keep it, a miss drops it.
@@ -128,9 +128,9 @@ mod tests {
             .collect();
 
         let unique: BTreeSet<_> = roots.iter().cloned().collect();
-        assert_eq!(unique.len(), roots.len(), "each allocator call should return a unique root: {roots:?}",);
+        assert_eq!(unique.len(), roots.len(), "each allocator call should return a unique root: {roots:?}");
         for root in &roots {
-            assert!(root.is_dir(), "the allocator should create the root before returning it: {}", root.display(),);
+            assert!(root.is_dir(), "the allocator should create the root before returning it: {}", root.display());
         }
         for root in roots {
             fs::remove_dir_all(&root)
@@ -225,7 +225,7 @@ mod tests {
         // Replace the loaded component by hash (ADR-0022 in-place swap,
         // ADR-0116 selector). The trampoline keeps its lineage address.
         let caps = bench.replace_by_selector(engine, loaded.mailbox_id, &hash);
-        assert!(caps.handlers.iter().any(|h| h.id == Tick::ID), "the replaced probe still advertises its Tick handler",);
+        assert!(caps.handlers.iter().any(|h| h.id == Tick::ID), "the replaced probe still advertises its Tick handler");
     }
 
     /// A `spawn_substrate` boot manifest written in component selectors
@@ -283,7 +283,7 @@ mod tests {
         // and no racing a fixed liveness budget.
         let expected = probe_lineage_addr();
         let registered = poll_until(|| bench.list_components(engine).iter().any(|n| n == &expected));
-        assert!(registered, "the boot-manifest probe should come up and register at {expected}",);
+        assert!(registered, "the boot-manifest probe should come up and register at {expected}");
 
         // Best-effort: clean up the staged temp files.
         let _ = fs::remove_file(&staged_wasm);

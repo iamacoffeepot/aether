@@ -309,7 +309,7 @@ mod tests {
         // measuring per-box.
         let cost = measure_handoff_cost_nanos();
         assert!(cost >= 1, "handoff cost must be a positive floor");
-        assert!(cost < 10_000_000, "handoff cost {cost}ns implausibly large (> 10ms) — probe likely broken",);
+        assert!(cost < 10_000_000, "handoff cost {cost}ns implausibly large (> 10ms) — probe likely broken");
     }
 
     #[test]
@@ -357,7 +357,7 @@ mod tests {
         for _ in 0..200 {
             cell.fold(5_000);
         }
-        assert!(5_000 - cell.mean() < granularity, "live folds converge toward the operating cost: {}", cell.mean(),);
+        assert!(5_000 - cell.mean() < granularity, "live folds converge toward the operating cost: {}", cell.mean());
         assert_eq!(cell.samples(), 201, "every live fold counted");
     }
 
@@ -387,7 +387,7 @@ mod tests {
             w.join().expect("fold worker panicked");
         }
 
-        assert_eq!(cell.mean(), 1_000, "folding the seed value leaves the mean fixed under any interleaving",);
+        assert_eq!(cell.mean(), 1_000, "folding the seed value leaves the mean fixed under any interleaving");
         assert_eq!(
             cell.samples(),
             1 + THREADS as u64 * PER_THREAD,

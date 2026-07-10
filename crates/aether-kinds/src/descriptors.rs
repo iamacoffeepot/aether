@@ -55,6 +55,6 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(names.len(), sorted.len(), "duplicate kind names in descriptors::all(): {names:?}",);
+        assert_eq!(names.len(), sorted.len(), "duplicate kind names in descriptors::all(): {names:?}");
     }
 }

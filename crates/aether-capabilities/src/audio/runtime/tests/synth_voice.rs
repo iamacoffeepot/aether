@@ -62,7 +62,7 @@ fn partial_bank_envelope_decreases_after_attack() {
     for _ in 0..4_000 {
         voice.next_sample(dt);
         let level = voice.envelope_level();
-        assert!(level <= last + f32::EPSILON, "partial envelope must not rise in sustain: {level} > {last}",);
+        assert!(level <= last + f32::EPSILON, "partial envelope must not rise in sustain: {level} > {last}");
         last = level;
     }
 }
@@ -74,7 +74,7 @@ fn higher_pitch_decays_in_fewer_samples() {
     let mut high = PartialBankVoice::new(84, 100, &def, 0.3, 48_000.0);
     let low_samples = samples_until_done(&mut low, 48_000.0);
     let high_samples = samples_until_done(&mut high, 48_000.0);
-    assert!(high_samples < low_samples, "high pitch ({high_samples}) should ring shorter than low ({low_samples})",);
+    assert!(high_samples < low_samples, "high pitch ({high_samples}) should ring shorter than low ({low_samples})");
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn upper_partial_energy_rises_with_velocity() {
         let total: f32 = amps.iter().map(|a| a.abs()).sum();
         upper / total
     };
-    assert!(upper_share(&hard) > upper_share(&soft), "harder strike must shift energy toward upper partials",);
+    assert!(upper_share(&hard) > upper_share(&soft), "harder strike must shift energy toward upper partials");
 }
 
 #[test]
@@ -143,7 +143,7 @@ fn pad_holds_level_through_sustain() {
         voice.next_sample(dt);
     }
     let after = voice.envelope_level();
-    assert!((after - level).abs() < 1.0e-3, "pad must sustain its level while held: {level} -> {after}",);
+    assert!((after - level).abs() < 1.0e-3, "pad must sustain its level while held: {level} -> {after}");
 }
 
 /// A sustain-holding ADSR (instant attack, no decay, full
@@ -167,8 +167,8 @@ fn zero_crossings(samples: &[f32]) -> usize {
 #[test]
 fn noise_is_bounded_and_nonzero() {
     let samples = collect_osc(Wave::Noise { lowpass: 1.0, tone_mix: 0.0 }, 1.0, voice_seed(MailboxId(1), 9, 60), 4_000);
-    assert!(samples.iter().all(|s| s.abs() <= 1.0 + f32::EPSILON), "noise sample escaped [-1, 1]",);
-    assert!(samples.iter().any(|s| s.abs() > 0.0), "noise produced silence",);
+    assert!(samples.iter().all(|s| s.abs() <= 1.0 + f32::EPSILON), "noise sample escaped [-1, 1]");
+    assert!(samples.iter().any(|s| s.abs() > 0.0), "noise produced silence");
 }
 
 #[test]
@@ -192,7 +192,7 @@ fn lowpass_reduces_sample_to_sample_delta() {
         let count = (s.len() - 1) as f32;
         sum / count
     };
-    assert!(mean_delta(&filtered) < mean_delta(&unfiltered), "lowpassed noise should be smoother sample-to-sample",);
+    assert!(mean_delta(&filtered) < mean_delta(&unfiltered), "lowpassed noise should be smoother sample-to-sample");
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn pitch_sweep_zero_crossing_rate_falls_toward_base() {
     let samples: Vec<f32> = (0..19_200).map(|_| voice.next_sample(dt)).collect();
     let onset = zero_crossings(&samples[0..2_400]);
     let settled = zero_crossings(&samples[16_800..19_200]);
-    assert!(settled < onset, "swept pitch should slow toward the base frequency: onset {onset}, settled {settled}",);
+    assert!(settled < onset, "swept pitch should slow toward the base frequency: onset {onset}, settled {settled}");
 }
 
 #[test]
@@ -243,7 +243,7 @@ fn reverb_send_zero_matches_pre_reverb_dry_mix_bit_for_bit() {
     sender
         .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch: 60, velocity: 100, instrument_id: 0, pan: 0 })
         .unwrap();
-    assert_eq!(synth.reverb_send(), 0.0, "reverb send must default to fully dry",);
+    assert_eq!(synth.reverb_send(), 0.0, "reverb send must default to fully dry");
 
     let mut buf = vec![0.0f32; 480];
     synth.fill(&mut buf, 1);
@@ -265,7 +265,7 @@ fn reverb_send_zero_matches_pre_reverb_dry_mix_bit_for_bit() {
             dry.tanh()
         })
         .collect();
-    assert_eq!(buf, expected, "reverb_send == 0.0 must not alter the dry mix",);
+    assert_eq!(buf, expected, "reverb_send == 0.0 must not alter the dry mix");
 }
 
 #[test]
@@ -293,7 +293,7 @@ fn reverb_tail_persists_after_the_note_ends() {
     // already ended.
     let mut after = vec![0.0f32; 4_000];
     synth.fill(&mut after, 1);
-    assert!(after.iter().any(|s| s.abs() > 1.0e-6), "expected a reverb tail after the note's voice had already ended",);
+    assert!(after.iter().any(|s| s.abs() > 1.0e-6), "expected a reverb tail after the note's voice had already ended");
 }
 
 // ADR-0104 scheduled note events. These drive `fill` with known
@@ -388,7 +388,7 @@ fn scheduled_note_off_releases_after_its_note_on() {
     let tail_samples = (0.6 * TEST_RATE) as usize;
     let mut tail = vec![0.0f32; tail_samples];
     synth.fill(&mut tail, 1);
-    assert_eq!(synth.voice_count(), 0, "scheduled note-off never released the voice",);
+    assert_eq!(synth.voice_count(), 0, "scheduled note-off never released the voice");
 }
 
 #[test]
@@ -433,7 +433,7 @@ fn same_key_note_ons_stack_voices() {
     }
     let mut buf = vec![0.0f32; 128];
     synth.fill(&mut buf, 1);
-    assert_eq!(synth.voice_count(), 2, "two same-key note-ons must both sound as independent voices",);
+    assert_eq!(synth.voice_count(), 2, "two same-key note-ons must both sound as independent voices");
 }
 
 /// Tripwire: with two voices stacked on one key, `NoteOff` must
@@ -466,12 +466,12 @@ fn note_off_releases_oldest_unreleased_voice_on_shared_key() {
     // resident regardless of how long we run.
     let mut tail = vec![0.0f32; 12_000];
     synth.fill(&mut tail, 1);
-    assert_eq!(synth.voice_count(), 1, "note-off must release exactly the oldest voice, leaving its sibling sounding",);
-    assert!(synth.has_voice_with_pitch(60), "the un-released sibling must still be sounding",);
+    assert_eq!(synth.voice_count(), 1, "note-off must release exactly the oldest voice, leaving its sibling sounding");
+    assert!(synth.has_voice_with_pitch(60), "the un-released sibling must still be sounding");
 
     sender.push(AudioEvent::NoteOff { sender_mailbox: MailboxId(1), pitch: 60, instrument_id: 0 }).unwrap();
     synth.fill(&mut tail, 1);
-    assert_eq!(synth.voice_count(), 0, "second note-off must release the surviving voice",);
+    assert_eq!(synth.voice_count(), 0, "second note-off must release the surviving voice");
 }
 
 #[test]
@@ -581,7 +581,7 @@ fn set_sender_gain_scales_voice_contribution() {
     let unity = render_energy(None);
     let halved = render_energy(Some(0.5));
     let ratio = halved / unity;
-    assert!((ratio - 0.5).abs() < 0.05, "gain 0.5 should halve a sender's energy, got ratio {ratio}",);
+    assert!((ratio - 0.5).abs() < 0.05, "gain 0.5 should halve a sender's energy, got ratio {ratio}");
 }
 
 // Tripwire: a set_sender_gain arriving after a note is already sounding
@@ -683,8 +683,8 @@ fn voice_steal_evicts_quietest_note() {
     // The active pool stays exactly at the cap — the stolen voice
     // moved to the (separate) dying pool, not into `voices`.
     assert_eq!(synth.voice_count(), MAX_VOICES, "active pool must stay at the cap");
-    assert!(!synth.has_voice_with_pitch(QUIET_PITCH), "voice steal must evict the quietest note (pitch=5, velocity 1)",);
-    assert!(synth.has_voice_with_pitch(0), "the loud oldest voice (pitch=0) must survive a quietest steal",);
+    assert!(!synth.has_voice_with_pitch(QUIET_PITCH), "voice steal must evict the quietest note (pitch=5, velocity 1)");
+    assert!(synth.has_voice_with_pitch(0), "the loud oldest voice (pitch=0) must survive a quietest steal");
 }
 
 /// A stolen voice must fade out over `STEAL_RELEASE_SECS`, not drop to
@@ -703,7 +703,7 @@ fn steal_release_fades_rather_than_cutting() {
 
     voice.steal_release();
     // Still audible on the very next sample — not an instant cut.
-    assert!(voice.current_level() > 0.0, "stolen voice must not drop to zero in one sample",);
+    assert!(voice.current_level() > 0.0, "stolen voice must not drop to zero in one sample");
 
     // Within STEAL_RELEASE_SECS the fast release completes.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

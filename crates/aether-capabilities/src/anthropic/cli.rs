@@ -214,9 +214,9 @@ mod tests {
 
         let _ = fs::remove_file(&script);
 
-        assert!(err.starts_with(TIMEOUT_SENTINEL), "expected timeout sentinel, got {err:?}",);
+        assert!(err.starts_with(TIMEOUT_SENTINEL), "expected timeout sentinel, got {err:?}");
         // The deadline fired well under the child's 5s lifetime, which
         // also implies the kill returned (the child was reaped).
-        assert!(started.elapsed() < Duration::from_secs(2), "timeout took too long: {:?}", started.elapsed(),);
+        assert!(started.elapsed() < Duration::from_secs(2), "timeout took too long: {:?}", started.elapsed());
     }
 }

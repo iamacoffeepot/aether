@@ -63,7 +63,7 @@ const TEXTURE_YELLOW: [u8; 3] = [255, 255, 0];
 /// `panel`, matching what `LoadResult.name` reports.
 fn panel_address() -> String {
     use aether_actor::Addressable;
-    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE,)
+    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE)
 }
 
 /// A flat-colored quad draw item in the widget's own local coordinates.
@@ -161,7 +161,7 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8], config: &WidgetConfig) {
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { name, .. } => {
-            assert!(name.ends_with(":panel"), "the Widget root should register under :panel; got {name}",)
+            assert!(name.ends_with(":panel"), "the Widget root should register under :panel; got {name}");
         }
         LoadResult::Err { error } => panic!("load Widget root: {error}"),
     }
@@ -256,7 +256,7 @@ fn flat_panel_is_one_sender_with_chrome_under_children() {
         "child a's rect should read red (its fill over the blue background), got {:?}",
         rgb_at(&img, 18, 18),
     );
-    assert!(dominant(rgb_at(&img, 42, 26), 1), "child b's rect should read green, got {:?}", rgb_at(&img, 42, 26),);
+    assert!(dominant(rgb_at(&img, 42, 26), 1), "child b's rect should read green, got {:?}", rgb_at(&img, 42, 26));
     // A background-only pixel (inside the chrome rect, outside both
     // children) reads blue — the chrome is visible where nothing overdraws.
     assert!(
@@ -345,7 +345,7 @@ fn nested_tree_draws_in_depth_first_order() {
 
     // Depth-first order, read by hue: root chrome (blue) under the interior
     // node's chrome (green) under the interior's leaf (white).
-    assert!(dominant(rgb_at(&img, 16, 18), 0), "leaf a reads red, got {:?}", rgb_at(&img, 16, 18),);
+    assert!(dominant(rgb_at(&img, 16, 18), 0), "leaf a reads red, got {:?}", rgb_at(&img, 16, 18));
     // Inside b's green chrome but outside its white leaf: green wins,
     // proving b's chrome drew over the root's blue background.
     assert!(
@@ -650,12 +650,12 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
     let tolerance = 20;
     let intended_region = Rect { min_x: 29, min_y: 13, max_x: 33, max_y: 17 };
     let intended = target_color_stats(&img, TEXTURE_RED, tolerance, Some(intended_region));
-    assert!(intended.fraction > 0.8, "the child's red UV crop should own its intended region: {intended:?}",);
+    assert!(intended.fraction > 0.8, "the child's red UV crop should own its intended region: {intended:?}");
     let wrong_color = target_color_stats(&img, TEXTURE_GREEN, tolerance, Some(intended_region));
-    assert!(wrong_color.fraction < 0.1, "the red crop must not silently sample the green quadrant: {wrong_color:?}",);
+    assert!(wrong_color.fraction < 0.1, "the red crop must not silently sample the green quadrant: {wrong_color:?}");
     let clipped_out =
         target_color_stats(&img, TEXTURE_RED, tolerance, Some(Rect { min_x: 24, min_y: 12, max_x: 25, max_y: 17 }));
-    assert!(clipped_out.fraction < 0.1, "the textured child must not escape its slot clip: {clipped_out:?}",);
+    assert!(clipped_out.fraction < 0.1, "the textured child must not escape its slot clip: {clipped_out:?}");
     let overlap_blue =
         target_color_stats(&img, TEXTURE_BLUE, tolerance, Some(Rect { min_x: 38, min_y: 18, max_x: 42, max_y: 20 }));
     assert!(
@@ -664,7 +664,7 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
     );
     let final_region = Rect { min_x: 46, min_y: 24, max_x: 49, max_y: 27 };
     let final_yellow = target_color_stats(&img, TEXTURE_YELLOW, tolerance, Some(final_region));
-    assert!(final_yellow.fraction > 0.8, "the final solid should overdraw the blue textured item: {final_yellow:?}",);
+    assert!(final_yellow.fraction > 0.8, "the final solid should overdraw the blue textured item: {final_yellow:?}");
     let covered_blue = target_color_stats(&img, TEXTURE_BLUE, tolerance, Some(final_region));
-    assert!(covered_blue.fraction < 0.1, "the blue crop should be hidden beneath the final solid: {covered_blue:?}",);
+    assert!(covered_blue.fraction < 0.1, "the blue crop should be hidden beneath the final solid: {covered_blue:?}");
 }

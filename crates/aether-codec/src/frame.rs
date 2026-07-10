@@ -288,7 +288,7 @@ mod tests {
         let mut sink: Vec<u8> = Vec::new();
         let err = write_frame(&mut sink, &msg).expect_err("oversize write must reject");
         assert!(matches!(err, FrameError::EncodeTooLarge { .. }));
-        assert!(sink.is_empty(), "oversize encode must not write partial bytes; got {} bytes", sink.len(),);
+        assert!(sink.is_empty(), "oversize encode must not write partial bytes; got {} bytes", sink.len());
     }
 
     /// The `AETHER_MAX_FRAME_SIZE` env-var override goes through

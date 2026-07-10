@@ -1295,19 +1295,19 @@ mod tests {
         );
 
         // Cell (2,3): inherit points resolve the cell's own paint.
-        assert_eq!(world.underlay_point(cell(2, 3), 0, 0), Material::Stone, "inherit resolves the cell paint",);
+        assert_eq!(world.underlay_point(cell(2, 3), 0, 0), Material::Stone, "inherit resolves the cell paint");
         assert_eq!(world.underlay_point(cell(2, 3), 3, 3), Material::Stone);
         // Cell (4,5): inherit points resolve the region default; explicit
         // points pin, and an explicit Void reads Void even in a painted cell.
-        assert_eq!(world.underlay_point(cell(4, 5), 2, 2), Material::Grass, "inherit resolves the region default",);
-        assert_eq!(world.underlay_point(cell(4, 5), 0, 0), Material::Sand, "an explicit point overrides the cascade",);
+        assert_eq!(world.underlay_point(cell(4, 5), 2, 2), Material::Grass, "inherit resolves the region default");
+        assert_eq!(world.underlay_point(cell(4, 5), 0, 0), Material::Sand, "an explicit point overrides the cascade");
         assert_eq!(
             world.underlay_point(cell(4, 5), 1, 0),
             Material::Void,
             "an explicit Void point reads Void in a painted cell",
         );
         // Cell (6,7): no cascade source, so an inherit point reads Void.
-        assert_eq!(world.underlay_point(cell(6, 7), 0, 0), Material::Void, "no cascade source",);
+        assert_eq!(world.underlay_point(cell(6, 7), 0, 0), Material::Void, "no cascade source");
     }
 
     #[test]
@@ -1545,9 +1545,9 @@ mod tests {
             Some(SmoothingProfile { iterations: 4, degrees: 45 }),
             "registration clamps to the apron-safe range",
         );
-        assert_eq!(world.smoothing_override(cell(1, 0)), None, "an unregistered id is no override",);
-        assert_eq!(world.smoothing_override(cell(2, 0)), None, "plane 0 is no override",);
-        assert_eq!(world.smoothing_override(cell(100, 100)), None, "a missing chunk is no override",);
+        assert_eq!(world.smoothing_override(cell(1, 0)), None, "an unregistered id is no override");
+        assert_eq!(world.smoothing_override(cell(2, 0)), None, "plane 0 is no override");
+        assert_eq!(world.smoothing_override(cell(100, 100)), None, "a missing chunk is no override");
     }
 
     #[test]
@@ -1803,7 +1803,7 @@ mod tests {
         });
         let level_m = 128.0 / 256.0;
         for corner in world.cell_corner_heights(cell(5, 5)) {
-            assert!((corner - level_m).abs() < 1e-6, "water corner {corner} not flat at {level_m}",);
+            assert!((corner - level_m).abs() < 1e-6, "water corner {corner} not flat at {level_m}");
         }
         // And it is the stood-on surface, while height stays the raw lakebed.
         assert!((world.surface_height(5.5, 5.5) - level_m).abs() < 1e-6);
@@ -1875,10 +1875,10 @@ mod tests {
         world.set_cell_heights(cell(3, 3), &[40, -25]);
         assert_eq!(world.point_height(cell(3, 3), 0, 0), 140, "+delta lifts");
         assert_eq!(world.point_height(cell(3, 3), 1, 0), 75, "-delta drops");
-        assert_eq!(world.point_height(cell(3, 3), 2, 0), 100, "the untouched tail inherits the cell height",);
+        assert_eq!(world.point_height(cell(3, 3), 2, 0), 100, "the untouched tail inherits the cell height");
         // A short stamp leaves the tail inheriting; an empty stamp clears all.
         world.set_cell_heights(cell(3, 3), &[]);
-        assert_eq!(world.point_height(cell(3, 3), 0, 0), 100, "an empty stamp clears the cell to inherit",);
+        assert_eq!(world.point_height(cell(3, 3), 0, 0), 100, "an empty stamp clears the cell to inherit");
 
         // Extremes saturate rather than wrap: a max-magnitude delta on a
         // near-i32-max cell height clamps at the bound, not overflow-wraps.
@@ -1887,7 +1887,7 @@ mod tests {
         let mut ex_world = World::new();
         ex_world.insert_chunk(ChunkPos { x: 0, z: 0 }, extreme);
         ex_world.set_cell_heights(cell(0, 0), &[i16::MAX]);
-        assert_eq!(ex_world.point_height(cell(0, 0), 0, 0), i32::MAX, "a lift past the range saturates at i32::MAX",);
+        assert_eq!(ex_world.point_height(cell(0, 0), 0, 0), i32::MAX, "a lift past the range saturates at i32::MAX");
     }
 
     #[test]
@@ -1929,7 +1929,7 @@ mod tests {
             chunk.height_points.iter().all(|point| *point == HEIGHT_POINT_INHERIT),
             "a pre-6 buffer reads an all-zero height-delta plane",
         );
-        assert_eq!(world.point_height(cell(0, 0), 2, 1), 128, "a zero-relief point resolves the cell's own height",);
+        assert_eq!(world.point_height(cell(0, 0), 2, 1), 128, "a zero-relief point resolves the cell's own height");
     }
 
     #[test]
@@ -1960,9 +1960,9 @@ mod tests {
         let world = World::from_bytes(&buf).expect("a v6 buffer still decodes");
         let chunk = world.chunk(ChunkPos { x: 0, z: 0 }).expect("chunk");
         assert_eq!(chunk.overlay_mask[0], 255);
-        assert_eq!(chunk.overlay_mask[3], 255, "legacy bit 0 expands across its SUB=16 block",);
+        assert_eq!(chunk.overlay_mask[3], 255, "legacy bit 0 expands across its SUB=16 block");
         assert_eq!(chunk.overlay_mask[4], 0);
-        assert_eq!(chunk.overlay_mask[8], 255, "legacy bit 2 expands across its SUB=16 block",);
+        assert_eq!(chunk.overlay_mask[8], 255, "legacy bit 2 expands across its SUB=16 block");
     }
 
     #[test]
@@ -2031,7 +2031,7 @@ mod tests {
         for i in 1..48 {
             let wx = 5.02 + i as f32 * 0.02;
             let h = world.surface_height(wx, 5.5);
-            assert!((h - prev).abs() < 0.05, "a continuous ramp jumped {} at x {wx}", (h - prev).abs(),);
+            assert!((h - prev).abs() < 0.05, "a continuous ramp jumped {} at x {wx}", (h - prev).abs());
             prev = h;
         }
     }
@@ -2054,10 +2054,10 @@ mod tests {
         // Center of the raised block (subcell (1,1)..(2,2)) stands at 200/256.
         let sub_f = sub as f32;
         let inside = world.surface_height(5.0 + 1.5 / sub_f, 5.0 + 1.5 / sub_f);
-        assert!((inside - 200.0 / 256.0).abs() < 1e-4, "the plateau interior stands at the raised level, got {inside}",);
+        assert!((inside - 200.0 / 256.0).abs() < 1e-4, "the plateau interior stands at the raised level, got {inside}");
         // A flat corner subcell stays at the base — the plate did not blend
         // the raise outward across the break.
         let outside = world.surface_height(5.0 + 0.5 / sub_f, 5.0 + 0.5 / sub_f);
-        assert!(outside.abs() < 1e-4, "a flat subcell outside the plateau stays at the base, got {outside}",);
+        assert!(outside.abs() < 1e-4, "a flat subcell outside the plateau stays at the base, got {outside}");
     }
 }

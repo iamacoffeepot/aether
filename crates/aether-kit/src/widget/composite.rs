@@ -120,7 +120,7 @@ impl Composite {
         for delta in self.pending_membership.drain(..) {
             match delta {
                 MembershipDelta::Added { subname, type_namespace } => {
-                    added.push(MembershipEntry { subname, type_namespace })
+                    added.push(MembershipEntry { subname, type_namespace });
                 }
                 MembershipDelta::Removed { subname } => removed.push(subname),
             }
@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn a_leaf_with_no_slots_is_immediately_complete() {
         let composite = Composite::new();
-        assert!(composite.is_complete(), "a node with no registered slots completes vacuously — the childless case",);
+        assert!(composite.is_complete(), "a node with no registered slots completes vacuously — the childless case");
     }
 
     #[test]
@@ -240,7 +240,7 @@ mod tests {
         assert!(composite.fill(a, list(vec![quad(0.0, 0.1)])));
         assert!(!composite.is_complete(), "one of two slots filled");
         assert!(composite.fill(b, list(vec![quad(0.0, 0.2)])));
-        assert!(composite.is_complete(), "both slots filled closes the counter",);
+        assert!(composite.is_complete(), "both slots filled closes the counter");
     }
 
     #[test]
@@ -252,7 +252,7 @@ mod tests {
             !composite.fill(MailboxId(99), list(vec![quad(0.0, 0.5)])),
             "a stray reply from a non-slot child does not land",
         );
-        assert!(!composite.is_complete(), "and does not close the real slot's counter",);
+        assert!(!composite.is_complete(), "and does not close the real slot's counter");
     }
 
     #[test]
@@ -264,7 +264,7 @@ mod tests {
         composite.fill(a, list(vec![quad(0.0, 0.1)]));
         assert!(composite.is_complete());
         composite.begin_frame();
-        assert!(!composite.is_complete(), "a new frame re-opens the slot so its reply must arrive again",);
+        assert!(!composite.is_complete(), "a new frame re-opens the slot so its reply must arrive again");
     }
 
     #[test]
@@ -278,7 +278,7 @@ mod tests {
         composite.fill(a, list(vec![quad(0.0, 0.1)]));
         assert!(!composite.is_complete(), "b still owed");
         assert!(composite.forget_slot(b), "b removed");
-        assert!(composite.is_complete(), "with b despawned the counter closes on a alone",);
+        assert!(composite.is_complete(), "with b despawned the counter closes on a alone");
     }
 
     #[test]
@@ -458,9 +458,9 @@ mod tests {
     #[test]
     fn take_membership_changes_clears_the_buffer_and_is_none_when_quiet() {
         let mut composite = Composite::new();
-        assert!(composite.take_membership_changes().is_none(), "nothing has changed yet, so there is no event",);
+        assert!(composite.take_membership_changes().is_none(), "nothing has changed yet, so there is no event");
         composite.register_slot(MailboxId(1), Vec2::ZERO, None, "alpha", "aether.kit.widget");
-        assert!(composite.take_membership_changes().is_some(), "the buffered add drains as an event",);
+        assert!(composite.take_membership_changes().is_some(), "the buffered add drains as an event");
         assert!(
             composite.take_membership_changes().is_none(),
             "the drain cleared the buffer, so a second drain finds nothing",

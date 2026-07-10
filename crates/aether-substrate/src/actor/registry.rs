@@ -600,7 +600,7 @@ mod tests {
         r.register_monitor(a, b).unwrap();
         assert_eq!(r.monitor_count(b), 1);
         let _ = r.close_actor(a);
-        assert_eq!(r.monitor_count(b), 0, "dead watcher should be pruned from b's monitors_of",);
+        assert_eq!(r.monitor_count(b), 0, "dead watcher should be pruned from b's monitors_of");
     }
 
     #[test]
@@ -665,7 +665,7 @@ mod tests {
             t_reg.join().expect("register thread joins");
             t_close.join().expect("close thread joins");
 
-            assert!(r.is_tombstoned(target), "close_actor always tombstones the target",);
+            assert!(r.is_tombstoned(target), "close_actor always tombstones the target");
             assert_eq!(
                 r.monitor_count(target),
                 0,

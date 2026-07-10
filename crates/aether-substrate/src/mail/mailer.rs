@@ -841,7 +841,7 @@ mod tests {
         assert_eq!(*correlation, 0xCAFE, "correlation echoed onto the reply");
         match LogTailResult::decode_from_bytes(payload).unwrap() {
             LogTailResult::Err { error } => {
-                assert!(error.contains(&unknown.to_string()), "error names the recipient id: {error}",)
+                assert!(error.contains(&unknown.to_string()), "error names the recipient id: {error}");
             }
             other @ LogTailResult::Ok { .. } => {
                 panic!("expected LogTailResult::Err, got {other:?}")
@@ -868,7 +868,7 @@ mod tests {
                 .with_reply_to(Source::with_correlation(SourceAddr::Component(recorder_id), 0xCAFE)),
         );
 
-        assert!(recorded.read().unwrap().is_empty(), "non-LogTail unknown-mailbox mail warn-drops with no reply",);
+        assert!(recorded.read().unwrap().is_empty(), "non-LogTail unknown-mailbox mail warn-drops with no reply");
     }
 
     /// ADR-0086 Phase 3b: `aether.trace.tail` to `CHASSIS_MAILBOX_ID`

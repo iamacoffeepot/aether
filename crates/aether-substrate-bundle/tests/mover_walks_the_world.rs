@@ -61,7 +61,7 @@ struct SceneCapture {
 }
 
 fn component_address(name: &str) -> String {
-    format!("aether.component/{}:{name}", aether_capabilities::WasmTrampoline::NAMESPACE,)
+    format!("aether.component/{}:{name}", aether_capabilities::WasmTrampoline::NAMESPACE)
 }
 
 fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
@@ -165,7 +165,7 @@ fn capture_scene(bench: &mut TestBench, mover: &str, world: &str, label: &'stati
 
 #[allow(clippy::cast_precision_loss)]
 fn assert_cliff_shape(label: &str, stats: ColorRegionStats, exclusion: ColorRegionStats) {
-    assert!(stats.sampled > 0 && stats.matching >= 32, "{label} should contain a sampled sand cliff; stats={stats:?}",);
+    assert!(stats.sampled > 0 && stats.matching >= 32, "{label} should contain a sampled sand cliff; stats={stats:?}");
     assert!(
         (0.005..0.20).contains(&stats.fraction),
         "{label} sand cliff should be bounded, neither absent nor a full-screen target; \

@@ -1729,7 +1729,7 @@ mod tests {
         // compares with zero scored cells (no regression-to-zero verdict).
         match report {
             SectionReport::ThroughputCompared { cells, .. } => {
-                assert!(cells.is_empty(), "a truncated cell must produce no scored comparison cell, got {cells:?}")
+                assert!(cells.is_empty(), "a truncated cell must produce no scored comparison cell, got {cells:?}");
             }
             other => panic!("expected a compared throughput section, got {other:?}"),
         }

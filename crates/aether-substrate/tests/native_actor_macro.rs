@@ -821,8 +821,8 @@ fn manual_handler_replies_through_ctx() {
     let reply = reply_rx
         .recv_timeout(Duration::from_secs(2))
         .expect("the manual handler replied to the inbound sender via ctx.reply");
-    assert_eq!(reply.kind, ManualAck::ID, "the reply carries the manual handler's ack kind",);
-    assert_eq!(reply.sender.correlation_id, 91, "the caller's correlation is echoed onto the manual reply",);
+    assert_eq!(reply.kind, ManualAck::ID, "the reply carries the manual handler's ack kind");
+    assert_eq!(reply.sender.correlation_id, 91, "the caller's correlation is echoed onto the manual reply");
     let ack = ManualAck::decode_from_bytes(reply.payload.bytes()).expect("the reply decodes");
     assert_eq!(ack, ManualAck { seq: 9 }, "the manual reply carries the ping seq");
 }

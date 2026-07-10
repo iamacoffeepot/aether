@@ -46,7 +46,7 @@ fn loaded_bank_registers_past_builtins_and_plays() {
         .unwrap();
     synth.fill(&mut buf, 1);
     assert_eq!(synth.voice_count(), 1, "loaded id did not sound a voice");
-    assert!(buf.iter().any(|s| s.abs() > 0.0), "sampled instrument produced silence",);
+    assert!(buf.iter().any(|s| s.abs() > 0.0), "sampled instrument produced silence");
 }
 
 #[test]
@@ -70,8 +70,8 @@ fn banks_register_in_load_order() {
     let mut buf = vec![0.0f32; 32];
     synth.fill(&mut buf, 1);
     assert_eq!(synth.bank_count(), 2);
-    assert!(synth.bank_for(first).unwrap().select(60, 100).is_some(), "id {first} should resolve the first bank",);
-    assert!(synth.bank_for(second).unwrap().select(72, 100).is_some(), "id {second} should resolve the second bank",);
+    assert!(synth.bank_for(first).unwrap().select(60, 100).is_some(), "id {first} should resolve the first bank");
+    assert!(synth.bank_for(second).unwrap().select(72, 100).is_some(), "id {second} should resolve the second bank");
 }
 
 #[test]
@@ -143,7 +143,7 @@ fn sample_voice_ends_when_sample_exhausts() {
         n += 1;
     }
     assert!(voice.done(), "sample voice never finished");
-    assert!((479..=481).contains(&n), "ended at {n} samples, expected ~480",);
+    assert!((479..=481).contains(&n), "ended at {n} samples, expected ~480");
 }
 
 #[test]
@@ -163,7 +163,7 @@ fn note_off_release_ends_sample_voice_before_sample_end() {
         n += 1;
     }
     assert!(voice.done(), "released sample voice never ended");
-    assert!(n < 10_000, "release ({n}) should end well before the sample exhausts",);
+    assert!(n < 10_000, "release ({n}) should end well before the sample exhausts");
 }
 
 #[test]
@@ -204,7 +204,7 @@ fn looped_sample_voice_ends_on_note_off_release() {
         n += 1;
     }
     assert!(voice.done(), "released looped voice never ended");
-    assert!(n < 10_000, "release ({n}) should retire the voice within the ramp",);
+    assert!(n < 10_000, "release ({n}) should retire the voice within the ramp");
 }
 
 #[test]
@@ -225,8 +225,8 @@ fn assemble_bank_scales_loop_points_by_resample_ratio() {
     let bank =
         assemble_bank("test".to_owned(), &[region], &[("a.wav".to_owned(), wav)], 48_000).expect("bank assembles");
     let lp = bank.regions[0].loop_region.expect("loop scaled through to the region");
-    assert!((lp.start - 200.0).abs() < 2.0, "loop_start should scale ~2x to 200, got {}", lp.start,);
-    assert!((lp.end - 800.0).abs() < 2.0, "loop_end should scale ~2x to 800, got {}", lp.end,);
+    assert!((lp.start - 200.0).abs() < 2.0, "loop_start should scale ~2x to 200, got {}", lp.start);
+    assert!((lp.end - 800.0).abs() < 2.0, "loop_end should scale ~2x to 800, got {}", lp.end);
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn assemble_bank_clamps_loop_end_to_resampled_length() {
     let lp = region.loop_region.expect("loop scaled through");
     #[allow(clippy::cast_precision_loss)]
     let len = region.pcm.len() as f32;
-    assert!(lp.end <= len, "loop_end {} must clamp to the resampled length {len}", lp.end,);
+    assert!(lp.end <= len, "loop_end {} must clamp to the resampled length {len}", lp.end);
 }
 
 #[test]
@@ -296,7 +296,7 @@ fn sample_voices_count_against_max_voices() {
             .unwrap();
     }
     synth.fill(&mut buf, 1);
-    assert_eq!(synth.voice_count(), MAX_VOICES, "sample voices must count against MAX_VOICES and steal",);
+    assert_eq!(synth.voice_count(), MAX_VOICES, "sample voices must count against MAX_VOICES and steal");
 }
 
 #[test]

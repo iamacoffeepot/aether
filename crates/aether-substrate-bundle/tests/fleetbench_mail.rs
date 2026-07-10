@@ -46,9 +46,9 @@ mod tests {
         let replies = bench.send(engine, &addr, &ConfigQuery);
         let reply = match replies.as_slice() {
             [one] => one,
-            other => panic!("ping-pong expected exactly one reply event, got {}", other.len(),),
+            other => panic!("ping-pong expected exactly one reply event, got {}", other.len()),
         };
-        assert_eq!(reply.kind, ConfigEcho::ID, "the component reply should be a ConfigEcho",);
+        assert_eq!(reply.kind, ConfigEcho::ID, "the component reply should be a ConfigEcho");
         let echo = ConfigEcho::decode_from_bytes(&reply.payload).expect("the reply payload decodes as ConfigEcho");
         assert_eq!(
             echo,
@@ -61,8 +61,8 @@ mod tests {
             .iter()
             .find(|record| record.request_kind == ConfigQuery::ID)
             .expect("the ConfigQuery round-trip is recorded as a CallRecord");
-        assert_eq!(query_record.engine, Some(engine), "the ConfigQuery is routed to the forked engine",);
-        assert_eq!(query_record.reply_kinds, vec![ConfigEcho::ID], "the ConfigQuery drew exactly one ConfigEcho reply",);
+        assert_eq!(query_record.engine, Some(engine), "the ConfigQuery is routed to the forked engine");
+        assert_eq!(query_record.reply_kinds, vec![ConfigEcho::ID], "the ConfigQuery drew exactly one ConfigEcho reply");
     }
 
     /// `send_mail` row: route an `fs::List` to the forked engine's
@@ -80,18 +80,18 @@ mod tests {
         let replies = bench.send(engine, "aether.fs", &List { namespace: "save".to_owned(), prefix: String::new() });
         let reply = match replies.as_slice() {
             [one] => one,
-            other => panic!("send_mail expected exactly one reply event, got {}", other.len(),),
+            other => panic!("send_mail expected exactly one reply event, got {}", other.len()),
         };
-        assert_eq!(reply.kind, ListResult::ID, "the fs reply should be a ListResult",);
-        assert_eq!(fs_reply_namespace(&reply.payload), "save", "the ListResult should echo the requested namespace",);
+        assert_eq!(reply.kind, ListResult::ID, "the fs reply should be a ListResult");
+        assert_eq!(fs_reply_namespace(&reply.payload), "save", "the ListResult should echo the requested namespace");
 
         let list_record = bench
             .calls()
             .iter()
             .find(|record| record.request_kind == List::ID)
             .expect("the fs List round-trip is recorded as a CallRecord");
-        assert_eq!(list_record.engine, Some(engine), "the List call is routed to the forked engine",);
-        assert_eq!(list_record.reply_kinds, vec![ListResult::ID], "the List call drew exactly one ListResult reply",);
+        assert_eq!(list_record.engine, Some(engine), "the List call is routed to the forked engine");
+        assert_eq!(list_record.reply_kinds, vec![ListResult::ID], "the List call drew exactly one ListResult reply");
     }
 
     /// `send_mail_traced` row: dispatch a one-entry traced batch
@@ -108,7 +108,7 @@ mod tests {
 
         let (root, replies) =
             bench.send_traced(engine, "aether.fs", &List { namespace: "save".to_owned(), prefix: String::new() });
-        assert_ne!(root, MailId::NONE, "the traced batch ack carries a non-sentinel chassis root",);
+        assert_ne!(root, MailId::NONE, "the traced batch ack carries a non-sentinel chassis root");
 
         let echoed = replies
             .iter()
@@ -125,7 +125,7 @@ mod tests {
             .iter()
             .find(|record| record.request_kind == DispatchTraced::ID)
             .expect("the traced dispatch is recorded as a CallRecord");
-        assert_eq!(traced_record.engine, Some(engine), "the traced batch is routed to the forked engine",);
+        assert_eq!(traced_record.engine, Some(engine), "the traced batch is routed to the forked engine");
         assert!(
             traced_record.reply_kinds.contains(&ListResult::ID),
             "the traced call's reply stream includes the ListResult",

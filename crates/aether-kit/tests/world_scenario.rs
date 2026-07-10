@@ -58,7 +58,7 @@ fn unsafe_extent_rejection(source: MarkRef, operator: &str) -> OperatorResult {
 }
 
 fn component_address() -> String {
-    format!("aether.component/{}:{COMPONENT_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE,)
+    format!("aether.component/{}:{COMPONENT_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE)
 }
 
 fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
@@ -494,9 +494,9 @@ fn rounded_cliff_renders_without_a_convex_corner_seam() {
     let background = background_top_left(&image);
 
     let cap = projected_pixel(matrix, Vec3::new(8.0, 1.0, 8.0));
-    assert!(pixel_differs(&image, background, cap.0, cap.1), "high-cap control sample must render",);
+    assert!(pixel_differs(&image, background, cap.0, cap.1), "high-cap control sample must render");
     let clear = projected_pixel(matrix, Vec3::new(3.0, 0.0, 3.0));
-    assert!(!pixel_differs(&image, background, clear.0, clear.1), "off-terrain control sample must remain clear",);
+    assert!(!pixel_differs(&image, background, clear.0, clear.1), "off-terrain control sample must remain clear");
 
     // The southeast convex corner was where independent cap/chamfer/sliver
     // passes left a clear pinhole. The new chord is within half a subcell of

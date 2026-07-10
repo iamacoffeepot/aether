@@ -216,10 +216,10 @@ impl Drop for ArtifactGuard {
 fn report_persist<W: io::Write + ?Sized>(writer: &mut W, id: &str, result: &Result<PathBuf, ArtifactWriteError>) {
     match result {
         Ok(dir) => {
-            let _ = writeln!(writer, "test-bench artifact guard '{id}': wrote failure artifacts to {}", dir.display(),);
+            let _ = writeln!(writer, "test-bench artifact guard '{id}': wrote failure artifacts to {}", dir.display());
         }
         Err(error) => {
-            let _ = writeln!(writer, "test-bench artifact guard '{id}': failed to write failure artifacts: {error}",);
+            let _ = writeln!(writer, "test-bench artifact guard '{id}': failed to write failure artifacts: {error}");
         }
     }
 }
@@ -334,7 +334,7 @@ mod tests {
             let _guard = ArtifactGuard::arm_with_root("passing", tiny_png(), checks, results, root.clone());
             // Guard drops here without panicking.
         }
-        assert!(!root.exists(), "a guard dropped without panicking must not create its artifact root at all",);
+        assert!(!root.exists(), "a guard dropped without panicking must not create its artifact root at all");
     }
 
     #[test]
@@ -350,10 +350,10 @@ mod tests {
 
         let dir = root.join("failing");
         assert!(dir.join("actual.png").is_file(), "actual.png must exist");
-        assert!(dir.join("measurements.json").is_file(), "measurements.json must exist",);
-        assert!(dir.join("mask_0.png").is_file(), "mask_0.png must exist for the single armed check",);
-        assert!(!dir.join("reference.png").exists(), "no reference.png without an attached reference",);
-        assert!(!dir.join("difference.png").exists(), "no difference.png without an attached reference",);
+        assert!(dir.join("measurements.json").is_file(), "measurements.json must exist");
+        assert!(dir.join("mask_0.png").is_file(), "mask_0.png must exist for the single armed check");
+        assert!(!dir.join("reference.png").exists(), "no reference.png without an attached reference");
+        assert!(!dir.join("difference.png").exists(), "no difference.png without an attached reference");
 
         let entries: BTreeSet<String> = fs::read_dir(&dir)
             .expect("read artifact dir")
@@ -409,8 +409,8 @@ mod tests {
         guard.persist();
 
         let dir = root.join("mismatched");
-        assert!(dir.join("actual.png").is_file(), "the actual/mask/measurements set still persists",);
-        assert!(!dir.join("reference.png").exists(), "a dimension-mismatched reference must not be written",);
+        assert!(dir.join("actual.png").is_file(), "the actual/mask/measurements set still persists");
+        assert!(!dir.join("reference.png").exists(), "a dimension-mismatched reference must not be written");
         assert!(!dir.join("difference.png").exists());
 
         let _ = fs::remove_dir_all(&root);
@@ -457,7 +457,7 @@ mod tests {
         fs::write(dir.join("actual.png"), b"mutated").expect("mutate actual.png");
         guard.persist();
         let contents = fs::read(dir.join("actual.png")).expect("read actual.png");
-        assert_eq!(contents, b"mutated", "a second persist() call must be a no-op and not overwrite the mutated file",);
+        assert_eq!(contents, b"mutated", "a second persist() call must be a no-op and not overwrite the mutated file");
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -477,7 +477,7 @@ mod tests {
                 matches!(components.next(), Some(Component::Normal(_))),
                 "sanitized id {sanitized:?} must be one normal path component",
             );
-            assert!(components.next().is_none(), "sanitized id {sanitized:?} must not contain a second path component",);
+            assert!(components.next().is_none(), "sanitized id {sanitized:?} must not contain a second path component");
         }
     }
 
@@ -511,7 +511,7 @@ mod tests {
                 let mut guard = ArtifactGuard::arm_with_root(label, tiny_png(), checks, results, root_for_guard);
                 guard.persist();
             }));
-            assert!(outcome.is_ok(), "a {label} mismatch must not panic: {outcome:?}",);
+            assert!(outcome.is_ok(), "a {label} mismatch must not panic: {outcome:?}");
 
             let dir = root.join(label);
             let measurements: serde_json::Value =
@@ -535,7 +535,7 @@ mod tests {
             let failure = Err(ArtifactWriteError::Io(io::Error::other("simulated artifact failure")));
             report_persist(&mut writer, "failure", &failure);
         });
-        assert!(outcome.is_ok(), "a reporter write error must not panic: {outcome:?}",);
+        assert!(outcome.is_ok(), "a reporter write error must not panic: {outcome:?}");
     }
 
     #[test]
@@ -557,7 +557,7 @@ mod tests {
             let mut guard = ArtifactGuard::arm_with_root("id", tiny_png(), checks, results, blocking_file.clone());
             guard.persist();
         }));
-        assert!(outcome.is_ok(), "a write failure inside persist() must not panic: {outcome:?}",);
+        assert!(outcome.is_ok(), "a write failure inside persist() must not panic: {outcome:?}");
 
         let _ = fs::remove_dir_all(&base);
     }

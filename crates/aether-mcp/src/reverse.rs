@@ -237,7 +237,7 @@ mod tests {
         for n in 0..=3 {
             let name = format!("aether-test-worker-{n}");
             let id = thread_id_from_name(&name);
-            assert_eq!(names.render(id.0), name, "bounded template instance {name} should reverse",);
+            assert_eq!(names.render(id.0), name, "bounded template instance {name} should reverse");
         }
     }
 
@@ -273,7 +273,7 @@ mod tests {
         assert_eq!(names.render(id.0), tag);
 
         names.cache_resolved(id.0, Some("aether-instanced-player:42".to_string()));
-        assert!(!names.needs_resolve(id.0), "a resolved id no longer needs a query",);
+        assert!(!names.needs_resolve(id.0), "a resolved id no longer needs a query");
         assert_eq!(names.render(id.0), "aether-instanced-player:42");
     }
 
@@ -282,7 +282,7 @@ mod tests {
         let mut names = EngineNames::from_manifest(&synthetic_manifest());
         let id = thread_id_from_name("aether-instanced-gone:1");
         names.cache_resolved(id.0, None);
-        assert!(!names.needs_resolve(id.0), "a confirmed miss is cached, not re-queried",);
+        assert!(!names.needs_resolve(id.0), "a confirmed miss is cached, not re-queried");
         // Still renders the hex tag — the miss didn't manufacture a name.
         let tag = tagged_id::encode(id.0).expect("thread id is taggable");
         assert_eq!(names.render(id.0), tag);
@@ -294,6 +294,6 @@ mod tests {
         let names = EngineNames::from_manifest(&empty);
         let id = mailbox_id_from_name("aether.audio");
         let tag = tagged_id::encode(id.0).expect("mailbox id is taggable");
-        assert_eq!(names.render(id.0), tag, "with no manifest folded, every id renders the hex tag",);
+        assert_eq!(names.render(id.0), tag, "with no manifest folded, every id renders the hex tag");
     }
 }

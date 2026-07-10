@@ -852,10 +852,10 @@ mod tests {
         for cid in 0..total {
             reg.fire_settled(root(7, cid as u64));
         }
-        assert!(reg.settled_count() <= cap, "settled window exceeded its bound: {} > {cap}", reg.settled_count(),);
+        assert!(reg.settled_count() <= cap, "settled window exceeded its bound: {} > {cap}", reg.settled_count());
         // The most recently settled root is inside every cell's window,
         // so a late subscriber still pre-fires.
         let rx = reg.subscribe_settlement(root(7, (total - 1) as u64));
-        assert!(rx.try_recv().is_ok(), "recent root should pre-fire a late subscriber",);
+        assert!(rx.try_recv().is_ok(), "recent root should pre-fire a late subscriber");
     }
 }

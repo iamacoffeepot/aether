@@ -301,7 +301,7 @@ mod tests {
     fn press_inside_then_release_outside_cancels() {
         let mut b = button();
         b.press_at(20.0, 20.0);
-        assert!(!b.release_at(200.0, 200.0), "a release that drifts off the button does not click",);
+        assert!(!b.release_at(200.0, 200.0), "a release that drifts off the button does not click");
         assert!(!b.pointer_pressed, "disarmed even on a cancel");
     }
 

@@ -69,7 +69,7 @@ fn require_wgpu_only() -> bool {
         return true;
     }
     let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-    assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available",);
+    assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available");
     eprintln!("skipping: no wgpu adapter available");
     false
 }
@@ -86,9 +86,9 @@ fn cap_registry_reports_accepted_kinds() {
     let mbox = load_named(&mut bench, &wasm_path, "probe");
     let caps = bench.capability_registry();
 
-    assert!(caps.accepts(mbox, Tick::ID), "probe should accept its declared Tick handler",);
-    assert!(caps.accepts(mbox, SetRender::ID), "probe should accept its declared SetRender handler",);
-    assert!(!caps.accepts(mbox, Ping::ID), "probe has no Ping handler and no fallback — must reject Ping",);
+    assert!(caps.accepts(mbox, Tick::ID), "probe should accept its declared Tick handler");
+    assert!(caps.accepts(mbox, SetRender::ID), "probe should accept its declared SetRender handler");
+    assert!(!caps.accepts(mbox, Ping::ID), "probe has no Ping handler and no fallback — must reject Ping");
 }
 
 /// The probe is a strict receiver — no `#[fallback]`. Its trampoline
@@ -104,7 +104,7 @@ fn cap_registry_reports_fallback() {
     let mbox = load_named(&mut bench, &wasm_path, "strict");
     let caps = bench.capability_registry();
 
-    assert!(!caps.has_fallback(mbox), "probe is a strict receiver; has_fallback must be false",);
+    assert!(!caps.has_fallback(mbox), "probe is a strict receiver; has_fallback must be false");
     // No fallback ⇒ unknown kinds are rejected, not swallowed.
     assert!(!caps.accepts(mbox, Ping::ID));
 }
@@ -181,7 +181,7 @@ fn cap_registry_clears_on_drop() {
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let mbox = load_named(&mut bench, &wasm_path, "victim");
-    assert!(bench.capability_registry().accepts(mbox, Tick::ID), "sanity: loaded probe accepts Tick before drop",);
+    assert!(bench.capability_registry().accepts(mbox, Tick::ID), "sanity: loaded probe accepts Tick before drop");
 
     let dropped = bench
         .execute(vec![(
@@ -195,7 +195,7 @@ fn cap_registry_clears_on_drop() {
     }
 
     let caps = bench.capability_registry();
-    assert!(!caps.accepts(mbox, Tick::ID), "dropped component's mailbox must accept nothing",);
+    assert!(!caps.accepts(mbox, Tick::ID), "dropped component's mailbox must accept nothing");
     assert!(!caps.has_fallback(mbox));
 }
 
@@ -212,7 +212,7 @@ fn cap_registry_covers_native_cap() {
 
     let fs_mbox = mailbox_id_from_name(FsCapability::NAMESPACE);
     let caps = bench.capability_registry();
-    assert!(caps.accepts(fs_mbox, Write::ID), "the native aether.fs cap should accept its declared Write handler",);
+    assert!(caps.accepts(fs_mbox, Write::ID), "the native aether.fs cap should accept its declared Write handler");
     // A native cap with no `#[fallback]` rejects undeclared kinds.
     assert!(
         !caps.accepts(fs_mbox, KindId(0xDEAD_BEEF)),

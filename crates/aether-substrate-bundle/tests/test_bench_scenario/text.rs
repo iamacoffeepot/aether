@@ -184,8 +184,8 @@ fn text_draw_clip_bounds_glyph_pixels() {
         bg,
         tolerance,
     );
-    assert!(inside > 0.05, "clipped text should still light pixels inside the clip; coverage={inside}",);
-    assert_eq!(outside, 0.0, "glyph pixels outside the text clip should remain background",);
+    assert!(inside > 0.05, "clipped text should still light pixels inside the clip; coverage={inside}");
+    assert_eq!(outside, 0.0, "glyph pixels outside the text clip should remain background");
 }
 
 /// ADR-0105 font-metrics grab end to end (issue 1854): grab a real
@@ -241,7 +241,7 @@ fn font_metrics_grab_measures_like_the_draw_path() {
     }
 
     assert!(local > 0.0, "a non-empty run has positive extent");
-    assert_eq!(local, draw_pen, "local measure must equal the draw-path advance sum exactly",);
+    assert_eq!(local, draw_pen, "local measure must equal the draw-path advance sum exactly");
 }
 
 /// ADR-0105 screen-space text origin (issue 1773): drawing `Screen` text

@@ -47,7 +47,7 @@ const CHUNK_EDGE: usize = 16;
 /// The full trampoline address a loaded component registers at (ADR-0099 §4):
 /// the component host `/`-joined to the trampoline node under `name`.
 fn component_address(name: &str) -> String {
-    format!("aether.component/{}:{name}", aether_capabilities::WasmTrampoline::NAMESPACE,)
+    format!("aether.component/{}:{name}", aether_capabilities::WasmTrampoline::NAMESPACE)
 }
 
 /// A `NamedMail` carrying `mail`'s wire encoding to `recipient` — the capture
@@ -81,7 +81,7 @@ fn load_kit_export(bench: &mut TestBench, wasm: &[u8], export: &str, name: &str,
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { name: addr, .. } => {
-            assert!(addr.ends_with(&format!(":{name}")), "export {export} should register under :{name}; got {addr}",)
+            assert!(addr.ends_with(&format!(":{name}")), "export {export} should register under :{name}; got {addr}");
         }
         LoadResult::Err { error } => panic!("load {export}: {error}"),
     }

@@ -43,11 +43,11 @@ use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::requ
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
 fn panel_address() -> String {
-    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE,)
+    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE)
 }
 
 fn child_address(subname: &str) -> String {
-    format!("{}/{}:{}", panel_address(), aether_capabilities::WasmTrampoline::NAMESPACE, subname,)
+    format!("{}/{}:{}", panel_address(), aether_capabilities::WasmTrampoline::NAMESPACE, subname)
 }
 
 /// Load the `WidgetPanel` root under the name `panel` (export
@@ -80,7 +80,7 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8]) -> String {
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { name, .. } => {
-            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}",);
+            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}");
             name
         }
         LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
@@ -195,7 +195,7 @@ fn load_result_lineage_reaches_builtin_button_state_externally() {
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut bench = TestBench::start_with_size(240, 220).expect("boot");
     let panel = load_panel(&mut bench, &wasm);
-    let button = format!("{panel}/{}:button", aether_capabilities::WasmTrampoline::NAMESPACE,);
+    let button = format!("{panel}/{}:button", aether_capabilities::WasmTrampoline::NAMESPACE);
     let unavailable = WidgetControlState { enabled: false, ..WidgetControlState::default() };
 
     bench
@@ -221,7 +221,7 @@ fn load_result_lineage_reaches_builtin_button_state_externally() {
         .iter()
         .filter(|entry| entry.message.contains("widget button clicked") && entry.message.contains("widget=button"))
         .count();
-    assert_eq!(clicks, 1, "lineage-addressed disable blocks the first click and re-enable permits the second",);
+    assert_eq!(clicks, 1, "lineage-addressed disable blocks the first click and re-enable permits the second");
 }
 
 /// A slider child spec for the declarative-children scenario: full `0..=255`
@@ -307,7 +307,7 @@ fn load_panel_with(bench: &mut TestBench, wasm: &[u8], children: Vec<WidgetChild
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { name, .. } => {
-            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}",)
+            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}");
         }
         LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
     }
@@ -456,7 +456,7 @@ fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
         .iter()
         .filter(|message| message.contains("widget button clicked") && message.contains("widget=run"))
         .count();
-    assert_eq!(clicks, 2, "Space release and the first Enter press click exactly once each; log was:\n{joined}",);
+    assert_eq!(clicks, 2, "Space release and the first Enter press click exactly once each; log was:\n{joined}");
 }
 
 /// Read-only must block both of Radio's value-changing paths. Re-enabling the
@@ -584,7 +584,7 @@ fn live_state_changes_cancel_button_arm_and_slider_drag() {
         4,
         "the cancelled drag emits only its initial press; the live drag emits press/move/release; log was:\n{joined}",
     );
-    assert_eq!(committed, 1, "only the enabled positive-control drag may commit; log was:\n{joined}",);
+    assert_eq!(committed, 1, "only the enabled positive-control drag may commit; log was:\n{joined}");
 }
 
 /// A read-only text field remains focusable but cannot commit. Enabling the

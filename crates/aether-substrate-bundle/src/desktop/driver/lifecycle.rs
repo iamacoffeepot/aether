@@ -177,12 +177,12 @@ mod tests {
 
         let slots = ActorSlots::new();
         let matched = with_stamped(&slots, || try_framework_dispatch(&mailer, window_mailbox, &mail));
-        assert!(matched, "framework dispatch arm must match a LogTail Call at aether.window",);
+        assert!(matched, "framework dispatch arm must match a LogTail Call at aether.window");
 
         let dispatch =
             reply_rx.recv_timeout(Duration::from_secs(2)).expect("framework arm routed a reply to the caller inbox");
-        assert_eq!(dispatch.kind_name, <LogTailResult as Kind>::NAME, "the reply is a LogTailResult",);
-        assert_eq!(dispatch.root, root, "the framework-arm reply joins the inbound's causal chain (#1710)",);
+        assert_eq!(dispatch.kind_name, <LogTailResult as Kind>::NAME, "the reply is a LogTailResult");
+        assert_eq!(dispatch.root, root, "the framework-arm reply joins the inbound's causal chain (#1710)");
 
         // Drop the guard last so its `Finished` records after the reply's
         // `Sent` (ADR-0080 §6) — settlement bookkeeping stays balanced.
@@ -314,7 +314,7 @@ mod tests {
             None,
         ));
         drop(inbox.try_next().expect("the NONE push is queued"));
-        assert!(guard_rx.try_recv().is_err(), "a NONE inbound discharges no root",);
+        assert!(guard_rx.try_recv().is_err(), "a NONE inbound discharges no root");
     }
 
     /// iamacoffeepot/aether#1704: the lifecycle reply inbox is a

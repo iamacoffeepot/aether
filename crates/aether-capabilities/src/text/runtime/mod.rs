@@ -350,7 +350,7 @@ impl NativeActor for TextCapability {
                 let reason = format!("file read failed: {error:?}");
                 match context.reply {
                     PendingReply::LoadFont => {
-                        ctx.reply_to(context.source, &LoadFontResult::Err { namespace, path, error: reason })
+                        ctx.reply_to(context.source, &LoadFontResult::Err { namespace, path, error: reason });
                     }
                     PendingReply::FontMetrics => {
                         ctx.reply_to(context.source, &FontMetricsResult::Err { error: reason });
@@ -396,10 +396,10 @@ impl NativeActor for TextCapability {
                 );
                 match reply {
                     PendingReply::LoadFont => {
-                        done.resolve_value(ctx, &LoadFontResult::Ok { font_id, name, resident_bytes })
+                        done.resolve_value(ctx, &LoadFontResult::Ok { font_id, name, resident_bytes });
                     }
                     PendingReply::FontMetrics => {
-                        done.resolve_value(ctx, &FontMetricsResult::Ok { metrics: build_font_metrics(&font) })
+                        done.resolve_value(ctx, &FontMetricsResult::Ok { metrics: build_font_metrics(&font) });
                     }
                 }
             }
@@ -829,7 +829,7 @@ mod tests {
         let mut state = TextCapabilityState::new();
         let (binding, rx) = ctx_binding();
         draw_screen(&mut state, &binding, 99, "hi", 32.0, [0.0, 0.0]);
-        assert!(rx.try_recv().is_err(), "an unknown font_id must not emit any render mail",);
+        assert!(rx.try_recv().is_err(), "an unknown font_id must not emit any render mail");
     }
 
     #[test]
@@ -841,8 +841,8 @@ mod tests {
         state.fonts.insert(0, Arc::new(font));
         let (binding, rx) = ctx_binding();
         draw_screen(&mut state, &binding, 0, "hi", 32.0, [0.0, 0.0]);
-        assert!(state.atlas_create_inflight, "first draw should kick off atlas creation",);
-        assert!(state.atlas_texture_id.is_none(), "no texture id until create_texture replies",);
+        assert!(state.atlas_create_inflight, "first draw should kick off atlas creation");
+        assert!(state.atlas_texture_id.is_none(), "no texture id until create_texture replies");
         assert_next_send_kind::<CreateTexture>(&binding, &rx);
     }
 
@@ -939,10 +939,10 @@ mod tests {
         draw_screen(&mut state, &binding, 0, "A", 24.0, [ox, oy]);
         let quads_offset = collect_draw_textured_quads(&binding, &rx).quads;
 
-        assert_eq!(quads_zero.len(), quads_offset.len(), "same text must produce the same number of quads",);
+        assert_eq!(quads_zero.len(), quads_offset.len(), "same text must produce the same number of quads");
         for (z, o) in quads_zero.iter().zip(quads_offset.iter()) {
-            assert!((o.x - z.x - ox).abs() < 0.01, "quad x should shift by {ox}: zero={}, offset={}", z.x, o.x,);
-            assert!((o.y - z.y - oy).abs() < 0.01, "quad y should shift by {oy}: zero={}, offset={}", z.y, o.y,);
+            assert!((o.x - z.x - ox).abs() < 0.01, "quad x should shift by {ox}: zero={}, offset={}", z.x, o.x);
+            assert!((o.y - z.y - oy).abs() < 0.01, "quad y should shift by {oy}: zero={}, offset={}", z.y, o.y);
         }
     }
 

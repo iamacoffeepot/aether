@@ -84,7 +84,7 @@ const ACCENT_SRGB: [u8; 3] = [0xa8, 0xc9, 0x7a];
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
 fn panel_address() -> String {
-    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE,)
+    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE)
 }
 
 /// The bundle's `assets/` dir — where `RobotoMono.ttf` ships, resolved
@@ -143,7 +143,7 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8], font_id: u32) {
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { name, .. } => {
-            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}",)
+            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}");
         }
         LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
     }
@@ -269,7 +269,7 @@ fn panel_glyphs_sit_inside_their_row_frames() {
         CaptureFrameResult::Err { error } => panic!("capture failed: {error}"),
     };
 
-    assert_eq!(verdict.results.len(), rows.len(), "one result per requested check",);
+    assert_eq!(verdict.results.len(), rows.len(), "one result per requested check");
 
     // A quarter of the row height: the corrected origin centers glyphs well
     // inside this band, while the removed ascent sag sits a full ascent

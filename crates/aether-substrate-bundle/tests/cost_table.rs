@@ -71,7 +71,7 @@ fn init_seeds_cells_and_dispatch_folds() {
         };
         let tick = rows.iter().find(|r| r.kind_id == Tick::ID).expect("Tick handler cell seeded at init");
         assert_eq!(tick.samples, 0, "neutral seed before any dispatch");
-        assert!(rows.iter().any(|r| r.kind_id == SetRender::ID), "SetRender handler cell seeded at init",);
+        assert!(rows.iter().any(|r| r.kind_id == SetRender::ID), "SetRender handler cell seeded at init");
     }
 
     // Advance 3 ticks → the probe's on_tick dispatches 3× → 3 folds into
@@ -85,7 +85,7 @@ fn init_seeds_cells_and_dispatch_folds() {
         panic!("expected Ok");
     };
     let tick = rows.iter().find(|r| r.kind_id == Tick::ID).expect("Tick handler cell present");
-    assert_eq!(tick.samples, 3, "three Tick dispatches folded into the init-seeded cell",);
+    assert_eq!(tick.samples, 3, "three Tick dispatches folded into the init-seeded cell");
     let set_render = rows.iter().find(|r| r.kind_id == SetRender::ID).expect("SetRender handler cell present");
-    assert_eq!(set_render.samples, 0, "an un-dispatched handler stays at the neutral seed",);
+    assert_eq!(set_render.samples, 0, "an un-dispatched handler stays at the neutral seed");
 }

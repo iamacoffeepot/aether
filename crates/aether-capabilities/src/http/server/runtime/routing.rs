@@ -126,7 +126,7 @@ pub fn register_route(
         }
         if !shared {
             return RegisterRouteResult::Err {
-                error: format!("route ({prefix:?}, {method:?}) already claimed by mailbox {:?}", existing.members[0],),
+                error: format!("route ({prefix:?}, {method:?}) already claimed by mailbox {:?}", existing.members[0]),
             };
         }
         if existing.kind != kind {

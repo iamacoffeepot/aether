@@ -122,7 +122,7 @@ fn bind_then_list_then_unbind_roundtrip() {
         BindListenerResult::Ok { listener_name, local_port, .. } => (listener_name, local_port),
         BindListenerResult::Err { reason, .. } => panic!("bind failed: {reason}"),
     };
-    assert_eq!(listener_name, local_port.to_string(), "default subname should be the bound port",);
+    assert_eq!(listener_name, local_port.to_string(), "default subname should be the bound port");
     assert!(local_port > 0, "OS-picked port should be non-zero");
 
     // List enumerates the one listener.
@@ -150,7 +150,7 @@ fn bind_then_list_then_unbind_roundtrip() {
     // dropped the entry on MonitorNotice.
     let list_reply: ListListenersResult =
         drive_and_decode(&registry, &rx, TcpCapability::NAMESPACE, &ListListeners::default());
-    assert!(list_reply.listeners.is_empty(), "list should drop the unbound listener",);
+    assert!(list_reply.listeners.is_empty(), "list should drop the unbound listener");
 }
 
 /// Binding the same port twice fails the second bind. Uses
@@ -181,7 +181,7 @@ fn bind_port_in_use_returns_err() {
         BindListenerResult::Ok { .. } => panic!("expected port-in-use Err"),
         BindListenerResult::Err { reason, addr } => {
             assert_eq!(addr, format!("127.0.0.1:{local_port}"));
-            assert!(reason.starts_with("bind failed:"), "expected bind-fail reason, got: {reason}",);
+            assert!(reason.starts_with("bind failed:"), "expected bind-fail reason, got: {reason}");
         }
     }
 }

@@ -406,7 +406,7 @@ mod tests {
             .filter_map(Result::ok)
             .filter_map(|e| e.file_name().to_str().map(ToString::to_string))
             .collect();
-        assert!(!siblings.iter().any(|s| s.contains(".tmp-")), "unexpected tmp file left behind: {siblings:?}",);
+        assert!(!siblings.iter().any(|s| s.contains(".tmp-")), "unexpected tmp file left behind: {siblings:?}");
         cleanup(&root);
     }
 
@@ -1033,7 +1033,7 @@ mod tests {
         );
         match result {
             FsFetchResult::Err { error, .. } => {
-                assert!(matches!(error, FsFetchError::Transform(_)), "expected Transform error, got {error:?}",);
+                assert!(matches!(error, FsFetchError::Transform(_)), "expected Transform error, got {error:?}");
             }
             FsFetchResult::Ok { .. } => panic!("expected Err(Transform), got Ok"),
         }
@@ -1061,7 +1061,7 @@ mod tests {
         );
         match result {
             FsFetchResult::Err { error, .. } => {
-                assert!(matches!(error, FsFetchError::Panicked(_)), "expected Panicked error, got {error:?}",);
+                assert!(matches!(error, FsFetchError::Panicked(_)), "expected Panicked error, got {error:?}");
             }
             FsFetchResult::Ok { .. } => panic!("expected Err(Panicked), got Ok"),
         }

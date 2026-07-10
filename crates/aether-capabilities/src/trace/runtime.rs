@@ -238,7 +238,7 @@ mod tests {
 
         match ack {
             DispatchTracedAck::Ok { root } => {
-                assert_eq!(root, inbound, "Ok ack must echo the in-flight inbound mail id as the chassis root")
+                assert_eq!(root, inbound, "Ok ack must echo the in-flight inbound mail id as the chassis root");
             }
             DispatchTracedAck::Err { error } => {
                 panic!("expected Ok ack, got Err: {error}")

@@ -143,6 +143,6 @@ mod tests {
                 break;
             }
         }
-        assert!(found_late_energy, "expected nonzero reverb tail several hundred samples after the impulse",);
+        assert!(found_late_energy, "expected nonzero reverb tail several hundred samples after the impulse");
     }
 }

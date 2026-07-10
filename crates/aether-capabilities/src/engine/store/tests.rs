@@ -72,13 +72,13 @@ fn component_store_uploads_dedups_and_resolves_by_attribute() {
     // Resolve by hash and by name; the manifest is the component one.
     let by_hash = store.get(&Selector::Hash(h1.clone())).expect("the component resolves by hash");
     assert_eq!(by_hash.kind, ArtifactKind::Component);
-    assert!(by_hash.manifest.as_component().is_some(), "a component entry carries a component manifest",);
+    assert!(by_hash.manifest.as_component().is_some(), "a component entry carries a component manifest");
     let by_name = store.get(&Selector::Name("probe".to_owned())).expect("the component resolves by name");
     assert_eq!(by_name.hash, h1, "the name points at the component hash");
 
     // A component is not listed as a binary, and vice versa.
     store.upload(b"a-binary", ArtifactKind::Binary, manifest("headless"), None);
-    assert_eq!(store.list_binaries(&ListEngineBinaries::default()).len(), 1, "only the binary lists as a binary",);
+    assert_eq!(store.list_binaries(&ListEngineBinaries::default()).len(), 1, "only the binary lists as a binary");
     let components = store.list_components(&ListComponentBinaries::default());
     assert_eq!(components.len(), 1, "only the component lists as a component");
     assert_eq!(components[0].hash, h1);
@@ -146,7 +146,7 @@ fn eviction_skips_pinned_and_named_entries() {
 
     assert!(store.contains(&h_named), "a named entry is never evicted");
     assert!(store.contains(&h_pinned), "a pinned entry is never evicted");
-    assert!(!store.contains(&h_plain), "the oldest unnamed, unpinned entry is evicted first",);
+    assert!(!store.contains(&h_plain), "the oldest unnamed, unpinned entry is evicted first");
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -174,7 +174,7 @@ fn list_applies_chassis_and_caps_filters() {
         caps: vec!["aether.render".to_owned()],
         target: None,
     });
-    assert_eq!(render_capable.len(), 1, "only the desktop binary links render",);
+    assert_eq!(render_capable.len(), 1, "only the desktop binary links render");
     assert_eq!(render_capable[0].manifest.chassis, "desktop");
 
     let all = store.list_binaries(&ListEngineBinaries::default());

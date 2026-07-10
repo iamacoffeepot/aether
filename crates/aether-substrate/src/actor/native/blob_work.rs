@@ -1337,7 +1337,7 @@ mod tests {
 
         drop(blob);
 
-        assert!(guard_rx.try_recv().is_err(), "MailId::NONE mail does not settle any root",);
+        assert!(guard_rx.try_recv().is_err(), "MailId::NONE mail does not settle any root");
     }
 
     /// End-to-end under a live multi-worker pool: a wide fan-out recruits

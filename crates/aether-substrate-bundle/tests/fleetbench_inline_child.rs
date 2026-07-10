@@ -49,9 +49,9 @@ mod tests {
         let child_replies = bench.send(engine, &child_addr, &InlineProbe);
         let child_reply = match child_replies.as_slice() {
             [one] => one,
-            other => panic!("the inline child should reply exactly once, got {}", other.len(),),
+            other => panic!("the inline child should reply exactly once, got {}", other.len()),
         };
-        assert_eq!(child_reply.kind, InlineEcho::ID, "the child reply should be an InlineEcho",);
+        assert_eq!(child_reply.kind, InlineEcho::ID, "the child reply should be an InlineEcho");
         let echo = InlineEcho::decode_from_bytes(&child_reply.payload).expect("the child reply decodes as InlineEcho");
         assert_eq!(
             echo.who, INLINE_WHO_CHILD,
@@ -66,7 +66,7 @@ mod tests {
             [one] => one,
             other => panic!("the parent should reply exactly once, got {}", other.len()),
         };
-        assert_eq!(parent_reply.kind, InlineEcho::ID, "the parent reply should be an InlineEcho",);
+        assert_eq!(parent_reply.kind, InlineEcho::ID, "the parent reply should be an InlineEcho");
         let parent_echo =
             InlineEcho::decode_from_bytes(&parent_reply.payload).expect("the parent reply decodes as InlineEcho");
         assert_eq!(
@@ -81,7 +81,7 @@ mod tests {
             .iter()
             .find(|record| record.request_kind == InlineProbe::ID && record.reply_kinds == vec![InlineEcho::ID])
             .expect("the InlineProbe round-trip is recorded as a CallRecord");
-        assert_eq!(child_record.engine, Some(engine), "the InlineProbe is routed to the forked engine",);
+        assert_eq!(child_record.engine, Some(engine), "the InlineProbe is routed to the forked engine");
     }
 
     /// Issue 2690 reload gate: a typed-config inline child's state
@@ -138,7 +138,7 @@ mod tests {
         // config's initial value, not silently dropped — survives the
         // swap: the fix this issue makes.
         let after_replace = count(&mut bench, engine, &child_addr);
-        assert_eq!(after_replace, expected_moved, "the typed-config child's moved state survives replace_component",);
+        assert_eq!(after_replace, expected_moved, "the typed-config child's moved state survives replace_component");
     }
 
     /// Send a `CountQuery` to `recipient` and decode the single

@@ -64,7 +64,7 @@ async fn spawn_substrate_unresolvable_component_selector_is_tool_error() {
             }],
         }))
         .await;
-    assert!(result.is_err(), "an unresolvable component selector should abort the spawn as a tool error",);
+    assert!(result.is_err(), "an unresolvable component selector should abort the spawn as a tool error");
 }
 
 /// `spawn_substrate` rejects `replicas: 0` on a boot-list component
@@ -92,7 +92,7 @@ async fn spawn_substrate_replicas_zero_is_tool_error() {
             }],
         }))
         .await;
-    assert!(result.is_err(), "replicas: 0 must be a tool error, not a silent no-op",);
+    assert!(result.is_err(), "replicas: 0 must be a tool error, not a silent no-op");
 }
 
 /// `terminate_substrate` with a malformed `engine_id` surfaces the

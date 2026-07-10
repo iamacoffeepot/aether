@@ -31,9 +31,9 @@ mod tests {
         let replies = bench.send(engine, "aether.component", &DescribeComponent { name: addr.clone() });
         let reply = match replies.as_slice() {
             [one] => one,
-            other => panic!("describe expected exactly one reply event, got {}", other.len(),),
+            other => panic!("describe expected exactly one reply event, got {}", other.len()),
         };
-        assert_eq!(reply.kind, DescribeComponentResult::ID, "the reply should be a DescribeComponentResult",);
+        assert_eq!(reply.kind, DescribeComponentResult::ID, "the reply should be a DescribeComponentResult");
         let result = DescribeComponentResult::decode_from_bytes(&reply.payload)
             .expect("the reply payload decodes as DescribeComponentResult");
         let capabilities = match result {
@@ -79,6 +79,6 @@ mod tests {
         };
         let result = DescribeComponentResult::decode_from_bytes(&reply.payload)
             .expect("the reply payload decodes as DescribeComponentResult");
-        assert!(matches!(result, DescribeComponentResult::Err { .. }), "an unregistered name should describe as Err",);
+        assert!(matches!(result, DescribeComponentResult::Err { .. }), "an unregistered name should describe as Err");
     }
 }

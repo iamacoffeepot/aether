@@ -316,13 +316,13 @@ mod tests {
         );
 
         assert_eq!(result.resolved[1].id, unseen_tag);
-        assert_eq!(result.resolved[1].name, None, "unregistered id misses the runtime registry",);
+        assert_eq!(result.resolved[1].name, None, "unregistered id misses the runtime registry");
 
         assert_eq!(result.resolved[2].id, mailbox_tag);
-        assert_eq!(result.resolved[2].name, None, "a static name lives in the manifest, not the dynamic arm",);
+        assert_eq!(result.resolved[2].name, None, "a static name lives in the manifest, not the dynamic arm");
 
         assert_eq!(result.resolved[3].id, "not-a-tagged-id");
-        assert_eq!(result.resolved[3].name, None, "a malformed id reports None without aborting the batch",);
+        assert_eq!(result.resolved[3].name, None, "a malformed id reports None without aborting the batch");
     }
 
     /// A native test cap with a synchronous `-> R` handler — the

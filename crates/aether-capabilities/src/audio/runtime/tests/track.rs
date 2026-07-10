@@ -113,7 +113,7 @@ fn replay_same_key_restarts_single_track() {
     }
     let mut buf = vec![0.0f32; 64];
     synth.fill(&mut buf, 1);
-    assert_eq!(synth.track_count(), 1, "re-playing the same key must restart, not stack",);
+    assert_eq!(synth.track_count(), 1, "re-playing the same key must restart, not stack");
 }
 
 /// A `TrackStart` at an explicit sender + lane over the shared
@@ -141,7 +141,7 @@ fn distinct_lanes_under_one_sender_play_independently() {
     sender.push(keyed_track_start(MailboxId(0), Some("b"), ramp_pcm(4_800))).unwrap();
     let mut buf = vec![0.0f32; 64];
     synth.fill(&mut buf, 1);
-    assert_eq!(synth.track_count(), 2, "distinct lanes must not alias to one track",);
+    assert_eq!(synth.track_count(), 2, "distinct lanes must not alias to one track");
     // Stopping lane a leaves lane b sounding.
     sender
         .push(AudioEvent::TrackStop {
@@ -153,7 +153,7 @@ fn distinct_lanes_under_one_sender_play_independently() {
         .unwrap();
     let mut tail = vec![0.0f32; 512];
     synth.fill(&mut tail, 1);
-    assert_eq!(synth.track_count(), 1, "stopping one lane must not silence the other",);
+    assert_eq!(synth.track_count(), 1, "stopping one lane must not silence the other");
 }
 
 #[test]
@@ -165,7 +165,7 @@ fn same_sender_and_lane_replays_single_track() {
     }
     let mut buf = vec![0.0f32; 64];
     synth.fill(&mut buf, 1);
-    assert_eq!(synth.track_count(), 1, "re-playing the same (sender, lane) key must restart, not stack",);
+    assert_eq!(synth.track_count(), 1, "re-playing the same (sender, lane) key must restart, not stack");
 }
 #[test]
 fn play_track_happy_path_replies_ok_and_starts_a_track() {

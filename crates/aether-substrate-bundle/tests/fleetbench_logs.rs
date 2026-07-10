@@ -52,7 +52,7 @@ mod tests {
         });
 
         // The ring's per-actor sequence starts at 1 (ADR-0081).
-        assert!(entry.sequence >= 1, "a buffered entry should carry a 1-based ring sequence, got {}", entry.sequence,);
+        assert!(entry.sequence >= 1, "a buffered entry should carry a 1-based ring sequence, got {}", entry.sequence);
 
         // Walk the cursor: a re-query past `next_since` must not
         // re-yield the entry we already consumed.

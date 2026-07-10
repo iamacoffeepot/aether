@@ -349,7 +349,7 @@ fn failed_singleton_init_releases_namespace_and_sink() {
         .build_passive()
         .expect_err("init failure must propagate");
     // The error wraps init's std::io::Error message.
-    assert!(format!("{err:?}").contains("intentional init failure"), "expected init error to propagate, got {err:?}",);
+    assert!(format!("{err:?}").contains("intentional init failure"), "expected init error to propagate, got {err:?}");
 
     // Sink at the cap's namespace must be gone — Registry::lookup
     // returns None for absent entries.
@@ -831,7 +831,7 @@ fn chassis_teardown_runs_unwire_for_many_pooled_actors() {
     drop(chassis);
 
     for (i, counter) in counters.iter().enumerate() {
-        assert_eq!(counter.load(AtomicOrdering::SeqCst), 1, "actor {i} must have run unwire exactly once",);
+        assert_eq!(counter.load(AtomicOrdering::SeqCst), 1, "actor {i} must have run unwire exactly once");
     }
 }
 
@@ -1040,7 +1040,7 @@ fn ctx_monitor_fires_notice_at_target_close() {
         1,
         "watcher's monitor should be registered against target",
     );
-    assert_eq!(chassis.actor_registry().monitoring_count(watcher_id), 1, "watcher should appear in the reverse index",);
+    assert_eq!(chassis.actor_registry().monitoring_count(watcher_id), 1, "watcher should appear in the reverse index");
 
     // Fire Quit at the target — its handler self-shuts; the
     // dispatcher's close path runs `close_actor`, which fans out
@@ -1062,7 +1062,7 @@ fn ctx_monitor_fires_notice_at_target_close() {
     while notice_count.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(notice_count.load(AtomicOrdering::SeqCst), 1, "watcher should have received exactly one MonitorNotice",);
+    assert_eq!(notice_count.load(AtomicOrdering::SeqCst), 1, "watcher should have received exactly one MonitorNotice");
     assert_eq!(
         last_target.load(AtomicOrdering::SeqCst),
         target_id.0,
@@ -1079,9 +1079,9 @@ fn ctx_monitor_fires_notice_at_target_close() {
         !chassis.actor_registry().is_live(target_id),
         "target slot should transition Live → Dead after close fan-out",
     );
-    assert!(chassis.actor_registry().is_tombstoned(target_id), "target id should be tombstoned",);
+    assert!(chassis.actor_registry().is_tombstoned(target_id), "target id should be tombstoned");
     // Forward index for target was drained.
-    assert_eq!(chassis.actor_registry().monitor_count(target_id), 0, "monitors_of[target] must drain after fan-out",);
+    assert_eq!(chassis.actor_registry().monitor_count(target_id), 0, "monitors_of[target] must drain after fan-out");
 
     drop(chassis);
 }
@@ -1223,7 +1223,7 @@ fn watcher_close_prunes_targets_forward_index() {
     while close_observed.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(close_observed.load(AtomicOrdering::SeqCst), 1, "watcher's unwire fired exactly once",);
+    assert_eq!(close_observed.load(AtomicOrdering::SeqCst), 1, "watcher's unwire fired exactly once");
 
     // Watcher slot tombstones; target slot still Live; target's
     // forward index drained of the dead watcher.
@@ -1231,8 +1231,8 @@ fn watcher_close_prunes_targets_forward_index() {
     while chassis.actor_registry().is_live(watcher_id) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
-    assert!(chassis.actor_registry().is_tombstoned(watcher_id), "watcher tombstoned",);
-    assert!(chassis.actor_registry().is_live(target_id), "target should still be Live (watcher closed, not target)",);
+    assert!(chassis.actor_registry().is_tombstoned(watcher_id), "watcher tombstoned");
+    assert!(chassis.actor_registry().is_live(target_id), "target should still be Live (watcher closed, not target)");
     assert_eq!(
         chassis.actor_registry().monitor_count(target_id),
         0,
@@ -1318,7 +1318,7 @@ fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
     assert_eq!(a_id, id_a, "resolve_actor returns the matching MailboxId");
 
     // Missing subname → None.
-    assert!(chassis.resolve_actor::<Member>("missing").is_none(), "unknown subname should return None",);
+    assert!(chassis.resolve_actor::<Member>("missing").is_none(), "unknown subname should return None");
 
     // resolve_actors enumerates all three. Order is registry-defined
     // (HashMap iteration), so collect into a sorted subname vec for
@@ -1352,10 +1352,10 @@ fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
         thread::sleep(Duration::from_millis(5));
     }
 
-    assert!(chassis.resolve_actor::<Member>("c").is_none(), "closed instance should disappear from resolve_actor",);
+    assert!(chassis.resolve_actor::<Member>("c").is_none(), "closed instance should disappear from resolve_actor");
     let mut after: Vec<String> = chassis.resolve_actors::<Member>().into_iter().map(|(name, _id)| name).collect();
     after.sort();
-    assert_eq!(after, vec!["a".to_owned(), "b".to_owned()], "resolve_actors should drop the closed instance",);
+    assert_eq!(after, vec!["a".to_owned(), "b".to_owned()], "resolve_actors should drop the closed instance");
 
     // Counter for unused warning. (`_id_a` / `_id_b` retain their
     // names elsewhere; this guard keeps the compiler happy.)
@@ -1537,7 +1537,7 @@ fn instanced_can_spawn_grandchild() {
     // Issue 629 / Phase A: resolve_actor returns the address.
     // Verify it resolves and matches the registry id.
     let resolved = chassis.resolve_actor::<Grandchild>("only").expect("resolve_actor must find the grandchild");
-    assert_eq!(resolved, grandchild_id, "resolve_actor returns the matching MailboxId",);
+    assert_eq!(resolved, grandchild_id, "resolve_actor returns the matching MailboxId");
     // The grandchild is alive (verifies the dispatcher's Arc<AtomicU32>
     // is the same one passed in via config — the test's `received`
     // counter sees handler dispatches against the live instance).
@@ -1558,7 +1558,7 @@ fn instanced_can_spawn_grandchild() {
     while chassis.actor_registry().is_live(parent_id) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
-    assert!(chassis.actor_registry().is_tombstoned(parent_id), "parent should have tombstoned",);
+    assert!(chassis.actor_registry().is_tombstoned(parent_id), "parent should have tombstoned");
     // Grandchild survives — no cascade.
     assert!(
         chassis.actor_registry().is_live(grandchild_id),
@@ -1649,7 +1649,7 @@ fn spawn_actor_runs_wire_once_after_init() {
         .finish()
         .expect("spawn instanced actor");
 
-    assert_eq!(wire_count.load(AtomicOrdering::SeqCst), 1, "wire must fire exactly once on Spawner::spawn_actor",);
+    assert_eq!(wire_count.load(AtomicOrdering::SeqCst), 1, "wire must fire exactly once on Spawner::spawn_actor");
 
     drop(chassis);
     let _ = id;
@@ -1800,7 +1800,7 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
     };
     let chassis = builder.build_passive().expect("multi-pass boot succeeds");
 
-    assert_eq!(wire_ran.load(AtomicOrdering::SeqCst), 1, "pinger's wire must have run during the wire pass",);
+    assert_eq!(wire_ran.load(AtomicOrdering::SeqCst), 1, "pinger's wire must have run during the wire pass");
 
     // Wait for Ponger's dispatcher to drain the wire-emitted ping.
     let deadline = Instant::now() + Duration::from_millis(500);

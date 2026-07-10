@@ -209,7 +209,7 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
 
         let textures = handles.textures.lock().expect("textures mutex is not poisoned");
-        assert!(!textures.entries.contains_key(&texture_id), "destroy_texture should remove the staged registry entry",);
+        assert!(!textures.entries.contains_key(&texture_id), "destroy_texture should remove the staged registry entry");
         drop(textures);
 
         let seen = observed.lock().expect("observed_kinds mutex is not poisoned").clone();
@@ -247,7 +247,7 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
 
         let textures = handles.textures.lock().expect("textures mutex is not poisoned");
-        assert_eq!(textures.entries.len(), 2, "unknown and reserved destroy requests must not remove registry entries",);
+        assert_eq!(textures.entries.len(), 2, "unknown and reserved destroy requests must not remove registry entries");
         assert!(textures.entries.contains_key(&user_texture_id));
         assert!(textures.entries.contains_key(&WHITE_TEXTURE_ID));
 
@@ -324,7 +324,7 @@ mod tests {
 
         let batches = handles.quad_frame.lock().expect("quad_frame mutex is not poisoned").clone();
         assert_eq!(batches.len(), 1, "one QuadBatch should be in the accumulator");
-        assert_eq!(batches[0].texture_id, WHITE_TEXTURE_ID, "batch must use the reserved white texture id",);
+        assert_eq!(batches[0].texture_id, WHITE_TEXTURE_ID, "batch must use the reserved white texture id");
         assert_eq!(batches[0].quads.len(), 1, "batch must contain the one expanded quad");
         assert_eq!(
             batches[0].quads[0].tint,
@@ -336,7 +336,7 @@ mod tests {
         let textures = handles.textures.lock().expect("textures mutex is not poisoned");
         let white =
             textures.entries.get(&WHITE_TEXTURE_ID).expect("white texture must be lazily inserted on first send");
-        assert_eq!(white.format, TextureFormat::Rgba8, "white texture must remain RGBA8",);
+        assert_eq!(white.format, TextureFormat::Rgba8, "white texture must remain RGBA8");
 
         drop(chassis);
     }

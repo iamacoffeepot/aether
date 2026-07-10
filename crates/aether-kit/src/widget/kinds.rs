@@ -243,7 +243,7 @@ impl WidgetDrawItem {
         let mut item = self.clone();
         match &mut item {
             Self::Quad { clip: own, .. } | Self::TexturedQuad { clip: own, .. } | Self::Text { clip: own, .. } => {
-                *own = clip
+                *own = clip;
             }
         }
         Some(item)

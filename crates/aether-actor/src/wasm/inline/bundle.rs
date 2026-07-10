@@ -259,8 +259,8 @@ mod tests {
         let parent_version = 7;
 
         let (version, bytes) = compose(parent_version, parent_bytes, &[]);
-        assert_eq!(version, parent_version, "zero-child compose passes the parent version through unchanged",);
-        assert_eq!(bytes, parent_bytes.to_vec(), "zero-child compose is byte-identical to the raw parent blob",);
+        assert_eq!(version, parent_version, "zero-child compose passes the parent version through unchanged");
+        assert_eq!(bytes, parent_bytes.to_vec(), "zero-child compose is byte-identical to the raw parent blob");
 
         let decomposed = decompose(version, &bytes);
         assert_eq!(
@@ -284,7 +284,7 @@ mod tests {
         ];
 
         let (version, bytes) = compose(5, parent_bytes, &children);
-        assert_eq!(version, COMPOSITE_VERSION, "a children-present bundle is tagged with the composite version",);
+        assert_eq!(version, COMPOSITE_VERSION, "a children-present bundle is tagged with the composite version");
 
         let decomposed = decompose(version, &bytes);
         assert_eq!(
@@ -292,7 +292,7 @@ mod tests {
             ParentState { version: 5, bytes: parent_bytes.to_vec() },
             "the parent state survives the composite round-trip",
         );
-        assert_eq!(decomposed.children, children, "every child entry survives the composite round-trip",);
+        assert_eq!(decomposed.children, children, "every child entry survives the composite round-trip");
     }
 
     /// Step 2 tripwire: a child's non-empty `config_bytes` survive the
@@ -310,7 +310,7 @@ mod tests {
         let (version, bytes) = compose(1, &[], slice::from_ref(&entry));
         let decomposed = decompose(version, &bytes);
 
-        assert_eq!(decomposed.children.len(), 1, "exactly the one entry round-trips",);
+        assert_eq!(decomposed.children.len(), 1, "exactly the one entry round-trips");
         assert_eq!(
             decomposed.children[0].config_bytes, entry.config_bytes,
             "the child's config bytes survive the composite round-trip \
@@ -329,6 +329,6 @@ mod tests {
         let (version, mut bytes) = compose(0, &[1, 2], &[child(0x33, 0x44, "c", &[5])]);
         bytes.truncate(6);
         let decomposed = decompose(version, &bytes);
-        assert!(decomposed.children.is_empty(), "a truncated frame yields no children (raw fallback)",);
+        assert!(decomposed.children.is_empty(), "a truncated frame yields no children (raw fallback)");
     }
 }

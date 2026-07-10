@@ -194,7 +194,7 @@ fn write_crash_dump(
         // Stderr only — the panic itself is the load-bearing
         // signal; failure to write the forensic dump should not
         // obscure it with extra noise on the normal logging path.
-        let _ = writeln!(io::stderr(), "aether-substrate: failed to create crash dir {}: {e}", dir.display(),);
+        let _ = writeln!(io::stderr(), "aether-substrate: failed to create crash dir {}: {e}", dir.display());
         return;
     }
     let path = dir.join(format!("{}.jsonl", sanitize_filename(thread_name)));
@@ -216,7 +216,7 @@ fn write_crash_dump(
         backtrace_text.as_deref(),
         ring.as_deref(),
     ) {
-        let _ = writeln!(io::stderr(), "aether-substrate: failed to write crash dump {}: {e}", path.display(),);
+        let _ = writeln!(io::stderr(), "aether-substrate: failed to write crash dump {}: {e}", path.display());
     }
 }
 
@@ -381,7 +381,7 @@ mod tests {
     fn payload_string_handles_unknown_type() {
         let payload: Box<dyn Any + Send> = Box::new(42i32);
         let out = payload_string(payload.as_ref());
-        assert!(out.starts_with("<non-string panic payload"), "unexpected: {out}",);
+        assert!(out.starts_with("<non-string panic payload"), "unexpected: {out}");
     }
 
     /// Forced branch returns a captured backtrace regardless of env.
@@ -440,7 +440,7 @@ mod tests {
         let _ = panic::take_hook();
         panic::set_hook(saved);
 
-        assert_eq!(counter.load(Ordering::SeqCst), 1, "previous hook must run exactly once per panic on this thread",);
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "previous hook must run exactly once per panic on this thread");
     }
 
     /// End-to-end: installing the global hook, driving a panic,
@@ -464,11 +464,11 @@ mod tests {
         let events = captured.lock().unwrap();
         let panic_events: Vec<&CapturedEvent> =
             events.iter().filter(|e| e.target == "aether_substrate::panic").collect();
-        assert!(!panic_events.is_empty(), "no panic event captured (got {} non-panic events)", events.len(),);
+        assert!(!panic_events.is_empty(), "no panic event captured (got {} non-panic events)", events.len());
         let merged: String = panic_events.iter().map(|e| e.fields.as_str()).collect::<Vec<_>>().join(" | ");
-        assert!(merged.contains("e2e probe 8e3a"), "panic payload missing from event: {merged}",);
-        assert!(merged.contains("location"), "location field missing from event: {merged}",);
-        assert!(merged.contains("thread"), "thread field missing from event: {merged}",);
+        assert!(merged.contains("e2e probe 8e3a"), "panic payload missing from event: {merged}");
+        assert!(merged.contains("location"), "location field missing from event: {merged}");
+        assert!(merged.contains("thread"), "thread field missing from event: {merged}");
     }
 
     struct CapturedEvent {
@@ -532,7 +532,7 @@ mod tests {
 
     fn tempdir(suffix: &str) -> PathBuf {
         let mut dir = env::temp_dir();
-        dir.push(format!("aether-panic-hook-test-{}-{}", suffix, process::id(),));
+        dir.push(format!("aether-panic-hook-test-{}-{}", suffix, process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("tempdir creates");
         dir
@@ -630,7 +630,7 @@ mod tests {
             assert_eq!(lines.len(), 1, "{label}: header only");
             let header: serde_json::Value = serde_json::from_str(lines[0]).expect("header is json");
             assert_eq!(header["ring_entries"], 0, "{label}: ring_entries 0");
-            assert!(header["backtrace"].is_null(), "{label}: no backtrace → null in the JSON",);
+            assert!(header["backtrace"].is_null(), "{label}: no backtrace → null in the JSON");
         }
     }
 }

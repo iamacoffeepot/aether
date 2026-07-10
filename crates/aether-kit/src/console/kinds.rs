@@ -197,8 +197,8 @@ mod tests {
     fn default_config_uses_embedded_console_font() {
         let config = ConsoleConfig::default();
 
-        assert!(config.font_namespace.is_empty(), "empty namespace selects the embedded console font",);
-        assert!(config.font_path.is_empty(), "empty path selects the embedded console font",);
+        assert!(config.font_namespace.is_empty(), "empty namespace selects the embedded console font");
+        assert!(config.font_path.is_empty(), "empty path selects the embedded console font");
     }
 
     #[test]

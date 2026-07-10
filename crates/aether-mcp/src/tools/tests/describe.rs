@@ -22,7 +22,7 @@ async fn describe_kinds_returns_the_substrate_inventory() {
         first.get("name").is_some() && first.get("shape").is_some(),
         "compact entry must carry name and shape, got: {first}",
     );
-    assert!(first.get("schema").is_none(), "compact entry must not carry schema, got: {first}",);
+    assert!(first.get("schema").is_none(), "compact entry must not carry schema, got: {first}");
 }
 
 /// `describe_kinds(prefix="aether.fs")` narrows the array to only the
@@ -43,7 +43,7 @@ async fn describe_kinds_prefix_narrows_results() {
     assert!(!arr.is_empty(), "aether.fs prefix should match at least one kind");
     for entry in &arr {
         let name = entry["name"].as_str().expect("name is a string");
-        assert!(name.starts_with("aether.fs"), "entry name {name:?} should start with \"aether.fs\"",);
+        assert!(name.starts_with("aether.fs"), "entry name {name:?} should start with \"aether.fs\"");
     }
 }
 
@@ -64,8 +64,8 @@ async fn describe_kinds_full_returns_schema_key() {
     let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
     assert!(!arr.is_empty(), "aether.fs prefix should match at least one kind");
     for entry in &arr {
-        assert!(entry.get("schema").is_some(), "full entry must carry schema, got: {entry}",);
-        assert!(entry.get("shape").is_none(), "full entry must not carry shape, got: {entry}",);
+        assert!(entry.get("schema").is_some(), "full entry must carry schema, got: {entry}");
+        assert!(entry.get("shape").is_none(), "full entry must not carry shape, got: {entry}");
     }
 }
 

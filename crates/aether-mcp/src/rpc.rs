@@ -762,7 +762,7 @@ mod tests {
         // re-dial and fails cleanly (not a hang). This proves the
         // dead-socket path surfaces an error rather than blocking.
         let while_down = session.call(probe_envelope()).await;
-        assert!(while_down.is_err(), "a call against a still-down hub must error cleanly, not hang",);
+        assert!(while_down.is_err(), "a call against a still-down hub must error cleanly, not hang");
 
         // The hub comes back on the same port.
         let (hub2, port2) = FakeHub::serve(port);
@@ -845,9 +845,9 @@ mod tests {
         assert!(!timed_out, "a settled call is not a timeout");
         assert_eq!(events.len(), 2, "both echoed reply events are surfaced");
         for event in &events {
-            assert_eq!(event.payload, probe_envelope().payload, "each reply echoes the probe envelope",);
+            assert_eq!(event.payload, probe_envelope().payload, "each reply echoes the probe envelope");
         }
-        assert_eq!(pending_count(&session), 0, "a settled call de-registers its cid",);
+        assert_eq!(pending_count(&session), 0, "a settled call de-registers its cid");
 
         hub.stop();
     }
@@ -879,8 +879,8 @@ mod tests {
             .expect("a timeout is not a transport error");
 
         assert!(timed_out, "withholding ReplyEnd forces the timeout arm");
-        assert_eq!(events.len(), 1, "the reply that arrived before the timeout is still returned",);
-        assert_eq!(pending_count(&session), 0, "a timed-out call must not leak its cid in pending",);
+        assert_eq!(events.len(), 1, "the reply that arrived before the timeout is still returned");
+        assert_eq!(pending_count(&session), 0, "a timed-out call must not leak its cid in pending");
 
         hub.stop();
     }
@@ -900,7 +900,7 @@ mod tests {
 
         session.fire(probe_envelope()).await.expect("fire writes the call");
 
-        assert_eq!(pending_count(&session), 0, "fire registers nothing in pending",);
+        assert_eq!(pending_count(&session), 0, "fire registers nothing in pending");
 
         hub.stop();
     }

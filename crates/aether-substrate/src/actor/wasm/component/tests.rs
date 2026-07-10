@@ -501,7 +501,7 @@ fn instantiate_large_config_grows_large_region() {
     let mut component = instantiate_with_config(&wat_init_with_config(), &payload);
     let large_ptr = component.large_ptr;
     assert_ne!(large_ptr, 0, "large region must have been grown");
-    assert_ne!(large_ptr, component.small_ptr, "large config must not land in the small region",);
+    assert_ne!(large_ptr, component.small_ptr, "large config must not land in the small region");
     // init saw the large-region pointer.
     assert_eq!(component.read_u32(204), large_ptr);
     assert_eq!(component.read_u32(208) as usize, payload.len());
@@ -540,7 +540,7 @@ fn instantiate_config_without_allocator_returns_clean_error() {
         panic!("config to a guest without an allocator must fail");
     };
     let msg = format!("{err}");
-    assert!(msg.contains("no realloc_p32 allocator"), "error should name the missing allocator; got: {msg}",);
+    assert!(msg.contains("no realloc_p32 allocator"), "error should name the missing allocator; got: {msg}");
 }
 
 #[test]
@@ -571,7 +571,7 @@ fn wire_invokes_export_and_writes_marker() {
     // wire hasn't been invoked yet — `instantiate` no longer fires it.
     assert_eq!(component.read_u32(100), 0);
     component.wire().expect("wire ok");
-    assert_eq!(component.read_u32(100), 0x77, "wire must run when Component::wire is invoked",);
+    assert_eq!(component.read_u32(100), 0x77, "wire must run when Component::wire is invoked");
     // Mailbox id stamped into offset 108 by the WAT — test ctx
     // uses MailboxId(0), so the low 32 bits are 0.
     assert_eq!(component.read_u32(108), 0);
@@ -601,7 +601,7 @@ fn unwire_invokes_export_and_writes_marker() {
 fn wire_trap_propagates_via_component_wire() {
     let mut component = instantiate(WAT_WIRE_TRAPS);
     let result = component.wire();
-    assert!(result.is_err(), "Component::wire must propagate the guest trap as wasmtime::Error",);
+    assert!(result.is_err(), "Component::wire must propagate the guest trap as wasmtime::Error");
 }
 
 /// Issue 584 Phase 2b: `unwire` traps are contained the same way
@@ -634,7 +634,7 @@ fn deliver_small_payload_uses_small_region() {
     let rc = component.deliver(&mail).expect("deliver ok");
     assert_eq!(rc, 0, "guest receive should have run");
     // The fixture's `receive` recorded the pointer it was handed at offset 16.
-    assert_eq!(component.read_u32(16), small_ptr, "small payload should land in the cached small region",);
+    assert_eq!(component.read_u32(16), small_ptr, "small payload should land in the cached small region");
 }
 
 /// ADR-0095: a payload larger than `SMALL_REGION_BYTES` but within the deliverable
@@ -650,7 +650,7 @@ fn deliver_large_payload_grows_large_region() {
     let large_ptr = component.large_ptr;
     assert_ne!(large_ptr, 0, "large region must have been grown");
     assert_ne!(large_ptr, component.small_ptr);
-    assert_eq!(component.read_u32(16), large_ptr, "large payload should land in the grown large region",);
+    assert_eq!(component.read_u32(16), large_ptr, "large payload should land in the grown large region");
 }
 
 /// ADR-0095: a payload past the absolute deliverable ceiling is dropped
@@ -853,7 +853,7 @@ fn deliver_threads_zero_source_for_session_origin() {
     let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
         .with_reply_to(Source::to(SourceAddr::Session(token)));
     component.deliver(&mail).expect("deliver");
-    assert_eq!(component.read_u32(500), 0, "a session origin must thread 0 (MailboxId::NONE) as the source param",);
+    assert_eq!(component.read_u32(500), 0, "a session origin must thread 0 (MailboxId::NONE) as the source param");
 }
 
 #[test]
@@ -866,7 +866,7 @@ fn deliver_threads_zero_source_for_no_reply_target() {
     // prior value, proving the substrate threaded NONE.
     let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1);
     component.deliver(&mail).expect("deliver");
-    assert_eq!(component.read_u32(500), 0, "a no-reply-target origin must thread 0 as the source param",);
+    assert_eq!(component.read_u32(500), 0, "a no-reply-target origin must thread 0 as the source param");
 }
 
 #[test]
@@ -878,7 +878,7 @@ fn reply_correlation_import_exposes_reply_envelope_only() {
     let reply = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
         .with_reply_to(Source::with_correlation(SourceAddr::None, 0x5151));
     component.deliver(&reply).expect("deliver reply");
-    assert_eq!(component.read_u32(500), 0x5151, "reply envelope must expose its echoed correlation",);
+    assert_eq!(component.read_u32(500), 0x5151, "reply envelope must expose its echoed correlation");
 
     let request = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
         .with_reply_to(Source::with_correlation(SourceAddr::Component(M(7)), 0x9999));
@@ -1011,7 +1011,7 @@ fn reply_mail_component_target_echoes_inbound_correlation() {
         reply_to.correlation_id, INBOUND_CORRELATION,
         "reply must echo the inbound correlation, not a fresh mint",
     );
-    assert_eq!(reply_to.addr, SourceAddr::None, "reply-of-a-reply target must be None, matching native send_reply",);
+    assert_eq!(reply_to.addr, SourceAddr::None, "reply-of-a-reply target must be None, matching native send_reply");
 }
 
 /// ADR-0037 Phase 1 + Phase 2: when a component sends to a mailbox
@@ -1175,7 +1175,7 @@ fn inline_alias_folded_id_matches_post_1920_convention() {
     ));
     let from_path =
         aether_data::mailbox_id_from_path("aether.component/aether.embedded:testparent/aether.embedded:widget");
-    assert_eq!(folded, from_path, "the host-fn alias fold matches the rendered-name parse → fold",);
+    assert_eq!(folded, from_path, "the host-fn alias fold matches the rendered-name parse → fold");
 }
 
 /// ADR-0114 step 1: an alias `MailboxEntry` cloned from the parent's
@@ -1214,12 +1214,12 @@ fn inline_alias_routes_into_parent_slot_inbox() {
         .expect("alias registers under the folded id");
 
     // Name resolution (the wire `Call` path) resolves the alias.
-    assert_eq!(registry.lookup(&alias_name), Some(alias_id), "the rendered alias name resolves to the folded alias id",);
+    assert_eq!(registry.lookup(&alias_name), Some(alias_id), "the rendered alias name resolves to the folded alias id");
 
     // Mail addressed to the alias lands in the parent slot's inbox.
     let mailer = Mailer::new(Arc::clone(&registry));
     mailer.push(Mail::new(alias_id, aether_data::KindId(0xABCD), vec![1, 2, 3], 1));
-    assert_eq!(captured.lock().unwrap().len(), 1, "alias mail dispatched into the parent slot's inbox",);
+    assert_eq!(captured.lock().unwrap().len(), 1, "alias mail dispatched into the parent slot's inbox");
 }
 
 /// Issue 1987: a guest `send` carrying `from == self` (a
@@ -1238,7 +1238,7 @@ fn send_stamps_self_when_recipient_is_own_mailbox() {
 
     let captured = captured.lock().unwrap();
     let (mail_id, _root, _parent) = captured[0];
-    assert_eq!(mail_id.sender, sender, "origin stamps the component's own id when from == self",);
+    assert_eq!(mail_id.sender, sender, "origin stamps the component's own id when from == self");
 }
 
 /// Issue 1987: a guest `send` carrying `from == an inline-child alias`
@@ -1258,6 +1258,6 @@ fn send_stamps_alias_when_recipient_is_inline_child() {
 
     let captured = captured.lock().unwrap();
     let (mail_id, _root, _parent) = captured[0];
-    assert_eq!(mail_id.sender, alias, "origin stamps the alias (dispatch identity) when from is a child",);
-    assert_ne!(mail_id.sender, sender, "the child's send must not stamp the parent component",);
+    assert_eq!(mail_id.sender, alias, "origin stamps the alias (dispatch identity) when from is a child");
+    assert_ne!(mail_id.sender, sender, "the child's send must not stamp the parent component");
 }

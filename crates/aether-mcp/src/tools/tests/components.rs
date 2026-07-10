@@ -124,7 +124,7 @@ fn components_all_loaded_exact_match_is_ready() {
         components_all_loaded(&want, &actual),
         "both wanted names present (alongside an extra baseline) should be ready",
     );
-    assert!(components_all_loaded(&[], &[]), "empty want is trivially ready",);
+    assert!(components_all_loaded(&[], &[]), "empty want is trivially ready");
 }
 
 /// `components_all_loaded` is false when only a subset of the wanted names
@@ -192,7 +192,7 @@ async fn load_component_unresolvable_selector_is_tool_error() {
             replicas: None,
         }))
         .await;
-    assert!(result.is_err(), "an unresolvable selector should be a tool error",);
+    assert!(result.is_err(), "an unresolvable selector should be a tool error");
 }
 
 /// `load_component` rejects `replicas: 0` (issue 2626, ADR-0090 §4
@@ -213,7 +213,7 @@ async fn load_component_replicas_zero_is_tool_error() {
             replicas: Some(0),
         }))
         .await;
-    assert!(result.is_err(), "replicas: 0 must be a tool error, not a silent no-op",);
+    assert!(result.is_err(), "replicas: 0 must be a tool error, not a silent no-op");
 }
 
 /// `replace_component` with a malformed tagged mailbox id is

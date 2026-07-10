@@ -453,7 +453,7 @@ mod tests {
         // where the cut can land mid-UTF-8 — either way it's an Err).
         let bytes = encode_pack(&sample_pack());
         for len in 0..bytes.len() {
-            assert!(decode_pack(&bytes[..len]).is_err(), "decode of {len}-byte prefix unexpectedly succeeded",);
+            assert!(decode_pack(&bytes[..len]).is_err(), "decode of {len}-byte prefix unexpectedly succeeded");
         }
     }
 

@@ -380,15 +380,15 @@ mod tests {
         let decomposed = bundle::decompose(version, &bytes);
         assert_eq!(decomposed.parent.version, 3, "parent version is carried");
         assert_eq!(decomposed.parent.bytes, vec![0xDE, 0xAD]);
-        assert_eq!(decomposed.children.len(), 2, "exactly the two inserted children are packed",);
+        assert_eq!(decomposed.children.len(), 2, "exactly the two inserted children are packed");
         let a = decomposed.children.iter().find(|c| c.alias_id == id_a.0).expect("child a present");
         assert_eq!(a.type_tag, 0xAAAA);
         assert_eq!(a.state_bytes, 0x1111_2222u32.to_le_bytes().to_vec());
-        assert_eq!(a.config_bytes, vec![0x11, 0x22], "child a's config bytes ride the compose alongside its state",);
+        assert_eq!(a.config_bytes, vec![0x11, 0x22], "child a's config bytes ride the compose alongside its state");
         let b = decomposed.children.iter().find(|c| c.alias_id == id_b.0).expect("child b present");
         assert!(b.is_counter, "child b's counter flag is carried");
         assert_eq!(b.state_bytes, 0x3333_4444u32.to_le_bytes().to_vec());
-        assert!(b.config_bytes.is_empty(), "child b was spawned with no retained config bytes",);
+        assert!(b.config_bytes.is_empty(), "child b was spawned with no retained config bytes");
     }
 
     /// Step 4 coverage: each child entry is offered to the reconstruct
@@ -549,7 +549,7 @@ mod tests {
         };
 
         let reconstructed = reconstruct_one_child::<TypedConfigChild>(&registry, &to_reconstruct);
-        assert!(reconstructed, "a typed-config child with real config bytes must reconstruct",);
+        assert!(reconstructed, "a typed-config child with real config bytes must reconstruct");
 
         let mut child = registry.take(alias).expect("the reconstructed child is registered under its alias");
         let code = child.erased_dispatch(
@@ -558,7 +558,7 @@ mod tests {
             // memory, and the probe child's dispatch reads no payload.
             unsafe { Mail::__from_ptr(0, 1, 0, 1, crate::NO_REPLY_HANDLE, alias.0) },
         );
-        assert_eq!(code, 0xDEAD_BEEF, "the child's init decoded the real config value, not a default",);
+        assert_eq!(code, 0xDEAD_BEEF, "the child's init decoded the real config value, not a default");
     }
 
     /// Step 5 coverage: an empty-bytes entry for a typed-config child still
@@ -581,7 +581,7 @@ mod tests {
         };
 
         let reconstructed = reconstruct_one_child::<TypedConfigChild>(&registry, &to_reconstruct);
-        assert!(!reconstructed, "empty bytes don't decode as a typed (non-unit) Config, so reconstruct skips",);
-        assert!(registry.take(alias).is_none(), "a skipped child is never registered",);
+        assert!(!reconstructed, "empty bytes don't decode as a typed (non-unit) Config, so reconstruct skips");
+        assert!(registry.take(alias).is_none(), "a skipped child is never registered");
     }
 }

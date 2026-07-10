@@ -827,10 +827,10 @@ fn get_round_trips_to_handler() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
     let response = round_trip(port_of(&chassis), b"GET /hello?name=ada HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200 status line, got: {response:?}",);
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200 status line, got: {response:?}");
     assert!(response.contains("x-aether-method: Get\r\n"), "{response:?}");
     assert!(response.contains("x-aether-path: /hello\r\n"), "{response:?}");
-    assert!(response.contains("x-aether-query: name=ada\r\n"), "{response:?}",);
+    assert!(response.contains("x-aether-query: name=ada\r\n"), "{response:?}");
     let peer_addr_header = response
         .lines()
         .find_map(|line| line.strip_prefix("x-aether-peer-addr: "))
@@ -852,7 +852,7 @@ fn post_round_trips_body() {
 
     let response =
         round_trip(port_of(&chassis), b"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello");
-    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {response:?}",);
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {response:?}");
     assert!(response.contains("x-aether-method: Post\r\n"), "{response:?}");
     assert_eq!(body_of(&response), "hello", "body echoed verbatim");
 }
@@ -865,7 +865,7 @@ fn oversize_body_is_413() {
 
     let response =
         round_trip(port_of(&chassis), b"POST /big HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n");
-    assert!(response.starts_with("HTTP/1.1 413 "), "expected 413, got: {response:?}",);
+    assert!(response.starts_with("HTTP/1.1 413 "), "expected 413, got: {response:?}");
 }
 
 /// A websocket-upgrade request that also declares an oversized
@@ -887,7 +887,7 @@ fn oversize_body_on_ws_upgrade_is_413() {
           Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
           Content-Length: 100\r\n\r\n",
     );
-    assert!(response.starts_with("HTTP/1.1 413 "), "expected 413, got: {response:?}",);
+    assert!(response.starts_with("HTTP/1.1 413 "), "expected 413, got: {response:?}");
 }
 
 /// A websocket-upgrade request that also carries the request-smuggling
@@ -913,7 +913,7 @@ fn smuggling_on_ws_upgrade_is_411() {
           Content-Length: 5\r\n\
           Transfer-Encoding: chunked\r\n\r\nhello",
     );
-    assert!(response.starts_with("HTTP/1.1 411 "), "expected 411, got: {response:?}",);
+    assert!(response.starts_with("HTTP/1.1 411 "), "expected 411, got: {response:?}");
 }
 
 /// A non-enumerated method is answered `501` before any dispatch.
@@ -922,7 +922,7 @@ fn unknown_method_is_501() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
     let response = round_trip(port_of(&chassis), b"FROB /x HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert!(response.starts_with("HTTP/1.1 501 "), "expected 501, got: {response:?}",);
+    assert!(response.starts_with("HTTP/1.1 501 "), "expected 501, got: {response:?}");
 }
 
 /// A request whose configured handler resolves to nothing is
@@ -937,7 +937,7 @@ fn no_handler_is_503() {
         .expect("server boots");
 
     let response = round_trip(port_of(&chassis), b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert!(response.starts_with("HTTP/1.1 503 "), "expected 503, got: {response:?}",);
+    assert!(response.starts_with("HTTP/1.1 503 "), "expected 503, got: {response:?}");
 }
 
 /// A handler that receives the request but never replies settles
@@ -956,7 +956,7 @@ fn response_less_chain_is_502() {
         .expect("caps boot");
 
     let response = round_trip(port_of(&chassis), b"GET /drop HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert!(response.starts_with("HTTP/1.1 502 "), "expected 502, got: {response:?}",);
+    assert!(response.starts_with("HTTP/1.1 502 "), "expected 502, got: {response:?}");
 }
 
 /// A percent-encoded path is decoded before it reaches the handler
@@ -967,8 +967,8 @@ fn percent_encoded_path_is_decoded() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
     let response = round_trip(port_of(&chassis), b"GET /hello%20world?x=1 HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {response:?}",);
-    assert!(response.contains("x-aether-path: /hello world\r\n"), "{response:?}",);
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {response:?}");
+    assert!(response.contains("x-aether-path: /hello world\r\n"), "{response:?}");
     assert!(response.contains("x-aether-query: x=1\r\n"), "{response:?}");
 }
 
@@ -984,7 +984,7 @@ fn transfer_encoding_is_411() {
         port_of(&chassis),
         b"POST /chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
     );
-    assert!(response.starts_with("HTTP/1.1 411 "), "expected 411, got: {response:?}",);
+    assert!(response.starts_with("HTTP/1.1 411 "), "expected 411, got: {response:?}");
 }
 
 /// A request carrying `Expect: 100-continue` receives the interim `100
@@ -997,8 +997,8 @@ fn expect_continue_gets_100_continue() {
         port_of(&chassis),
         b"POST /submit HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nhello",
     );
-    assert!(response.starts_with("HTTP/1.1 100 Continue\r\n\r\n"), "expected interim 100 Continue, got: {response:?}",);
-    assert!(response.contains("HTTP/1.1 200 OK\r\n"), "expected final 200 after the interim, got: {response:?}",);
+    assert!(response.starts_with("HTTP/1.1 100 Continue\r\n\r\n"), "expected interim 100 Continue, got: {response:?}");
+    assert!(response.contains("HTTP/1.1 200 OK\r\n"), "expected final 200 after the interim, got: {response:?}");
 }
 
 /// A HEAD response carries the handler's headers — including the
@@ -1010,9 +1010,9 @@ fn head_response_suppresses_body() {
     let port = port_of(&chassis);
 
     let head_response = round_trip(port, b"HEAD /x HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert!(head_response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {head_response:?}",);
-    assert!(head_response.contains("Content-Length: 10\r\n"), "{head_response:?}",);
-    assert_eq!(body_of(&head_response), "", "HEAD must not carry a message body",);
+    assert!(head_response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {head_response:?}");
+    assert!(head_response.contains("Content-Length: 10\r\n"), "{head_response:?}");
+    assert_eq!(body_of(&head_response), "", "HEAD must not carry a message body");
 
     let get_response = round_trip(port, b"GET /x HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(body_of(&get_response), "fixed body");
@@ -1060,7 +1060,7 @@ fn over_capacity_connection_is_503() {
     thread::sleep(Duration::from_millis(200));
 
     let response = round_trip(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert!(response.starts_with("HTTP/1.1 503 "), "expected 503, got: {response:?}",);
+    assert!(response.starts_with("HTTP/1.1 503 "), "expected 503, got: {response:?}");
 
     drop(held);
 }
@@ -1131,8 +1131,8 @@ fn streamed_response_reassembles_across_credit_window() {
 
     let response = round_trip(port_of(&chassis), b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
-    assert!(response.contains("Transfer-Encoding: chunked\r\n"), "streamed response is chunked: {response:?}",);
-    assert!(!response.contains("Content-Length:"), "streamed response omits Content-Length: {response:?}",);
+    assert!(response.contains("Transfer-Encoding: chunked\r\n"), "streamed response is chunked: {response:?}");
+    assert!(!response.contains("Content-Length:"), "streamed response omits Content-Length: {response:?}");
 
     let expected: Vec<u8> = (0..STREAM_CHUNK_COUNT).flat_map(stream_chunk_body).collect();
     assert_eq!(
@@ -1158,7 +1158,7 @@ fn over_window_flood_tears_the_stream_down() {
         response.contains("Transfer-Encoding: chunked\r\n"),
         "flood stream head is chunked before teardown: {response:?}",
     );
-    assert!(!response.contains("0\r\n\r\n"), "flood stream is torn down before the terminator: {response:?}",);
+    assert!(!response.contains("0\r\n\r\n"), "flood stream is torn down before the terminator: {response:?}");
 }
 
 /// Server config for the request-streaming tests (ADR-0128): a small inbound
@@ -1194,7 +1194,7 @@ fn large_upload_streams_past_the_buffered_cap() {
 
     let response = round_trip(port, &request);
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
-    assert_eq!(body_of(&response), format!("received:{body_len}"), "the streamed byte count round-trips",);
+    assert_eq!(body_of(&response), format!("received:{body_len}"), "the streamed byte count round-trips");
 }
 
 /// A `Transfer-Encoding: chunked` upload to a streaming handler is accepted and
@@ -1211,8 +1211,8 @@ fn chunked_upload_streams_to_streaming_handler() {
         b"POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n\
           5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
     );
-    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "chunked upload accepted, not 411: {response:?}",);
-    assert_eq!(body_of(&response), "received:11", "the two chunks decoded to 11 body bytes",);
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "chunked upload accepted, not 411: {response:?}");
+    assert_eq!(body_of(&response), "received:11", "the two chunks decoded to 11 body bytes");
 }
 
 /// A request carrying both `Content-Length` and `Transfer-Encoding` (the
@@ -1259,7 +1259,7 @@ fn chunked_on_ws_upgrade_is_411() {
           Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
           Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
     );
-    assert!(response.starts_with("HTTP/1.1 411 "), "expected 411, got: {response:?}",);
+    assert!(response.starts_with("HTTP/1.1 411 "), "expected 411, got: {response:?}");
 }
 
 /// A buffered handler (no `HttpRequestStreamOpen` in its accept-set) keeps the
@@ -1309,7 +1309,7 @@ fn poll_body(port: u16, request: &[u8], expected: &str) {
         if body_of(&response) == expected {
             return;
         }
-        assert!(Instant::now() < deadline, "expected body {expected:?} within 10s; last response: {response:?}",);
+        assert!(Instant::now() < deadline, "expected body {expected:?} within 10s; last response: {response:?}");
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -1326,7 +1326,7 @@ fn routed_prefix_dispatches_as_registered_kind() {
     poll_body(port, b"GET /api/widgets HTTP/1.1\r\nHost: localhost\r\n\r\n", "api:/api/widgets");
 
     let unrouted = round_trip(port, b"GET /other HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert_eq!(body_of(&unrouted), "fixed body", "unrouted path falls back to handler_mailbox",);
+    assert_eq!(body_of(&unrouted), "fixed body", "unrouted path falls back to handler_mailbox");
 }
 
 /// A macro-authored route with a real `FromRequest` extractor dispatches
@@ -1344,8 +1344,8 @@ fn routed_extractor_success_and_failure() {
     // Failure: with the route proven live, a request missing `name`
     // short-circuits to the extractor's 400 response body.
     let missing = round_trip(port, b"GET /extract HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert!(missing.starts_with("HTTP/1.1 400 "), "extractor Err becomes the reply status: {missing:?}",);
-    assert_eq!(body_of(&missing), "missing name query parameter", "extractor Err body is replied verbatim",);
+    assert!(missing.starts_with("HTTP/1.1 400 "), "extractor Err becomes the reply status: {missing:?}");
+    assert_eq!(body_of(&missing), "missing name query parameter", "extractor Err body is replied verbatim");
 }
 
 /// Longest prefix wins among overlapping routes, matching stops at
@@ -1364,7 +1364,7 @@ fn longest_prefix_wins_on_segment_boundaries() {
     assert_eq!(body_of(&exact), "api:/api", "exact prefix hit routes");
 
     let boundary = round_trip(port, b"GET /apiary HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert_eq!(body_of(&boundary), "fixed body", "/apiary is not under /api — segment-boundary match",);
+    assert_eq!(body_of(&boundary), "fixed body", "/apiary is not under /api — segment-boundary match");
 }
 
 /// A method-specific route beats a method-agnostic one at equal
@@ -1380,7 +1380,7 @@ fn method_specific_route_beats_agnostic() {
     poll_body(port, b"GET /m HTTP/1.1\r\nHost: localhost\r\n\r\n", "any-m");
 
     let specific = round_trip(port, b"POST /m HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
-    assert_eq!(body_of(&specific), "post-m", "POST takes the method-specific route with both routes live",);
+    assert_eq!(body_of(&specific), "post-m", "POST takes the method-specific route with both routes live");
 }
 
 /// A bare `#[http::router]` impl still registers exclusive (issue 2625
@@ -1419,7 +1419,7 @@ fn bare_router_stays_exclusive_second_claim_rejected() {
         match body_of(&contested) {
             "excl-macro-alpha" | "excl-macro-beta" => break body_of(&contested).to_string(),
             _ => {
-                assert!(Instant::now() < deadline, "expected /macro-excl to become live within 10s",);
+                assert!(Instant::now() < deadline, "expected /macro-excl to become live within 10s");
                 thread::sleep(Duration::from_millis(25));
             }
         }
@@ -1428,7 +1428,7 @@ fn bare_router_stays_exclusive_second_claim_rejected() {
     for _ in 0..24 {
         let contested = round_trip(port, b"GET /macro-excl HTTP/1.1\r\nHost: localhost\r\n\r\n");
         let body = body_of(&contested);
-        assert_eq!(body, owner, "bare #[http::router] must stay exclusive; observed a second route member",);
+        assert_eq!(body, owner, "bare #[http::router] must stay exclusive; observed a second route member");
         thread::sleep(Duration::from_millis(10));
     }
 }
@@ -1574,7 +1574,7 @@ fn route_registered_mid_connection_serves_next_request() {
     // Pre-registration: /late falls back to the echo handler.
     stream.write_all(b"GET /late HTTP/1.1\r\nHost: localhost\r\n\r\n").expect("write request");
     let first = read_one_response(&mut stream, &mut carry);
-    assert!(first.contains("x-aether-path: /late"), "pre-registration request falls back to echo: {first:?}",);
+    assert!(first.contains("x-aether-path: /late"), "pre-registration request falls back to echo: {first:?}");
 
     // Register /late at the fixed-body handler while the connection is
     // parked between keep-alive requests.
@@ -1644,7 +1644,7 @@ fn shared_route_spreads_across_members() {
         if pair.contains(&"alpha".to_string()) && pair.contains(&"beta".to_string()) {
             break;
         }
-        assert!(Instant::now() < deadline, "expected alpha+beta across a request pair within 10s; got {pair:?}",);
+        assert!(Instant::now() < deadline, "expected alpha+beta across a request pair within 10s; got {pair:?}");
         thread::sleep(Duration::from_millis(25));
     }
 
@@ -1724,7 +1724,7 @@ fn read_response_head(stream: &mut TcpStream, carry: &mut Vec<u8>, chunk: &mut [
             return pos + 4;
         }
         let n = stream.read(chunk).expect("read response head");
-        assert!(n > 0, "eof before response head; buffered: {:?}", String::from_utf8_lossy(carry),);
+        assert!(n > 0, "eof before response head; buffered: {:?}", String::from_utf8_lossy(carry));
         carry.extend_from_slice(&chunk[..n]);
     }
 }
@@ -1787,7 +1787,7 @@ fn read_one_chunked_response(stream: &mut TcpStream, carry: &mut Vec<u8>) -> Str
 fn assert_closed(stream: &mut TcpStream) {
     let mut tail = [0u8; 64];
     let read = stream.read(&mut tail);
-    assert!(matches!(read, Ok(0)), "expected the server to close the connection, got: {read:?}",);
+    assert!(matches!(read, Ok(0)), "expected the server to close the connection, got: {read:?}");
 }
 
 /// Two requests round-trip in order on one kept-alive socket (HTTP/1.1
@@ -1815,13 +1815,13 @@ fn keep_alive_serves_sequential_requests_on_one_socket() {
     stream.flush().expect("flush");
 
     let first = read_one_response(&mut stream, &mut carry);
-    assert!(first.starts_with("HTTP/1.1 200 OK\r\n"), "first response 200: {first:?}",);
-    assert!(first.contains("x-aether-path: /one\r\n"), "first response is /one: {first:?}",);
-    assert!(first.contains("Connection: keep-alive\r\n"), "first response keeps alive: {first:?}",);
+    assert!(first.starts_with("HTTP/1.1 200 OK\r\n"), "first response 200: {first:?}");
+    assert!(first.contains("x-aether-path: /one\r\n"), "first response is /one: {first:?}");
+    assert!(first.contains("Connection: keep-alive\r\n"), "first response keeps alive: {first:?}");
 
     let second = read_one_response(&mut stream, &mut carry);
-    assert!(second.contains("x-aether-path: /two\r\n"), "second response is /two, in order: {second:?}",);
-    assert!(second.contains("Connection: keep-alive\r\n"), "second response keeps alive: {second:?}",);
+    assert!(second.contains("x-aether-path: /two\r\n"), "second response is /two, in order: {second:?}");
+    assert!(second.contains("Connection: keep-alive\r\n"), "second response keeps alive: {second:?}");
 
     // A final `Connection: close` request terminates the connection.
     stream
@@ -1829,8 +1829,8 @@ fn keep_alive_serves_sequential_requests_on_one_socket() {
         .expect("write closing request");
     stream.flush().expect("flush");
     let third = read_one_response(&mut stream, &mut carry);
-    assert!(third.contains("x-aether-path: /three\r\n"), "third response is /three: {third:?}",);
-    assert!(third.contains("Connection: close\r\n"), "third response closes: {third:?}",);
+    assert!(third.contains("x-aether-path: /three\r\n"), "third response is /three: {third:?}");
+    assert!(third.contains("Connection: close\r\n"), "third response closes: {third:?}");
     assert_closed(&mut stream);
 }
 
@@ -1857,8 +1857,8 @@ fn keep_alive_reuses_socket_after_streamed_response() {
     stream.flush().expect("flush");
     let first = read_one_chunked_response(&mut stream, &mut carry);
     assert!(first.starts_with("HTTP/1.1 200 OK\r\n"), "{first:?}");
-    assert!(first.contains("Connection: keep-alive\r\n"), "streamed response keeps alive: {first:?}",);
-    assert_eq!(dechunk(body_of(&first)).into_bytes(), expected, "first stream reassembles in order",);
+    assert!(first.contains("Connection: keep-alive\r\n"), "streamed response keeps alive: {first:?}");
+    assert_eq!(dechunk(body_of(&first)).into_bytes(), expected, "first stream reassembles in order");
 
     // The reuse invariant: a second request on the same socket after the
     // stream ended gets served rather than the socket being closed.
@@ -1866,8 +1866,8 @@ fn keep_alive_reuses_socket_after_streamed_response() {
     stream.flush().expect("flush");
     let second = read_one_chunked_response(&mut stream, &mut carry);
     assert!(second.starts_with("HTTP/1.1 200 OK\r\n"), "{second:?}");
-    assert!(second.contains("Connection: keep-alive\r\n"), "second streamed response keeps alive too: {second:?}",);
-    assert_eq!(dechunk(body_of(&second)).into_bytes(), expected, "second stream reassembles in order",);
+    assert!(second.contains("Connection: keep-alive\r\n"), "second streamed response keeps alive too: {second:?}");
+    assert_eq!(dechunk(body_of(&second)).into_bytes(), expected, "second stream reassembles in order");
 }
 
 /// Pins the negative alongside the reuse tripwire above: a streamed request
@@ -1886,7 +1886,7 @@ fn streamed_response_honors_explicit_connection_close() {
     stream.flush().expect("flush");
     let response = read_one_chunked_response(&mut stream, &mut carry);
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
-    assert!(response.contains("Connection: close\r\n"), "streamed response honors explicit close: {response:?}",);
+    assert!(response.contains("Connection: close\r\n"), "streamed response honors explicit close: {response:?}");
     assert_closed(&mut stream);
 }
 
@@ -1904,8 +1904,8 @@ fn http_1_0_defaults_to_close() {
 
     let mut carry: Vec<u8> = Vec::new();
     let response = read_one_response(&mut stream, &mut carry);
-    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {response:?}",);
-    assert!(response.contains("Connection: close\r\n"), "HTTP/1.0 defaults to close: {response:?}",);
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {response:?}");
+    assert!(response.contains("Connection: close\r\n"), "HTTP/1.0 defaults to close: {response:?}");
     assert_closed(&mut stream);
 }
 
@@ -1925,7 +1925,7 @@ fn idle_kept_alive_connection_closes_after_timeout() {
 
     let mut carry: Vec<u8> = Vec::new();
     let response = read_one_response(&mut stream, &mut carry);
-    assert!(response.contains("Connection: keep-alive\r\n"), "kept-alive response: {response:?}",);
+    assert!(response.contains("Connection: keep-alive\r\n"), "kept-alive response: {response:?}");
 
     // Now idle. The 300 ms idle timeout closes the connection well before the
     // 5 s request timeout / read timeout would — the elapsed bound is the

@@ -183,7 +183,7 @@ fn actor_trace_ring_size_env_reaches_chassis_boot() {
     let lines = run_headless_capture_with_env(&[], &[("AETHER_ACTOR_TRACE_RING_SIZE", "8191")], Duration::from_secs(2));
     let cap = find_numeric_field(&lines, "trace_ring_capacity")
         .unwrap_or_else(|| panic!("no trace_ring_capacity tracing line observed; stderr was:\n{lines:?}"));
-    assert_eq!(cap, 8191, "AETHER_ACTOR_TRACE_RING_SIZE must reach the chassis boot",);
+    assert_eq!(cap, 8191, "AETHER_ACTOR_TRACE_RING_SIZE must reach the chassis boot");
 }
 
 #[test]
@@ -201,5 +201,5 @@ fn actor_trace_ring_max_size_env_reaches_chassis_boot() {
     // unambiguous despite both landing on the same line.
     let max = find_numeric_field(&lines, "trace_ring_max_capacity")
         .unwrap_or_else(|| panic!("no trace_ring_max_capacity tracing line observed; stderr was:\n{lines:?}"));
-    assert_eq!(max, 131_072, "AETHER_ACTOR_TRACE_RING_MAX_SIZE must reach the chassis boot",);
+    assert_eq!(max, 131_072, "AETHER_ACTOR_TRACE_RING_MAX_SIZE must reach the chassis boot");
 }

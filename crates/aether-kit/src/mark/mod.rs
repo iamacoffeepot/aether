@@ -254,7 +254,7 @@ mod tests {
             let result = store.update(created.id, geometry, label);
             match expected {
                 MarkMutationError::EmptyUpdate => {
-                    assert_eq!(result, MarkUpdateResult::Rejected { error: MarkMutationError::EmptyUpdate })
+                    assert_eq!(result, MarkUpdateResult::Rejected { error: MarkMutationError::EmptyUpdate });
                 }
                 MarkMutationError::InvalidGeometry { .. } => assert!(matches!(
                     result,

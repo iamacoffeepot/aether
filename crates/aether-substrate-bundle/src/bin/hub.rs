@@ -29,7 +29,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let chassis = HubChassis::build(HubEnv::from_env_with_argv(&cli)?)?;
-    eprintln!("aether-substrate-bundle: hub chassis initialised (profile={})", HubChassis::PROFILE,);
+    eprintln!("aether-substrate-bundle: hub chassis initialised (profile={})", HubChassis::PROFILE);
     chassis.run()?;
     Ok(())
 }

@@ -107,7 +107,7 @@ impl fmt::Display for TestBenchError {
             Self::Boot(e) => write!(f, "substrate boot failed: {e}"),
             Self::Decode(e) => write!(f, "decode reply: {e}"),
             Self::Timeout { expected, pumped_iterations } => {
-                write!(f, "expected {expected} reply, did not arrive within {pumped_iterations} pump iterations",)
+                write!(f, "expected {expected} reply, did not arrive within {pumped_iterations} pump iterations")
             }
             Self::Advance(e) => write!(f, "advance failed: {e}"),
             Self::Capture(e) => write!(f, "capture failed: {e}"),
@@ -1338,9 +1338,9 @@ mod tests {
         let TestBenchError::SettlementTimeout { pending, .. } = &err else {
             panic!("expected SettlementTimeout, got {err:?}");
         };
-        assert!(pending.contains("in_flight=1"), "dump should name the stuck root with in_flight=1: {pending}",);
+        assert!(pending.contains("in_flight=1"), "dump should name the stuck root with in_flight=1: {pending}");
         // The rendered error string carries the dump too.
-        assert!(err.to_string().contains("in_flight=1"), "Display should surface the pending dump: {err}",);
+        assert!(err.to_string().contains("in_flight=1"), "Display should surface the pending dump: {err}");
     }
 
     /// Boot, advance one tick, capture, sanity-check the PNG.
@@ -1415,7 +1415,7 @@ mod tests {
         let reply: CaptureFrameResult = result.reply("capture").expect("capture step replied with CaptureFrameResult");
         match reply {
             CaptureFrameResult::Ok { png, verdict, .. } => {
-                assert!(verdict.is_none(), "no checks were requested, so the verdict must be absent",);
+                assert!(verdict.is_none(), "no checks were requested, so the verdict must be absent");
                 assert!(
                     png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
                     "captured bytes are not a PNG: first 8 bytes={:?}",
@@ -1501,7 +1501,7 @@ mod tests {
         .expect("subscribe + advance");
 
         let captured = captured.lock().expect("test setup: captured mutex is never poisoned");
-        assert!(!captured.is_empty(), "subscriber received no mail — fanout never reached it",);
+        assert!(!captured.is_empty(), "subscriber received no mail — fanout never reached it");
         let (mail_id, root, parent) = captured[0];
         // Issue 723 fix: each fanned-out copy gets its own MailId, but
         // the root is inherited from the chassis-root tick and the

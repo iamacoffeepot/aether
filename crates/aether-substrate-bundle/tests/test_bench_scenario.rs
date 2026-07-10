@@ -83,7 +83,7 @@ const PROBE_NAME: &str = "probe";
 /// trampoline node — exactly what `LoadResult.name` reports.
 fn probe_address() -> String {
     use aether_actor::Addressable;
-    format!("aether.component/{}:{}", aether_capabilities::WasmTrampoline::NAMESPACE, PROBE_NAME,)
+    format!("aether.component/{}:{}", aether_capabilities::WasmTrampoline::NAMESPACE, PROBE_NAME)
 }
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
 
@@ -206,7 +206,7 @@ fn require_wgpu_only() -> bool {
         return true;
     }
     let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-    assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available",);
+    assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available");
     eprintln!("skipping: no wgpu adapter available");
     false
 }

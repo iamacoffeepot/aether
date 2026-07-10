@@ -312,14 +312,14 @@ mod route_registration {
 
     #[track_caller]
     fn expect_ok(result: RegisterRouteResult) {
-        assert!(matches!(result, RegisterRouteResult::Ok), "expected Ok, got {result:?}",);
+        assert!(matches!(result, RegisterRouteResult::Ok), "expected Ok, got {result:?}");
     }
 
     #[track_caller]
     fn expect_err_containing(result: RegisterRouteResult, needle: &str) {
         match result {
             RegisterRouteResult::Err { error } => {
-                assert!(error.contains(needle), "error {error:?} does not contain {needle:?}",)
+                assert!(error.contains(needle), "error {error:?} does not contain {needle:?}");
             }
             RegisterRouteResult::Ok => panic!("expected Err containing {needle:?}, got Ok"),
         }
@@ -329,7 +329,7 @@ mod route_registration {
     /// table holds exactly one route — the shape every case below checks.
     fn only_route(routes: &SharedRoutes) -> (Vec<MailboxId>, KindId, bool) {
         let table = routes.read().expect("route table lock");
-        assert_eq!(table.len(), 1, "expected exactly one route, got {}", table.len(),);
+        assert_eq!(table.len(), 1, "expected exactly one route, got {}", table.len());
         let route = &table[0];
         let snapshot = (route.members.clone(), route.kind, route.shared);
         drop(table);

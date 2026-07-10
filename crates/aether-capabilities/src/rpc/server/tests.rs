@@ -450,9 +450,9 @@ fn dispatch_traced_with_deferred_replies_routes_each_event_then_settles() {
             other => panic!("expected ReplyEvent / ReplyEnd, got {other:?}"),
         }
     }
-    assert!(saw_ack, "expected DispatchTracedAck reply event before ReplyEnd",);
+    assert!(saw_ack, "expected DispatchTracedAck reply event before ReplyEnd");
     deferred_values.sort_unstable();
-    assert_eq!(deferred_values, vec![11, 22], "expected one DeferredEchoReply per request, sorted by value",);
+    assert_eq!(deferred_values, vec![11, 22], "expected one DeferredEchoReply per request, sorted by value");
 }
 
 /// Fire-and-forget `Call { cid: None }` skips reply correlation
@@ -530,7 +530,7 @@ fn wire_version_mismatch_kicks_connection() {
     let reply: WireFrame = read_frame(&mut stream).expect("read Bye");
     match reply {
         WireFrame::Bye { reason } => {
-            assert!(reason.contains("wire_version"), "Bye reason should mention wire_version: {reason}",);
+            assert!(reason.contains("wire_version"), "Bye reason should mention wire_version: {reason}");
         }
         other => panic!("expected Bye, got {other:?}"),
     }
@@ -564,7 +564,7 @@ fn oversize_frame_replies_with_frame_too_large_and_session_survives() {
     let max = max_frame_size();
     assert!(max >= MAX_FRAME_SIZE, "cap accessor lifted below default");
     let oversize: usize = max + 1;
-    assert!(oversize <= max.saturating_mul(2), "test size must be inside the drain ceiling",);
+    assert!(oversize <= max.saturating_mul(2), "test size must be inside the drain ceiling");
     #[allow(clippy::cast_possible_truncation)]
     let prefix = (oversize as u32).to_le_bytes();
     stream.write_all(&prefix).expect("write oversize length prefix");

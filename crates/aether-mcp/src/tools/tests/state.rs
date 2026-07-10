@@ -67,10 +67,10 @@ async fn resolve_and_encode_refreshes_on_field_mismatch() {
         .await
         .expect("field-mismatch encode failure refreshes and retries");
 
-    assert_eq!(calls.load(Ordering::Relaxed), 1, "the field-mismatch triggered exactly one refresh RPC",);
-    assert_eq!(desc.schema, widened, "resolve_and_encode returns the fresh (widened) descriptor",);
+    assert_eq!(calls.load(Ordering::Relaxed), 1, "the field-mismatch triggered exactly one refresh RPC");
+    assert_eq!(desc.schema, widened, "resolve_and_encode returns the fresh (widened) descriptor");
     let decoded = aether_codec::decode_schema(&payload, &widened).expect("payload decodes against the widened schema");
-    assert_eq!(decoded, params, "the new field round-trips through the refreshed schema",);
+    assert_eq!(decoded, params, "the new field round-trips through the refreshed schema");
 }
 
 /// Issue 2672: the refresh-and-retry is bounded to exactly one
@@ -98,8 +98,8 @@ async fn resolve_and_encode_retry_is_bounded_to_one_refresh() {
     let params = serde_json::json!({ "button": "left" });
     let result = mcp.resolve_and_encode(engine, name, params).await;
 
-    assert!(result.is_err(), "a field the fresh vocab still lacks surfaces an error, not a hang",);
-    assert_eq!(calls.load(Ordering::Relaxed), 1, "the retry refreshed exactly once — no loop",);
+    assert!(result.is_err(), "a field the fresh vocab still lacks surfaces an error, not a hang");
+    assert_eq!(calls.load(Ordering::Relaxed), 1, "the retry refreshed exactly once — no loop");
 }
 
 /// ADR-0091 issue 1232 (end-to-end): a kind registered in the
@@ -169,7 +169,7 @@ async fn lookup_descriptor_picks_up_a_post_load_kind_via_inventory() {
         )
     });
     let decoded_schema: SchemaType = wire::from_bytes(&entry.schema_wire).expect("schema_wire decodes");
-    assert!(matches!(decoded_schema, SchemaType::String), "the registered schema round-trips through the wire",);
+    assert!(matches!(decoded_schema, SchemaType::String), "the registered schema round-trips through the wire");
 
     // Now drive the harness's encode path directly. Seed the
     // per-engine cache the way a real refresh would (engine id is

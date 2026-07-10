@@ -32,7 +32,7 @@ mod tests {
             let engines = bench.list_engines();
             wanted.iter().all(|id| engines.iter().any(|e| &e.engine_id == id))
         });
-        assert!(listed, "both spawned engines should round-trip through ListEngines: {:?}", bench.list_engines(),);
+        assert!(listed, "both spawned engines should round-trip through ListEngines: {:?}", bench.list_engines());
     }
 
     /// Spawn one headless substrate, confirm it is supervised, then

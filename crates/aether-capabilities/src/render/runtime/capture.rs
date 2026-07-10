@@ -73,6 +73,6 @@ pub fn resolve_reference(
     let full_path = assets_dir.join(&sim.reference_path);
     match fs::read(&full_path) {
         Ok(bytes) => Ok(Some(ReferenceCapture { png_bytes: bytes, threshold: sim.threshold })),
-        Err(e) => Err(format!("capture_frame similarity: could not read reference {:?}: {e}", sim.reference_path,)),
+        Err(e) => Err(format!("capture_frame similarity: could not read reference {:?}: {e}", sim.reference_path)),
     }
 }

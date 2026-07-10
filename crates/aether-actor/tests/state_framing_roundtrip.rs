@@ -99,5 +99,5 @@ fn reshaped_state_kind_misses_decode_with_bytes_present() {
         prior.decode_kind::<CounterStateReshaped>().is_none(),
         "a reshaped state kind must not decode the old bundle",
     );
-    assert!(!prior.bytes().is_empty(), "the raw bytes stay present on a decode-miss — this is the warn trigger",);
+    assert!(!prior.bytes().is_empty(), "the raw bytes stay present on a decode-miss — this is the warn trigger");
 }

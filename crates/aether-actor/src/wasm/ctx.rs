@@ -1254,17 +1254,17 @@ mod tests {
 
         let source = MailboxId(0x9999_0000_1234_5678);
         let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x10, &registry, source.0);
-        assert_eq!(ctx.source_mailbox(), Some(source), "a non-NONE threaded source must surface verbatim",);
+        assert_eq!(ctx.source_mailbox(), Some(source), "a non-NONE threaded source must surface verbatim");
 
         let none_ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
-        assert_eq!(none_ctx.source_mailbox(), None, "MailboxId::NONE means no peer-component origin",);
+        assert_eq!(none_ctx.source_mailbox(), None, "MailboxId::NONE means no peer-component origin");
     }
 
     #[test]
     fn local_dispatch_ctx_never_reads_host_reply_correlation() {
         let registry = Registry::new();
         let ctx: WasmCtx<'_, Manual> = WasmCtx::__new_local_dispatch(0x10, &registry, NO_INBOUND_SOURCE);
-        assert_eq!(ctx.in_reply_to(), None, "cluster-drained dispatches carry no host correlation",);
+        assert_eq!(ctx.in_reply_to(), None, "cluster-drained dispatches carry no host correlation");
     }
 
     /// ADR-0134: `emit` on a `Multi<K>` ctx routes a detached mail at the
@@ -1284,13 +1284,13 @@ mod tests {
         // detached mail there and enqueues locally.
         let mut ctx: WasmCtx<'_, Manual> = WasmCtx::__new(source, &registry, source);
         Emit::<()>::emit(ctx.as_multi::<()>(), &());
-        assert_eq!(registry.queued_len(), 1, "emit routes a detached mail at the threaded source",);
+        assert_eq!(registry.queued_len(), 1, "emit routes a detached mail at the threaded source");
 
         // A sourceless dispatch (NONE) has no routable target — the emit
         // drops rather than enqueuing.
         let mut none_ctx: WasmCtx<'_, Manual> = WasmCtx::__new(source, &registry, NO_INBOUND_SOURCE);
         Emit::<()>::emit(none_ctx.as_multi::<()>(), &());
-        assert_eq!(registry.queued_len(), 1, "a sourceless emit drops — no additional mail enqueued",);
+        assert_eq!(registry.queued_len(), 1, "a sourceless emit drops — no additional mail enqueued");
     }
 
     /// ADR-0134: the multi mode marker is layout-neutral — a `Multi<K>`
@@ -1400,15 +1400,15 @@ mod tests {
         let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
 
         // The root has no registry parent entry — its parent is cross-cluster.
-        assert!(ctx.parent().is_none(), "the cluster root resolves no in-cluster parent",);
+        assert!(ctx.parent().is_none(), "the cluster root resolves no in-cluster parent");
 
         // child(name) resolves the resident widget; a missing name is None.
         let child = ctx.child("widget").expect("the widget resolves by subname");
         assert_eq!(child.mailbox_id(), widget, "child resolves to the alias id");
-        assert!(ctx.child("missing").is_none(), "a missing subname resolves to None",);
+        assert!(ctx.child("missing").is_none(), "a missing subname resolves to None");
         let grandchild = child.child("label").expect("the grandchild resolves relative to the child handle");
-        assert_eq!(grandchild.mailbox_id(), label, "handle-relative child walk reaches the grandchild",);
-        assert!(child.child("missing").is_none(), "a missing grandchild segment resolves to None",);
+        assert_eq!(grandchild.mailbox_id(), label, "handle-relative child walk reaches the grandchild");
+        assert!(child.child("missing").is_none(), "a missing grandchild segment resolves to None");
 
         // The resolved relative is a cluster member, so a send routes in
         // place; the local path enqueues and makes no host call (the host
@@ -1421,7 +1421,7 @@ mod tests {
             "the resolved relative is classified as an in-cluster recipient",
         );
         child.send(&());
-        assert_eq!(registry.queued_len(), 1, "a send to a resolved relative enqueues locally — no scheduler hop",);
+        assert_eq!(registry.queued_len(), 1, "a send to a resolved relative enqueues locally — no scheduler hop");
     }
 
     #[test]
@@ -1444,7 +1444,7 @@ mod tests {
 
         let mailbox = WasmActorMailbox::<SucceedingChild>::__new(child.0, root, &registry);
         let request = mailbox.send_tracked(&());
-        assert_eq!(request.0, Source::NO_CORRELATION, "local inline sends have no host-minted request id",);
+        assert_eq!(request.0, Source::NO_CORRELATION, "local inline sends have no host-minted request id");
     }
 
     // Issue 2692: the by-tag spawn host-unit fixtures. `thread_local` (not
@@ -1575,7 +1575,7 @@ mod tests {
             .spawn_inline_child_by_tag(ActorTypeTag::of::<StubChild>(), Subname::Named("tagged"), &config_bytes)
             .expect("a known tag spawns its exported type");
 
-        assert!(registry.take(alias).is_some(), "the tagged child is resident under the resolver's alias",);
+        assert!(registry.take(alias).is_some(), "the tagged child is resident under the resolver's alias");
         assert_eq!(
             STUB_INIT_CONFIG.get(),
             Some(0x1234_5678),
@@ -1630,7 +1630,7 @@ mod tests {
             matches!(result, Err(SpawnError::UnknownActorTag(t)) if t == unknown),
             "an unresolvable tag returns UnknownActorTag(tag), got {result:?}",
         );
-        assert!(registry.child_metas().is_empty(), "an unknown tag inserts no child",);
+        assert!(registry.child_metas().is_empty(), "an unknown tag inserts no child");
     }
 
     /// Step 5(c): subname validation runs before the resolver — a
@@ -1788,7 +1788,7 @@ mod tests {
         .expect("the nesting parent installs");
 
         // The parent's `wire` ran and it was reinserted into its slot.
-        assert!(registry.take(parent).is_some(), "the parent's wire ran and it was reinserted",);
+        assert!(registry.take(parent).is_some(), "the parent's wire ran and it was reinserted");
         // The `wire` spawned a nested inline child mid-wire (the reentrant
         // install path) — resolved to the stub resolver's fixed alias.
         assert!(
@@ -1824,13 +1824,13 @@ mod tests {
             (),
         )
         .expect("the probe installs");
-        assert_eq!(PROBE_WIRE_COUNT.get(), 1, "a fresh inline spawn runs the child's wire exactly once",);
+        assert_eq!(PROBE_WIRE_COUNT.get(), 1, "a fresh inline spawn runs the child's wire exactly once");
 
         let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x9200, &registry, NO_INBOUND_SOURCE);
         let removed = ctx.despawn_inline_child(probe);
         assert!(removed, "despawning a resident child returns true");
-        assert_eq!(PROBE_UNWIRE_COUNT.get(), 1, "despawn runs the child's unwire exactly once",);
-        assert!(registry.take(probe).is_none(), "the despawned child's slot is gone",);
+        assert_eq!(PROBE_UNWIRE_COUNT.get(), 1, "despawn runs the child's unwire exactly once");
+        assert!(registry.take(probe).is_none(), "the despawned child's slot is gone");
     }
 
     /// Issue 2746: a `replace_component` reconstruct runs `init` +
@@ -1855,7 +1855,7 @@ mod tests {
         };
         let ok = reconstruct_one_child::<LifecycleProbe>(&registry, &to_reconstruct);
         assert!(ok, "a ()-config probe reconstructs from empty bytes");
-        assert_eq!(PROBE_WIRE_COUNT.get(), 0, "a reconstruct runs init + on_rehydrate, never wire",);
-        assert!(registry.take(alias).is_some(), "the reconstructed child is resident under its alias",);
+        assert_eq!(PROBE_WIRE_COUNT.get(), 0, "a reconstruct runs init + on_rehydrate, never wire");
+        assert!(registry.take(alias).is_some(), "the reconstructed child is resident under its alias");
     }
 }

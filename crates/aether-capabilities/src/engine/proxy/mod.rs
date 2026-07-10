@@ -220,7 +220,7 @@ mod tests {
                 assert_eq!(value, 42, "echoed value routed back through the proxy");
                 return;
             }
-            assert!(Instant::now() < deadline, "reply did not route back through the proxy within 5s",);
+            assert!(Instant::now() < deadline, "reply did not route back through the proxy within 5s");
             thread::sleep(Duration::from_millis(20));
         }
     }
@@ -252,7 +252,7 @@ mod tests {
                 },
             )
             .finish();
-        assert!(result.is_err(), "spawning a proxy at a closed port should fail at init",);
+        assert!(result.is_err(), "spawning a proxy at a closed port should fail at init");
     }
 
     /// How a [`fake_server`] treats the proxy's heartbeat pings after

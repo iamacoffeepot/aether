@@ -254,7 +254,7 @@ mod tests {
         // unset knob reproduces the const default.
         // Tripwire: drifts when `DEFAULT_TICK_HZ` or the derive literal changes.
         let layer = TickConfigLayer::builder().load().expect("defaults load");
-        assert_eq!(layer.hz, DEFAULT_TICK_HZ, "derive default must match DEFAULT_TICK_HZ",);
+        assert_eq!(layer.hz, DEFAULT_TICK_HZ, "derive default must match DEFAULT_TICK_HZ");
         assert_eq!(TickConfig::default().hz, DEFAULT_TICK_HZ);
     }
 

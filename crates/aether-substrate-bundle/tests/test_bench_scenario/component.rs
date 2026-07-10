@@ -274,7 +274,7 @@ fn multi_actor_sibling_spawn() {
         LoadResult::Ok { name, .. } => name,
         LoadResult::Err { error } => panic!("multi-actor load failed: {error}"),
     };
-    assert!(root_name.ends_with(":test.ui.root"), "selected export should resolve to test.ui.root; got {root_name}",);
+    assert!(root_name.ends_with(":test.ui.root"), "selected export should resolve to test.ui.root; got {root_name}");
 
     // ADR-0099 §3/§4: a spawned sibling nests under its spawner, so the
     // Panel registers at the `/`-rendered lineage path — the RootManager's
@@ -475,7 +475,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE,);
+    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE);
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
@@ -512,7 +512,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
         ])
         .expect("bump + query sequence");
     let pre_count = pre.reply::<CountReport>("query").expect("decode pre-replace CountReport");
-    assert_eq!(pre_count, CountReport { count: 3 }, "three bumps should leave the counter at 3 before the replace",);
+    assert_eq!(pre_count, CountReport { count: 3 }, "three bumps should leave the counter at 3 before the replace");
 
     // Replace the wasm at the same mailbox id with the same binary.
     // `on_dehydrate` saves the count on the old instance; `on_rehydrate`
@@ -563,7 +563,7 @@ fn replace_preserves_state_via_typed_state_kind() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_stateful_typed") else {
         return;
     };
-    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE,);
+    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE);
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
@@ -647,7 +647,7 @@ fn typed_state_decode_miss_boots_fresh() {
     let Some(reshaped_path) = require_runtime("aether_test_fixtures_stateful_reshaped") else {
         return;
     };
-    let addr = format!("aether.component/{}:{TYPED_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE,);
+    let addr = format!("aether.component/{}:{TYPED_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE);
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let typed_wasm = fs::read(&typed_path).expect("read typed fixture wasm");
@@ -736,7 +736,7 @@ fn childless_component_hot_reloads_unchanged() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE,);
+    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE);
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
