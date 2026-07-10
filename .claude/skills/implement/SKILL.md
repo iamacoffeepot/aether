@@ -219,6 +219,7 @@ CI green — or green except a sole `Qodana scan` red held for `/land`:
 
 1. Phase label: leave the issue at `phase:refine`. The resting state is "draft PR open + green (or Qodana-only red)" — no comment; the PR's checks are the record. A held `Qodana scan` red is normal here: `/land` runs the Qodana sweep before it un-drafts.
 2. Leave the PR as a **draft**. Do not un-draft, do not merge, do not close, do not delete the `phase:*` label (Done is a `/land`-time action). Un-drafting is the user's (or the approved release process's) action — once a PR is un-drafted, native auto-merge lands it on green ([[feedback_green_pr_automerges_before_review]]).
+   A held green draft may still receive its first-green automated review: the review action fires when CI passes and, when the rollup is actionable, posts findings and sets `review:unresolved` on the PR (the dogfood runner sets `dogfood:unresolved` by the same contract). Addressing those findings is part of the hold — fix in follow-up commits and `workflow_dispatch` re-run the runner to clear the label, or spin them into child issues via /sketch and let the user strip it deliberately. `/land` refuses to land while either label is present.
 3. Print to user:
 
    ```

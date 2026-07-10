@@ -27,8 +27,9 @@ Two entry shapes, one skill:
 | PR exists and is a draft | "PR #N is not a draft — it may have already been un-drafted or merged." |
 | CI green — or green except `Qodana scan` as the sole failing required check, none pending (the [Qodana sweep](#qodana-sweep) resolves it before un-draft) | "PR #N has a non-Qodana required check red (or checks pending). Wait, or use `/implement <issue>` to fix a non-Qodana red." |
 | PR has a closing issue (the PR's closing-issue reference) | "PR #N has no closing issue. Link one (`Closes #M`) or delete the phase label manually." |
+| PR label set contains neither `review:unresolved` nor `dogfood:unresolved` (REST: `gh api repos/iamacoffeepot/aether/issues/<n>/labels --jq '.[].name'` — PRs are issues in the labels API) | "PR #N carries `<label>` — unresolved automated QA findings. Fix and `workflow_dispatch` re-run the runner to clear it, or spin the findings into child issues via /sketch and strip the label deliberately." |
 
-Read PR draft state and `mergeable_state` over REST (`gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.draft, .mergeable_state'`); read CI state from the REST check-runs endpoint (`gh api repos/iamacoffeepot/aether/commits/<sha>/check-runs`). Both are REST forms per the §REST-vs-GraphQL routing table in `/scope`.
+Read PR draft state and `mergeable_state` over REST (`gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.draft, .mergeable_state'`); read CI state from the REST check-runs endpoint (`gh api repos/iamacoffeepot/aether/commits/<sha>/check-runs`). Both are REST forms per the §REST-vs-GraphQL routing table in `/scope`. The QA-label gate makes the automated runners' findings load-bearing: the label is set and cleared by the runner's poster (e.g. `scripts/post-review-rollup.mjs` — set when the rollup is actionable, cleared by a re-run that finds nothing actionable), so a refusal here routes through the runner, not around it.
 
 ## Sweep land
 
@@ -230,6 +231,7 @@ This is the same form `/scope` documents for the `Backlog` and `Done` phases —
 - Auto-resolve content conflicts. A `dirty` branch always surfaces to the user (or an optional delegated agent).
 - Un-draft a PR with a non-Qodana required check red. The gate enforces green before un-draft, except a sole `Qodana scan` red, which the [Qodana sweep](#qodana-sweep) resolves first.
 - Auto-suppress Qodana findings — edit a `qodana.yaml` exclude or commit a `--baseline` — without surfacing to the user. The Qodana sweep fixes findings or surfaces them; it never silences them.
+- Strip `review:unresolved` / `dogfood:unresolved` itself. The runner's poster clears the label on a re-run that finds nothing actionable; a deliberate strip by the user is the taste override. `/land` only refuses while the label is present.
 - Land PRs in parallel. Protected `main` enforces linear history; parallel landing races to discover the serialization. The sequence lands one at a time with recompute.
 - Delete the `phase:*` label before verifying the merge completed (`merged` field confirmed `true`).
 - Remove a worktree whose PR has not merged. The sweep tail runs only after a confirmed merge.
