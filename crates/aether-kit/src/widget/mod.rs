@@ -55,7 +55,7 @@ use aether_capabilities::text::DrawText;
 use aether_capabilities::{LifecycleCapability, RenderCapability, TextCapability};
 use aether_data::Kind;
 use aether_kinds::{QuadSpace, Tick};
-use aether_math::{Rgba, Vec2};
+use aether_math::Vec2;
 
 use crate::widget::composite::Composite;
 
@@ -189,7 +189,7 @@ pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
                 y: *y,
                 width: *width,
                 height: *height,
-                color: Rgba::from_array(*color),
+                color: *color,
             }),
             WidgetDrawItem::Text { .. } => None,
         })
@@ -215,7 +215,7 @@ pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
                 font_id: *font_id,
                 text: text.clone(),
                 size_pixels: *size_pixels,
-                color: Rgba::from_array(*color),
+                color: *color,
                 origin: [*x, *y],
                 space: QuadSpace::Screen,
                 clip: None,

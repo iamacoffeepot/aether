@@ -40,7 +40,7 @@ use aether_capabilities::render::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured,
     DrawSolidQuads, DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect,
     MaterialTexturedRect, SolidQuad, TextureFormat, TexturedQuad, UpdateTexture, Vertex,
-    ViewProjection,
+    ViewProjection, WHITE_TEXTURE_ID,
 };
 use aether_capabilities::text::{
     DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult,
@@ -50,10 +50,13 @@ use aether_kinds::{
     CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, DropComponent, DropResult,
     FrameCheck, FrameCheckResult, FrameRect, FrameReduction, ListComponents, ListComponentsResult,
     LoadComponent, LoadResult, NamedMail, Ping, QuadScale, QuadSpace, ReplaceComponent,
-    ReplaceResult,
+    ReplaceResult, SimilarityCheck,
 };
 use aether_math::{Mat4, Rgb, Rgba, Vec3};
 use aether_substrate::render as substrate_render;
+use aether_substrate::render::{
+    QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD,
+};
 use aether_substrate_bundle::test_bench::{
     ArtifactGuard, BenchOp, TestBench,
     test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},

@@ -7,8 +7,8 @@
 #![allow(clippy::wildcard_imports)]
 
 //! Wire kinds for the world plane stack — the `aether.kit.world.*` mail a
-//! peer sends [`WorldView`] to write chunks, paint cells, register regions,
-//! or load a serialized world.
+//! peer sends [`WorldView`] to write chunks, paint cells or compact vector
+//! stamps, register regions, or load a serialized world.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -143,6 +143,77 @@ impl SetCellPoints {
             z: self.z,
         }
     }
+}
+
+/// A point on the world's XZ plane, expressed in octimeters.
+///
+/// Keeping the axes and unit named in the wire vocabulary prevents callers
+/// from having to infer whether a positional pair is `[x, z]`, `[z, x]`, or
+/// measured in cells rather than octimeters.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorldPoint {
+    pub x_octimeters: i32,
+    pub z_octimeters: i32,
+}
+
+impl WorldPoint {
+    #[must_use]
+    pub const fn new(x_octimeters: i32, z_octimeters: i32) -> Self {
+        Self {
+            x_octimeters,
+            z_octimeters,
+        }
+    }
+}
+
+/// Maximum number of vertices accepted by one polygon stamp.
+pub const MAX_STAMP_VERTICES: usize = 1024;
+/// Maximum raster extent of one stamp along either axis, in subcells.
+pub const MAX_STAMP_EDGE_SUBCELLS: usize = 4096;
+/// Maximum total raster area allocated for one stamp, in subcells.
+pub const MAX_STAMP_SUBCELLS: usize = 1_048_576;
+/// Maximum estimated scanline work accepted by one stamp. The estimate
+/// includes edge tests, intersection sorting, and interval-to-subcell visits.
+pub const MAX_STAMP_RASTER_WORK: usize = 33_554_432;
+
+/// `aether.kit.world.stamp_polygon` — rasterize a polygon directly into the
+/// scalar overlay coverage plane. `points` is a [`WorldPoint`] vertex ring;
+/// concave rings use even-odd fill. `material` is a raw [`Material`] byte.
+/// Fewer than three points, more than [`MAX_STAMP_VERTICES`] points, a
+/// degenerate or oversized ring, or `Material::Void` paints nothing. Across
+/// all stamp kinds, equal materials max-compose coverage; a different
+/// material replaces the mask of each cell it reaches in painter order.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.world.stamp_polygon")]
+pub struct StampPolygon {
+    pub points: Vec<WorldPoint>,
+    pub material: u8,
+}
+
+/// `aether.kit.world.stamp_disc` — rasterize a compact disc description into
+/// the scalar overlay coverage plane. `center` is a [`WorldPoint`],
+/// `radius_octimeters` is center-to-edge distance, and `material` is a raw
+/// [`Material`] byte. A zero radius, oversized raster, or `Material::Void`
+/// paints nothing.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.world.stamp_disc")]
+pub struct StampDisc {
+    pub center: WorldPoint,
+    pub radius_octimeters: u32,
+    pub material: u8,
+}
+
+/// `aether.kit.world.stamp_hexagon` — rasterize a flat-top regular hexagon
+/// into the scalar overlay coverage plane. `center` is a [`WorldPoint`],
+/// `radius_octimeters` is center-to-vertex distance, and `material` is a raw
+/// [`Material`] byte. A zero radius, oversized raster, or `Material::Void`
+/// paints nothing.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.world.stamp_hexagon")]
+pub struct StampHexagon {
+    pub center: WorldPoint,
+    pub radius_octimeters: u32,
+    pub material: u8,
 }
 
 /// `aether.kit.world.set_cell_heights` — stamp one cell's `SUB × SUB` height

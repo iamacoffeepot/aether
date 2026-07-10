@@ -5,15 +5,15 @@
 //! The single-line text field (issue 2660).
 //!
 //! Committed text (`TextInput`, already layout- and IME-resolved) inserts at
-//! the caret; the editing keys the substrate emits scancodes for — Backspace,
-//! Left, Right, Enter — move the caret or commit; an in-flight IME composition
-//! (`ImePreedit`) renders as a trailing underlined span. The caret is a
+//! the caret. `TextFieldWidget` currently handles Backspace, Left, Right, and
+//! Enter to move the caret or commit; an in-flight IME composition (`ImePreedit`)
+//! renders as a trailing underlined span. The caret is a
 //! byte-offset into the string and every move lands on a `char` boundary, so a
 //! multi-byte character is never split. There is no selection in v1.
 //!
-//! Home / End are not handled: the substrate's `keycode` space has no
-//! `KEY_HOME` / `KEY_END` scancode yet (only Backspace / arrows / Enter /
-//! Tab), so those edits await the keycodes landing.
+//! The chassis keycode vocabulary also includes Delete, Home, End, Page Up,
+//! and Page Down. `TextFieldWidget` does not yet implement behavior for those
+//! keys.
 
 use alloc::string::String;
 use alloc::vec::Vec;

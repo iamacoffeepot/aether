@@ -62,6 +62,11 @@ pub(super) fn map_winit_keycode(k: KeyCode) -> Option<u32> {
         KeyCode::ControlRight => keycode::KEY_CTRL_RIGHT,
         KeyCode::AltLeft => keycode::KEY_ALT_LEFT,
         KeyCode::AltRight => keycode::KEY_ALT_RIGHT,
+        KeyCode::Delete => keycode::KEY_DELETE,
+        KeyCode::Home => keycode::KEY_HOME,
+        KeyCode::End => keycode::KEY_END,
+        KeyCode::PageUp => keycode::KEY_PAGE_UP,
+        KeyCode::PageDown => keycode::KEY_PAGE_DOWN,
         _ => return None,
     })
 }
@@ -300,6 +305,24 @@ mod tests {
             map_winit_keycode(KeyCode::Backquote),
             Some(keycode::KEY_BACKQUOTE)
         );
+    }
+
+    // Tripwire: the five text-editing navigation keys must translate to
+    // their paired stable `aether_kinds::keycode` constant — the desktop
+    // chassis's sole bridge from winit's unstable `KeyCode` discriminants
+    // onto the wire.
+    #[test]
+    fn map_winit_keycode_covers_editing_navigation_keys() {
+        let cases = [
+            (KeyCode::Delete, keycode::KEY_DELETE),
+            (KeyCode::Home, keycode::KEY_HOME),
+            (KeyCode::End, keycode::KEY_END),
+            (KeyCode::PageUp, keycode::KEY_PAGE_UP),
+            (KeyCode::PageDown, keycode::KEY_PAGE_DOWN),
+        ];
+        for (winit_code, expected) in cases {
+            assert_eq!(map_winit_keycode(winit_code), Some(expected));
+        }
     }
 
     #[test]

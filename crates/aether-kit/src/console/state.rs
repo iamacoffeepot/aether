@@ -3,6 +3,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use aether_data::MailboxId;
+use aether_math::Rgba;
 
 use super::markdown::{MarkdownLine, format_visible_history};
 use super::{ConsoleCommandInvoked, ConsoleConfig, ConsoleTheme};
@@ -92,7 +93,7 @@ impl ConsoleState {
     }
 
     #[must_use]
-    pub fn theme_color(theme: &ConsoleTheme, style: LineStyle) -> [f32; 4] {
+    pub fn theme_color(theme: &ConsoleTheme, style: LineStyle) -> Rgba {
         match style {
             LineStyle::Input => theme.input_color,
             LineStyle::Output => theme.output_color,

@@ -147,7 +147,7 @@ fn emit_clip_gap_walls(
     styles: &StyleTable,
     tris: &mut Vec<DrawTriangle>,
 ) {
-    let mut color: Option<[f32; 3]> = None;
+    let mut color: Option<Rgb> = None;
     for axis in 0..2 {
         for (fa, sa) in fragments {
             let Some((line, false)) = sa[axis] else {
@@ -462,7 +462,7 @@ fn emit_mixed_window(
                 x: wx,
                 y,
                 z: wz,
-                color: Rgb::new(color[0], color[1], color[2]),
+                color,
             }
         };
         for poly in label_window_polys(case, connected) {
