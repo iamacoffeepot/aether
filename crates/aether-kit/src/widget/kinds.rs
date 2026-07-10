@@ -397,6 +397,10 @@ pub enum WidgetKind {
     /// The actor owns its offset and recursively routes wheel residuals.
     /// Appended to preserve every established wire discriminant above.
     Scroll,
+    /// A fixed-row virtual list — `config` decodes as [`VirtualListConfig`].
+    /// Appended after `Scroll` to preserve every established wire discriminant
+    /// above.
+    VirtualList,
 }
 
 impl WidgetKind {
@@ -424,6 +428,7 @@ impl WidgetKind {
             Self::TextField => aether_data::mailbox_id_from_name("aether.kit.widget.text_field").0,
             Self::TextArea => aether_data::mailbox_id_from_name("aether.kit.widget.text_area").0,
             Self::Button => aether_data::mailbox_id_from_name("aether.kit.widget.button").0,
+            Self::VirtualList => aether_data::mailbox_id_from_name("aether.kit.widget.virtual_list").0,
             Self::Composite | Self::Scroll | Self::BehaviorHost => return None,
         };
         Some(tag)
@@ -643,6 +648,20 @@ pub struct RadioConfig {
     pub state: WidgetControlState,
 }
 
+/// `aether.kit.widget.virtual_list.config` — a fixed-row viewport over a
+/// potentially large item vector. The panel fixes the viewport height from
+/// `visible_row_count`; the actor realizes only that bounded row window.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.kit.widget.virtual_list.config")]
+pub struct VirtualListConfig {
+    pub items: Vec<String>,
+    pub initial_selected_index: u32,
+    pub visible_row_count: u32,
+    pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
+}
+
 /// `aether.kit.widget.button.config` — a momentary push button showing
 /// `label`, firing [`ButtonClicked`] on a press-then-release-inside.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
@@ -739,6 +758,14 @@ pub struct TextCommitted {
 #[kind(name = "aether.kit.widget.radio.selected")]
 pub struct RadioSelected {
     pub index: u32,
+}
+
+/// `aether.kit.widget.virtual_list.selected` — a virtual list's changed
+/// selection, attributed by the parent from the sending child's mailbox.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.virtual_list.selected")]
+pub struct VirtualListSelected {
+    pub selected_index: u32,
 }
 
 /// `aether.kit.widget.button.clicked` — a button's value-up event, fired once
@@ -862,10 +889,12 @@ mod tests {
         let image = wire::to_vec(&WidgetKind::Image).expect("encode Image");
         let text_area = wire::to_vec(&WidgetKind::TextArea).expect("encode TextArea");
         let scroll = wire::to_vec(&WidgetKind::Scroll).expect("encode Scroll");
+        let virtual_list = wire::to_vec(&WidgetKind::VirtualList).expect("encode VirtualList");
         assert_eq!(behavior_host.as_slice(), 6_u32.to_le_bytes());
         assert_eq!(image.as_slice(), 7_u32.to_le_bytes());
         assert_eq!(text_area.as_slice(), 8_u32.to_le_bytes());
         assert_eq!(scroll.as_slice(), 9_u32.to_le_bytes());
+        assert_eq!(virtual_list.as_slice(), 10_u32.to_le_bytes());
     }
 
     #[test]

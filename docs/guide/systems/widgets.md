@@ -1,8 +1,8 @@
 # The widget set & focus model
 
 `aether-kit` ships a set of guest-side widgets — a slider, a text field, a
-multiline text area, a radio group, a button, a label, and an image — as ordinary
-`#[actor(instanced)]` types.
+multiline text area, a radio group, a fixed-row virtual list, a button, a label,
+and an image — as ordinary `#[actor(instanced)]` types.
 A panel root spawns them as inline children (ADR-0114) and drives them entirely
 by mail, so composing an editor panel is a matter of laying out widgets and
 translating their value events, never re-deriving hit rects, focus, or per-row
@@ -26,9 +26,9 @@ recorded at spawn, so a widget's identity is its inline subname and nothing a
 widget sends can misreport it.
 
 - **Config, down.** One `Config` kind per widget — `SliderConfig`,
-  `TextFieldConfig`, `TextAreaConfig`, `RadioConfig`, `ButtonConfig`,
-  `LabelConfig`, `ImageConfig` — each embedding a `theme: Theme`. The config is
-  both the value
+  `TextFieldConfig`, `TextAreaConfig`, `RadioConfig`, `VirtualListConfig`,
+  `ButtonConfig`, `LabelConfig`, `ImageConfig` — each embedding a
+  `theme: Theme`. The config is both the value
   `spawn_inline_child::<W>(subname, &config)` boots the widget with and a
   re-sendable mail: send a widget its config kind again to reconfigure it in
   place (a slider's range, a field's cap, a button's label).
@@ -50,19 +50,38 @@ widget sends can misreport it.
   value; a changed config or state mail emits source-attributed
   `WidgetStateChanged` so panel routing cannot drift. Hidden widgets keep their
   slot and answer `Collect` with an empty `WidgetDrawList`; disabled widgets
-  draw muted but leave input routing; read-only Slider, Radio, TextField, and
-  TextArea remain focusable but reject mutation. Button and Label ignore
-  read-only and validation.
+  draw muted but leave input routing; read-only Slider, Radio, TextField,
+  TextArea, and VirtualList remain focusable but reject mutation. Button and
+  Label ignore read-only and validation.
 - **Interaction, down.** The root sends `FocusGained` / `FocusLost` and
   `HoverGained` / `HoverLost`. Hover comes from explicit edges, not from a child
   inferring absence from raw motion. Pressed and hover select an exclusive fill
   (Disabled → Pressed → Hover → Normal); focus and validation are separate
   outlines, so both remain visible together.
 - **Value, up.** `SliderChanged { value, committed }`, `TextCommitted { text }`,
-  `RadioSelected { index }`, and `ButtonClicked` flow to the parent through
-  `ctx.parent()`. A slider streams `committed: false` values through a drag and
-  a final `committed: true` on release, so a consumer previews the drag and
-  commits the expensive work once.
+  `RadioSelected { index }`, `VirtualListSelected { selected_index }`, and
+  `ButtonClicked` flow to the parent through `ctx.parent()`. A slider streams
+  `committed: false` values through a drag and a final `committed: true` on
+  release, so a consumer previews the drag and commits the expensive work
+  once.
+
+## Fixed-row virtual lists
+
+`VirtualListConfig { items, initial_selected_index, visible_row_count, theme,
+state }` retains the complete string vector while realizing at most
+`visible_row_count` rows. The panel fixes the slot height at
+`theme.row_height * visible_row_count` and clips the slot to that viewport;
+an empty item vector or zero-row viewport is not pointer- or focus-eligible.
+This bounded realization is the intended path for hundreds or thousands of
+uniform-height choices.
+
+Up and Down move selection by one. PageUp and PageDown move by the configured
+nonzero visible-row count. Movement clamps at the item-vector ends and shifts
+the realized window only enough to reveal the selected row. A click divides
+the assigned frame height by the number of rows actually realized, so a short
+list fills its viewport and the frame's bottom edge remains exclusive. Hidden
+lists answer every `Collect` with an empty draw list; disabled and read-only
+lists reject both pointer and keyboard selection changes.
 
 ## Image widget
 

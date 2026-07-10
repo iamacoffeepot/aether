@@ -45,7 +45,7 @@ use aether_capabilities::fs::NamespaceRoots;
 use aether_capabilities::render::{DrawTexturedQuads, WHITE_TEXTURE_ID};
 use aether_capabilities::text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
 use aether_data::{Kind, mailbox_id_from_path};
-use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_RIGHT, KEY_TAB, KEY_UP};
+use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_PAGE_DOWN, KEY_RIGHT, KEY_TAB, KEY_UP};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
     CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, FrameCheck, FrameCheckResult, FrameRect,
@@ -54,8 +54,8 @@ use aether_kinds::{
 };
 use aether_kit::{
     ButtonConfig, LabelConfig, PanelConfig, ScrollConfig, ScrollExtent, ScrollOffset, SetTheme, SetWidgetState,
-    SliderConfig, TextAreaConfig, Theme, ThemeState, WidgetChildSpec, WidgetConfig, WidgetControlState, WidgetDrawItem,
-    WidgetKind, WidgetValidation,
+    SliderConfig, TextAreaConfig, Theme, ThemeState, VirtualListConfig, WidgetChildSpec, WidgetConfig,
+    WidgetControlState, WidgetDrawItem, WidgetKind, WidgetValidation,
 };
 use aether_math::Rgba;
 use aether_substrate_bundle::test_bench::{
@@ -342,6 +342,23 @@ fn scroll_child(
     }
 }
 
+fn virtual_list_child(subname: &str, state: WidgetControlState) -> WidgetChildSpec {
+    WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::VirtualList,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: VirtualListConfig {
+            items: (0..200).map(|index| format!("{index:03}")).collect(),
+            initial_selected_index: 0,
+            visible_row_count: 5,
+            theme: Theme::DEFAULT,
+            state,
+        }
+        .encode_into_bytes(),
+    }
+}
+
 fn control_state_children() -> Vec<WidgetChildSpec> {
     let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
@@ -366,6 +383,61 @@ fn solid_for<'a>(snapshot: &'a [DrawTexturedQuads], clip: &ClipRect) -> &'a Draw
         .iter()
         .find(|batch| batch.texture_id == WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(clip))
         .unwrap_or_else(|| panic!("missing solid batch for {clip:?}; snapshot: {snapshot:?}"))
+}
+
+fn virtual_list_clip() -> ClipRect {
+    ClipRect { x: PANEL_X, y: PANEL_Y, width: PANEL_WIDTH, height: ROW_HEIGHT * 5.0 }
+}
+
+fn assert_virtual_list_rows(
+    snapshot: &[DrawTexturedQuads],
+    selected_row_offset: usize,
+    selected_tint: Rgba,
+    outline_quad_count: usize,
+) {
+    let clip = virtual_list_clip();
+    let batch = solid_for(snapshot, &clip);
+    assert_eq!(
+        batch.quads.len(),
+        5 + outline_quad_count,
+        "five realized row quads plus the requested outlines only; snapshot: {snapshot:?}",
+    );
+    for (row_offset, quad) in batch.quads[..5].iter().enumerate() {
+        assert_eq!(quad.x, PANEL_X);
+        assert_eq!(quad.y, PANEL_Y + row_offset as f32 * ROW_HEIGHT);
+        assert_eq!(quad.width, PANEL_WIDTH);
+        assert_eq!(quad.height, ROW_HEIGHT);
+        let expected_tint =
+            if row_offset == selected_row_offset { selected_tint } else { Theme::DEFAULT.surface_raised };
+        assert_eq!(quad.tint, expected_tint, "row offset {row_offset} has the wrong selection/state fill");
+    }
+}
+
+fn assert_five_virtual_list_glyph_rows(snapshot: &[DrawTexturedQuads]) {
+    let clip = virtual_list_clip();
+    let glyph_quads: Vec<_> = snapshot
+        .iter()
+        .filter(|batch| batch.texture_id != WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(&clip))
+        .flat_map(|batch| &batch.quads)
+        .collect();
+    assert_eq!(glyph_quads.len(), 15, "five three-digit labels, and no off-window labels, should be resident");
+    for row_offset in 0..5usize {
+        let row_top = PANEL_Y + row_offset as f32 * ROW_HEIGHT;
+        let row_bottom = row_top + ROW_HEIGHT;
+        assert!(
+            glyph_quads.iter().any(|quad| quad.y >= row_top && quad.y + quad.height <= row_bottom),
+            "realized row offset {row_offset} should carry resident glyph geometry",
+        );
+    }
+    for quad in glyph_quads {
+        assert!(
+            quad.x >= clip.x
+                && quad.y >= clip.y
+                && quad.x + quad.width <= clip.x + clip.width
+                && quad.y + quad.height <= clip.y + clip.height,
+            "virtual-list glyph {quad:?} should remain inside its exact panel-owned clip {clip:?}",
+        );
+    }
 }
 
 fn assert_initial_control_snapshot(snapshot: &[DrawTexturedQuads], slider_y: f32, hover_y: f32) {
@@ -1799,4 +1871,140 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
     assert_eq!(final_terminals.len(), 3);
     assert_eq!(log_f32(final_terminals[1], "residual_y_pixels"), Some(-20.0),);
     assert_eq!(log_f32(final_terminals[2], "residual_x_pixels"), Some(10.0),);
+}
+
+/// A real panel carrying 200 items must keep the committed overlay bounded to
+/// five fixed rows while paging, tail clamping, shared state overlays, and
+/// hidden absence all remain observable through the current `TestBench` APIs.
+#[test]
+#[allow(clippy::too_many_lines)] // one cohesive bounded-window/state/render acceptance run
+fn virtual_list_bounds_realization_and_renders_selection_state() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = build_bench();
+    boot_panel_with_children(&mut bench, &wasm, vec![virtual_list_child("inventory", WidgetControlState::default())]);
+
+    bench
+        .execute(vec![("initial", BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new()))])
+        .expect("initial virtual-list capture");
+    let initial = bench.committed_overlay_snapshot();
+    assert_virtual_list_rows(&initial, 0, Theme::DEFAULT.accent, 0);
+    assert_five_virtual_list_glyph_rows(&initial);
+
+    let panel = panel_address();
+    let list = child_address("inventory");
+    let warning = WidgetControlState {
+        validation: WidgetValidation::Warning { message: "check selection".to_owned() },
+        ..WidgetControlState::default()
+    };
+    bench
+        .execute(vec![
+            ("focus", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("page", BenchOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
+            (
+                "hover_selected",
+                BenchOp::send_mail(&panel, &MouseMove { x: PANEL_X + 20.0, y: PANEL_Y + ROW_HEIGHT * 4.5 }),
+            ),
+            ("warn", BenchOp::send_mail(&list, &SetWidgetState { state: warning })),
+        ])
+        .expect("page and shared-state session");
+
+    let selected_interior = rect(
+        PANEL_X + BORDER + 1.0,
+        PANEL_Y + ROW_HEIGHT * 4.0 + BORDER + 1.0,
+        PANEL_X + PANEL_WIDTH - BORDER - 1.0,
+        PANEL_Y + ROW_HEIGHT * 5.0 - BORDER - 1.0,
+    );
+    let outside_below =
+        rect(PANEL_X, PANEL_Y + ROW_HEIGHT * 5.0 + 2.0, PANEL_X + PANEL_WIDTH, PANEL_Y + ROW_HEIGHT * 5.0 + 12.0);
+    let paged_verdict = capture(
+        &mut bench,
+        vec![
+            check(FrameReduction::Coverage, selected_interior, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
+            check(FrameReduction::Coverage, outside_below, CLEAR_SRGB, PARTITION_TOLERANCE),
+        ],
+    );
+    assert!(
+        coverage(&paged_verdict.results[0]) > 0.95,
+        "the revealed selected bottom row should raster as a full accent interior",
+    );
+    assert!(
+        coverage(&paged_verdict.results[1]) < 0.02,
+        "no virtual-list row may raster below the fixed five-row viewport",
+    );
+
+    let paged = bench.committed_overlay_snapshot();
+    assert_virtual_list_rows(&paged, 4, Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Hover), 8);
+    assert_five_virtual_list_glyph_rows(&paged);
+    let paged_solids = solid_for(&paged, &virtual_list_clip());
+    assert!(
+        paged_solids.quads[5..9].iter().all(|quad| quad.tint == Theme::DEFAULT.warning),
+        "the outer validation outline must precede focus",
+    );
+    assert!(
+        paged_solids.quads[9..13].iter().all(|quad| quad.tint == Theme::DEFAULT.accent),
+        "the focus outline must remain visible inset after validation",
+    );
+
+    for _ in 0..45 {
+        bench
+            .execute(vec![("tail_page", BenchOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN }))])
+            .expect("page toward virtual-list tail");
+    }
+    let selection_events_before_noop = panel_log_messages(&mut bench)
+        .iter()
+        .filter(|message| message.contains("widget virtual list selected"))
+        .count();
+    bench
+        .execute(vec![
+            ("tail_noop_one", BenchOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
+            ("tail_noop_two", BenchOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
+            ("tail_capture", BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
+        ])
+        .expect("tail clamp and capture");
+    let tail_log = panel_log_messages(&mut bench);
+    let selection_events_after_noop =
+        tail_log.iter().filter(|message| message.contains("widget virtual list selected")).count();
+    assert_eq!(
+        selection_events_after_noop, selection_events_before_noop,
+        "clamped PageDown at the last item must emit no event",
+    );
+    assert!(
+        tail_log.iter().any(|message| {
+            message.contains("widget virtual list selected")
+                && message.contains("widget=inventory")
+                && message.contains("selected_index=199")
+        }),
+        "paging must reach and attribute the final item; log was:\n{}",
+        tail_log.join("\n"),
+    );
+    let tail = bench.committed_overlay_snapshot();
+    assert_virtual_list_rows(&tail, 4, Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Hover), 8);
+    assert_five_virtual_list_glyph_rows(&tail);
+
+    let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };
+    bench
+        .execute(vec![("hide", BenchOp::send_mail(&list, &SetWidgetState { state: hidden }))])
+        .expect("hide virtual list");
+    let hidden_verdict = capture(
+        &mut bench,
+        vec![check(
+            FrameReduction::Coverage,
+            rect(PANEL_X, PANEL_Y, PANEL_X + PANEL_WIDTH, PANEL_Y + ROW_HEIGHT * 5.0),
+            SURFACE_SRGB,
+            PARTITION_TOLERANCE,
+        )],
+    );
+    assert!(
+        coverage(&hidden_verdict.results[0]) < 0.02,
+        "hidden collect should leave only the panel's surface backdrop",
+    );
+    let hidden_snapshot = bench.committed_overlay_snapshot();
+    let clip = virtual_list_clip();
+    assert!(
+        hidden_snapshot.iter().all(|batch| batch.clip.as_ref() != Some(&clip)),
+        "hidden virtual list must contribute no row or glyph batch; snapshot: {hidden_snapshot:?}",
+    );
 }

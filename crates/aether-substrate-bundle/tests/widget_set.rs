@@ -29,15 +29,15 @@ use std::fs;
 
 use aether_actor::Addressable;
 use aether_data::Kind;
-use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_SPACE, KEY_TAB, KEY_UP};
+use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_PAGE_DOWN, KEY_SPACE, KEY_TAB, KEY_UP};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
     Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, Modifiers, MouseButton, MouseButtonRelease, MouseMove,
     TextInput, Tick,
 };
 use aether_kit::{
-    ButtonConfig, PanelConfig, RadioConfig, SetWidgetState, SliderConfig, TextFieldConfig, Theme, WidgetChildSpec,
-    WidgetControlState, WidgetKind,
+    ButtonConfig, PanelConfig, RadioConfig, SetWidgetState, SliderConfig, TextFieldConfig, Theme, VirtualListConfig,
+    WidgetChildSpec, WidgetControlState, WidgetKind,
 };
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 
@@ -324,6 +324,30 @@ fn radio_selected_index(message: &str) -> Option<u32> {
     message.split("index=").nth(1)?.split_whitespace().next()?.parse().ok()
 }
 
+fn virtual_list_selected_index(message: &str) -> Option<u32> {
+    if !message.contains("widget virtual list selected") {
+        return None;
+    }
+    message.split("selected_index=").nth(1)?.split_whitespace().next()?.parse().ok()
+}
+
+fn virtual_list_spec(subname: &str, state: WidgetControlState) -> WidgetChildSpec {
+    WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::VirtualList,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: VirtualListConfig {
+            items: (0..200).map(|index| format!("Row {index:03}")).collect(),
+            initial_selected_index: 0,
+            visible_row_count: 5,
+            theme: Theme::DEFAULT,
+            state,
+        }
+        .encode_into_bytes(),
+    }
+}
+
 /// A panel handed an explicit `children` list stacks exactly those widgets in
 /// the declared order, and that order drives the focus (Tab) cycle — the
 /// declarative-composition path the built-in reference stack can never
@@ -370,6 +394,62 @@ fn panel_stacks_declared_children_in_order() {
         vec!["first".to_owned(), "second".to_owned()],
         "the declared child order must drive both the vertical stack and the Tab \
          focus cycle; committed slider events arrived as {order:?}; log was:\n{joined}",
+    );
+}
+
+/// A five-row virtual viewport over 200 items must page and reveal through the
+/// real panel routing path while read-only and disabled state block both input
+/// lanes. The top-row click after two keyboard changes also proves hit testing
+/// is relative to the realized window rather than the full item vector.
+#[test]
+fn virtual_list_pages_clicks_and_blocks_read_only_disabled_changes() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = TestBench::start_with_size(240, 150).expect("boot");
+    let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
+    load_panel_with(&mut bench, &wasm, vec![virtual_list_spec("inventory", read_only)]);
+
+    let panel = panel_address();
+    let list = child_address("inventory");
+    let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
+    bench
+        .execute(vec![
+            ("spawn", BenchOp::send_mail(&panel, &Tick)),
+            ("focus_read_only", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("blocked_read_only_page", BenchOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
+            ("blocked_read_only_press", BenchOp::send_mail(&panel, &press(30.0, 118.0))),
+            ("blocked_read_only_release", BenchOp::send_mail(&panel, &release(30.0, 118.0))),
+            ("make_mutable", BenchOp::send_mail(&list, &SetWidgetState { state: WidgetControlState::default() })),
+            ("page_to_five", BenchOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
+            ("down_to_six", BenchOp::send_mail(&panel, &Key { code: KEY_DOWN })),
+            ("click_realized_top", BenchOp::send_mail(&panel, &press(30.0, 22.0))),
+            ("release_realized_top", BenchOp::send_mail(&panel, &release(30.0, 22.0))),
+            ("disable", BenchOp::send_mail(&list, &SetWidgetState { state: disabled })),
+            ("blocked_disabled_page", BenchOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
+            ("blocked_disabled_press", BenchOp::send_mail(&panel, &press(30.0, 94.0))),
+            ("blocked_disabled_release", BenchOp::send_mail(&panel, &release(30.0, 94.0))),
+            ("enable", BenchOp::send_mail(&list, &SetWidgetState { state: WidgetControlState::default() })),
+            ("refocus", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("page_to_seven", BenchOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
+        ])
+        .expect("virtual-list state and selection session");
+
+    let log = panel_log_messages(&mut bench);
+    let selected_indices: Vec<u32> = log.iter().filter_map(|message| virtual_list_selected_index(message)).collect();
+    assert_eq!(
+        selected_indices,
+        vec![5, 6, 2, 7],
+        "only allowed actual changes should reach the attributed panel log; log was:\n{}",
+        log.join("\n"),
+    );
+    assert!(
+        log.iter()
+            .filter(|message| message.contains("widget virtual list selected"))
+            .all(|message| message.contains("widget=inventory")),
+        "every virtual-list event must retain source attribution; log was:\n{}",
+        log.join("\n"),
     );
 }
 

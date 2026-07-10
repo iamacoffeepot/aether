@@ -11,6 +11,7 @@
 //! - [`ButtonWidget`] — a momentary push button.
 //! - [`LabelWidget`] — static, non-interactive text.
 //! - [`ImageWidget`] — a static, non-interactive borrowed texture.
+//! - [`VirtualListWidget`] — a fixed-row virtualized item list.
 //!
 //! Each caches its assigned [`WidgetFrame`](crate::widget::WidgetFrame) rect
 //! and its [`Theme`], answers every
@@ -32,6 +33,7 @@ pub mod radio;
 pub mod slider;
 pub mod text_area;
 pub mod text_field;
+pub mod virtual_list;
 
 pub use button::ButtonWidget;
 pub use image::ImageWidget;
@@ -40,6 +42,7 @@ pub use radio::RadioGroupWidget;
 pub use slider::SliderWidget;
 pub use text_area::TextAreaWidget;
 pub use text_field::TextFieldWidget;
+pub use virtual_list::VirtualListWidget;
 
 use alloc::vec::Vec;
 
