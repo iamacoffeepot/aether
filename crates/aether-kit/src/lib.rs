@@ -20,6 +20,9 @@
 //! - [`mesh::MeshViewer`] — loads a `.dsl` / `.obj` mesh file and replays it
 //!   to the render sink, selected by the `aether_kit@aether.kit.mesh`
 //!   export. Its `aether.kit.mesh.load` kind lives in [`mesh`].
+//! - [`mark::MarkBook`] — owns revisioned terrain annotations with stable ids,
+//!   selected by the `aether_kit@aether.kit.mark` export. Its CRUD and
+//!   snapshot vocabulary lives in [`mark`].
 //! - [`world::WorldView`] — meshes the chunked world plane stack into a
 //!   flat-color marching-squares base render, selected by the
 //!   `aether_kit@aether.kit.world` export. The [`world`] module also holds
@@ -58,6 +61,7 @@ extern crate alloc;
 pub mod camera;
 pub mod camera_controller;
 pub mod console;
+pub mod mark;
 pub mod mesh;
 pub mod mover;
 pub mod widget;
@@ -66,6 +70,11 @@ pub mod world;
 pub use console::{
     ConsoleCommandInvoked, ConsoleCommandOutput, ConsoleConfig, ConsoleTheme,
     RegisterConsoleCommand, UnregisterConsoleCommand,
+};
+pub use mark::{
+    Mark, MarkCreate, MarkCreateResult, MarkDelete, MarkDeleteResult, MarkGeometry, MarkGet,
+    MarkGetResult, MarkId, MarkList, MarkListResult, MarkMutationError, MarkRef, MarkUpdate,
+    MarkUpdateResult, SavedMarks,
 };
 pub use mover::MoverTeleport;
 pub use widget::theme::{SetTheme, Theme, WidgetState};
@@ -106,6 +115,7 @@ aether_actor::export!(
     entry = console::ConsoleOverlay,
     camera::CameraComponent,
     camera_controller::CameraController,
+    mark::MarkBook,
     mesh::MeshViewer,
     world::WorldView,
     mover::WorldMover,
@@ -123,6 +133,7 @@ aether_actor::export!(
     entry = console::ConsoleOverlay,
     camera::CameraComponent,
     camera_controller::CameraController,
+    mark::MarkBook,
     mesh::MeshViewer,
     world::WorldView,
     mover::WorldMover,
