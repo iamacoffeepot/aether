@@ -140,6 +140,22 @@ jobs:
         if: steps.resolve.outputs.proceed == 'true'
         run: git fetch origin main:refs/remotes/origin/main
 
+      # The repo's .claude hooks serve concurrent interactive sessions
+      # sharing a clone: SessionStart binds each session into its own
+      # worktree, and the boundary hooks police edits outside it. Inside
+      # CI they are actively harmful — run 29084427000's session was
+      # rebound into a per-session worktree (so the rollup landed outside
+      # $GITHUB_WORKSPACE) and deleted the live transcript tee target as
+      # "untracked scratch in the main checkout" (#2986). The runner is
+      # ephemeral and single-purpose, so strip the hooks from this
+      # checkout COPY; the hooks in the repo itself are untouched and
+      # stay active for interactive sessions.
+      - name: Strip interactive-session hooks from the checkout copy
+        if: steps.resolve.outputs.proceed == 'true'
+        run: |
+          jq 'del(.hooks)' .claude/settings.json > /tmp/settings.json
+          mv /tmp/settings.json .claude/settings.json
+
       - name: Note when the OAuth token secret is absent
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN == ''
         run: |
@@ -179,7 +195,9 @@ jobs:
       # stream-json + the jq renderer make the session watchable LIVE in
       # the Actions log (assistant text + tool names as they happen), and
       # the tee'd JSONL is the durable session transcript, uploaded as an
-      # artifact below (iamacoffeepot/aether#2981). The wait contract is
+      # artifact below (iamacoffeepot/aether#2981). The tee target lives
+      # in /tmp, outside the checkout, so the session can never mistake
+      # it for repo scratch and delete it (#2986). The wait contract is
       # MECHANICAL, not prose: the prompt prescribes a concrete poll loop
       # (sleep + check for the rollup file) because two live runs proved a
       # session will end on a promise with the workflow still in flight.
@@ -198,19 +216,22 @@ jobs:
           THE WAIT CONTRACT (load-bearing — two prior runs died on this): the Workflow tool
           runs in the BACKGROUND. In headless mode your final reply exits the process and
           KILLS the in-flight workflow, so you may not produce a final reply until
-          review-rollup.json exists on disk. While the workflow runs, poll mechanically:
-          run the Bash command 'sleep 60; ls review-rollup.json 2>/dev/null || echo waiting'
+          ${GITHUB_WORKSPACE}/review-rollup.json exists on disk. While the workflow runs, poll
+          mechanically: run the Bash command
+          'sleep 60; ls ${GITHUB_WORKSPACE}/review-rollup.json 2>/dev/null || echo waiting'
           again and again, as many turns as it takes — the completion notification or the
           workflow result will reach you between polls. Polling turns are cheap; an early
-          final reply wastes the whole run.
+          final reply wastes the whole run. The file will never appear on its own — the
+          workflow returns the rollup as a VALUE, and YOU write the file when it does.
           When the workflow returns { rollup, files }, write the returned ROLLUP object as JSON
-          verbatim to review-rollup.json in the repo root (the rollup, not the whole return).
+          verbatim to exactly ${GITHUB_WORKSPACE}/review-rollup.json — that absolute path, not
+          a path relative to your working directory (the rollup, not the whole return).
           Do not edit any source. Print exactly REVIEW-DONE when the file is written." \
             --dangerously-skip-permissions \
             --model claude-sonnet-5 \
             --max-turns 80 \
             --output-format stream-json --verbose \
-            | tee review-session.jsonl \
+            | tee /tmp/review-session.jsonl \
             | jq -rj --unbuffered '
                 if .type == "assistant" then
                   ([.message.content[]? | if .type == "text" then "\n■ " + .text + "\n"
@@ -236,7 +257,13 @@ jobs:
           elif [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
             echo "produced=false" >> "$GITHUB_OUTPUT"
             echo "review ran but produced no rollup — failing loudly. Session's final events:"
-            tail -n 5 review-session.jsonl 2>/dev/null | cut -c1-2000 || echo "(no session transcript)"
+            # An if, not `tail … || echo`: the pipeline's exit status is
+            # cut's, so the || fallback can never fire (#2986).
+            if [ -f /tmp/review-session.jsonl ]; then
+              tail -n 5 /tmp/review-session.jsonl | cut -c1-2000
+            else
+              echo "(no session transcript)"
+            fi
             exit 1
           else
             echo "produced=false" >> "$GITHUB_OUTPUT"
@@ -257,7 +284,7 @@ jobs:
         if: always()
         with:
           name: review-session-transcript
-          path: review-session.jsonl
+          path: /tmp/review-session.jsonl
           if-no-files-found: ignore
 
   post:
