@@ -5,10 +5,6 @@ use aether_data::MailboxId;
 use aether_math::Rgba;
 use serde::{Deserialize, Serialize};
 
-const fn owns_input_by_default() -> bool {
-    true
-}
-
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct ConsoleTheme {
     pub background_color: Rgba,
@@ -108,6 +104,10 @@ impl Default for ConsoleTheme {
 
 fn scaled_color(color: Rgba, rgb_scale: f32, alpha: f32) -> Rgba {
     Rgba::new(color.r * rgb_scale, color.g * rgb_scale, color.b * rgb_scale, alpha)
+}
+
+const fn owns_input_by_default() -> bool {
+    true
 }
 
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]

@@ -53,13 +53,7 @@ fn region(name: &str, target: MailboxId, x_pixels: f32, input_lanes: RegionInput
 }
 
 fn load_probe(bench: &mut TestBench, wasm_path: &Path, name: &str) -> LoadedActor {
-    load_actor(
-        bench,
-        wasm_path,
-        "test.editor_region_probe",
-        name,
-        &EditorRegionProbeConfig { region_name: name.to_owned() },
-    )
+    load_actor(bench, wasm_path, "test.editor_region_probe", name, &EditorRegionProbeConfig { name: name.to_owned() })
 }
 
 fn load_shell(bench: &mut TestBench, wasm_path: &Path, regions: Vec<RegionSpec>) {
@@ -198,12 +192,12 @@ fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
         DrainEditorInputsResult {
             region_name: "focus-a".to_owned(),
             inputs: vec![
-                ObservedEditorInput::KeyPress { key_code: 65 },
+                ObservedEditorInput::KeyPress { code: 65 },
                 ObservedEditorInput::TextInput { text: "a".to_owned() },
                 ObservedEditorInput::Modifiers { shift: false, ctrl: true, alt: false, meta: false },
                 ObservedEditorInput::Modifiers { shift: false, ctrl: false, alt: false, meta: false },
-                ObservedEditorInput::KeyPress { key_code: KEY_TAB },
-                ObservedEditorInput::KeyRelease { key_code: KEY_TAB },
+                ObservedEditorInput::KeyPress { code: KEY_TAB },
+                ObservedEditorInput::KeyRelease { code: KEY_TAB },
             ],
         },
     );
@@ -213,7 +207,7 @@ fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
             region_name: "focus-b".to_owned(),
             inputs: vec![
                 ObservedEditorInput::Modifiers { shift: false, ctrl: false, alt: false, meta: false },
-                ObservedEditorInput::KeyPress { key_code: KEY_BACKQUOTE },
+                ObservedEditorInput::KeyPress { code: KEY_BACKQUOTE },
                 ObservedEditorInput::ImePreedit {
                     text: "composition".to_owned(),
                     cursor_begin: Some(1),

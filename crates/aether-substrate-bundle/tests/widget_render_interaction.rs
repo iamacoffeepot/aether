@@ -249,7 +249,7 @@ fn load_editor_probe(bench: &mut TestBench, wasm_path: &Path) -> LoadedProbe {
                 &LoadComponent {
                     wasm: fs::read(wasm_path).expect("read fixture wasm"),
                     name: Some("region-b".to_owned()),
-                    config: EditorRegionProbeConfig { region_name: "region-b".to_owned() }.encode_into_bytes(),
+                    config: EditorRegionProbeConfig { name: "region-b".to_owned() }.encode_into_bytes(),
                     export: Some("test.editor_region_probe".to_owned()),
                 },
             ),

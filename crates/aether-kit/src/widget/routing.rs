@@ -46,8 +46,8 @@ impl RegionInputLanes {
 impl EditorKeyChord {
     #[must_use]
     pub const fn matches(self, key: Key, modifiers: Modifiers) -> bool {
-        let pressed_code = key.code;
-        self.key_code == pressed_code
+        let key_code = key.code;
+        self.key_code == key_code
             && self.shift == modifiers.shift
             && self.ctrl == modifiers.ctrl
             && self.alt == modifiers.alt

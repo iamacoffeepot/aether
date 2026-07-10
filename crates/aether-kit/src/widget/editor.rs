@@ -3,12 +3,13 @@
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::InputCapability;
 use aether_capabilities::input::InputMailboxExt;
+use aether_data::{Kind, MailboxId};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
 };
 
 use super::EditorConfig;
-use super::routing::{RegionFocusTransition, RegionInputLane, RegionKeyRoute, RegionPointerRoute, Routing};
+use super::routing::{RegionFocusTransition, RegionInputLane, Routing};
 
 /// The sole interactive-input subscriber for a configured set of editor peers.
 pub struct EditorShell {
@@ -25,16 +26,15 @@ impl EditorShell {
         }
     }
 
-    fn forward_pointer<K: aether_data::Kind>(&self, ctx: &mut WasmCtx<'_>, route: RegionPointerRoute, payload: &K) {
-        self.prime_focus(ctx, route.focus);
-        if let Some(target) = route.target {
-            ctx.send_to(target, payload);
-        }
-    }
-
-    fn forward_key<K: aether_data::Kind>(&self, ctx: &mut WasmCtx<'_>, route: RegionKeyRoute, payload: &K) {
-        self.prime_focus(ctx, route.focus);
-        if let Some(target) = route.target {
+    fn forward<K: Kind>(
+        &self,
+        ctx: &mut WasmCtx<'_>,
+        focus: Option<RegionFocusTransition>,
+        target: Option<MailboxId>,
+        payload: &K,
+    ) {
+        self.prime_focus(ctx, focus);
+        if let Some(target) = target {
             ctx.send_to(target, payload);
         }
     }
@@ -67,7 +67,7 @@ impl WasmActor for EditorShell {
     #[handler::single]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         let route = self.routing.pointer_press(press);
-        self.forward_pointer(ctx, route, &press);
+        self.forward(ctx, route.focus, route.target, &press);
     }
 
     #[handler::single]
@@ -94,13 +94,13 @@ impl WasmActor for EditorShell {
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         let route = self.routing.key_press(key);
-        self.forward_key(ctx, route, &key);
+        self.forward(ctx, route.focus, route.target, &key);
     }
 
     #[handler::single]
     fn on_key_release(&mut self, ctx: &mut WasmCtx<'_>, release: KeyRelease) {
         let route = self.routing.key_release(release);
-        self.forward_key(ctx, route, &release);
+        self.forward(ctx, route.focus, route.target, &release);
     }
 
     #[handler::single]

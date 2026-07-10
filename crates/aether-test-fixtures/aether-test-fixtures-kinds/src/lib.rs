@@ -377,7 +377,7 @@ pub const MATRIX_CELL_CHILD_TO_SELF: u32 = 4;
 )]
 #[kind(name = "aether.test_fixtures.editor_region_probe.config")]
 pub struct EditorRegionProbeConfig {
-    pub region_name: String,
+    pub name: String,
 }
 
 /// One raw input observed by an editor-region probe.
@@ -387,8 +387,8 @@ pub enum ObservedEditorInput {
     PointerRelease { button: u32, x_pixels: f32, y_pixels: f32 },
     PointerMotion { x_pixels: f32, y_pixels: f32 },
     Wheel { delta_x_pixels: f32, delta_y_pixels: f32, x_pixels: f32, y_pixels: f32 },
-    KeyPress { key_code: u32 },
-    KeyRelease { key_code: u32 },
+    KeyPress { code: u32 },
+    KeyRelease { code: u32 },
     TextInput { text: String },
     ImePreedit { text: String, cursor_begin: Option<u32>, cursor_end: Option<u32> },
     Modifiers { shift: bool, ctrl: bool, alt: bool, meta: bool },

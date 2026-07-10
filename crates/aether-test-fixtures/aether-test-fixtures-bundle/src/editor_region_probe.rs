@@ -21,7 +21,7 @@ impl WasmActor for EditorRegionProbe {
     const NAMESPACE: &'static str = "test.editor_region_probe";
 
     fn init(config: EditorRegionProbeConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Self { region_name: config.region_name, inputs: Vec::new() })
+        Ok(Self { region_name: config.name, inputs: Vec::new() })
     }
 
     #[handler::single]
@@ -59,12 +59,12 @@ impl WasmActor for EditorRegionProbe {
 
     #[handler::single]
     fn on_key(&mut self, _ctx: &mut WasmCtx<'_>, key: Key) {
-        self.inputs.push(ObservedEditorInput::KeyPress { key_code: key.code });
+        self.inputs.push(ObservedEditorInput::KeyPress { code: key.code });
     }
 
     #[handler::single]
     fn on_key_release(&mut self, _ctx: &mut WasmCtx<'_>, release: KeyRelease) {
-        self.inputs.push(ObservedEditorInput::KeyRelease { key_code: release.code });
+        self.inputs.push(ObservedEditorInput::KeyRelease { code: release.code });
     }
 
     #[handler::single]
