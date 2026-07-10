@@ -117,11 +117,31 @@ jobs:
         if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
         run: npm install -g @anthropic-ai/claude-code
 
+      # Mark the checkout trusted so settings.json permissions aren't
+      # ignored with a warning (harmless under skip-permissions, but it
+      # removes a variable from the experiment).
+      - name: Pre-trust the workspace for headless Claude
+        if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        run: |
+          printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$PWD" > "$HOME/.claude.json"
+
+      # Auth in isolation, before any MCP is involved: a one-line prompt
+      # with no tools. If this fails, the OAuth token itself is the
+      # problem (bad secret value or unsupported auth path) — not the
+      # harness, not .mcp.json.
+      - name: "Stage 2a — auth probe (no MCP)"
+        if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        run: |
+          claude -p "Reply with exactly: AUTH-OK" \
+            --model claude-sonnet-5 \
+            --max-turns 1 | tee /tmp/auth.log
+          grep -q "AUTH-OK" /tmp/auth.log
+
       # Stage 2 — drive. Headless Claude Code, subscription OAuth auth,
       # project .mcp.json as the tool source. --dangerously-skip-permissions
       # is the ephemeral-runner pattern: the box holds nothing but this
       # job's tokens and dies at job end.
-      - name: "Stage 2 — headless Claude drives a headless substrate over MCP"
+      - name: "Stage 2b — headless Claude drives a headless substrate over MCP"
         if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
         run: |
           claude -p "$(cat .github/spike/dogfood-drive-prompt.md)" \
