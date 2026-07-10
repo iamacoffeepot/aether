@@ -8,15 +8,17 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::TextCapability;
-use aether_capabilities::text::{FontMetricsRequest, FontMetricsResult, FontRef};
+use aether_capabilities::text::FontMetricsResult;
 use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP};
 use aether_kinds::{
     CachedFontMetrics, ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput, mouse_button,
 };
 
-use crate::widget::set::{push_control_outlines, quad, reply_if_hidden, text_origin_y};
-use crate::widget::state::{InteractionState, emit_state_changed};
+use crate::widget::set::{
+    apply_text_control_state, apply_text_theme, pump_text_font_metrics, push_control_outlines, quad, release_text_drag,
+    reply_if_hidden, text_control_theme_state, text_origin_y, update_text_modifiers,
+};
+use crate::widget::state::InteractionState;
 use crate::widget::text_edit::{EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEditState, TextSpan};
 use crate::widget::theme::{SetTheme, Theme, ThemeState};
 use crate::widget::{
@@ -97,29 +99,15 @@ impl TextAreaWidget {
     }
 
     fn theme_state(&self) -> ThemeState {
-        if self.state.focused() {
-            self.state.supporting_theme_state(self.dragging)
-        } else {
-            self.state.theme_state(self.dragging)
-        }
+        text_control_theme_state(&self.state, self.dragging)
     }
 
     fn apply_control_state(&mut self, ctx: &WasmCtx<'_>, next: WidgetControlState) {
-        if self.state.replace(next) {
-            if !self.state.can_mutate() {
-                self.edit.clear_composition();
-            }
-            if !self.state.is_available() {
-                self.dragging = false;
-            }
-            emit_state_changed(ctx, &self.state);
-        }
+        apply_text_control_state(ctx, &mut self.state, &mut self.edit, &mut self.dragging, next);
     }
 
     fn pump_font_metrics(&mut self, ctx: &mut WasmCtx<'_>) {
-        if let Some(id) = self.font_metrics.take_pending_request() {
-            ctx.actor::<TextCapability>().send(&FontMetricsRequest { font: FontRef::Id(id) });
-        }
+        pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
     fn reconcile_scroll(&mut self) {
@@ -376,9 +364,7 @@ impl WasmActor for TextAreaWidget {
 
     #[handler::single]
     fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        self.font_metrics.set_desired(set.theme.font_id);
-        self.theme = set.theme;
-        self.pump_font_metrics(ctx);
+        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
     }
 
     #[handler::single]
@@ -487,16 +473,12 @@ impl WasmActor for TextAreaWidget {
 
     #[handler::single]
     fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
-        if release.button == mouse_button::LEFT {
-            self.dragging = false;
-        }
+        release_text_drag(&mut self.dragging, release);
     }
 
     #[handler::single]
     fn on_modifiers(&mut self, _ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
-        if self.state.is_available() {
-            self.modifiers = modifiers;
-        }
+        update_text_modifiers(&self.state, &mut self.modifiers, modifiers);
     }
 
     #[handler::single]

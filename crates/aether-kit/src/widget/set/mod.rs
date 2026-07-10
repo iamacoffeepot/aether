@@ -44,11 +44,61 @@ pub use text_field::TextFieldWidget;
 use alloc::vec::Vec;
 
 use aether_actor::WasmCtx;
+use aether_capabilities::TextCapability;
+use aether_capabilities::text::{FontMetricsRequest, FontRef};
+use aether_kinds::{Modifiers, MouseButtonRelease, mouse_button};
 use aether_math::Rgba;
 
-use crate::widget::state::InteractionState;
-use crate::widget::theme::Theme;
-use crate::widget::{WidgetDrawItem, WidgetDrawList};
+use crate::widget::state::{InteractionState, emit_state_changed};
+use crate::widget::text_edit::{FontMetricsAdapter, TextEditState};
+use crate::widget::theme::{Theme, ThemeState};
+use crate::widget::{WidgetControlState, WidgetDrawItem, WidgetDrawList};
+
+fn text_control_theme_state(state: &InteractionState, dragging: bool) -> ThemeState {
+    if state.focused() { state.supporting_theme_state(dragging) } else { state.theme_state(dragging) }
+}
+
+fn apply_text_control_state(
+    ctx: &WasmCtx<'_>,
+    state: &mut InteractionState,
+    edit: &mut TextEditState,
+    dragging: &mut bool,
+    next: WidgetControlState,
+) {
+    if state.replace(next) {
+        if !state.can_mutate() {
+            edit.clear_composition();
+        }
+        if !state.is_available() {
+            *dragging = false;
+        }
+        emit_state_changed(ctx, state);
+    }
+}
+
+fn pump_text_font_metrics(ctx: &mut WasmCtx<'_>, font_metrics: &mut FontMetricsAdapter) {
+    if let Some(id) = font_metrics.take_pending_request() {
+        ctx.actor::<TextCapability>().send(&FontMetricsRequest { font: FontRef::Id(id) });
+    }
+}
+
+fn apply_text_theme(ctx: &mut WasmCtx<'_>, font_metrics: &mut FontMetricsAdapter, theme: &mut Theme, next: Theme) {
+    font_metrics.set_desired(next.font_id);
+    *theme = next;
+    pump_text_font_metrics(ctx, font_metrics);
+}
+
+fn release_text_drag(dragging: &mut bool, release: MouseButtonRelease) {
+    if release.button == mouse_button::LEFT {
+        *dragging = false;
+    }
+}
+
+fn update_text_modifiers(state: &InteractionState, modifiers: &mut Modifiers, next: Modifiers) {
+    if state.is_available() {
+        *modifiers = next;
+    }
+}
 
 /// Discharge the hidden-widget branch of the always-reply compositing
 /// protocol. Hidden controls retain their slot, so every `Collect` must still
