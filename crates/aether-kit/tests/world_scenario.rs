@@ -17,11 +17,17 @@ use aether_actor::Addressable;
 use aether_capabilities::render::ViewProjection;
 use aether_data::Kind;
 use aether_kinds::{LoadComponent, LoadResult, NamedMail, Render};
-use aether_kit::world::{CELLS_PER_CHUNK_AREA, Material, SetChunk, StampHexagon, WorldPoint};
+use aether_kit::mark::{MarkId, MarkRef};
+use aether_kit::world::{
+    ApplyBrush, AutomatonRule, BrushParameters, CELLS_PER_CHUNK_AREA, Material, OperatorBudget,
+    OperatorCell, OperatorChunk, OperatorError, OperatorResult, OperatorStats, RunAutomaton,
+    SetChunk, StampHexagon, WorldPoint,
+};
 use aether_math::{Mat4, Vec3};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{
-    Image, background_top_left, bounding_box, centroid, coverage, decode_png,
+    Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png,
+    target_color_stats,
 };
 
 const COMPONENT_NAME: &str = "world";
@@ -30,6 +36,32 @@ const HEIGHT: u32 = 128;
 const FRAME_CENTER: f32 = 64.0;
 const WIDTH_F32: f32 = 128.0;
 const HEIGHT_F32: f32 = 128.0;
+const STONE_SRGB: [u8; 3] = [140, 140, 148];
+const GRASS_SRGB: [u8; 3] = [77, 140, 64];
+const SAND_SRGB: [u8; 3] = [217, 199, 140];
+const MATERIAL_COLOR_TOLERANCE: u8 = 20;
+
+fn assert_material_color(image: &Image, bounds: Rect, target: [u8; 3], label: &str) {
+    let stats = target_color_stats(image, target, MATERIAL_COLOR_TOLERANCE, Some(bounds));
+    assert!(
+        stats.matching >= 16 && stats.fraction > 0.10,
+        "{label} should contain a bounded region of its requested material color; got {stats:?}",
+    );
+}
+
+fn unsafe_extent_rejection(source: MarkRef, operator: &str) -> OperatorResult {
+    OperatorResult::Failed {
+        source,
+        error: OperatorError::InvalidParameters {
+            reason: format!("{operator} extent exceeds the mesher's apron-safe coordinate range"),
+        },
+        stats: OperatorStats {
+            steps_run: 0,
+            subcells_written: 0,
+            touched_chunks: Vec::new(),
+        },
+    }
+}
 
 fn component_address() -> String {
     format!(
@@ -200,6 +232,316 @@ fn stamp_hexagon_renders_a_smooth_centered_silhouette() {
     assert!(
         drawn_width > 85 && drawn_height > 70,
         "hexagon silhouette should have broad smooth extents; got {drawn_width}x{drawn_height}",
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // one cohesive brush + automaton + partial-budget acceptance proof
+fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let mut bench = TestBench::start_with_size(WIDTH, HEIGHT).expect("boot");
+    load_world(&mut bench, &wasm_path);
+    let world = component_address();
+    let edge_brush_source = MarkRef {
+        id: MarkId::new(14),
+        revision: 1,
+    };
+    let huge_automaton_source = MarkRef {
+        id: MarkId::new(15),
+        revision: 1,
+    };
+    let rejected = bench
+        .execute(vec![
+            (
+                "edge_brush",
+                BenchOp::send_and_await(
+                    world.as_str(),
+                    &ApplyBrush {
+                        source: edge_brush_source,
+                        path: vec![WorldPoint::new(i32::MAX - 16, 128)],
+                        brush: BrushParameters {
+                            radius_octimeters: 16,
+                            spacing_octimeters: 16,
+                            material: Material::Stone.to_u8(),
+                        },
+                        budget: OperatorBudget {
+                            max_steps: 1,
+                            max_subcells: 1_000,
+                        },
+                    },
+                ),
+            ),
+            (
+                "huge_automaton",
+                BenchOp::send_and_await(
+                    world.as_str(),
+                    &RunAutomaton {
+                        source: huge_automaton_source,
+                        seed: OperatorCell {
+                            cell_x: 10_000_000,
+                            cell_z: 0,
+                        },
+                        rule: AutomatonRule::Grow {
+                            material: Material::Grass.to_u8(),
+                            generations: 0,
+                        },
+                        budget: OperatorBudget {
+                            max_steps: 1,
+                            max_subcells: 256,
+                        },
+                    },
+                ),
+            ),
+        ])
+        .expect("reject unsafe operator extents without trapping");
+    assert_eq!(
+        rejected
+            .reply::<OperatorResult>("edge_brush")
+            .expect("decode edge brush rejection"),
+        unsafe_extent_rejection(edge_brush_source, "brush"),
+    );
+    assert_eq!(
+        rejected
+            .reply::<OperatorResult>("huge_automaton")
+            .expect("decode huge automaton rejection"),
+        unsafe_extent_rejection(huge_automaton_source, "automaton"),
+    );
+
+    // A valid awaited request on the same actor proves both invalid handlers
+    // returned normally; its exact fresh-world stats and render prove neither
+    // rejection leaked mutation into the usable coordinate domain.
+    let brush_source = MarkRef {
+        id: MarkId::new(11),
+        revision: 4,
+    };
+
+    let brushed = bench
+        .execute(vec![(
+            "brush",
+            BenchOp::send_and_await(
+                world.as_str(),
+                &ApplyBrush {
+                    source: brush_source,
+                    path: vec![WorldPoint::new(576, 1088), WorldPoint::new(1088, 1088)],
+                    brush: BrushParameters {
+                        radius_octimeters: 64,
+                        spacing_octimeters: 256,
+                        material: Material::Stone.to_u8(),
+                    },
+                    budget: OperatorBudget {
+                        max_steps: 3,
+                        max_subcells: 180,
+                    },
+                },
+            ),
+        )])
+        .expect("apply reference brush");
+    assert_eq!(
+        brushed
+            .reply::<OperatorResult>("brush")
+            .expect("decode brush result"),
+        OperatorResult::Applied {
+            source: brush_source,
+            stats: OperatorStats {
+                steps_run: 3,
+                subcells_written: 180,
+                touched_chunks: vec![OperatorChunk {
+                    chunk_x: 0,
+                    chunk_z: 0,
+                }],
+            },
+        },
+    );
+
+    let brush_capture = bench
+        .execute(vec![(
+            "brush_capture",
+            BenchOp::capture_with_mails(
+                vec![
+                    envelope("aether.render", &top_down_view_projection(3.25, 4.25, 1.5)),
+                    envelope(world.as_str(), &Render),
+                ],
+                Vec::new(),
+            ),
+        )])
+        .expect("capture brushed world");
+    let brush_image = decode_png(
+        brush_capture
+            .captured("brush_capture")
+            .expect("brush capture bytes"),
+    )
+    .expect("decode brush capture");
+    let brush_background = background_top_left(&brush_image);
+    let brush_fraction = coverage(&brush_image, brush_background, 5);
+    assert!(
+        (0.03..0.15).contains(&brush_fraction),
+        "three bounded brush discs should render as a visible path; got {brush_fraction}",
+    );
+    let brush_bounds = bounding_box(&brush_image, brush_background, 5)
+        .expect("brush rendered bounds for material-color check");
+    assert_material_color(&brush_image, brush_bounds, STONE_SRGB, "stone brush");
+
+    let automaton_source = MarkRef {
+        id: MarkId::new(12),
+        revision: 2,
+    };
+    let grown = bench
+        .execute(vec![(
+            "automaton",
+            BenchOp::send_and_await(
+                world.as_str(),
+                &RunAutomaton {
+                    source: automaton_source,
+                    seed: OperatorCell {
+                        cell_x: 8,
+                        cell_z: 8,
+                    },
+                    rule: AutomatonRule::Grow {
+                        material: Material::Grass.to_u8(),
+                        generations: 1,
+                    },
+                    budget: OperatorBudget {
+                        max_steps: 5,
+                        max_subcells: 1_280,
+                    },
+                },
+            ),
+        )])
+        .expect("run reference automaton");
+    assert_eq!(
+        grown
+            .reply::<OperatorResult>("automaton")
+            .expect("decode automaton result"),
+        OperatorResult::Applied {
+            source: automaton_source,
+            stats: OperatorStats {
+                steps_run: 5,
+                subcells_written: 1_280,
+                touched_chunks: vec![OperatorChunk {
+                    chunk_x: 0,
+                    chunk_z: 0,
+                }],
+            },
+        },
+    );
+
+    let automaton_capture = bench
+        .execute(vec![(
+            "automaton_capture",
+            BenchOp::capture_with_mails(
+                vec![
+                    envelope("aether.render", &top_down_view_projection(8.5, 8.5, 2.5)),
+                    envelope(world.as_str(), &Render),
+                ],
+                Vec::new(),
+            ),
+        )])
+        .expect("capture automaton world");
+    let automaton_image = decode_png(
+        automaton_capture
+            .captured("automaton_capture")
+            .expect("automaton capture bytes"),
+    )
+    .expect("decode automaton capture");
+    let automaton_background = background_top_left(&automaton_image);
+    let automaton_fraction = coverage(&automaton_image, automaton_background, 5);
+    assert!(
+        (0.08..0.40).contains(&automaton_fraction),
+        "the five-cell reference growth should occupy a bounded cross; got {automaton_fraction}",
+    );
+    let automaton_bounds = bounding_box(&automaton_image, automaton_background, 5)
+        .expect("automaton rendered bounds for material-color check");
+    assert_material_color(
+        &automaton_image,
+        automaton_bounds,
+        GRASS_SRGB,
+        "grass automaton",
+    );
+
+    let limited_source = MarkRef {
+        id: MarkId::new(13),
+        revision: 9,
+    };
+    let limited = bench
+        .execute(vec![(
+            "limited",
+            BenchOp::send_and_await(
+                world.as_str(),
+                &RunAutomaton {
+                    source: limited_source,
+                    seed: OperatorCell {
+                        cell_x: 12,
+                        cell_z: 8,
+                    },
+                    rule: AutomatonRule::Grow {
+                        material: Material::Sand.to_u8(),
+                        generations: 1,
+                    },
+                    budget: OperatorBudget {
+                        max_steps: 5,
+                        max_subcells: 512,
+                    },
+                },
+            ),
+        )])
+        .expect("run budget-limited automaton");
+    assert_eq!(
+        limited
+            .reply::<OperatorResult>("limited")
+            .expect("decode limited result"),
+        OperatorResult::Failed {
+            source: limited_source,
+            error: OperatorError::SubcellBudgetExhausted,
+            stats: OperatorStats {
+                steps_run: 2,
+                subcells_written: 512,
+                touched_chunks: vec![OperatorChunk {
+                    chunk_x: 0,
+                    chunk_z: 0,
+                }],
+            },
+        },
+    );
+
+    let limited_capture = bench
+        .execute(vec![(
+            "limited_capture",
+            BenchOp::capture_with_mails(
+                vec![
+                    envelope("aether.render", &top_down_view_projection(13.0, 8.5, 2.0)),
+                    envelope(world.as_str(), &Render),
+                ],
+                Vec::new(),
+            ),
+        )])
+        .expect("capture limited automaton world");
+    let limited_image = decode_png(
+        limited_capture
+            .captured("limited_capture")
+            .expect("limited capture bytes"),
+    )
+    .expect("decode limited capture");
+    let limited_background = background_top_left(&limited_image);
+    let limited_fraction = coverage(&limited_image, limited_background, 5);
+    assert!(
+        (0.04..0.30).contains(&limited_fraction),
+        "the two accepted cells should render while the third stays absent; got {limited_fraction}",
+    );
+    let limited_bounds = bounding_box(&limited_image, limited_background, 5)
+        .expect("limited automaton rendered bounds");
+    assert_material_color(
+        &limited_image,
+        limited_bounds,
+        SAND_SRGB,
+        "sand partial automaton",
+    );
+    let limited_width = limited_bounds.max_x - limited_bounds.min_x + 1;
+    let limited_height = limited_bounds.max_y - limited_bounds.min_y + 1;
+    assert!(
+        limited_width > limited_height + limited_height / 2,
+        "the rendered prefix should be exactly the two horizontal seed/east cells, not the rejected north cell; bounds: {limited_bounds:?}",
     );
 }
 

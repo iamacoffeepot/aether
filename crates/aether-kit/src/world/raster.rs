@@ -315,9 +315,38 @@ pub(super) fn stamp_polygon(
     points: &[WorldPoint],
     material: Material,
 ) -> BTreeSet<ChunkPos> {
-    let mut touched = BTreeSet::new();
+    stamp_polygon_bounded(world, points, material, u32::MAX).touched
+}
+
+/// Accounting returned by [`stamp_polygon_bounded`].
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct BoundedStamp {
+    pub(super) touched: BTreeSet<ChunkPos>,
+    pub(super) subcells_written: u32,
+    pub(super) exhausted: bool,
+}
+
+/// Rasterize and compose at most `max_subcells` covered samples.
+///
+/// Each storage-changing sample is charged before its painter-order write;
+/// unchanged max-composition costs zero. Taking a cell from another material
+/// atomically charges every nonzero sample cleared plus the new sample. When
+/// the cap is reached, the returned world contains exactly the accepted
+/// prefix, `exhausted` is true, and no later sample has been touched. The
+/// ordinary stamp path is the unbounded wrapper above.
+pub(super) fn stamp_polygon_bounded(
+    world: &mut World,
+    points: &[WorldPoint],
+    material: Material,
+    max_subcells: u32,
+) -> BoundedStamp {
+    let mut result = BoundedStamp {
+        touched: BTreeSet::new(),
+        subcells_written: 0,
+        exhausted: false,
+    };
     if material == Material::Void {
-        return touched;
+        return result;
     }
     let raster = rasterize_polygon(points);
     for (global_subcell_x, global_subcell_z, coverage) in raster.covered_samples() {
@@ -327,25 +356,50 @@ pub(super) fn stamp_polygon(
         let base = cell_index * SUBCELLS_PER_CELL;
         let within =
             (address.subcell_z * SUBCELLS_PER_CELL_EDGE.cast_signed() + address.subcell_x) as usize;
-        let chunk = world.chunk_mut_or_insert(chunk_pos);
-        let mut changed = if chunk.overlay[cell_index] == material {
-            false
+
+        let (material_changes, prior_coverage, cleared_subcells) =
+            world.chunk(chunk_pos).map_or((true, 0, 0), |chunk| {
+                let material_changes = chunk.overlay[cell_index] != material;
+                let cleared_subcells = if material_changes {
+                    chunk.overlay_mask[base..base + SUBCELLS_PER_CELL]
+                        .iter()
+                        .filter(|&&sample| sample != 0)
+                        .count() as u32
+                } else {
+                    0
+                };
+                (
+                    material_changes,
+                    chunk.overlay_mask[base + within],
+                    cleared_subcells,
+                )
+            });
+        let composed = if material_changes {
+            coverage
         } else {
+            prior_coverage.max(coverage)
+        };
+        let coverage_writes = u32::from(material_changes || prior_coverage != composed);
+        let write_cost = cleared_subcells + coverage_writes;
+        if write_cost > max_subcells - result.subcells_written {
+            result.exhausted = true;
+            return result;
+        }
+        result.subcells_written += write_cost;
+        if write_cost == 0 {
+            continue;
+        }
+
+        let chunk = world.chunk_mut_or_insert(chunk_pos);
+        if material_changes {
             chunk.overlay[cell_index] = material;
             chunk.overlay_mask[base..base + SUBCELLS_PER_CELL].fill(0);
-            true
-        };
+        }
         let slot = &mut chunk.overlay_mask[base + within];
-        let composed = (*slot).max(coverage);
-        if *slot != composed {
-            *slot = composed;
-            changed = true;
-        }
-        if changed {
-            touched.insert(chunk_pos);
-        }
+        *slot = composed;
+        result.touched.insert(chunk_pos);
     }
-    touched
+    result
 }
 
 #[cfg(test)]
@@ -429,6 +483,75 @@ mod tests {
         assert_eq!(world.overlay_coverage(CellPos { x: 15, z: 1 }, 15, 0), 255);
         assert_eq!(world.overlay(CellPos { x: 16, z: 1 }), Material::Stone);
         assert_eq!(world.overlay_coverage(CellPos { x: 16, z: 1 }, 0, 0), 255);
+    }
+
+    #[test]
+    fn bounded_stamp_reports_exact_cross_chunk_writes() {
+        let mut world = World::new();
+        let result = stamp_polygon_bounded(
+            &mut world,
+            &[
+                point(4080, 256),
+                point(4112, 256),
+                point(4112, 272),
+                point(4080, 272),
+            ],
+            Material::Stone,
+            2,
+        );
+
+        assert_eq!(result.subcells_written, 2);
+        assert!(!result.exhausted);
+        assert_eq!(
+            result.touched,
+            BTreeSet::from([ChunkPos { x: 0, z: 0 }, ChunkPos { x: 1, z: 0 }]),
+        );
+    }
+
+    #[test]
+    fn bounded_stamp_stops_before_the_over_cap_write() {
+        let mut world = World::new();
+        let result = stamp_polygon_bounded(
+            &mut world,
+            &[point(0, 0), point(32, 0), point(32, 16), point(0, 16)],
+            Material::Sand,
+            1,
+        );
+
+        assert_eq!(result.subcells_written, 1);
+        assert!(result.exhausted);
+        let cell = CellPos { x: 0, z: 0 };
+        assert_eq!(world.overlay_coverage(cell, 0, 0), 255);
+        assert_eq!(
+            world.overlay_coverage(cell, 1, 0),
+            0,
+            "the second covered sample is the rejected over-cap write",
+        );
+    }
+
+    #[test]
+    fn bounded_material_takeover_is_atomic_and_charges_exact_changes() {
+        let mut world = World::new();
+        let two_samples = [point(0, 0), point(32, 0), point(32, 16), point(0, 16)];
+        stamp_polygon(&mut world, &two_samples, Material::Stone);
+        let first_sample = [point(0, 0), point(16, 0), point(16, 16), point(0, 16)];
+
+        let rejected = stamp_polygon_bounded(&mut world, &first_sample, Material::Sand, 2);
+        assert!(rejected.exhausted);
+        assert_eq!(rejected.subcells_written, 0);
+        assert!(rejected.touched.is_empty());
+        let cell = CellPos { x: 0, z: 0 };
+        assert_eq!(world.overlay(cell), Material::Stone);
+        assert_eq!(world.overlay_coverage(cell, 0, 0), 255);
+        assert_eq!(world.overlay_coverage(cell, 1, 0), 255);
+
+        let applied = stamp_polygon_bounded(&mut world, &first_sample, Material::Sand, 3);
+        assert!(!applied.exhausted);
+        assert_eq!(applied.subcells_written, 3);
+        assert_eq!(applied.touched, BTreeSet::from([ChunkPos { x: 0, z: 0 }]));
+        assert_eq!(world.overlay(cell), Material::Sand);
+        assert_eq!(world.overlay_coverage(cell, 0, 0), 255);
+        assert_eq!(world.overlay_coverage(cell, 1, 0), 0);
     }
 
     #[test]

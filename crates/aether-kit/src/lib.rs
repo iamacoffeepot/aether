@@ -86,10 +86,12 @@ pub use widget::{
     WidgetKind, WidgetStateChanged, WidgetValidation,
 };
 pub use world::{
-    CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk, ChunkPos,
-    HEIGHT_POINT_INHERIT, HEIGHT_POINTS_PER_CHUNK, Material, Region, SetCellHeights, SetCellPoints,
-    SetChunk, SetRegion, SmoothingProfile, StampDisc, StampHexagon, StampPolygon, WaterPlane,
-    World, WorldDecodeError, WorldLoad, WorldPoint,
+    ApplyBrush, AutomatonRule, BrushParameters, CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS,
+    CellPos, Chunk, ChunkPos, HEIGHT_POINT_INHERIT, HEIGHT_POINTS_PER_CHUNK, Material,
+    OperatorBudget, OperatorCell, OperatorChunk, OperatorError, OperatorResult, OperatorStats,
+    Region, RunAutomaton, SetCellHeights, SetCellPoints, SetChunk, SetRegion, SmoothingProfile,
+    StampDisc, StampHexagon, StampPolygon, WaterPlane, World, WorldDecodeError, WorldLoad,
+    WorldPoint,
 };
 
 /// Octimeters per tile: `1 tile = 1 meter = 256 octimeters`.
