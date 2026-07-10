@@ -59,7 +59,7 @@ jobs:
         # ships neither the library nor the unversioned dev symlink, and
         # without them the desktop chassis panics at boot under Xvfb.
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-          mesa-vulkan-drivers xvfb libxkbcommon-x11-0 libxkbcommon-x11-dev mold
+          mesa-vulkan-drivers xvfb libxkbcommon-x11-0 libxkbcommon-x11-dev mold ffmpeg
       - uses: Swatinem/rust-cache@v2
       - name: Configure sccache (S3 backend)
         run: |
@@ -178,6 +178,18 @@ jobs:
             --max-turns 40 | tee /tmp/drive.log
           grep -q "SPIKE-DRIVE-PASS" /tmp/drive.log
 
+      # Record the virtual display for the duration of the visual trial —
+      # the human's watch-what-happened view. Recording is scoped to the
+      # VISUAL stage only (the only stage that draws anything), matching
+      # the design rule: no video for trials with no visual content.
+      - name: "Stage 3 — start display recording (x11grab)"
+        if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        run: |
+          nohup ffmpeg -y -f x11grab -video_size 1280x800 -framerate 15 -i :99 \
+            -codec:v libx264 -preset veryfast -pix_fmt yuv420p /tmp/trial.mp4 \
+            > /tmp/ffmpeg.log 2>&1 &
+          echo $! > /tmp/ffmpeg.pid
+
       # Stage 3 — visual. Same headless Claude, but it spawns the DESKTOP
       # chassis (under the Xvfb display) and calls capture_frame. PASS =
       # a real image came back through the swapchain readback path.
@@ -190,6 +202,29 @@ jobs:
             --model claude-sonnet-5 \
             --max-turns 40 | tee /tmp/visual.log
           grep -q "SPIKE-VISUAL-PASS" /tmp/visual.log
+
+      # Finalize + upload the recording even when the trial itself failed —
+      # a failed visual trial is exactly when a human wants to watch. The
+      # runner's instance-profile creds are append-only on the evidence
+      # bucket (PutObject under evidence/* only); the printed URL is the
+      # stable public-read form.
+      - name: "Stage 3 — stop recording, upload to evidence bucket"
+        if: always() && env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        run: |
+          [ -f /tmp/ffmpeg.pid ] || { echo "no recording was started"; exit 0; }
+          kill -INT "$(cat /tmp/ffmpeg.pid)" 2>/dev/null || true
+          for _ in $(seq 1 10); do
+            kill -0 "$(cat /tmp/ffmpeg.pid)" 2>/dev/null || break
+            sleep 1
+          done
+          [ -s /tmp/trial.mp4 ] || { echo "recording empty — nothing to upload"; cat /tmp/ffmpeg.log; exit 0; }
+          ls -la /tmp/trial.mp4
+          KEY="evidence/spike/${{ github.run_id }}-${{ github.run_attempt }}/trial.mp4"
+          aws s3 cp /tmp/trial.mp4 "s3://aether-evidence/${KEY}" --content-type video/mp4
+          URL="https://aether-evidence.s3.amazonaws.com/${KEY}"
+          echo "trial video: ${URL}"
+          echo "### Trial video" >> "$GITHUB_STEP_SUMMARY"
+          echo "[watch the visual trial](${URL})" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Tunnel log (diagnostics)
         if: always()
