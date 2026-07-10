@@ -137,32 +137,26 @@ jobs:
   # triples CI time without catching anything new. See ADR-0035 § CI
   # matrix scope.
   test:
-    name: Test (workspace, linux, shard ${{ matrix.partition }}/2)
+    name: Test (workspace, linux)
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    # 8 vCPU ephemeral EC2 spot runner per shard (RunsOn stack,
-    # us-east-1); both shards fit the current 32-vCPU spot quota
-    # alongside clippy + qodana. S3 magic cache — see clippy.
+    # 8 vCPU ephemeral EC2 spot runner (RunsOn stack, us-east-1).
+    # S3 magic cache — see clippy.
     # volume=150gb: the default ~40 GB root volume ENOSPCs under the
     # full runner image + the --all-features workspace test build +
     # fleetbench's per-test substrate copies; the volume lives only
     # for the job so the size is effectively free.
     runs-on: runs-on=${{ github.run_id }}/runner=8cpu-linux-x64/volume=150gb/extras=s3-cache
-    # The suite is sharded 2-way by nextest's deterministic name-hash
-    # partition (iamacoffeepot/aether#2803): each shard compiles the
-    # workspace against the shared rust-cache and runs half the tests,
-    # so the wall clock is setup + compile + half the execution. A
-    # build-once/nextest-archive split would serialize build -> run
-    # and ship multi-GB test binaries between jobs, which is slower
-    # end-to-end than two concurrent warm-cache compiles. A warm shard
-    # is ~8 min; cap at 30 so runner-load variance never cancels a
-    # healthy run mid-flight while a genuine hang still can't eat the
-    # default 6h quota.
+    # Quota-gated single job: the account's 32-vCPU spot quota can't
+    # absorb two 8-vCPU shards alongside clippy + qodana when runs
+    # overlap (MaxSpotInstanceCountExceeded -> on-demand fallback /
+    # queueing). The 2-way nextest name-hash shard split
+    # (iamacoffeepot/aether#2803) costs ~half the test execution in
+    # wall clock (~2 min) when collapsed, which sccache's member-crate
+    # caching more than buys back. Restore the split when the pending
+    # spot-quota increase lands: matrix partition [1, 2] + nextest
+    # --partition 'hash:N/2' + shard-qualified artifact name.
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        partition: [ 1, 2 ]
     env:
       # Use mold to reduce peak link memory and speed up the test
       # build — keeps the linker OOM (collect2: ld terminated with
@@ -244,27 +238,21 @@ jobs:
       # steady-state cap.
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
-      # hash partitioning assigns each test to a shard by a stable hash
-      # of its name — every test runs in exactly one shard regardless of
-      # how many binaries it spans, and the slow substrate-bundle
-      # integration tests spread statistically instead of clumping.
       - name: Run tests (workspace, parallel)
         run: cargo nextest run --all-features --profile ci
-          --partition 'hash:${{ matrix.partition }}/2'
         env:
           AETHER_REQUIRE_RUNTIME: "1"
       # iamacoffeepot/aether#2914: a failing direct TestBench visual
       # assertion that armed `test_bench::artifacts::ArtifactGuard`
       # leaves its actual/mask/measurements set under
-      # `target/test-bench-artifacts/`; a passing shard writes nothing
-      # there. Upload is shard-qualified (each partition gets its own
-      # artifact name) and ignores the tree being absent, matching the
+      # `target/test-bench-artifacts/`; a passing run writes nothing
+      # there. Upload ignores the tree being absent, matching the
       # fuzz-crash-artifact upload pattern in fuzz-nightly.yml.
       - name: Upload test-bench failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: test-bench-artifacts-shard-${{ matrix.partition }}
+          name: test-bench-artifacts
           path: target/test-bench-artifacts/**
           if-no-files-found: ignore
           retention-days: 7
