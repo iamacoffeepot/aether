@@ -76,8 +76,8 @@ jobs:
       - uses: runs-on/action@v2
       # Resolve the PR and apply the run gates BEFORE any checkout — these
       # are pure GitHub API calls. Sets proceed=false (a clean no-op) when
-      # there is no open PR, the opt-in `review` label is absent, or the
-      # once-only marker is already present. head_sha feeds the checkout.
+      # there is no open PR or the once-only marker is already present.
+      # head_sha feeds the checkout.
       - name: Resolve PR and apply gates
         id: resolve
         env:
@@ -102,16 +102,6 @@ jobs:
             exit 0
           fi
           echo "pr_number=$pr" >> "$GITHUB_OUTPUT"
-
-          # Bring-up gate (plan step 6): the opt-in `review` label is
-          # required while the annotation contract proves out on real PRs.
-          # A follow-up one-liner removes this block once it has.
-          has_label="$(gh api "repos/${REPO}/issues/${pr}/labels" --jq 'any(.[]; .name == "review")')"
-          if [ "$has_label" != "true" ]; then
-            echo "PR #$pr lacks the opt-in 'review' label — skipping."
-            echo "proceed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
 
           # Once-only guard: the marker comment is the run-once state. A
           # manual dispatch bypasses it (deliberate re-review); the poster
