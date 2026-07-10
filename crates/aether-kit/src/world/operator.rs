@@ -7,6 +7,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use alloc::collections::{BTreeSet, VecDeque};
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use core::cmp::Ordering;
@@ -144,7 +145,7 @@ pub(super) fn apply_brush(
 
 fn validate_brush(path: &[WorldPoint], brush: BrushParameters) -> Result<(), OperatorError> {
     if path.is_empty() || path.len() > MAX_STAMP_VERTICES {
-        return Err(invalid_parameters(alloc::format!(
+        return Err(invalid_parameters(format!(
             "brush path requires 1..={MAX_STAMP_VERTICES} world points; got {}",
             path.len()
         )));
@@ -214,7 +215,7 @@ fn validate_remesh_extent(
         i32::try_from(min_cell_z),
         i32::try_from(max_cell_z),
     ) else {
-        return Err(invalid_parameters(alloc::format!(
+        return Err(invalid_parameters(format!(
             "{operator} extent exceeds the cell coordinate range"
         )));
     };
@@ -229,7 +230,7 @@ fn validate_remesh_extent(
     if !mesher::chunk_remesh_extent_is_coordinate_safe(min_chunk)
         || !mesher::chunk_remesh_extent_is_coordinate_safe(max_chunk)
     {
-        return Err(invalid_parameters(alloc::format!(
+        return Err(invalid_parameters(format!(
             "{operator} extent exceeds the mesher's apron-safe coordinate range"
         )));
     }
