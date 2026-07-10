@@ -170,7 +170,7 @@ fn intersect_widget_clips(
 /// One draw in a [`WidgetDrawList`], in the widget's own local
 /// coordinates (offset by the parent at composite time). A widget emits a
 /// heterogeneous run of these in authored order — the single-list shape
-/// preserves per-item quad/text interleave, which a two-vector
+/// preserves per-item solid/textured/text interleave, which a split-vector
 /// quads-then-texts split would foreclose. Each variant's optional `clip` is
 /// a [`WidgetClipRect`] in the same local space as its geometry. Not a kind on
 /// its own; only addressable inside [`WidgetDrawList::items`].
@@ -185,6 +185,24 @@ pub enum WidgetDrawItem {
         width: f32,
         height: f32,
         color: Rgba,
+        clip: Option<WidgetClipRect>,
+    },
+    /// A textured rectangle. `(x, y)` is the top-left corner and
+    /// `(width, height)` the size in the widget's local pixels;
+    /// `(u0, v0)`–`(u1, v1)` selects the texture sub-rectangle;
+    /// `texture_id` is a non-owning session id from `CreateTexture`; and
+    /// `tint` is a linear RGBA multiplier.
+    TexturedQuad {
+        texture_id: u32,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        u0: f32,
+        v0: f32,
+        u1: f32,
+        v1: f32,
+        tint: Rgba,
         clip: Option<WidgetClipRect>,
     },
     /// A glyph run. `(x, y)` is the baseline origin in local pixels;
@@ -225,6 +243,31 @@ impl WidgetDrawItem {
                 color: *color,
                 clip: clip.map(|rect| rect.offset(by)),
             },
+            Self::TexturedQuad {
+                texture_id,
+                x,
+                y,
+                width,
+                height,
+                u0,
+                v0,
+                u1,
+                v1,
+                tint,
+                clip,
+            } => Self::TexturedQuad {
+                texture_id: *texture_id,
+                x: x + by.x,
+                y: y + by.y,
+                width: *width,
+                height: *height,
+                u0: *u0,
+                v0: *v0,
+                u1: *u1,
+                v1: *v1,
+                tint: *tint,
+                clip: clip.map(|rect| rect.offset(by)),
+            },
             Self::Text {
                 x,
                 y,
@@ -250,7 +293,9 @@ impl WidgetDrawItem {
     #[must_use]
     pub(super) fn intersect_clip(&self, slot: Option<WidgetClipRect>) -> Option<Self> {
         let own = match self {
-            Self::Quad { clip, .. } | Self::Text { clip, .. } => *clip,
+            Self::Quad { clip, .. } | Self::TexturedQuad { clip, .. } | Self::Text { clip, .. } => {
+                *clip
+            }
         };
         let clip = match intersect_widget_clips(own, slot) {
             WidgetClipIntersection::Unbounded => None,
@@ -259,7 +304,9 @@ impl WidgetDrawItem {
         };
         let mut item = self.clone();
         match &mut item {
-            Self::Quad { clip: own, .. } | Self::Text { clip: own, .. } => *own = clip,
+            Self::Quad { clip: own, .. }
+            | Self::TexturedQuad { clip: own, .. }
+            | Self::Text { clip: own, .. } => *own = clip,
         }
         Some(item)
     }
@@ -268,7 +315,9 @@ impl WidgetDrawItem {
     #[must_use]
     pub(super) fn valid_clip(&self) -> WidgetClipIntersection {
         let clip = match self {
-            Self::Quad { clip, .. } | Self::Text { clip, .. } => *clip,
+            Self::Quad { clip, .. } | Self::TexturedQuad { clip, .. } | Self::Text { clip, .. } => {
+                *clip
+            }
         };
         intersect_widget_clips(clip, None)
     }
@@ -653,6 +702,50 @@ mod tests {
                 }),
             },
             "offset moves the corner by the vector and leaves the extent untouched",
+        );
+    }
+
+    #[test]
+    fn textured_quad_offset_translates_origin_and_clip_only() {
+        let item = WidgetDrawItem::TexturedQuad {
+            texture_id: 17,
+            x: 3.0,
+            y: 5.0,
+            width: 10.0,
+            height: 4.0,
+            u0: 0.125,
+            v0: 0.25,
+            u1: 0.75,
+            v1: 0.875,
+            tint: Rgba::new(0.5, 0.75, 1.0, 0.8),
+            clip: Some(WidgetClipRect {
+                x: 4.0,
+                y: 6.0,
+                width: 8.0,
+                height: 2.0,
+            }),
+        };
+        assert_eq!(
+            item.offset(Vec2::new(100.0, 20.0)),
+            WidgetDrawItem::TexturedQuad {
+                texture_id: 17,
+                x: 103.0,
+                y: 25.0,
+                width: 10.0,
+                height: 4.0,
+                u0: 0.125,
+                v0: 0.25,
+                u1: 0.75,
+                v1: 0.875,
+                tint: Rgba::new(0.5, 0.75, 1.0, 0.8),
+                clip: Some(WidgetClipRect {
+                    x: 104.0,
+                    y: 26.0,
+                    width: 8.0,
+                    height: 2.0,
+                }),
+            },
+            "offset preserves texture identity, extent, UVs, and tint",
         );
     }
 

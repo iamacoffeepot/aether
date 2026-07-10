@@ -14,7 +14,7 @@
 //! - The **root** (`config.root`) subscribes the frame stage once and, on
 //!   each `Tick`, resets its [`Composite`], appends its own chrome, and
 //!   sends [`Collect`] to each child in layout order. When its slots close
-//!   it emits the whole subtree as contiguous equal-clip `DrawSolidQuads`
+//!   it emits the whole subtree as contiguous compatible solid/textured
 //!   runs (plus one `DrawText` per glyph run) to `aether.render` /
 //!   `aether.text`, remaining the cluster's only render sender.
 //! - An **interior** node does the same on each inbound [`Collect`], but
@@ -52,7 +52,9 @@ use aether_actor::{
     ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::render::{DrawSolidQuads, SolidQuad};
+use aether_capabilities::render::{
+    DrawSolidQuads, DrawTexturedQuads, SolidQuad, TexturedQuad as RenderTexturedQuad,
+};
 use aether_capabilities::text::DrawText;
 use aether_capabilities::{LifecycleCapability, RenderCapability, TextCapability};
 use aether_data::Kind;
@@ -171,51 +173,111 @@ pub(crate) fn accept_child_list(
     composite.is_complete()
 }
 
-/// One contiguous run of solid quads sharing an effective widget-local clip.
+/// One contiguous run of non-text widget draws with one render capability
+/// shape. Text is filtered before planning and remains on its later lane.
 #[derive(Debug, PartialEq)]
-struct SolidRun {
-    clip: Option<WidgetClipRect>,
-    quads: Vec<SolidQuad>,
+enum DirectRun {
+    Solid {
+        clip: Option<WidgetClipRect>,
+        quads: Vec<SolidQuad>,
+    },
+    Textured {
+        texture_id: u32,
+        clip: Option<WidgetClipRect>,
+        quads: Vec<RenderTexturedQuad>,
+    },
 }
 
-/// Plan the quad subsequence into contiguous equal-clip runs. Text is emitted
-/// by its separate capability after solids, so text items neither enter nor
-/// split these runs. Invalid explicit clips omit their items.
-fn solid_runs(list: &WidgetDrawList) -> Vec<SolidRun> {
-    let mut runs: Vec<SolidRun> = Vec::new();
+/// Plan the filtered non-text subsequence in one pass. Adjacent solids
+/// coalesce by effective clip; adjacent textured items coalesce by texture id
+/// and effective clip. A kind, texture, or clip transition flushes without
+/// globally regrouping repeated keys, preserving painter order. Invalid
+/// explicit clips omit their items.
+fn direct_runs(list: &WidgetDrawList) -> Vec<DirectRun> {
+    let mut runs: Vec<DirectRun> = Vec::new();
     for item in &list.items {
-        let WidgetDrawItem::Quad {
-            x,
-            y,
-            width,
-            height,
-            color,
-            ..
-        } = item
-        else {
-            continue;
-        };
-        let clip = match item.valid_clip() {
-            WidgetClipIntersection::Unbounded => None,
-            WidgetClipIntersection::Finite { rect } => Some(rect),
-            WidgetClipIntersection::Empty => continue,
-        };
-        let quad = SolidQuad {
-            x: *x,
-            y: *y,
-            width: *width,
-            height: *height,
-            color: *color,
-        };
-        if let Some(run) = runs.last_mut()
-            && run.clip == clip
-        {
-            run.quads.push(quad);
-        } else {
-            runs.push(SolidRun {
-                clip,
-                quads: vec![quad],
-            });
+        match item {
+            WidgetDrawItem::Quad {
+                x,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } => {
+                let clip = match item.valid_clip() {
+                    WidgetClipIntersection::Unbounded => None,
+                    WidgetClipIntersection::Finite { rect } => Some(rect),
+                    WidgetClipIntersection::Empty => continue,
+                };
+                let quad = SolidQuad {
+                    x: *x,
+                    y: *y,
+                    width: *width,
+                    height: *height,
+                    color: *color,
+                };
+                if let Some(DirectRun::Solid {
+                    clip: run_clip,
+                    quads,
+                }) = runs.last_mut()
+                    && *run_clip == clip
+                {
+                    quads.push(quad);
+                } else {
+                    runs.push(DirectRun::Solid {
+                        clip,
+                        quads: vec![quad],
+                    });
+                }
+            }
+            WidgetDrawItem::TexturedQuad {
+                texture_id,
+                x,
+                y,
+                width,
+                height,
+                u0,
+                v0,
+                u1,
+                v1,
+                tint,
+                ..
+            } => {
+                let clip = match item.valid_clip() {
+                    WidgetClipIntersection::Unbounded => None,
+                    WidgetClipIntersection::Finite { rect } => Some(rect),
+                    WidgetClipIntersection::Empty => continue,
+                };
+                let quad = RenderTexturedQuad {
+                    x: *x,
+                    y: *y,
+                    width: *width,
+                    height: *height,
+                    u0: *u0,
+                    v0: *v0,
+                    u1: *u1,
+                    v1: *v1,
+                    tint: *tint,
+                };
+                if let Some(DirectRun::Textured {
+                    texture_id: run_texture_id,
+                    clip: run_clip,
+                    quads,
+                }) = runs.last_mut()
+                    && *run_texture_id == *texture_id
+                    && *run_clip == clip
+                {
+                    quads.push(quad);
+                } else {
+                    runs.push(DirectRun::Textured {
+                        texture_id: *texture_id,
+                        clip,
+                        quads: vec![quad],
+                    });
+                }
+            }
+            WidgetDrawItem::Text { .. } => {}
         }
     }
     runs
@@ -230,18 +292,33 @@ fn framebuffer_clip(rect: WidgetClipRect) -> ClipRect {
     }
 }
 
-/// Emit a flattened subtree as the cluster's single render + text sender:
-/// contiguous `DrawSolidQuads` runs for the flat fills (preserving their
-/// depth-first relative order), then one `DrawText` per glyph run. Text's extra
-/// hop through the text cap lands its glyphs after the direct quad batches the
-/// same frame — the fills-under-labels layering a composited UI surface needs.
+/// Emit a flattened subtree as the cluster's single render + text sender.
+/// Compatible solid/textured runs preserve authored non-text order through
+/// same-recipient FIFO, then one `DrawText` is sent per glyph run. Text's extra
+/// hop through the text cap keeps the established later lane.
 pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
-    for run in solid_runs(list) {
-        ctx.actor::<RenderCapability>().send(&DrawSolidQuads {
-            space: QuadSpace::Screen,
-            clip: run.clip.map(framebuffer_clip),
-            quads: run.quads,
-        });
+    for run in direct_runs(list) {
+        match run {
+            DirectRun::Solid { clip, quads } => {
+                ctx.actor::<RenderCapability>().send(&DrawSolidQuads {
+                    space: QuadSpace::Screen,
+                    clip: clip.map(framebuffer_clip),
+                    quads,
+                });
+            }
+            DirectRun::Textured {
+                texture_id,
+                clip,
+                quads,
+            } => {
+                ctx.actor::<RenderCapability>().send(&DrawTexturedQuads {
+                    texture_id,
+                    space: QuadSpace::Screen,
+                    clip: clip.map(framebuffer_clip),
+                    quads,
+                });
+            }
+        }
     }
     for item in &list.items {
         if let WidgetDrawItem::Text {
@@ -300,8 +377,25 @@ mod tests {
         }
     }
 
+    fn textured(texture_id: u32, x: f32, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
+        WidgetDrawItem::TexturedQuad {
+            texture_id,
+            x,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            u0: 0.0,
+            v0: 0.0,
+            u1: 1.0,
+            v1: 1.0,
+            tint: Rgba::WHITE,
+            clip,
+        }
+    }
+
     #[test]
-    fn solid_planner_coalesces_only_adjacent_equal_clips_in_quad_order() {
+    #[allow(clippy::too_many_lines)] // one cohesive direct-run order/key matrix
+    fn direct_planner_coalesces_only_adjacent_compatible_non_text_items() {
         let a = WidgetClipRect {
             x: 1.0,
             y: 2.0,
@@ -317,30 +411,72 @@ mod tests {
         let list = WidgetDrawList {
             intrinsic: None,
             items: vec![
-                quad(0.0, None),
-                quad(1.0, Some(a)),
+                quad(0.0, Some(a)),
+                textured(7, 1.0, Some(a)),
                 text(Some(b)),
-                quad(2.0, Some(a)),
-                quad(3.0, Some(b)),
-                quad(4.0, Some(a)),
+                textured(7, 2.0, Some(a)),
+                textured(8, 3.0, Some(a)),
+                textured(7, 4.0, Some(a)),
+                textured(7, 5.0, Some(b)),
+                quad(6.0, Some(b)),
+                quad(7.0, Some(b)),
             ],
         };
-        let runs = solid_runs(&list);
-        assert_eq!(runs.len(), 4);
-        assert_eq!(runs[0].clip, None);
-        assert_eq!(runs[1].clip, Some(a));
-        assert_eq!(runs[2].clip, Some(b));
-        assert_eq!(runs[3].clip, Some(a));
-        assert_eq!(runs[1].quads.len(), 2, "text does not split a solid run");
-        let xs: Vec<f32> = runs
-            .iter()
-            .flat_map(|run| run.quads.iter().map(|quad| quad.x))
-            .collect();
-        assert_eq!(xs, vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+        let runs = direct_runs(&list);
+        assert_eq!(runs.len(), 6);
+        assert!(matches!(
+            &runs[0],
+            DirectRun::Solid { clip, quads }
+                if *clip == Some(a) && quads.iter().map(|quad| quad.x).eq([0.0])
+        ));
+        assert!(
+            matches!(
+                &runs[1],
+                DirectRun::Textured {
+                    texture_id: 7,
+                    clip,
+                    quads,
+                } if *clip == Some(a)
+                    && quads.iter().map(|quad| quad.x).eq([1.0, 2.0])
+            ),
+            "text does not split a compatible textured run"
+        );
+        assert!(matches!(
+            &runs[2],
+            DirectRun::Textured {
+                texture_id: 8,
+                clip,
+                quads,
+            } if *clip == Some(a) && quads.iter().map(|quad| quad.x).eq([3.0])
+        ));
+        assert!(
+            matches!(
+                &runs[3],
+                DirectRun::Textured {
+                    texture_id: 7,
+                    clip,
+                    quads,
+                } if *clip == Some(a) && quads.iter().map(|quad| quad.x).eq([4.0])
+            ),
+            "a repeated texture key after a different texture must not reorder"
+        );
+        assert!(matches!(
+            &runs[4],
+            DirectRun::Textured {
+                texture_id: 7,
+                clip,
+                quads,
+            } if *clip == Some(b) && quads.iter().map(|quad| quad.x).eq([5.0])
+        ));
+        assert!(matches!(
+            &runs[5],
+            DirectRun::Solid { clip, quads }
+                if *clip == Some(b) && quads.iter().map(|quad| quad.x).eq([6.0, 7.0])
+        ));
     }
 
     #[test]
-    fn solid_planner_keeps_unclipped_output_one_batch_and_omits_invalid_clips() {
+    fn direct_planner_keeps_unclipped_solids_one_batch_and_omits_invalid_clips() {
         let invalid = WidgetClipRect {
             x: 0.0,
             y: 0.0,
@@ -351,13 +487,13 @@ mod tests {
             intrinsic: None,
             items: vec![quad(1.0, None), quad(2.0, Some(invalid)), quad(3.0, None)],
         };
-        let runs = solid_runs(&list);
+        let runs = direct_runs(&list);
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].clip, None);
-        assert_eq!(
-            runs[0].quads.iter().map(|quad| quad.x).collect::<Vec<_>>(),
-            vec![1.0, 3.0],
-        );
+        assert!(matches!(
+            &runs[0],
+            DirectRun::Solid { clip: None, quads }
+                if quads.iter().map(|quad| quad.x).eq([1.0, 3.0])
+        ));
     }
 }
 
@@ -368,10 +504,9 @@ mod tests {
 /// Load the root with a `WidgetConfig { root: true, chrome, children }`;
 /// each `children` entry carries a pre-encoded child `WidgetConfig` in its
 /// `config` bytes, so the whole tree ships in one load. The cluster is one
-/// render sender: the root emits every widget's quads in structural
-/// depth-first order, grouped only where adjacent quads share an effective
-/// clip, so a background drawn as root chrome sits under the children by
-/// construction.
+/// render sender: the root emits every widget's solid/textured draws in
+/// structural depth-first order, grouping only adjacent compatible items, so
+/// a background drawn as root chrome sits under the children by construction.
 #[actor(instanced)]
 impl WasmActor for Widget {
     type Config = WidgetConfig;
