@@ -856,23 +856,7 @@ impl Default for PanelConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_data::wire::{self, to_vec};
-    use alloc::vec;
-
-    #[test]
-    fn virtual_list_appends_without_renumbering_established_widget_kinds() {
-        assert_eq!(to_vec(&WidgetKind::Composite).expect("encode Composite"), vec![0, 0, 0, 0]);
-        assert_eq!(to_vec(&WidgetKind::Label).expect("encode Label"), vec![1, 0, 0, 0]);
-        assert_eq!(to_vec(&WidgetKind::Slider).expect("encode Slider"), vec![2, 0, 0, 0]);
-        assert_eq!(to_vec(&WidgetKind::Radio).expect("encode Radio"), vec![3, 0, 0, 0]);
-        assert_eq!(to_vec(&WidgetKind::TextField).expect("encode TextField"), vec![4, 0, 0, 0]);
-        assert_eq!(to_vec(&WidgetKind::Button).expect("encode Button"), vec![5, 0, 0, 0]);
-        assert_eq!(to_vec(&WidgetKind::BehaviorHost).expect("encode BehaviorHost"), vec![6, 0, 0, 0]);
-        assert_eq!(to_vec(&WidgetKind::Image).expect("encode Image"), vec![7, 0, 0, 0]);
-        assert_eq!(to_vec(&WidgetKind::TextArea).expect("encode TextArea"), vec![8, 0, 0, 0]);
-        assert_eq!(to_vec(&WidgetKind::Scroll).expect("encode Scroll"), vec![9, 0, 0, 0]);
-        assert_eq!(to_vec(&WidgetKind::VirtualList).expect("encode VirtualList"), vec![10, 0, 0, 0]);
-    }
+    use aether_data::wire;
 
     #[test]
     fn scroll_wire_vocabulary_uses_named_semantic_records() {

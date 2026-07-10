@@ -392,7 +392,7 @@ fn virtual_list_clip() -> ClipRect {
 fn assert_virtual_list_rows(
     snapshot: &[DrawTexturedQuads],
     selected_row_offset: usize,
-    selected_tint: aether_math::Rgba,
+    selected_tint: Rgba,
     outline_quad_count: usize,
 ) {
     let clip = virtual_list_clip();
