@@ -49,9 +49,9 @@ use crate::args::ActorCostArgs;
 use crate::args::ActorLogsArgs;
 use crate::args::{
     CaptureFrameArgs, CaptureMailSpec, ComponentSpec, DescribeComponentArgs, DescribeHandlersArgs, DescribeKindsArgs,
-    ListBinariesArgs, ListComponentsArgs, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, ReplaceComponentArgs,
-    ReplyEventJson, SendMailArgs, SendMailTracedArgs, SpawnSubstrateArgs, TerminateSubstrateArgs, TracedMailSpec,
-    UploadBinaryArgs, UploadComponentArgs,
+    ListBinariesArgs, ListComponentsArgs, ListEnginesArgs, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec,
+    ReplaceComponentArgs, ReplyEventJson, SendMailArgs, SendMailTracedArgs, SpawnSubstrateArgs, TerminateSubstrateArgs,
+    TracedMailSpec, UploadBinaryArgs, UploadComponentArgs,
 };
 use crate::reverse::EngineNames;
 use crate::rpc::RpcSession;
@@ -234,10 +234,10 @@ impl Mcp {
 #[tool_router]
 impl Mcp {
     #[tool(
-        description = "List every engine the hub currently supervises, plus a recently-died sidecar. Returns an object {engines, recently_died}: each `engines` item reports the engine_id (pass it to send_mail / terminate_substrate) and the localhost RPC port the hub assigned its substrate; each `recently_died` item reports a departed engine with why it left — reason \"terminated\" (a deliberate terminate_substrate), \"crashed\" (the substrate closed its connection), \"evicted\" (a missed-heartbeat eviction), or \"spawn_failed\" (a spawn that never connected — the substrate failed to come up) — plus a detail string and how long ago it left, so a clean shutdown is distinguishable from a failure."
+        description = "List every engine the hub currently supervises, plus a recently-died sidecar. Returns an object {engines, recently_died}: each `engines` item reports the engine_id (pass it to send_mail / terminate_substrate) and the localhost RPC port the hub assigned its substrate; each `recently_died` item reports a departed engine with why it left — reason \"terminated\" (a deliberate terminate_substrate), \"crashed\" (the substrate closed its connection), \"evicted\" (a missed-heartbeat eviction), or \"spawn_failed\" (a spawn that never connected — the substrate failed to come up) — plus a detail string and how long ago it left, so a clean shutdown is distinguishable from a failure. Pass `show` to filter which lists come back so a routine liveness check doesn't pay the context cost of the whole fleet history: \"alive\" returns only {engines}, \"dead\" returns only {recently_died}, and \"all\" (the default when omitted) returns both. The unasked list is absent from the reply JSON, not present-but-empty. Any other `show` value is a tool error naming the three accepted values."
     )]
-    pub async fn list_engines(&self) -> Result<String, McpError> {
-        engine::list_engines(self).await
+    pub async fn list_engines(&self, Parameters(args): Parameters<ListEnginesArgs>) -> Result<String, McpError> {
+        engine::list_engines(self, args).await
     }
 
     #[tool(
