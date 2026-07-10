@@ -13,8 +13,8 @@
 //! Each caches its assigned [`WidgetFrame`](crate::widget::WidgetFrame) rect
 //! and its [`Theme`], answers every
 //! [`Collect`](crate::widget::Collect) with a
-//! [`WidgetDrawList`](crate::widget::WidgetDrawList) drawn in its own local
-//! coordinates (colors resolved through [`Theme::fill`](crate::widget::theme::Theme::fill)),
+//! [`WidgetDrawList`] drawn in its own local
+//! coordinates (colors resolved through [`Theme::fill`]),
 //! and reports value changes up to its parent. Widgets never subscribe to
 //! input; the root forwards it — see [`super::focus::Focus`] and
 //! [`super::panel::WidgetPanel`].
@@ -37,11 +37,28 @@ pub use text_field::TextFieldWidget;
 
 use alloc::vec::Vec;
 
+use aether_actor::WasmCtx;
 use aether_math::Rgba;
 
-use crate::widget::WidgetDrawItem;
 use crate::widget::state::InteractionState;
 use crate::widget::theme::Theme;
+use crate::widget::{WidgetDrawItem, WidgetDrawList};
+
+/// Discharge the hidden-widget branch of the always-reply compositing
+/// protocol. Hidden controls retain their slot, so every `Collect` must still
+/// produce one empty draw-list reply.
+pub(super) fn reply_if_hidden(ctx: &WasmCtx<'_>, state: &InteractionState) -> bool {
+    if state.is_visible() {
+        return false;
+    }
+    if let Some(parent) = ctx.parent() {
+        parent.send(&WidgetDrawList {
+            intrinsic: None,
+            items: Vec::new(),
+        });
+    }
+    true
+}
 
 /// A flat-colored quad in a widget's own local coordinates — the shared
 /// constructor the widgets build their chrome from.

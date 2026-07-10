@@ -37,14 +37,15 @@ use aether_kinds::{
 };
 
 use crate::widget::set::{
-    APPROX_ADVANCE_RATIO, approx_text_width, push_control_outlines, quad, text_origin_y,
+    APPROX_ADVANCE_RATIO, approx_text_width, push_control_outlines, quad, reply_if_hidden,
+    text_origin_y,
 };
 use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::text_edit::{EditPolicy, SingleLineLayout, TextEditState, TextSpan};
 use crate::widget::theme::{SetTheme, Theme, ThemeState};
 use crate::widget::{
     Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, TextCommitted,
-    TextFieldConfig, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    TextFieldConfig, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 /// A single-line editable string. Holds the reusable editing state, the
@@ -236,6 +237,18 @@ impl TextFieldWidget {
             self.state.theme_state(self.dragging)
         }
     }
+
+    fn apply_control_state(&mut self, ctx: &WasmCtx<'_>, next: WidgetControlState) {
+        if self.state.replace(next) {
+            if !self.state.can_mutate() {
+                self.edit.clear_composition();
+            }
+            if !self.state.is_available() {
+                self.dragging = false;
+            }
+            emit_state_changed(ctx, &self.state);
+        }
+    }
 }
 
 /// A text-field widget. Spawned inline by a panel root with a
@@ -285,29 +298,13 @@ impl WasmActor for TextFieldWidget {
         self.max_chars = config.max_chars;
         self.set_desired_font_id(config.theme.font_id);
         self.theme = config.theme;
-        if self.state.replace(config.state) {
-            if !self.state.can_mutate() {
-                self.edit.clear_composition();
-            }
-            if !self.state.is_available() {
-                self.dragging = false;
-            }
-            emit_state_changed(ctx, &self.state);
-        }
+        self.apply_control_state(ctx, config.state);
         self.pump_font_metrics(ctx);
     }
 
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
-        if self.state.replace(set.state) {
-            if !self.state.can_mutate() {
-                self.edit.clear_composition();
-            }
-            if !self.state.is_available() {
-                self.dragging = false;
-            }
-            emit_state_changed(ctx, &self.state);
-        }
+        self.apply_control_state(ctx, set.state);
     }
 
     /// Restyle: adopt the fanned theme and request metrics for its font.
@@ -372,7 +369,7 @@ impl WasmActor for TextFieldWidget {
             KEY_BACKSPACE if self.state.can_mutate() => self.edit.delete_backward(),
             KEY_LEFT => self.edit.move_left(extend),
             KEY_RIGHT => self.edit.move_right(extend),
-            KEY_ENTER => {
+            KEY_ENTER if self.state.can_mutate() => {
                 if let Some(parent) = ctx.parent() {
                     parent.send(&TextCommitted {
                         text: String::from(self.edit.value()),
@@ -462,16 +459,12 @@ impl WasmActor for TextFieldWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
+        if reply_if_hidden(ctx, &self.state) {
+            return;
+        }
         let Some(parent) = ctx.parent() else {
             return;
         };
-        if !self.state.is_visible() {
-            parent.send(&WidgetDrawList {
-                intrinsic: None,
-                items: Vec::new(),
-            });
-            return;
-        }
         let width = self.frame.width;
         let height = self.frame.height;
         let pad = self.theme.pad;

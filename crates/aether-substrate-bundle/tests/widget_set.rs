@@ -36,8 +36,8 @@ use aether_kinds::{
     MouseButtonRelease, MouseMove, TextInput, Tick,
 };
 use aether_kit::{
-    ButtonConfig, PanelConfig, SetWidgetState, SliderConfig, Theme, WidgetChildSpec,
-    WidgetControlState, WidgetKind,
+    ButtonConfig, PanelConfig, SetWidgetState, SliderConfig, TextFieldConfig, Theme,
+    WidgetChildSpec, WidgetControlState, WidgetKind,
 };
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 
@@ -268,6 +268,22 @@ fn button_spec(subname: &str, state: WidgetControlState) -> WidgetChildSpec {
         clip: None,
         config: ButtonConfig {
             label: "Run".to_owned(),
+            theme: Theme::DEFAULT,
+            state,
+        }
+        .encode_into_bytes(),
+    }
+}
+
+fn text_field_spec(subname: &str, initial: &str, state: WidgetControlState) -> WidgetChildSpec {
+    WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::TextField,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: TextFieldConfig {
+            initial: initial.to_owned(),
+            max_chars: 0,
             theme: Theme::DEFAULT,
             state,
         }
@@ -536,5 +552,78 @@ fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
     assert_eq!(
         clicks, 2,
         "Space release and the first Enter press click exactly once each; log was:\n{joined}",
+    );
+}
+
+/// A read-only text field remains focusable but cannot commit. Enabling the
+/// same live actor then permits exactly one commit, proving the negative path
+/// is not an input-routing or log-observation false positive.
+#[test]
+fn read_only_text_field_blocks_activation_until_enabled() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = TestBench::start_with_size(240, 80).expect("boot");
+    let read_only = WidgetControlState {
+        read_only: true,
+        ..WidgetControlState::default()
+    };
+    load_panel_with(
+        &mut bench,
+        &wasm,
+        vec![text_field_spec("locked", "locked", read_only)],
+    );
+
+    let panel = panel_address();
+    bench
+        .execute(vec![
+            ("spawn", BenchOp::send_mail(&panel, &Tick)),
+            ("focus", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            (
+                "blocked_text",
+                BenchOp::send_mail(
+                    &panel,
+                    &TextInput {
+                        text: " mutation".to_owned(),
+                    },
+                ),
+            ),
+            (
+                "blocked_enter",
+                BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }),
+            ),
+            (
+                "enable",
+                BenchOp::send_mail(
+                    child_address("locked"),
+                    &SetWidgetState {
+                        state: WidgetControlState::default(),
+                    },
+                ),
+            ),
+            (
+                "allowed_enter",
+                BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }),
+            ),
+        ])
+        .expect("read-only text activation session");
+
+    let log = panel_log_messages(&mut bench);
+    let joined = log.join("\n");
+    let commits: Vec<_> = log
+        .iter()
+        .filter(|message| {
+            message.contains("widget text committed") && message.contains("widget=locked")
+        })
+        .collect();
+    assert_eq!(
+        commits.len(),
+        1,
+        "read-only Enter must not commit, while enabled Enter commits once; log was:\n{joined}",
+    );
+    assert!(
+        commits[0].contains("text=locked"),
+        "blocked read-only TextInput must not alter the later committed value; log was:\n{joined}",
     );
 }

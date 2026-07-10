@@ -345,6 +345,29 @@ fn slider_child(subname: &str, state: WidgetControlState) -> WidgetChildSpec {
     }
 }
 
+fn control_state_children() -> Vec<WidgetChildSpec> {
+    let hidden = WidgetControlState {
+        visible: false,
+        ..WidgetControlState::default()
+    };
+    let disabled = WidgetControlState {
+        enabled: false,
+        ..WidgetControlState::default()
+    };
+    let invalid = WidgetControlState {
+        validation: WidgetValidation::Error {
+            message: "outside range".to_owned(),
+        },
+        ..WidgetControlState::default()
+    };
+    vec![
+        button_child("hidden", "Hidden", hidden),
+        button_child("disabled", "Disabled", disabled),
+        slider_child("value", invalid),
+        button_child("hover", "Hover", WidgetControlState::default()),
+    ]
+}
+
 fn row_clip(y: f32) -> ClipRect {
     ClipRect {
         x: PANEL_X,
@@ -420,6 +443,37 @@ fn assert_updated_control_snapshot(snapshot: &[DrawTexturedQuads], slider_y: f32
         solid_for(snapshot, &row_clip(hover_y)).quads[0].tint,
         Theme::DEFAULT.accent,
         "child→empty hover emits HoverLost and restores the normal fill",
+    );
+}
+
+fn assert_stationary_hover_survives_focus_traversal(
+    bench: &mut TestBench,
+    panel: &str,
+    hover_y: f32,
+) {
+    // Focus is independent from hover: Tab to the hovered button and away
+    // again without moving the pointer. The button must remain hovered because
+    // only a root-issued HoverLost may clear that fact.
+    bench
+        .execute(vec![
+            (
+                "focus_hovered_button",
+                BenchOp::send_mail(panel, &Key { code: KEY_TAB }),
+            ),
+            (
+                "focus_away_without_motion",
+                BenchOp::send_mail(panel, &Key { code: KEY_TAB }),
+            ),
+            (
+                "capture_stationary_hover",
+                BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new()),
+            ),
+        ])
+        .expect("stationary hover survives focus traversal");
+    assert_eq!(
+        solid_for(&bench.committed_overlay_snapshot(), &row_clip(hover_y)).quads[0].tint,
+        Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Hover),
+        "Tab focus changes must not clear root-owned hover while the pointer stays still",
     );
 }
 
@@ -1469,30 +1523,7 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut bench = build_bench();
 
-    let hidden = WidgetControlState {
-        visible: false,
-        ..WidgetControlState::default()
-    };
-    let disabled = WidgetControlState {
-        enabled: false,
-        ..WidgetControlState::default()
-    };
-    let invalid = WidgetControlState {
-        validation: WidgetValidation::Error {
-            message: "outside range".to_owned(),
-        },
-        ..WidgetControlState::default()
-    };
-    boot_panel_with_children(
-        &mut bench,
-        &wasm,
-        vec![
-            button_child("hidden", "Hidden", hidden),
-            button_child("disabled", "Disabled", disabled),
-            slider_child("value", invalid),
-            button_child("hover", "Hover", WidgetControlState::default()),
-        ],
-    );
+    boot_panel_with_children(&mut bench, &wasm, control_state_children());
 
     let panel = panel_address();
     let slider_y = PANEL_Y + (ROW_HEIGHT + GAP) * 2.0;
@@ -1530,6 +1561,7 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
         .expect("state snapshot");
 
     assert_initial_control_snapshot(&bench.committed_overlay_snapshot(), slider_y, hover_y);
+    assert_stationary_hover_survives_focus_traversal(&mut bench, &panel, hover_y);
 
     // Moving to empty clears hover; runtime mail reveals the hidden slot and
     // changes the slider's validation role without changing either value.

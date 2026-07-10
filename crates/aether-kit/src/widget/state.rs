@@ -65,10 +65,10 @@ impl InteractionState {
         self.focused = self.is_available();
     }
 
-    /// Losing focus cancels transient interaction owned by the control. The
-    /// panel remains authoritative and may re-send hover on the next move.
+    /// Losing focus clears only the focus fact. Hover remains root-owned and
+    /// survives until the panel sends [`crate::widget::HoverLost`].
     pub(super) fn lose_focus(&mut self) {
-        self.clear_transient();
+        self.focused = false;
     }
 
     pub(super) fn set_hovered(&mut self, hovered: bool) {
@@ -160,6 +160,18 @@ mod tests {
         assert!(!state.focused());
         assert_eq!(state.theme_state(false), ThemeState::Normal);
         assert!(!state.can_mutate());
+    }
+
+    #[test]
+    fn focus_loss_preserves_root_owned_hover() {
+        let mut state = InteractionState::new(WidgetControlState::default());
+        state.gain_focus();
+        state.set_hovered(true);
+
+        state.lose_focus();
+
+        assert!(!state.focused());
+        assert_eq!(state.theme_state(false), ThemeState::Hover);
     }
 
     #[test]

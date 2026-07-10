@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 
-use crate::widget::set::text_origin_y;
+use crate::widget::set::{reply_if_hidden, text_origin_y};
 use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
@@ -91,13 +91,7 @@ impl WasmActor for LabelWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if !self.state.is_visible() {
-            if let Some(parent) = ctx.parent() {
-                parent.send(&WidgetDrawList {
-                    intrinsic: None,
-                    items: Vec::new(),
-                });
-            }
+        if reply_if_hidden(ctx, &self.state) {
             return;
         }
         let size = self.theme.label_size_pixels;

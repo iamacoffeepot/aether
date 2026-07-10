@@ -17,12 +17,12 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease};
 
-use crate::widget::set::{push_control_outlines, quad, text_origin_y};
+use crate::widget::set::{push_control_outlines, quad, reply_if_hidden, text_origin_y};
 use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
     Collect, FocusGained, FocusLost, HoverGained, HoverLost, RadioConfig, RadioSelected,
-    SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    SetWidgetState, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 /// A radio group. Holds the option labels, the selected index, and the cached
@@ -55,6 +55,15 @@ impl RadioGroupWidget {
             #[allow(clippy::cast_possible_truncation)]
             let index = self.selected as u32;
             parent.send(&RadioSelected { index });
+        }
+    }
+
+    fn apply_control_state(&mut self, ctx: &WasmCtx<'_>, next: WidgetControlState) {
+        if self.state.replace(next) {
+            if !self.state.can_mutate() {
+                self.pressed = false;
+            }
+            emit_state_changed(ctx, &self.state);
         }
     }
 }
@@ -93,22 +102,12 @@ impl WasmActor for RadioGroupWidget {
         self.selected = clamp_index(config.initial_index, config.options.len());
         self.options = config.options;
         self.theme = config.theme;
-        if self.state.replace(config.state) {
-            if !self.state.can_mutate() {
-                self.pressed = false;
-            }
-            emit_state_changed(ctx, &self.state);
-        }
+        self.apply_control_state(ctx, config.state);
     }
 
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
-        if self.state.replace(set.state) {
-            if !self.state.can_mutate() {
-                self.pressed = false;
-            }
-            emit_state_changed(ctx, &self.state);
-        }
+        self.apply_control_state(ctx, set.state);
     }
 
     /// Restyle: adopt the fanned theme.
@@ -192,13 +191,7 @@ impl WasmActor for RadioGroupWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if !self.state.is_visible() {
-            if let Some(parent) = ctx.parent() {
-                parent.send(&WidgetDrawList {
-                    intrinsic: None,
-                    items: Vec::new(),
-                });
-            }
+        if reply_if_hidden(ctx, &self.state) {
             return;
         }
         let row_height = self.theme.row_height.max(1.0);
